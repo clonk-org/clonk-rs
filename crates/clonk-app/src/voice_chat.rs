@@ -45,6 +45,14 @@ use clonk_engine::{ObjectSnapshot, PlayerStatus, SimulationSnapshot};
 use crate::settings::VoiceActivation;
 
 pub(crate) const SPEAKING_HANGOVER: Duration = Duration::from_millis(250);
+const VOICE_FRAME_DURATION: Duration = Duration::from_millis(20);
+const INITIAL_VOICE_JITTER_FRAMES: usize = 4;
+const MIN_VOICE_JITTER_FRAMES: usize = 2;
+const MAX_VOICE_JITTER_FRAMES: usize = 6;
+const MAX_PENDING_VOICE_FRAMES: usize = 8;
+const VOICE_SEQUENCE_WINDOW_FRAMES: usize = u64::BITS as usize;
+const MIN_VOICE_JITTER_OBSERVATIONS: usize = 3;
+const VOICE_PLAYOUT_GUARD_FRAMES: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PushToTalkAction {
@@ -89,6 +97,8 @@ pub(crate) enum VoiceFrameDisposition {
 struct SpeakerActivity {
     stream_epoch: u32,
     latest_sequence: u16,
+    seen_sequences: u64,
+    playout_floor: Option<u16>,
     last_frame_at: Instant,
 }
 
@@ -144,7 +154,9 @@ impl VoiceActivationGate {
 
 pub(crate) struct AcceptedRemoteVoiceFrame {
     pub(crate) stream_id: u64,
+    pub(crate) sequence: u16,
     pub(crate) samples: [i16; clonk_audio::VOICE_FRAME_SAMPLES],
+    pub(crate) concealed: bool,
     pub(crate) reset_stream: bool,
 }
 
@@ -164,6 +176,326 @@ type VoiceCaptureOpener = Box<dyn FnMut() -> Result<Box<dyn VoiceFrameSource>, V
 pub(crate) struct RemoteVoiceStream {
     pub(crate) stream_epoch: u32,
     pub(crate) last_frame_at: Option<Instant>,
+    jitter: RemoteVoiceJitterBuffer,
+}
+
+#[derive(Debug)]
+struct BufferedRemoteVoiceFrame {
+    sequence: u16,
+    samples: [i16; clonk_audio::VOICE_FRAME_SAMPLES],
+}
+
+#[derive(Debug)]
+struct RemoteVoicePlayoutFrame {
+    sequence: u16,
+    samples: [i16; clonk_audio::VOICE_FRAME_SAMPLES],
+    concealed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemoteVoicePlayoutStats {
+    pub(crate) target_frames: usize,
+    pub(crate) reordered_frames: u64,
+    pub(crate) concealed_frames: u64,
+}
+
+#[derive(Debug)]
+struct RemoteVoiceJitterBuffer {
+    pending: Vec<BufferedRemoteVoiceFrame>,
+    next_playout_sequence: Option<u16>,
+    first_arrival_at: Option<Instant>,
+    arrival_origin: Option<(u16, Instant)>,
+    transit_bounds_ns: Option<(i128, i128)>,
+    arrival_observations: usize,
+    target_frames: usize,
+    started: bool,
+    previous_output: Option<[i16; clonk_audio::VOICE_FRAME_SAMPLES]>,
+    highest_arrival_sequence: Option<u16>,
+    reordered_frames: u64,
+    concealed_frames: u64,
+}
+
+impl Default for RemoteVoiceJitterBuffer {
+    fn default() -> Self {
+        Self {
+            pending: Vec::with_capacity(MAX_PENDING_VOICE_FRAMES),
+            next_playout_sequence: None,
+            first_arrival_at: None,
+            arrival_origin: None,
+            transit_bounds_ns: None,
+            arrival_observations: 0,
+            target_frames: INITIAL_VOICE_JITTER_FRAMES,
+            started: false,
+            previous_output: None,
+            highest_arrival_sequence: None,
+            reordered_frames: 0,
+            concealed_frames: 0,
+        }
+    }
+}
+
+impl RemoteVoiceJitterBuffer {
+    fn can_insert(&self, sequence: u16) -> bool {
+        if self
+            .pending
+            .iter()
+            .any(|pending| pending.sequence == sequence)
+        {
+            return false;
+        }
+        let Some(anchor) = self.insertion_anchor(sequence) else {
+            return false;
+        };
+        let incoming_offset = sequence.wrapping_sub(anchor);
+        let mut retained_count = 0;
+        let mut farthest_offset = None;
+        for offset in self
+            .pending
+            .iter()
+            .map(|pending| pending.sequence.wrapping_sub(anchor))
+            .filter(|&offset| usize::from(offset) < VOICE_SEQUENCE_WINDOW_FRAMES)
+        {
+            retained_count += 1;
+            farthest_offset = farthest_offset.max(Some(offset));
+        }
+        if retained_count < MAX_PENDING_VOICE_FRAMES {
+            return true;
+        }
+        farthest_offset.is_some_and(|farthest_offset| incoming_offset < farthest_offset)
+    }
+
+    fn insertion_anchor(&self, sequence: u16) -> Option<u16> {
+        let Some(next_playout_sequence) = self.next_playout_sequence else {
+            return Some(sequence);
+        };
+        let forward = sequence.wrapping_sub(next_playout_sequence);
+        if usize::from(forward) < VOICE_SEQUENCE_WINDOW_FRAMES {
+            return Some(next_playout_sequence);
+        }
+        let rewind = next_playout_sequence.wrapping_sub(sequence);
+        (!self.started && usize::from(rewind) < VOICE_SEQUENCE_WINDOW_FRAMES).then_some(sequence)
+    }
+
+    fn insert(
+        &mut self,
+        sequence: u16,
+        received_at: Instant,
+        samples: [i16; clonk_audio::VOICE_FRAME_SAMPLES],
+    ) -> bool {
+        if !self.can_insert(sequence) {
+            return false;
+        }
+        let insertion_anchor = self.insertion_anchor(sequence).unwrap_or(sequence);
+        self.pending.retain(|pending| {
+            usize::from(pending.sequence.wrapping_sub(insertion_anchor))
+                < VOICE_SEQUENCE_WINDOW_FRAMES
+        });
+        if self.pending.len() >= MAX_PENDING_VOICE_FRAMES {
+            let Some((farthest_position, _)) = self
+                .pending
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, pending)| pending.sequence.wrapping_sub(insertion_anchor))
+            else {
+                return false;
+            };
+            self.pending.remove(farthest_position);
+        }
+        match self.highest_arrival_sequence.as_mut() {
+            Some(highest) => {
+                let advance = sequence.wrapping_sub(*highest);
+                if advance <= u16::MAX / 2 {
+                    *highest = sequence;
+                } else {
+                    self.reordered_frames = self.reordered_frames.saturating_add(1);
+                }
+            }
+            None => self.highest_arrival_sequence = Some(sequence),
+        }
+        let mut next_playout_sequence = *self.next_playout_sequence.get_or_insert(sequence);
+        self.first_arrival_at.get_or_insert(received_at);
+        let offset = sequence.wrapping_sub(next_playout_sequence);
+        if offset > u16::MAX / 2 {
+            let rewind = next_playout_sequence.wrapping_sub(sequence);
+            if self.started || usize::from(rewind) >= VOICE_SEQUENCE_WINDOW_FRAMES {
+                return false;
+            }
+            next_playout_sequence = sequence;
+            self.next_playout_sequence = Some(sequence);
+        }
+        self.pending
+            .push(BufferedRemoteVoiceFrame { sequence, samples });
+        self.pending
+            .sort_unstable_by_key(|pending| pending.sequence.wrapping_sub(next_playout_sequence));
+        self.observe_arrival(sequence, received_at);
+        true
+    }
+
+    fn observe_arrival(&mut self, sequence: u16, received_at: Instant) {
+        let (origin_sequence, origin_at) =
+            *self.arrival_origin.get_or_insert((sequence, received_at));
+        let arrival_offset_ns = received_at
+            .checked_duration_since(origin_at)
+            .map(duration_nanos)
+            .unwrap_or_else(|| -duration_nanos(origin_at.duration_since(received_at)));
+        let sequence_offset = i128::from(sequence.wrapping_sub(origin_sequence) as i16);
+        let residual_ns = arrival_offset_ns
+            .saturating_sub(sequence_offset.saturating_mul(duration_nanos(VOICE_FRAME_DURATION)));
+        match self.transit_bounds_ns.as_mut() {
+            Some((minimum, maximum)) => {
+                *minimum = (*minimum).min(residual_ns);
+                *maximum = (*maximum).max(residual_ns);
+            }
+            None => self.transit_bounds_ns = Some((residual_ns, residual_ns)),
+        }
+        self.arrival_observations = self.arrival_observations.saturating_add(1);
+        // Resize only the startup prebuffer. Growing a live delay without
+        // time-stretching would create the very gap this buffer prevents.
+        if self.started || self.arrival_observations < MIN_VOICE_JITTER_OBSERVATIONS {
+            return;
+        }
+        let (minimum, maximum) = self
+            .transit_bounds_ns
+            .expect("an observed voice arrival has transit bounds");
+        let frame_ns = duration_nanos(VOICE_FRAME_DURATION);
+        let spread_ns = maximum.saturating_sub(minimum);
+        let spread_frames = spread_ns.saturating_add(frame_ns - 1) / frame_ns;
+        self.target_frames = usize::try_from(spread_frames.saturating_add(1))
+            .unwrap_or(MAX_VOICE_JITTER_FRAMES)
+            .clamp(MIN_VOICE_JITTER_FRAMES, MAX_VOICE_JITTER_FRAMES);
+    }
+
+    #[cfg(test)]
+    fn target_frames(&self) -> usize {
+        self.target_frames
+    }
+
+    fn drain_ready(&mut self, now: Instant, max_frames: usize) -> Vec<RemoteVoicePlayoutFrame> {
+        self.drain_ready_with_headroom(now, max_frames, 0)
+    }
+
+    fn drain_ready_with_headroom(
+        &mut self,
+        now: Instant,
+        max_frames: usize,
+        buffered_playout_frames: usize,
+    ) -> Vec<RemoteVoicePlayoutFrame> {
+        let Some(mut next_sequence) = self.next_playout_sequence else {
+            return Vec::new();
+        };
+        if !self.started {
+            let contiguous = self
+                .pending
+                .iter()
+                .take_while(|frame| {
+                    let matches = frame.sequence == next_sequence;
+                    next_sequence = next_sequence.wrapping_add(u16::from(matches));
+                    matches
+                })
+                .count();
+            let prebuffer_elapsed = self.first_arrival_at.is_some_and(|first_arrival_at| {
+                now.saturating_duration_since(first_arrival_at)
+                    >= VOICE_FRAME_DURATION.saturating_mul(self.target_frames as u32)
+            });
+            if contiguous < self.target_frames && !prebuffer_elapsed {
+                return Vec::new();
+            }
+            self.started = true;
+        }
+
+        let mut ready = Vec::with_capacity(max_frames.min(self.pending.len()));
+        while ready.len() < max_frames {
+            let expected = self
+                .next_playout_sequence
+                .expect("a started voice jitter buffer has a playout sequence");
+            let Some(position) = self
+                .pending
+                .iter()
+                .position(|pending| pending.sequence == expected)
+            else {
+                let successor = self
+                    .pending
+                    .iter()
+                    .min_by_key(|pending| pending.sequence.wrapping_sub(expected))
+                    .map(|pending| (pending.sequence, pending.samples[0]));
+                let Some((successor_sequence, successor_first)) = successor else {
+                    break;
+                };
+                let Some(previous_output) = self.previous_output else {
+                    break;
+                };
+                let successor_distance = successor_sequence.wrapping_sub(expected);
+                if successor_distance == 0 || successor_distance > u16::MAX / 2 {
+                    break;
+                }
+                let buffered_headroom = buffered_playout_frames.saturating_add(ready.len());
+                if buffered_headroom > VOICE_PLAYOUT_GUARD_FRAMES {
+                    break;
+                }
+                let samples = concealed_voice_frame(&previous_output, successor_first);
+                self.previous_output = Some(samples);
+                ready.push(RemoteVoicePlayoutFrame {
+                    sequence: expected,
+                    samples,
+                    concealed: true,
+                });
+                self.concealed_frames = self.concealed_frames.saturating_add(1);
+                self.next_playout_sequence = Some(if successor_distance == 1 {
+                    expected.wrapping_add(1)
+                } else {
+                    successor_sequence
+                });
+                continue;
+            };
+            let frame = self.pending.remove(position);
+            self.previous_output = Some(frame.samples);
+            ready.push(RemoteVoicePlayoutFrame {
+                sequence: frame.sequence,
+                samples: frame.samples,
+                concealed: false,
+            });
+            self.next_playout_sequence = Some(expected.wrapping_add(1));
+        }
+        ready
+    }
+
+    fn stats(&self) -> RemoteVoicePlayoutStats {
+        RemoteVoicePlayoutStats {
+            target_frames: self.target_frames,
+            reordered_frames: self.reordered_frames,
+            concealed_frames: self.concealed_frames,
+        }
+    }
+}
+
+fn duration_nanos(duration: Duration) -> i128 {
+    i128::try_from(duration.as_nanos()).unwrap_or(i128::MAX)
+}
+
+fn concealed_voice_frame(
+    previous_frame: &[i16; clonk_audio::VOICE_FRAME_SAMPLES],
+    next_sample: i16,
+) -> [i16; clonk_audio::VOICE_FRAME_SAMPLES] {
+    let previous_first = i64::from(previous_frame[0]);
+    let previous_last = i64::from(previous_frame[clonk_audio::VOICE_FRAME_SAMPLES - 1]);
+    let bridge_difference = i64::from(next_sample).saturating_sub(previous_last);
+    let bridge_denominator =
+        i64::try_from(clonk_audio::VOICE_FRAME_SAMPLES + 1).unwrap_or(i64::MAX);
+    let texture_denominator =
+        i64::try_from(clonk_audio::VOICE_FRAME_SAMPLES - 1).unwrap_or(i64::MAX);
+    let previous_difference = previous_last.saturating_sub(previous_first);
+    std::array::from_fn(|index| {
+        let texture_numerator = i64::try_from(index).unwrap_or(i64::MAX);
+        let previous_baseline = previous_first.saturating_add(
+            previous_difference.saturating_mul(texture_numerator) / texture_denominator,
+        );
+        let texture = i64::from(previous_frame[index]).saturating_sub(previous_baseline);
+        let bridge_numerator = i64::try_from(index + 1).unwrap_or(i64::MAX);
+        previous_last
+            .saturating_add(bridge_difference.saturating_mul(bridge_numerator) / bridge_denominator)
+            .saturating_add(texture)
+            .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16
+    })
 }
 
 pub(crate) struct VoiceChatState {
@@ -344,13 +676,15 @@ impl VoiceChatState {
             disposition,
             VoiceFrameDisposition::Accepted | VoiceFrameDisposition::AcceptedNewEpoch
         ) {
-            self.remote_streams.insert(
-                (client_id, player_id),
-                RemoteVoiceStream {
-                    stream_epoch,
-                    last_frame_at: Some(received_at),
-                },
-            );
+            let stream = self
+                .remote_streams
+                .entry((client_id, player_id))
+                .or_default();
+            if disposition == VoiceFrameDisposition::AcceptedNewEpoch {
+                stream.jitter = RemoteVoiceJitterBuffer::default();
+            }
+            stream.stream_epoch = stream_epoch;
+            stream.last_frame_at = Some(received_at);
         }
         disposition
     }
@@ -363,6 +697,16 @@ impl VoiceChatState {
     ) -> Option<AcceptedRemoteVoiceFrame> {
         let samples = decode_voice_frame(&frame.payload).ok()?;
         let client_id = i32::try_from(frame.client_id).ok()?;
+        if self
+            .remote_streams
+            .get(&(client_id, frame.player_id))
+            .is_some_and(|stream| {
+                stream.stream_epoch == frame.stream_epoch
+                    && !stream.jitter.can_insert(frame.sequence)
+            })
+        {
+            return None;
+        }
         let disposition = self.note_remote_frame(
             snapshot,
             client_id,
@@ -373,9 +717,20 @@ impl VoiceChatState {
         );
         match disposition {
             VoiceFrameDisposition::Accepted | VoiceFrameDisposition::AcceptedNewEpoch => {
+                let inserted = self
+                    .remote_streams
+                    .get_mut(&(client_id, frame.player_id))
+                    .is_some_and(|stream| {
+                        stream.jitter.insert(frame.sequence, received_at, samples)
+                    });
+                if !inserted {
+                    return None;
+                }
                 Some(AcceptedRemoteVoiceFrame {
                     stream_id: voice_stream_id(client_id, frame.player_id),
+                    sequence: frame.sequence,
                     samples,
+                    concealed: false,
                     reset_stream: disposition == VoiceFrameDisposition::AcceptedNewEpoch,
                 })
             }
@@ -383,6 +738,63 @@ impl VoiceChatState {
             | VoiceFrameDisposition::OwnershipMismatch
             | VoiceFrameDisposition::DuplicateOrLate => None,
         }
+    }
+
+    pub(crate) fn drain_remote_playout(
+        &mut self,
+        client_id: i32,
+        player_id: i32,
+        now: Instant,
+        max_frames: usize,
+        buffered_playout_frames: usize,
+    ) -> Vec<AcceptedRemoteVoiceFrame> {
+        let Some(stream) = self.remote_streams.get_mut(&(client_id, player_id)) else {
+            return Vec::new();
+        };
+        let stream_epoch = stream.stream_epoch;
+        let frames =
+            stream
+                .jitter
+                .drain_ready_with_headroom(now, max_frames, buffered_playout_frames);
+        if !frames.is_empty() {
+            stream.last_frame_at = Some(now);
+        }
+        let playout_floor = if frames.is_empty() {
+            None
+        } else {
+            stream.jitter.next_playout_sequence
+        };
+        if let Some(playout_floor) = playout_floor {
+            if let Some(activity) = self
+                .activity
+                .speakers
+                .get_mut(&(client_id, player_id))
+                .filter(|activity| activity.stream_epoch == stream_epoch)
+            {
+                activity.playout_floor = Some(playout_floor);
+            }
+        }
+        frames
+            .into_iter()
+            .map(|frame| AcceptedRemoteVoiceFrame {
+                stream_id: voice_stream_id(client_id, player_id),
+                sequence: frame.sequence,
+                samples: frame.samples,
+                concealed: frame.concealed,
+                reset_stream: false,
+            })
+            .collect()
+    }
+
+    pub(crate) fn remote_playout_stats(
+        &self,
+        client_id: i32,
+        player_id: i32,
+    ) -> RemoteVoicePlayoutStats {
+        self.remote_streams
+            .get(&(client_id, player_id))
+            .map(|stream| stream.jitter.stats())
+            .unwrap_or_default()
     }
 
     pub(crate) fn note_local_frame(&mut self, client_id: i32, player_id: i32, now: Instant) {
@@ -405,7 +817,25 @@ impl VoiceChatState {
             }
             active
         });
+        for speaker in &expired {
+            self.advance_replay_floor_past_accepted(*speaker);
+        }
         expired
+    }
+
+    pub(crate) fn discard_remote_playback(&mut self, client_id: i32, player_id: i32) -> bool {
+        let speaker = (client_id, player_id);
+        let removed = self.remote_streams.remove(&speaker).is_some();
+        if removed {
+            self.advance_replay_floor_past_accepted(speaker);
+        }
+        removed
+    }
+
+    fn advance_replay_floor_past_accepted(&mut self, speaker: (i32, i32)) {
+        if let Some(activity) = self.activity.speakers.get_mut(&speaker) {
+            activity.playout_floor = Some(activity.latest_sequence.wrapping_add(1));
+        }
     }
 
     pub(crate) fn forget_client(&mut self, client_id: i32) -> Vec<(i32, i32)> {
@@ -478,9 +908,32 @@ impl VoiceActivityTracker {
         let mut disposition = VoiceFrameDisposition::Accepted;
         if let Some(activity) = self.speakers.get_mut(&key) {
             if activity.stream_epoch == stream_epoch {
-                let advance = sequence.wrapping_sub(activity.latest_sequence);
-                if advance == 0 || advance > u16::MAX / 2 {
+                if activity.playout_floor.is_some_and(|playout_floor| {
+                    sequence.wrapping_sub(playout_floor) > u16::MAX / 2
+                }) {
                     return VoiceFrameDisposition::DuplicateOrLate;
+                }
+                let advance = sequence.wrapping_sub(activity.latest_sequence);
+                if advance == 0 {
+                    return VoiceFrameDisposition::DuplicateOrLate;
+                }
+                if advance <= u16::MAX / 2 {
+                    activity.seen_sequences = if u32::from(advance) >= u64::BITS {
+                        1
+                    } else {
+                        (activity.seen_sequences << advance) | 1
+                    };
+                    activity.latest_sequence = sequence;
+                } else {
+                    let rewind = activity.latest_sequence.wrapping_sub(sequence);
+                    if u32::from(rewind) >= u64::BITS {
+                        return VoiceFrameDisposition::DuplicateOrLate;
+                    }
+                    let seen_bit = 1_u64 << rewind;
+                    if activity.seen_sequences & seen_bit != 0 {
+                        return VoiceFrameDisposition::DuplicateOrLate;
+                    }
+                    activity.seen_sequences |= seen_bit;
                 }
             } else {
                 let advance = stream_epoch.wrapping_sub(activity.stream_epoch);
@@ -488,9 +941,11 @@ impl VoiceActivityTracker {
                     return VoiceFrameDisposition::DuplicateOrLate;
                 }
                 disposition = VoiceFrameDisposition::AcceptedNewEpoch;
+                activity.latest_sequence = sequence;
+                activity.seen_sequences = 1;
+                activity.playout_floor = None;
             }
             activity.stream_epoch = stream_epoch;
-            activity.latest_sequence = sequence;
             activity.last_frame_at = received_at;
         } else {
             self.speakers.insert(
@@ -498,6 +953,8 @@ impl VoiceActivityTracker {
                 SpeakerActivity {
                     stream_epoch,
                     latest_sequence: sequence,
+                    seen_sequences: 1,
+                    playout_floor: None,
                     last_frame_at: received_at,
                 },
             );
@@ -575,6 +1032,22 @@ mod tests {
             ..PlayerState::default()
         }];
         snapshot
+    }
+
+    fn ramp_voice_frame(sequence: u16) -> [i16; clonk_audio::VOICE_FRAME_SAMPLES] {
+        std::array::from_fn(|sample| {
+            let absolute_sample = usize::from(sequence) * clonk_audio::VOICE_FRAME_SAMPLES + sample;
+            4_000 + i16::try_from(absolute_sample * 8).unwrap_or(i16::MAX)
+        })
+    }
+
+    fn bipolar_voice_frame() -> [i16; clonk_audio::VOICE_FRAME_SAMPLES] {
+        std::array::from_fn(|sample| match sample {
+            0..=79 => i16::try_from(sample * 100).unwrap_or(i16::MAX),
+            80..=159 => i16::try_from((159 - sample) * 100).unwrap_or(i16::MAX),
+            160..=239 => -i16::try_from((sample - 160) * 100).unwrap_or(i16::MAX),
+            _ => -i16::try_from((319 - sample) * 100).unwrap_or(i16::MAX),
+        })
     }
 
     struct TestVoiceSource {
@@ -677,6 +1150,421 @@ mod tests {
     }
 
     #[test]
+    fn remote_voice_accepts_one_out_of_order_frame_within_the_playout_window_once() {
+        let snapshot = snapshot_with_player(17, 7);
+        let now = Instant::now();
+        let mut activity = VoiceActivityTracker::default();
+
+        assert_eq!(
+            activity.note_frame(&snapshot, 7, 17, 4, 40, now),
+            VoiceFrameDisposition::Accepted,
+        );
+        assert_eq!(
+            activity.note_frame(&snapshot, 7, 17, 4, 42, now),
+            VoiceFrameDisposition::Accepted,
+        );
+        assert_eq!(
+            activity.note_frame(&snapshot, 7, 17, 4, 41, now),
+            VoiceFrameDisposition::Accepted,
+        );
+        assert_eq!(
+            activity.note_frame(&snapshot, 7, 17, 4, 41, now),
+            VoiceFrameDisposition::DuplicateOrLate,
+        );
+        assert_eq!(
+            activity.note_frame(&snapshot, 7, 17, 4, 43, now),
+            VoiceFrameDisposition::Accepted,
+        );
+    }
+
+    #[test]
+    fn remote_voice_jitter_buffer_reorders_frames_before_playout() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+
+        assert!(jitter.insert(40, start, [40; clonk_audio::VOICE_FRAME_SAMPLES]));
+        assert!(jitter.insert(
+            42,
+            start + Duration::from_millis(20),
+            [42; clonk_audio::VOICE_FRAME_SAMPLES],
+        ));
+        assert!(jitter.insert(
+            41,
+            start + Duration::from_millis(35),
+            [41; clonk_audio::VOICE_FRAME_SAMPLES],
+        ));
+        assert!(jitter.insert(
+            43,
+            start + Duration::from_millis(60),
+            [43; clonk_audio::VOICE_FRAME_SAMPLES],
+        ));
+
+        let ready = jitter.drain_ready(start + Duration::from_millis(60), usize::MAX);
+        assert_eq!(
+            ready.iter().map(|frame| frame.sequence).collect::<Vec<_>>(),
+            vec![40, 41, 42, 43],
+        );
+        assert!(ready.iter().all(|frame| !frame.concealed));
+    }
+
+    #[test]
+    fn remote_voice_jitter_buffer_rewinds_an_unstarted_first_arrival() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+
+        for (sequence, arrival_ms) in [(2, 0), (0, 10), (1, 20), (3, 30)] {
+            assert!(jitter.insert(
+                sequence,
+                start + Duration::from_millis(arrival_ms),
+                [sequence as i16; clonk_audio::VOICE_FRAME_SAMPLES],
+            ));
+        }
+
+        assert_eq!(
+            jitter
+                .drain_ready(start + Duration::from_millis(30), usize::MAX)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+        );
+    }
+
+    #[test]
+    fn remote_voice_jitter_buffer_rewinds_within_the_replay_window() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+
+        assert!(jitter.insert(13, start, bipolar_voice_frame()));
+        assert!(jitter.insert(0, start + Duration::from_millis(10), bipolar_voice_frame(),));
+    }
+
+    #[test]
+    fn remote_voice_jitter_buffer_orders_sequence_wrap() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for (sequence, arrival_ms) in [(u16::MAX - 1, 0), (0, 20), (u16::MAX, 35), (1, 60)] {
+            assert!(jitter.insert(
+                sequence,
+                start + Duration::from_millis(arrival_ms),
+                bipolar_voice_frame(),
+            ));
+        }
+
+        assert_eq!(
+            jitter
+                .drain_ready(start + Duration::from_millis(60), usize::MAX)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![u16::MAX - 1, u16::MAX, 0, 1],
+        );
+    }
+
+    #[test]
+    fn full_voice_jitter_buffer_keeps_a_late_frame_closer_to_playout() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for sequence in [0, 2, 3, 4, 5, 6, 7, 8] {
+            assert!(jitter.insert(
+                sequence,
+                start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
+                ramp_voice_frame(sequence),
+            ));
+        }
+
+        assert!(jitter.insert(1, start + Duration::from_millis(170), ramp_voice_frame(1),));
+        assert_eq!(
+            jitter
+                .drain_ready(start + Duration::from_millis(170), usize::MAX)
+                .into_iter()
+                .map(|frame| (frame.sequence, frame.concealed))
+                .collect::<Vec<_>>(),
+            (0..8).map(|sequence| (sequence, false)).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn remote_voice_jitter_buffer_sizes_prebuffer_from_observed_arrival_spread() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+
+        assert!(jitter.insert(0, start, [0; clonk_audio::VOICE_FRAME_SAMPLES]));
+        assert!(jitter.insert(
+            1,
+            start + VOICE_FRAME_DURATION,
+            [1; clonk_audio::VOICE_FRAME_SAMPLES],
+        ));
+        assert!(jitter.insert(
+            2,
+            start + VOICE_FRAME_DURATION.saturating_mul(2),
+            [2; clonk_audio::VOICE_FRAME_SAMPLES],
+        ));
+        assert_eq!(jitter.target_frames(), 2);
+
+        assert!(jitter.insert(
+            3,
+            start + VOICE_FRAME_DURATION.saturating_mul(6),
+            [3; clonk_audio::VOICE_FRAME_SAMPLES],
+        ));
+        assert_eq!(jitter.target_frames(), 4);
+    }
+
+    #[test]
+    fn remote_voice_jitter_buffer_freezes_delay_after_playout_starts() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for sequence in 0..3 {
+            assert!(jitter.insert(
+                sequence,
+                start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
+                ramp_voice_frame(sequence),
+            ));
+        }
+        assert_eq!(jitter.target_frames(), 2);
+        assert_eq!(
+            jitter
+                .drain_ready(start + Duration::from_millis(40), usize::MAX)
+                .len(),
+            3,
+        );
+
+        assert!(jitter.insert(3, start + Duration::from_millis(120), ramp_voice_frame(3),));
+        assert_eq!(
+            jitter.target_frames(),
+            2,
+            "growing live playout delay would itself introduce an audio gap",
+        );
+    }
+
+    #[test]
+    fn remote_voice_jitter_buffer_conceals_one_lost_frame_without_a_gap_or_click() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for (sequence, arrival_ms) in [(0, 0), (2, 21), (1, 52), (3, 65), (5, 100)] {
+            assert!(jitter.insert(
+                sequence,
+                start + Duration::from_millis(arrival_ms),
+                ramp_voice_frame(sequence),
+            ));
+        }
+
+        let mut ready = jitter.drain_ready(start + Duration::from_millis(100), usize::MAX);
+        ready.extend(jitter.drain_ready(start + Duration::from_millis(180), usize::MAX));
+
+        assert_eq!(
+            ready
+                .iter()
+                .map(|frame| (frame.sequence, frame.concealed))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, false),
+                (1, false),
+                (2, false),
+                (3, false),
+                (4, true),
+                (5, false)
+            ],
+        );
+        let played_samples = ready
+            .iter()
+            .flat_map(|frame| frame.samples)
+            .collect::<Vec<_>>();
+        let expected_samples = (0..6).flat_map(ramp_voice_frame).collect::<Vec<_>>();
+        assert_eq!(played_samples, expected_samples);
+        assert!(played_samples.windows(2).all(|pair| pair[1] - pair[0] == 8));
+    }
+
+    #[test]
+    fn concealed_voice_preserves_energy_across_zero_crossing_boundaries() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for sequence in [0, 1, 2, 3, 5] {
+            assert!(jitter.insert(
+                sequence,
+                start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
+                bipolar_voice_frame(),
+            ));
+        }
+
+        assert_eq!(
+            jitter
+                .drain_ready(start + Duration::from_millis(100), usize::MAX)
+                .len(),
+            4,
+        );
+        let ready = jitter.drain_ready_with_headroom(
+            start + Duration::from_millis(100),
+            usize::MAX,
+            VOICE_PLAYOUT_GUARD_FRAMES,
+        );
+        assert_eq!(
+            ready
+                .iter()
+                .map(|frame| (frame.sequence, frame.concealed))
+                .collect::<Vec<_>>(),
+            vec![(4, true), (5, false)],
+        );
+        let concealed = &ready[0].samples;
+        assert!(
+            concealed
+                .iter()
+                .map(|sample| i64::from(sample.abs()))
+                .sum::<i64>()
+                > 500_000
+        );
+        assert_eq!(concealed[0], 0);
+        assert_eq!(concealed[clonk_audio::VOICE_FRAME_SAMPLES - 1], 0);
+        assert!(concealed
+            .windows(2)
+            .all(|pair| (pair[1] - pair[0]).abs() <= 100));
+    }
+
+    #[test]
+    fn isolated_voice_loss_is_concealed_before_buffered_playout_runs_dry() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for (sequence, arrival_ms) in [(0, 0), (1, 20), (2, 40), (3, 60), (5, 80)] {
+            assert!(jitter.insert(
+                sequence,
+                start + Duration::from_millis(arrival_ms),
+                ramp_voice_frame(sequence),
+            ));
+        }
+
+        assert_eq!(
+            jitter
+                .drain_ready_with_headroom(start + Duration::from_millis(80), usize::MAX, 0)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+        );
+        assert_eq!(
+            jitter
+                .drain_ready_with_headroom(start + Duration::from_millis(100), usize::MAX, 2)
+                .into_iter()
+                .map(|frame| (frame.sequence, frame.concealed))
+                .collect::<Vec<_>>(),
+            vec![(4, true), (5, false)],
+        );
+    }
+
+    #[test]
+    fn consecutive_voice_loss_reanchors_after_one_concealed_frame() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for sequence in [0, 1, 2, 3, 6] {
+            assert!(jitter.insert(
+                sequence,
+                start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
+                ramp_voice_frame(sequence),
+            ));
+        }
+
+        assert_eq!(
+            jitter
+                .drain_ready(start + Duration::from_millis(120), usize::MAX)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+        );
+        assert_eq!(
+            jitter
+                .drain_ready_with_headroom(
+                    start + Duration::from_millis(120),
+                    usize::MAX,
+                    VOICE_PLAYOUT_GUARD_FRAMES,
+                )
+                .into_iter()
+                .map(|frame| (frame.sequence, frame.concealed))
+                .collect::<Vec<_>>(),
+            vec![(4, true), (6, false)],
+        );
+        assert!(jitter.insert(7, start + Duration::from_millis(140), ramp_voice_frame(7),));
+        assert_eq!(
+            jitter
+                .drain_ready(start + Duration::from_millis(140), usize::MAX)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![7],
+        );
+    }
+
+    #[test]
+    fn large_bounded_voice_sequence_jump_reanchors_without_wedging_playout() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for sequence in [0, 1, 2, 3, 13] {
+            assert!(jitter.insert(
+                sequence,
+                start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
+                bipolar_voice_frame(),
+            ));
+        }
+
+        assert_eq!(
+            jitter
+                .drain_ready(start + Duration::from_millis(260), usize::MAX)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+        );
+        assert_eq!(
+            jitter
+                .drain_ready_with_headroom(
+                    start + Duration::from_millis(260),
+                    usize::MAX,
+                    VOICE_PLAYOUT_GUARD_FRAMES,
+                )
+                .into_iter()
+                .map(|frame| (frame.sequence, frame.concealed))
+                .collect::<Vec<_>>(),
+            vec![(4, true), (13, false)],
+        );
+        assert!(jitter.insert(
+            14,
+            start + Duration::from_millis(280),
+            bipolar_voice_frame(),
+        ));
+        assert!(!jitter.insert(5, start + Duration::from_millis(280), bipolar_voice_frame(),));
+        assert_eq!(
+            jitter
+                .drain_ready(start + Duration::from_millis(280), usize::MAX)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![14],
+        );
+    }
+
+    #[test]
+    fn paused_voice_playout_keeps_reordering_while_buffered_headroom_remains() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for sequence in [0, 1, 2, 3, 5] {
+            assert!(jitter.insert(
+                sequence,
+                start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
+                ramp_voice_frame(sequence),
+            ));
+        }
+
+        assert_eq!(
+            jitter
+                .drain_ready_with_headroom(start + Duration::from_millis(100), usize::MAX, 0)
+                .len(),
+            4,
+        );
+        assert!(jitter
+            .drain_ready_with_headroom(start + Duration::from_secs(1), usize::MAX, 4)
+            .is_empty());
+    }
+
+    #[test]
     fn voice_activity_rejects_a_delayed_packet_from_an_old_stream_epoch() {
         let snapshot = snapshot_with_player(17, 7);
         let now = Instant::now();
@@ -732,6 +1620,143 @@ mod tests {
     }
 
     #[test]
+    fn expired_voice_playback_rejects_an_unseen_frame_behind_the_playout_floor() {
+        let snapshot = snapshot_with_player(17, 7);
+        let start = Instant::now();
+        let mut voice = VoiceChatState::default();
+        let frame = |sequence| clonk_network::VoiceFrame {
+            client_id: 7,
+            player_id: 17,
+            stream_epoch: 5,
+            sequence,
+            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .to_vec(),
+        };
+
+        assert!(voice
+            .accept_remote_frame(&snapshot, &frame(100), start)
+            .is_some());
+        let playout_at = start + Duration::from_millis(80);
+        assert_eq!(
+            voice
+                .drain_remote_playout(7, 17, playout_at, usize::MAX, 0)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![100],
+        );
+        let expires_at = playout_at + SPEAKING_HANGOVER;
+        assert_eq!(voice.expire_playback(expires_at), vec![(7, 17)],);
+
+        assert!(voice
+            .accept_remote_frame(&snapshot, &frame(99), expires_at)
+            .is_none());
+        assert!(voice.active_speakers(expires_at).is_empty());
+        assert!(voice
+            .accept_remote_frame(&snapshot, &frame(101), expires_at)
+            .is_some());
+    }
+
+    #[test]
+    fn expiring_unplayed_voice_advances_the_replay_floor_past_discarded_packets() {
+        let snapshot = snapshot_with_player(17, 7);
+        let start = Instant::now();
+        let mut voice = VoiceChatState::default();
+        let frame = |sequence| clonk_network::VoiceFrame {
+            client_id: 7,
+            player_id: 17,
+            stream_epoch: 5,
+            sequence,
+            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .to_vec(),
+        };
+
+        assert!(voice
+            .accept_remote_frame(&snapshot, &frame(100), start)
+            .is_some());
+        assert_eq!(
+            voice.expire_playback(start + SPEAKING_HANGOVER),
+            vec![(7, 17)],
+        );
+        assert!(voice
+            .accept_remote_frame(&snapshot, &frame(99), start + SPEAKING_HANGOVER,)
+            .is_none());
+        assert!(voice
+            .accept_remote_frame(&snapshot, &frame(101), start + SPEAKING_HANGOVER,)
+            .is_some());
+    }
+
+    #[test]
+    fn buffered_voice_playback_expires_after_the_last_drain_not_the_last_packet() {
+        let snapshot = snapshot_with_player(17, 7);
+        let start = Instant::now();
+        let mut voice = VoiceChatState::default();
+        let frame = |sequence| clonk_network::VoiceFrame {
+            client_id: 7,
+            player_id: 17,
+            stream_epoch: 5,
+            sequence,
+            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .to_vec(),
+        };
+
+        for sequence in 0..5 {
+            assert!(voice
+                .accept_remote_frame(&snapshot, &frame(sequence), start)
+                .is_some());
+        }
+        assert_eq!(
+            voice
+                .drain_remote_playout(7, 17, start, 5, 0)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            (0..5).collect::<Vec<_>>(),
+        );
+        for sequence in 5..13 {
+            assert!(voice
+                .accept_remote_frame(&snapshot, &frame(sequence), start)
+                .is_some());
+        }
+
+        assert_eq!(
+            voice
+                .drain_remote_playout(7, 17, start + Duration::from_millis(240), 3, 2)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![5, 6, 7],
+        );
+        assert!(voice.active_speakers(start + SPEAKING_HANGOVER).is_empty());
+        assert!(voice.expire_playback(start + SPEAKING_HANGOVER).is_empty());
+        assert_eq!(
+            voice
+                .drain_remote_playout(7, 17, start + Duration::from_millis(300), 3, 2)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![8, 9, 10],
+        );
+        assert_eq!(
+            voice
+                .drain_remote_playout(7, 17, start + Duration::from_millis(360), 3, 2)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![11, 12],
+        );
+        assert!(voice
+            .expire_playback(
+                start + Duration::from_millis(360) + SPEAKING_HANGOVER - Duration::from_millis(1),
+            )
+            .is_empty());
+        assert_eq!(
+            voice.expire_playback(start + Duration::from_millis(360) + SPEAKING_HANGOVER),
+            vec![(7, 17)],
+        );
+    }
+
+    #[test]
     fn disconnect_and_clear_return_each_playback_stream_for_removal_once() {
         let mut snapshot = snapshot_with_player(17, 7);
         snapshot.players.push(PlayerState {
@@ -756,6 +1781,32 @@ mod tests {
         assert!(voice.forget_client(7).is_empty());
         assert_eq!(voice.clear(), vec![(8, 23)]);
         assert!(voice.clear().is_empty());
+    }
+
+    #[test]
+    fn discarding_remote_playback_keeps_the_replay_tombstone() {
+        let snapshot = snapshot_with_player(17, 7);
+        let now = Instant::now();
+        let mut voice = VoiceChatState::default();
+        assert_eq!(
+            voice.note_remote_frame(&snapshot, 7, 17, 4, 9, now),
+            VoiceFrameDisposition::Accepted,
+        );
+
+        assert!(voice.discard_remote_playback(7, 17));
+        assert!(!voice.remote_streams.contains_key(&(7, 17)));
+        assert_eq!(
+            voice.note_remote_frame(&snapshot, 7, 17, 4, 9, now),
+            VoiceFrameDisposition::DuplicateOrLate,
+        );
+        assert_eq!(
+            voice.note_remote_frame(&snapshot, 7, 17, 4, 8, now),
+            VoiceFrameDisposition::DuplicateOrLate,
+        );
+        assert_eq!(
+            voice.note_remote_frame(&snapshot, 7, 17, 4, 10, now),
+            VoiceFrameDisposition::Accepted,
+        );
     }
 
     #[test]
@@ -918,6 +1969,110 @@ mod tests {
         assert!(!accepted.reset_stream);
         assert_eq!(accepted.samples, [1_000; 320]);
         assert_eq!(voice.active_speakers(now), vec![(7, 17)]);
+    }
+
+    #[test]
+    fn remote_voice_rejects_a_sequence_outside_the_replay_window_without_refreshing_activity() {
+        let snapshot = snapshot_with_player(17, 7);
+        let start = Instant::now();
+        let mut voice = VoiceChatState::default();
+        let frame = |sequence| clonk_network::VoiceFrame {
+            client_id: 7,
+            player_id: 17,
+            stream_epoch: 5,
+            sequence,
+            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .to_vec(),
+        };
+
+        assert!(voice
+            .accept_remote_frame(&snapshot, &frame(0), start)
+            .is_some());
+        assert!(voice
+            .accept_remote_frame(
+                &snapshot,
+                &frame(VOICE_SEQUENCE_WINDOW_FRAMES as u16),
+                start + SPEAKING_HANGOVER - Duration::from_millis(1),
+            )
+            .is_none());
+        assert!(voice.active_speakers(start + SPEAKING_HANGOVER).is_empty());
+        assert!(voice
+            .accept_remote_frame(&snapshot, &frame(1), start + SPEAKING_HANGOVER,)
+            .is_some());
+    }
+
+    #[test]
+    fn accepted_remote_voice_drains_in_sequence_order_after_poll_batching() {
+        let snapshot = snapshot_with_player(17, 7);
+        let now = Instant::now();
+        let mut voice = VoiceChatState::default();
+
+        for sequence in [0, 2, 1, 3] {
+            let frame = clonk_network::VoiceFrame {
+                client_id: 7,
+                player_id: 17,
+                stream_epoch: 5,
+                sequence,
+                payload: clonk_audio::encode_voice_frame(&[sequence as i16; 320]).to_vec(),
+            };
+            assert!(voice.accept_remote_frame(&snapshot, &frame, now).is_some());
+        }
+
+        assert_eq!(
+            voice
+                .drain_remote_playout(7, 17, now, clonk_audio::DEFAULT_VOICE_BUFFERED_FRAMES, 0,)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+        );
+    }
+
+    #[test]
+    fn remote_voice_rejects_a_missing_frame_after_playout_concealed_it() {
+        let snapshot = snapshot_with_player(17, 7);
+        let start = Instant::now();
+        let mut voice = VoiceChatState::default();
+
+        for sequence in [0, 1, 2, 3, 5] {
+            let frame = clonk_network::VoiceFrame {
+                client_id: 7,
+                player_id: 17,
+                stream_epoch: 5,
+                sequence,
+                payload: clonk_audio::encode_voice_frame(&ramp_voice_frame(sequence)).to_vec(),
+            };
+            assert!(voice
+                .accept_remote_frame(&snapshot, &frame, start)
+                .is_some());
+        }
+        let mut drained = voice.drain_remote_playout(
+            7,
+            17,
+            start + Duration::from_millis(120),
+            clonk_audio::DEFAULT_VOICE_BUFFERED_FRAMES,
+            0,
+        );
+        drained.extend(voice.drain_remote_playout(7, 17, start + Duration::from_millis(120), 2, 2));
+        assert_eq!(
+            drained
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5],
+        );
+
+        let late = clonk_network::VoiceFrame {
+            client_id: 7,
+            player_id: 17,
+            stream_epoch: 5,
+            sequence: 4,
+            payload: clonk_audio::encode_voice_frame(&ramp_voice_frame(4)).to_vec(),
+        };
+        assert!(voice
+            .accept_remote_frame(&snapshot, &late, start + Duration::from_millis(200))
+            .is_none());
+        assert!(voice.active_speakers(start + SPEAKING_HANGOVER).is_empty());
     }
 
     #[test]

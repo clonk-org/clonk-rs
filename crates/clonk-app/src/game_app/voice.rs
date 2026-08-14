@@ -108,7 +108,10 @@ impl GameApp {
     }
 
     pub(crate) fn update_voice_chat(&mut self) {
-        let now = Instant::now();
+        self.update_voice_chat_at(Instant::now());
+    }
+
+    pub(crate) fn update_voice_chat_at(&mut self, now: Instant) {
         let received = self
             .network
             .as_mut()
@@ -133,7 +136,7 @@ impl GameApp {
             .map_or(0.0, |audio| audio.options.voice_volume);
 
         for frame in received {
-            let Some(position) = i32::try_from(frame.client_id).ok().and_then(|client_id| {
+            let Some(_position) = i32::try_from(frame.client_id).ok().and_then(|client_id| {
                 voice_source_position(&self.snapshot, client_id, frame.player_id)
             }) else {
                 continue;
@@ -144,18 +147,10 @@ impl GameApp {
             else {
                 continue;
             };
-            let (audibility, pan) =
-                compute_object_positional_mix(position, &self.snapshot, &viewports);
-            if let Some(audio) = self.audio.as_ref() {
-                if accepted.reset_stream {
+            if accepted.reset_stream {
+                if let Some(audio) = self.audio.as_ref() {
                     audio.system.remove_voice_stream(accepted.stream_id);
                 }
-                audio.system.queue_voice_stream_with_mix(
-                    accepted.stream_id,
-                    accepted.samples,
-                    audibility * voice_volume,
-                    pan,
-                );
             }
         }
 
@@ -167,17 +162,36 @@ impl GameApp {
             .collect::<Vec<_>>();
         for (client_id, player_id) in active_streams {
             let Some(position) = voice_source_position(&self.snapshot, client_id, player_id) else {
+                self.voice_chat
+                    .discard_remote_playback(client_id, player_id);
                 self.remove_voice_playback([(client_id, player_id)]);
                 continue;
             };
             let (audibility, pan) =
                 compute_object_positional_mix(position, &self.snapshot, &viewports);
             if let Some(audio) = self.audio.as_ref() {
-                audio.system.update_voice_stream(
-                    crate::voice_chat::voice_stream_id(client_id, player_id),
-                    audibility * voice_volume,
-                    pan,
-                );
+                let stream_id = crate::voice_chat::voice_stream_id(client_id, player_id);
+                let queued_frames = audio.system.voice_stream_stats(stream_id).queued_frames;
+                let maximum_queued_frames =
+                    clonk_audio::DEFAULT_VOICE_BUFFERED_FRAMES.saturating_sub(1);
+                let available_frames = maximum_queued_frames.saturating_sub(queued_frames);
+                for frame in self.voice_chat.drain_remote_playout(
+                    client_id,
+                    player_id,
+                    now,
+                    available_frames,
+                    queued_frames,
+                ) {
+                    audio.system.queue_voice_stream_with_mix(
+                        stream_id,
+                        frame.samples,
+                        audibility * voice_volume,
+                        pan,
+                    );
+                }
+                audio
+                    .system
+                    .update_voice_stream(stream_id, audibility * voice_volume, pan);
             }
         }
 

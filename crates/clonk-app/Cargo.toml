@@ -101,6 +101,7 @@ windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "UI_Noti
 # of production builds.
 clonk-app-menus = { path = "../clonk-app-menus", features = ["test-hooks"] }
 clonk-app-netplay = { path = "../clonk-app-netplay", features = ["test-hooks"] }
+clonk-audio = { path = "../clonk-audio", features = ["test-hooks"] }
 flate2 = "1"
 # Keep clonk-engine's property-test dependencies in the app test graph so adding
 # clonk-engine or the full workspace does not rebuild shared transitive crates.
