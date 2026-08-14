@@ -172,6 +172,111 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.wait_until("HUT3 opens its real Contents menu", 30, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(18))
     })?;
+    let linekit = object_with_definition(player.engine(), "LNKT")
+        .expect("Tutorial06 creates the line kit in HUT3");
+    let linekit_index = player
+        .engine()
+        .cursor_object_menu(owner)
+        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "LNKT"))
+        .expect("Tutorial06 puts LNKT in HUT3");
+    player.menu_navigate_to_index(linekit_index)?;
+    player.menu_enter()?;
+    player.wait_until("the surface CLNK takes LNKT", 80, |engine| {
+        engine
+            .object_snapshot(linekit)
+            .is_some_and(|object| object.container == Some(builder))
+    })?;
+    player.menu_close()?;
+    player.wait_until("HUT3 restores its context menu", 30, |engine| {
+        object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(14))
+    })?;
+    player.menu_navigate_to_caption("Exit")?;
+    player.menu_enter()?;
+    player.wait_until("the LNKT-carrying CLNK exits HUT3", 80, |engine| {
+        engine.object_snapshot(builder).is_some_and(|object| {
+            object.container.is_none()
+                && object.action.name == "Walk"
+                && clonk_carries(engine, builder, "LNKT")
+        })
+    })?;
+    player.hold_until(
+        COM_RIGHT,
+        "the builder carries LNKT to the future elevator site",
+        100,
+        |engine| {
+            engine.object_snapshot(builder).is_some_and(|object| {
+                object.action.name == "Walk"
+                    && (329..=333).contains(&object.position.x)
+                    && clonk_carries(engine, builder, "LNKT")
+            })
+        },
+    )?;
+    // Classic movement retains COMD_Right after the physical key is released.
+    // Stop in Walk before throwing LNKT east while the route is unobstructed;
+    // Throw is rejected outside DFA_WALK (C4Object.cpp:3419-3449;
+    // C4Command.cpp:981-984; C4ObjectCom.cpp:625-637).
+    player.tap(COM_DOWN)?;
+    player.wait_until(
+        "the LNKT carrier stops at the future elevator",
+        40,
+        |engine| {
+            engine.object_snapshot(builder).is_some_and(|object| {
+                object.action.name == "Walk"
+                    && object.velocity.x == 0
+                    && object.velocity.y == 0
+                    && object.fixed_velocity.is_none()
+                    && clonk_carries(engine, builder, "LNKT")
+            })
+        },
+    )?;
+    let linekit_launch_x = player
+        .engine()
+        .object_snapshot(builder)
+        .expect("the LNKT carrier remains live")
+        .position
+        .x;
+    player.tap(COM_THROW)?;
+    player.wait_until("LNKT settles east of the future elevator", 120, |engine| {
+        engine.object_snapshot(linekit).is_some_and(|object| {
+            object.container.is_none()
+                && object.position.x > linekit_launch_x
+                && object.velocity.x == 0
+                && object.velocity.y == 0
+                && object.fixed_velocity.is_none()
+                && engine
+                    .object_snapshot(builder)
+                    .is_some_and(|builder| builder.action.name == "Walk")
+        })
+    })?;
+    player.hold_until(
+        COM_LEFT,
+        "the builder returns to HUT3 before constructing ELEV",
+        100,
+        |engine| {
+            engine
+                .object_snapshot(builder)
+                .zip(engine.object_snapshot(hut))
+                .is_some_and(|(builder, hut)| {
+                    object_with_definition(engine, "ELEV").is_none()
+                        && builder.action.name == "Walk"
+                        && builder.position.x <= hut.position.x + 4
+                })
+        },
+    )?;
+    player.tap(COM_UP)?;
+    player.wait_until("the surface CLNK re-enters HUT3", 80, |engine| {
+        engine
+            .object_snapshot(builder)
+            .is_some_and(|object| object.container == Some(hut))
+    })?;
+    player.wait_until("HUT3 reopens its context menu", 30, |engine| {
+        object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(14))
+    })?;
+    player.menu_navigate_to_caption("Contents")?;
+    player.menu_enter()?;
+    player.wait_until("HUT3 reopens its real Contents menu", 30, |engine| {
+        object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(18))
+    })?;
     let conkit_index = player
         .engine()
         .cursor_object_menu(owner)
@@ -196,7 +301,7 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
 
     // CNKT::Activate creates the known ELEV construction at the CLNK's
     // feet; double Dig activates the first carried object
-    // (Conkit.c4d/Script.c:5-33; C4ObjectCom.cpp:531-539).
+    // (Conkit.c4d/Script.c:5-39; C4ObjectCom.cpp:531-539).
     player.hold_until(
         COM_RIGHT,
         "the builder reaches the space between HUT3 and POWR",
@@ -225,6 +330,59 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         })
         .map(|_| object_with_definition(player.engine(), "ELEV").expect("ELEV exists"))?;
     player.double_tap(COM_DOWN)?;
+    player.wait_until(
+        "ELEV receives every component before LNKT occupies the inventory",
+        2_400,
+        |engine| {
+            engine.object_snapshot(elevator).is_some_and(|object| {
+                object.construction < 100_000
+                    && object.components.get("WOOD").copied() == Some(4)
+                    && object.components.get("METL").copied() == Some(2)
+            })
+        },
+    )?;
+    player.tap(COM_DOWN)?;
+    player.wait_until(
+        "the builder pauses ELEV before fetching LNKT",
+        80,
+        |engine| {
+            engine.object_snapshot(builder).is_some_and(|object| {
+                object.action.name == "Walk" && object.command_stack.is_empty()
+            })
+        },
+    )?;
+
+    // A Clonk can carry only one ordinary item. LNKT was staged before ELEV
+    // existed, so invest every WOOD/METL first and only then collect it east of
+    // the site. Resuming Build cannot put the kit away for another component,
+    // and completion queues Energy without the blocked post-ELEV HUT3 trip
+    // (Clonk.c4d/Script.c:738-764; Elevator.c4d/DefCore.txt:16;
+    // C4Object.cpp:1682-1747,3395-3397,3504-3508;
+    // C4Command.cpp:823-861,2246-2311).
+    player.hold_until(
+        COM_RIGHT,
+        "the builder collects the staged LNKT",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(linekit)
+                .is_some_and(|object| object.container == Some(builder))
+        },
+    )?;
+    player.hold_until(
+        COM_LEFT,
+        "the LNKT-carrying builder returns to ELEV",
+        120,
+        |engine| {
+            engine
+                .object_snapshot(builder)
+                .zip(engine.object_snapshot(elevator))
+                .is_some_and(|(builder, elevator)| {
+                    builder.action.name == "Walk" && builder.position.x <= elevator.position.x + 3
+                })
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
     player.wait_until("ELEV finishes and creates ELEC", 3_000, |engine| {
         object_with_definition(engine, "ELEC").is_some()
             && engine
@@ -232,10 +390,22 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
                 .is_some_and(|object| object.construction == 100_000)
     })?;
 
+    let power_plant = object_with_definition(player.engine(), "POWR")
+        .expect("Tutorial06 creates POWR before play starts");
+    // Energy first creates an intermediate POWR-to-LNKT line, then replaces
+    // the kit endpoint with ELEV only after the return trip
+    // (C4Command.cpp:2273-2311).
     player.wait_until(
         "the automatic Energy command connects ELEV to POWR",
         1_200,
-        |engine| object_with_definition(engine, "PWRL").is_some(),
+        |engine| {
+            engine.snapshot().objects.into_iter().any(|object| {
+                object.definition_id == "PWRL"
+                    && object.action.name == "Connect"
+                    && object.action.target == Some(power_plant)
+                    && object.action.target2 == Some(elevator)
+            })
+        },
     )?;
     player.wait_until("Tutorial06 points at the surface coal", 300, |engine| {
         tutorial_message_contains(engine, "dig out a few pieces of coal")
@@ -319,8 +489,6 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
             })
         })
         .expect("the miner carries the coal thrown into POWR");
-    let power_plant = object_with_definition(player.engine(), "POWR")
-        .expect("Tutorial06 creates POWR before play starts");
     player.tap(COM_THROW)?;
     player.wait_until("POWR receives the thrown COAL", 180, |engine| {
         engine
@@ -384,12 +552,17 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     // POWR consumes fuel only while its connected chain requests energy
     // (PowerPlant.c4d/Script.c:63-85). The first physical drill attempt
     // supplies that demand but ELEC rejects it while NoEnergy is true
-    // (Elevator/Case/Script.c:346-355). Once POWR is Burning, releasing and
-    // repeating the same ordinary double-Dig starts the shaft normally.
+    // (Elevator/Case/Script.c:346-355,503-508). Wait for Burning to deliver
+    // the requested energy, then repeat the ordinary double-Dig.
     player.wait_until("POWR starts burning the thrown COAL", 180, |engine| {
         engine
             .object_snapshot(power_plant)
             .is_some_and(|object| object.action.name == "Burning")
+    })?;
+    player.wait_until("POWR supplies ELEC's requested energy", 180, |engine| {
+        engine
+            .object_snapshot(elevator)
+            .is_some_and(|object| object.energy >= 12_500)
     })?;
     player.release(COM_DIG)?;
     player.wait_out_double_click()?;
@@ -944,12 +1117,55 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     )?;
     player.hold_until(
         COM_LEFT,
-        "the builder reaches the CRYS transfer point",
+        "the builder reaches the CRYS transfer point or its wall",
         180,
         |engine| {
-            engine
-                .object_snapshot(builder)
-                .is_some_and(|object| object.position.x <= 280)
+            engine.object_snapshot(builder).is_some_and(|object| {
+                object.position.x <= 280
+                    || (object.position.x <= 283 && object.action.name == "Scale")
+                    || (object.position.x <= 283
+                        && matches!(object.action.name.as_str(), "Walk" | "Swim")
+                        && object.velocity.x == 0
+                        && object.velocity.y == 0
+                        && object.fixed_velocity.is_none())
+            })
+        },
+    )?;
+    if player
+        .engine()
+        .object_snapshot(builder)
+        .is_some_and(|object| object.action.name == "Scale")
+    {
+        // The drained layout can attach at x=282, two pixels east of the old
+        // incidental waypoint. Descend to a stable Walk/Swim contact there;
+        // the following real Collection is the transfer acceptance
+        // (C4Object.cpp:4823-4855).
+        player.hold_until(
+            COM_DOWN,
+            "the builder descends from the CRYS transfer wall",
+            100,
+            |engine| {
+                engine.object_snapshot(builder).is_some_and(|object| {
+                    matches!(object.action.name.as_str(), "Walk" | "Swim")
+                        && object.position.x <= 283
+                        && object.velocity.x == 0
+                        && object.velocity.y == 0
+                        && object.fixed_velocity.is_none()
+                })
+            },
+        )?;
+    }
+    player.wait_until(
+        "the builder steadies at the CRYS transfer point",
+        80,
+        |engine| {
+            engine.object_snapshot(builder).is_some_and(|object| {
+                matches!(object.action.name.as_str(), "Walk" | "Swim")
+                    && object.position.x <= 283
+                    && object.velocity.x == 0
+                    && object.velocity.y == 0
+                    && object.fixed_velocity.is_none()
+            })
         },
     )?;
     player.tap(COM_CURSOR_RIGHT)?;
@@ -972,50 +1188,54 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.assert_milestone("CursorRight selects the CRYS-carrying builder", |engine| {
         engine.crew_cursor(owner) == Some(builder)
     })?;
-    // ELEC is the physical floor at (330,326). Center over it, wait for the
-    // raw swim velocity to stop, then descend onto its solid mask. ObjectComUp
-    // cannot jump from DFA_SWIM, while Down accelerates toward the contact
-    // that restores Walk (C4ObjectCom.cpp:335-350;
-    // C4Object.cpp:4319-4379,4938-4956).
+    let elevator_x = player
+        .engine()
+        .object_snapshot(elevator_case)
+        .expect("Tutorial06 keeps ELEC")
+        .position
+        .x;
+    // A submerged bottom contact cannot turn Swim into Walk. Climb out at the
+    // eastern wall, then launch a real UpLeft jump across its lip and release
+    // directly over ELEC so the physical fall lands on its solid mask
+    // (C4Object.cpp:3743-3755,4332-4379,4823-4855,4967-4974;
+    // C4ObjectCom.cpp:220-235,280-307).
     player.hold_until(
         COM_RIGHT,
-        "the CRYS-carrying builder reaches the ELEC shaft",
-        80,
-        |engine| {
-            engine
-                .object_snapshot(builder)
-                .is_some_and(|object| object.position.x >= 329)
-        },
-    )?;
-    player.wait_until("the CRYS carrier comes to rest above ELEC", 80, |engine| {
-        engine.object_snapshot(builder).is_some_and(|object| {
-            object.velocity.x == 0 && object.velocity.y == 0 && object.fixed_velocity.is_none()
-        })
-    })?;
-    player.hold_until(
-        COM_DOWN,
-        "the CRYS-carrying builder settles on ELEC",
-        80,
+        "the CRYS-carrying builder reaches the eastern pool wall",
+        160,
         |engine| {
             engine.object_snapshot(builder).is_some_and(|object| {
-                object.action.name == "Walk" && (327..=333).contains(&object.position.x)
+                object.action.name == "Scale" && object.position.x > elevator_x
             })
         },
     )?;
     player.hold_until(
-        COM_LEFT,
-        "the CRYS-carrying builder centers on ELEC",
-        40,
+        COM_UP,
+        "the CRYS-carrying builder climbs out at the eastern pool wall",
+        120,
         |engine| {
             engine
                 .object_snapshot(builder)
-                .is_some_and(|object| object.position.x <= 332)
+                .is_some_and(|object| object.action.name == "Walk" && !object.in_liquid)
         },
     )?;
-    player.wait_until("the CRYS carrier comes to rest on ELEC", 40, |engine| {
+    player.press(COM_LEFT)?;
+    let crossed_lip = player.hold_until(
+        COM_UP,
+        "the CRYS-carrying builder jumps back over ELEC",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.position.x <= elevator_x + 3)
+        },
+    );
+    player.release(COM_LEFT)?;
+    crossed_lip?;
+    player.wait_until("the CRYS carrier lands on ELEC", 120, |engine| {
         engine.object_snapshot(builder).is_some_and(|object| {
             object.action.name == "Walk"
-                && (327..=333).contains(&object.position.x)
+                && ((elevator_x - 3)..=(elevator_x + 3)).contains(&object.position.x)
                 && object.velocity.x == 0
                 && object.velocity.y == 0
                 && object.fixed_velocity.is_none()
