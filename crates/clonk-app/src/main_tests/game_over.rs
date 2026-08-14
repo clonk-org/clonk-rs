@@ -663,7 +663,12 @@ fn host_round_restart_keeps_the_session_up_and_rebuilds_its_own_lobby() {
         prepared: None,
     }));
 
-    app.restart_current_network_scenario().test_value();
+    app.mode = AppMode::Running;
+    assert!(app.show_abort_dialog(app.local_owner));
+    finish_abort_dialog(
+        &mut app,
+        clonk_frontend::message_dialog::MessageDialogResult::Restart,
+    );
 
     assert!(
         app.network.is_some(),
@@ -687,6 +692,65 @@ fn host_round_restart_keeps_the_session_up_and_rebuilds_its_own_lobby() {
         "the host lands back in its own lobby"
     );
     assert_eq!(app.mode, AppMode::Menu);
+}
+
+#[test]
+fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+    let host_name = staged.lobby.local_name.clone();
+    app.active_scenario = Some(scenario);
+    app.active_definition_load = Some(activated_definition_load(
+        Some(staged.effective_definition_modules.clone()),
+        staged.definition_load,
+    ));
+    let (manager, _events, _commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        player_name: host_name,
+        prepared: None,
+    }));
+    app.control_clients.replace_snapshot([
+        clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            name: LegacyCString::from_bytes(b"Exact Host".to_vec()).test_value(),
+            ..Default::default()
+        },
+        clonk_engine::ClientCoreControlData {
+            client_id: 7,
+            activated: true,
+            name: LegacyCString::from_bytes(b"Connected Client".to_vec()).test_value(),
+            ..Default::default()
+        },
+    ]);
+
+    app.restart_current_network_scenario().test_value();
+
+    assert!(
+        app.network.is_some(),
+        "the live session must survive restart"
+    );
+    assert!(
+        app.classic_host_lobby.is_some(),
+        "the running scenario's effective definitions must rebuild its lobby"
+    );
+    assert_eq!(app.startup_view, StartupView::NetworkLobby);
+    assert!(
+        app.classic_host_lobby
+            .test_ref()
+            .controller
+            .rows()
+            .iter()
+            .any(|row| row.id() == LobbyRosterId::Client(7)),
+        "an already-connected client must be present without rejoining"
+    );
 }
 
 #[test]
