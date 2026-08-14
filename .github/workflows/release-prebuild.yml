@@ -192,21 +192,21 @@ jobs:
 
       - name: Restore trusted-main Linux build cache
         if: matrix.name == 'linux'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: full-parity
           save-if: false
 
       - name: Restore trusted-main Windows build cache
         if: matrix.name == 'windows'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: windows-runtime-msvc
           save-if: false
 
       - name: Restore trusted-main macOS build cache
         if: matrix.name == 'macos'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: recording-host-oracles
           save-if: false
@@ -321,21 +321,21 @@ jobs:
 
       - name: Restore trusted-main Linux runtime cache
         if: matrix.name == 'linux'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: full-parity
           save-if: false
 
       - name: Restore trusted-main Windows runtime cache
         if: matrix.name == 'windows'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: windows-runtime-msvc
           save-if: false
 
       - name: Restore trusted-main macOS runtime cache
         if: startsWith(matrix.name, 'macos-')
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: recording-host-oracles
           save-if: false
@@ -366,7 +366,7 @@ jobs:
 
       - name: Restore shipped MSVC dependency cache
         if: matrix.name == 'windows'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: shipped-msvc-runtime-v1
           save-if: false
