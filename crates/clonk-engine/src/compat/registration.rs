@@ -1273,6 +1273,9 @@ fn install_host_dispatch_hooks(script: &mut ScriptEngine) {
     script.register_global_call_context_hook(std::sync::Arc::new(global_call_context_hook));
     script.register_eval_direct_exec_hook(std::rc::Rc::new(eval_direct_exec_hook));
     script.register_local_cell_hook(std::rc::Rc::new(foreign_local_cell_hook));
+    script.register_object_target_availability_probe(std::rc::Rc::new(
+        arrow_object_target_available_by_id,
+    ));
 }
 
 pub fn register_host_functions(script: &mut ScriptEngine) {

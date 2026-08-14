@@ -204,6 +204,10 @@ pub type GlobalSlots =
 /// writes go through it. Registered by the engine like method_dispatch.
 pub type LocalCellHook = std::rc::Rc<dyn Fn(&Value, &str) -> Option<crate::vm::ValueCell>>;
 
+/// Reports whether a nonzero object id is still a valid AB_CALL receiver in
+/// the embedding world's current synchronous callback.
+pub type ObjectTargetAvailabilityProbe = std::rc::Rc<dyn Fn(u64) -> bool>;
+
 pub fn new_global_variables() -> GlobalVariables {
     std::rc::Rc::new(std::cell::RefCell::new(IndexMap::new()))
 }
@@ -1165,6 +1169,9 @@ pub struct Engine {
     globals_consts: Option<GlobalVariables>,
     /// Cross-object LocalN cell supplier (see [`LocalCellHook`]).
     local_cell_hook: Option<LocalCellHook>,
+    /// World-liveness check shared by ordinary arrow dispatch and the VM's
+    /// Local/LocalN/SetLocal fast paths.
+    object_target_availability_probe: Option<ObjectTargetAvailabilityProbe>,
     /// Shared engine-global C4StringTable registration ledger.
     string_registrations: Option<StringRegistrations>,
     /// Literals retained by scripts already installed in this host. This lets
@@ -1293,6 +1300,7 @@ impl Engine {
             globals_numbered: Some(new_global_slots()),
             globals_consts: None,
             local_cell_hook: None,
+            object_target_availability_probe: None,
             // Even standalone clonk-script engines own one native string table.
             // Embedders may replace it with their game-global shared ledger.
             string_registrations: Some(new_string_registrations()),
@@ -2107,6 +2115,13 @@ impl Engine {
         self.local_cell_hook = Some(hook);
     }
 
+    pub fn register_object_target_availability_probe(
+        &mut self,
+        probe: ObjectTargetAvailabilityProbe,
+    ) {
+        self.object_target_availability_probe = Some(probe);
+    }
+
     pub fn register_method_dispatch(&mut self, dispatch: HostFunction) {
         self.method_dispatch = Some(dispatch);
     }
@@ -2167,6 +2182,7 @@ impl Engine {
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_object_target_availability_probe(self.object_target_availability_probe.as_ref())
         .with_string_registrations(self.string_registrations.as_deref())
     }
 

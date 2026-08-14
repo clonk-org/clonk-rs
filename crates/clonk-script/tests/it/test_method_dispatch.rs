@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use clonk_script::{Engine, Script, Value};
+use clonk_script::{clear_active_object_references, Engine, Script, Value};
 
 #[test]
 fn object_target_routes_through_the_method_dispatch_hook() {
@@ -146,6 +146,41 @@ fn engine_wide_known_failsafe_name_preserves_zero_target_validation() {
         error.to_string().contains("Object call: target is zero!"),
         "got: {error}"
     );
+}
+
+#[test]
+fn removal_during_arguments_stops_before_bare_local_method_dispatch() {
+    // Parse_Params evaluates Clear first, then AB_CALL observes that
+    // AssignRemoval cleared its retained receiver and errors before Method
+    // runs (C4Object.cpp:312; C4AulExec.cpp:1216-1226).
+    let source = r#"#strict 3
+        func Method(ignored) { Mark(); return 99; }
+        func Probe() { return Target()->Method(Clear()); }
+    "#;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("script compiles"));
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Nil)
+    });
+    {
+        let calls = Arc::clone(&calls);
+        engine.register_host_function("Mark", move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Nil)
+        });
+    }
+
+    let error = engine
+        .call("Probe", &[])
+        .expect_err("the cleared receiver stops before local dispatch");
+    assert!(
+        error.to_string().contains("Object call: target is zero!"),
+        "got: {error}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "Method did not run");
 }
 
 #[test]

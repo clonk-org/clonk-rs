@@ -1,7 +1,89 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use clonk_script::{Engine, RuntimeError, Value};
+use clonk_script::{clear_active_object_references, Engine, RuntimeError, Value};
+
+#[test]
+fn a_global_cell_created_by_a_nested_call_stays_in_the_outer_reference_sweep() {
+    // A newly allocated engine-global C4Value outlives the nested function
+    // that first writes it, but remains on the object's FirstRef chain until
+    // AssignRemoval clears it (C4Value.cpp:78-99; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Bool(true))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Create() { SetGlobal(0, Target()); }
+func Probe() { Create(); Clear(); return Global(0); }
+"#,
+        )
+        .expect("global lifetime probe parses");
+
+    assert_eq!(
+        engine
+            .call("Probe", &[])
+            .expect("global lifetime probe runs"),
+        Value::Nil
+    );
+}
+
+#[test]
+fn a_compiled_call_clears_values_retained_below_a_removing_call() {
+    // The first AB_FUNC argument remains a live C4Value while the second
+    // argument executes. AssignRemoval clears that earlier stack slot before
+    // Sink receives it (C4AulExec.cpp:821-846; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Nil)
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Sink(first, second) { return first; }
+func Probe() { return Sink(Target(), Clear()); }
+"#,
+        )
+        .expect("compiled stack probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("compiled call runs"),
+        Value::Nil
+    );
+}
+
+#[test]
+fn a_tree_walk_array_clears_an_element_retained_during_removal() {
+    // AB_MKARRAY retains every earlier element C4Value while later elements
+    // execute, so AssignRemoval clears the first slot before construction
+    // finishes (C4AulExec.cpp:870-885; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Nil)
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+    SetLocal(0, 0); // unsupported by the compiled subset: exercise AST slots
+    return [Target(), Clear()];
+}
+"#,
+        )
+        .expect("tree-walk array probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk array runs"),
+        Value::Array(vec![Value::Nil, Value::Nil])
+    );
+}
 
 #[test]
 fn failsafe_global_call_to_missing_function_evaluates_arguments_then_returns_nil() {
