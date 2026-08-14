@@ -164,7 +164,11 @@ impl GameApp {
         let Some((client_id, player_id)) = local_identity else {
             return;
         };
-        for captured in self.voice_chat.drain_captured_frames() {
+        let activation = self
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.options.voice_activation());
+        for captured in self.voice_chat.drain_captured_frames(activation.as_ref()) {
             let frame = match clonk_network::VoiceFrame::outbound(
                 player_id,
                 captured.stream_epoch,
