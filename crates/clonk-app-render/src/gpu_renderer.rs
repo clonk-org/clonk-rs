@@ -37,6 +37,12 @@ const PACKED_OBJECT_SPRITE_INSTANCE_STRIDE: u64 =
     (17 * std::mem::size_of::<f32>() + 5 * std::mem::size_of::<u32>()) as u64;
 const PACKED_SOLID_RECT_INSTANCE_STRIDE: u64 =
     (8 * std::mem::size_of::<f32>() + std::mem::size_of::<u32>()) as u64;
+const PACKED_LANDSCAPE_INSTANCE_STRIDE: u64 =
+    (13 * std::mem::size_of::<f32>() + 5 * std::mem::size_of::<u32>()) as u64;
+const LANDSCAPE_INSTANCE_BYTE_BUDGET: u64 = 96;
+const LANDSCAPE_FLAG_GAMMA: u32 = 1 << 0;
+const LANDSCAPE_FLAG_SMOOTH: u32 = 1 << 1;
+const LANDSCAPE_SHAPE_SHIFT: u32 = 2;
 /// A covered physical pixel may not cost more than this to describe. The
 /// triangle-pair lowering it replaces spent 432 bytes on the same one pixel.
 const SOLID_RECT_INSTANCE_BYTE_BUDGET: u64 = 40;
@@ -232,6 +238,39 @@ const PACKED_SOLID_RECT_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
         format: wgpu::VertexFormat::Uint32,
         offset: 32,
         shader_location: 2,
+    },
+];
+
+const PACKED_LANDSCAPE_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 16,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32x4,
+        offset: 32,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 48,
+        shader_location: 3,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 56,
+        shader_location: 4,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 68,
+        shader_location: 5,
     },
 ];
 
@@ -666,6 +705,16 @@ struct VertexInput {
     @location(4) phase_gamma: vec4<f32>,
 };
 
+struct CompactVertexInput {
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) clip_rect: vec4<f32>,
+    @location(1) uv_rect: vec4<f32>,
+    @location(2) packed_modulation: vec4<u32>,
+    @location(3) liquid_scale: vec2<f32>,
+    @location(4) phase: vec3<f32>,
+    @location(5) flags: u32,
+};
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -689,6 +738,65 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.modulation = input.modulation;
     output.liquid_scale = input.liquid_scale;
     output.phase_gamma = input.phase_gamma;
+    return output;
+}
+
+fn unpack_c4_modulation(packed: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32((packed >> 16u) & 255u) / 255.0,
+        f32((packed >> 8u) & 255u) / 255.0,
+        f32(packed & 255u) / 255.0,
+        f32(packed >> 24u) / 255.0,
+    );
+}
+
+@vertex
+fn vs_compact(input: CompactVertexInput) -> VertexOutput {
+    let shape = input.flags >> 2u;
+    var position = vec2<f32>(input.clip_rect.x, input.clip_rect.y);
+    var uv = vec2<f32>(input.uv_rect.x, input.uv_rect.y);
+    switch input.vertex_index {
+        case 1u: {
+            position = vec2<f32>(input.clip_rect.z, input.clip_rect.y);
+            uv = vec2<f32>(input.uv_rect.z, input.uv_rect.y);
+        }
+        case 2u: {
+            position = vec2<f32>(input.clip_rect.x, input.clip_rect.w);
+            uv = vec2<f32>(input.uv_rect.x, input.uv_rect.w);
+        }
+        case 3u: {
+            position = vec2<f32>(input.clip_rect.z, input.clip_rect.w);
+            uv = vec2<f32>(input.uv_rect.z, input.uv_rect.w);
+        }
+        default: {}
+    }
+    if shape == 1u && input.vertex_index == 3u {
+        position = vec2<f32>(input.clip_rect.x, input.clip_rect.w);
+        uv = vec2<f32>(input.uv_rect.x, input.uv_rect.w);
+    }
+    if shape == 2u {
+        if input.vertex_index == 0u {
+            position = vec2<f32>(input.clip_rect.x, input.clip_rect.w);
+            uv = vec2<f32>(input.uv_rect.x, input.uv_rect.w);
+        } else if input.vertex_index >= 2u {
+            position = vec2<f32>(input.clip_rect.z, input.clip_rect.w);
+            uv = vec2<f32>(input.uv_rect.z, input.uv_rect.w);
+        }
+    }
+
+    var output: VertexOutput;
+    output.position = vec4<f32>(position, 0.0, 1.0);
+    output.uv = uv;
+    output.modulation = unpack_c4_modulation(input.packed_modulation[input.vertex_index]);
+    output.liquid_scale = vec4<f32>(
+        input.liquid_scale,
+        select(0.0, 1.0, (input.flags & 2u) != 0u),
+        0.0,
+    );
+    output.phase_gamma = vec4<f32>(
+        input.phase,
+        select(0.0, 1.0, (input.flags & 1u) != 0u),
+    );
     return output;
 }
 
@@ -1592,11 +1700,13 @@ pub struct GpuRendererStats {
     pub quad_instances: usize,
     pub sprite_instances: usize,
     pub object_sprite_instances: usize,
+    pub landscape_instances: usize,
     /// Physical point and line-fragment rectangles uploaded as compact instances.
     pub solid_rect_instances: usize,
     pub quad_instance_upload_bytes: usize,
     pub sprite_instance_upload_bytes: usize,
     pub object_sprite_upload_bytes: usize,
+    pub landscape_instance_upload_bytes: usize,
     pub solid_rect_upload_bytes: usize,
     pub composition_recreated: bool,
 }
@@ -1768,6 +1878,7 @@ enum DrawKind {
     Sprite(QuadBindingKey),
     ObjectSprite(QuadBindingKey),
     Landscape(LandscapeBindingKey),
+    LandscapeInstance(LandscapeBindingKey),
     Solid { alpha_mode: GpuSolidAlphaMode },
     SolidRect { alpha_mode: GpuSolidAlphaMode },
 }
@@ -1785,6 +1896,7 @@ struct BuiltDrawStream {
     quad_instances: Vec<PackedQuadInstance>,
     sprite_instances: Vec<PackedSpriteInstance>,
     object_sprite_instances: Vec<PackedObjectSpriteInstance>,
+    landscape_instances: Vec<PackedLandscapeInstance>,
     solid_rect_instances: Vec<PackedSolidRectInstance>,
     calls: Vec<DrawCall>,
 }
@@ -1832,6 +1944,9 @@ impl GpuRendererStats {
         self.object_sprite_instances = stream.object_sprite_instances.len();
         self.object_sprite_upload_bytes =
             stream.object_sprite_instances.len() * PACKED_OBJECT_SPRITE_INSTANCE_STRIDE as usize;
+        self.landscape_instances = stream.landscape_instances.len();
+        self.landscape_instance_upload_bytes =
+            stream.landscape_instances.len() * PACKED_LANDSCAPE_INSTANCE_STRIDE as usize;
         self.solid_rect_instances = stream.solid_rect_instances.len();
         self.solid_rect_upload_bytes =
             stream.solid_rect_instances.len() * PACKED_SOLID_RECT_INSTANCE_STRIDE as usize;
@@ -1842,7 +1957,9 @@ impl GpuRendererStats {
                 DrawKind::Quad(_) => &mut self.quad_draw_calls,
                 DrawKind::Sprite(_) => &mut self.sprite_draw_calls,
                 DrawKind::ObjectSprite(_) => &mut self.object_sprite_draw_calls,
-                DrawKind::Landscape(_) => &mut self.landscape_draw_calls,
+                DrawKind::Landscape(_) | DrawKind::LandscapeInstance(_) => {
+                    &mut self.landscape_draw_calls
+                }
                 DrawKind::Solid { .. } => &mut self.solid_draw_calls,
                 DrawKind::SolidRect { .. } => &mut self.solid_rect_draw_calls,
             };
@@ -1988,6 +2105,7 @@ pub struct RetainedGpuRenderer {
     object_sprite_normal_pipeline: wgpu::RenderPipeline,
     object_sprite_additive_pipeline: wgpu::RenderPipeline,
     landscape_pipeline: wgpu::RenderPipeline,
+    landscape_instance_pipeline: wgpu::RenderPipeline,
     solid_replace_pipeline: wgpu::RenderPipeline,
     solid_over_normal_pipeline: wgpu::RenderPipeline,
     solid_non_separate_normal_pipeline: wgpu::RenderPipeline,
@@ -2028,6 +2146,8 @@ pub struct RetainedGpuRenderer {
     sprite_instance_buffer_size: u64,
     object_sprite_instance_buffer: wgpu::Buffer,
     object_sprite_instance_buffer_size: u64,
+    landscape_instance_buffer: wgpu::Buffer,
+    landscape_instance_buffer_size: u64,
     solid_rect_instance_buffer: wgpu::Buffer,
     solid_rect_instance_buffer_size: u64,
     quad_index_buffer: wgpu::Buffer,
@@ -2035,6 +2155,7 @@ pub struct RetainedGpuRenderer {
     quad_instance_scratch: Vec<PackedQuadInstance>,
     sprite_instance_scratch: Vec<PackedSpriteInstance>,
     object_sprite_instance_scratch: Vec<PackedObjectSpriteInstance>,
+    landscape_instance_scratch: Vec<PackedLandscapeInstance>,
     solid_rect_instance_scratch: Vec<PackedSolidRectInstance>,
     draw_call_scratch: Vec<DrawCall>,
     composition: Option<CompositionTarget>,
@@ -2253,6 +2374,17 @@ impl RetainedGpuRenderer {
             GpuBlend::Normal,
             GpuSolidAlphaMode::SourceOver,
         );
+        let landscape_instance_pipeline = scene_pipeline_with_vertex_layout(
+            device,
+            "lc_gpu_landscape_instances",
+            &landscape_pipeline_layout,
+            &landscape_shader,
+            wgpu::PrimitiveTopology::TriangleList,
+            GpuBlend::Normal,
+            GpuSolidAlphaMode::SourceOver,
+            packed_landscape_instance_layout(),
+            "vs_compact",
+        );
         // Triangle-list solids interpolate across a whole primitive, so they
         // keep the generic vertex stream. Point and line commands resolve to
         // whole physical pixels and ride the instanced rectangle pipeline.
@@ -2429,6 +2561,12 @@ impl RetainedGpuRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let landscape_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_landscape_instances"),
+            size: INITIAL_VERTEX_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let solid_rect_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lc_gpu_solid_rect_instances"),
             size: INITIAL_VERTEX_BUFFER_SIZE,
@@ -2466,6 +2604,7 @@ impl RetainedGpuRenderer {
             object_sprite_normal_pipeline,
             object_sprite_additive_pipeline,
             landscape_pipeline,
+            landscape_instance_pipeline,
             solid_replace_pipeline,
             solid_over_normal_pipeline,
             solid_non_separate_normal_pipeline,
@@ -2499,6 +2638,8 @@ impl RetainedGpuRenderer {
             sprite_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
             object_sprite_instance_buffer,
             object_sprite_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
+            landscape_instance_buffer,
+            landscape_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
             solid_rect_instance_buffer,
             solid_rect_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
             quad_index_buffer,
@@ -2506,6 +2647,7 @@ impl RetainedGpuRenderer {
             quad_instance_scratch: Vec::new(),
             sprite_instance_scratch: Vec::new(),
             object_sprite_instance_scratch: Vec::new(),
+            landscape_instance_scratch: Vec::new(),
             solid_rect_instance_scratch: Vec::new(),
             draw_call_scratch: Vec::new(),
             composition: None,
@@ -2805,6 +2947,7 @@ impl RetainedGpuRenderer {
             quad_instances,
             sprite_instances,
             object_sprite_instances,
+            landscape_instances,
             solid_rect_instances,
             calls,
         } = draw_stream;
@@ -2813,6 +2956,7 @@ impl RetainedGpuRenderer {
         let sprite_instance_bytes = packed_sprite_instance_bytes(&sprite_instances);
         let object_sprite_instance_bytes =
             packed_object_sprite_instance_bytes(&object_sprite_instances);
+        let landscape_instance_bytes = packed_landscape_instance_bytes(&landscape_instances);
         let solid_rect_instance_bytes = packed_solid_rect_instance_bytes(&solid_rect_instances);
         self.ensure_bind_groups(device, &calls)?;
         let mut used_quad_bindings = HashSet::new();
@@ -2822,7 +2966,7 @@ impl RetainedGpuRenderer {
                 DrawKind::Quad(key) | DrawKind::Sprite(key) | DrawKind::ObjectSprite(key) => {
                     used_quad_bindings.insert(key);
                 }
-                DrawKind::Landscape(key) => {
+                DrawKind::Landscape(key) | DrawKind::LandscapeInstance(key) => {
                     used_landscape_bindings.insert(key);
                 }
                 DrawKind::Solid { .. } | DrawKind::SolidRect { .. } => {}
@@ -2855,6 +2999,10 @@ impl RetainedGpuRenderer {
                 0,
                 object_sprite_instance_bytes,
             );
+        }
+        self.ensure_landscape_instance_buffer(device, landscape_instance_bytes.len())?;
+        if !landscape_instance_bytes.is_empty() {
+            queue.write_buffer(&self.landscape_instance_buffer, 0, landscape_instance_bytes);
         }
         self.ensure_solid_rect_instance_buffer(device, solid_rect_instance_bytes.len())?;
         if !solid_rect_instance_bytes.is_empty() {
@@ -3004,6 +3152,7 @@ impl RetainedGpuRenderer {
         self.quad_instance_scratch = quad_instances;
         self.sprite_instance_scratch = sprite_instances;
         self.object_sprite_instance_scratch = object_sprite_instances;
+        self.landscape_instance_scratch = landscape_instances;
         self.solid_rect_instance_scratch = solid_rect_instances;
         self.draw_call_scratch = calls;
         Ok(readback)
@@ -3319,12 +3468,14 @@ impl RetainedGpuRenderer {
         let mut quad_instances = std::mem::take(&mut self.quad_instance_scratch);
         let mut sprite_instances = std::mem::take(&mut self.sprite_instance_scratch);
         let mut object_sprite_instances = std::mem::take(&mut self.object_sprite_instance_scratch);
+        let mut landscape_instances = std::mem::take(&mut self.landscape_instance_scratch);
         let mut solid_rect_instances = std::mem::take(&mut self.solid_rect_instance_scratch);
         let mut calls = std::mem::take(&mut self.draw_call_scratch);
         vertices.clear();
         quad_instances.clear();
         sprite_instances.clear();
         object_sprite_instances.clear();
+        landscape_instances.clear();
         solid_rect_instances.clear();
         calls.clear();
         calls.reserve(layers.iter().map(|layer| layer.scene.commands.len()).sum());
@@ -3337,6 +3488,7 @@ impl RetainedGpuRenderer {
                 &mut quad_instances,
                 &mut sprite_instances,
                 &mut object_sprite_instances,
+                &mut landscape_instances,
                 &mut solid_rect_instances,
                 &mut calls,
                 layer_call_start,
@@ -3347,6 +3499,7 @@ impl RetainedGpuRenderer {
             quad_instances,
             sprite_instances,
             object_sprite_instances,
+            landscape_instances,
             solid_rect_instances,
             calls,
         })
@@ -3362,6 +3515,7 @@ impl RetainedGpuRenderer {
         quad_instances: &mut Vec<PackedQuadInstance>,
         sprite_instances: &mut Vec<PackedSpriteInstance>,
         object_sprite_instances: &mut Vec<PackedObjectSpriteInstance>,
+        landscape_instances: &mut Vec<PackedLandscapeInstance>,
         solid_rect_instances: &mut Vec<PackedSolidRectInstance>,
         calls: &mut Vec<DrawCall>,
         layer_call_start: usize,
@@ -3521,21 +3675,77 @@ impl RetainedGpuRenderer {
                             base_extent[1] as f32 / extent[1] as f32,
                         ]
                     });
-                    let start = vertex_count(vertices)?;
-                    for index in [0, 1, 2, 2, 1, 3] {
-                        append_vertex(
-                            vertices,
-                            packed_landscape_vertex(
-                                quad[index],
-                                liquid_scale,
-                                *phase,
-                                fragment_gamma_flag(scene.gamma_mode, *gamma),
-                                self.smooth_landscape,
-                                &projection,
-                            )?,
-                        );
-                    }
-                    let end = vertex_count(vertices)?;
+                    let gamma = fragment_gamma_flag(scene.gamma_mode, *gamma);
+                    let packed = [
+                        packed_landscape_vertex(
+                            quad[0],
+                            liquid_scale,
+                            *phase,
+                            gamma,
+                            self.smooth_landscape,
+                            &projection,
+                        )?,
+                        packed_landscape_vertex(
+                            quad[1],
+                            liquid_scale,
+                            *phase,
+                            gamma,
+                            self.smooth_landscape,
+                            &projection,
+                        )?,
+                        packed_landscape_vertex(
+                            quad[2],
+                            liquid_scale,
+                            *phase,
+                            gamma,
+                            self.smooth_landscape,
+                            &projection,
+                        )?,
+                        packed_landscape_vertex(
+                            quad[3],
+                            liquid_scale,
+                            *phase,
+                            gamma,
+                            self.smooth_landscape,
+                            &projection,
+                        )?,
+                    ];
+                    let (start, end, kind) = match try_packed_landscape_instance(
+                        packed,
+                        liquid_scale,
+                        *phase,
+                        gamma,
+                        self.smooth_landscape,
+                    ) {
+                        Some(instance) => {
+                            let start = landscape_instance_count(landscape_instances)?;
+                            landscape_instances.push(instance);
+                            (
+                                start,
+                                landscape_instance_count(landscape_instances)?,
+                                DrawKind::LandscapeInstance(LandscapeBindingKey {
+                                    base: *base,
+                                    mask: *liquid_mask,
+                                    liquid: *liquid,
+                                }),
+                            )
+                        }
+                        None => {
+                            let start = vertex_count(vertices)?;
+                            for index in [0, 1, 2, 2, 1, 3] {
+                                append_vertex(vertices, packed[index]);
+                            }
+                            (
+                                start,
+                                vertex_count(vertices)?,
+                                DrawKind::Landscape(LandscapeBindingKey {
+                                    base: *base,
+                                    mask: *liquid_mask,
+                                    liquid: *liquid,
+                                }),
+                            )
+                        }
+                    };
                     DrawCall::push_compatible_quad(
                         calls,
                         layer_call_start,
@@ -3543,11 +3753,7 @@ impl RetainedGpuRenderer {
                             vertices: start..end,
                             scissor: projection.scissor,
                             blend: GpuBlend::Normal,
-                            kind: DrawKind::Landscape(LandscapeBindingKey {
-                                base: *base,
-                                mask: *liquid_mask,
-                                liquid: *liquid,
-                            }),
+                            kind,
                         },
                     );
                 }
@@ -3713,7 +3919,9 @@ impl RetainedGpuRenderer {
                     });
                     self.quad_bind_groups.insert(key, bind_group);
                 }
-                DrawKind::Landscape(key) if !self.landscape_bind_groups.contains_key(&key) => {
+                DrawKind::Landscape(key) | DrawKind::LandscapeInstance(key)
+                    if !self.landscape_bind_groups.contains_key(&key) =>
+                {
                     let base = self
                         .textures
                         .get(&key.base)
@@ -3867,6 +4075,30 @@ impl RetainedGpuRenderer {
             mapped_at_creation: false,
         });
         self.object_sprite_instance_buffer_size = size;
+        Ok(())
+    }
+
+    fn ensure_landscape_instance_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        required: usize,
+    ) -> Result<(), GpuRendererError> {
+        let required =
+            u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
+        if required <= self.landscape_instance_buffer_size {
+            return Ok(());
+        }
+        let size = required
+            .checked_next_power_of_two()
+            .ok_or(GpuRendererError::VertexRangeOverflow)?
+            .max(INITIAL_VERTEX_BUFFER_SIZE);
+        self.landscape_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_landscape_instances"),
+            size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.landscape_instance_buffer_size = size;
         Ok(())
     }
 
@@ -4072,6 +4304,22 @@ impl RetainedGpuRenderer {
                     );
                     pass.draw(call.vertices.clone(), 0..1);
                 }
+                DrawKind::LandscapeInstance(key) => {
+                    pass.set_vertex_buffer(0, self.landscape_instance_buffer.slice(..));
+                    pass.set_index_buffer(
+                        self.quad_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint16,
+                    );
+                    pass.set_pipeline(&self.landscape_instance_pipeline);
+                    pass.set_bind_group(
+                        1,
+                        self.landscape_bind_groups
+                            .get(&key)
+                            .expect("landscape binding was prepared"),
+                        &[],
+                    );
+                    pass.draw_indexed(0..6, 0, call.vertices.clone());
+                }
                 DrawKind::Solid { alpha_mode } => {
                     pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                     pass.set_pipeline(self.solid_pipeline(call.blend, alpha_mode));
@@ -4119,6 +4367,28 @@ struct PackedSpriteInstance {
     modulation: u32,
     flags: u32,
 }
+
+/// One byte-exact, axis-aligned retained landscape command.
+///
+/// Full fog chunks and both canonical NoBoxFades triangles share this layout.
+/// More general projective geometry or non-C4 modulation stays on the generic
+/// vertex stream.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PackedLandscapeInstance {
+    clip_rect: [f32; 4],
+    uv_rect: [f32; 4],
+    modulation: [u32; 4],
+    liquid_scale: [f32; 2],
+    phase: [f32; 3],
+    flags: u32,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<PackedLandscapeInstance>() == 72);
+    assert!(std::mem::align_of::<PackedLandscapeInstance>() == 4);
+    assert!(PACKED_LANDSCAPE_INSTANCE_STRIDE <= LANDSCAPE_INSTANCE_BYTE_BUDGET);
+};
 
 /// One axis-aligned physical rectangle of flat color.
 ///
@@ -4343,6 +4613,106 @@ fn packed_landscape_vertex(
         data0: vertex.modulation,
         data1: [liquid_scale[0], liquid_scale[1], flag(smooth), 0.0],
         data2: [phase[0], phase[1], phase[2], flag(gamma)],
+    })
+}
+
+fn exact_normalized_byte(value: f32) -> Option<u8> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return None;
+    }
+    let byte = (value * 255.0).round() as u8;
+    ((f32::from(byte) / 255.0).to_bits() == value.to_bits()).then_some(byte)
+}
+
+fn packed_c4_modulation(modulation: [f32; 4]) -> Option<u32> {
+    let [red, green, blue, transparency] = modulation.map(exact_normalized_byte);
+    Some(
+        (u32::from(transparency?) << 24)
+            | (u32::from(red?) << 16)
+            | (u32::from(green?) << 8)
+            | u32::from(blue?),
+    )
+}
+
+fn same_float(left: f32, right: f32) -> bool {
+    left.to_bits() == right.to_bits()
+}
+
+fn same_xy(left: [f32; 2], right: [f32; 2]) -> bool {
+    same_float(left[0], right[0]) && same_float(left[1], right[1])
+}
+
+fn try_packed_landscape_instance(
+    vertices: [PackedVertex; 4],
+    liquid_scale: [f32; 2],
+    phase: [f32; 3],
+    gamma: bool,
+    smooth: bool,
+) -> Option<PackedLandscapeInstance> {
+    let homogeneous_rect = vertices
+        .iter()
+        .all(|vertex| same_float(vertex.clip[2], 0.0) && same_float(vertex.clip[3], 1.0));
+    if !homogeneous_rect {
+        return None;
+    }
+    let clip = vertices.map(|vertex| [vertex.clip[0], vertex.clip[1]]);
+    let uv = vertices.map(|vertex| vertex.uv);
+    let full = same_float(clip[0][0], clip[2][0])
+        && same_float(clip[1][0], clip[3][0])
+        && same_float(clip[0][1], clip[1][1])
+        && same_float(clip[2][1], clip[3][1])
+        && same_float(uv[0][0], uv[2][0])
+        && same_float(uv[1][0], uv[3][0])
+        && same_float(uv[0][1], uv[1][1])
+        && same_float(uv[2][1], uv[3][1]);
+    let first_triangle = same_xy(clip[2], clip[3])
+        && same_xy(uv[2], uv[3])
+        && same_float(clip[0][0], clip[2][0])
+        && same_float(clip[0][1], clip[1][1])
+        && same_float(uv[0][0], uv[2][0])
+        && same_float(uv[0][1], uv[1][1]);
+    let second_triangle = same_xy(clip[2], clip[3])
+        && same_xy(uv[2], uv[3])
+        && same_float(clip[1][0], clip[2][0])
+        && same_float(clip[0][1], clip[2][1])
+        && same_float(uv[1][0], uv[2][0])
+        && same_float(uv[0][1], uv[2][1]);
+    let (clip_rect, uv_rect, shape) = if full {
+        (
+            [clip[0][0], clip[0][1], clip[3][0], clip[3][1]],
+            [uv[0][0], uv[0][1], uv[3][0], uv[3][1]],
+            0,
+        )
+    } else if first_triangle {
+        (
+            [clip[0][0], clip[0][1], clip[1][0], clip[2][1]],
+            [uv[0][0], uv[0][1], uv[1][0], uv[2][1]],
+            1,
+        )
+    } else if second_triangle {
+        (
+            [clip[0][0], clip[1][1], clip[2][0], clip[0][1]],
+            [uv[0][0], uv[1][1], uv[2][0], uv[0][1]],
+            2,
+        )
+    } else {
+        return None;
+    };
+    let modulation = [
+        packed_c4_modulation(vertices[0].data0)?,
+        packed_c4_modulation(vertices[1].data0)?,
+        packed_c4_modulation(vertices[2].data0)?,
+        packed_c4_modulation(vertices[3].data0)?,
+    ];
+    Some(PackedLandscapeInstance {
+        clip_rect,
+        uv_rect,
+        modulation,
+        liquid_scale,
+        phase,
+        flags: (u32::from(gamma) * LANDSCAPE_FLAG_GAMMA)
+            | (u32::from(smooth) * LANDSCAPE_FLAG_SMOOTH)
+            | shape << LANDSCAPE_SHAPE_SHIFT,
     })
 }
 
@@ -4975,6 +5345,10 @@ fn validate_scene(
                 for vertex in vertices {
                     validate_gpu_vertex(vertex, projection.as_ref())?;
                 }
+                // Validate the worst-case generic fallback without repeating
+                // compact classification on the hot path. This may reject an
+                // unreachable multi-billion-command scene early, but it can
+                // never admit a range that the six-vertex fallback overflows.
                 packed_vertices = packed_vertices.saturating_add(6);
             }
             GpuCommand::SpriteBatch {
@@ -5464,6 +5838,12 @@ fn object_sprite_instance_count(
     u32::try_from(instances.len()).map_err(|_| GpuRendererError::VertexRangeOverflow)
 }
 
+fn landscape_instance_count(
+    instances: &[PackedLandscapeInstance],
+) -> Result<u32, GpuRendererError> {
+    u32::try_from(instances.len()).map_err(|_| GpuRendererError::VertexRangeOverflow)
+}
+
 fn solid_rect_instance_count(
     instances: &[PackedSolidRectInstance],
 ) -> Result<u32, GpuRendererError> {
@@ -5511,6 +5891,24 @@ fn packed_sprite_instance_bytes(instances: &[PackedSpriteInstance]) -> &[u8] {
     }
     // SAFETY: `PackedSpriteInstance` is `repr(C)`, contains only contiguous
     // `f32` and `u32` fields, and the size assertion above excludes padding.
+    unsafe {
+        std::slice::from_raw_parts(
+            instances.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(instances),
+        )
+    }
+}
+
+fn packed_landscape_instance_bytes(instances: &[PackedLandscapeInstance]) -> &[u8] {
+    const {
+        assert!(
+            std::mem::size_of::<PackedLandscapeInstance>()
+                == PACKED_LANDSCAPE_INSTANCE_STRIDE as usize
+        );
+    }
+    // SAFETY: `PackedLandscapeInstance` is `repr(C)`, contains only
+    // contiguous `f32` and `u32` fields, and the size assertion excludes
+    // padding. Reading initialized object representations as bytes is valid.
     unsafe {
         std::slice::from_raw_parts(
             instances.as_ptr().cast::<u8>(),
@@ -5951,6 +6349,14 @@ fn packed_sprite_instance_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: PACKED_SPRITE_INSTANCE_STRIDE,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &PACKED_SPRITE_INSTANCE_ATTRIBUTES,
+    }
+}
+
+fn packed_landscape_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: PACKED_LANDSCAPE_INSTANCE_STRIDE,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &PACKED_LANDSCAPE_INSTANCE_ATTRIBUTES,
     }
 }
 
@@ -7430,6 +7836,68 @@ mod tests {
     }
 
     #[test]
+    fn compact_landscape_instance_preserves_all_canonical_shapes_in_72_bytes() {
+        let color = [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 68.0 / 255.0];
+        let vertex = |clip: [f32; 2], uv: [f32; 2]| PackedVertex {
+            clip: [clip[0], clip[1], 0.0, 1.0],
+            uv,
+            data0: color,
+            data1: [0.0; 4],
+            data2: [0.0; 4],
+        };
+        let top_left = vertex([-0.75, 0.5], [0.125, 0.25]);
+        let top_right = vertex([0.25, 0.5], [0.875, 0.25]);
+        let bottom_left = vertex([-0.75, -0.5], [0.125, 0.75]);
+        let bottom_right = vertex([0.25, -0.5], [0.875, 0.75]);
+        let pack = |vertices| {
+            try_packed_landscape_instance(vertices, [2.0, 4.0], [0.25, -0.5, 0.75], true, true)
+                .expect("canonical landscape geometry is compact")
+        };
+
+        let full = pack([top_left, top_right, bottom_left, bottom_right]);
+        let first = pack([top_left, top_right, bottom_left, bottom_left]);
+        let second = pack([bottom_left, top_right, bottom_right, bottom_right]);
+
+        assert_eq!(std::mem::size_of::<PackedLandscapeInstance>(), 72);
+        assert_eq!(std::mem::align_of::<PackedLandscapeInstance>(), 4);
+        assert_eq!(full.clip_rect, [-0.75, 0.5, 0.25, -0.5]);
+        assert_eq!(full.uv_rect, [0.125, 0.25, 0.875, 0.75]);
+        assert_eq!(full.modulation, [0x4411_2233; 4]);
+        assert_eq!(full.flags, LANDSCAPE_FLAG_GAMMA | LANDSCAPE_FLAG_SMOOTH);
+        assert_eq!(first.flags >> LANDSCAPE_SHAPE_SHIFT, 1);
+        assert_eq!(second.flags >> LANDSCAPE_SHAPE_SHIFT, 2);
+        assert_eq!(packed_landscape_instance_bytes(&[full]).len(), 72);
+    }
+
+    #[test]
+    fn compact_landscape_rejects_projective_and_non_c4_vertices() {
+        let vertex = |x, y, w, modulation| PackedVertex {
+            clip: [x, y, 0.0, w],
+            uv: [(x + 1.0) / 2.0, (1.0 - y) / 2.0],
+            data0: modulation,
+            data1: [0.0; 4],
+            data2: [0.0; 4],
+        };
+        let exact = [1.0, 1.0, 1.0, 0.0];
+        let projective = [
+            vertex(-1.0, 1.0, 2.0, exact),
+            vertex(1.0, 1.0, 2.0, exact),
+            vertex(-1.0, -1.0, 2.0, exact),
+            vertex(1.0, -1.0, 2.0, exact),
+        ];
+        let non_c4 = projective.map(|mut vertex| {
+            vertex.clip[3] = 1.0;
+            vertex.data0 = [0.5, 0.75, 1.0, 0.0];
+            vertex
+        });
+
+        assert!(
+            try_packed_landscape_instance(projective, [1.0; 2], [0.0; 3], false, false).is_none()
+        );
+        assert!(try_packed_landscape_instance(non_c4, [1.0; 2], [0.0; 3], false, false).is_none());
+    }
+
+    #[test]
     fn generic_vertex_stream_stats_report_count_and_bytes() {
         let vertex = PackedVertex {
             clip: [0.0; 4],
@@ -7443,6 +7911,7 @@ mod tests {
             quad_instances: Vec::new(),
             sprite_instances: Vec::new(),
             object_sprite_instances: Vec::new(),
+            landscape_instances: Vec::new(),
             solid_rect_instances: Vec::new(),
             calls: Vec::new(),
         };
@@ -7478,6 +7947,14 @@ mod tests {
                 sample_tile_size: 0.0,
                 flags: 0,
             }],
+            landscape_instances: vec![PackedLandscapeInstance {
+                clip_rect: [0.0; 4],
+                uv_rect: [0.0; 4],
+                modulation: [0; 4],
+                liquid_scale: [0.0; 2],
+                phase: [0.0; 3],
+                flags: 0,
+            }],
             solid_rect_instances: vec![PackedSolidRectInstance {
                 clip_rect: [0.0; 4],
                 color: [0.0; 4],
@@ -7504,11 +7981,46 @@ mod tests {
             stats.object_sprite_upload_bytes,
             PACKED_OBJECT_SPRITE_INSTANCE_STRIDE as usize
         );
+        assert_eq!(stats.landscape_instances, 1);
+        assert_eq!(
+            stats.landscape_instance_upload_bytes,
+            PACKED_LANDSCAPE_INSTANCE_STRIDE as usize
+        );
         assert_eq!(stats.solid_rect_instances, 1);
         assert_eq!(
             stats.solid_rect_upload_bytes,
             PACKED_SOLID_RECT_INSTANCE_STRIDE as usize
         );
+    }
+
+    #[test]
+    fn four_k_landscape_instance_stream_stays_below_196_kib() {
+        let instance = PackedLandscapeInstance {
+            clip_rect: [0.0; 4],
+            uv_rect: [0.0; 4],
+            modulation: [0; 4],
+            liquid_scale: [0.0; 2],
+            phase: [0.0; 3],
+            flags: 0,
+        };
+        let stream = BuiltDrawStream {
+            vertices: Vec::new(),
+            quad_instances: Vec::new(),
+            sprite_instances: Vec::new(),
+            object_sprite_instances: Vec::new(),
+            landscape_instances: vec![instance; 2_040],
+            solid_rect_instances: Vec::new(),
+            calls: Vec::new(),
+        };
+        let mut stats = GpuRendererStats::default();
+
+        stats.record_draw_stream(&stream);
+
+        assert_eq!(stats.landscape_instances, 2_040);
+        assert_eq!(stats.landscape_instance_upload_bytes, 146_880);
+        assert!(stats.landscape_instance_upload_bytes <= 196 * 1024);
+        assert_eq!(stats.generic_vertices, 0);
+        assert_eq!(stats.generic_vertex_upload_bytes, 0);
     }
 
     #[test]
@@ -7539,12 +8051,14 @@ mod tests {
             quad_instances: Vec::new(),
             sprite_instances: Vec::new(),
             object_sprite_instances: Vec::new(),
+            landscape_instances: Vec::new(),
             solid_rect_instances: Vec::new(),
             calls: vec![
                 call(DrawKind::Quad(quad)),
                 call(DrawKind::Sprite(quad)),
                 call(DrawKind::ObjectSprite(quad)),
                 call(DrawKind::Landscape(landscape)),
+                call(DrawKind::LandscapeInstance(landscape)),
                 call(DrawKind::Solid {
                     alpha_mode: GpuSolidAlphaMode::SourceOver,
                 }),
@@ -7557,12 +8071,12 @@ mod tests {
 
         stats.record_draw_stream(&stream);
 
-        assert_eq!(stats.draw_calls, 6);
-        assert_eq!(stats.compatible_resource_runs, 6);
+        assert_eq!(stats.draw_calls, 7);
+        assert_eq!(stats.compatible_resource_runs, 7);
         assert_eq!(stats.quad_draw_calls, 1);
         assert_eq!(stats.sprite_draw_calls, 1);
         assert_eq!(stats.object_sprite_draw_calls, 1);
-        assert_eq!(stats.landscape_draw_calls, 1);
+        assert_eq!(stats.landscape_draw_calls, 2);
         assert_eq!(stats.solid_draw_calls, 1);
         assert_eq!(stats.solid_rect_draw_calls, 1);
     }
@@ -8966,6 +9480,13 @@ mod tests {
 
         let coalesced_frame = render_identity_readback(&mut renderer, &device, &queue, &coalesced);
         assert_eq!(renderer.last_stats().draw_calls, 1);
+        assert_eq!(renderer.last_stats().generic_vertices, 0);
+        assert_eq!(renderer.last_stats().generic_vertex_upload_bytes, 0);
+        assert_eq!(renderer.last_stats().landscape_instances, 2);
+        assert_eq!(
+            renderer.last_stats().landscape_instance_upload_bytes,
+            2 * PACKED_LANDSCAPE_INSTANCE_STRIDE as usize
+        );
         let split_frame = render_identity_readback(&mut renderer, &device, &queue, &forced_split);
 
         assert_eq!(renderer.last_stats().draw_calls, 2);
@@ -8974,6 +9495,162 @@ mod tests {
             coalesced_frame.rgba,
             vec![0, 0, 0, 0, 64, 128, 0, 192, 0, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn compact_landscape_matches_the_forced_generic_path() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping compact landscape parity check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let modulation = [
+            [255.0 / 255.0, 31.0 / 255.0, 63.0 / 255.0, 0.0],
+            [127.0 / 255.0, 255.0 / 255.0, 31.0 / 255.0, 0.0],
+            [63.0 / 255.0, 31.0 / 255.0, 255.0 / 255.0, 0.0],
+            [255.0 / 255.0, 127.0 / 255.0, 63.0 / 255.0, 0.0],
+        ];
+        let compact_vertices = modulated_quad(0.0, 0.0, 3.0, 2.0, modulation);
+        let command = |vertices| GpuCommand::Landscape {
+            base: texture,
+            liquid_mask: None,
+            liquid: None,
+            vertices,
+            clip: Some(Rect::new(1, 0, 2, 2)),
+            phase: [0.25, -0.5, 0.75],
+            gamma: true,
+        };
+        let scene = |vertices| {
+            let mut scene = test_scene(
+                [3, 2],
+                Color::new(11, 19, 31, 47),
+                vec![rgba_resource(texture, [196, 143, 89, 223])],
+                vec![command(vertices)],
+            );
+            scene.gamma = GpuGammaLut::from_ramp(&GammaRamp::from_control_points([
+                0x102030, 0x708090, 0xd0e0f0,
+            ]));
+            scene.gamma_mode = GpuGammaMode::Fragment;
+            scene
+        };
+        let mut renderer = test_renderer(&device, &queue);
+        let presentation = GpuPresentation {
+            physical_extent: [5, 4],
+            scale: 1.5,
+            crop_top: 1,
+        };
+
+        for smooth in [false, true] {
+            renderer.set_smooth_landscape(smooth);
+            for gamma_mode in [
+                GpuGammaMode::Disabled,
+                GpuGammaMode::Fragment,
+                GpuGammaMode::Monitor,
+            ] {
+                let mut scene = scene(compact_vertices);
+                scene.gamma_mode = gamma_mode;
+                assert_compact_landscape_matches_generic(
+                    &mut renderer,
+                    &device,
+                    &queue,
+                    &scene,
+                    &presentation,
+                    1,
+                    1,
+                    &format!(
+                        "full landscape, smooth={smooth}, gamma_mode={gamma_mode:?}, fractional crop",
+                    ),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generic_landscape_fallback_is_an_ordered_compact_stream_barrier() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping mixed landscape fallback check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let command = |w, modulation| GpuCommand::Landscape {
+            base: texture,
+            liquid_mask: None,
+            liquid: None,
+            vertices: quad(0.0, 0.0, 1.0, 1.0, w, modulation),
+            clip: None,
+            phase: [0.0; 3],
+            gamma: false,
+        };
+        let red = [1.0, 0.0, 0.0, 127.0 / 255.0];
+        let green = [0.0, 1.0, 0.0, 127.0 / 255.0];
+        let blue = [0.0, 0.0, 1.0, 127.0 / 255.0];
+        let scene = |commands| {
+            test_scene(
+                [1, 1],
+                Color::transparent(),
+                vec![rgba_resource(texture, [255; 4])],
+                commands,
+            )
+        };
+        let mixed = scene(vec![
+            command(1.0, red),
+            command(2.0, green),
+            command(1.0, blue),
+        ]);
+        let generic = scene(vec![
+            command(2.0, red),
+            command(2.0, green),
+            command(2.0, blue),
+        ]);
+        let mut renderer = test_renderer(&device, &queue);
+
+        let mixed_frame = render_identity_readback(&mut renderer, &device, &queue, &mixed);
+        let mixed_stats = renderer.last_stats();
+        let generic_frame = render_identity_readback(&mut renderer, &device, &queue, &generic);
+
+        assert_eq!(mixed_frame, generic_frame);
+        assert_eq!(mixed_stats.draw_calls, 3);
+        assert_eq!(mixed_stats.landscape_instances, 2);
+        assert_eq!(mixed_stats.generic_vertices, 6);
+        assert_eq!(renderer.last_stats().draw_calls, 1);
+        assert_eq!(renderer.last_stats().landscape_instances, 0);
+        assert_eq!(renderer.last_stats().generic_vertices, 18);
+    }
+
+    #[test]
+    fn compact_landscape_upload_updates_without_resizing_its_buffer() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping compact landscape upload check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let scene = |modulation| {
+            test_scene(
+                [1, 1],
+                Color::transparent(),
+                vec![rgba_resource(texture, [255; 4])],
+                vec![GpuCommand::Landscape {
+                    base: texture,
+                    liquid_mask: None,
+                    liquid: None,
+                    vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, modulation),
+                    clip: None,
+                    phase: [0.0; 3],
+                    gamma: false,
+                }],
+            )
+        };
+        let mut renderer = test_renderer(&device, &queue);
+
+        let red =
+            render_identity_readback(&mut renderer, &device, &queue, &scene([1.0, 0.0, 0.0, 0.0]));
+        let green =
+            render_identity_readback(&mut renderer, &device, &queue, &scene([0.0, 1.0, 0.0, 0.0]));
+
+        assert_eq!(red.rgba, vec![255, 0, 0, 255]);
+        assert_eq!(green.rgba, vec![0, 255, 0, 255]);
+        assert_eq!(renderer.last_stats().landscape_instances, 1);
+        assert_eq!(renderer.last_stats().generic_vertices, 0);
     }
 
     #[test]
@@ -9093,6 +9770,9 @@ mod tests {
 
         let coalesced_frame = render_identity_readback(&mut renderer, &device, &queue, &coalesced);
         assert_eq!(renderer.last_stats().draw_calls, 1);
+        assert_eq!(renderer.last_stats().generic_vertices, 0);
+        assert_eq!(renderer.last_stats().landscape_instances, 2);
+        assert_eq!(renderer.last_stats().landscape_instance_upload_bytes, 144);
         let split_frame = render_identity_readback(&mut renderer, &device, &queue, &forced_split);
 
         assert_eq!(renderer.last_stats().draw_calls, 2);
@@ -9105,6 +9785,16 @@ mod tests {
             .rgba
             .chunks_exact(4)
             .any(|pixel| pixel == [0, 255, 0, 255]));
+        assert_compact_landscape_matches_generic(
+            &mut renderer,
+            &device,
+            &queue,
+            &coalesced,
+            &GpuPresentation::identity(4, 4),
+            2,
+            1,
+            "both NoBoxFades triangle encodings",
+        );
     }
 
     #[test]
@@ -9140,9 +9830,25 @@ mod tests {
             };
         let resources = |ids: [GpuTextureId; 3]| {
             vec![
-                rgba_resource(ids[0], [100, 140, 220, 255]),
-                r8_resource(ids[1], 255),
-                rgba_resource(ids[2], [220, 96, 48, 255]),
+                GpuTextureResource::immutable_rgba(
+                    ids[0],
+                    4,
+                    1,
+                    Arc::from([
+                        100, 140, 220, 255, 110, 150, 210, 255, 120, 160, 200, 255, 130, 170, 190,
+                        255,
+                    ]),
+                ),
+                GpuTextureResource {
+                    id: ids[1],
+                    extent: [4, 1],
+                    revision: 0,
+                    base_revision: None,
+                    format: GpuTextureFormat::R8,
+                    pixels: Arc::from([255_u8; 4]),
+                    dirty: Vec::new(),
+                },
+                rgba_resource_2x1(ids[2], [220, 96, 48, 255], [48, 208, 160, 255]),
             ]
         };
         let first = |ids| {
@@ -9150,7 +9856,7 @@ mod tests {
                 ids,
                 0.0,
                 1.0,
-                [0.75, 1.0, 0.5, 31.0 / 255.0],
+                [191.0 / 255.0, 1.0, 127.0 / 255.0, 31.0 / 255.0],
                 [0.3, -0.2, 0.1],
                 false,
             )
@@ -9160,7 +9866,7 @@ mod tests {
                 ids,
                 1.0,
                 2.0,
-                [1.0, 0.5, 0.75, 63.0 / 255.0],
+                [1.0, 127.0 / 255.0, 191.0 / 255.0, 63.0 / 255.0],
                 [-0.1, 0.4, 0.2],
                 true,
             )
@@ -9188,6 +9894,8 @@ mod tests {
 
         let coalesced_frame = render_identity_readback(&mut renderer, &device, &queue, &coalesced);
         assert_eq!(renderer.last_stats().draw_calls, 1);
+        assert_eq!(renderer.last_stats().generic_vertices, 0);
+        assert_eq!(renderer.last_stats().landscape_instances, 2);
         let split_frame = render_identity_readback(&mut renderer, &device, &queue, &forced_split);
 
         assert_eq!(renderer.last_stats().draw_calls, 2);
@@ -9195,6 +9903,16 @@ mod tests {
         assert_ne!(
             readback_pixel(&coalesced_frame, 0, 0),
             readback_pixel(&coalesced_frame, 1, 0)
+        );
+        assert_compact_landscape_matches_generic(
+            &mut renderer,
+            &device,
+            &queue,
+            &coalesced,
+            &GpuPresentation::identity(2, 1),
+            2,
+            1,
+            "liquid phase with 4x1 base and 2x1 liquid",
         );
     }
 
@@ -9249,6 +9967,16 @@ mod tests {
         assert_eq!(
             coalesced_frame.rgba,
             vec![220, 32, 48, 255, 220, 32, 48, 255, 24, 216, 72, 255,]
+        );
+        assert_compact_landscape_matches_generic(
+            &mut renderer,
+            &device,
+            &queue,
+            &coalesced,
+            &GpuPresentation::identity(3, 1),
+            3,
+            2,
+            "adjacent native landscape texture tiles",
         );
     }
 
@@ -10664,6 +11392,16 @@ mod tests {
         assert_eq!(renderer.last_stats().full_upload_bytes, 46);
         assert_eq!(renderer.last_stats().dirty_upload_calls, 0);
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 0);
+        assert_eq!(renderer.last_stats().generic_vertices, 6);
+        assert_eq!(
+            renderer.last_stats().generic_vertex_upload_bytes,
+            6 * PACKED_VERTEX_STRIDE as usize
+        );
+        assert_eq!(renderer.last_stats().landscape_instances, 1);
+        assert_eq!(
+            renderer.last_stats().landscape_instance_upload_bytes,
+            PACKED_LANDSCAPE_INSTANCE_STRIDE as usize
+        );
         assert!(renderer.last_stats().composition_recreated);
         assert_eq!(
             readback_last_presentation(&renderer, &device, &queue),
@@ -11186,6 +11924,12 @@ mod tests {
         assert_eq!(renderer.last_stats().full_upload_bytes, 0);
         assert_eq!(renderer.last_stats().dirty_upload_calls, 0);
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 0);
+        assert_eq!(renderer.last_stats().generic_vertices, 6);
+        assert_eq!(renderer.last_stats().landscape_instances, 1);
+        assert_eq!(
+            renderer.last_stats().landscape_instance_upload_bytes,
+            PACKED_LANDSCAPE_INSTANCE_STRIDE as usize
+        );
         assert!(renderer.last_stats().composition_recreated);
         assert_eq!(
             renderer.generation(),
@@ -11254,6 +11998,12 @@ mod tests {
         assert_eq!(renderer.last_stats().full_upload_bytes, 46);
         assert_eq!(renderer.last_stats().dirty_upload_calls, 0);
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 0);
+        assert_eq!(renderer.last_stats().generic_vertices, 6);
+        assert_eq!(renderer.last_stats().landscape_instances, 1);
+        assert_eq!(
+            renderer.last_stats().landscape_instance_upload_bytes,
+            PACKED_LANDSCAPE_INSTANCE_STRIDE as usize
+        );
         assert!(renderer.last_stats().composition_recreated);
         let validation = runtime.block_on(replacement_validation_scope.pop());
         assert!(
@@ -11612,6 +12362,84 @@ mod tests {
     ) -> GpuReadbackFrame {
         let layer = GpuSceneLayer::new(scene, *presentation);
         render_layers_readback(renderer, device, queue, std::slice::from_ref(&layer))
+    }
+
+    fn forced_generic_landscape_scene(scene: &GpuScene) -> GpuScene {
+        let mut scene = scene.clone();
+        for command in &mut scene.commands {
+            let GpuCommand::Landscape { vertices, .. } = command else {
+                continue;
+            };
+            for vertex in vertices {
+                vertex.position = vertex.position.map(|coordinate| coordinate * 2.0);
+            }
+        }
+        scene
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_compact_landscape_matches_generic(
+        renderer: &mut RetainedGpuRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &GpuScene,
+        presentation: &GpuPresentation,
+        expected_instances: usize,
+        expected_draws: usize,
+        label: &str,
+    ) {
+        let compact = render_readback(renderer, device, queue, scene, presentation);
+        let compact_stats = renderer.last_stats();
+        let generic_scene = forced_generic_landscape_scene(scene);
+        let generic = render_readback(renderer, device, queue, &generic_scene, presentation);
+        let generic_stats = renderer.last_stats();
+
+        assert_eq!(compact, generic, "{label}: compact and generic pixels");
+        assert_eq!(
+            (
+                compact_stats.landscape_instances,
+                compact_stats.landscape_instance_upload_bytes,
+                compact_stats.generic_vertices,
+                compact_stats.generic_vertex_upload_bytes,
+            ),
+            (
+                expected_instances,
+                expected_instances * PACKED_LANDSCAPE_INSTANCE_STRIDE as usize,
+                0,
+                0,
+            ),
+            "{label}: compact stream",
+        );
+        assert_eq!(
+            (
+                generic_stats.landscape_instances,
+                generic_stats.landscape_instance_upload_bytes,
+                generic_stats.generic_vertices,
+                generic_stats.generic_vertex_upload_bytes,
+            ),
+            (
+                0,
+                0,
+                expected_instances * 6,
+                expected_instances * 6 * PACKED_VERTEX_STRIDE as usize,
+            ),
+            "{label}: generic stream",
+        );
+        assert_eq!(
+            (
+                compact_stats.draw_calls,
+                compact_stats.landscape_draw_calls,
+                generic_stats.draw_calls,
+                generic_stats.landscape_draw_calls,
+            ),
+            (
+                expected_draws,
+                expected_draws,
+                expected_draws,
+                expected_draws
+            ),
+            "{label}: landscape draw runs",
+        );
     }
 
     fn render_layers_readback(

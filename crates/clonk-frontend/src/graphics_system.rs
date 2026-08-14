@@ -806,6 +806,10 @@ pub struct GraphicsSystem {
     /// Active viewport `CClrModAddMap`. It is installed for world drawing and
     /// removed before parallax GUI/overlay rendering.
     pub(crate) active_fog_map: Option<Arc<ClrModMap>>,
+    /// Deterministic fixture retained by the dedicated landscape benchmark
+    /// system so its warm capture scope excludes map construction.
+    #[cfg(any(test, feature = "bench"))]
+    benchmark_landscape_fog_map: Option<Arc<ClrModMap>>,
     /// `C4D_IgnoreFoW` temporarily disables the map around an object's base
     /// draw without affecting the surrounding viewport pass.
     fog_suppression_depth: u32,
@@ -907,6 +911,8 @@ impl GraphicsSystem {
             liquid_animation_cycle: LiquidAnimationCycle::default(),
             presentation_rng: SafeRng::default(),
             active_fog_map: None,
+            #[cfg(any(test, feature = "bench"))]
+            benchmark_landscape_fog_map: None,
             fog_suppression_depth: 0,
         }
     }
@@ -1290,6 +1296,115 @@ impl GraphicsSystem {
         self.draw_pxs(particles, 1.0, None);
         self.finish_gpu_scene_capture(gamma)
             .expect("benchmark capture was started")
+    }
+
+    /// Capture one source-aligned fogged landscape viewport through the same
+    /// retained lowering used by production rendering.
+    ///
+    /// The benchmark owns this `GraphicsSystem`: the synthetic cache is kept
+    /// between calls so command and texture capacities reach their warm
+    /// steady state before allocation and timing probes begin.
+    #[cfg(any(test, feature = "bench"))]
+    #[doc(hidden)]
+    pub fn capture_landscape_fog_for_benchmark(
+        &mut self,
+        extent: [u32; 2],
+        gamma: &clonk_graphics::GammaRamp,
+    ) -> clonk_graphics::GpuScene {
+        assert_eq!(
+            extent,
+            [self.surface_width, self.surface_height],
+            "landscape benchmark extent must match its capture surface"
+        );
+        assert!(
+            extent.into_iter().all(|dimension| dimension != 0),
+            "landscape benchmark extent must be nonzero"
+        );
+        let cache_matches = self
+            .landscape_cache
+            .as_ref()
+            .is_some_and(|cache| [cache.width, cache.height] == extent);
+        if !cache_matches {
+            let pixel_count = (extent[0] as usize)
+                .checked_mul(extent[1] as usize)
+                .expect("landscape benchmark pixel count");
+            let grid = PixelGrid::new(
+                extent[0],
+                extent[1],
+                vec![0; pixel_count],
+                vec![0],
+                vec![None],
+                vec![None],
+            );
+            let mut cache = LandscapeRenderCache::new(
+                grid,
+                extent[0],
+                extent[1],
+                false,
+                (0, 0, true, true, None),
+            );
+            cache.record_gpu_update(&[(0, 0, extent[0], extent[1])]);
+            self.landscape_cache = Some(cache);
+        }
+
+        if self.benchmark_landscape_fog_map.is_none() {
+            let mut map =
+                ClrModMap::reset(64, 64, extent[0] as i32, extent[1] as i32, 0, 0, 0, 0, 0)
+                    .expect("positive landscape benchmark fog extent");
+            for (index, modulation) in map.cells.iter_mut().enumerate() {
+                let red = 96 + (index * 17 % 160) as u32;
+                let green = 96 + (index * 29 % 160) as u32;
+                let blue = 96 + (index * 43 % 160) as u32;
+                *modulation = (red << 16) | (green << 8) | blue;
+            }
+            self.benchmark_landscape_fog_map = Some(Arc::new(map));
+        }
+        let saved_fog_map = self.active_fog_map.replace(Arc::clone(
+            self.benchmark_landscape_fog_map
+                .as_ref()
+                .expect("landscape benchmark fog fixture"),
+        ));
+        let saved_viewport = (self.viewport_x, self.viewport_y, self.viewport_zoom);
+        self.viewport_x = 0.0;
+        self.viewport_y = 0.0;
+        self.viewport_zoom = 1.0;
+
+        let fog = self
+            .fog_draw_context()
+            .expect("landscape benchmark installed fog");
+        let sampler = FogSpriteSampler::new(
+            &fog,
+            (0.0, 0.0, extent[0] as f32, extent[1] as f32),
+            (0.0, 0.0, extent[0] as f32, extent[1] as f32),
+            (extent[0], extent[1]),
+            false,
+            |x, y| (x, y),
+        )
+        .expect("landscape benchmark fog sampler");
+        self.begin_gpu_scene_capture();
+        let recorded = record_gpu_landscape(
+            &mut self.surface,
+            self.landscape_cache
+                .as_mut()
+                .expect("landscape benchmark cache"),
+            extent[0],
+            extent[1],
+            0.0,
+            0.0,
+            1.0,
+            SpriteBlitState::normal().with_renderer_config(self.advanced_renderer_config),
+            Some(&fog),
+            Some(&sampler),
+            None,
+            !gamma.is_passthrough(),
+        );
+        let scene = self
+            .finish_gpu_scene_capture(gamma)
+            .expect("landscape benchmark capture was started");
+        self.active_fog_map = saved_fog_map;
+        (self.viewport_x, self.viewport_y, self.viewport_zoom) = saved_viewport;
+        assert!(recorded, "landscape benchmark retained capture failed");
+        scene
     }
 
     #[cfg(feature = "bench")]
@@ -10717,5 +10832,65 @@ mod hd_exact_blit_tests {
             graphics.take_shader_landscape_plan().is_none(),
             "a taken plan must not be handed to a second frame"
         );
+    }
+}
+
+#[cfg(test)]
+mod landscape_benchmark_capture_tests {
+    use super::*;
+
+    fn benchmark_graphics(extent: [u32; 2]) -> GraphicsSystem {
+        GraphicsSystem::new(
+            extent[0],
+            extent[1],
+            extent[1] as i32,
+            "landscape capture benchmark test",
+            Arc::new(clonk_graphics::BitmapFont::new()),
+            Arc::new(HashMap::new()),
+            Arc::new(CursorAtlas::empty()),
+            Arc::new(HudGraphics::default()),
+        )
+    }
+
+    #[test]
+    fn benchmark_capture_uses_the_real_fogged_landscape_chunk_path() {
+        // CStdGL records one smooth-shaded landscape quad per source-aligned
+        // 64-pixel fog chunk (src/StdGL.cpp:710-763).
+        let extent = [800, 600];
+        let mut graphics = benchmark_graphics(extent);
+
+        let scene = graphics
+            .capture_landscape_fog_for_benchmark(extent, &clonk_graphics::GammaRamp::identity());
+
+        assert_eq!(scene.logical_extent, extent);
+        assert_eq!(scene.commands.len(), 13 * 10);
+        assert_eq!(scene.textures.len(), 1);
+        assert!(scene
+            .commands
+            .iter()
+            .all(|command| matches!(command, GpuCommand::Landscape { .. })));
+    }
+
+    #[test]
+    fn benchmark_capture_reuses_its_deterministic_fog_fixture() {
+        let extent = [800, 600];
+        let mut graphics = benchmark_graphics(extent);
+        let gamma = clonk_graphics::GammaRamp::identity();
+
+        let first_scene = graphics.capture_landscape_fog_for_benchmark(extent, &gamma);
+        let first_map = Arc::clone(
+            graphics
+                .benchmark_landscape_fog_map
+                .as_ref()
+                .expect("first capture installs its retained fog fixture"),
+        );
+        let second_scene = graphics.capture_landscape_fog_for_benchmark(extent, &gamma);
+        let second_map = graphics
+            .benchmark_landscape_fog_map
+            .as_ref()
+            .expect("second capture retains its fog fixture");
+
+        assert!(Arc::ptr_eq(&first_map, second_map));
+        assert_eq!(first_scene.commands, second_scene.commands);
     }
 }
