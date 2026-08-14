@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "kind": "historical_full_scenario_differential",
+  "issue": "clonk-org/clonk-rs#394",
+  "scope": {
+    "historical": true,
+    "validates_current_head": false
+  },
+  "oracle": {
+    "pinned_commit": "7d43b47b7d789b533f32d005e64596e0a07019cd",
+    "execution_checkout_commit": "40579922c8f0eb7b16c846b1acab047663975b4c",
+    "pinned_base_src_tree": "f0597bdde7201f58b5e28d7ed42071d489ddf6de",
+    "execution_base_src_tree": "f0597bdde7201f58b5e28d7ed42071d489ddf6de",
+    "pinned_rust_tree": "e412c65ba3a8c6d7212a08cbf22c08947a0858df",
+    "content_commit": "67a54d0e662bda3aa0202134efc065d7bc420872"
+  },
+  "rust_runtime": {
+    "commit": "40579922c8f0eb7b16c846b1acab047663975b4c",
+    "tree": "3bad3e5313662c38ed89811b77bfdca42beb3191"
+  },
+  "instrumentation": {
+    "kind": "fail_closed_sync_comparison",
+    "changes_simulation_logic": false,
+    "patch": "parity/reports/goldrush_seed_424242_rng_ledger.diff",
+    "patch_sha256": "0aced9aa61ae911814612f40f07c5e73579850b2479653c4bd72cfac0e5a6283",
+    "files": [
+      "rust/crates/lc-engine/src/ffi.rs",
+      "rust/include/lc_engine_ffi.h",
+      "src/rust/RustEngineBridge.cpp"
+    ]
+  },
+  "scenario": {
+    "path": "Western.c4f/Goldrush.c4s",
+    "random_seed": 424242,
+    "map_seed": 38954,
+    "startup_player_count": 1,
+    "use_fair_crew": true,
+    "fair_crew_strength": 1000,
+    "control_rate": 2,
+    "auto_frame_skip": true,
+    "flags": [
+      "/nonetwork",
+      "/console"
+    ],
+    "player_profile": {
+      "sha256": "bfcfe9ac6b7a5085a48dc03bd495e7c31ddf824506a2b317c34f3862b47f1694",
+      "size": 31254,
+      "source_record": "Records.c4f/178-Goldrush.c4s/CtrlRec.c4b",
+      "source_record_sha256": "da584c47f35f14543ba1dfeec4a9f178a83da7904c865503790fa758f0a6241f",
+      "offset": 28,
+      "length": 31254
+    }
+  },
+  "comparison": {
+    "status": "match",
+    "first_frame": 1,
+    "previous_horizon": 14415,
+    "last_matching_frame": 15000,
+    "comparator": "lc_engine_runtime_compare_snapshot",
+    "raw_fixed_fields": [
+      "fix_x.val",
+      "fix_y.val",
+      "fix_r.val",
+      "xdir.val",
+      "ydir.val",
+      "rdir.val"
+    ],
+    "synced_rng_fields": [
+      "FRndPtr3",
+      "RandomHold",
+      "RandomCount"
+    ],
+    "random3_compared": true,
+    "safe_random_compared": false,
+    "presentation_randomness_compared": false,
+    "synced_rng_fail_closed": true
+  },
+  "terminal_probe": {
+    "debugger": "lldb",
+    "architecture": "arm64",
+    "binary_sha256": "442c8abd0593df3e193b1393ca529d92a81d2d52de286ebc6f12cd0002b53c3f",
+    "breakpoint_symbol": "lc_engine_runtime_compare_snapshot",
+    "frame_argument_register": "x1",
+    "frame_argument": 15000,
+    "return_register": "w0",
+    "return_value": 1,
+    "parity_mismatch_log_entries": 0
+  },
+  "source_citations": [
+    "src/C4GameParameters.cpp:424-427",
+    "src/C4Landscape.cpp:561-580",
+    "src/C4Game.cpp:796-870,1899-1903",
+    "src/C4Random.cpp:22-41",
+    "src/C4Control.cpp:445-451,482-492",
+    "src/rust/RustEngineBridge.cpp:1141-1176,1974-2022,2127-2164",
+    "rust/crates/lc-engine/src/ffi.rs:1397-1754,2361-2507",
+    "rust/crates/lc-engine/src/lib.rs:20773-20806"
+  ]
+}
