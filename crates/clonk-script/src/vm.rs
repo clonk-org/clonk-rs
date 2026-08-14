@@ -468,6 +468,18 @@ fn clear_value_for_object_reference_sweeps(value: &mut Value, cursor: usize) {
     });
 }
 
+/// C++ keeps every completed key/value pair of an AB_MAP on the value stack
+/// until the map opcode pops them, so a removal inside a later entry clears
+/// all of the earlier ones (C4AulExec.cpp map construction; C4Object.cpp:312).
+fn clear_map_for_object_reference_sweeps(map: &mut ValueMap, cursor: usize) {
+    let mut retained = Value::Proplist(std::mem::take(map));
+    clear_value_for_object_reference_sweeps(&mut retained, cursor);
+    let Value::Proplist(cleared) = retained else {
+        unreachable!("a reference-swept map remains a map");
+    };
+    *map = cleared;
+}
+
 fn object_target_id(value: &Value) -> Option<u64> {
     match value {
         Value::Object(id) if *id != 0 => Some(*id),
@@ -6012,9 +6024,11 @@ impl<'a> Vm<'a> {
                     .map(|tracked| tracked.value);
                 }
                 if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
-                    let left = self.evaluate_tracked(lhs, env, depth)?;
+                    let left_sweep_cursor = object_reference_sweep_cursor();
+                    let mut left = self.evaluate_tracked(lhs, env, depth)?;
                     let _left_slot = ValueStackReservation::reserve(1)?;
                     let right = self.evaluate_tracked(rhs, env, depth)?;
+                    left.clear_object_reference_sweeps(left_sweep_cursor);
                     let equal = self.values_equal(
                         &left.value,
                         &right.value,
@@ -6048,6 +6062,10 @@ impl<'a> Vm<'a> {
                     }
                     let _left_slot = ValueStackReservation::reserve(1)?;
                     let right = self.evaluate(rhs, env, depth)?;
+                    // AB_And leaves the left operand on the stack across the
+                    // right side, so a removal there clears it before the
+                    // coercion reads it (C4AulExec.cpp:733-748).
+                    clear_value_for_object_reference_sweeps(&mut left, left_sweep_cursor);
                     return Ok(Value::Bool(left.as_bool() && right.as_bool()));
                 }
                 if matches!(op, BinaryOp::Or) {
@@ -6059,6 +6077,7 @@ impl<'a> Vm<'a> {
                     }
                     let _left_slot = ValueStackReservation::reserve(1)?;
                     let right = self.evaluate(rhs, env, depth)?;
+                    clear_value_for_object_reference_sweeps(&mut left, left_sweep_cursor);
                     return Ok(Value::Bool(left.as_bool() || right.as_bool()));
                 }
                 let _left_slot = ValueStackReservation::reserve(1)?;
@@ -6601,14 +6620,16 @@ impl<'a> Vm<'a> {
                 let mut map = ValueMap::with_capacity(entries.len());
                 let mut value_stack = ValueStackReservation::empty();
                 for (key_expr, value_expr) in entries {
-                    let key_sweep_cursor = object_reference_sweep_cursor();
+                    let entry_sweep_cursor = object_reference_sweep_cursor();
                     let key = self.evaluate_set_no_ref_result(key_expr, env, depth)?;
                     value_stack.grow(1)?;
                     let mut key = key.into_value()?;
+                    let value_sweep_cursor = object_reference_sweep_cursor();
                     let value = self.evaluate_set_no_ref_result(value_expr, env, depth)?;
                     value_stack.grow(1)?;
                     let value = value.into_value()?;
-                    clear_value_for_object_reference_sweeps(&mut key, key_sweep_cursor);
+                    clear_value_for_object_reference_sweeps(&mut key, value_sweep_cursor);
+                    clear_map_for_object_reference_sweeps(&mut map, entry_sweep_cursor);
                     c4_map_assign_set(&mut map, key, value);
                 }
                 Ok(Value::Proplist(map))
@@ -6740,17 +6761,22 @@ impl<'a> Vm<'a> {
                 Ok(TrackedValue::array(tracked))
             }
             Expr::Proplist(entries) => {
-                let mut tracked = Vec::with_capacity(entries.len());
+                let mut tracked: Vec<(Value, TrackedValue)> = Vec::with_capacity(entries.len());
                 let mut value_stack = ValueStackReservation::empty();
                 for (key_expr, value_expr) in entries {
-                    let key_sweep_cursor = object_reference_sweep_cursor();
+                    let entry_sweep_cursor = object_reference_sweep_cursor();
                     let key = self.evaluate_set_no_ref_result(key_expr, env, depth)?;
                     value_stack.grow(1)?;
                     let mut key = key.into_value()?;
+                    let value_sweep_cursor = object_reference_sweep_cursor();
                     let value = self.evaluate_set_no_ref_result(value_expr, env, depth)?;
                     value_stack.grow(1)?;
                     let value = value.into_tracked()?;
-                    clear_value_for_object_reference_sweeps(&mut key, key_sweep_cursor);
+                    clear_value_for_object_reference_sweeps(&mut key, value_sweep_cursor);
+                    for (retained_key, retained_value) in &mut tracked {
+                        clear_value_for_object_reference_sweeps(retained_key, entry_sweep_cursor);
+                        retained_value.clear_object_reference_sweeps(entry_sweep_cursor);
+                    }
                     tracked.push((key, value));
                 }
                 Ok(TrackedValue::proplist(tracked))
