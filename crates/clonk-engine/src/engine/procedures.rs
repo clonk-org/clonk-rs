@@ -2956,6 +2956,10 @@ impl Engine {
         object.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut object.fixed_velocity);
         object.refresh_velocity_from_fixed();
+        // Attachment (C4Object.cpp:5194-5196): after SetDir, so the
+        // TurnAction StartCall above still observed the pre-write register.
+        object.frame_t_attach |= CNAT_BOTTOM;
+        object.state.t_attach = object.frame_t_attach;
         Ok(true)
     }
 
@@ -3113,8 +3117,15 @@ impl Engine {
             }
         }
 
-        let (_, advance) = self.set_exec_direction_from_xdir_live(puller_id, 0)?;
+        let (live_idx, advance) = self.set_exec_direction_from_xdir_live(puller_id, 0)?;
         *phase_advance = Some(advance);
+        let Some(idx) = live_idx else {
+            return Ok(false);
+        };
+        // Attachment (C4Object.cpp:5194-5196).
+        let object = &mut self.objects[idx];
+        object.frame_t_attach |= CNAT_BOTTOM;
+        object.state.t_attach = object.frame_t_attach;
 
         Ok(true)
     }
@@ -3253,9 +3264,13 @@ impl Engine {
         }
 
         // Other (C4Object.cpp:5235-5238): grounded fighting and Tick35
-        // experience after every validity check above has succeeded.
+        // experience after every validity check above has succeeded. The
+        // attachment lands before the experience call, whose promotion
+        // callback can read Action.t_attach.
         let fighter_id = self.objects[idx].id;
         let fighter = &mut self.objects[idx];
+        fighter.frame_t_attach |= CNAT_BOTTOM;
+        fighter.state.t_attach = fighter.frame_t_attach;
         fighter.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut fighter.fixed_velocity);
         fighter.refresh_velocity_from_fixed();
@@ -3624,6 +3639,10 @@ impl Engine {
         object.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut object.fixed_velocity);
         object.refresh_velocity_from_fixed();
+        // Attachment (C4Object.cpp:5110-5112): after SetDir, so the
+        // TurnAction StartCall above still observed the pre-write register.
+        object.frame_t_attach |= CNAT_BOTTOM;
+        object.state.t_attach = object.frame_t_attach;
         Ok(true)
     }
 
@@ -3750,8 +3769,15 @@ impl Engine {
             );
         }
 
-        let (_, advance) = self.set_exec_direction_from_xdir_live(pusher_id, 1)?;
+        let (live_idx, advance) = self.set_exec_direction_from_xdir_live(pusher_id, 1)?;
         *phase_advance = Some(advance);
+        let Some(idx) = live_idx else {
+            return Ok(false);
+        };
+        // Attachment (C4Object.cpp:5110-5112).
+        let object = &mut self.objects[idx];
+        object.frame_t_attach |= CNAT_BOTTOM;
+        object.state.t_attach = object.frame_t_attach;
 
         Ok(true)
     }

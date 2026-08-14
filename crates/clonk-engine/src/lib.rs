@@ -9026,6 +9026,8 @@ fn attach_direction(attach: u32) -> (i32, i32) {
 /// the ActMap Attach's MultiAttach flag, :4703/:4758) — only the
 /// no-procedure default case applies the FULL ActMap Attach (:5427);
 /// DIG and SWIM RESET the whole register to CNAT_None (:4916/:4967).
+/// Push, Pull and Fight keep only that pre-procedure base here and OR
+/// CNAT_Bottom after their live SetDir / distance check.
 #[doc(hidden)]
 pub fn procedure_t_attach(
     procedure: ActionProcedure,
@@ -9043,10 +9045,7 @@ pub fn procedure_t_attach(
         | ActionProcedure::Kneel
         | ActionProcedure::Throw
         | ActionProcedure::Bridge
-        | ActionProcedure::Push
-        | ActionProcedure::Pull
-        | ActionProcedure::Chop
-        | ActionProcedure::Fight => base | CNAT_BOTTOM,
+        | ActionProcedure::Chop => base | CNAT_BOTTOM,
         ActionProcedure::Scale => {
             let mut attach = base;
             if direction == Direction::Left {
