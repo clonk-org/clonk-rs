@@ -86,7 +86,14 @@ impl GameApp {
             return true;
         }
         let echo_reference = self.voice_echo_reference();
-        if let Err(error) = self.voice_chat.start_capture(Some(key), echo_reference) {
+        let input_device = self
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.options.voice_input_device.clone());
+        if let Err(error) =
+            self.voice_chat
+                .start_capture_on_device(Some(key), echo_reference, input_device)
+        {
             tracing::warn!(%error, "push-to-talk could not open the microphone");
         }
         true
@@ -97,23 +104,41 @@ impl GameApp {
     /// — only without a key to hold. It never opens one on the push-to-talk
     /// default, and it closes a capture the player stranded by switching back:
     /// no key owns that capture, so nothing else ever would.
-    fn update_voice_activated_capture(&mut self, voice_activated: bool) {
+    fn update_voice_activated_capture(&mut self, voice_activated: bool, now: Instant) {
+        let echo_reference = self.voice_echo_reference();
+        let input_device = self
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.options.voice_input_device.clone());
         if !voice_activated {
-            if self.voice_chat.capture_active() && self.voice_chat.capture_key().is_none() {
+            if self.voice_chat.voice_activated_capture_requested() {
                 self.voice_chat.stop_capture();
+            } else if let Err(error) =
+                self.voice_chat
+                    .reconcile_capture_device_at(input_device, echo_reference, now)
+            {
+                tracing::warn!(%error, "the selected microphone could not be opened");
             }
             return;
         }
-        let echo_reference = self.voice_echo_reference();
-        if let Err(error) = self
-            .voice_chat
-            .start_voice_activated_capture(echo_reference)
-        {
+        if let Err(error) = self.voice_chat.reconcile_capture_device_at(
+            input_device.clone(),
+            echo_reference.clone(),
+            now,
+        ) {
+            tracing::warn!(%error, "the selected microphone could not be opened");
+            return;
+        }
+        if let Err(error) = self.voice_chat.start_voice_activated_capture_on_device_at(
+            echo_reference,
+            input_device,
+            now,
+        ) {
             tracing::warn!(%error, "voice activation could not open the microphone");
         }
     }
 
-    fn remove_voice_playback(&self, speakers: impl IntoIterator<Item = (i32, i32)>) {
+    pub(crate) fn remove_voice_playback(&self, speakers: impl IntoIterator<Item = (i32, i32)>) {
         let Some(audio) = self.audio.as_ref() else {
             return;
         };
@@ -231,7 +256,7 @@ impl GameApp {
             return;
         };
         let activation = self.voice_activation();
-        self.update_voice_activated_capture(activation.is_some());
+        self.update_voice_activated_capture(activation.is_some(), now);
         for captured in self.voice_chat.drain_captured_frames(activation.as_ref()) {
             let frame = match clonk_network::VoiceFrame::outbound(
                 player_id,

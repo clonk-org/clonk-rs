@@ -54,7 +54,8 @@ use std::time::{Duration, Instant};
 
 use clonk_audio::{
     decode_voice_frame, EncodedVoiceFrame, VoiceCapture, VoiceCaptureError, VoiceCaptureOptions,
-    VoiceEchoReference, VoiceInputFrame, VoiceProcessingConfig, VoiceProcessingSwitches,
+    VoiceEchoReference, VoiceInputDeviceId, VoiceInputFrame, VoiceProcessingConfig,
+    VoiceProcessingSwitches,
 };
 use clonk_engine::{ObjectSnapshot, PlayerStatus, SimulationSnapshot};
 
@@ -69,6 +70,7 @@ const MAX_PENDING_VOICE_FRAMES: usize = 8;
 const VOICE_SEQUENCE_WINDOW_FRAMES: usize = u64::BITS as usize;
 const MIN_VOICE_JITTER_OBSERVATIONS: usize = 3;
 const VOICE_PLAYOUT_GUARD_FRAMES: usize = 2;
+const VOICE_CAPTURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PushToTalkAction {
@@ -178,11 +180,19 @@ pub(crate) struct AcceptedRemoteVoiceFrame {
 
 pub(crate) trait VoiceFrameSource {
     fn drain_frames(&self) -> Vec<VoiceInputFrame>;
+
+    fn stream_generation(&self) -> u64 {
+        0
+    }
 }
 
 impl VoiceFrameSource for VoiceCapture {
     fn drain_frames(&self) -> Vec<VoiceInputFrame> {
         self.drain_frames()
+    }
+
+    fn stream_generation(&self) -> u64 {
+        self.stream_generation()
     }
 }
 
@@ -524,6 +534,9 @@ pub(crate) struct VoiceChatState {
     /// microphone to close (clonk-org/clonk-rs#421).
     processing: Arc<VoiceProcessingSwitches>,
     capture_key: Option<winit::keyboard::KeyCode>,
+    capture_input_device: Option<VoiceInputDeviceId>,
+    next_capture_retry_at: Option<Instant>,
+    capture_stream_generation: u64,
     activation_gate: VoiceActivationGate,
     activation_open_failed: bool,
     stream_epoch: u32,
@@ -562,6 +575,9 @@ impl VoiceChatState {
             }),
             processing: VoiceProcessingSwitches::new(VoiceProcessingConfig::default()),
             capture_key: None,
+            capture_input_device: None,
+            next_capture_retry_at: None,
+            capture_stream_generation: 0,
             activation_gate: VoiceActivationGate::default(),
             activation_open_failed: false,
             stream_epoch: 0,
@@ -593,13 +609,46 @@ impl VoiceChatState {
         key: Option<winit::keyboard::KeyCode>,
         echo_reference: Option<VoiceEchoReference>,
     ) -> Result<(), VoiceCaptureError> {
+        self.start_capture_on_device(key, echo_reference, None)
+    }
+
+    pub(crate) fn start_capture_on_device(
+        &mut self,
+        key: Option<winit::keyboard::KeyCode>,
+        echo_reference: Option<VoiceEchoReference>,
+        input_device: Option<VoiceInputDeviceId>,
+    ) -> Result<(), VoiceCaptureError> {
+        self.start_capture_on_device_at(key, echo_reference, input_device, Instant::now())
+    }
+
+    fn start_capture_on_device_at(
+        &mut self,
+        key: Option<winit::keyboard::KeyCode>,
+        echo_reference: Option<VoiceEchoReference>,
+        input_device: Option<VoiceInputDeviceId>,
+        now: Instant,
+    ) -> Result<(), VoiceCaptureError> {
         if self.capture.is_some() {
             return Ok(());
         }
-        let mut options = VoiceCaptureOptions::new(self.processing.clone());
-        options.echo_reference = echo_reference;
-        self.capture = Some((self.capture_opener)(options)?);
+        // Intent must outlive the physical stream. If the selected microphone
+        // is absent, the release of a held push-to-talk key still owns and
+        // cancels this pending capture instead of falling through to gameplay.
         self.capture_key = key;
+        self.capture_input_device = input_device.clone();
+        let mut options = VoiceCaptureOptions::new(self.processing.clone());
+        options.input_device = input_device;
+        options.echo_reference = echo_reference;
+        let capture = match (self.capture_opener)(options) {
+            Ok(capture) => capture,
+            Err(error) => {
+                self.next_capture_retry_at = now.checked_add(VOICE_CAPTURE_RETRY_INTERVAL);
+                return Err(error);
+            }
+        };
+        self.capture_stream_generation = capture.stream_generation();
+        self.capture = Some(capture);
+        self.next_capture_retry_at = None;
         self.activation_gate.close();
         self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
         self.next_sequence = 0;
@@ -609,26 +658,104 @@ impl VoiceChatState {
     /// Opens a capture no push-to-talk key owns, for a player who has chosen
     /// voice activation.
     ///
-    /// A failed open latches. Voice activation has no key press to rate-limit
-    /// it, so without the latch a missing or busy microphone would be reopened
-    /// on every tick for as long as the player stays in the game. The latch
-    /// clears the next time the capture stops — which is what a player who has
-    /// just plugged a microphone in will cause by leaving and re-entering.
+    /// A failed open is retried on a bounded cadence. Voice activation has no
+    /// key press to rate-limit it, so a missing or busy microphone must not be
+    /// reopened on every tick; the timer still lets a newly plugged selected
+    /// input recover without leaving the game.
     pub(crate) fn start_voice_activated_capture(
         &mut self,
         echo_reference: Option<VoiceEchoReference>,
     ) -> Result<(), VoiceCaptureError> {
-        if self.capture.is_some() || self.activation_open_failed {
+        self.start_voice_activated_capture_on_device(echo_reference, None)
+    }
+
+    pub(crate) fn start_voice_activated_capture_on_device(
+        &mut self,
+        echo_reference: Option<VoiceEchoReference>,
+        input_device: Option<VoiceInputDeviceId>,
+    ) -> Result<(), VoiceCaptureError> {
+        self.start_voice_activated_capture_on_device_at(
+            echo_reference,
+            input_device,
+            Instant::now(),
+        )
+    }
+
+    pub(crate) fn start_voice_activated_capture_on_device_at(
+        &mut self,
+        echo_reference: Option<VoiceEchoReference>,
+        input_device: Option<VoiceInputDeviceId>,
+        now: Instant,
+    ) -> Result<(), VoiceCaptureError> {
+        if self.capture.is_some()
+            || (self.activation_open_failed
+                && self
+                    .next_capture_retry_at
+                    .is_some_and(|retry_at| now < retry_at))
+        {
             return Ok(());
         }
-        let opened = self.start_capture(None, echo_reference);
+        let opened = self.start_capture_on_device_at(None, echo_reference, input_device, now);
         self.activation_open_failed = opened.is_err();
+        opened
+    }
+
+    /// Applies a settings change without discarding who currently owns the
+    /// capture. Replacing the physical stream starts a fresh media epoch, but
+    /// leaves the network and every remote playout stream untouched.
+    pub(crate) fn reconcile_capture_device(
+        &mut self,
+        input_device: Option<VoiceInputDeviceId>,
+        echo_reference: Option<VoiceEchoReference>,
+    ) -> Result<(), VoiceCaptureError> {
+        self.reconcile_capture_device_at(input_device, echo_reference, Instant::now())
+    }
+
+    pub(crate) fn reconcile_capture_device_at(
+        &mut self,
+        input_device: Option<VoiceInputDeviceId>,
+        echo_reference: Option<VoiceEchoReference>,
+        now: Instant,
+    ) -> Result<(), VoiceCaptureError> {
+        if self.capture_input_device == input_device {
+            if self.capture.is_none()
+                && self.capture_key.is_some()
+                && self
+                    .next_capture_retry_at
+                    .is_none_or(|retry_at| now >= retry_at)
+            {
+                return self.start_capture_on_device_at(
+                    self.capture_key,
+                    echo_reference,
+                    input_device,
+                    now,
+                );
+            }
+            return Ok(());
+        }
+        let requested =
+            self.capture.is_some() || self.capture_key.is_some() || self.activation_open_failed;
+        let key = self.capture_key;
+        self.capture = None;
+        self.capture_input_device = input_device.clone();
+        self.next_capture_retry_at = None;
+        self.activation_open_failed = false;
+        if !requested {
+            return Ok(());
+        }
+        let opened = self.start_capture_on_device_at(key, echo_reference, input_device, now);
+        if key.is_none() {
+            self.activation_open_failed = opened.is_err();
+        }
         opened
     }
 
     pub(crate) fn stop_capture(&mut self) {
         self.capture = None;
         self.capture_key = None;
+        self.capture_input_device = None;
+        self.next_capture_retry_at = None;
+        self.capture_stream_generation = 0;
         self.activation_open_failed = false;
         self.activation_gate.close();
     }
@@ -641,6 +768,10 @@ impl VoiceChatState {
         self.capture_key
     }
 
+    pub(crate) fn voice_activated_capture_requested(&self) -> bool {
+        self.capture_key.is_none() && (self.capture.is_some() || self.activation_open_failed)
+    }
+
     /// `activation` is `Some` only in voice-activated mode, where it decides
     /// per frame whether the microphone's output is transmitted at all. On the
     /// push-to-talk default it is `None` and every captured frame goes out.
@@ -651,8 +782,15 @@ impl VoiceChatState {
         let Some(capture) = self.capture.as_ref() else {
             return Vec::new();
         };
-        capture
-            .drain_frames()
+        let frames = capture.drain_frames();
+        let generation = capture.stream_generation();
+        if generation != self.capture_stream_generation {
+            self.capture_stream_generation = generation;
+            self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
+            self.next_sequence = 0;
+            self.activation_gate.close();
+        }
+        frames
             .into_iter()
             .filter_map(|frame| match activation {
                 None => Some((frame.payload, false)),
@@ -1885,6 +2023,225 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(2, 0)],
         );
+    }
+
+    #[test]
+    fn failed_push_to_talk_open_keeps_the_key_owned_until_release() {
+        let mut voice = VoiceChatState::with_capture_opener(
+            |_| -> Result<TestVoiceSource, VoiceCaptureError> {
+                Err(VoiceCaptureError::NoInputDevice)
+            },
+        );
+
+        assert!(matches!(
+            voice.start_capture(Some(winit::keyboard::KeyCode::Backquote), None),
+            Err(VoiceCaptureError::NoInputDevice),
+        ));
+        assert_eq!(
+            voice.capture_key(),
+            Some(winit::keyboard::KeyCode::Backquote),
+            "an unplugged microphone must not make a held push-to-talk key forget its release",
+        );
+
+        voice.stop_capture();
+        assert_eq!(voice.capture_key(), None);
+    }
+
+    #[test]
+    fn capture_opens_with_the_exact_selected_input_device() {
+        let observed = Rc::new(RefCell::new(None));
+        let observed_options = observed.clone();
+        let mut voice = VoiceChatState::with_capture_opener(move |options| {
+            *observed_options.borrow_mut() = options.input_device;
+            Ok(TestVoiceSource::with_frame([0; 164]))
+        });
+        let selected = r#"coreaudio:USB #1 — \"room\""#
+            .parse::<clonk_audio::VoiceInputDeviceId>()
+            .expect("a persisted CPAL input device identity");
+
+        voice
+            .start_capture_on_device(
+                Some(winit::keyboard::KeyCode::Backquote),
+                None,
+                Some(selected.clone()),
+            )
+            .expect("the injected microphone opens");
+
+        assert_eq!(*observed.borrow(), Some(selected));
+    }
+
+    #[test]
+    fn selecting_a_different_input_replaces_capture_without_forgetting_its_key() {
+        struct DroppingVoiceSource {
+            frame: RefCell<Option<VoiceInputFrame>>,
+            drops: Rc<Cell<usize>>,
+        }
+
+        impl VoiceFrameSource for DroppingVoiceSource {
+            fn drain_frames(&self) -> Vec<VoiceInputFrame> {
+                self.frame.borrow_mut().take().into_iter().collect()
+            }
+        }
+
+        impl Drop for DroppingVoiceSource {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+
+        let first = "coreaudio:first"
+            .parse::<VoiceInputDeviceId>()
+            .expect("the first device identity");
+        let second = "coreaudio:second"
+            .parse::<VoiceInputDeviceId>()
+            .expect("the second device identity");
+        let opens = Rc::new(RefCell::new(Vec::new()));
+        let observed_opens = opens.clone();
+        let drops = Rc::new(Cell::new(0));
+        let observed_drops = drops.clone();
+        let mut voice = VoiceChatState::with_capture_opener(move |options| {
+            observed_opens.borrow_mut().push(options.input_device);
+            Ok(DroppingVoiceSource {
+                frame: RefCell::new(Some(VoiceInputFrame {
+                    payload: [0; clonk_audio::VOICE_ENCODED_FRAME_BYTES],
+                    level: 1.0,
+                })),
+                drops: observed_drops.clone(),
+            })
+        });
+
+        voice
+            .start_capture_on_device(
+                Some(winit::keyboard::KeyCode::Backquote),
+                None,
+                Some(first.clone()),
+            )
+            .expect("first input opens");
+        assert_eq!(
+            voice
+                .drain_captured_frames(None)
+                .into_iter()
+                .map(|frame| (frame.stream_epoch, frame.sequence))
+                .collect::<Vec<_>>(),
+            vec![(1, 0)],
+        );
+
+        voice
+            .reconcile_capture_device(Some(second.clone()), None)
+            .expect("replacement input opens");
+
+        assert_eq!(opens.borrow().as_slice(), &[Some(first), Some(second)],);
+        assert_eq!(
+            drops.get(),
+            1,
+            "the replaced stream is dropped exactly once"
+        );
+        assert_eq!(
+            voice.capture_key(),
+            Some(winit::keyboard::KeyCode::Backquote),
+        );
+        assert_eq!(
+            voice
+                .drain_captured_frames(None)
+                .into_iter()
+                .map(|frame| (frame.stream_epoch, frame.sequence))
+                .collect::<Vec<_>>(),
+            vec![(2, 0)],
+        );
+    }
+
+    #[test]
+    fn voice_activation_retries_a_missing_input_only_after_the_bounded_delay() {
+        let attempts = Rc::new(Cell::new(0));
+        let observed_attempts = attempts.clone();
+        let mut voice = VoiceChatState::with_capture_opener(move |_| {
+            observed_attempts.set(observed_attempts.get() + 1);
+            if observed_attempts.get() == 1 {
+                Err(VoiceCaptureError::NoInputDevice)
+            } else {
+                Ok(TestVoiceSource::with_frame([0; 164]))
+            }
+        });
+        let start = Instant::now();
+
+        assert!(matches!(
+            voice.start_voice_activated_capture_on_device_at(None, None, start),
+            Err(VoiceCaptureError::NoInputDevice),
+        ));
+        for elapsed in [
+            Duration::from_millis(1),
+            Duration::from_millis(100),
+            Duration::from_millis(999),
+        ] {
+            voice
+                .start_voice_activated_capture_on_device_at(None, None, start + elapsed)
+                .expect("the retry remains latched before its deadline");
+        }
+        assert_eq!(attempts.get(), 1, "the microphone is not opened per tick");
+        assert!(!voice.capture_active());
+
+        voice
+            .start_voice_activated_capture_on_device_at(None, None, start + Duration::from_secs(1))
+            .expect("the bounded retry opens a reappeared microphone");
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(
+            voice
+                .drain_captured_frames(None)
+                .into_iter()
+                .map(|frame| (frame.stream_epoch, frame.sequence))
+                .collect::<Vec<_>>(),
+            vec![(1, 0)],
+            "failed attempts do not consume a media epoch",
+        );
+    }
+
+    #[test]
+    fn a_hotplug_reopen_starts_one_new_media_epoch() {
+        struct ReopeningVoiceSource {
+            generation: Rc<Cell<u64>>,
+            frames: Rc<RefCell<Vec<VoiceInputFrame>>>,
+        }
+
+        impl VoiceFrameSource for ReopeningVoiceSource {
+            fn drain_frames(&self) -> Vec<VoiceInputFrame> {
+                std::mem::take(&mut *self.frames.borrow_mut())
+            }
+
+            fn stream_generation(&self) -> u64 {
+                self.generation.get()
+            }
+        }
+
+        let generation = Rc::new(Cell::new(1));
+        let frames = Rc::new(RefCell::new(Vec::new()));
+        let source_generation = generation.clone();
+        let source_frames = frames.clone();
+        let mut voice = VoiceChatState::with_capture_opener(move |_| {
+            Ok(ReopeningVoiceSource {
+                generation: source_generation.clone(),
+                frames: source_frames.clone(),
+            })
+        });
+        voice
+            .start_capture(None, None)
+            .expect("initial input opens");
+
+        let mut capture_one = || {
+            frames.borrow_mut().push(VoiceInputFrame {
+                payload: [0; clonk_audio::VOICE_ENCODED_FRAME_BYTES],
+                level: 1.0,
+            });
+            voice
+                .drain_captured_frames(None)
+                .into_iter()
+                .map(|frame| (frame.stream_epoch, frame.sequence))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(capture_one(), vec![(1, 0)]);
+
+        generation.set(2);
+        assert_eq!(capture_one(), vec![(2, 0)]);
+        assert_eq!(capture_one(), vec![(2, 1)]);
     }
 
     #[test]

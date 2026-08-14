@@ -563,6 +563,157 @@ fn capture_processing_follows_the_settings_without_reopening_the_microphone() {
 }
 
 #[test]
+fn voice_activation_opens_the_exact_configured_input_device() {
+    struct SilentVoiceSource;
+
+    impl crate::voice_chat::VoiceFrameSource for SilentVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            Vec::new()
+        }
+    }
+
+    let selected = "coreaudio:built-in-microphone"
+        .parse::<clonk_audio::VoiceInputDeviceId>()
+        .expect("a persisted CPAL input device identity");
+    let observed = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let observed_options = observed.clone();
+    let mut app = new_classic_running_sandbox_app();
+    let local_client = 7;
+    app.engine
+        .test_player_mut(app.local_owner)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    app.snapshot = app.engine.snapshot();
+    let (manager, _events, _voice) =
+        NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    let options = &mut app.audio.test_mut().options;
+    options.voice_enabled = true;
+    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    options.voice_input_device = Some(selected.clone());
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+        *observed_options.borrow_mut() = options.input_device;
+        Ok(SilentVoiceSource)
+    });
+
+    app.update_voice_chat();
+
+    assert_eq!(*observed.borrow(), Some(selected));
+}
+
+#[test]
+fn clearing_the_live_network_session_drops_microphone_capture_without_another_tick() {
+    struct DroppingVoiceSource(std::rc::Rc<std::cell::Cell<usize>>);
+
+    impl crate::voice_chat::VoiceFrameSource for DroppingVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            Vec::new()
+        }
+    }
+
+    impl Drop for DroppingVoiceSource {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    let drops = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed_drops = drops.clone();
+    let mut app = new_classic_running_sandbox_app();
+    let (manager, _events, _voice) = NetworkManager::test_stub_with_voice_for_client_id(7);
+    app.network = Some(manager);
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+        Ok(DroppingVoiceSource(observed_drops.clone()))
+    });
+    app.voice_chat
+        .start_capture(Some(VirtualKeyCode::Backquote), None)
+        .expect("the injected microphone opens");
+
+    app.clear_live_network_session();
+
+    assert_eq!(
+        drops.get(),
+        1,
+        "session teardown closes capture synchronously"
+    );
+    assert!(!app.voice_chat.capture_active());
+    assert!(app.network.is_none());
+}
+
+#[test]
+fn changing_voice_input_keeps_the_network_and_simulation_session() {
+    struct OneFrameVoiceSource {
+        frame: std::cell::RefCell<Option<clonk_audio::VoiceInputFrame>>,
+        drops: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl crate::voice_chat::VoiceFrameSource for OneFrameVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            self.frame.borrow_mut().take().into_iter().collect()
+        }
+    }
+
+    impl Drop for OneFrameVoiceSource {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    let first = "coreaudio:first"
+        .parse::<clonk_audio::VoiceInputDeviceId>()
+        .expect("the first device identity");
+    let second = "coreaudio:second"
+        .parse::<clonk_audio::VoiceInputDeviceId>()
+        .expect("the second device identity");
+    let opens = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed_opens = opens.clone();
+    let drops = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed_drops = drops.clone();
+    let mut app = new_classic_running_sandbox_app();
+    let local_client = 7;
+    app.engine
+        .test_player_mut(app.local_owner)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    app.snapshot = app.engine.snapshot();
+    let before = app.snapshot.clone();
+    let (manager, _events, mut voice) =
+        NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    let options = &mut app.audio.test_mut().options;
+    options.voice_enabled = true;
+    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    options.voice_activation_threshold = 0.0;
+    options.voice_input_device = Some(first.clone());
+    let payload = clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]);
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+        observed_opens.borrow_mut().push(options.input_device);
+        Ok(OneFrameVoiceSource {
+            frame: std::cell::RefCell::new(Some(clonk_audio::VoiceInputFrame {
+                payload,
+                level: 1.0,
+            })),
+            drops: observed_drops.clone(),
+        })
+    });
+    let now = Instant::now();
+
+    app.update_voice_chat_at(now);
+    let before_hotplug = voice.try_recv_outbound().test_value();
+    app.audio.test_mut().options.voice_input_device = Some(second.clone());
+    app.update_voice_chat_at(now + Duration::from_millis(20));
+    let after_hotplug = voice.try_recv_outbound().test_value();
+
+    assert_eq!(opens.borrow().as_slice(), &[Some(first), Some(second)]);
+    assert_eq!(drops.get(), 1, "only the replaced stream is closed");
+    assert_eq!(
+        (before_hotplug.stream_epoch, before_hotplug.sequence),
+        (1, 0)
+    );
+    assert_eq!((after_hotplug.stream_epoch, after_hotplug.sequence), (2, 0));
+    assert!(app.network.is_some(), "the game session remains connected");
+    assert_eq!(app.snapshot, before, "voice never mutates lockstep state");
+}
+
+#[test]
 fn every_capture_carries_the_reference_echo_cancellation_can_be_switched_on_with() {
     struct SilentVoiceSource;
 

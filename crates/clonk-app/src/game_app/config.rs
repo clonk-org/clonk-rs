@@ -1317,9 +1317,16 @@ impl GameApp {
             .as_ref()
             .map(|dialog| dialog.active_sheet())
             .unwrap_or_default();
+        let voice_input_devices = match clonk_audio::voice_input_devices() {
+            Ok(devices) => devices,
+            Err(error) => {
+                tracing::warn!(%error, "could not enumerate voice input devices");
+                Vec::new()
+            }
+        };
         let mut controller =
             clonk_frontend::startup_options_advanced::AdvancedConfigController::new(
-                advanced_config::sections(&config),
+                advanced_config::sections_with_voice_input_devices(&config, &voice_input_devices),
             );
         controller.set_labels(
             clonk_frontend::startup_options_advanced::AdvancedConfigLabels {

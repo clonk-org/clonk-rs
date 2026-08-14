@@ -1,4 +1,4 @@
-use clonk_audio::VoiceProcessingConfig;
+use clonk_audio::{VoiceInputDeviceId, VoiceProcessingConfig};
 use clonk_core::std_config::Config;
 use clonk_frontend::startup_options_graphics::{
     MAX_GRAPHICS_SCALE_PERCENT, MIN_GRAPHICS_SCALE_PERCENT,
@@ -73,6 +73,9 @@ pub struct AudioOptions {
     /// Port-only, explicit microphone opt-in. LegacyClonk has no voice chat.
     pub voice_enabled: bool,
     pub voice_volume: f32,
+    /// Opaque CPAL microphone endpoint ID. `None` follows the system default
+    /// instead of pinning one host-provided endpoint.
+    pub voice_input_device: Option<VoiceInputDeviceId>,
     pub voice_push_to_talk: VirtualKeyCode,
     pub voice_activation_mode: VoiceActivationMode,
     /// Level a captured frame must reach to open a voice-activated capture, on
@@ -107,6 +110,7 @@ impl Default for AudioOptions {
             music_volume: 1.0,
             voice_enabled: false,
             voice_volume: 1.0,
+            voice_input_device: None,
             voice_push_to_talk: VirtualKeyCode::Backquote,
             voice_activation_mode: VoiceActivationMode::default(),
             // -36 dBFS: above a quiet room, below ordinary speech.
@@ -227,6 +231,10 @@ impl AudioOptions {
             if let Some(value) = parse_native_config_integer(raw) {
                 self.voice_volume = value.clamp(0, 100) as f32 / 100.0;
             }
+        }
+
+        if let Some(raw) = config.get_in(Some("Voice"), "InputDevice") {
+            self.voice_input_device = raw.parse().ok();
         }
 
         if let Some(raw) = config.get_in(Some("Voice"), "PushToTalkKey") {
@@ -356,6 +364,13 @@ impl AudioOptions {
         let section = Some("Voice");
         config.set_in(section, "Enabled", bool_config_value(self.voice_enabled));
         config.set_in(section, "Volume", self.voice_volume_percent().to_string());
+        config.set_in(
+            section,
+            "InputDevice",
+            self.voice_input_device
+                .as_ref()
+                .map_or("", VoiceInputDeviceId::as_str),
+        );
         if let Some(encoded) = crate::input::encode_virtual_key_code(self.voice_push_to_talk) {
             config.set_in(section, "PushToTalkKey", encoded.to_string());
         }
@@ -531,6 +546,7 @@ mod tests {
             music_volume: 0.83,
             voice_enabled: true,
             voice_volume: 0.42,
+            voice_input_device: None,
             voice_push_to_talk: VirtualKeyCode::KeyT,
             voice_activation_mode: VoiceActivationMode::VoiceActivated,
             voice_activation_threshold: 0.25,
@@ -622,6 +638,58 @@ mod tests {
             reloaded.voice_activation_mode,
             VoiceActivationMode::VoiceActivated
         );
+    }
+
+    #[test]
+    fn voice_input_device_id_round_trips_through_config_serialization() {
+        let selected = r#"coreaudio:Built-in "Mic"\USB"#
+            .parse()
+            .expect("valid host-qualified device ID");
+        let options = AudioOptions {
+            voice_input_device: Some(selected),
+            ..AudioOptions::default()
+        };
+        let mut config = Config::new();
+
+        options.write_startup_voice_config(&mut config);
+        let serialized = config.to_string().expect("config serializes");
+        let mut reader = serialized.as_bytes();
+        let reloaded_config = Config::from_reader(&mut reader).expect("config reloads");
+        let mut reloaded = AudioOptions::default();
+        reloaded.apply_config(&reloaded_config);
+
+        assert_eq!(reloaded.voice_input_device, options.voice_input_device);
+    }
+
+    #[test]
+    fn malformed_nonempty_voice_input_identity_never_falls_back_to_the_default_microphone() {
+        let mut config = Config::new();
+        config.set_in(Some("Voice"), "InputDevice", "corrupt persisted identity");
+
+        let mut loaded = AudioOptions::default();
+        loaded.apply_config(&config);
+
+        assert_eq!(
+            loaded
+                .voice_input_device
+                .as_ref()
+                .map(VoiceInputDeviceId::as_str),
+            Some("corrupt persisted identity"),
+            "only an explicitly empty selection may mean system default",
+        );
+    }
+
+    #[test]
+    fn default_voice_input_device_clears_previous_explicit_id() {
+        let mut config = Config::new();
+        config.set_in(Some("Voice"), "InputDevice", "coreaudio:old-device");
+
+        AudioOptions::default().write_startup_voice_config(&mut config);
+
+        assert_eq!(config.get_in(Some("Voice"), "InputDevice"), Some(""));
+        let mut reloaded = AudioOptions::default();
+        reloaded.apply_config(&config);
+        assert_eq!(reloaded.voice_input_device, None);
     }
 
     #[test]

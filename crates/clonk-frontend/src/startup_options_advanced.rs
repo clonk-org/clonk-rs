@@ -15,6 +15,7 @@ use crate::{expand_hotkey_markup, ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use anyhow::{ensure, Result};
 use clonk_graphics::clonk_font::{ClonkFont, TextAlign};
 use clonk_graphics::{GammaRamp, Rect, Surface};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,13 @@ const TITLE_LEFT_INDENT: i32 = 5;
 const TITLE_RIGHT_INDENT: i32 = 20;
 const TITLE_SCROLL_DELAY: Duration = Duration::from_millis(3000);
 
+/// One stable persisted value and its user-facing label in a choice row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdvancedConfigChoice {
+    pub value: String,
+    pub label: String,
+}
+
 /// Typed value displayed by one advanced setting row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdvancedConfigValue {
@@ -43,6 +51,13 @@ pub enum AdvancedConfigValue {
         value: i128,
         min: i128,
         max: i128,
+    },
+    /// A finite set of user-facing labels backed by stable persisted values.
+    /// `value` is deliberately independent of the label and may be absent
+    /// from `choices` when a saved device or plugin is temporarily missing.
+    Choice {
+        value: String,
+        choices: Vec<AdvancedConfigChoice>,
     },
     Text(String),
     /// A raw or explicitly protected setting. It is displayed but cannot be
@@ -58,7 +73,22 @@ impl AdvancedConfigValue {
         match self {
             Self::Bool(value) => i32::from(*value).to_string(),
             Self::Integer { value, .. } => value.to_string(),
-            Self::Text(value) | Self::ReadOnly(value) => value.clone(),
+            Self::Choice { value, .. } | Self::Text(value) | Self::ReadOnly(value) => value.clone(),
+        }
+    }
+
+    fn display_text(&self) -> Cow<'_, str> {
+        match self {
+            Self::Bool(value) => Cow::Borrowed(if *value { "1" } else { "0" }),
+            Self::Integer { value, .. } => Cow::Owned(value.to_string()),
+            Self::Choice { value, choices } => choices
+                .iter()
+                .find(|choice| choice.value == *value)
+                .map_or_else(
+                    || Cow::Borrowed(value.as_str()),
+                    |choice| Cow::Borrowed(choice.label.as_str()),
+                ),
+            Self::Text(value) | Self::ReadOnly(value) => Cow::Borrowed(value),
         }
     }
 
@@ -460,6 +490,16 @@ impl AdvancedConfigController {
                 *current = truncate_utf8(value, MAX_EDIT_BYTES);
                 true
             }
+            (
+                AdvancedConfigValue::Choice {
+                    value: current,
+                    choices,
+                },
+                AdvancedConfigValue::Choice { value, .. },
+            ) if choices.iter().any(|choice| choice.value == value) => {
+                *current = value;
+                true
+            }
             _ => false,
         }
     }
@@ -669,13 +709,13 @@ impl AdvancedConfigController {
             AdvancedConfigHit::Decrement(index) => {
                 self.focus = AdvancedConfigFocus::Row(index);
                 self.pointer_pressed = Some(PressTarget::Decrement(index));
-                self.step_integer_and_keep_focus(index, -1);
+                self.step_value_and_keep_focus(index, -1);
                 self.sound_events.push(AdvancedConfigSound::ArrowHit);
             }
             AdvancedConfigHit::Increment(index) => {
                 self.focus = AdvancedConfigFocus::Row(index);
                 self.pointer_pressed = Some(PressTarget::Increment(index));
-                self.step_integer_and_keep_focus(index, 1);
+                self.step_value_and_keep_focus(index, 1);
                 self.sound_events.push(AdvancedConfigSound::ArrowHit);
             }
             AdvancedConfigHit::Row(index) => {
@@ -1022,7 +1062,7 @@ impl AdvancedConfigController {
             return false;
         }
         let before = self.row(index).map(|row| row.value.serialized());
-        self.step_integer_and_keep_focus(index, delta);
+        self.step_value_and_keep_focus(index, delta);
         before != self.row(index).map(|row| row.value.serialized())
     }
 
@@ -1056,7 +1096,9 @@ impl AdvancedConfigController {
         let text = match value {
             AdvancedConfigValue::Integer { value, .. } => value.to_string(),
             AdvancedConfigValue::Text(value) => value.clone(),
-            AdvancedConfigValue::Bool(_) | AdvancedConfigValue::ReadOnly(_) => return,
+            AdvancedConfigValue::Bool(_)
+            | AdvancedConfigValue::Choice { .. }
+            | AdvancedConfigValue::ReadOnly(_) => return,
         };
         self.active_edit = Some(ActiveEdit {
             section: self.current_section,
@@ -1122,7 +1164,9 @@ impl AdvancedConfigController {
                 }
             }
             AdvancedConfigValue::Text(value) => *value = text,
-            AdvancedConfigValue::Bool(_) | AdvancedConfigValue::ReadOnly(_) => {}
+            AdvancedConfigValue::Bool(_)
+            | AdvancedConfigValue::Choice { .. }
+            | AdvancedConfigValue::ReadOnly(_) => {}
         }
     }
 
@@ -1168,30 +1212,44 @@ impl AdvancedConfigController {
                 Vec::new()
             }
             PressTarget::Decrement(index) => {
-                self.step_integer(index, -1);
+                self.step_value(index, -1);
                 Vec::new()
             }
             PressTarget::Increment(index) => {
-                self.step_integer(index, 1);
+                self.step_value(index, 1);
                 Vec::new()
             }
         }
     }
 
-    fn step_integer(&mut self, index: usize, delta: i128) {
-        if let Some(AdvancedConfigRow {
-            value: AdvancedConfigValue::Integer { value, min, max },
-            ..
-        }) = self.row_mut(index)
-        {
-            let next = value.saturating_add(delta).clamp(*min, *max);
-            *value = next;
+    fn step_value(&mut self, index: usize, delta: i128) {
+        let Some(row) = self.row_mut(index) else {
+            return;
+        };
+        match &mut row.value {
+            AdvancedConfigValue::Integer { value, min, max } => {
+                *value = value.saturating_add(delta).clamp(*min, *max);
+            }
+            AdvancedConfigValue::Choice { value, choices } if !choices.is_empty() => {
+                let current = choices.iter().position(|choice| choice.value == *value);
+                let next = match current {
+                    Some(current) if delta < 0 => (current + choices.len() - 1) % choices.len(),
+                    Some(current) => (current + 1) % choices.len(),
+                    None if delta < 0 => choices.len() - 1,
+                    None => 0,
+                };
+                value.clone_from(&choices[next].value);
+            }
+            AdvancedConfigValue::Bool(_)
+            | AdvancedConfigValue::Choice { .. }
+            | AdvancedConfigValue::Text(_)
+            | AdvancedConfigValue::ReadOnly(_) => {}
         }
     }
 
-    fn step_integer_and_keep_focus(&mut self, index: usize, delta: i128) {
+    fn step_value_and_keep_focus(&mut self, index: usize, delta: i128) {
         self.sync_active_edit_value(true);
-        self.step_integer(index, delta);
+        self.step_value(index, delta);
         if self.focus != AdvancedConfigFocus::Row(index) {
             return;
         }
@@ -1259,10 +1317,13 @@ impl AdvancedConfigController {
             }
             AdvancedConfigFocus::Row(index)
                 if self.row(index).is_some_and(|row| {
-                    matches!(row.value, AdvancedConfigValue::Integer { .. })
+                    matches!(
+                        row.value,
+                        AdvancedConfigValue::Integer { .. } | AdvancedConfigValue::Choice { .. }
+                    )
                 }) =>
             {
-                self.step_integer_and_keep_focus(index, -i128::from(direction));
+                self.step_value_and_keep_focus(index, -i128::from(direction));
             }
             AdvancedConfigFocus::Row(_) => {}
             AdvancedConfigFocus::Save
@@ -1664,6 +1725,23 @@ impl AdvancedConfigScreen {
                             surface, fonts, controller, row_layout, active, gamma,
                         );
                     }
+                    AdvancedConfigValue::Choice { .. } => {
+                        if let Some(edit) = row_layout.edit {
+                            let display = row.value.display_text();
+                            draw_edit_box(
+                                surface,
+                                edit,
+                                display.as_ref(),
+                                None,
+                                &fonts.text,
+                                [255, 255, 255, 255],
+                                gamma,
+                            );
+                        }
+                        Self::render_step_buttons(
+                            surface, fonts, controller, row_layout, active, gamma,
+                        );
+                    }
                     AdvancedConfigValue::Text(value) => {
                         if let Some(edit) = row_layout.edit {
                             let rendered_active = active
@@ -2018,20 +2096,33 @@ fn row_layout(
             h: size,
         }
     });
-    let is_integer = matches!(row.value, AdvancedConfigValue::Integer { .. });
+    let has_step_buttons = matches!(row.value, AdvancedConfigValue::Integer { .. })
+        || matches!(
+            row.value,
+            AdvancedConfigValue::Choice {
+                ref choices,
+                ..
+            } if !choices.is_empty()
+        );
     let is_edit = matches!(
         row.value,
-        AdvancedConfigValue::Integer { .. } | AdvancedConfigValue::Text(_)
+        AdvancedConfigValue::Integer { .. }
+            | AdvancedConfigValue::Choice { .. }
+            | AdvancedConfigValue::Text(_)
     );
-    let step_width = if is_integer { control.h.min(20) } else { 0 };
+    let step_width = if has_step_buttons {
+        control.h.min(20)
+    } else {
+        0
+    };
     let upper_step_height = (control.h / 2).max(1);
-    let decrement_button = is_integer.then_some(IntRect {
+    let decrement_button = has_step_buttons.then_some(IntRect {
         x: control.x + control.w - step_width,
         y: control.y + upper_step_height,
         w: step_width,
         h: (control.h - upper_step_height).max(1),
     });
-    let increment_button = is_integer.then_some(IntRect {
+    let increment_button = has_step_buttons.then_some(IntRect {
         x: control.x + control.w - step_width,
         y: control.y,
         w: step_width,
@@ -2324,6 +2415,152 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn advanced_config_choice_cycles_by_stable_value_and_serializes_value_not_label() {
+        let choices = vec![
+            AdvancedConfigChoice {
+                value: "".into(),
+                label: "System default".into(),
+            },
+            AdvancedConfigChoice {
+                value: "coreaudio:built-in".into(),
+                label: "Shared microphone".into(),
+            },
+            AdvancedConfigChoice {
+                value: "coreaudio:usb".into(),
+                label: "Shared microphone".into(),
+            },
+        ];
+        let mut state = AdvancedConfigController::new(vec![AdvancedConfigSection::new(
+            "Voice",
+            vec![AdvancedConfigRow::new(
+                "InputDevice",
+                AdvancedConfigValue::Choice {
+                    value: "coreaudio:built-in".into(),
+                    choices,
+                },
+            )],
+        )]);
+        state.resize(800, 600);
+
+        let value = state.value("Voice", "InputDevice").expect("choice");
+        assert_eq!(value.serialized(), "coreaudio:built-in");
+        assert_eq!(value.display_text(), "Shared microphone");
+
+        let edit = state.layout().rows[0].edit.expect("choice display");
+        state.handle_pointer_down(center(edit));
+        assert!(!state.handle_text_input("not a device id"));
+        assert_eq!(
+            state
+                .value("Voice", "InputDevice")
+                .expect("choice")
+                .serialized(),
+            "coreaudio:built-in",
+        );
+
+        let increment = state.layout().rows[0]
+            .increment_button
+            .expect("choice increment arrow");
+        state.handle_pointer_down(center(increment));
+        state.handle_pointer_up(center(increment));
+        let value = state.value("Voice", "InputDevice").expect("choice");
+        assert_eq!(value.serialized(), "coreaudio:usb");
+        assert_eq!(value.display_text(), "Shared microphone");
+        assert_eq!(
+            state.changes(),
+            vec![AdvancedConfigChange {
+                section: "Voice".into(),
+                key: "InputDevice".into(),
+                value: "coreaudio:usb".into(),
+            }],
+            "the stable value, never the duplicate display label, is persisted",
+        );
+
+        state.handle_key_down(KeyCode::Up);
+        assert_eq!(
+            state
+                .value("Voice", "InputDevice")
+                .expect("choice")
+                .serialized(),
+            "",
+            "Up cycles forward and wraps",
+        );
+        state.handle_key_down(KeyCode::Down);
+        assert_eq!(
+            state
+                .value("Voice", "InputDevice")
+                .expect("choice")
+                .serialized(),
+            "coreaudio:usb",
+            "Down cycles backward and wraps",
+        );
+    }
+
+    #[test]
+    fn advanced_config_choice_preserves_unknown_value_until_it_is_stepped() {
+        let mut state = AdvancedConfigController::new(vec![AdvancedConfigSection::new(
+            "Voice",
+            vec![AdvancedConfigRow::new(
+                "InputDevice",
+                AdvancedConfigValue::Choice {
+                    value: "coreaudio:missing".into(),
+                    choices: vec![
+                        AdvancedConfigChoice {
+                            value: "".into(),
+                            label: "System default".into(),
+                        },
+                        AdvancedConfigChoice {
+                            value: "coreaudio:usb".into(),
+                            label: "USB microphone".into(),
+                        },
+                    ],
+                },
+            )],
+        )]);
+        state.resize(800, 600);
+
+        let value = state.value("Voice", "InputDevice").expect("choice");
+        assert_eq!(value.serialized(), "coreaudio:missing");
+        assert_eq!(value.display_text(), "coreaudio:missing");
+        assert!(state.changes().is_empty());
+        assert!(!state.set_value(
+            "Voice",
+            "InputDevice",
+            AdvancedConfigValue::Choice {
+                value: "coreaudio:other-missing".into(),
+                choices: Vec::new(),
+            },
+        ));
+
+        let increment = state.layout().rows[0]
+            .increment_button
+            .expect("choice increment arrow");
+        state.handle_pointer_down(center(increment));
+        assert_eq!(
+            state
+                .value("Voice", "InputDevice")
+                .expect("choice")
+                .serialized(),
+            "",
+            "stepping forward from an unknown value selects the first choice",
+        );
+        assert!(state.set_value(
+            "Voice",
+            "InputDevice",
+            AdvancedConfigValue::Choice {
+                value: "coreaudio:usb".into(),
+                choices: Vec::new(),
+            },
+        ));
+        let value = state.value("Voice", "InputDevice").expect("choice");
+        assert_eq!(value.serialized(), "coreaudio:usb");
+        assert_eq!(value.display_text(), "USB microphone");
+        assert!(matches!(
+            value,
+            AdvancedConfigValue::Choice { choices, .. } if choices.len() == 2
+        ));
     }
 
     #[test]
