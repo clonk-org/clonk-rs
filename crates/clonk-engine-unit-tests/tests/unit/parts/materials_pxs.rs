@@ -2089,6 +2089,234 @@
     }
 
     #[test]
+    fn shake_circle_dislodges_a_solid_pixel_after_removing_its_only_support() {
+        // clonk-org/clonk-rs#438 deliberately improves on pinned C++ here:
+        // C4Landscape::ShakeFreePix only checks materials marked Instable
+        // (C4Landscape.cpp:928-938,861-878), so stable one-pixel Earth debris
+        // otherwise remains in the collision raster forever.
+        let materials = materials_pxs_test_materials(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=1
+        "#,
+        );
+        let earth = materials.id_of("Earth").test_value();
+        let mut engine = pxs_engine(9, materials);
+
+        let mut bytes = vec![0; 5 * 6];
+        bytes[5 + 2] = 30;
+        bytes[2 * 5 + 2] = 30;
+        let grid = pxs_grid(5, 6, bytes, &[(30, 100, "Earth")]);
+        engine.set_landscape(pxs_grid_world(5, 6, vec![6; 5], grid));
+
+        assert_eq!(
+            engine.landscape().test_value().material_at(2, 1),
+            Some(earth),
+            "the upper Earth pixel starts supported"
+        );
+
+        engine.execute_shake_circle_operation(Vector2::new(2, 3), 1);
+
+        assert_eq!(
+            engine.landscape().test_value().material_at(2, 1),
+            None,
+            "the unsupported pixel must stop obstructing object movement"
+        );
+        assert_eq!(
+            engine.pxs_system.count(),
+            2,
+            "both the shaken support and newly isolated pixel continue as PXS"
+        );
+    }
+
+    #[test]
+    fn shake_circle_dislodges_a_two_pixel_fragment_with_its_removed_support() {
+        let materials = materials_pxs_test_materials(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=1
+        "#,
+        );
+        let earth = materials.id_of("Earth").test_value();
+        let mut engine = pxs_engine(9, materials);
+
+        let mut bytes = vec![0; 5 * 7];
+        bytes[5 + 2] = 30;
+        bytes[2 * 5 + 2] = 30;
+        bytes[3 * 5 + 2] = 30;
+        let grid = pxs_grid(5, 7, bytes, &[(30, 100, "Earth")]);
+        engine.set_landscape(pxs_grid_world(5, 7, vec![7; 5], grid));
+
+        engine.execute_shake_circle_operation(Vector2::new(2, 4), 1);
+
+        let landscape = engine.landscape().test_value();
+        assert_eq!(landscape.material_at(2, 1), None);
+        assert_eq!(landscape.material_at(2, 2), None);
+        assert_eq!(
+            engine.pxs_system.count(),
+            3,
+            "the support and both pixels in the detached fragment become PXS"
+        );
+        assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
+    }
+
+    #[test]
+    fn shake_circle_preserves_terrain_fragments_larger_than_two_pixels() {
+        let materials = materials_pxs_test_materials(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=1
+        "#,
+        );
+        let earth = materials.id_of("Earth").test_value();
+        let mut engine = pxs_engine(9, materials);
+
+        let mut bytes = vec![0; 7 * 7];
+        for (x, y) in [(2, 1), (3, 1), (2, 2), (2, 3), (3, 3)] {
+            bytes[y * 7 + x] = 30;
+        }
+        let grid = pxs_grid(7, 7, bytes, &[(30, 100, "Earth")]);
+        engine.set_landscape(pxs_grid_world(7, 7, vec![7; 7], grid));
+
+        engine.execute_shake_circle_operation(Vector2::new(3, 4), 2);
+
+        let landscape = engine.landscape().test_value();
+        for (x, y) in [(2, 1), (3, 1), (2, 2)] {
+            assert_eq!(
+                landscape.material_at(x, y),
+                Some(earth),
+                "the product cleanup is bounded to one- and two-pixel debris"
+            );
+        }
+        assert_eq!(
+            engine.pxs_system.count(),
+            2,
+            "only the two pixels inside the shake circle become PXS"
+        );
+    }
+
+    #[test]
+    fn shake_circle_dislodges_a_horizontal_two_pixel_fragment() {
+        let materials = materials_pxs_test_materials(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=1
+        "#,
+        );
+        let earth = materials.id_of("Earth").test_value();
+        let mut engine = pxs_engine(9, materials);
+
+        let mut bytes = vec![0; 5 * 6];
+        for (x, y) in [(2, 1), (3, 1), (2, 2)] {
+            bytes[y * 5 + x] = 30;
+        }
+        let grid = pxs_grid(5, 6, bytes, &[(30, 100, "Earth")]);
+        engine.set_landscape(pxs_grid_world(5, 6, vec![6; 5], grid));
+
+        engine.execute_shake_circle_operation(Vector2::new(2, 3), 1);
+
+        let landscape = engine.landscape().test_value();
+        assert_eq!(landscape.material_at(2, 1), None);
+        assert_eq!(landscape.material_at(3, 1), None);
+        assert_eq!(
+            engine.pxs_system.count(),
+            3,
+            "the removed support and both orientations of two-pixel debris become PXS"
+        );
+        assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
+        assert_eq!(
+            engine
+                .pxs_system
+                .iter()
+                .map(|pxs| (pxs.x, pxs.y))
+                .collect::<Vec<_>>(),
+            vec![
+                (itofix(2), itofix(2)),
+                (itofix(2), itofix(1)),
+                (itofix(3), itofix(1)),
+            ],
+            "equal-height debris is appended left-to-right"
+        );
+    }
+
+    #[test]
+    fn shake_circle_dislodges_a_pixel_after_removing_its_side_connection() {
+        let materials = materials_pxs_test_materials(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=1
+        "#,
+        );
+        let earth = materials.id_of("Earth").test_value();
+        let mut engine = pxs_engine(9, materials);
+
+        let mut bytes = vec![0; 5 * 6];
+        bytes[2 * 5 + 2] = 30;
+        bytes[2 * 5 + 3] = 30;
+        let grid = pxs_grid(5, 6, bytes, &[(30, 100, "Earth")]);
+        engine.set_landscape(pxs_grid_world(5, 6, vec![6; 5], grid));
+
+        engine.execute_shake_circle_operation(Vector2::new(2, 3), 1);
+
+        assert_eq!(
+            engine.landscape().test_value().material_at(3, 2),
+            None,
+            "a one-pixel fragment loses collision even when its removed connection was beside it"
+        );
+        assert_eq!(engine.pxs_system.count(), 2);
+        assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
+    }
+
+    #[test]
+    fn shake_circle_appends_dislodged_debris_in_stable_scan_order() {
+        let materials = materials_pxs_test_materials(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=1
+        "#,
+        );
+        let mut engine = pxs_engine(9, materials);
+
+        let mut bytes = vec![0; 7 * 7];
+        for (x, y) in [(3, 1), (2, 2), (3, 2), (2, 3)] {
+            bytes[y * 7 + x] = 30;
+        }
+        let grid = pxs_grid(7, 7, bytes, &[(30, 100, "Earth")]);
+        engine.set_landscape(pxs_grid_world(7, 7, vec![7; 7], grid));
+        let rng_before = engine.rng.clone();
+
+        engine.execute_shake_circle_operation(Vector2::new(3, 4), 2);
+
+        assert_eq!(
+            engine
+                .pxs_system
+                .iter()
+                .map(|pxs| (pxs.x, pxs.y, pxs.xdir, pxs.ydir))
+                .collect::<Vec<_>>(),
+            vec![
+                (itofix(2), itofix(3), C4Fixed::ZERO, C4Fixed::ZERO),
+                (itofix(3), itofix(2), C4Fixed::ZERO, C4Fixed::ZERO),
+                (itofix(2), itofix(2), C4Fixed::ZERO, C4Fixed::ZERO),
+                (itofix(3), itofix(1), C4Fixed::ZERO, C4Fixed::ZERO),
+            ],
+            "native circle PXS stay first, followed by debris bottom-to-top"
+        );
+        assert_eq!(engine.rng, rng_before, "cleanup itself consumes no RNG");
+    }
+
+    #[test]
     fn blast_circle_shifts_materials_with_blast_shift_to() -> Result<(), EngineError> {
         let materials = materials_pxs_test_materials(
             r#"

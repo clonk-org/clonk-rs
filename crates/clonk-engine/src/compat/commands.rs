@@ -475,23 +475,36 @@ pub(crate) fn preview_shake_circle_pixels(
         return;
     }
     if landscape.pixel_grid().is_some() {
+        let mut cleared_solid_pixels = Vec::new();
         for ycnt in (-radius..radius).rev() {
             let remaining =
                 i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
             let line_width = (remaining as f64).sqrt() as i32;
             let y = center.y.saturating_add(ycnt);
             for xcnt in -line_width..line_width + i32::from(line_width == 0) {
-                let _ = landscape.dig_free_pix(center.x.saturating_add(xcnt), y, materials);
+                let x = center.x.saturating_add(xcnt);
+                if let Some(material) = landscape
+                    .dig_free_pix(x, y, materials)
+                    .and_then(|material| materials.get_by_id(material))
+                {
+                    if material.dig_free() && material.is_solid() {
+                        cleared_solid_pixels.push(Vector2::new(x, y));
+                    }
+                }
             }
+        }
+        let fragments = landscape.shake_free_fragments(&cleared_solid_pixels, materials);
+        let mut first_changed_column = center.x.saturating_sub(radius);
+        let mut last_changed_column = center.x.saturating_add(radius);
+        for (position, _) in fragments {
+            first_changed_column = first_changed_column.min(position.x);
+            last_changed_column = last_changed_column.max(position.x);
+            let _ = landscape.dig_free_pix(position.x, position.y, materials);
         }
         if let Some((width, _)) = landscape.grid_dimensions() {
             landscape.refresh_raster_columns(
-                center.x.saturating_sub(radius).clamp(0, width) as usize
-                    ..center
-                        .x
-                        .saturating_add(radius)
-                        .saturating_add(1)
-                        .clamp(0, width) as usize,
+                first_changed_column.clamp(0, width) as usize
+                    ..last_changed_column.saturating_add(1).clamp(0, width) as usize,
             );
         }
         return;
