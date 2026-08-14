@@ -49,19 +49,27 @@ save-game slots.
 ### Proximity voice chat
 
 Network games between Clonk Rust clients support proximity voice. It is off by
-default: open **Options → Advanced**, expand **Voice**, and enable `Enabled`.
-Nothing opens the microphone until you do, whatever the rest of the section
-says. A speaker icon appears above the Clonk each participant currently has
-selected. Change `Enabled` before hosting or joining; transport negotiation is
-fixed for that network connection.
+default: open **Options → Audio** and tick **Enable voice chat**. Nothing opens
+the microphone until you do, whatever the rest of this section says. A speaker
+icon appears above the Clonk each participant currently has selected. Enable it
+before hosting or joining; transport negotiation is fixed for that network
+connection.
+
+The Audio sheet carries the settings you are likely to change — the opt-in,
+the playback volume, the push-to-talk key, and **Open mic (voice activated)**.
+The full set, including the two tuning values below, lives in **Options →
+Advanced** under **Voice**, which is also where to configure voice at
+resolutions too small for the sheet's Voice chat group (640x480).
 
 Once enabled, `ActivationMode` chooses how the microphone opens:
 
-- `PushToTalk` (the default) opens it only while a key is held. That key is
-  the backquote (`` ` ``) unless you change `PushToTalkKey`.
-- `VoiceActivated` opens it whenever you could speak — in a running game, with
-  the window focused and a Clonk selected — and transmits only while it hears
-  you. `ActivationThreshold` (0–100) sets how loud that has to be, spread
+- `PushToTalk` (the default, and **Open mic** left unticked) opens it only
+  while a key is held. That key is the backquote (`` ` ``) unless you change
+  `PushToTalkKey`, which the Audio sheet's **Push to talk** button rebinds.
+- `VoiceActivated` (**Open mic** ticked) opens it whenever you could speak —
+  in a running game, with the window focused and a Clonk selected — and
+  transmits only while it hears you.
+  `ActivationThreshold` (0–100) sets how loud that has to be, spread
   evenly over −60…0 dBFS rather than over raw amplitude, so the useful
   settings sit in the middle of the range rather than bunched at the bottom;
   `0` transmits continuously and `100` never opens. `ActivationHangover` is

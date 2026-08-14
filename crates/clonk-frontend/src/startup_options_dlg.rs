@@ -143,6 +143,7 @@ pub struct OptionsLabels {
     /// counterpart to any of them.
     pub voice_chat: String,
     pub voice_enabled: String,
+    pub voice_activated: String,
     pub voice_volume: String,
     pub voice_push_to_talk: String,
     /// `IDS_CTL_DISPLAYMODE`.
@@ -203,6 +204,7 @@ impl Default for OptionsLabels {
             sound_effects: "Sound effects".into(),
             voice_chat: "Voice chat".into(),
             voice_enabled: "Enable voice chat".into(),
+            voice_activated: "Voice activated".into(),
             voice_volume: "Voice volume".into(),
             voice_push_to_talk: "Push to talk".into(),
             display_mode: "Display mode".into(),
@@ -605,6 +607,10 @@ impl SoundSheetLayout {
             SoundCheckboxId::VoiceEnabled => self
                 .voice
                 .map(|voice| voice.enabled_check)
+                .unwrap_or_default(),
+            SoundCheckboxId::VoiceActivated => self
+                .voice
+                .map(|voice| voice.activation_check)
                 .unwrap_or_default(),
             _ => self.checkboxes[id.index()],
         }
@@ -1126,6 +1132,7 @@ pub fn options_dlg_layout_for(
     let voice_metrics = VoiceGroupMetrics {
         row_height: sound_check_h,
         enable_check_width: book_w(&labels.voice_enabled) + sound_check_h + 4,
+        activation_check_width: book_w(&labels.voice_activated) + sound_check_h + 4,
         push_to_talk_label_width: book_w(&voice_push_to_talk_heading(labels)),
         volume_label_width: book_w(&sound_volume_heading(labels, SoundVolumeId::Voice)),
         title_line_height: title_lh,
@@ -1299,15 +1306,20 @@ pub enum SoundCheckboxId {
     /// `Config.Voice.Enabled`. Port-only, and deliberately last so C++'s four
     /// keep their exact focus order (clonk-org/clonk-rs#452).
     VoiceEnabled,
+    /// `Config.Voice.ActivationMode` as a two-state control: unchecked is
+    /// `PushToTalk`, the default, and checked is `VoiceActivated`. Port-only
+    /// (clonk-org/clonk-rs#422).
+    VoiceActivated,
 }
 
 impl SoundCheckboxId {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::FrontendMusic,
         Self::FrontendSoundEffects,
         Self::GameMusic,
         Self::GameSoundEffects,
         Self::VoiceEnabled,
+        Self::VoiceActivated,
     ];
 
     const fn index(self) -> usize {
@@ -1317,6 +1329,7 @@ impl SoundCheckboxId {
             Self::GameMusic => 2,
             Self::GameSoundEffects => 3,
             Self::VoiceEnabled => 4,
+            Self::VoiceActivated => 5,
         }
     }
 }
@@ -1382,6 +1395,9 @@ pub struct SoundSheetState {
     pub sound_effects_volume: u8,
     /// `Config.Voice.Enabled`; port-only, and off unless the player opts in.
     pub voice_enabled: bool,
+    /// `Config.Voice.ActivationMode == VoiceActivated`; port-only, and off
+    /// unless the player asks for it, so push-to-talk stays the default.
+    pub voice_activated: bool,
     /// `Config.Voice.Volume`; port-only.
     pub voice_volume: u8,
     /// The bound `Config.Voice.PushToTalkKey` as the app formats it for
@@ -1408,6 +1424,7 @@ impl SoundSheetState {
             music_volume: music_volume.min(100),
             sound_effects_volume: sound_effects_volume.min(100),
             voice_enabled: false,
+            voice_activated: false,
             voice_volume: 100,
             push_to_talk_key: String::new(),
         }
@@ -1422,6 +1439,14 @@ impl SoundSheetState {
         self
     }
 
+    /// Seeds `Config.Voice.ActivationMode` (clonk-org/clonk-rs#422): `true` is
+    /// `VoiceActivated`, `false` the default `PushToTalk`.
+    #[must_use]
+    pub fn with_voice_activated(mut self, voice_activated: bool) -> Self {
+        self.voice_activated = voice_activated;
+        self
+    }
+
     pub const fn checkbox(&self, id: SoundCheckboxId) -> bool {
         match id {
             SoundCheckboxId::FrontendMusic => self.frontend_music,
@@ -1429,6 +1454,7 @@ impl SoundSheetState {
             SoundCheckboxId::GameMusic => self.game_music,
             SoundCheckboxId::GameSoundEffects => self.game_sound_effects,
             SoundCheckboxId::VoiceEnabled => self.voice_enabled,
+            SoundCheckboxId::VoiceActivated => self.voice_activated,
         }
     }
 
@@ -1447,6 +1473,7 @@ impl SoundSheetState {
             SoundCheckboxId::GameMusic => self.game_music = checked,
             SoundCheckboxId::GameSoundEffects => self.game_sound_effects = checked,
             SoundCheckboxId::VoiceEnabled => self.voice_enabled = checked,
+            SoundCheckboxId::VoiceActivated => self.voice_activated = checked,
         }
     }
 
@@ -2672,7 +2699,12 @@ impl OptionsDlgState {
                     order.push(OptionsFocus::VoicePushToTalk);
                 } else {
                     order.retain(|focus| {
-                        *focus != OptionsFocus::SoundCheckbox(SoundCheckboxId::VoiceEnabled)
+                        !matches!(
+                            focus,
+                            OptionsFocus::SoundCheckbox(
+                                SoundCheckboxId::VoiceEnabled | SoundCheckboxId::VoiceActivated
+                            )
+                        )
                     });
                 }
             }
@@ -2727,7 +2759,9 @@ impl OptionsDlgState {
             OptionsFocus::Back | OptionsFocus::Tabular => true,
             OptionsFocus::Program(_) => self.active_sheet == OptionsSheet::Program,
             OptionsFocus::Graphics(_) => self.active_sheet == OptionsSheet::Graphics,
-            OptionsFocus::SoundCheckbox(SoundCheckboxId::VoiceEnabled)
+            OptionsFocus::SoundCheckbox(
+                SoundCheckboxId::VoiceEnabled | SoundCheckboxId::VoiceActivated,
+            )
             | OptionsFocus::VoicePushToTalk => {
                 self.active_sheet == OptionsSheet::Sound && self.voice_group_present()
             }
@@ -3611,6 +3645,7 @@ fn sound_checkbox_label(labels: &OptionsLabels, id: SoundCheckboxId) -> &str {
             &labels.sound_effects
         }
         SoundCheckboxId::VoiceEnabled => &labels.voice_enabled,
+        SoundCheckboxId::VoiceActivated => &labels.voice_activated,
     }
 }
 
@@ -3663,6 +3698,7 @@ const fn sound_checkbox_tooltip_key(id: SoundCheckboxId) -> &'static str {
         // Port-only key, shipped in `planet/System.c4g` alongside C++'s own
         // `IDS_DESC_*` tips (clonk-org/clonk-rs#452).
         SoundCheckboxId::VoiceEnabled => "IDS_DESC_VOICEENABLED",
+        SoundCheckboxId::VoiceActivated => "IDS_DESC_VOICEACTIVATED",
     }
 }
 
@@ -5402,17 +5438,21 @@ impl OptionsDlgScreen {
             &state.labels.voice_chat,
             gamma,
         );
-        let id = SoundCheckboxId::VoiceEnabled;
-        Self::draw_checkbox(
-            surface,
-            assets,
-            book,
-            &layout.enabled_check,
-            sound_checkbox_label(&state.labels, id),
-            state.sound.checkbox(id),
-            draw_focus && state.sound_checkbox_highlighted(id),
-            gamma,
-        );
+        for (id, rect) in [
+            (SoundCheckboxId::VoiceEnabled, &layout.enabled_check),
+            (SoundCheckboxId::VoiceActivated, &layout.activation_check),
+        ] {
+            Self::draw_checkbox(
+                surface,
+                assets,
+                book,
+                rect,
+                sound_checkbox_label(&state.labels, id),
+                state.sound.checkbox(id),
+                draw_focus && state.sound_checkbox_highlighted(id),
+                gamma,
+            );
+        }
         book.book.draw_with_gamma(
             surface,
             layout.push_to_talk_label.x,
@@ -7354,6 +7394,7 @@ mod tests {
         let client_top = voice.group.y + 4 + gui.caption.line_height;
         for child in [
             voice.enabled_check,
+            voice.activation_check,
             voice.volume_label,
             voice.volume_slider,
             voice.push_to_talk_label,
@@ -7372,12 +7413,15 @@ mod tests {
             );
         }
         // Row 0 holds the opt-in on the left and the labelled key button on the
-        // right; row 1 holds the bar below both.
+        // right; row 1 holds the activation mode below the opt-in, then the bar.
         assert_eq!(voice.push_to_talk_label.y, voice.enabled_check.y);
         assert_eq!(voice.push_to_talk_button.y, voice.enabled_check.y);
         assert!(voice.push_to_talk_button.x > voice.push_to_talk_label.x);
         assert!(voice.enabled_check.x < voice.push_to_talk_label.x);
-        assert!(voice.volume_label.y > voice.enabled_check.y);
+        assert!(voice.activation_check.y > voice.enabled_check.y);
+        assert_eq!(voice.activation_check.x, voice.enabled_check.x);
+        assert_eq!(voice.volume_label.y, voice.activation_check.y);
+        assert!(voice.volume_label.x > voice.activation_check.x);
         assert!(voice.volume_slider.x > voice.volume_label.x);
     }
 
@@ -7835,10 +7879,13 @@ mod tests {
 
     #[test]
     fn sound_focus_cycle_and_raw_low_button_match_control_priority() {
-        // The port-only voice opt-in defaults off, so it is seeded on here to
-        // keep every checkbox on the sheet starting from the same state.
-        let (mut state, _) =
-            live_sound_state(SoundSheetState::default().with_voice(true, 100, "Backquote".into()));
+        // Both port-only voice checkboxes default off, so they are seeded on
+        // here to keep every checkbox on the sheet starting from the same state.
+        let (mut state, _) = live_sound_state(
+            SoundSheetState::default()
+                .with_voice(true, 100, "Backquote".into())
+                .with_voice_activated(true),
+        );
         assert_eq!(state.focus, OptionsFocus::Tabular);
 
         for id in SoundCheckboxId::ALL {
@@ -7884,11 +7931,11 @@ mod tests {
         assert!(state.handle_tab(true).is_empty());
         assert_eq!(state.focus, OptionsFocus::VoicePushToTalk);
         assert!(state.handle_tab(true).is_empty());
-        // Shift-Tab again lands on the port-only opt-in appended after C++'s
-        // four checkboxes.
+        // Shift-Tab again lands on the last of the port-only checkboxes
+        // appended after C++'s four.
         assert_eq!(
             state.focused_sound_checkbox(),
-            Some(SoundCheckboxId::VoiceEnabled)
+            Some(SoundCheckboxId::VoiceActivated)
         );
         assert_eq!(
             state.handle_ctrl_tab(false),
