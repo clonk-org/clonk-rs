@@ -4,6 +4,22 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-08-14
+
+### Bug fixes
+
+- Preserve host geometry across SetGraphics (#447)
+- Reject runtime joins past the player limit (#446)
+- Preserve native action procedure direction ordering (#444)
+- Settle small earthquake debris (#440)
+- Resynchronize fixed position after cross-check fling (#439)
+- Reject exact saves with missing player state (#437)
+- Clear removed object references before arrow calls (#436)
+
+### Testing
+
+- Restore tutorial 04 through 07 virtual routes (#441)
+
 ## [0.11.1] - 2026-08-13
 
 ### Bug fixes
