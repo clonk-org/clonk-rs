@@ -126,79 +126,31 @@ impl VoiceCapture {
         let (sender, frames) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
         let dropped_frames = Arc::new(AtomicU64::new(0));
         let stream_config = supported.config();
+        // One arm per PCM format cpal can hand us; only the negotiated one
+        // ever runs, so each may take the channel and the counter by value.
+        macro_rules! input_stream {
+            ($sample:ty) => {
+                build_voice_input_stream::<$sample>(
+                    &device,
+                    stream_config,
+                    sender,
+                    dropped_frames.clone(),
+                )?
+            };
+        }
         let stream = match supported.sample_format() {
-            cpal::SampleFormat::I8 => build_voice_input_stream::<i8>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::I16 => build_voice_input_stream::<i16>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::I24 => build_voice_input_stream::<cpal::I24>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::I32 => build_voice_input_stream::<i32>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::I64 => build_voice_input_stream::<i64>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::U8 => build_voice_input_stream::<u8>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::U16 => build_voice_input_stream::<u16>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::U24 => build_voice_input_stream::<cpal::U24>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::U32 => build_voice_input_stream::<u32>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::U64 => build_voice_input_stream::<u64>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::F32 => build_voice_input_stream::<f32>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::F64 => build_voice_input_stream::<f64>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
+            cpal::SampleFormat::I8 => input_stream!(i8),
+            cpal::SampleFormat::I16 => input_stream!(i16),
+            cpal::SampleFormat::I24 => input_stream!(cpal::I24),
+            cpal::SampleFormat::I32 => input_stream!(i32),
+            cpal::SampleFormat::I64 => input_stream!(i64),
+            cpal::SampleFormat::U8 => input_stream!(u8),
+            cpal::SampleFormat::U16 => input_stream!(u16),
+            cpal::SampleFormat::U24 => input_stream!(cpal::U24),
+            cpal::SampleFormat::U32 => input_stream!(u32),
+            cpal::SampleFormat::U64 => input_stream!(u64),
+            cpal::SampleFormat::F32 => input_stream!(f32),
+            cpal::SampleFormat::F64 => input_stream!(f64),
             _ => {
                 return Err(VoiceCaptureError::Stream(
                     "unsupported non-PCM microphone sample format".to_string(),
