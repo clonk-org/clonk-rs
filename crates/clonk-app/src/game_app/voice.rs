@@ -86,7 +86,7 @@ impl GameApp {
     /// no key owns that capture, so nothing else ever would.
     fn update_voice_activated_capture(&mut self, voice_activated: bool) {
         if !voice_activated {
-            if self.voice_chat.capture_key().is_none() {
+            if self.voice_chat.capture_active() && self.voice_chat.capture_key().is_none() {
                 self.voice_chat.stop_capture();
             }
             return;
