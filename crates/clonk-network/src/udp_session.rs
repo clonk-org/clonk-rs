@@ -1466,7 +1466,33 @@ pub struct ReliableUdpSessionHandle {
     voice_media: mpsc::Sender<ReliableUdpVoiceDatagram>,
 }
 
+pub(crate) struct ReliableUdpVoiceMediaPermit<'a> {
+    permit: mpsc::Permit<'a, ReliableUdpVoiceDatagram>,
+}
+
+impl ReliableUdpVoiceMediaPermit<'_> {
+    pub(crate) fn send(self, peer: SocketAddr, payload: Vec<u8>) {
+        self.permit.send(ReliableUdpVoiceDatagram {
+            peer: canonical_reliable_udp_peer_address(peer),
+            payload,
+        });
+    }
+}
+
 impl ReliableUdpSessionHandle {
+    #[cfg(test)]
+    pub(crate) fn test_voice_queue() -> (Self, mpsc::Receiver<ReliableUdpVoiceDatagram>) {
+        let (commands, _command_rx) = mpsc::channel(1);
+        let (voice_media, voice_media_rx) = mpsc::channel(VOICE_MEDIA_CAPACITY);
+        (
+            Self {
+                commands,
+                voice_media,
+            },
+            voice_media_rx,
+        )
+    }
+
     pub(crate) fn try_send_voice_media(&self, peer: SocketAddr, payload: Vec<u8>) -> bool {
         self.voice_media
             .try_send(ReliableUdpVoiceDatagram {
@@ -1474,6 +1500,13 @@ impl ReliableUdpSessionHandle {
                 payload,
             })
             .is_ok()
+    }
+
+    pub(crate) fn try_reserve_voice_media(&self) -> Option<ReliableUdpVoiceMediaPermit<'_>> {
+        self.voice_media
+            .try_reserve()
+            .ok()
+            .map(|permit| ReliableUdpVoiceMediaPermit { permit })
     }
 
     pub async fn init_puncher(&self, address: SocketAddr, role: NetpuncherRole) -> io::Result<()> {

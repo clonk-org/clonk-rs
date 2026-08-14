@@ -66,10 +66,9 @@ pub(crate) struct EchoReferenceReader {
 /// to the residual suppressor below, which does not care where the echo came
 /// from. The filter costs about one percent of a core per 1024 taps.
 const ECHO_TAIL_SAMPLES: usize = 2_048;
-/// Normalized step size. Large enough to converge within a few seconds of
-/// speech, small enough that the misadjustment it leaves behind stays under the
-/// residual suppressor's floor.
-const ECHO_ADAPTATION_RATE: f32 = 0.3;
+/// Normalized step size. Large enough to converge during the opening fraction
+/// of an utterance, while remaining within the NLMS stability bound.
+const ECHO_ADAPTATION_RATE: f32 = 1.0;
 /// Geigel double-talk detector: a room cannot return more sound than the
 /// speakers put into it, so a microphone louder than the far end that could
 /// have caused it is hearing someone speak, and the filter must not adapt to
@@ -77,10 +76,19 @@ const ECHO_ADAPTATION_RATE: f32 = 0.3;
 /// down, and the residual suppressor below is what protects the near end.
 const ECHO_PATH_MAX_GAIN: f32 = 1.0;
 /// How much of the filter's own output is assumed to survive as residual echo.
-/// The adaptive filter never cancels perfectly — the two devices resample at
-/// different rates, so the aliasing above 8 kHz differs between the reference
-/// and the microphone and simply cannot be regressed away.
+/// The adaptive filter never cancels a nonlinear speaker and microphone path,
+/// device-clock drift, or room-path changes perfectly.
 const ECHO_RESIDUAL_LEAKAGE: f32 = 0.25;
+/// Conservative residual energy assumed before the adaptive filter has learned
+/// enough of the room to produce its own estimate. Push-to-talk captures start
+/// cold, so relying on the learned estimate alone leaves the first short
+/// utterance almost completely uncancelled.
+const ECHO_COLD_START_RESIDUAL_RATIO: f32 = 0.25;
+/// Keep the conservative residual estimate only while the filter learns its
+/// first room path. The normal learned estimate takes over after this many
+/// frames that were safe to adapt, so quiet double talk is not held down for
+/// the rest of the capture.
+const ECHO_COLD_START_ADAPTATION_FRAMES: u32 = 12;
 /// Floor of the residual suppressor's gain: 30 dB down while the far end plays
 /// alone, which is quiet enough that no one hears themselves back.
 const ECHO_RESIDUAL_MIN_GAIN: f32 = 0.03;
@@ -108,6 +116,7 @@ pub(crate) struct EchoCanceller {
     /// detector.
     far_peaks: [f32; ECHO_TAIL_FRAMES],
     residual_gain: f32,
+    adapted_frames: u32,
 }
 
 const ECHO_TAIL_FRAMES: usize = ECHO_TAIL_SAMPLES.div_ceil(VOICE_FRAME_SAMPLES);
@@ -215,6 +224,7 @@ impl EchoCanceller {
             far: [0.0; VOICE_FRAME_SAMPLES],
             far_peaks: [0.0; ECHO_TAIL_FRAMES],
             residual_gain: 1.0,
+            adapted_frames: 0,
         }
     }
 
@@ -247,6 +257,7 @@ impl EchoCanceller {
             .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
         let near_end_present = microphone_peak > far_peak * ECHO_PATH_MAX_GAIN;
         let adapt = energy > 1e-6 && !near_end_present;
+        let cold_start = self.adapted_frames < ECHO_COLD_START_ADAPTATION_FRAMES;
 
         let mut echo_energy = 0.0;
         let mut error_energy = 0.0;
@@ -269,11 +280,20 @@ impl EchoCanceller {
             error_energy += error * error;
             *sample = error;
         }
+        if adapt {
+            self.adapted_frames = self.adapted_frames.saturating_add(1);
+        }
 
         // What the filter could not model is proportional to what it did model,
         // so hold the frame down by the Wiener gain that would leave only the
         // near end behind.
-        let residual = ECHO_RESIDUAL_LEAKAGE * echo_energy;
+        let far_frame_energy = self.far.iter().map(|sample| sample * sample).sum::<f32>();
+        let cold_start_residual = if cold_start && !near_end_present {
+            ECHO_COLD_START_RESIDUAL_RATIO * far_frame_energy
+        } else {
+            0.0
+        };
+        let residual = (ECHO_RESIDUAL_LEAKAGE * echo_energy).max(cold_start_residual);
         let target =
             (error_energy / (error_energy + residual + 1e-12)).clamp(ECHO_RESIDUAL_MIN_GAIN, 1.0);
         self.residual_gain += (target - self.residual_gain) * ECHO_RESIDUAL_SMOOTHING;
@@ -348,6 +368,42 @@ mod tests {
     }
 
     #[test]
+    fn echo_cancellation_quiets_speaker_bleed_within_a_short_utterance() {
+        let mut tap = VoiceEchoTap::new(16_000);
+        let mut canceller = EchoCanceller::new(Some(tap.reference()));
+        let mut signal = TestSignal(17);
+        let delay = 700;
+        let mut played = vec![0.0; delay + 64 + VOICE_FRAME_SAMPLES];
+        let mut heard = Vec::new();
+        let mut sent = Vec::new();
+
+        for index in 0..12 {
+            let mut frame = [0.0; VOICE_FRAME_SAMPLES];
+            for sample in frame.iter_mut() {
+                *sample = signal.next() * 0.3;
+                tap.push_output_frame(*sample, *sample);
+            }
+            played.extend_from_slice(&frame);
+            let mut microphone = [0.0; VOICE_FRAME_SAMPLES];
+            for (offset, sample) in microphone.iter_mut().enumerate() {
+                *sample = echo_of(&played, played.len() - VOICE_FRAME_SAMPLES + offset, delay);
+            }
+            let raw = microphone;
+            canceller.process(&mut microphone);
+            if index >= 7 {
+                heard.extend_from_slice(&raw);
+                sent.extend_from_slice(&microphone);
+            }
+        }
+
+        let reduction = 20.0 * (rms(&heard) / rms(&sent).max(1e-9)).log10();
+        assert!(
+            reduction >= 15.0,
+            "push-to-talk is often shorter than a second; speaker bleed fell only {reduction:.1} dB",
+        );
+    }
+
+    #[test]
     fn echo_cancellation_still_lets_someone_talk_over_the_game() {
         let mut tap = VoiceEchoTap::new(16_000);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
@@ -386,6 +442,87 @@ mod tests {
         assert!(
             kept > 0.5,
             "speech over the game must still get through, kept {kept:.2} of it",
+        );
+    }
+
+    #[test]
+    fn converged_echo_cancellation_keeps_a_quiet_talker_over_loud_game_audio() {
+        let mut tap = VoiceEchoTap::new(16_000);
+        let mut canceller = EchoCanceller::new(Some(tap.reference()));
+        let mut signal = TestSignal(31);
+        let delay = 400;
+        let mut played = vec![0.0; delay + VOICE_FRAME_SAMPLES];
+        let mut phase = 0.0_f32;
+        let mut spoken = Vec::new();
+        let mut sent = Vec::new();
+
+        for index in 0..60 {
+            let mut frame = [0.0; VOICE_FRAME_SAMPLES];
+            for sample in &mut frame {
+                *sample = signal.next() * 0.3;
+                tap.push_output_frame(*sample, *sample);
+            }
+            played.extend_from_slice(&frame);
+            let talking = index >= 40;
+            let mut microphone = [0.0; VOICE_FRAME_SAMPLES];
+            let mut speech = [0.0; VOICE_FRAME_SAMPLES];
+            for (offset, sample) in microphone.iter_mut().enumerate() {
+                phase += std::f32::consts::TAU * 220.0 / VOICE_SAMPLE_RATE as f32;
+                speech[offset] = if talking { 0.04 * phase.sin() } else { 0.0 };
+                let at = played.len() - VOICE_FRAME_SAMPLES + offset;
+                *sample = 0.1 * played[at - delay] + speech[offset];
+            }
+            canceller.process(&mut microphone);
+            if index >= 50 {
+                spoken.extend_from_slice(&speech);
+                sent.extend_from_slice(&microphone);
+            }
+        }
+
+        let kept = rms(&sent) / rms(&spoken);
+        assert!(
+            kept > 0.75,
+            "the startup fallback stayed on after convergence and kept only {kept:.2} of quiet speech",
+        );
+    }
+
+    #[test]
+    fn cold_echo_cancellation_keeps_speech_over_the_game() {
+        let mut tap = VoiceEchoTap::new(16_000);
+        let mut canceller = EchoCanceller::new(Some(tap.reference()));
+        let mut signal = TestSignal(29);
+        let delay = 400;
+        let mut played = vec![0.0; delay + 64 + VOICE_FRAME_SAMPLES];
+        let mut phase = 0.0_f32;
+        let mut spoken = Vec::new();
+        let mut sent = Vec::new();
+
+        for index in 0..12 {
+            let mut frame = [0.0; VOICE_FRAME_SAMPLES];
+            for sample in frame.iter_mut() {
+                *sample = signal.next() * 0.3;
+                tap.push_output_frame(*sample, *sample);
+            }
+            played.extend_from_slice(&frame);
+            let mut microphone = [0.0; VOICE_FRAME_SAMPLES];
+            let mut speech = [0.0; VOICE_FRAME_SAMPLES];
+            for (offset, sample) in microphone.iter_mut().enumerate() {
+                phase += std::f32::consts::TAU * 220.0 / VOICE_SAMPLE_RATE as f32;
+                speech[offset] = 0.25 * phase.sin();
+                *sample = echo_of(&played, played.len() - VOICE_FRAME_SAMPLES + offset, delay)
+                    + speech[offset];
+            }
+            canceller.process(&mut microphone);
+            if index >= 7 {
+                spoken.extend_from_slice(&speech);
+                sent.extend_from_slice(&microphone);
+            }
+        }
+
+        let kept = rms(&sent) / rms(&spoken);
+        assert!(
+            kept > 0.5,
+            "cold-start echo suppression must not mute the nearby talker, kept {kept:.2}",
         );
     }
 

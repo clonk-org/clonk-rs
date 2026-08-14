@@ -3737,6 +3737,76 @@ mod tests {
         host.shutdown().await.test_value();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn udp_host_relays_authenticated_client_voice_to_another_client_without_self_echo() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let mut host = start_host(
+            listener,
+            HostConfig {
+                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+                ..HostConfig::default()
+            },
+        )
+        .await
+        .test_value();
+        let host_address = host.udp_local_addr().test_value();
+        let mut alpha = connect_udp_client(
+            host_address,
+            ClientConfig::new("Alpha", ParticipantKind::Player),
+        )
+        .await
+        .test_value();
+        let alpha_id = alpha.client_id();
+        let mut beta = connect_udp_client(
+            host_address,
+            ClientConfig::new("Beta", ParticipantKind::Player),
+        )
+        .await
+        .test_value();
+        let beta_id = beta.client_id();
+        timeout(EVENT_WAIT, async {
+            while !host.voice_available() || !alpha.voice_available() || !beta.voice_available() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .test_value();
+        assert!(!alpha.mesh_peer_ids().await.contains(&beta_id));
+        assert!(!beta.mesh_peer_ids().await.contains(&alpha_id));
+        let mut host_voice = host.take_voice_receiver();
+        let mut alpha_voice = alpha.take_voice_receiver();
+        let mut beta_voice = beta.take_voice_receiver();
+        let frame = crate::VoiceFrame::outbound(17, 3, 9, vec![0x5a; 164]).test_value();
+
+        alpha.voice_sender().try_send(frame.clone()).test_value();
+
+        let received_by_host = timeout(EVENT_WAIT, host_voice.recv())
+            .await
+            .test_value()
+            .test_value();
+        let received_by_beta = timeout(EVENT_WAIT, beta_voice.recv())
+            .await
+            .test_value()
+            .test_value();
+        for received in [received_by_host, received_by_beta] {
+            assert_eq!(received.client_id, alpha_id);
+            assert_eq!(received.player_id, frame.player_id);
+            assert_eq!(received.stream_epoch, frame.stream_epoch);
+            assert_eq!(received.sequence, frame.sequence);
+            assert_eq!(received.payload, frame.payload);
+        }
+        assert!(
+            timeout(Duration::from_millis(100), alpha_voice.recv())
+                .await
+                .is_err(),
+            "the host relay must not echo a client's own voice frame back to it",
+        );
+
+        alpha.shutdown().await.test_value();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
+    }
+
     #[test]
     fn application_voice_queue_holds_at_most_160_milliseconds() {
         assert!(

@@ -365,28 +365,48 @@ impl VoiceCaptureProcessor {
     }
 }
 
-/// Streaming linear interpolation down to [`VOICE_SAMPLE_RATE`]. Capture uses
+/// Streaming conversion to [`VOICE_SAMPLE_RATE`], with a low-pass filter before
+/// downsampling and linear interpolation between source samples. Capture uses
 /// it on the microphone's own rate; the echo reference uses it on the mixer's
-/// output rate, so both sides of the canceller see the same resampling.
+/// output rate, so both sides of the canceller see the same conversion.
 #[derive(Debug)]
 pub(crate) struct StreamingVoiceResampler {
     source_per_output: f64,
+    anti_alias: Option<VoiceAntiAliasFilter>,
     previous: Option<f32>,
     current_source_index: u64,
     next_output_position: f64,
 }
 
+/// A causal low-pass ahead of downsampling. Linear interpolation alone is not
+/// a sample-rate converter when the source is faster: it aliases everything
+/// above 8 kHz back into the speech band, where it sounds like noise and no
+/// longer matches the echo reference produced by another device rate.
+#[derive(Debug)]
+struct VoiceAntiAliasFilter {
+    coefficients: Box<[f32]>,
+    history: Box<[f32]>,
+    newest: usize,
+    primed: bool,
+}
+
+const VOICE_ANTI_ALIAS_TAPS: usize = 127;
+
 impl StreamingVoiceResampler {
     pub(crate) fn new(source_rate: u32) -> Self {
         Self {
             source_per_output: f64::from(source_rate) / f64::from(VOICE_SAMPLE_RATE),
+            anti_alias: VoiceAntiAliasFilter::new(source_rate),
             previous: None,
             current_source_index: 0,
             next_output_position: 0.0,
         }
     }
 
-    pub(crate) fn push_sample(&mut self, sample: f32, mut emit: impl FnMut(f32)) {
+    pub(crate) fn push_sample(&mut self, mut sample: f32, mut emit: impl FnMut(f32)) {
+        if let Some(filter) = self.anti_alias.as_mut() {
+            sample = filter.process(sample);
+        }
         let Some(previous) = self.previous else {
             self.previous = Some(sample);
             emit(sample);
@@ -403,6 +423,58 @@ impl StreamingVoiceResampler {
             self.next_output_position += self.source_per_output;
         }
         self.previous = Some(sample);
+    }
+}
+
+impl VoiceAntiAliasFilter {
+    fn new(source_rate: u32) -> Option<Self> {
+        if source_rate <= VOICE_SAMPLE_RATE {
+            return None;
+        }
+        let cutoff = 0.45 * VOICE_SAMPLE_RATE as f64 / f64::from(source_rate);
+        let center = (VOICE_ANTI_ALIAS_TAPS - 1) as f64 * 0.5;
+        let mut coefficients = (0..VOICE_ANTI_ALIAS_TAPS)
+            .map(|index| {
+                let offset = index as f64 - center;
+                let sinc = if offset == 0.0 {
+                    2.0 * cutoff
+                } else {
+                    (2.0 * std::f64::consts::PI * cutoff * offset).sin()
+                        / (std::f64::consts::PI * offset)
+                };
+                let phase =
+                    std::f64::consts::TAU * index as f64 / (VOICE_ANTI_ALIAS_TAPS - 1) as f64;
+                let blackman = 0.42 - 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos();
+                (sinc * blackman) as f32
+            })
+            .collect::<Vec<_>>();
+        let sum = coefficients.iter().sum::<f32>();
+        for coefficient in &mut coefficients {
+            *coefficient /= sum;
+        }
+        Some(Self {
+            coefficients: coefficients.into_boxed_slice(),
+            history: vec![0.0; VOICE_ANTI_ALIAS_TAPS].into_boxed_slice(),
+            newest: VOICE_ANTI_ALIAS_TAPS - 1,
+            primed: false,
+        })
+    }
+
+    fn process(&mut self, sample: f32) -> f32 {
+        if !self.primed {
+            self.history.fill(sample);
+            self.primed = true;
+            return sample;
+        }
+        self.newest = (self.newest + 1) % self.history.len();
+        self.history[self.newest] = sample;
+        let oldest = (self.newest + 1) % self.history.len();
+        let (early, late) = self.history.split_at(oldest);
+        self.coefficients
+            .iter()
+            .zip(late.iter().chain(early))
+            .map(|(coefficient, sample)| coefficient * sample)
+            .sum()
     }
 }
 
@@ -447,7 +519,7 @@ pub fn encode_voice_frame(samples: &[i16; VOICE_FRAME_SAMPLES]) -> [u8; VOICE_EN
     encoded[..2].copy_from_slice(&samples[0].to_le_bytes());
 
     let mut predictor = i32::from(samples[0]);
-    let mut step_index = 0_u8;
+    let mut step_index = initial_ima_step_index(samples);
     encoded[2] = step_index;
 
     for (code_index, sample) in samples[1..].iter().enumerate() {
@@ -460,6 +532,27 @@ pub fn encode_voice_frame(samples: &[i16; VOICE_FRAME_SAMPLES]) -> [u8; VOICE_EN
         }
     }
     encoded
+}
+
+/// Chooses the self-contained frame's initial quantizer state. Reusing index
+/// zero every 20 ms forces IMA to reacquire the signal at a 50 Hz cadence, so
+/// evaluate every legal state and keep the one with the least frame error.
+fn initial_ima_step_index(samples: &[i16; VOICE_FRAME_SAMPLES]) -> u8 {
+    (0..IMA_STEP_TABLE.len())
+        .min_by_key(|candidate| {
+            let mut predictor = i32::from(samples[0]);
+            let mut step_index = *candidate as u8;
+            samples[1..]
+                .iter()
+                .map(|sample| {
+                    encode_ima_sample(i32::from(*sample), &mut predictor, &mut step_index);
+                    i64::from(i32::from(*sample) - predictor)
+                        .unsigned_abs()
+                        .pow(2)
+                })
+                .sum::<u64>()
+        })
+        .unwrap_or_default() as u8
 }
 
 /// Decodes one complete self-contained voice frame.
@@ -624,6 +717,30 @@ mod tests {
         assert!(decoded.iter().all(|sample| sample.abs_diff(2_000) <= 1));
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn capture_resampling_rejects_frequencies_above_voice_nyquist() {
+        let resampled_rms = |frequency_hz: f32| {
+            let mut resampler = StreamingVoiceResampler::new(48_000);
+            let mut output = Vec::new();
+            for index in 0..4_800 {
+                let phase = std::f32::consts::TAU * frequency_hz * index as f32 / 48_000.0;
+                resampler.push_sample(phase.sin(), |sample| output.push(sample));
+            }
+            let settled = &output[400..];
+            (settled.iter().map(|sample| sample * sample).sum::<f32>() / settled.len() as f32)
+                .sqrt()
+        };
+
+        let speech = resampled_rms(1_000.0);
+        let ultrasonic = resampled_rms(12_000.0);
+
+        assert!(speech > 0.65, "the speech band was attenuated to {speech}");
+        assert!(
+            ultrasonic < speech * 0.01,
+            "12 kHz aliased into the 16 kHz voice signal at {ultrasonic}, versus {speech} in-band",
+        );
     }
 
     #[test]

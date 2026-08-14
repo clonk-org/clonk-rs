@@ -1578,7 +1578,7 @@ impl AudioMixer {
                 }
 
                 if let Some(tap) = echo_tap.as_mut() {
-                    tap.push_output_frame(left, right);
+                    tap.push_output_frame(left.clamp(-1.0, 1.0), right.clamp(-1.0, 1.0));
                 }
 
                 let offset = frame_index * output_channels;
@@ -2945,6 +2945,37 @@ mod tests {
             assert!(
                 (sample - mixed).abs() < 1e-6,
                 "reference sample {index} was {sample}, output was {mixed}",
+            );
+        }
+    }
+
+    #[test]
+    fn echo_reference_matches_the_clamped_device_output() {
+        use crate::voice_echo::EchoReferenceReader;
+
+        let mixer = AudioMixer::new(VOICE_SAMPLE_RATE, 8);
+        let mut reader = EchoReferenceReader::new(mixer.voice_echo_reference());
+        let sound = mixer
+            .load_sound(&generate_sine_wave(100, 440.0, VOICE_SAMPLE_RATE))
+            .unwrap();
+        for _ in 0..8 {
+            mixer.play_sound(sound, false).unwrap();
+        }
+
+        let mut output = vec![0.0_f32; VOICE_FRAME_SAMPLES * 2];
+        mixer.mix_f32(&mut output);
+        assert!(
+            output.iter().any(|sample| sample.abs() == 1.0),
+            "the fixture must drive the device output into its clamp",
+        );
+
+        let mut far = [0.0; VOICE_FRAME_SAMPLES];
+        reader.read(&mut far);
+        for (index, sample) in far.iter().enumerate() {
+            let played = (output[index * 2] + output[index * 2 + 1]) * 0.5;
+            assert!(
+                (sample - played).abs() < 1e-6,
+                "reference sample {index} was {sample}, device played {played}",
             );
         }
     }
