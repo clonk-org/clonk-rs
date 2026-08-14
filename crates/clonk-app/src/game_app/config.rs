@@ -1787,7 +1787,11 @@ impl GameApp {
             sheets: [
                 text("IDS_DLG_PROGRAM", "Program"),
                 text("IDS_DLG_GRAPHICS", "Graphics"),
-                text("IDS_DLG_SOUND", "Sound"),
+                // Port-only id. C++ captions this sheet `IDS_DLG_SOUND`, which
+                // the ingame menu still uses for its own Sound entry; the port
+                // also hosts the voice-chat group here, so the caption reads
+                // "Audio" (clonk-org/clonk-rs#452).
+                text("IDS_DLG_AUDIO", "Audio"),
                 text("IDS_DLG_KEYBOARD", "Keyboard"),
                 text("IDS_DLG_GAMEPAD", "Gamepad"),
                 text("IDS_DLG_NETWORK", "Network"),

@@ -165,7 +165,7 @@ impl Default for OptionsLabels {
             sheets: [
                 "Program".into(),
                 "Graphics".into(),
-                "Sound".into(),
+                "Audio".into(),
                 "Keyboard".into(),
                 "Gamepad".into(),
                 "Network".into(),
@@ -206,8 +206,16 @@ impl Default for OptionsLabels {
 /// Sheet titles + icon phases, ctor order (C4StartupOptionsDlg.cpp:663-668;
 /// LanguageUS.txt). Program and Sound are pixel-implemented; the remaining
 /// sheets are data stubs for the tab strip.
+///
+/// Deliberate divergence: C++ captions the third sheet `IDS_DLG_SOUND`
+/// ("Sound"). The port also hosts the port-only voice-chat group there
+/// (clonk-org/clonk-rs#452), which "Sound" no longer describes, so the caption
+/// resolves through the port-only `IDS_DLG_AUDIO` instead. Only the caption
+/// moves: the tab strip lays every clip, icon and centred caption anchor out at
+/// a fixed 95px pitch (C4GuiTabular.cpp:436-441,59-64), so no pixel depends on
+/// the text's length.
 pub const SHEET_TITLES: [&str; 6] = [
-    "Program", "Graphics", "Sound", "Keyboard", "Gamepad", "Network",
+    "Program", "Graphics", "Audio", "Keyboard", "Gamepad", "Network",
 ];
 
 /// Entries filled by `C4StartupOptionsDlg::OnFontFaceComboFill`, in native
@@ -7013,6 +7021,12 @@ mod tests {
         assert_eq!(state.handle_hotkey('0'), None);
         assert_eq!(state.handle_hotkey('A'), None);
         assert_eq!(state.controls().selected_set(ControlDevice::Keyboard), 3);
+    }
+
+    #[test]
+    fn third_sheet_is_captioned_audio_because_it_also_carries_voice_chat() {
+        assert_eq!(SHEET_TITLES[2], "Audio");
+        assert_eq!(OptionsLabels::default().sheets[2], "Audio");
     }
 
     #[test]
