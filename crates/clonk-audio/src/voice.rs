@@ -357,17 +357,18 @@ impl VoiceCaptureProcessor {
     }
 }
 
-#[cfg(any(feature = "cpal", test))]
-struct StreamingVoiceResampler {
+/// Streaming linear interpolation down to [`VOICE_SAMPLE_RATE`]. Capture uses
+/// it on the microphone's own rate; the echo reference uses it on the mixer's
+/// output rate, so both sides of the canceller see the same resampling.
+pub(crate) struct StreamingVoiceResampler {
     source_per_output: f64,
     previous: Option<f32>,
     current_source_index: u64,
     next_output_position: f64,
 }
 
-#[cfg(any(feature = "cpal", test))]
 impl StreamingVoiceResampler {
-    fn new(source_rate: u32) -> Self {
+    pub(crate) fn new(source_rate: u32) -> Self {
         Self {
             source_per_output: f64::from(source_rate) / f64::from(VOICE_SAMPLE_RATE),
             previous: None,
@@ -376,7 +377,7 @@ impl StreamingVoiceResampler {
         }
     }
 
-    fn push_sample(&mut self, sample: f32, mut emit: impl FnMut(f32)) {
+    pub(crate) fn push_sample(&mut self, sample: f32, mut emit: impl FnMut(f32)) {
         let Some(previous) = self.previous else {
             self.previous = Some(sample);
             emit(sample);
@@ -396,8 +397,7 @@ impl StreamingVoiceResampler {
     }
 }
 
-#[cfg(any(feature = "cpal", test))]
-fn voice_f32_to_i16(sample: f32) -> i16 {
+pub(crate) fn voice_f32_to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * 32_768.0)
         .round()
         .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
