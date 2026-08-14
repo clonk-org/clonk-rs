@@ -351,8 +351,8 @@ def _exact_bool(value, label):
 
 def validate_retained_gpu_profile(profile):
     schema_version = profile.get("schema_version")
-    if type(schema_version) is not int or schema_version != 1:
-        raise BenchmarkFailure("retained GPU profile schema_version must be 1")
+    if type(schema_version) is not int or schema_version not in (1, 2):
+        raise BenchmarkFailure("retained GPU profile schema_version must be 1 or 2")
     fingerprint = _require_mapping(
         profile.get("fingerprint"), "retained GPU fingerprint"
     )
@@ -635,6 +635,11 @@ def validate_retained_gpu_profile(profile):
             "object_sprite_upload_bytes",
             "solid_rect_upload_bytes",
         )
+        if schema_version >= 2:
+            renderer_counter_keys += (
+                "landscape_instances",
+                "landscape_instance_upload_bytes",
+            )
         renderer_counts = {
             key: _exact_nonnegative_integer(
                 renderer.get(key),
@@ -702,6 +707,14 @@ def validate_retained_gpu_profile(profile):
             ("object_sprite_instances", "object_sprite_upload_bytes", 88),
             ("solid_rect_instances", "solid_rect_upload_bytes", 36),
         )
+        if schema_version >= 2:
+            stream_layouts += (
+                (
+                    "landscape_instances",
+                    "landscape_instance_upload_bytes",
+                    72,
+                ),
+            )
         if any(
             renderer_counts[byte_key]
             != renderer_counts[count_key] * byte_stride
@@ -921,7 +934,9 @@ def validate_retained_gpu_profile(profile):
             )
 
 
-def parse_retained_gpu_profile(lines, *, required):
+def parse_retained_gpu_profile(
+    lines, *, required, minimum_schema_version=None
+):
     marker = f"{RETAINED_GPU_PROFILE_PREFIX} "
     matches = [line.strip()[len(marker) :] for line in lines if line.startswith(marker)]
     if not matches:
@@ -944,6 +959,15 @@ def parse_retained_gpu_profile(lines, *, required):
     if not isinstance(profile, dict):
         raise BenchmarkFailure("retained GPU profile must be a JSON object")
     validate_retained_gpu_profile(profile)
+    if (
+        minimum_schema_version is not None
+        and profile["schema_version"] < minimum_schema_version
+    ):
+        raise BenchmarkFailure(
+            "retained GPU profile schema_version "
+            f"{profile['schema_version']} is older than required "
+            f"{minimum_schema_version}"
+        )
     return profile
 
 
@@ -1733,6 +1757,7 @@ def parse_presentation_evidence(
     process_status,
     *,
     require_retained_gpu_profile=False,
+    minimum_retained_gpu_profile_schema_version=None,
     expected_timestamp_query_request=None,
 ):
     report = parse_presentation_line(
@@ -1762,7 +1787,9 @@ def parse_presentation_evidence(
             f"{process_status}; expected {expected_status}"
         )
     retained_gpu_profile = parse_retained_gpu_profile(
-        lines, required=require_retained_gpu_profile
+        lines,
+        required=require_retained_gpu_profile,
+        minimum_schema_version=minimum_retained_gpu_profile_schema_version,
     )
     if retained_gpu_profile is not None:
         requested = retained_gpu_profile["timestamp_queries"]["requested"]
@@ -1819,6 +1846,7 @@ def run_paired_arm(
     artifact_dir,
     expected_inputs,
     require_retained_gpu_profile,
+    minimum_retained_gpu_profile_schema_version,
     expected_timestamp_query_request,
 ):
     output_dir = artifact_dir / label
@@ -1862,6 +1890,9 @@ def run_paired_arm(
             lines,
             process_status,
             require_retained_gpu_profile=require_retained_gpu_profile,
+            minimum_retained_gpu_profile_schema_version=(
+                minimum_retained_gpu_profile_schema_version
+            ),
             expected_timestamp_query_request=expected_timestamp_query_request,
         ),
     }
@@ -2056,6 +2087,7 @@ def run_paired_benchmark(arguments):
                 artifact_dir=artifact_dir,
                 expected_inputs=inputs,
                 require_retained_gpu_profile=False,
+                minimum_retained_gpu_profile_schema_version=None,
                 expected_timestamp_query_request=False,
             )
             manifest["runs"]["baseline"] = baseline
@@ -2086,6 +2118,7 @@ def run_paired_benchmark(arguments):
                 artifact_dir=artifact_dir,
                 expected_inputs=inputs,
                 require_retained_gpu_profile=True,
+                minimum_retained_gpu_profile_schema_version=2,
                 expected_timestamp_query_request=True,
             )
             manifest["runs"]["candidate"] = candidate
@@ -2208,6 +2241,7 @@ def run_benchmark(arguments):
             presentation_lines,
             presentation_status,
             require_retained_gpu_profile=True,
+            minimum_retained_gpu_profile_schema_version=2,
             expected_timestamp_query_request=True,
         )
         report = evidence["presentation"]

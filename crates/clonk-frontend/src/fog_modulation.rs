@@ -319,13 +319,33 @@ pub(crate) fn interpolate_quad_color(colors: [Color; 4], weights: [f32; 4]) -> C
 }
 
 impl FogSpriteSampler {
+    fn axis_range_capacity(origin: f32, extent: f32, chunk_size: f32) -> usize {
+        if !origin.is_finite()
+            || !extent.is_finite()
+            || !chunk_size.is_finite()
+            || extent <= 0.0
+            || chunk_size <= 0.0
+            || !(origin + extent).is_finite()
+        {
+            return 0;
+        }
+        // A source interval can begin in the middle of one native chunk, so
+        // its upper bound is ceil(extent/chunk) plus that leading fragment.
+        // Cap only the reservation; malformed direct callers retain the old
+        // loop behaviour while the validated capture paths reject more than
+        // one million complete quads before reaching this function.
+        ((extent / chunk_size).ceil() as usize)
+            .saturating_add(1)
+            .min(1_000_001)
+    }
+
     pub(crate) fn axis_ranges(
         origin: f32,
         extent: f32,
         chunk_size: f32,
         flipped: bool,
     ) -> Vec<(f32, f32)> {
-        let mut ranges = Vec::new();
+        let mut ranges = Vec::with_capacity(Self::axis_range_capacity(origin, extent, chunk_size));
         let end = origin + extent;
         let mut position = origin;
         while position < end {
@@ -1677,6 +1697,43 @@ pub(crate) fn prepare_liquid_animation_fragment(
         } else {
             f32::from(source.a.saturating_sub(modulation[3]))
         },
+    }
+}
+
+#[cfg(test)]
+mod fog_chunk_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn fog_axis_ranges_reserve_every_native_chunk_before_capture() {
+        // CStdGL divides fogged landscape blits into source-aligned pieces no
+        // wider than 64 pixels (src/StdGL.cpp:710-763). Reserve the complete
+        // axis before pushing so allocator calls do not grow with its length.
+        assert_eq!(FogSpriteSampler::axis_range_capacity(0.0, 64.0, 64.0), 2);
+        assert_eq!(
+            FogSpriteSampler::axis_range_capacity(0.0, 3_840.0, 64.0),
+            61
+        );
+        assert_eq!(
+            FogSpriteSampler::axis_range_capacity(0.0, 2_160.0, 64.0),
+            35
+        );
+
+        let map = Arc::new(ClrModMap::reset(64, 64, 3_840, 2_160, 0, 0, 0, 0, 0).unwrap());
+        let fog = FogDrawContext { map, zoom: 1.0 };
+        let sampler = FogSpriteSampler::new(
+            &fog,
+            (0.0, 0.0, 3_840.0, 2_160.0),
+            (0.0, 0.0, 3_840.0, 2_160.0),
+            (3_840, 2_160),
+            false,
+            |x, y| (x, y),
+        )
+        .unwrap();
+
+        assert_eq!(sampler.x_ranges.len(), 60);
+        assert_eq!(sampler.y_ranges.len(), 34);
+        assert_eq!(sampler.quads.len(), 2_040);
     }
 }
 

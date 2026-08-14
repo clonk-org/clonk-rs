@@ -1150,6 +1150,12 @@ and byte count (including mip levels), composition recreation, expanded fog
 chunk, and successful generic-sprite fallback reason. Fallback reasons are
 non-exclusive, so their sum may exceed the fallback total.
 
+Retained profile schema 2 adds the compact landscape-instance count and upload
+bytes and requires `landscape_instance_upload_bytes == landscape_instances *
+72` for every frame. The paired-run parser still accepts schema 1 from a legacy
+baseline, where that stream did not exist, but the instrumented candidate emits
+schema 2 and cannot omit either counter.
+
 GPU pass timing is separately opt-in. The runner removes any ambient setting,
 leaves the baseline uninstrumented, and launches the candidate with:
 
@@ -1178,27 +1184,55 @@ JSON booleans/floats, and CPU reconciliation must hold exactly. A legacy
 baseline without the new prefix is still valid A/B input; a partial, duplicate,
 or malformed candidate record is not.
 
-### 4K fogged-landscape renderer microbenchmark
+### Fogged-landscape capture and renderer microbenchmark
 
-Run the retained renderer against prebuilt 3840x2160 fog workloads:
+Run production fog capture and the retained renderer at both 800x600 and
+3840x2160:
 
 ```sh
 cargo bench -p clonk-app-render --features bench \
   --bench landscape_render --locked
 ```
 
-The normal arm samples a retained 4096x4096 landscape backing through 2,040
-source-aligned 64-pixel fog chunks. The `NoBoxFades` arm represents each chunk
-as its two flat-shaded triangles, for 4,080 ordered landscape commands. Both
-arms require one scene draw and two total draws, including the fixed final
-presentation pass; a count mismatch fails before Criterion records samples.
+`landscape_capture/fogged_800x600_130_chunks` and
+`landscape_capture/fogged_4k_2040_chunks` call the real `GraphicsSystem` fogged
+landscape lowering. Each dedicated system retains its synthetic landscape cache,
+fog map and recorder capacity across warmups, so the Criterion samples exclude
+fixture construction. Before wgpu is initialized, a scoped counting allocator
+warms separate one-chunk, 130-chunk and 2,040-chunk systems three times and
+measures their fourth capture. The benchmark fails unless all three allocation
+call counts are equal. Allocation bytes may scale with the output scene; the
+gate is specifically that command count cannot create additional allocation
+calls.
 
-The reported wall time covers retained-renderer processing of the prebuilt
-scene, command encoding, queue submission, and waiting for device completion.
-It excludes frontend fog capture and scene construction, and it is not a
-GPU-only duration. Use the windowed Arso-Morf profile above when stage-separated
-CPU samples, frontend fallback reasons, or named GPU-pass timestamps are needed;
-the Criterion wall-time sample remains a combined renderer/GPU measurement.
+The two normal renderer arms consume those production-captured scenes. A
+separate 4K `NoBoxFades` arm retains the two flat-shaded triangle commands per
+chunk, for 4,080 ordered landscape commands. The compact record is 72 bytes.
+The 800x600 arm therefore uploads 130 records (9,360 bytes), while the normal
+4K arm uploads 2,040 records (146,880 bytes) and no generic vertices; the 4K
+byte count must remain at or below 196 KiB. Every renderer arm requires one
+scene draw and two total draws including the fixed presentation pass. The raw
+evidence line reports source commands, instance and generic-stream bytes,
+scene/total draws, and `cpu_stages.stream_packing_upload`. That last duration is
+host packing/upload time, not GPU execution.
+
+The Criterion `landscape_render/*` wall-time samples still combine retained
+processing, command encoding, queue submission and a device-completion wait.
+For a named GPU interval, opt in to clonk-org/clonk-rs#267's timestamp path:
+
+```sh
+LC_GPU_TIMESTAMP_QUERIES=1 cargo bench -p clonk-app-render --features bench \
+  --bench landscape_render --locked
+```
+
+The ordinary Criterion device always requests an empty optional feature set.
+When the adapter supports `TIMESTAMP_QUERY`, the preflight creates a separate
+device requesting only that feature and records eight named `Scene` samples per
+workload. It reports the median valid duration plus validity counts and fails if
+all eight samples are invalid. Counter rollover and other invalid samples remain
+visible rather than being converted into durations. When the request is disabled
+or unsupported, no timestamp device is created, both effective optional feature
+sets stay empty, and the raw duration is explicitly `unavailable`.
 
 ### Deep Sea retained-GPU presentation benchmark
 

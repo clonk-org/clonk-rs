@@ -1257,6 +1257,8 @@ fn retained_gpu_artifact_frame_preserves_raw_structural_and_cpu_samples() {
             },
             object_sprite_instances: 13,
             object_sprite_upload_bytes: 17,
+            landscape_instances: 19,
+            landscape_instance_upload_bytes: 1_368,
             ..gpu_renderer::GpuRendererStats::default()
         },
         surface: clonk_surface::WindowSurfaceCpuStages {
@@ -1282,6 +1284,8 @@ fn retained_gpu_artifact_frame_preserves_raw_structural_and_cpu_samples() {
     assert_eq!(frame.cpu.unclassified_ns, 7);
     assert_eq!(frame.renderer.object_sprite_instances, 13);
     assert_eq!(frame.renderer.object_sprite_upload_bytes, 17);
+    assert_eq!(frame.renderer.landscape_instances, 19);
+    assert_eq!(frame.renderer.landscape_instance_upload_bytes, 1_368);
     assert_eq!(frame.frontend_capture.owner_mask_fallbacks, 1);
 }
 

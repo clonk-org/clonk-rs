@@ -50,10 +50,12 @@ pub(crate) struct RetainedGpuRendererStatsRecord {
     pub(crate) quad_instances: usize,
     pub(crate) sprite_instances: usize,
     pub(crate) object_sprite_instances: usize,
+    pub(crate) landscape_instances: usize,
     pub(crate) solid_rect_instances: usize,
     pub(crate) quad_instance_upload_bytes: usize,
     pub(crate) sprite_instance_upload_bytes: usize,
     pub(crate) object_sprite_upload_bytes: usize,
+    pub(crate) landscape_instance_upload_bytes: usize,
     pub(crate) solid_rect_upload_bytes: usize,
     pub(crate) composition_recreated: bool,
 }
@@ -84,10 +86,12 @@ impl From<gpu_renderer::GpuRendererStats> for RetainedGpuRendererStatsRecord {
             quad_instances: stats.quad_instances,
             sprite_instances: stats.sprite_instances,
             object_sprite_instances: stats.object_sprite_instances,
+            landscape_instances: stats.landscape_instances,
             solid_rect_instances: stats.solid_rect_instances,
             quad_instance_upload_bytes: stats.quad_instance_upload_bytes,
             sprite_instance_upload_bytes: stats.sprite_instance_upload_bytes,
             object_sprite_upload_bytes: stats.object_sprite_upload_bytes,
+            landscape_instance_upload_bytes: stats.landscape_instance_upload_bytes,
             solid_rect_upload_bytes: stats.solid_rect_upload_bytes,
             composition_recreated: stats.composition_recreated,
         }
@@ -495,7 +499,7 @@ impl RetainedGpuProfileArtifact {
             crop_top: boundary_context.presentation_crop_top,
         };
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
             fingerprint: RetainedGpuFingerprintRecord {
                 adapter: device.adapter_info().into(),
                 adapter_feature_bits,

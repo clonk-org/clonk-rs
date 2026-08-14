@@ -146,6 +146,15 @@ def retained_gpu_profile():
     }
 
 
+def retained_gpu_profile_v2():
+    profile = retained_gpu_profile()
+    profile["schema_version"] = 2
+    renderer = profile["frames"][0]["renderer"]
+    renderer["landscape_instances"] = 2
+    renderer["landscape_instance_upload_bytes"] = 144
+    return profile
+
+
 def retained_gpu_profile_for_durations(durations):
     profile = retained_gpu_profile()
     template = profile["frames"][0]
@@ -158,6 +167,16 @@ def retained_gpu_profile_for_durations(durations):
             duration - frame["cpu"]["named_total_ns"]
         )
         profile["frames"].append(frame)
+    return profile
+
+
+def retained_gpu_profile_v2_for_durations(durations):
+    profile = retained_gpu_profile_for_durations(durations)
+    profile["schema_version"] = 2
+    for frame in profile["frames"]:
+        renderer = frame["renderer"]
+        renderer["landscape_instances"] = 0
+        renderer["landscape_instance_upload_bytes"] = 0
     return profile
 
 
@@ -546,6 +565,44 @@ class RetainedGpuProfileTests(unittest.TestCase):
         parsed = MODULE.parse_retained_gpu_profile([line], required=True)
 
         self.assertEqual(parsed, profile)
+
+    def test_accepts_v2_landscape_instance_stream(self):
+        profile = retained_gpu_profile_v2()
+        line = "LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)
+
+        parsed = MODULE.parse_retained_gpu_profile([line], required=True)
+
+        self.assertEqual(parsed, profile)
+
+    def test_v2_requires_landscape_instance_stream_counters(self):
+        for key in (
+            "landscape_instances",
+            "landscape_instance_upload_bytes",
+        ):
+            with self.subTest(key=key):
+                profile = retained_gpu_profile_v2()
+                del profile["frames"][0]["renderer"][key]
+                line = "LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)
+
+                with self.assertRaisesRegex(
+                    MODULE.BenchmarkFailure,
+                    "retained GPU frame 0 "
+                    f"renderer.{key} must be a nonnegative integer",
+                ):
+                    MODULE.parse_retained_gpu_profile([line], required=True)
+
+    def test_v2_rejects_landscape_instance_stream_byte_count_drift(self):
+        profile = retained_gpu_profile_v2()
+        profile["frames"][0]["renderer"][
+            "landscape_instance_upload_bytes"
+        ] += 1
+        line = "LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)
+
+        with self.assertRaisesRegex(
+            MODULE.BenchmarkFailure,
+            "retained GPU stream bytes do not reconcile for sample 0",
+        ):
+            MODULE.parse_retained_gpu_profile([line], required=True)
 
     def test_rejects_cpu_stage_reconciliation_drift(self):
         profile = retained_gpu_profile()
@@ -961,12 +1018,57 @@ class RetainedGpuProfileTests(unittest.TestCase):
                 ],
                 0,
                 require_retained_gpu_profile=True,
+                minimum_retained_gpu_profile_schema_version=2,
                 expected_timestamp_query_request=True,
             )
 
+    def test_candidate_presentation_evidence_rejects_legacy_profile_schema(self):
+        profile = retained_gpu_profile_for_durations(
+            [5_000_000, 7_000_000, 9_000_000]
+        )
+        profile_line = "LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)
+
+        with self.assertRaisesRegex(
+            MODULE.BenchmarkFailure,
+            "retained GPU profile schema_version 1 is older than required 2",
+        ):
+            MODULE.parse_presentation_evidence(
+                [
+                    NativeCadenceTests.BENCHMARK_LINE,
+                    NativeCadenceTests.CONTEXT_LINE,
+                    NativeCadenceTests.NETWORK_LINE,
+                    profile_line,
+                    MODULE.PRESENTATION_PASS,
+                ],
+                0,
+                require_retained_gpu_profile=True,
+                minimum_retained_gpu_profile_schema_version=2,
+                expected_timestamp_query_request=True,
+            )
+
+    def test_baseline_presentation_evidence_accepts_legacy_profile_schema(self):
+        profile = retained_gpu_profile_for_durations(
+            [5_000_000, 7_000_000, 9_000_000]
+        )
+        profile_line = "LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)
+
+        evidence = MODULE.parse_presentation_evidence(
+            [
+                NativeCadenceTests.BENCHMARK_LINE,
+                NativeCadenceTests.CONTEXT_LINE,
+                NativeCadenceTests.NETWORK_LINE,
+                profile_line,
+                MODULE.PRESENTATION_PASS,
+            ],
+            0,
+            require_retained_gpu_profile=False,
+        )
+
+        self.assertEqual(evidence["retained_gpu_profile"]["schema_version"], 1)
+
     def test_profile_evidence_requires_submission_kind_counts(self):
         profile_line = "LC_APP_RETAINED_GPU_PROFILE " + json.dumps(
-            retained_gpu_profile()
+            retained_gpu_profile_v2()
         )
         line = NativeCadenceTests.BENCHMARK_LINE.replace(
             "retained_gpu_present_submissions=3 "
@@ -988,11 +1090,12 @@ class RetainedGpuProfileTests(unittest.TestCase):
                 ],
                 0,
                 require_retained_gpu_profile=True,
+                minimum_retained_gpu_profile_schema_version=2,
                 expected_timestamp_query_request=True,
             )
 
     def test_candidate_profile_must_confirm_timestamp_request(self):
-        profile = retained_gpu_profile_for_durations(
+        profile = retained_gpu_profile_v2_for_durations(
             [5_000_000, 7_000_000, 9_000_000]
         )
         profile["timestamp_queries"]["requested"] = False
@@ -1012,11 +1115,12 @@ class RetainedGpuProfileTests(unittest.TestCase):
                 ],
                 0,
                 require_retained_gpu_profile=True,
+                minimum_retained_gpu_profile_schema_version=2,
                 expected_timestamp_query_request=True,
             )
 
     def test_candidate_profile_durations_must_match_legacy_samples(self):
-        profile = retained_gpu_profile_for_durations(
+        profile = retained_gpu_profile_v2_for_durations(
             [5_000_000, 7_000_000, 9_000_000]
         )
         profile["frames"][0]["end_to_end_ns"] += 1
@@ -1037,6 +1141,7 @@ class RetainedGpuProfileTests(unittest.TestCase):
                 ],
                 0,
                 require_retained_gpu_profile=True,
+                minimum_retained_gpu_profile_schema_version=2,
                 expected_timestamp_query_request=True,
             )
 
@@ -1146,7 +1251,7 @@ class PairedBenchmarkTests(unittest.TestCase):
     PRESENTATION_LINE = NativeCadenceTests.BENCHMARK_LINE
     CONTEXT_LINE = NativeCadenceTests.CONTEXT_LINE
     NETWORK_LINE = NativeCadenceTests.NETWORK_LINE
-    CANDIDATE_PROFILE = retained_gpu_profile_for_durations(
+    CANDIDATE_PROFILE = retained_gpu_profile_v2_for_durations(
         [5_000_000, 7_000_000, 9_000_000]
     )
 
