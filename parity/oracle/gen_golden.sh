@@ -10,7 +10,7 @@
 # direction blocks, and active solid-mask bitmap sampling
 # (src/C4SolidMaskBitmap.h), complete C4Object::DigOutMaterialCast and landscape
 # BlastFree methods, and the bottom/top/side-flight C4Object::ContactAction
-# arms. The Rust side
+# arms, plus C4PlayerList::GetCount and Join's player-capacity gate. The Rust side
 # (crates/clonk-engine/src/parity_differential.rs) diffs against the committed
 # JSON, so this script only needs to run when the C++ primitives or oracle
 # coverage change.
@@ -214,6 +214,30 @@ awk '
   p && /^}$/ { found = 1; exit }
   END { if (!found) exit 1 }
 ' "$src/C4Game.cpp" > "$gen/game_init_goals.inc"
+
+# Player admission counts every linked C4Player, then rejects before duplicate
+# file checks, allocation, or initialization when count+1 exceeds MaxPlayers.
+# Bound both extracts to their production functions and the Join extract to
+# the next named section so source movement cannot silently select another
+# condition with similar text.
+awk '
+  /^int C4PlayerList::GetCount\(\) const$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4PlayerList.cpp" > "$gen/player_list_get_count.inc"
+
+awk '
+  /^C4Player \*C4PlayerList::Join\(/ { in_join = 1 }
+  in_join && /^}$/ { exit 1 }
+  in_join && /^[[:space:]]*\/\/ Too many players$/ { p = 1 }
+  p && /if \(GetCount\(\) \+ 1 > Game.Parameters.MaxPlayers\)/ { conditions++ }
+  p && /Log\(C4ResStrTableKey::IDS_PRC_TOOMANYPLRS, Game.Parameters.MaxPlayers\);/ { logs++ }
+  p && /^[[:space:]]*return nullptr;$/ { returns++ }
+  p && /^[[:space:]]*\/\/ Check duplicate file usage$/ { bounded = 1; exit }
+  p { print }
+  END { if (!bounded || conditions != 1 || logs != 1 || returns != 1) exit 1 }
+' "$src/C4PlayerList.cpp" > "$gen/player_join_capacity.inc"
 
 # The extracted methods traverse and mutate C4IDList. Lift the small list
 # operations they call as well, including both production findId overloads.

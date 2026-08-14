@@ -6,6 +6,22 @@
 use super::*;
 
 impl Engine {
+    /// Checks the next `C4PlayerList::Join` admission without mutating player
+    /// or team state. The join entry points repeat this check authoritatively.
+    pub fn check_player_capacity(&self) -> Result<(), EngineError> {
+        // C4PlayerList::Join counts every live list node and rejects before
+        // registration when GetCount() + 1 exceeds MaxPlayers
+        // (C4PlayerList.cpp:172-178, 288-294).
+        let player_count = i32::try_from(self.players.len()).unwrap_or(i32::MAX);
+        if let Some(maximum) = self
+            .max_players()
+            .filter(|maximum| player_count >= *maximum)
+        {
+            return Err(EngineError::TooManyPlayers { maximum });
+        }
+        Ok(())
+    }
+
     pub(crate) fn join_player_at_client_with_semantics(
         &mut self,
         config: JoinPlayerConfig,
@@ -15,6 +31,7 @@ impl Engine {
         runtime_control: PlayerRuntimeControl,
         player_info_core: Option<PlayerInfoCoreState>,
     ) -> Result<JoinPlayerOutcome, EngineError> {
+        self.check_player_capacity()?;
         let auto_generate_teams = self.team_state.team_configuration.auto_generate_teams;
         let generated_team_is_valid = auto_generate_teams
             && config
@@ -80,6 +97,7 @@ impl Engine {
         &mut self,
         config: JoinPlayerConfig,
     ) -> Result<i32, EngineError> {
+        self.check_player_capacity()?;
         self.join_player_for_team_selection_at_client(config, PlayerAtClient::HOST)
     }
 

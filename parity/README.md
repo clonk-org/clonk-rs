@@ -43,6 +43,7 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `shake_objects` | complete `C4Game::ShakeObjects` + `C4Object::Fling` bodies | master-order gates, `Random(3)`/`Rnd3()` consumption, attachment material identity, and raw Fling fallback |
 | `blast_free` | complete `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` bodies | exact circle scan, pre-mutation material counts, duplicate-slot BlastShiftTo/DefaultMatTex byte selection, IFT preservation, and RNG order |
 | `network_rule_goal_placement` | complete `C4SGame::ConvertGoals` and `C4Game::InitRules`/`InitGoals` bodies (`src/C4Scenario.cpp:506-556`; `src/C4Game.cpp:4056-4076`) | HarpoonRace's authored RVLR plus default energy realism becomes authoritative RVLR+ENRG parameters; rules use `max(count, 1)`, goals use the exact count, and local scenario lists cannot replace synchronized JoinData lists |
+| `player_join_capacity` | complete `C4PlayerList::GetCount` plus the mechanically extracted capacity block from `C4PlayerList::Join` (`src/C4PlayerList.cpp:172-178,288-294`) | all linked players count, zero is a closed limit, one remaining slot admits exactly one named player, and rejection leaves the ordered roster unchanged |
 | `contact_action_bottom_flight` | complete bottom `DFA_FLIGHT` arm of `C4Object::ContactAction` + action helpers | the `(OCF_HitSpeed4 \|\| fDisabled)` FlatUp gate, including low-speed disabled actions |
 | `contact_action_top_side_flight` | complete top/left/right `DFA_FLIGHT` arms + action helpers + unresolved-flight tail | the `(OCF_HitSpeed3 \|\| fDisabled)` Tumble gates, exact transient wall kicks, enabled Hangle/Scale controls, and final slide-free state |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
@@ -191,6 +192,16 @@ live shadow-diff — see "Phase 2" below.
   differential, not a full native network session; the production method
   bodies are exact while object creation and `UpdateRules` are recording
   scaffolds.
+- `player_join_capacity` mechanically extracts and compiles the complete
+  production `C4PlayerList::GetCount` body and the capacity block bounded inside
+  `C4PlayerList::Join`. The generator also fails closed unless that block has
+  exactly one count comparison, too-many-player log call, and null return. A
+  three-row linked-list scaffold records zero, below-limit, and exact-full
+  admission. Rust seeds and attempts the same named players exclusively through
+  public `Engine::join_player` calls, then compares the real result and ordered
+  roster. The C++ scaffold executes and validates the diagnostic call, but the
+  Rust differential deliberately makes no logging claim: application-level
+  presentation is covered by the join-control tests.
 - `contact_action_bottom_flight` mechanically extracts the complete first
   `DFA_FLIGHT` switch arm from `C4Object::ContactAction` and the production
   `ObjectActionWalk`, `ObjectActionKneel`, and `ObjectActionFlat` helpers. Its

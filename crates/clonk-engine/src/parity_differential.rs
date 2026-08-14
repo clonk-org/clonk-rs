@@ -8,8 +8,9 @@
 //! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
 //! `src/C4ActionDirection.h`, `src/C4ActionCallbacks.h`, and
 //! `src/C4SolidMaskBitmap.h`, mechanically extracted DFA_PUSH/DFA_PULL/DFA_FIGHT
-//! direction blocks from `src/C4Object.cpp`, plus complete `FnEval`, DirectExec's temporary
-//! context setup, `C4Effect::Execute`, C4AulScriptFunc's engine-call
+//! direction blocks from `src/C4Object.cpp`, `C4PlayerList::GetCount` and
+//! `Join`'s capacity block from `src/C4PlayerList.cpp`, plus complete `FnEval`,
+//! DirectExec's temporary context setup, `C4Effect::Execute`, C4AulScriptFunc's engine-call
 //! forwarding and script-context setup, `FnGetX`/`FnGetY`,
 //! `C4Object::DigOutMaterialCast`,
 //! `C4Game::ShakeObjects`, `C4Object::Fling`, `C4Landscape::ClearPix`,
@@ -45,9 +46,9 @@ use crate::scenario::{
 use crate::{
     contact_action_wall_tumble_x, ActionSpec, ActionState, CommandDirection, Definition,
     DefinitionPicture, DefinitionRect, DefinitionSpriteImage, DefinitionTargetRect, Direction,
-    EffectVarValue, Engine, ObjectBaseGraphics, ObjectStatus, ObjectUpdate, PhysicalInfo,
-    PhysicsSettings, PlayerConfig, Scenario, ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING,
-    CATEGORY_OBJECT, CATEGORY_VEHICLE, OWNER_NONE,
+    EffectVarValue, Engine, EngineError, JoinPlayerConfig, ObjectBaseGraphics, ObjectStatus,
+    ObjectUpdate, PhysicalInfo, PhysicsSettings, PlayerConfig, Scenario, ShapeAttachRecord,
+    SpawnConfig, CATEGORY_LIVING, CATEGORY_OBJECT, CATEGORY_VEHICLE, OWNER_NONE,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1022,6 +1023,103 @@ fn rust_network_rule_goal_placement(case: &Value, case_index: usize) {
     );
 }
 
+fn player_join_capacity_config(name: &str, player_info_id: i32) -> JoinPlayerConfig {
+    JoinPlayerConfig {
+        name: name.to_string(),
+        player_info_id,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff0000,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: false,
+        auto_context_menu: false,
+        startup_player_count: 1,
+    }
+}
+
+fn player_names(engine: &Engine) -> Value {
+    Value::Array(
+        engine
+            .players()
+            .map(|player| Value::String(player.name().to_string()))
+            .collect(),
+    )
+}
+
+fn rust_player_join_capacity(case: &Value, case_index: usize) {
+    const SECTION: &str = "player_join_capacity";
+    let initial_names = case["names_before"]
+        .as_array()
+        .expect("player join capacity names_before is a C++ oracle array");
+    let mut engine = Engine::with_seed(0);
+    for (index, name) in initial_names.iter().enumerate() {
+        let name = name
+            .as_str()
+            .expect("player join capacity initial name is a string");
+        engine
+            .join_player(player_join_capacity_config(name, index as i32 + 1))
+            .unwrap_or_else(|error| panic!("initial player `{name}` joins: {error}"));
+    }
+
+    expect_eq(
+        SECTION,
+        case_index,
+        "count_before",
+        i(case, "count_before"),
+        engine.players().count() as i64,
+    );
+    expect_json_eq(
+        SECTION,
+        case_index,
+        "names_before",
+        case["names_before"].clone(),
+        player_names(&engine),
+    );
+
+    let maximum = i(case, "max_players") as i32;
+    let joining_name = case["joining_name"]
+        .as_str()
+        .expect("player join capacity joining_name is a string");
+    engine.set_max_players(maximum);
+    let result = engine.join_player(player_join_capacity_config(
+        joining_name,
+        initial_names.len() as i32 + 1,
+    ));
+    let accepted = match result {
+        Ok(_) => true,
+        Err(EngineError::TooManyPlayers { .. }) => false,
+        Err(error) => panic!("unexpected player join error for `{joining_name}`: {error}"),
+    };
+
+    expect_json_eq(
+        SECTION,
+        case_index,
+        "accepted",
+        case["accepted"].clone(),
+        serde_json::json!(accepted),
+    );
+    expect_eq(
+        SECTION,
+        case_index,
+        "count_after",
+        i(case, "count_after"),
+        engine.players().count() as i64,
+    );
+    expect_json_eq(
+        SECTION,
+        case_index,
+        "names_after",
+        case["names_after"].clone(),
+        player_names(&engine),
+    );
+}
+
 #[test]
 fn parity_differential_matches_cpp_golden() {
     let golden = load_golden();
@@ -1038,6 +1136,33 @@ fn parity_differential_matches_cpp_golden() {
         .enumerate()
     {
         rust_network_rule_goal_placement(case, case_index);
+    }
+
+    // C4PlayerList.cpp:172-178,288-294. The C++ oracle compiles the exact
+    // linked-list count and Join capacity gate; Rust seeds and attempts every
+    // row through Engine::join_player, including the zero-is-closed boundary.
+    let player_join_capacity_cases = golden["player_join_capacity"]
+        .as_array()
+        .expect("player_join_capacity is a C++ oracle array");
+    let player_join_capacity_names = player_join_capacity_cases
+        .iter()
+        .map(|case| {
+            case["name"]
+                .as_str()
+                .expect("player_join_capacity case has a name")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        player_join_capacity_names,
+        [
+            "zero_rejects_empty",
+            "below_limit_accepts",
+            "at_limit_rejects",
+        ],
+        "player_join_capacity must retain its exact ordered three-row matrix"
+    );
+    for (case_index, case) in player_join_capacity_cases.iter().enumerate() {
+        rust_player_join_capacity(case, case_index);
     }
 
     // 1. itofix (whole-integer + precision-denominated).

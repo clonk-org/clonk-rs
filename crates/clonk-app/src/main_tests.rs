@@ -3913,6 +3913,101 @@ fn synchronized_remote_join_has_no_local_viewport_feedback() {
 
 #[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
+fn synchronized_runtime_join_obeys_parameterless_set_max_player() {
+    // SetMaxPlayer() writes zero to Game.Parameters.MaxPlayers. A later
+    // synchronized C4ControlJoinPlayer reaches C4PlayerList::Join, which logs
+    // IDS_PRC_TOOMANYPLRS and returns before allocating a player
+    // (C4Script.cpp:3693-3705; C4Control.cpp:710-749;
+    // C4PlayerList.cpp:271-294).
+    let mut app = new_lightweight_running_sandbox_app();
+    app.engine
+        .install_scenario_script_with_convention(
+            "closed runtime admission",
+            "global func CloseAdmission() { return SetMaxPlayer(); }",
+            true,
+        )
+        .test_value();
+    app.engine
+        .call_scenario_script_function("CloseAdmission", Vec::new())
+        .test_value();
+    assert_eq!(app.engine.max_players(), Some(0));
+
+    let before = app.engine.players().count();
+    let info_id = 75;
+    let at_client = app.offline_local_client_id();
+    app.control_clients
+        .replace_snapshot([clonk_engine::ClientCoreControlData {
+            client_id: at_client,
+            name: clonk_engine::LegacyCString::from_bytes(b"Host Client".to_vec()).test_value(),
+            ..Default::default()
+        }]);
+    app.control_player_infos
+        .apply(clonk_engine::PlayerInfoControlData {
+            client_id: at_client,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                name: clonk_engine::LegacyCString::from_bytes(b"Late Player".to_vec()).test_value(),
+                id: info_id,
+                ..Default::default()
+            }],
+            by_client: 1,
+            ..Default::default()
+        });
+    app.local_controls
+        .toggle_mouse(app.local_owner)
+        .test_value();
+    assert_eq!(app.local_controls.mouse_owner(), None);
+    app.mouse_control = false;
+    app.ingame_mouse_init_centered = true;
+    let controls_before = app.local_controls.assignments().collect::<Vec<_>>();
+    let viewports_before = app.graphics.active_viewport_projections();
+    let player_file = tempdir();
+    let player_file_path = player_file.path().join("LatePlayer.c4p");
+    // Local C4Control joins pass the filename to C4PlayerList::Join. Its
+    // capacity gate runs before C4Player::Init tries to parse this profile
+    // (C4Player.cpp:267-275).
+    fs::write(&player_file_path, b"malformed but present").test_value();
+
+    app.apply_join_player_control(clonk_engine::JoinPlayerControlData {
+        filename: clonk_engine::LegacyCString::from_bytes(
+            player_file_path.to_string_lossy().into_owned().into_bytes(),
+        )
+        .test_value(),
+        at_client,
+        info_id,
+        source: clonk_engine::JoinPlayerSource::Embedded(
+            include_bytes!("../../clonk-engine/tests/fixtures/embedded_player.c4p").to_vec(),
+        ),
+        by_client: at_client,
+    })
+    .test_value();
+
+    assert_eq!(app.engine.players().count(), before);
+    assert!(app
+        .engine
+        .players()
+        .all(|player| player.player_info_id() != info_id));
+    assert!(!app
+        .control_player_infos
+        .get(info_id)
+        .test_value()
+        .is_joined());
+    assert_eq!(
+        app.local_controls.assignments().collect::<Vec<_>>(),
+        controls_before
+    );
+    assert_eq!(app.graphics.active_viewport_projections(), viewports_before);
+    assert!(
+        app.ingame_mouse_init_centered,
+        "a rejected player never reaches C4Player::InitControl"
+    );
+    assert!(message_board_logical_entries(&app).ends_with(&[
+        "Player join: Late Player".to_string(),
+        "This scenario is designed for a maximum of 0 players.".to_string(),
+    ]));
+}
+
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
 fn synchronized_join_for_a_missing_client_is_ignored() {
     // C4ControlJoinPlayer resolves AtClient before joining and returns
     // immediately when that client has already disappeared

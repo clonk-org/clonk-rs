@@ -7227,6 +7227,38 @@ impl GameApp {
         }
     }
 
+    /// Enters the portion of `C4PlayerList::Join` that runs before player
+    /// allocation and profile loading (C4PlayerList.cpp:278-294).
+    fn begin_player_list_join(&mut self, info: &clonk_engine::ControlPlayerInfoEntry) -> bool {
+        let player_name = legacy_presentation_text(control_player_effective_name(info));
+        let join_template = self.runtime_resource_text("IDS_PRC_JOINPLR", "Player join: %s");
+        self.append_control_message_log(
+            format_resource_string(join_template, &[&player_name]),
+            CONTROL_LOG_COLOR,
+            None,
+        );
+        match self.engine.check_player_capacity() {
+            Ok(()) => true,
+            Err(EngineError::TooManyPlayers { maximum }) => {
+                let maximum = maximum.to_string();
+                let template = self.runtime_resource_text(
+                    "IDS_PRC_TOOMANYPLRS",
+                    "This scenario is designed for a maximum of %d players.",
+                );
+                self.append_control_message_log(
+                    format_resource_string(template, &[&maximum]),
+                    CONTROL_LOG_COLOR,
+                    None,
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(%error, "player capacity preflight failed");
+                false
+            }
+        }
+    }
+
     pub(crate) fn apply_join_player_control(
         &mut self,
         join: clonk_engine::JoinPlayerControlData,
@@ -7300,8 +7332,15 @@ impl GameApp {
                 // Rust has no stable local temp path to serialize while this
                 // resource is loading. Resolve the completed registry entry by
                 // ID on the authoring host too, after PreExecute releases it.
-                if let Some(path) = self.admission_resources.complete_path(core.id) {
-                    match PlayerFile::load_from_path(path) {
+                if let Some(path) = self
+                    .admission_resources
+                    .complete_path(core.id)
+                    .map(Path::to_path_buf)
+                {
+                    if !self.begin_player_list_join(&info) {
+                        return Ok(());
+                    }
+                    match PlayerFile::load_from_path(&path) {
                         Ok(file) => Some(file),
                         Err(error) => {
                             tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load completed player resource");
@@ -7309,6 +7348,9 @@ impl GameApp {
                         }
                     }
                 } else if self.control_playback.is_some() {
+                    if !self.begin_player_list_join(&info) {
+                        return Ok(());
+                    }
                     match self.replay_record_player_file(core) {
                         Ok(file) => Some(file),
                         Err(error) => {
@@ -7325,6 +7367,9 @@ impl GameApp {
             {
                 // Script players have no .c4p file even on the host that issued
                 // their fileless JoinPlayer control (C4Control.cpp:745-749).
+                if !self.begin_player_list_join(&info) {
+                    return Ok(());
+                }
                 None
             }
             clonk_engine::JoinPlayerSource::Embedded(_)
@@ -7332,6 +7377,9 @@ impl GameApp {
                     || (offline_local && join.by_client == join.at_client) =>
             {
                 let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
+                if !self.begin_player_list_join(&info) {
+                    return Ok(());
+                }
                 match PlayerFile::load_from_path(&path) {
                     Ok(file) => Some(file),
                     Err(error) => {
@@ -7340,12 +7388,24 @@ impl GameApp {
                     }
                 }
             }
-            clonk_engine::JoinPlayerSource::Embedded(_) => {
-                match clonk_engine::resolve_remote_embedded_player_data_with_engine(
-                    &self.engine,
-                    &join,
-                    &info,
-                ) {
+            clonk_engine::JoinPlayerSource::Embedded(data) => {
+                let player_data = if data.is_empty() && !info.is_script_player() {
+                    clonk_engine::resolve_remote_embedded_player_data_with_engine(
+                        &self.engine,
+                        &join,
+                        &info,
+                    )
+                } else {
+                    if !self.begin_player_list_join(&info) {
+                        return Ok(());
+                    }
+                    clonk_engine::resolve_remote_embedded_player_data_with_engine(
+                        &self.engine,
+                        &join,
+                        &info,
+                    )
+                };
+                match player_data {
                     Ok(clonk_engine::RemoteEmbeddedPlayerData::PlayerFile(file)) => Some(file),
                     Ok(clonk_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile) => None,
                     Err(error) => {
@@ -7477,7 +7537,21 @@ impl GameApp {
                     self.engine
                         .set_local_players(self.local_controls.owners().collect::<Vec<_>>());
                 }
-                tracing::warn!(info_id = join.info_id, %error, "player join failed");
+                match &error {
+                    EngineError::TooManyPlayers { maximum } => {
+                        let maximum = maximum.to_string();
+                        let template = self.runtime_resource_text(
+                            "IDS_PRC_TOOMANYPLRS",
+                            "This scenario is designed for a maximum of %d players.",
+                        );
+                        self.append_control_message_log(
+                            format_resource_string(template, &[&maximum]),
+                            CONTROL_LOG_COLOR,
+                            None,
+                        );
+                    }
+                    _ => tracing::warn!(info_id = join.info_id, %error, "player join failed"),
+                }
             }
         }
         Ok(())

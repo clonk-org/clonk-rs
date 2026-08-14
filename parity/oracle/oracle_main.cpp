@@ -45,6 +45,9 @@
 //     they call. The HarpoonRace fixture converts its authored RVLR rule plus
 //     default StructuresNeedEnergy into the RVLR+ENRG parameter list and then
 //     records the objects placed from those authoritative parameters.
+//   * `C4PlayerList::GetCount` and the capacity block in `C4PlayerList::Join`
+//     are mechanically extracted; a linked-player scaffold records the exact
+//     admission boundary and too-many-player diagnostic argument.
 //   * The complete bottom/top/side DFA_FLIGHT arms of
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
@@ -1556,6 +1559,143 @@ static void printNetworkRuleGoalPlacementCases()
         makeIDList({{"RACE", 0}}));
     printf("]");
 }
+
+namespace player_join_capacity_oracle
+{
+enum class C4ResStrTableKey
+{
+    IDS_PRC_TOOMANYPLRS,
+};
+
+struct C4GameParameters
+{
+    int32_t MaxPlayers{};
+};
+
+struct C4Game
+{
+    C4GameParameters Parameters;
+};
+
+static C4Game Game;
+static std::optional<int32_t> RejectedMaximum;
+static int32_t RejectionLogCalls{};
+
+static void Log(C4ResStrTableKey key, int32_t maximum)
+{
+    assert(key == C4ResStrTableKey::IDS_PRC_TOOMANYPLRS);
+    RejectedMaximum = maximum;
+    ++RejectionLogCalls;
+}
+
+struct C4Player
+{
+    std::string Name;
+    C4Player *Next{};
+};
+
+class C4PlayerList
+{
+public:
+    C4Player *First{};
+
+    int GetCount() const;
+
+    void Seed(std::initializer_list<const char *> names)
+    {
+        for (const char *name : names) Append(name);
+    }
+
+    C4Player *Join(const char *name)
+    {
+#include "player_join_capacity.inc"
+        return Append(name);
+    }
+
+    std::vector<std::string> Names() const
+    {
+        std::vector<std::string> names;
+        for (C4Player *player = First; player; player = player->Next)
+            names.push_back(player->Name);
+        return names;
+    }
+
+private:
+    std::array<C4Player, 3> Storage{};
+    std::size_t Used{};
+
+    C4Player *Append(const char *name)
+    {
+        assert(Used < Storage.size());
+        C4Player *player = &Storage[Used++];
+        player->Name = name;
+        player->Next = nullptr;
+        C4Player *last = First;
+        for (; last && last->Next; last = last->Next);
+        if (last) last->Next = player; else First = player;
+        return player;
+    }
+};
+
+#include "player_list_get_count.inc"
+
+static void printNames(const std::vector<std::string> &names)
+{
+    printf("[");
+    for (std::size_t index = 0; index < names.size(); ++index)
+    {
+        if (index) printf(",");
+        printf("\"%s\"", names[index].c_str());
+    }
+    printf("]");
+}
+
+static void printCases()
+{
+    struct AdmissionCase
+    {
+        const char *name;
+        int32_t maximum;
+        std::initializer_list<const char *> initialNames;
+        const char *joiningName;
+    };
+    const AdmissionCase cases[] = {
+        {"zero_rejects_empty", 0, {}, "Zero"},
+        {"below_limit_accepts", 2, {"Ada"}, "Bert"},
+        {"at_limit_rejects", 2, {"Ada", "Bert"}, "Cara"},
+    };
+
+    printf("\"player_join_capacity\":[");
+    for (std::size_t index = 0; index < std::size(cases); ++index)
+    {
+        const AdmissionCase &test = cases[index];
+        C4PlayerList players;
+        players.Seed(test.initialNames);
+        Game.Parameters.MaxPlayers = test.maximum;
+        RejectedMaximum.reset();
+        RejectionLogCalls = 0;
+        const auto namesBefore = players.Names();
+        const int32_t countBefore = players.GetCount();
+        const bool accepted = players.Join(test.joiningName) != nullptr;
+        const auto namesAfter = players.Names();
+        assert(RejectionLogCalls == (accepted ? 0 : 1));
+        assert(RejectedMaximum == (accepted
+            ? std::optional<int32_t>{}
+            : std::optional<int32_t>{test.maximum}));
+
+        if (index) printf(",");
+        printf("{\"name\":\"%s\",\"max_players\":%d,\"joining_name\":\"%s\","
+               "\"count_before\":%d,\"names_before\":",
+               test.name, test.maximum, test.joiningName, countBefore);
+        printNames(namesBefore);
+        printf(",\"accepted\":%s,\"count_after\":%d,\"names_after\":",
+               accepted ? "true" : "false", players.GetCount());
+        printNames(namesAfter);
+        printf("}");
+    }
+    printf("]");
+}
+} // namespace player_join_capacity_oracle
 
 static void printDigOutMaterialCastCase()
 {
@@ -3201,6 +3341,11 @@ int main()
     // 16. HarpoonRace C4SGame conversion followed by authoritative
     //     C4GameParameters rule/goal placement, plus a source/count edge.
     printNetworkRuleGoalPlacementCases();
+    printf(",\n");
+
+    // 16b. Exact C4PlayerList linked count and Join capacity gate. The matrix
+    //      pins zero-as-closed, one remaining slot, and exact-full rejection.
+    player_join_capacity_oracle::printCases();
     printf(",\n");
 
     // 17. Exact DigOutMaterialCast spawn arguments and the twenty following
