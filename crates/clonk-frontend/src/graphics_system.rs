@@ -7679,7 +7679,8 @@ impl GraphicsSystem {
                 gamma,
             );
         }
-        if let Some(sprite) = sprite {
+        if let Some(bitmap_sprite) = sprite {
+            let definition_sprite = geometry_sprite.unwrap_or(bitmap_sprite);
             // The face blit consumes the resolved origin (cox/coy are measured
             // from cotx/coty), so point the draw origin at it for exactly that
             // call. It is restored before the overlay walk, which resolves its
@@ -7691,7 +7692,8 @@ impl GraphicsSystem {
             self.draw_object_face(
                 object,
                 objects,
-                sprite,
+                bitmap_sprite,
+                definition_sprite,
                 owner_color,
                 zoom,
                 rotation_degrees,
@@ -8113,7 +8115,8 @@ impl GraphicsSystem {
         &mut self,
         object: &ObjectSnapshot,
         objects: &[ObjectSnapshot],
-        sprite: &DefinitionSprite,
+        bitmap_sprite: &DefinitionSprite,
+        definition_sprite: &DefinitionSprite,
         owner_color: Option<u32>,
         zoom: f32,
         rotation_degrees: f32,
@@ -8122,14 +8125,15 @@ impl GraphicsSystem {
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
         let con = object.construction.clamp(0, FULL_CON);
-        let def_shape = Self::sprite_def_shape(sprite);
-        let inst_shape = Self::con_scaled_shape(def_shape, con, sprite.stretch_growth);
-        let graphics = Self::live_action_graphics(&sprite.actions, &object.action);
+        let def_shape = Self::sprite_def_shape(definition_sprite);
+        let inst_shape = Self::con_scaled_shape(def_shape, con, definition_sprite.stretch_growth);
+        let graphics = Self::live_action_graphics(&definition_sprite.actions, &object.action);
         let Some(graphics) = graphics else {
             // Idle: BaseFace only, phase (0,0) (src/C4Object.cpp:2388-2392).
             self.draw_base_face(
                 object,
-                sprite,
+                bitmap_sprite,
+                definition_sprite,
                 con,
                 def_shape,
                 inst_shape,
@@ -8150,7 +8154,8 @@ impl GraphicsSystem {
         if graphics.facet_base {
             self.draw_base_face(
                 object,
-                sprite,
+                bitmap_sprite,
+                definition_sprite,
                 con,
                 def_shape,
                 inst_shape,
@@ -8194,7 +8199,7 @@ impl GraphicsSystem {
             let dest_y = coy + facet.target_y as f32;
             let dest_height = (target.position.y + target_shape.y) as f32 - dest_y;
             self.blit_face(
-                sprite,
+                bitmap_sprite,
                 SourceRect::new(facet.x, facet.y, facet.width, facet.height),
                 (
                     cox + facet.target_x as f32,
@@ -8240,7 +8245,7 @@ impl GraphicsSystem {
             (cox, coy, inst_shape.width as f32, inst_shape.height as f32)
         };
         self.blit_face(
-            sprite,
+            bitmap_sprite,
             source,
             dest,
             (
@@ -8265,7 +8270,8 @@ impl GraphicsSystem {
     fn draw_base_face(
         &mut self,
         object: &ObjectSnapshot,
-        sprite: &DefinitionSprite,
+        bitmap_sprite: &DefinitionSprite,
+        definition_sprite: &DefinitionSprite,
         con: i32,
         def_shape: DefinitionRect,
         inst_shape: DefinitionRect,
@@ -8295,7 +8301,7 @@ impl GraphicsSystem {
         let thgt = (shgt * con / FULL_CON) as f32;
 
         // Construction-type display (src/C4Object.cpp:453-460).
-        if !sprite.stretch_growth {
+        if !definition_sprite.stretch_growth {
             tx = cox as f32 + (inst_shape.width - swdt) as f32 / 2.0;
             twdt = swdt as f32;
             fy += shgt * (FULL_CON - con).max(0) / FULL_CON;
@@ -8303,7 +8309,7 @@ impl GraphicsSystem {
         }
 
         self.blit_face(
-            sprite,
+            bitmap_sprite,
             SourceRect::new(fx, fy, fwdt, fhgt),
             (tx, ty, twdt, thgt),
             (
@@ -8889,6 +8895,7 @@ impl GraphicsSystem {
                     target,
                     objects,
                     sprite,
+                    geometry_sprite,
                     owner_color,
                     zoom,
                     rotation_degrees,
@@ -9012,7 +9019,7 @@ impl GraphicsSystem {
     /// composed transform, and re-enters `C4Object::Draw`/`DrawTopFace` with
     /// ODM_BaseOnly. `fTemp` swaps only the bitmap: Shape, GrowthType and the
     /// live ActMap stay owned by the host's definition
-    /// (src/C4Object.cpp:377-382, :4230-4245).
+    /// (src/C4Object.cpp:357-400, 440-496, 4203-4217, 5894-5910).
     #[allow(clippy::too_many_arguments)]
     fn draw_overlay_extra_graphics(
         &mut self,
@@ -9025,10 +9032,14 @@ impl GraphicsSystem {
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
         let object_sprites = Arc::clone(&self.object_sprites);
-        let Some(sprite) = Self::overlay_source_sprite(object_sprites.as_ref(), object, overlay)
+        let Some(bitmap_sprite) =
+            Self::overlay_source_sprite(object_sprites.as_ref(), object, overlay)
         else {
             return;
         };
+        let definition_sprite = object_sprites
+            .get(object.definition_id.as_str())
+            .unwrap_or(bitmap_sprite);
         // `trf = *pPrevTrf; trf *= Transform;` — the host's own transform
         // applies first (inner), the overlay's second (outer). `trf` is a stack
         // object, so pDrawTransform is never null and the untransformed fast
@@ -9052,7 +9063,8 @@ impl GraphicsSystem {
         self.draw_object_face(
             object,
             objects,
-            sprite,
+            bitmap_sprite,
+            definition_sprite,
             owner_color,
             zoom,
             rotation_degrees,
@@ -9060,7 +9072,15 @@ impl GraphicsSystem {
             blit,
             gamma,
         );
-        self.paint_object_top_face_with(object, sprite, sprite, transform, true, blit, gamma);
+        self.paint_object_top_face_with(
+            object,
+            bitmap_sprite,
+            definition_sprite,
+            transform,
+            true,
+            blit,
+            gamma,
+        );
 
         self.viewport_x = saved_viewport_x;
         self.viewport_y = saved_viewport_y;

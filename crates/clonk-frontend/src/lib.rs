@@ -13816,6 +13816,114 @@ mod tests {
     }
 
     #[test]
+    fn cross_definition_base_graphics_use_host_geometry_with_source_bitmap() {
+        // SetGraphics replaces only pGraphics; Shape, GrowthType and ActMap
+        // stay on the live definition while their facet samples the selected
+        // bitmap (pinned C++ C4Object.cpp:357-400,440-496,4203-4217,
+        // 5894-5910; active draw at :2413-2492).
+        let blue = Color::opaque(0, 0, 180);
+        let red = Color::opaque(180, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let mut override_pixels = [red.r, red.g, red.b, red.a].repeat(8 * 8);
+        // The host ActMap selects this 4x4 crop from the override bitmap.
+        for y in 0..4 {
+            for x in 4..8 {
+                let offset = (y * 8 + x) * 4;
+                override_pixels[offset..offset + 4]
+                    .copy_from_slice(&[green.r, green.g, green.b, green.a]);
+            }
+        }
+
+        let host_action = DefinitionActionGraphics {
+            facet: Some(clonk_engine::DefinitionActionFacet {
+                x: 4,
+                y: 0,
+                width: 4,
+                height: 4,
+                target_x: 0,
+                target_y: 0,
+            }),
+            ..DefinitionActionGraphics::default()
+        };
+        let source_action = DefinitionActionGraphics {
+            facet: Some(clonk_engine::DefinitionActionFacet {
+                x: 0,
+                y: 4,
+                width: 2,
+                height: 2,
+                target_x: 0,
+                target_y: 0,
+            }),
+            ..DefinitionActionGraphics::default()
+        };
+        let host_sprite = DefinitionSprite {
+            actions: HashMap::from([("Active".to_string(), host_action)]),
+            shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
+            stretch_growth: false,
+            ..test_sprite(ImageData::new(
+                8,
+                8,
+                [blue.r, blue.g, blue.b, blue.a].repeat(8 * 8),
+            ))
+        };
+        let override_sprite = DefinitionSprite {
+            actions: HashMap::from([("Active".to_string(), source_action)]),
+            // Deliberately conflicting metadata: at half construction the
+            // old path drew a red 2x2 face at (14,12).
+            shape: Some(DefinitionRect::new(4, 4, 4, 4)),
+            stretch_growth: true,
+            ..test_sprite(ImageData::new(8, 8, override_pixels))
+        };
+        let sprites = Arc::new(HashMap::from([
+            (sprite_map_key("TestObject", None), host_sprite),
+            (sprite_map_key("OverrideSheet", None), override_sprite),
+        ]));
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(12, 10);
+        object.construction = FULL_CON / 2;
+        object.action = clonk_engine::ActionState::new("Active");
+        object.base_graphics = Some(clonk_engine::ObjectBaseGraphics {
+            definition: "OverrideSheet".to_string(),
+            graphics_name: None,
+            blit_mode: 0,
+        });
+
+        let mut graphics = test_graphics_with(
+            24,
+            20,
+            20,
+            "cross-definition base graphics",
+            sprites,
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_point_filtering(true);
+        let background = Color::opaque(0, 0, 0);
+        graphics.surface_mut().fill(background);
+        graphics.paint_object(
+            &object,
+            std::slice::from_ref(&object),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            0,
+            None,
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(8, 8),
+            Some(green),
+            "host Shape/GrowthType/ActMap must place the selected bitmap crop"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(14, 12),
+            Some(background),
+            "the selected definition's geometry must not place the face"
+        );
+    }
+
+    #[test]
     fn action_facet_is_anchored_at_shape_plus_facet_target() {
         // Regular action facet at full con: drawn facet-sized at
         // cox + Action.FacetX / coy + Action.FacetY (src/C4Object.cpp:
