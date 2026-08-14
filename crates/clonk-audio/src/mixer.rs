@@ -40,6 +40,18 @@ fn sdl_mixer_pan_steps(pan: f32) -> (i32, i32) {
     (left, right)
 }
 
+/// Peak the voice sub-mix is held to. Voice chat is a Rust-side extension with
+/// no C++ counterpart, so it is the one source that may be attenuated: the
+/// sound and music paths keep SDL_mixer's arithmetic, which lets a crowd of
+/// simultaneous sources run straight into the output clamp. Three decibels
+/// below full scale leaves the game's own audio room in the output range even
+/// while several people talk at once.
+const VOICE_BUS_CEILING: f32 = 0.707_945_8;
+/// How long the limiter takes to hand most of its gain back once the peak
+/// drops. Short enough to follow the gaps between syllables, long enough that
+/// a speaker joining or leaving does not step the others' level audibly.
+const VOICE_LIMITER_RELEASE_SECONDS: f32 = 0.1;
+
 /// SDL_mixer pulls music in callback-sized blocks. Keep the Rust music path
 /// similarly bounded instead of retaining one stereo-f32 frame per track
 /// frame for the complete duration.
@@ -856,6 +868,7 @@ struct MixerState {
     channel_generations: Vec<u64>,
     active_music: Option<MusicPlayback>,
     voice_streams: BTreeMap<VoiceStreamId, VoiceStreamPlayback>,
+    voice_limiter: VoiceLimiter,
     next_sound_id: u32,
     next_music_id: u32,
     next_inert_channel_generation: u64,
@@ -901,6 +914,13 @@ struct VoiceStreamPlayback {
     pan: f32,
     left_gain: f32,
     right_gain: f32,
+}
+
+/// Keeps the summed voice streams at or below [`VOICE_BUS_CEILING`].
+#[derive(Debug)]
+struct VoiceLimiter {
+    gain: f32,
+    release_coefficient: f32,
 }
 
 #[derive(Debug)]
@@ -971,6 +991,7 @@ impl AudioMixer {
             channel_generations: vec![0; max_channels],
             active_music: None,
             voice_streams: BTreeMap::new(),
+            voice_limiter: VoiceLimiter::new(sample_rate),
             next_sound_id: 1,
             next_music_id: 1,
             next_inert_channel_generation: 1,
@@ -1403,6 +1424,7 @@ impl AudioMixer {
                 active_channel_indices,
                 active_music,
                 voice_streams,
+                voice_limiter,
                 ..
             } = &mut *state;
             if active_channel_indices.is_empty()
@@ -1411,6 +1433,7 @@ impl AudioMixer {
                     .values()
                     .all(|stream| stream.frames.is_empty())
             {
+                voice_limiter.reset();
                 return;
             }
             debug_assert!(active_channel_indices
@@ -1462,12 +1485,18 @@ impl AudioMixer {
                     }
                 }
 
+                let mut voice_left = 0.0f32;
+                let mut voice_right = 0.0f32;
                 for stream in voice_streams.values_mut() {
                     if let Some(frame) = stream.next_frame() {
-                        left += frame[0] * stream.left_gain;
-                        right += frame[1] * stream.right_gain;
+                        voice_left += frame[0] * stream.left_gain;
+                        voice_right += frame[1] * stream.right_gain;
                     }
                 }
+                let voice_gain =
+                    voice_limiter.gain_for_peak(voice_left.abs().max(voice_right.abs()));
+                left += voice_left * voice_gain;
+                right += voice_right * voice_gain;
 
                 if !finished_music {
                     if let Some(music) = active_music.as_mut() {
@@ -1660,6 +1689,46 @@ impl VoiceStreamPlayback {
             queued_frames: self.frames.len(),
             dropped_stale_frames: self.dropped_stale_frames,
         }
+    }
+}
+
+impl VoiceLimiter {
+    fn new(output_sample_rate: u32) -> Self {
+        // One pole toward the target: the coefficient is the share of the
+        // remaining distance covered per sample, so the gain recovers all but
+        // 1/e of a step within the release time.
+        let release_samples = VOICE_LIMITER_RELEASE_SECONDS * output_sample_rate as f32;
+        Self {
+            gain: 1.0,
+            release_coefficient: if release_samples > 1.0 {
+                release_samples.recip()
+            } else {
+                1.0
+            },
+        }
+    }
+
+    /// The gain this frame's voice sum must be multiplied by. Attack is
+    /// instantaneous, so `gain <= VOICE_BUS_CEILING / peak` holds on the very
+    /// first sample of a burst instead of one release later; only handing the
+    /// gain back is smoothed, which is what keeps the limiter inaudible.
+    fn gain_for_peak(&mut self, peak: f32) -> f32 {
+        let target = if peak > VOICE_BUS_CEILING {
+            VOICE_BUS_CEILING / peak
+        } else {
+            1.0
+        };
+        self.gain = if target < self.gain {
+            target
+        } else {
+            self.gain + (target - self.gain) * self.release_coefficient
+        };
+        self.gain
+    }
+
+    /// Nothing is playing, so no gain reduction is owed to the next burst.
+    fn reset(&mut self) {
+        self.gain = 1.0;
     }
 }
 
@@ -2254,6 +2323,103 @@ mod tests {
         mixer.mix_f32(&mut output);
         assert!((output[0] - 0.125).abs() < 0.000_1);
         assert_eq!(output[1], 0.0);
+    }
+
+    #[test]
+    fn simultaneous_full_scale_voice_speakers_never_reach_the_output_clamp() {
+        let mixer = Arc::new(AudioMixer::new(VOICE_SAMPLE_RATE, 0));
+        for stream_id in 0..8 {
+            assert_eq!(
+                mixer.queue_voice_stream_with_mix(
+                    stream_id,
+                    [i16::MAX; VOICE_FRAME_SAMPLES],
+                    1.0,
+                    0.0,
+                ),
+                VoiceFrameQueueOutcome::Queued
+            );
+        }
+
+        let mut output = vec![0.0_f32; VOICE_FRAME_SAMPLES * 2];
+        mixer.mix_f32(&mut output);
+
+        let peak = output
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+        assert!(
+            peak < 1.0,
+            "eight speakers at full scale drove the mix into the output clamp at {peak}",
+        );
+    }
+
+    #[test]
+    fn voice_limiter_attacks_within_one_sample_and_releases_back_to_unity() {
+        let mut limiter = VoiceLimiter::new(VOICE_SAMPLE_RATE);
+
+        assert_eq!(
+            limiter.gain_for_peak(0.5),
+            1.0,
+            "one speaker under the ceiling is passed through untouched",
+        );
+
+        let attacked = limiter.gain_for_peak(4.0);
+        assert!(
+            (attacked - VOICE_BUS_CEILING / 4.0).abs() < 0.000_001,
+            "the very first over-ceiling sample is already bounded, got {attacked}",
+        );
+
+        let releasing = limiter.gain_for_peak(0.0);
+        assert!(
+            releasing > attacked && releasing < 1.0,
+            "gain is handed back gradually, not stepped, got {releasing}",
+        );
+
+        // Ten release constants of silence.
+        for _ in 0..VOICE_SAMPLE_RATE {
+            limiter.gain_for_peak(0.0);
+        }
+        assert!(
+            limiter.gain_for_peak(0.0) > 0.999,
+            "the limiter recovers unity gain once the crowd stops talking",
+        );
+    }
+
+    #[test]
+    fn voice_limiting_leaves_the_sound_channel_mix_untouched() {
+        let data = generate_sine_wave(50, 440.0, 44_100);
+        let render = |speakers: u64| {
+            let mixer = AudioMixer::new(44_100, 2);
+            let sound_id = mixer.load_sound(&data).unwrap();
+            mixer.play_sound(sound_id, false).unwrap();
+            for stream_id in 0..speakers {
+                mixer.queue_voice_stream_with_mix(
+                    stream_id,
+                    [i16::MAX; VOICE_FRAME_SAMPLES],
+                    1.0,
+                    0.0,
+                );
+            }
+            let mut output = vec![0.0_f32; 512 * 2];
+            mixer.mix_f32(&mut output);
+            output
+        };
+
+        let sound_only = render(0);
+        let with_crowd = render(8);
+
+        assert!(
+            sound_only.iter().any(|sample| sample.abs() > 0.1),
+            "the sound channel must actually be audible for this comparison",
+        );
+        for (index, (crowded, alone)) in with_crowd.iter().zip(&sound_only).enumerate() {
+            let voice_contribution = crowded - alone;
+            assert!(
+                (voice_contribution - VOICE_BUS_CEILING).abs() < 0.000_1,
+                "sample {index}: the limiter must scale the voice bus to its ceiling and leave \
+                 SDL_mixer's sound arithmetic alone, but the sound moved by {}",
+                voice_contribution - VOICE_BUS_CEILING,
+            );
+        }
     }
 
     #[cfg(feature = "cpal")]

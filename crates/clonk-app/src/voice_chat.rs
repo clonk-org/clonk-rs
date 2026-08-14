@@ -29,7 +29,11 @@
 //! `PlayerState.cursor`.
 //!
 //! Playback uses the existing linear 700-pixel positional mix; the speaker
-//! glyph additionally obeys per-viewport object/FoW visibility. Landscape
+//! glyph additionally obeys per-viewport object/FoW visibility. Several
+//! speakers at once would otherwise sum straight into the output clamp, so the
+//! audio mixer limits the summed voice bus to its own ceiling — voice is the
+//! one source it may attenuate, because the sound and music paths owe
+//! SDL_mixer's arithmetic. Landscape
 //! openness and obstacles deliberately do not occlude speech
 //! (clonk-org/clonk-rs#418), and the media lane is not encrypted
 //! (clonk-org/clonk-rs#426).
