@@ -44,6 +44,7 @@ use clonk_app_render::draw_commands;
 mod game_message;
 mod gamepad;
 mod gpu_instance;
+mod headed_surface_smoke;
 use clonk_app_menus::ingame_menu;
 use clonk_app_netplay::host_game_resource_sources;
 use clonk_app_render::gpu_renderer;
@@ -573,6 +574,9 @@ fn run() -> Result<()> {
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     let cli = Cli::parse();
+    if let Some(report_path) = cli.headed_surface_smoke.as_deref() {
+        headed_surface_smoke::prepare(report_path)?;
+    }
     // The startup-failure reporter in `main` is installed before this point
     // and has no access to the parsed command line. A dedicated server must
     // never wait on a modal acknowledgement, so latch the choice as soon as it
@@ -997,6 +1001,18 @@ fn run() -> Result<()> {
         // The next viewport window's key. `SHELL_WINDOW` is 0, so console windows
         // start above it; the value is a registry key, not a viewport identity.
         let mut next_developer_window_key = 1u64;
+        let mut headed_surface_smoke = cli
+            .headed_surface_smoke
+            .clone()
+            .map(|report_path| {
+                headed_surface_smoke::HeadedSurfaceSmoke::start(
+                    report_path,
+                    event_target,
+                    &mut developer_windows,
+                    &mut next_developer_window_key,
+                )
+            })
+            .transpose()?;
         // Set when the shell takes a graphics pass; consumed on the next event
         // loop entry, before the shell record is borrowed.
         let mut viewport_redraw_pending = false;
@@ -1007,6 +1023,32 @@ fn run() -> Result<()> {
 
         let mut dock_tile_attached = false;
         Ok(Box::new(move |event, event_target| {
+            if let Some(smoke) = headed_surface_smoke.as_mut() {
+                let (outcome, consumed) = match &event {
+                    Event::AboutToWait => (
+                        smoke.about_to_wait(event_target, &mut developer_windows),
+                        true,
+                    ),
+                    Event::WindowEvent {
+                        window_id,
+                        event: WindowEvent::RedrawRequested,
+                    } => (
+                        smoke.redraw(*window_id, event_target, &mut developer_windows),
+                        true,
+                    ),
+                    Event::LoopExiting => (Ok(()), false),
+                    _ => (Ok(()), false),
+                };
+                if let Err(error) = outcome {
+                    tracing::error!(%error, "headed surface smoke failed");
+                    smoke.fail(error);
+                    event_handler_exit_code.store(1, AtomicOrdering::Relaxed);
+                    event_target.exit();
+                }
+                if consumed {
+                    return;
+                }
+            }
             // Before the window borrow below, because the Dock tile belongs to the
             // application rather than to any one window.
             if dock_icon::should_attach_dock_tile(&event, dock_tile_attached) {
@@ -1892,6 +1934,12 @@ fn run() -> Result<()> {
                     windows = destroyed.len(),
                     "released the developer windows before the event loop returned"
                 );
+                if let Some(smoke) = headed_surface_smoke.as_mut() {
+                    if let Err(error) = smoke.finish(&destroyed, developer_windows.is_empty()) {
+                        tracing::error!(%error, "headed surface smoke report failed");
+                        event_handler_exit_code.store(1, AtomicOrdering::Relaxed);
+                    }
+                }
                 // After every other teardown line, so a log ending here ended
                 // on purpose. Nothing marked a shutdown before, which left
                 // "the log stops and the process is gone" reading identically

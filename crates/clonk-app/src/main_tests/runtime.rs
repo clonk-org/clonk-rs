@@ -159,6 +159,48 @@ fn headless_is_a_process_lifetime_switch_not_a_classic_argument() {
 }
 
 #[test]
+fn headed_surface_smoke_is_an_explicit_process_lifetime_diagnostic() {
+    let cli = Cli::try_parse_from([
+        "clonk-app",
+        "--headed-surface-smoke",
+        "headed-surface-report.json",
+    ])
+    .test_value();
+
+    assert_eq!(
+        cli.headed_surface_smoke,
+        Some(PathBuf::from("headed-surface-report.json"))
+    );
+    assert!(
+        Cli::try_parse_from([
+            "clonk-app",
+            "--headless",
+            "--headed-surface-smoke",
+            "headed-surface-report.json",
+        ])
+        .is_err(),
+        "the diagnostic must reach a real event loop, window and GPU surface"
+    );
+    assert!(
+        Cli::try_parse_from([
+            "clonk-app",
+            "--headed-surface-smoke",
+            "headed-surface-report.json",
+            "HarpoonRace.c4s",
+        ])
+        .is_err(),
+        "the diagnostic must not launch classic command-line work first"
+    );
+    assert!(
+        !<Cli as clap::CommandFactory>::command()
+            .render_long_help()
+            .to_string()
+            .contains("--headed-surface-smoke"),
+        "the hardware diagnostic is deliberately absent from ordinary user help"
+    );
+}
+
+#[test]
 fn classic_command_line_preserves_file_and_definition_order() {
     let classic = parse_classic_command_line(&[
         OsString::from("First.c4s"),

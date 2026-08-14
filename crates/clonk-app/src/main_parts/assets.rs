@@ -224,6 +224,24 @@ pub(crate) struct Cli {
     pub(crate) headless: bool,
 
     #[arg(
+        long = "headed-surface-smoke",
+        value_name = "REPORT.json",
+        conflicts_with_all = [
+            "headless",
+            "test_load",
+            "integration_test",
+            "host",
+            "join",
+            "sandbox",
+            "dump_frame",
+            "dump_menu_frame",
+            "classic_arguments"
+        ],
+        hide = true
+    )]
+    pub(crate) headed_surface_smoke: Option<std::path::PathBuf>,
+
+    #[arg(
         long = "dump-frame",
         value_name = "PATH",
         help = "Headless: boot the sandbox, advance --test-frames frames, render one in-game frame to a PNG at PATH, and exit (no window). For visual rendering-parity checks."

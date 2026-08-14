@@ -26,6 +26,7 @@ use std::sync::{Mutex, OnceLock};
 /// Generic over the instance type so the retention rule can be tested without
 /// a GPU: what matters is that `create` runs once per backend set and that the
 /// registry keeps its own handle afterwards.
+#[cfg(test)]
 fn retained_entry<T: Clone>(
     registry: &mut Vec<(wgpu::Backends, T)>,
     backends: wgpu::Backends,
@@ -41,9 +42,45 @@ fn retained_entry<T: Clone>(
         })
 }
 
-fn registry() -> &'static Mutex<Vec<(wgpu::Backends, wgpu::Instance)>> {
-    static REGISTRY: OnceLock<Mutex<Vec<(wgpu::Backends, wgpu::Instance)>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+struct InstanceEntry {
+    id: u64,
+    backends: wgpu::Backends,
+    instance: wgpu::Instance,
+    acquisitions: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InstanceAcquisitionEvidence {
+    pub(crate) sequence: u64,
+    pub(crate) entry_id: u64,
+    pub(crate) backends: wgpu::Backends,
+    pub(crate) created: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InstanceEntryEvidence {
+    pub(crate) entry_id: u64,
+    pub(crate) backends: wgpu::Backends,
+    pub(crate) acquisitions: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct InstanceRegistryEvidence {
+    pub(crate) acquisitions: Vec<InstanceAcquisitionEvidence>,
+    pub(crate) entries: Vec<InstanceEntryEvidence>,
+}
+
+#[derive(Default)]
+struct InstanceRegistry {
+    entries: Vec<InstanceEntry>,
+    acquisitions: Vec<InstanceAcquisitionEvidence>,
+    capture_acquisitions: bool,
+    next_entry_id: u64,
+}
+
+fn registry() -> &'static Mutex<InstanceRegistry> {
+    static REGISTRY: OnceLock<Mutex<InstanceRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(InstanceRegistry::default()))
 }
 
 /// The process's instance for `backends`, created on first use.
@@ -60,9 +97,74 @@ pub(crate) fn retained_instance(backends: wgpu::Backends) -> wgpu::Instance {
     let mut registry = registry()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    retained_entry(&mut registry, backends, || {
-        clonk_surface::create_instance(backends)
-    })
+    let (entry_id, instance, created) = match registry
+        .entries
+        .iter_mut()
+        .find(|entry| entry.backends == backends)
+    {
+        Some(entry) => {
+            entry.acquisitions += 1;
+            (entry.id, entry.instance.clone(), false)
+        }
+        None => {
+            registry.next_entry_id += 1;
+            let entry = InstanceEntry {
+                id: registry.next_entry_id,
+                backends,
+                instance: clonk_surface::create_instance(backends),
+                acquisitions: 1,
+            };
+            let result = (entry.id, entry.instance.clone(), true);
+            registry.entries.push(entry);
+            result
+        }
+    };
+    if registry.capture_acquisitions {
+        let sequence = registry.acquisitions.len() as u64 + 1;
+        registry.acquisitions.push(InstanceAcquisitionEvidence {
+            sequence,
+            entry_id,
+            backends,
+            created,
+        });
+    }
+    instance
+}
+
+/// Start the bounded acquisition trace consumed by the headed smoke process.
+///
+/// Normal sessions do not retain per-surface history. The diagnostic enables
+/// this before its shell is built, then exits after two acquisitions, so the
+/// evidence cannot grow with ordinary surface rebuilds.
+pub(crate) fn begin_retained_instance_evidence_capture() {
+    let mut registry = registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.acquisitions.clear();
+    registry.capture_acquisitions = true;
+}
+
+/// Snapshot the registry evidence used by the headed lifecycle gate.
+///
+/// Each successful surface must be preceded by one acquisition carrying the
+/// retained entry it actually received. That makes a full or selective bypass
+/// observable without relying on whether this machine's driver crashes.
+pub(crate) fn retained_instance_registry_evidence() -> InstanceRegistryEvidence {
+    let registry = registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    InstanceRegistryEvidence {
+        acquisitions: registry.acquisitions.clone(),
+        entries: registry
+            .entries
+            .iter()
+            .map(|entry| InstanceEntryEvidence {
+                entry_id: entry.id,
+                backends: entry.backends,
+                acquisitions: entry.acquisitions,
+            })
+            .collect(),
+    }
 }
 
 #[cfg(all(
@@ -118,8 +220,13 @@ mod tests {
     // the real instance and the real registry reachable without a GPU.
     #[test]
     fn asking_twice_for_a_backend_set_reaches_the_registry_rather_than_a_new_instance() {
-        let entries = || registry().lock().map_or(0, |registry| registry.len());
+        let entries = || {
+            registry()
+                .lock()
+                .map_or(0, |registry| registry.entries.len())
+        };
         assert_eq!(entries(), 0, "the registry starts empty in a fresh process");
+        begin_retained_instance_evidence_capture();
 
         let first = retained_instance(wgpu::Backends::empty());
         assert_eq!(entries(), 1);
@@ -130,6 +237,32 @@ mod tests {
         assert_eq!(entries(), 1);
         drop((first, second));
         assert_eq!(entries(), 1);
+        let evidence = retained_instance_registry_evidence();
+        assert_eq!(
+            evidence.acquisitions,
+            [
+                InstanceAcquisitionEvidence {
+                    sequence: 1,
+                    entry_id: 1,
+                    backends: wgpu::Backends::empty(),
+                    created: true,
+                },
+                InstanceAcquisitionEvidence {
+                    sequence: 2,
+                    entry_id: 1,
+                    backends: wgpu::Backends::empty(),
+                    created: false,
+                },
+            ]
+        );
+        assert_eq!(
+            evidence.entries,
+            [InstanceEntryEvidence {
+                entry_id: 1,
+                backends: wgpu::Backends::empty(),
+                acquisitions: 2,
+            }]
+        );
 
         let _reopened = retained_instance(wgpu::Backends::empty());
         assert_eq!(entries(), 1);
