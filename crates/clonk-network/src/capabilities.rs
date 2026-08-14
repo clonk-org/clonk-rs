@@ -6,15 +6,24 @@
 //! LegacyClonk server, so each is announced and used only when *both* ends
 //! support it.
 //!
-//! The announcement is safe to send unconditionally because C++'s
-//! `C4Network2IO::HandlePacket` switch has **no `default:` case**
-//! (oracle-src-pinned src/C4Network2IO.cpp): a packet ID it does not know is
-//! silently ignored, not rejected and not fatal. So this rides a PID outside
-//! C++'s range, a C++ peer drops it on the floor, and the absence of a reply is
-//! itself the signal that we are talking to C++.
+//! The announcement rides a PID outside every ID C++ dispatches, but "outside
+//! C++'s range" is not "invisible to C++". `C4Network2IO::HandlePacket`
+//! unpacks before dispatching, and `C4IDPacket::CompileFunc` `excCorrupt`s on
+//! an ID with no `FnUnpack` (oracle-src-pinned src/C4Packet2.cpp:210-217); the
+//! handler catches that, logs it, and in a release build closes the connection
+//! (src/C4Network2IO.cpp:820-834). A stock peer therefore drops the link on any
+//! port-only ID it receives — it never ignores one. The exemption is narrow:
+//! such an ID may be sent only to a peer already known to be this port, or
+//! immediately before a connection would close anyway (the host restart notices
+//! in [`crate::host_restart`]). It is not a licence for new port-only IDs on a
+//! live session.
 //!
-//! The default is therefore always the C++-compatible path. A capability is
-//! enabled only on positive evidence, never assumed from a version number.
+//! What the range does buy: a stock peer cannot *send* any of these IDs — it
+//! does not know them — so receiving an announcement is positive evidence that
+//! the sender is this port, and a peer that never announces stays absent from
+//! the registry. The default for such a peer is therefore always the
+//! C++-compatible path: a capability is enabled only on positive evidence,
+//! never assumed from a version number.
 
 use std::collections::BTreeMap;
 
@@ -211,8 +220,9 @@ mod tests {
 
     #[test]
     fn a_silent_peer_is_treated_as_stock_cpp() {
-        // The whole safety argument: C++ ignores the announcement, so it never
-        // replies, so it lands here as "supports nothing".
+        // The whole safety argument: a stock peer cannot produce this ID — it
+        // does not know it — so it never announces and lands here as "supports
+        // nothing".
         let registry = PeerCapabilityRegistry::default();
 
         assert_eq!(registry.of(7), PortCapabilities::default());
