@@ -2595,6 +2595,24 @@ fn pending_team_selection_counts_as_not_eliminated_for_game_over() -> Result<(),
 }
 
 #[test]
+fn team_selection_join_obeys_player_maximum_before_registration() {
+    // C4PlayerList::Join rejects over-capacity players before C4Player::Init
+    // can put them into team selection (C4PlayerList.cpp:271-303;
+    // C4Player.cpp:299-320).
+    let mut engine = Engine::new();
+    engine.set_max_players(0);
+
+    let result =
+        engine.join_player_for_team_selection(lifecycle_join_config("Blocked chooser", Vec::new()));
+
+    assert!(matches!(
+        result,
+        Err(EngineError::TooManyPlayers { maximum: 0 })
+    ));
+    assert_eq!(engine.players().count(), 0);
+}
+
+#[test]
 fn get_player_team_distinguishes_team_selection_from_unteamed() -> Result<(), EngineError> {
     // FnGetPlayerTeam returns an assigned roster team first, then -1 for
     // PS_TeamSelection/PS_TeamSelectionPending, 0 for a settled teamless
