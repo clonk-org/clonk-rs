@@ -951,10 +951,18 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         "the GOLD-carrying Clonk",
         None,
     )?;
-    // C4Object::ExecLife buys the empty base's first 100 energy for five
-    // wealth before subsequent GOLD sales can accumulate. The old driver
-    // predated that arm and expected the first five wealth to remain.
-    for target_wealth in [5, 10, 15, 20] {
+    // C4Object::ExecLife can spend one sale on the empty base's first 100
+    // energy. Let one complete Tick3 interval settle that purchase before
+    // deciding whether another physical mining trip is still necessary
+    // (C4Object.cpp:814-856).
+    for _ in 0..4 {
+        player.wait_until("HUT3 restores context after selling GOLD", 30, |engine| {
+            object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(14))
+        })?;
+        player.ticks(3)?;
+        if player_wealth(player.engine(), owner) >= 20 {
+            break;
+        }
         return_from_hut_and_collect_gold(&mut player, clonk, elevator_case, hut, owner)?;
         return_to_hut(
             &mut player,
@@ -963,17 +971,19 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             hut,
             owner,
             "the GOLD-carrying Clonk",
-            Some(target_wealth),
+            None,
         )?;
     }
+    player.wait_until("HUT3 restores context after the GOLD sales", 30, |engine| {
+        object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(14))
+    })?;
+    player.ticks(3)?;
+    player.assert_milestone("the physical GOLD sales fund the workshop", |engine| {
+        player_wealth(engine, owner) >= 20
+    })?;
 
     let workshop = object_with_definition(player.engine(), "WRKS")
         .expect("Tutorial07 creates the player's workshop");
-    player.wait_until(
-        "HUT3 restores context after the fifth GOLD sale",
-        30,
-        |engine| object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(14)),
-    )?;
     player.menu_navigate_to_caption("Exit")?;
     player.menu_enter()?;
     player.wait_until("the funded Clonk exits HUT3", 60, |engine| {

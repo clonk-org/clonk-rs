@@ -88,6 +88,9 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
             .object_snapshot(crystal)
             .is_some_and(|object| object.container == Some(first_clonk))
     })?;
+    // Classic controls retain the last procedure direction after key-up;
+    // Down changes that lingering Left to Stop without dropping contents
+    // (C4Player.cpp:1490-1554; Clonk.c4d/Script.c:175-183).
     player.tap(COM_DOWN)?;
     player.wait_until(
         "Tutorial06 launches its scripted earthquake",
@@ -100,14 +103,39 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.assert_milestone("Tutorial06 ShakeFree opens its surface pit", |engine| {
         !engine.debug_landscape_is_solid(60, 150)
     })?;
+    // The carrier is still tumbling through the new pit when the scripted
+    // message appears. Do not arm a horizontal control until it has reached
+    // a stable lower-cavern contact: C4Player::InCom retains held controls,
+    // so an early Right would become active on a transient Walk frame
+    // (C4Player.cpp:1490-1554; C4Object.cpp:3419-3449).
+    let mut stable_ticks = 0;
+    player.wait_until(
+        "the CRYS carrier lands safely in the lower cavern",
+        800,
+        |engine| {
+            let stable = object_with_definition(engine, "FXQ1").is_none()
+                && engine.object_snapshot(first_clonk).is_some_and(|object| {
+                    object.action.name == "Walk"
+                        && object.position.y >= 250
+                        && object.velocity.x == 0
+                        && object.velocity.y == 0
+                        && clonk_carries(engine, first_clonk, "CRYS")
+                });
+            stable_ticks = if stable { stable_ticks + 1 } else { 0 };
+            stable_ticks >= 3
+        },
+    )?;
     player.hold_until(
         COM_RIGHT,
         "the CRYS-carrying CLNK reaches the trapped cavern",
         800,
         |engine| {
-            engine
-                .object_snapshot(first_clonk)
-                .is_some_and(|object| object.position.x >= 160 && object.position.y >= 350)
+            engine.object_snapshot(first_clonk).is_some_and(|object| {
+                object.action.name == "Walk"
+                    && object.position.x >= 160
+                    && object.position.y >= 350
+                    && clonk_carries(engine, first_clonk, "CRYS")
+            })
         },
     )?;
 

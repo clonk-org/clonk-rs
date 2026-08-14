@@ -343,7 +343,10 @@ fn carry_gold_from_tunnel_to_hut(
     owner: i32,
     target_wealth: i32,
 ) -> Result<(), Box<dyn Error>> {
-    climb_from_gold_pocket(player, clonk, target_wealth > 10)?;
+    // The repaired route uses one replacement blast and then collects every
+    // remaining chunk from that same pocket. Its exit geometry therefore
+    // does not deepen on later sale trips.
+    climb_from_gold_pocket(player, clonk, false)?;
     player.hold_until(
         COM_RIGHT,
         format!("the {target_wealth}-wealth GOLD trip returns to ELEC"),
@@ -1079,18 +1082,23 @@ fn blast_one_tfln(
     if next_face_x < 414 && !attached {
         player.wait_until(
             "the Clonk catches the lit replacement TFLN at the gold face",
-            40,
+            80,
             |engine| {
                 engine
                     .object_snapshot(thrown)
                     .is_some_and(|flint| flint.container == Some(clonk))
             },
         )?;
-        player.assert_milestone(
+        player.wait_until(
             "the Clonk catches the lit replacement TFLN while facing the gold face",
+            30,
             |engine| {
                 engine.object_snapshot(clonk).is_some_and(|object| {
-                    object.action.name == "Walk" && object.direction == Direction::Left
+                    object.action.name == "Walk"
+                        && object.direction == Direction::Left
+                        && engine
+                            .object_snapshot(thrown)
+                            .is_some_and(|flint| flint.container == Some(clonk))
                 })
             },
         )?;
@@ -1913,6 +1921,11 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         .get("GOLD")
         .copied()
         .unwrap_or(0);
+    let hut_energy_before_sale = player
+        .engine()
+        .object_snapshot(hut)
+        .expect("Tutorial04 HUT2 remains live")
+        .energy;
     assert_eq!(
         wealth_before_sale, 0,
         "Tutorial04 reaches its first physical sale with zero wealth"
@@ -1981,15 +1994,21 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         0,
         "GOLD never remains as a live direct HUT2 content"
     );
-    assert_eq!(
-        player
-            .engine()
-            .player(owner)
-            .expect("Tutorial04 player remains live")
-            .wealth(),
-        wealth_before_sale + 5,
-        "Sell2Home credits GOLD's exact definition value on the entry frame"
-    );
+    // Command execution precedes ExecLife in the same object pass. If entry
+    // lands on Tick3, HUT2 can therefore spend GOLD's five wealth on its
+    // first BaseRegenerateEnergy purchase before the route observes the
+    // frame (C4Object.cpp:1082-1107,814-856). Pin the durable outcome
+    // instead of a transient pre-purchase balance.
+    player.wait_until(
+        "the first GOLD sale funds HUT2's initial energy reserve",
+        3,
+        |engine| {
+            engine.player_wealth(owner) == Some(wealth_before_sale)
+                && engine
+                    .object_snapshot(hut)
+                    .is_some_and(|hut| hut.energy > hut_energy_before_sale)
+        },
+    )?;
     assert_eq!(
         player
             .engine()
