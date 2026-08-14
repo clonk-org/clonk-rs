@@ -2,7 +2,7 @@
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
 #[test]
-fn app_virtual_keyboard_flings_tutorial05_wood_to_the_right_hill() {
+fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // Tutorial05's first material relay selects the valley CLNK, collects
     // its real WOOD, loads the real valley CATA, tensions it and fires to
     // Script63's right-hill rectangle
