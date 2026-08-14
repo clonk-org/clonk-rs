@@ -2665,6 +2665,12 @@ impl Engine {
                     .action
                     .apply_update_with_library(&update, &library);
                 if matches!(result, ActionUpdateResult::Applied) {
+                    // C4Object::SetAction resynchronizes both fixed
+                    // coordinates after every successful action selection,
+                    // including a same-action Jump selected by Fling
+                    // (C4Object.cpp:4142-4169).
+                    object.fixed_position =
+                        FixedVec2::from_ints(object.state.position.x, object.state.position.y);
                     if previous.name != object.state.action.name
                         || previous.act_map_index != object.state.action.act_map_index
                     {
