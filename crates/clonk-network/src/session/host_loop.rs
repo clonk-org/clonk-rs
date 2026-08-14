@@ -1382,7 +1382,11 @@ pub(crate) async fn handle_client_accepted(
     state.invalidate_control_send_time();
     debug_assert!(replaced_route.is_none());
     if let Some(announcement) = voice_announcement {
-        if let Some(cookie) = voice_auth.receive_cookie() {
+        if let Some(cookie) = state
+            .accepted_routes
+            .get(&connection_id)
+            .and_then(|route| route.voice_auth.receive_cookie())
+        {
             outbound.set_voice_receive_cookie(cookie);
         }
         let _ = outbound.try_send(ControlMessage::PortCapabilities(announcement));

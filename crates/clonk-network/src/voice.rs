@@ -102,7 +102,7 @@ impl VoiceRouteAuthentication {
         }
     }
 
-    pub(crate) fn announcement(self) -> Option<crate::PortCapabilities> {
+    pub(crate) fn announcement(&self) -> Option<crate::PortCapabilities> {
         self.local_receive_cookie
             .map(|cookie| crate::PortCapabilities::supported().with_voice_cookie(cookie))
     }
@@ -115,15 +115,15 @@ impl VoiceRouteAuthentication {
         }
     }
 
-    pub(crate) fn receive_cookie(self) -> Option<VoiceRouteCookie> {
+    pub(crate) fn receive_cookie(&self) -> Option<VoiceRouteCookie> {
         self.local_receive_cookie
     }
 
-    pub(crate) fn send_cookie(self) -> Option<VoiceRouteCookie> {
+    pub(crate) fn send_cookie(&self) -> Option<VoiceRouteCookie> {
         self.peer_receive_cookie
     }
 
-    pub(crate) const fn is_negotiated(self) -> bool {
+    pub(crate) const fn is_negotiated(&self) -> bool {
         self.local_receive_cookie.is_some() && self.peer_receive_cookie.is_some()
     }
 }

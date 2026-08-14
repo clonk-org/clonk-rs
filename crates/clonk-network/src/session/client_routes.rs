@@ -957,7 +957,7 @@ impl ClientRouteManager {
                 .routes
                 .get(&local_connection_id)
                 .expect("new client route exists");
-            if let Some(cookie) = voice_auth.receive_cookie() {
+            if let Some(cookie) = route.voice_auth.receive_cookie() {
                 route.outbound.set_voice_receive_cookie(cookie);
             }
             let _ = route.outbound.send(ClientRouteCommand::Message(
