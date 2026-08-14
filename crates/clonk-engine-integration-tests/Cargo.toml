@@ -24,6 +24,7 @@ path = "../clonk-engine/tests/it/main.rs"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 indexmap = { version = "2", features = ["serde"] }
+mimalloc = { version = "0.1", default-features = false }
 clonk-core = { path = "../clonk-core" }
 # Keep the optimized engine artifact feature-identical to clonk-app's test graph.
 clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }

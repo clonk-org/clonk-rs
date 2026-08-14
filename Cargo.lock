@@ -851,6 +851,7 @@ dependencies = [
  "indexmap",
  "libc",
  "memchr",
+ "mimalloc",
  "once_cell",
  "proptest",
  "rand 0.10.2",
