@@ -61,11 +61,23 @@ impl PortCapabilities {
     pub const INBAND_REDUNDANCY: u32 = 1 << 1;
     /// A tick with no input may be omitted rather than sent empty.
     pub const ELIDED_EMPTY_CONTROL: u32 = 1 << 2;
-    /// Best-effort voice media carried outside reliable packet accounting.
-    pub const VOICE_CHAT: u32 = 1 << 3;
+    /// Bit 3 announced the earlier *cleartext* voice media lane. Retired, never
+    /// reused, and never announced — see [`Self::VOICE_CHAT`].
+    pub const RETIRED_CLEARTEXT_VOICE_CHAT: u32 = 1 << 3;
     /// Host-routed control waits identify whether this client or a different
     /// participant held up the aggregate tick.
     pub const CONTROL_WAIT_ATTRIBUTION: u32 = 1 << 4;
+    /// Best-effort voice media carried outside reliable packet accounting and
+    /// sealed under the route's own key exchange.
+    ///
+    /// This takes a fresh bit rather than reusing bit 3 because the bit is what
+    /// an older build acts on. That build reads bit 3 as "this peer accepts my
+    /// voice", marks the route negotiated on the cookie alone, and opens its
+    /// microphone — putting *its* audio on the wire in the clear, for a lane
+    /// this build can no longer even receive. Retiring the bit means such a
+    /// peer sees no voice offer at all, which is the only honest answer: the
+    /// two builds cannot carry voice between them.
+    pub const VOICE_CHAT: u32 = 1 << 5;
 
     /// Everything this build knows how to do.
     pub fn supported() -> Self {
@@ -333,6 +345,34 @@ mod tests {
             PortCapabilities::VOICE_CHAT | PortCapabilities::CONTROL_WAIT_ATTRIBUTION,
             "the advertised mask must name exactly the implemented extensions"
         );
+    }
+
+    #[test]
+    fn the_retired_cleartext_voice_bit_is_never_announced() {
+        // A build from before the media lane was sealed treats bit 3 as "this
+        // peer accepts my voice" and opens its microphone on it, transmitting
+        // in the clear. Announcing that bit would make this build the reason
+        // that audio reaches the wire, for a lane it cannot even receive.
+        assert_ne!(
+            PortCapabilities::VOICE_CHAT,
+            PortCapabilities::RETIRED_CLEARTEXT_VOICE_CHAT
+        );
+        assert_eq!(
+            PortCapabilities::supported().bits() & PortCapabilities::RETIRED_CLEARTEXT_VOICE_CHAT,
+            0
+        );
+    }
+
+    #[test]
+    fn a_peer_offering_only_the_retired_cleartext_lane_gets_no_voice() {
+        let mut registry = PeerCapabilityRegistry::default();
+
+        registry.record(
+            7,
+            PortCapabilities::from_bits(PortCapabilities::RETIRED_CLEARTEXT_VOICE_CHAT),
+        );
+
+        assert!(!registry.peer_supports(7, PortCapabilities::VOICE_CHAT));
     }
 
     #[test]

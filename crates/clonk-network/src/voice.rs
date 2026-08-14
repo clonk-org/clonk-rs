@@ -22,11 +22,18 @@ pub const MAX_VOICE_PAYLOAD_BYTES: usize = VOICE_PAYLOAD_BYTES;
 pub(crate) const MAX_VOICE_DIRECT_RECIPIENTS: usize = 32;
 pub(crate) const VOICE_ROUTE_COOKIE_BYTES: usize = 16;
 
-/// A Rust-only datagram signature. It is recognized before the reliable-UDP
-/// packet header is inspected, so its following bytes can never advance the
-/// reliable receive window or enter PostMortem recovery.
+/// The Rust-only media datagram family, shared by every version of the lane.
 ///
-/// V2 seals everything after the route cookie. The signature is bumped rather
+/// The transport diverts on *this*, not on the exact version, and does so
+/// before the reliable-UDP packet header is inspected. That is what keeps media
+/// bytes out of the reliable receive window: an unrecognized version is still
+/// recognizably media, so it is dropped rather than read as a packet number.
+/// Divert by family, admit by version.
+pub(crate) const VOICE_MEDIA_FAMILY: &[u8; 4] = b"\x7fC4V";
+
+/// This build's exact wire version, and the only one it will encode or open.
+///
+/// V2 seals everything after the route cookie. The version is bumped rather
 /// than reused because a V1 build reads the cookie out of a V2 announcement
 /// happily — it simply ignores the trailing agreement key — and would then
 /// parse ciphertext as a cleartext packet. Bumping makes that mismatch fail at
@@ -463,7 +470,7 @@ pub(crate) enum VoicePacket {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum VoiceCodecError {
-    #[error("voice payload has {actual} bytes; V1 requires exactly {expected}")]
+    #[error("voice payload has {actual} bytes; this wire version requires exactly {expected}")]
     InvalidPayloadLength { actual: usize, expected: usize },
     #[error("voice relay names {0} direct recipients; at most {MAX_VOICE_DIRECT_RECIPIENTS} are allowed")]
     TooManyDirectRecipients(usize),
@@ -503,8 +510,15 @@ pub(crate) fn validate_voice_payload(payload: &[u8]) -> Result<(), VoiceCodecErr
     Ok(())
 }
 
+/// Whether the transport must keep this datagram off the reliable path.
+///
+/// Deliberately matches the family rather than this build's version: a peer
+/// speaking an older or newer media version is still speaking media, and the
+/// one thing that must not happen is its bytes reaching `receive_at`, where the
+/// four bytes after the signature would be observed as a reliable packet
+/// number. The codec then refuses anything that is not exactly this version.
 pub(crate) fn is_voice_media_datagram(wire: &[u8]) -> bool {
-    wire.starts_with(VOICE_MEDIA_PREFIX)
+    wire.starts_with(VOICE_MEDIA_FAMILY)
 }
 
 pub(crate) fn encode_voice_packet(packet: &VoicePacket) -> Result<Vec<u8>, VoiceCodecError> {
@@ -632,12 +646,15 @@ pub(crate) fn admit_voice_ingress(
     limiter: &mut VoiceIngressLimiter,
     now: Instant,
 ) -> Option<VoicePacket> {
-    if !voice_datagram_has_cookie(wire, cipher.cookie())
-        || !limiter.allow(authenticated_source, now)
-    {
+    // The cookie travels in the clear, so matching it proves only that the
+    // sender read one earlier datagram. Spend the source's budget after the
+    // seal has proved the datagram really came from that route: otherwise an
+    // on-path forger drains the bucket and silences the peer it is imitating.
+    if !voice_datagram_has_cookie(wire, cipher.cookie()) {
         return None;
     }
-    decode_authenticated_voice_packet(wire, cipher).ok()
+    let packet = decode_authenticated_voice_packet(wire, cipher).ok()?;
+    limiter.allow(authenticated_source, now).then_some(packet)
 }
 
 pub(crate) fn decode_voice_packet(wire: &[u8]) -> Result<VoicePacket, VoiceCodecError> {
@@ -822,6 +839,30 @@ mod tests {
         local.record_peer_capabilities(peer_announcement);
         peer.record_peer_capabilities(local_announcement);
         (local, peer)
+    }
+
+    #[test]
+    fn an_older_media_version_is_still_diverted_off_the_reliable_path() {
+        // The transport routes on the family, so a peer speaking V1 is kept
+        // away from `receive_at` — where "C4V1" would be observed as a reliable
+        // packet number and poison the receive window — and is then refused by
+        // the codec for not being this version.
+        let mut v1 = Vec::from(*b"\x7fC4V1");
+        v1.extend_from_slice(&[0x11; VOICE_ROUTE_COOKIE_BYTES]);
+        v1.extend_from_slice(&[0x5a; VOICE_PACKET_FIXED_HEADER + VOICE_PAYLOAD_BYTES]);
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
+            [0x42; VOICE_MEDIA_KEY_BYTES],
+        );
+
+        assert!(is_voice_media_datagram(&v1), "still recognized as media");
+        assert!(!voice_datagram_has_cookie(&v1, cipher.cookie()));
+        assert_eq!(
+            decode_authenticated_voice_packet(&v1, cipher),
+            Err(VoiceCodecError::MissingSignature),
+            "but never opened as this version"
+        );
+        assert!(v1.len() <= MAX_VOICE_WIRE_BYTES, "and still inside the cap");
     }
 
     #[test]
@@ -1144,23 +1185,33 @@ mod tests {
     }
 
     #[test]
-    fn ingress_admission_checks_route_cookie_before_consuming_source_budget() {
+    fn only_an_authentic_datagram_consumes_the_source_budget() {
         let start = Instant::now();
         let (local, _) = negotiated_route_pair();
         let (other_route, _) = negotiated_route_pair();
         let expected = local.receive_cipher().unwrap();
         let forged = other_route.receive_cipher().unwrap();
+        // The cookie is public, so this is what an on-path forger can actually
+        // build: the right route label over a body it cannot seal.
+        let unsealable =
+            VoiceMediaCipher::from_parts(expected.cookie(), [0xaa; VOICE_MEDIA_KEY_BYTES]);
         let packet = VoicePacket::Direct(
             VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
         );
         let valid_wire = encode_authenticated_voice_packet(expected, &packet).unwrap();
         let forged_wire = encode_authenticated_voice_packet(forged, &packet).unwrap();
+        let unsealable_wire = encode_authenticated_voice_packet(unsealable, &packet).unwrap();
         let mut limiter = VoiceIngressLimiter::default();
 
         for _ in 0..100 {
             assert_eq!(
                 admit_voice_ingress(&forged_wire, expected, 7, &mut limiter, start),
                 None
+            );
+            assert_eq!(
+                admit_voice_ingress(&unsealable_wire, expected, 7, &mut limiter, start),
+                None,
+                "a forger who copies the public cookie must not drain the real peer's budget"
             );
         }
         for _ in 0..75 {
