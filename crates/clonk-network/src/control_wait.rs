@@ -14,7 +14,10 @@ const CONTROL_WAIT_ATTRIBUTION_LIMIT: usize = 256;
 /// Packet ID for host-to-client control-wait attribution.
 ///
 /// This is in the port-only `0x7x` range, above every packet ID dispatched by
-/// the pinned C++ oracle. A stock peer silently ignores it.
+/// the pinned C++ oracle. A stock peer would close the connection on it (release
+/// builds), so the host sends it only to peers that announced
+/// [`crate::PortCapabilities::CONTROL_WAIT_ATTRIBUTION`] — a stock peer never
+/// receives one. See [`crate::capabilities`].
 pub const PID_PORT_CONTROL_WAIT_ATTRIBUTION: u8 = 0x73;
 
 /// Host-side classification of the participants missing at one control tick.

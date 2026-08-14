@@ -288,9 +288,9 @@ pub enum ControlMessage {
     },
     /// This peer announcing what it can do beyond the C++ protocol.
     ///
-    /// Safe to send to anybody: C++'s `HandlePacket` switch has no `default:`
-    /// case, so a stock peer ignores the ID entirely. See
-    /// [`crate::capabilities`].
+    /// Not safe to send to anybody: a stock peer closes the connection on an
+    /// ID it cannot unpack (release builds). See [`crate::capabilities`] for
+    /// the actual C++ behaviour and the narrow exemption.
     PortCapabilities(crate::PortCapabilities),
     /// The host announcing that the session about to close is being restarted,
     /// not lost. See [`crate::host_restart`].
