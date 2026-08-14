@@ -792,22 +792,35 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         .expect("the CRYS carrier survives the drained basin");
     if carrier.position.x < 278 {
         // Some material-motion layouts attach the swimmer to the x=226 wall.
-        // The opposite Scale edge lets go; UpRight then returns the Clonk to the
-        // drained transfer channel, where Stop clears the diagonal swim
-        // velocity before Right resumes the crossing
+        // Hold the opposite Scale edge until the swimmer moves beyond the
+        // five-pixel attachment search, then use UpRight to reach the channel.
+        // A one-frame edge tap may only change Scale to Jump and let the Clonk
+        // reattach before gaining any horizontal distance. Stop then clears
+        // the diagonal swim velocity before Right resumes the crossing
         // (C4Object.cpp:3618-3632,3654-3664,4823-4855,4957-4963;
-        // C4ObjectCom.cpp:310-314).
+        // C4ObjectCom.cpp:310-314; C4Physics.h:24-25).
+        let wall_x = carrier.position.x;
+        let wall_direction = carrier.direction;
         let let_go = if carrier.direction == Direction::Right {
             COM_LEFT
         } else {
             COM_RIGHT
         };
-        player.tap(let_go)?;
-        player.wait_until("the CRYS carrier releases the basin wall", 80, |engine| {
-            engine
-                .object_snapshot(first_clonk)
-                .is_some_and(|object| object.action.name != "Scale")
-        })?;
+        player.hold_until(
+            let_go,
+            "the CRYS carrier releases the basin wall",
+            80,
+            |engine| {
+                engine.object_snapshot(first_clonk).is_some_and(|object| {
+                    object.action.name == "Swim"
+                        && if wall_direction == Direction::Right {
+                            object.position.x <= wall_x - 6
+                        } else {
+                            object.position.x >= wall_x + 6
+                        }
+                })
+            },
+        )?;
         player.press(COM_RIGHT)?;
         let reached_channel = player.hold_until(
             COM_UP,
@@ -816,7 +829,7 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
             |engine| {
                 engine
                     .object_snapshot(first_clonk)
-                    .is_some_and(|object| object.position.y <= 315)
+                    .is_some_and(|object| object.action.name == "Swim" && object.position.y <= 315)
             },
         );
         player.release(COM_RIGHT)?;
