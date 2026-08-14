@@ -15,9 +15,10 @@ pub use font::{BitmapFont, FontMetrics, TextFont, TrueTypeFont, TrueTypeFontErro
 pub use gamma::GammaRamp;
 pub use gpu_scene::{
     GpuBlend, GpuCommand, GpuGammaLut, GpuGammaMode, GpuObjectSprite, GpuOuterModulation,
-    GpuOwnerMask, GpuPresentation, GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSceneRecorder,
-    GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidStyle, GpuSolidVertex, GpuSpriteQuad,
-    GpuTextureFormat, GpuTextureId, GpuTextureResource, GpuVertex, ShaderLandscapePlan,
+    GpuOwnerMask, GpuPresentation, GpuPrimitiveTopology, GpuSampler, GpuScene,
+    GpuSceneCaptureStats, GpuSceneRecorder, GpuSolidAlphaMode, GpuSolidOuterModulation,
+    GpuSolidStyle, GpuSolidVertex, GpuSpriteFallbackReasons, GpuSpriteQuad, GpuTextureFormat,
+    GpuTextureId, GpuTextureResource, GpuVertex, ShaderLandscapePlan,
 };
 pub use sampling::{stdgl_blit_sampling, BlitSampling};
 pub use snapshot::{SnapshotHasher, SurfaceSnapshot};

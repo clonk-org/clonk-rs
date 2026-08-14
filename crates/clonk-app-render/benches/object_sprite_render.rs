@@ -7,7 +7,7 @@ use clonk_graphics::{
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use std::hint::black_box;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const OBJECTS: usize = 1_000;
 const PHASES: usize = 20;
@@ -18,6 +18,7 @@ const NATIVE_TILE_SIZE: f32 = 128.0;
 const FRAME_EXTENT: [u32; 2] = [800, 600];
 const OBJECT_COLUMNS: usize = 40;
 const ADJACENT_RESOURCE_RUNS: usize = 1;
+const AMORTIZED_FRAMES: u32 = 16;
 
 fn st5b_texture(texture: GpuTextureId) -> GpuTextureResource {
     let mut pixels = Vec::with_capacity((SHEET_WIDTH * SHEET_HEIGHT * 4) as usize);
@@ -223,7 +224,8 @@ fn benchmark_device() -> (tokio::runtime::Runtime, wgpu::Device, wgpu::Queue) {
         .enable_all()
         .build()
         .expect("build object-sprite benchmark runtime");
-    let instance = wgpu::Instance::default();
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = runtime
         .block_on(async {
             let primary = instance
@@ -246,6 +248,7 @@ fn benchmark_device() -> (tokio::runtime::Runtime, wgpu::Device, wgpu::Queue) {
             }
         })
         .expect("object-sprite benchmark requires a wgpu adapter");
+    println!("object-sprite benchmark adapter: {:?}", adapter.get_info());
     let descriptor = wgpu::DeviceDescriptor {
         label: Some("lc_object_sprite_benchmark_device"),
         required_features: wgpu::Features::empty(),
@@ -362,6 +365,36 @@ fn bench_object_sprite_render(c: &mut Criterion) {
                 &compact,
                 &presentation,
             )
+        });
+    });
+    group.bench_function("compact_1000_st5b_amortized", |b| {
+        b.iter_custom(|iterations| {
+            let start = Instant::now();
+            for _ in 0..iterations {
+                for _ in 0..AMORTIZED_FRAMES {
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("lc_object_sprite_benchmark_encoder"),
+                        });
+                    compact_renderer
+                        .render(
+                            &device,
+                            &queue,
+                            &mut encoder,
+                            &target_view,
+                            &compact,
+                            &presentation,
+                            false,
+                        )
+                        .expect("render compact object-sprite benchmark scene");
+                    queue.submit([encoder.finish()]);
+                    black_box(compact_renderer.last_stats());
+                }
+                device
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .expect("wait for amortized compact object-sprite submissions");
+            }
+            start.elapsed() / AMORTIZED_FRAMES
         });
     });
     group.bench_function("generic_1000_st5b", |b| {

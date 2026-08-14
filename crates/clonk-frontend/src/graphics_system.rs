@@ -1245,10 +1245,25 @@ impl GraphicsSystem {
         &mut self,
         gamma: &clonk_graphics::GammaRamp,
     ) -> Option<clonk_graphics::GpuScene> {
+        self.finish_gpu_scene_capture_with_stats(gamma)
+            .map(|(scene, _)| scene)
+    }
+
+    pub fn finish_gpu_scene_capture_with_stats(
+        &mut self,
+        gamma: &clonk_graphics::GammaRamp,
+    ) -> Option<(
+        clonk_graphics::GpuScene,
+        clonk_graphics::GpuSceneCaptureStats,
+    )> {
         let extent = [self.surface.width(), self.surface.height()];
-        self.surface
-            .take_gpu_scene_capture()
-            .map(|recorder| recorder.into_scene(extent, Color::opaque(8, 12, 24), gamma))
+        self.surface.take_gpu_scene_capture().map(|recorder| {
+            let stats = recorder.capture_stats();
+            (
+                recorder.into_scene(extent, Color::opaque(8, 12, 24), gamma),
+                stats,
+            )
+        })
     }
 
     #[cfg(feature = "bench")]

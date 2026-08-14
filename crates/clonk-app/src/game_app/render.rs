@@ -2474,9 +2474,9 @@ impl GameApp {
             let _ = self.graphics.finish_gpu_scene_capture(&gamma);
             return Err(error);
         }
-        let mut scene = self
+        let (mut scene, capture_stats) = self
             .graphics
-            .finish_gpu_scene_capture(&gamma)
+            .finish_gpu_scene_capture_with_stats(&gamma)
             .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))?;
         scene.gamma_mode = gamma_mode;
         if let Some(plan) = self.pending_native_presentation.take() {
@@ -2488,6 +2488,7 @@ impl GameApp {
                     presentation,
                 });
             }
+            frame.capture_stats.merge(capture_stats);
             return Ok(frame);
         }
         Ok(RetainedGpuFrame {
@@ -2495,6 +2496,7 @@ impl GameApp {
                 scene,
                 presentation,
             }],
+            capture_stats,
         })
     }
 
@@ -2511,6 +2513,7 @@ impl GameApp {
         ];
         let [physical_width, physical_height] = logical_presentation.physical_extent;
         let default_fonts = self.native_startup_fonts.clone();
+        let mut capture_stats = clonk_graphics::GpuSceneCaptureStats::default();
         let mut physical_surface = self
             .retained_native_capture_surface
             .take()
@@ -2528,6 +2531,7 @@ impl GameApp {
                     "ordered retained GPU capture produced a CPU logical layer"
                 );
                 if let Some(recorder) = batch.gpu_recorder {
+                    capture_stats.merge(recorder.capture_stats());
                     let mut scene =
                         recorder.into_scene(logical_extent, Color::opaque(8, 12, 24), gamma);
                     scene.gamma_mode = gamma_mode;
@@ -2577,6 +2581,7 @@ impl GameApp {
                 let recorder = physical_surface.take_gpu_scene_capture().ok_or_else(|| {
                     anyhow!("scale-native GPU text capture ended before presentation")
                 })?;
+                capture_stats.merge(recorder.capture_stats());
                 if recorder.is_empty() {
                     continue;
                 }
@@ -2602,7 +2607,10 @@ impl GameApp {
         }
         self.retained_native_capture_surface = Some(physical_surface);
         result?;
-        Ok(RetainedGpuFrame { layers })
+        Ok(RetainedGpuFrame {
+            layers,
+            capture_stats,
+        })
     }
 
     /// A left-button press inside a console viewport window.

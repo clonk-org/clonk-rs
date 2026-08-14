@@ -15,6 +15,7 @@ pub(crate) struct NativePresentationPlan {
 
 pub(crate) struct RetainedGpuFrame {
     pub(crate) layers: Vec<RetainedGpuFrameLayer>,
+    pub(crate) capture_stats: clonk_graphics::GpuSceneCaptureStats,
 }
 
 pub(crate) struct RetainedGpuFrameLayer {

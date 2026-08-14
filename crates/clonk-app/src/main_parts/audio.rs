@@ -34,6 +34,156 @@ pub(crate) enum RetainedGpuPresentOutcome {
     Skipped,
 }
 
+/// Host-side measurements collected while preparing and submitting one
+/// retained frame. Renderer and surface stages are CPU wall time; GPU
+/// execution is reported separately by timestamp queries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RetainedGpuFrameContext {
+    pub(crate) surface_format: wgpu::TextureFormat,
+    pub(crate) renderer_surface_format: wgpu::TextureFormat,
+    pub(crate) surface_extent: [u32; 2],
+    pub(crate) buffer_extent: [u32; 2],
+    pub(crate) present_mode: wgpu::PresentMode,
+    pub(crate) alpha_mode: wgpu::CompositeAlphaMode,
+    pub(crate) mipmaps: bool,
+    pub(crate) smooth_landscape: bool,
+    pub(crate) shader_landscape: bool,
+    pub(crate) landscape_detail: u32,
+    pub(crate) frontend: clonk_frontend::AdvancedRendererConfig,
+    pub(crate) presentation_physical_extent: [u32; 2],
+    pub(crate) presentation_scale_bits: u32,
+    pub(crate) presentation_crop_top: u32,
+}
+
+impl Default for RetainedGpuFrameContext {
+    fn default() -> Self {
+        Self {
+            surface_format: wgpu::TextureFormat::Rgba8Unorm,
+            renderer_surface_format: wgpu::TextureFormat::Rgba8Unorm,
+            surface_extent: [1, 1],
+            buffer_extent: [1, 1],
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            mipmaps: false,
+            smooth_landscape: false,
+            shader_landscape: false,
+            landscape_detail: 1,
+            frontend: clonk_frontend::AdvancedRendererConfig::DEFAULT,
+            presentation_physical_extent: [1, 1],
+            presentation_scale_bits: 1.0_f32.to_bits(),
+            presentation_crop_top: 0,
+        }
+    }
+}
+
+impl RetainedGpuFrameContext {
+    pub(crate) fn capture(
+        pixels: &WindowSurface,
+        renderer: &gpu_renderer::RetainedGpuRenderer,
+        frontend: clonk_frontend::AdvancedRendererConfig,
+        presentation: &clonk_scaling::PresentationGeometry,
+    ) -> Self {
+        let surface_extent = pixels.surface_extent();
+        let buffer_extent = pixels.buffer_extent();
+        let physical_extent = presentation.physical_size();
+        Self {
+            surface_format: pixels.surface_texture_format(),
+            renderer_surface_format: renderer.surface_format(),
+            surface_extent: [surface_extent.0, surface_extent.1],
+            buffer_extent: [buffer_extent.0, buffer_extent.1],
+            present_mode: pixels.present_mode(),
+            alpha_mode: pixels.alpha_mode(),
+            mipmaps: renderer.mipmaps(),
+            smooth_landscape: renderer.smooth_landscape(),
+            shader_landscape: renderer.shader_landscape(),
+            landscape_detail: renderer.landscape_detail(),
+            frontend,
+            presentation_physical_extent: [physical_extent.0, physical_extent.1],
+            presentation_scale_bits: presentation.scale().to_bits(),
+            presentation_crop_top: presentation.crop_top(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RetainedGpuFrameProfile {
+    pub(crate) frame_preparation: Duration,
+    pub(crate) renderer: gpu_renderer::GpuRendererStats,
+    pub(crate) surface: clonk_surface::WindowSurfaceCpuStages,
+    pub(crate) capture: clonk_graphics::GpuSceneCaptureStats,
+    pub(crate) context: RetainedGpuFrameContext,
+}
+
+impl RetainedGpuFrameProfile {
+    pub(crate) fn named_cpu(self) -> Duration {
+        self.frame_preparation
+            .saturating_add(self.renderer.cpu_stages.total())
+            .saturating_add(self.surface.total())
+    }
+
+    pub(crate) fn reconcile(
+        self,
+        graphics_duration: Duration,
+    ) -> ReconciledRetainedGpuFrameProfile {
+        let named_cpu = self.named_cpu();
+        ReconciledRetainedGpuFrameProfile {
+            raw: self,
+            graphics_duration,
+            named_cpu,
+            unclassified_cpu: graphics_duration.saturating_sub(named_cpu),
+            overrun_cpu: named_cpu.saturating_sub(graphics_duration),
+        }
+    }
+}
+
+/// Reconciliation against the existing outer graphics-pass timer.
+///
+/// `overrun_cpu` keeps independently sampled nested clocks honest when their
+/// sum exceeds the outer measurement by timer granularity or scheduling
+/// noise; it is not folded into an unsigned residual.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReconciledRetainedGpuFrameProfile {
+    pub(crate) raw: RetainedGpuFrameProfile,
+    pub(crate) graphics_duration: Duration,
+    pub(crate) named_cpu: Duration,
+    pub(crate) unclassified_cpu: Duration,
+    pub(crate) overrun_cpu: Duration,
+}
+
+impl ReconciledRetainedGpuFrameProfile {
+    pub(crate) fn has_exact_reconciliation(self) -> bool {
+        self.named_cpu.saturating_add(self.unclassified_cpu)
+            == self.graphics_duration.saturating_add(self.overrun_cpu)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RetainedGpuProfiledOutcome {
+    Presented(RetainedGpuFrameProfile),
+    Skipped,
+}
+
+impl RetainedGpuProfiledOutcome {
+    pub(crate) const fn outcome(self) -> RetainedGpuPresentOutcome {
+        match self {
+            Self::Presented(_) => RetainedGpuPresentOutcome::Presented,
+            Self::Skipped => RetainedGpuPresentOutcome::Skipped,
+        }
+    }
+}
+
+fn retained_gpu_profiled_outcome(
+    presentation: clonk_surface::Presentation,
+    profile: Option<RetainedGpuFrameProfile>,
+) -> Result<RetainedGpuProfiledOutcome> {
+    match presentation {
+        clonk_surface::Presentation::Presented => profile
+            .map(RetainedGpuProfiledOutcome::Presented)
+            .context("presented retained GPU frame has no CPU measurements"),
+        clonk_surface::Presentation::Skipped => Ok(RetainedGpuProfiledOutcome::Skipped),
+    }
+}
+
 pub(crate) const fn retained_gpu_present_outcome(
     render_callback_invoked: bool,
 ) -> RetainedGpuPresentOutcome {
@@ -163,6 +313,23 @@ mod window_api_tests {
         preparation.prepare().unwrap();
         assert_eq!(preparation.outcome(), RetainedGpuPresentOutcome::Presented);
         assert_eq!(preparation_count.get(), 1);
+    }
+
+    #[test]
+    fn profiled_retained_outcome_requires_measurements_for_a_presented_drawable() {
+        let profile = RetainedGpuFrameProfile::default();
+        assert_eq!(
+            retained_gpu_profiled_outcome(clonk_surface::Presentation::Skipped, None).unwrap(),
+            RetainedGpuProfiledOutcome::Skipped
+        );
+        assert_eq!(
+            retained_gpu_profiled_outcome(clonk_surface::Presentation::Presented, Some(profile),)
+                .unwrap(),
+            RetainedGpuProfiledOutcome::Presented(profile)
+        );
+        assert!(
+            retained_gpu_profiled_outcome(clonk_surface::Presentation::Presented, None,).is_err()
+        );
     }
 
     #[test]
@@ -659,6 +826,9 @@ pub(crate) fn build_framebuffer(
     size: PhysicalSize<u32>,
 ) -> Result<WindowSurface> {
     let attempts = framebuffer_backend_attempts(wgpu::Backends::from_env());
+    let timestamp_queries = std::env::var("LC_GPU_TIMESTAMP_QUERIES")
+        .ok()
+        .is_some_and(|value| parse_config_bool(&value));
     let mut last_error = None;
     for backends in attempts {
         // Every window shares the process's instance for this backend set.
@@ -666,7 +836,7 @@ pub(crate) fn build_framebuffer(
         // `VkInstance`, which is what took the console down in
         // clonk-org/clonk-rs#53 — see `crate::gpu_instance`.
         let instance = crate::gpu_instance::retained_instance(backends);
-        match WindowSurface::build(
+        match WindowSurface::build_with_options(
             &instance,
             Arc::clone(window),
             (size.width, size.height),
@@ -676,6 +846,7 @@ pub(crate) fn build_framebuffer(
             // independently scheduled simulation and graphics timers behind an
             // implicit FIFO-vsync wait that the C++ application does not request.
             wgpu::PresentMode::AutoNoVsync,
+            clonk_surface::WindowSurfaceBuildOptions { timestamp_queries },
         ) {
             Ok(pixels) => return Ok(pixels),
             Err(error) => {
@@ -734,6 +905,16 @@ pub(crate) fn present_retained_gpu_frame(
     presenter: &clonk_scaling::FramePresenter,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
 ) -> Result<RetainedGpuPresentOutcome> {
+    present_retained_gpu_frame_profiled(app, pixels, presenter, renderer)
+        .map(RetainedGpuProfiledOutcome::outcome)
+}
+
+pub(crate) fn present_retained_gpu_frame_profiled(
+    app: &mut GameApp,
+    pixels: &WindowSurface,
+    presenter: &clonk_scaling::FramePresenter,
+    renderer: &mut gpu_renderer::RetainedGpuRenderer,
+) -> Result<RetainedGpuProfiledOutcome> {
     renderer
         .check_health()
         .context("retained GPU device was unavailable before presentation")?;
@@ -747,18 +928,28 @@ pub(crate) fn present_retained_gpu_frame(
     let request_native_save_readback = !app.pending_native_save_thumbnails.is_empty();
     let request_current_readback =
         !app.pending_screenshots.is_empty() || !app.pending_gpu_thumbnail_paths.is_empty();
+    let profile_context = RetainedGpuFrameContext::capture(
+        pixels,
+        renderer,
+        app.graphics.advanced_renderer_config(),
+        &geometry,
+    );
     let mut previous_native_readback = None;
     let mut readback = None;
-    let (submission, outcome, frame_preparation_error) = {
+    let mut retained_profile = None;
+    let (submission, frame_preparation_error) = {
         let mut frame_preparation_error = None;
         let mut frame_preparation = DeferredRetainedFramePreparation::new(|| {
+            let frame_preparation_started = Instant::now();
             let frame = app.render_retained_gpu_frame(presentation)?;
             let shader_landscape = app.graphics.take_shader_landscape_plan();
-            Ok::<_, anyhow::Error>((frame, shader_landscape))
+            let frame_preparation = frame_preparation_started.elapsed();
+            Ok::<_, anyhow::Error>((frame, shader_landscape, frame_preparation))
         });
         let submission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pixels.render_with(|encoder, surface_view, context| {
-                let (frame, shader_landscape) = match frame_preparation.prepare() {
+            pixels.render_with_profiled(|encoder, surface_view, context| {
+                let (frame, shader_landscape, frame_preparation) = match frame_preparation.prepare()
+                {
                     Ok(prepared) => prepared,
                     Err(error) => {
                         frame_preparation_error = Some(error);
@@ -790,25 +981,28 @@ pub(crate) fn present_retained_gpu_frame(
                     request_current_readback
                         || (request_native_save_readback && previous_native_readback.is_none()),
                 )?;
+                retained_profile = Some(RetainedGpuFrameProfile {
+                    frame_preparation,
+                    renderer: renderer.last_stats(),
+                    surface: clonk_surface::WindowSurfaceCpuStages::default(),
+                    capture: frame.capture_stats,
+                    context: profile_context,
+                });
                 Ok(())
             })
         }));
-        (
-            submission,
-            frame_preparation.outcome(),
-            frame_preparation_error,
-        )
+        (submission, frame_preparation_error)
     };
     if let Some(error) = frame_preparation_error {
         return Err(error);
     }
-    match submission {
-        // The presentation outcome is read off `frame_preparation` instead:
-        // it records whether the callback ran, which is the same signal and is
-        // already threaded through the readback arms below.
-        Ok(Ok(_presentation)) => renderer
-            .check_health()
-            .context("retained GPU device failed while submitting a frame")?,
+    let profiled_presentation = match submission {
+        Ok(Ok(profiled_presentation)) => {
+            renderer
+                .check_health()
+                .context("retained GPU device failed while submitting a frame")?;
+            profiled_presentation
+        }
         Ok(Err(error)) => {
             return Err(retained_gpu_presentation_error(
                 anyhow::Error::new(error).context("failed to submit retained GPU frame"),
@@ -831,9 +1025,15 @@ pub(crate) fn present_retained_gpu_frame(
             }
             std::panic::resume_unwind(payload);
         }
-    }
+    };
 
-    if outcome == RetainedGpuPresentOutcome::Skipped {
+    if let Some(profile) = retained_profile.as_mut() {
+        profile.surface = profiled_presentation.cpu_stages;
+    }
+    let outcome =
+        retained_gpu_profiled_outcome(profiled_presentation.presentation, retained_profile)?;
+
+    if outcome == RetainedGpuProfiledOutcome::Skipped {
         // Pixels acquired no drawable. Keep screenshot/save requests queued so
         // the next real presentation can fulfill them from an actual frame.
         return Ok(outcome);

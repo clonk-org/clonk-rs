@@ -1209,6 +1209,155 @@ fn presentation_benchmark_readiness_waits_for_one_executed_simulation_frame() {
 }
 
 #[test]
+fn retained_gpu_cpu_profile_reconciles_named_stages_with_the_outer_graphics_pass() {
+    let raw = RetainedGpuFrameProfile {
+        frame_preparation: Duration::from_nanos(2),
+        renderer: gpu_renderer::GpuRendererStats {
+            cpu_stages: gpu_renderer::GpuRendererCpuStages {
+                validation: Duration::from_nanos(3),
+                texture_synchronization: Duration::from_nanos(5),
+                stream_packing_upload: Duration::from_nanos(7),
+                command_encoding: Duration::from_nanos(11),
+            },
+            ..gpu_renderer::GpuRendererStats::default()
+        },
+        surface: clonk_surface::WindowSurfaceCpuStages {
+            drawable_acquisition: Duration::from_nanos(13),
+            command_encoder_finalization: Duration::from_nanos(17),
+            queue_submission: Duration::from_nanos(19),
+            presentation: Duration::from_nanos(23),
+        },
+        capture: clonk_graphics::GpuSceneCaptureStats::default(),
+        context: RetainedGpuFrameContext::default(),
+    };
+
+    let residual = raw.reconcile(Duration::from_nanos(84));
+    assert_eq!(residual.named_cpu, Duration::from_nanos(100));
+    assert_eq!(residual.unclassified_cpu, Duration::ZERO);
+    assert_eq!(residual.overrun_cpu, Duration::from_nanos(16));
+    assert!(residual.has_exact_reconciliation());
+
+    let residual = raw.reconcile(Duration::from_nanos(106));
+    assert_eq!(residual.named_cpu, Duration::from_nanos(100));
+    assert_eq!(residual.unclassified_cpu, Duration::from_nanos(6));
+    assert_eq!(residual.overrun_cpu, Duration::ZERO);
+    assert!(residual.has_exact_reconciliation());
+}
+
+#[test]
+fn retained_gpu_artifact_frame_preserves_raw_structural_and_cpu_samples() {
+    let raw = RetainedGpuFrameProfile {
+        frame_preparation: Duration::from_nanos(2),
+        renderer: gpu_renderer::GpuRendererStats {
+            cpu_stages: gpu_renderer::GpuRendererCpuStages {
+                validation: Duration::from_nanos(3),
+                texture_synchronization: Duration::from_nanos(5),
+                stream_packing_upload: Duration::from_nanos(7),
+                command_encoding: Duration::from_nanos(11),
+            },
+            object_sprite_instances: 13,
+            object_sprite_upload_bytes: 17,
+            ..gpu_renderer::GpuRendererStats::default()
+        },
+        surface: clonk_surface::WindowSurfaceCpuStages {
+            drawable_acquisition: Duration::from_nanos(19),
+            command_encoder_finalization: Duration::from_nanos(23),
+            queue_submission: Duration::from_nanos(29),
+            presentation: Duration::from_nanos(31),
+        },
+        capture: clonk_graphics::GpuSceneCaptureStats {
+            owner_mask_fallbacks: 1,
+            ..clonk_graphics::GpuSceneCaptureStats::default()
+        },
+        context: RetainedGpuFrameContext::default(),
+    };
+    let reconciled = raw.reconcile(Duration::from_nanos(137));
+
+    let frame = RetainedGpuProfileFrame::from_reconciled(4, reconciled).unwrap();
+
+    assert_eq!(frame.sample_index, 4);
+    assert_eq!(frame.end_to_end_ns, 137);
+    assert_eq!(frame.cpu.command_encoding_ns, 34);
+    assert_eq!(frame.cpu.named_total_ns, 130);
+    assert_eq!(frame.cpu.unclassified_ns, 7);
+    assert_eq!(frame.renderer.object_sprite_instances, 13);
+    assert_eq!(frame.renderer.object_sprite_upload_bytes, 17);
+    assert_eq!(frame.frontend_capture.owner_mask_fallbacks, 1);
+}
+
+#[test]
+fn retained_gpu_profile_rejects_a_surface_context_change_during_measurement() {
+    let original = RetainedGpuFrameContext::default();
+    let first = RetainedGpuFrameProfile {
+        context: original,
+        ..RetainedGpuFrameProfile::default()
+    }
+    .reconcile(Duration::ZERO);
+    let resized = RetainedGpuFrameContext {
+        surface_extent: [801, 600],
+        ..original
+    };
+    let second = RetainedGpuFrameProfile {
+        context: resized,
+        ..RetainedGpuFrameProfile::default()
+    }
+    .reconcile(Duration::ZERO);
+
+    assert!(retained_gpu_profile_context_is_stable(&[first], original));
+    assert!(!retained_gpu_profile_context_is_stable(
+        &[first, second],
+        resized
+    ));
+    assert!(!retained_gpu_profile_context_is_stable(&[first], resized));
+}
+
+#[test]
+fn retained_gpu_artifact_preserves_timestamp_rollover_as_raw_invalid_evidence() {
+    let record = RetainedGpuTimestampPassRecord::from(gpu_renderer::GpuTimestampSample {
+        pass: gpu_renderer::GpuTimestampPass::Scene,
+        begin_tick: u64::MAX,
+        end_tick: 4,
+        duration_ns: None,
+        validity: gpu_renderer::GpuTimestampSampleValidity::CounterRollover,
+    });
+
+    assert_eq!(record.pass, "scene");
+    assert_eq!(record.begin_tick, u64::MAX);
+    assert_eq!(record.end_tick, 4);
+    assert_eq!(record.duration_ns, None);
+    assert_eq!(record.validity, "counter_rollover");
+}
+
+#[test]
+fn retained_gpu_artifact_fingerprints_the_device_adapter_fields() {
+    let record = RetainedGpuAdapterRecord::from(wgpu::AdapterInfo {
+        name: "Adapter".to_owned(),
+        vendor: 0x1234,
+        device: 0x5678,
+        device_type: wgpu::DeviceType::DiscreteGpu,
+        device_pci_bus_id: "0000:01:00.0".to_owned(),
+        driver: "Driver".to_owned(),
+        driver_info: "1.2.3".to_owned(),
+        backend: wgpu::Backend::Vulkan,
+        subgroup_min_size: 16,
+        subgroup_max_size: 64,
+        transient_saves_memory: true,
+    });
+
+    assert_eq!(record.name, "Adapter");
+    assert_eq!(record.vendor_id, 0x1234);
+    assert_eq!(record.device_id, 0x5678);
+    assert_eq!(record.device_type, "discrete_gpu");
+    assert_eq!(record.pci_bus_id.as_deref(), Some("0000:01:00.0"));
+    assert_eq!(record.driver, "Driver");
+    assert_eq!(record.driver_info, "1.2.3");
+    assert_eq!(record.backend, "vulkan");
+    assert_eq!(record.subgroup_min_size, 16);
+    assert_eq!(record.subgroup_max_size, 64);
+    assert!(record.transient_saves_memory);
+}
+
+#[test]
 fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
     let base = Instant::now();
     let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
@@ -1339,6 +1488,70 @@ fn runtime_benchmark_window_does_not_require_a_visible_surface() {
     assert_eq!(report.simulation_frames, 0);
     assert_eq!(report.submissions, 0);
     assert!(report.graphics_samples.is_empty());
+}
+
+#[test]
+fn presentation_benchmark_retains_raw_gpu_profiles_only_inside_its_half_open_window() {
+    let base = Instant::now();
+    let started = base + PRESENTATION_BENCHMARK_WARMUP;
+    let deadline = started + Duration::from_secs(3);
+    let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+    let profile = RetainedGpuFrameProfile {
+        frame_preparation: Duration::from_nanos(5),
+        ..RetainedGpuFrameProfile::default()
+    };
+
+    assert_eq!(benchmark.poll(true, base, 10), None);
+    assert_eq!(benchmark.poll(true, started, 70), None);
+    benchmark.record_successful_retained_gpu_presentation(
+        started,
+        Duration::from_nanos(11),
+        true,
+        profile,
+    );
+    benchmark.record_successful_retained_gpu_presentation(
+        deadline,
+        Duration::from_nanos(13),
+        true,
+        profile,
+    );
+    let report = benchmark.poll(true, deadline, 71).test_value();
+
+    assert_eq!(report.submissions, 1);
+    assert_eq!(report.retained_gpu_profiles.len(), 1);
+    let retained = report.retained_gpu_profiles[0];
+    assert_eq!(retained.raw, profile);
+    assert_eq!(retained.graphics_duration, Duration::from_nanos(11));
+    assert!(retained.has_exact_reconciliation());
+}
+
+#[test]
+fn presentation_benchmark_consumes_timestamp_results_only_while_measuring() {
+    let base = Instant::now();
+    let started = base + PRESENTATION_BENCHMARK_WARMUP;
+    let deadline = started + Duration::from_secs(3);
+    let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+    let frame = |frame_id| gpu_renderer::GpuTimestampFrame {
+        frame_id,
+        renderer_generation: 1,
+        timestamp_period_ns: 1.0,
+        passes: Vec::new(),
+    };
+
+    benchmark.record_gpu_timestamp_frames(vec![frame(1)]);
+    assert_eq!(benchmark.poll(true, base, 10), None);
+    assert_eq!(benchmark.poll(true, started, 70), None);
+    benchmark.record_gpu_timestamp_frames(vec![frame(2)]);
+    let report = benchmark.poll(true, deadline, 71).test_value();
+
+    assert_eq!(
+        report
+            .gpu_timestamp_frames
+            .iter()
+            .map(|frame| frame.frame_id)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
 }
 
 #[test]

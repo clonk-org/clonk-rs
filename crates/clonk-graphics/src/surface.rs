@@ -3,8 +3,8 @@ use crate::color::Color;
 use crate::gpu_scene::{
     GpuBlend, GpuCommand, GpuObjectRunCapacityHints, GpuObjectSprite, GpuPrimitiveTopology,
     GpuSampler, GpuSceneRecorder, GpuSolidAlphaMode, GpuSolidOuterModulation,
-    GpuSolidRunCapacityHints, GpuSolidStyle, GpuSolidVertex, GpuTextureId, GpuTextureResource,
-    GpuVertex,
+    GpuSolidRunCapacityHints, GpuSolidStyle, GpuSolidVertex, GpuSpriteFallbackReasons,
+    GpuTextureId, GpuTextureResource, GpuVertex,
 };
 use crate::snapshot::{checksum_update, SurfaceSnapshot, FNV_OFFSET};
 use std::cell::{Cell, OnceCell};
@@ -742,6 +742,18 @@ impl Surface {
             return false;
         };
         scene.push(command);
+        true
+    }
+
+    pub fn record_gpu_sprite_fallback(
+        &mut self,
+        reasons: GpuSpriteFallbackReasons,
+        fog_expanded_chunks: usize,
+    ) -> bool {
+        let Some(scene) = self.gpu_scene.as_mut() else {
+            return false;
+        };
+        scene.record_gpu_sprite_fallback(reasons, fog_expanded_chunks);
         true
     }
 

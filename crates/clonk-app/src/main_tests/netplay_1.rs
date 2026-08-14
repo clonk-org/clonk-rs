@@ -660,6 +660,8 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
         graphics_p95: Duration::ZERO,
         graphics_p99: Duration::ZERO,
         graphics_samples: Vec::new(),
+        retained_gpu_profiles: Vec::new(),
+        gpu_timestamp_frames: Vec::new(),
     };
     assert_eq!(validate_native_tick_presentation_budget(&passing), Ok(()));
 

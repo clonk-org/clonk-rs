@@ -80,10 +80,10 @@ use clonk_engine::{
 use clonk_graphics::{
     stdgl_blit_sampling, BlitSampling, Color, GpuBlend, GpuCommand, GpuObjectSprite,
     GpuOuterModulation, GpuPrimitiveTopology, GpuSampler, GpuSolidAlphaMode,
-    GpuSolidOuterModulation, GpuSolidStyle, GpuSolidVertex, GpuSpriteQuad, GpuTextureId,
-    GpuTextureResource, GpuVertex, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect,
-    Surface, SurfaceDrawTarget, SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont,
-    Transform as GraphicsTransform,
+    GpuSolidOuterModulation, GpuSolidStyle, GpuSolidVertex, GpuSpriteFallbackReasons,
+    GpuSpriteQuad, GpuTextureId, GpuTextureResource, GpuVertex, PixelFormat, Point as SurfacePoint,
+    Rect as SurfaceRect, Surface, SurfaceDrawTarget, SurfaceSnapshot as GraphicsSurfaceSnapshot,
+    TextFont, Transform as GraphicsTransform,
 };
 use clonk_gui::{Rect as GuiRect, Size as GuiSize};
 use rayon::prelude::*;
@@ -2990,6 +2990,10 @@ mod tests {
             false,
         ));
 
+        let stats = surface.gpu_scene_capture().test_value().capture_stats();
+        assert_eq!(stats.generic_sprite_fallbacks, 1);
+        assert_eq!(stats.physical_texture_tile_fallbacks, 1);
+
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [24, 16],
             Color::transparent(),
@@ -3157,7 +3161,6 @@ mod tests {
         let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
-        reset_gpu_sprite_batch_fallbacks();
 
         assert!(capture_gpu_sprite(
             &mut surface,
@@ -3181,7 +3184,131 @@ mod tests {
             false,
         ));
 
-        assert_eq!(gpu_sprite_batch_fallbacks(), 0);
+        assert_eq!(
+            surface
+                .gpu_scene_capture()
+                .test_value()
+                .capture_stats()
+                .generic_sprite_fallbacks,
+            0
+        );
+    }
+
+    #[test]
+    fn owner_mask_generic_fallback_reports_only_owner_mask_reason() {
+        let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
+        let mask = ColorByOwnerMask::new(2, 2, Arc::from([255_u8; 4]));
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_sprite(
+            &mut surface,
+            (0.0, 0.0, 4.0, 4.0),
+            (0.0, 0.0, 4.0, 4.0),
+            &GraphicsTransform::identity(),
+            &image,
+            Some(&mask),
+            FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            Some(0x00ff_0000),
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Nearest,
+            false,
+        ));
+
+        let stats = surface.gpu_scene_capture().test_value().capture_stats();
+        assert_eq!(stats.generic_sprite_fallbacks, 1);
+        assert_eq!(stats.owner_mask_fallbacks, 1);
+        assert_eq!(stats.spatial_fog_fallbacks, 0);
+        assert_eq!(stats.precomputed_fog_modulation_fallbacks, 0);
+        assert_eq!(stats.texture_indent_fallbacks, 0);
+        assert_eq!(stats.physical_texture_tile_fallbacks, 0);
+        assert_eq!(stats.fog_expanded_chunks, 0);
+    }
+
+    #[test]
+    fn rejected_generic_sprite_does_not_report_a_retained_fallback() {
+        let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
+        let mask = ColorByOwnerMask::new(2, 2, Arc::from([255_u8; 4]));
+        let transform = GraphicsTransform::set(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 2.0);
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(!capture_gpu_sprite(
+            &mut surface,
+            (0.0, 0.0, 4.0, 4.0),
+            (0.0, 0.0, 4.0, 4.0),
+            &transform,
+            &image,
+            Some(&mask),
+            FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            Some(0x00ff_0000),
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Nearest,
+            false,
+        ));
+
+        assert_eq!(
+            surface.gpu_scene_capture().test_value().capture_stats(),
+            clonk_graphics::GpuSceneCaptureStats::default()
+        );
+    }
+
+    #[test]
+    fn precomputed_fog_generic_fallback_reports_its_reason() {
+        let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        let blit = SpriteBlitState::normal().with_fog_modulation(FogModulationSample {
+            modulation: [0x0020_2020, 0x0040_4040, 0x0060_6060, 0x0080_8080],
+            weights: [0.25; 4],
+        });
+
+        assert!(capture_gpu_sprite(
+            &mut surface,
+            (0.0, 0.0, 4.0, 4.0),
+            (0.0, 0.0, 4.0, 4.0),
+            &GraphicsTransform::identity(),
+            &image,
+            None,
+            FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            None,
+            blit,
+            None,
+            None,
+            GpuSampler::Nearest,
+            false,
+        ));
+
+        let stats = surface.gpu_scene_capture().test_value().capture_stats();
+        assert_eq!(stats.generic_sprite_fallbacks, 1);
+        assert_eq!(stats.precomputed_fog_modulation_fallbacks, 1);
+        assert_eq!(stats.spatial_fog_fallbacks, 0);
+        assert_eq!(stats.texture_indent_fallbacks, 0);
+        assert_eq!(stats.owner_mask_fallbacks, 0);
+        assert_eq!(stats.physical_texture_tile_fallbacks, 0);
+        assert_eq!(stats.fog_expanded_chunks, 0);
     }
 
     #[test]
@@ -3420,6 +3547,11 @@ mod tests {
             GpuSampler::Linear,
             false,
         ));
+        let stats = surface.gpu_scene_capture().test_value().capture_stats();
+        assert_eq!(stats.generic_sprite_fallbacks, 1);
+        assert_eq!(stats.spatial_fog_fallbacks, 1);
+        assert_eq!(stats.texture_indent_fallbacks, 1);
+        assert_eq!(stats.fog_expanded_chunks, 2);
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [100, 1],
             Color::transparent(),
@@ -3556,6 +3688,10 @@ mod tests {
             GpuSampler::Nearest,
             false,
         ));
+        let stats = surface.gpu_scene_capture().test_value().capture_stats();
+        assert_eq!(stats.generic_sprite_fallbacks, 1);
+        assert_eq!(stats.spatial_fog_fallbacks, 1);
+        assert_eq!(stats.owner_mask_fallbacks, 1);
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [8, 8],
             Color::transparent(),

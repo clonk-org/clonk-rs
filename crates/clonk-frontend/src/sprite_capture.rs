@@ -1,20 +1,5 @@
 use super::*;
 
-#[cfg(test)]
-std::thread_local! {
-    static GPU_SPRITE_BATCH_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_gpu_sprite_batch_fallbacks() {
-    GPU_SPRITE_BATCH_FALLBACKS.with(|fallbacks| fallbacks.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn gpu_sprite_batch_fallbacks() -> usize {
-    GPU_SPRITE_BATCH_FALLBACKS.with(std::cell::Cell::get)
-}
-
 #[derive(Clone, Copy)]
 struct CapturedGpuSpriteChunk {
     position: [[f32; 3]; 4],
@@ -757,10 +742,13 @@ fn capture_gpu_sprite_impl(
         let _ = surface.push_gpu_command(command);
         return true;
     }
-    #[cfg(test)]
-    GPU_SPRITE_BATCH_FALLBACKS.with(|fallbacks| {
-        fallbacks.set(fallbacks.get().saturating_add(1));
-    });
+    let fallback_reasons = GpuSpriteFallbackReasons {
+        spatial_fog: fog_sampler.is_some(),
+        precomputed_fog_modulation: blit.fog_modulation.is_some(),
+        texture_indent: texture_indent != 0.0,
+        owner_mask: mask.is_some(),
+        physical_texture_tiles,
+    };
     let chunk_geometry = if let Some(sampler) = fog_sampler.as_ref() {
         // Fog chunks use min(native tile size, 64), so every chunk is
         // already contained within exactly one C4TexRef tile.
@@ -1061,6 +1049,10 @@ fn capture_gpu_sprite_impl(
             None
         };
 
+    let _ = surface.record_gpu_sprite_fallback(
+        fallback_reasons,
+        usize::from(fallback_reasons.spatial_fog).saturating_mul(chunks.len()),
+    );
     for resource in base_resources {
         let _ = surface.add_gpu_texture(resource);
     }

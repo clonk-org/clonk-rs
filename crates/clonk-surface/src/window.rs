@@ -3,6 +3,7 @@
 
 use crate::acquire::{acquire_drawable, AcquireError, Acquisition};
 use crate::blit::{BlitTransform, Blitter};
+use std::time::{Duration, Instant};
 
 /// The CPU frame buffer's format. Four bytes per pixel, always: the buffer is
 /// filled by the software rasterizer, which has no other layout.
@@ -92,10 +93,71 @@ pub enum Presentation {
     Skipped,
 }
 
+/// Host-side wall-clock intervals around the surface API calls.
+///
+/// Submission and presentation are CPU call durations, not GPU completion.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WindowSurfaceCpuStages {
+    pub drawable_acquisition: Duration,
+    /// CPU time spent finalizing the command encoder before submission.
+    pub command_encoder_finalization: Duration,
+    pub queue_submission: Duration,
+    pub presentation: Duration,
+}
+
+impl WindowSurfaceCpuStages {
+    pub fn total(self) -> Duration {
+        self.drawable_acquisition
+            .saturating_add(self.command_encoder_finalization)
+            .saturating_add(self.queue_submission)
+            .saturating_add(self.presentation)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProfiledPresentation {
+    pub presentation: Presentation,
+    pub cpu_stages: WindowSurfaceCpuStages,
+}
+
 /// What the render callback is handed alongside the encoder and drawable view.
 pub struct FrameContext<'a> {
     pub device: &'a wgpu::Device,
     pub queue: &'a wgpu::Queue,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WindowSurfaceBuildOptions {
+    pub timestamp_queries: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TimestampQueryStatus {
+    pub requested: bool,
+    pub supported: bool,
+    pub enabled: bool,
+}
+
+impl TimestampQueryStatus {
+    pub const fn required_features(self) -> wgpu::Features {
+        if self.enabled {
+            wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        }
+    }
+}
+
+fn timestamp_query_status(
+    requested: bool,
+    adapter_features: wgpu::Features,
+) -> TimestampQueryStatus {
+    let supported = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
+    TimestampQueryStatus {
+        requested,
+        supported,
+        enabled: requested && supported,
+    }
 }
 
 /// A window's drawable, its CPU frame buffer, and the blit between them.
@@ -104,6 +166,8 @@ pub struct WindowSurface {
     device: wgpu::Device,
     queue: wgpu::Queue,
     max_texture_dimension_2d: u32,
+    adapter_features: wgpu::Features,
+    timestamp_query_status: TimestampQueryStatus,
 
     surface_format: wgpu::TextureFormat,
     surface_extent: (u32, u32),
@@ -131,12 +195,34 @@ impl WindowSurface {
     where
         W: wgpu::WindowHandle + raw_window_handle::HasDisplayHandle + 'static,
     {
+        Self::build_with_options(
+            instance,
+            window,
+            buffer_extent,
+            surface_extent,
+            present_mode,
+            WindowSurfaceBuildOptions::default(),
+        )
+    }
+
+    pub fn build_with_options<W>(
+        instance: &wgpu::Instance,
+        window: W,
+        buffer_extent: (u32, u32),
+        surface_extent: (u32, u32),
+        present_mode: wgpu::PresentMode,
+        options: WindowSurfaceBuildOptions,
+    ) -> Result<Self, SurfaceError>
+    where
+        W: wgpu::WindowHandle + raw_window_handle::HasDisplayHandle + 'static,
+    {
         pollster::block_on(Self::build_async(
             instance,
             window,
             buffer_extent,
             surface_extent,
             present_mode,
+            options,
         ))
     }
 
@@ -146,12 +232,16 @@ impl WindowSurface {
         buffer_extent: (u32, u32),
         surface_extent: (u32, u32),
         present_mode: wgpu::PresentMode,
+        options: WindowSurfaceBuildOptions,
     ) -> Result<Self, SurfaceError>
     where
         W: wgpu::WindowHandle + raw_window_handle::HasDisplayHandle + 'static,
     {
         let surface = instance.create_surface(window)?;
         let adapter = adapter_for(instance, &surface).await?;
+        let adapter_features = adapter.features();
+        let timestamp_query_status =
+            timestamp_query_status(options.timestamp_queries, adapter_features);
 
         // Ask for everything the adapter offers: the renderer reads
         // `max_texture_dimension_2d` back off the device to decide whether a
@@ -159,6 +249,7 @@ impl WindowSurface {
         // below what the hardware can do.
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
+                required_features: timestamp_query_status.required_features(),
                 required_limits: adapter.limits(),
                 ..wgpu::DeviceDescriptor::default()
             })
@@ -196,6 +287,8 @@ impl WindowSurface {
             device,
             queue,
             max_texture_dimension_2d,
+            adapter_features,
+            timestamp_query_status,
             surface_format,
             surface_extent,
             present_mode,
@@ -240,6 +333,11 @@ impl WindowSurface {
         self.buffer_extent
     }
 
+    /// The compositor drawable's configured extent.
+    pub const fn surface_extent(&self) -> (u32, u32) {
+        self.surface_extent
+    }
+
     pub const fn device(&self) -> &wgpu::Device {
         &self.device
     }
@@ -248,9 +346,27 @@ impl WindowSurface {
         &self.queue
     }
 
+    pub const fn timestamp_query_status(&self) -> TimestampQueryStatus {
+        self.timestamp_query_status
+    }
+
+    /// Optional features advertised by the exact adapter selected for this surface.
+    pub const fn adapter_features(&self) -> wgpu::Features {
+        self.adapter_features
+    }
+
     /// The drawable's format, which the scene renderer must target.
     pub const fn surface_texture_format(&self) -> wgpu::TextureFormat {
         self.surface_format
+    }
+
+    /// The presentation mode selected from the surface's advertised modes.
+    pub const fn present_mode(&self) -> wgpu::PresentMode {
+        self.present_mode
+    }
+
+    pub const fn alpha_mode(&self) -> wgpu::CompositeAlphaMode {
+        self.alpha_mode
     }
 
     /// The largest 2D texture this device can back.
@@ -306,6 +422,19 @@ impl WindowSurface {
             &FrameContext<'_>,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>,
     {
+        self.render_with_profiled(render)
+            .map(|profiled| profiled.presentation)
+    }
+
+    pub fn render_with_profiled<F>(&self, render: F) -> Result<ProfiledPresentation, SurfaceError>
+    where
+        F: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &wgpu::TextureView,
+            &FrameContext<'_>,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>,
+    {
+        let acquisition_started = Instant::now();
         let Some(frame) = acquire_drawable(
             || match self.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(frame) => Acquisition::Success(frame),
@@ -319,8 +448,15 @@ impl WindowSurface {
             || self.configure(),
         )?
         else {
-            return Ok(Presentation::Skipped);
+            return Ok(ProfiledPresentation {
+                presentation: Presentation::Skipped,
+                cpu_stages: WindowSurfaceCpuStages {
+                    drawable_acquisition: acquisition_started.elapsed(),
+                    ..WindowSurfaceCpuStages::default()
+                },
+            });
         };
+        let drawable_acquisition = acquisition_started.elapsed();
 
         let mut encoder = self
             .device
@@ -334,9 +470,25 @@ impl WindowSurface {
 
         render(&mut encoder, &view, &self.frame_context()).map_err(SurfaceError::Callback)?;
 
-        self.queue.submit(Some(encoder.finish()));
+        let finalization_started = Instant::now();
+        let command_buffer = encoder.finish();
+        let submission_started = Instant::now();
+        let command_encoder_finalization = submission_started.duration_since(finalization_started);
+        self.queue.submit(Some(command_buffer));
+        let presentation_started = Instant::now();
+        let queue_submission = presentation_started.duration_since(submission_started);
         frame.present();
-        Ok(Presentation::Presented)
+        let presented_at = Instant::now();
+        let presentation = presented_at.duration_since(presentation_started);
+        Ok(ProfiledPresentation {
+            presentation: Presentation::Presented,
+            cpu_stages: WindowSurfaceCpuStages {
+                drawable_acquisition,
+                command_encoder_finalization,
+                queue_submission,
+                presentation,
+            },
+        })
     }
 
     const fn frame_context(&self) -> FrameContext<'_> {
@@ -447,6 +599,49 @@ fn create_buffer_texture(device: &wgpu::Device, extent: (u32, u32)) -> wgpu::Tex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamp_feature_is_not_requested_when_disabled() {
+        let status = timestamp_query_status(false, wgpu::Features::TIMESTAMP_QUERY);
+
+        assert!(!status.requested);
+        assert!(status.supported);
+        assert!(!status.enabled);
+        assert_eq!(status.required_features(), wgpu::Features::empty());
+    }
+
+    #[test]
+    fn unsupported_timestamp_request_keeps_features_empty() {
+        let status = timestamp_query_status(true, wgpu::Features::empty());
+
+        assert!(status.requested);
+        assert!(!status.supported);
+        assert!(!status.enabled);
+        assert_eq!(status.required_features(), wgpu::Features::empty());
+    }
+
+    #[test]
+    fn supported_timestamp_request_enables_only_timestamp_query() {
+        let status = timestamp_query_status(
+            true,
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TEXTURE_COMPRESSION_BC,
+        );
+
+        assert!(status.enabled);
+        assert_eq!(status.required_features(), wgpu::Features::TIMESTAMP_QUERY);
+    }
+
+    #[test]
+    fn surface_cpu_stage_total_reconciles_host_api_intervals() {
+        let stages = WindowSurfaceCpuStages {
+            drawable_acquisition: std::time::Duration::from_nanos(1),
+            command_encoder_finalization: std::time::Duration::from_nanos(2),
+            queue_submission: std::time::Duration::from_nanos(3),
+            presentation: std::time::Duration::from_nanos(4),
+        };
+
+        assert_eq!(stages.total(), std::time::Duration::from_nanos(10));
+    }
 
     // A zero extent is what a minimized window reports, and the device rejects
     // it with a validation error that cannot be recovered from. Catching it
