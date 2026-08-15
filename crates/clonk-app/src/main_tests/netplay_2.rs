@@ -14087,55 +14087,32 @@ fn network_savegame_finalization_does_not_rerun_scenario_initialize() {
 }
 
 #[test]
-fn runtime_network_client_join_reaches_running_render_after_dynamic_sync() {
-    // A client that connects after GS_Go receives JoinData only after the
-    // host's synchronized dynamic capture. It must then pass FinalInit,
-    // reach/commit the GO barrier, execute the synchronized activation, and
-    // render a live world instead of remaining on a frozen loader or lobby
-    // (C4Network2.cpp:1099-1116,1574-1623,1820-1850,2017-2059,2081-2114;
+fn runtime_network_client_join_loading_reaches_running_render() {
+    // A client that connects after GS_Go must consume the production loading
+    // completion event, reach/commit the GO barrier, and execute a later
+    // activation update before it can render a live world. The synchronized
+    // transport and host-side activation request are covered by the
+    // clonk-org/clonk-rs#488 network tests (C4Network2.cpp:1574-1623,1820-1850,
+    // 2017-2059;
     // C4Game.cpp:455-483,2805-2863).
-    let mut host = new_state_only_running_sandbox_app();
-    let (host_manager, host_event_tx, mut host_commands) =
-        NetworkManager::test_stub_with_commands_for_client_id(0);
-    host.network = Some(host_manager);
-    host.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    host.host_join_snapshot = clonk_network::HostConfig::default().initial_join_snapshot;
-    host_event_tx
-        .send(NetworkEvent::JoinDataNeeded {
-            client_id: 7,
-            current_control_tick: 23,
-        })
-        .test_value();
-    host.process_network_events().test_value();
-    assert_eq!(
-        host_commands.take_submitted_decided_controls(),
-        vec![(
-            23,
-            clonk_engine::ControlPacket::Synchronize(clonk_engine::SynchronizeControlData {
-                save_player_files: false,
-                sync_clearance: true,
-                by_client: 0,
-            },),
-            true,
-        ),],
-        "C++ SendJoinData must request one synchronized dynamic capture"
-    );
-
     let directory = tempdir();
-    let scenario_path = directory.path().join("Scenario.c4s");
-    let dynamic_path = directory.path().join("Dynamic.c4s");
-    let mut scenario_group = MutableGroup::new("Scenario.c4s");
-    scenario_group
+    let combined_path = directory.path().join("Combined7.c4s");
+    let player_path = directory.path().join("Late.c4p");
+    let mut player_group = MutableGroup::new("Late.c4p");
+    player_group
         .add_file(
-            "Scenario.txt",
-            b"[Head]\nTitle=Runtime join\nNetworkGame=1\nNetworkRuntimeJoin=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n"
-                .to_vec(),
+            "Player.txt",
+            b"[Player]\nName=Late client\n[Preferences]\nControl=0\nMouse=0\n".to_vec(),
         )
         .test_value();
-    scenario_group
-        .add_child("Defs.c4d", packed_network_definition("Defs.c4d", "CLNK"))
+    let mut standalone_player_group = MutableGroup::new("Late.c4p");
+    standalone_player_group
+        .add_file(
+            "Player.txt",
+            b"[Player]\nName=Late client\n[Preferences]\nControl=0\nMouse=0\n".to_vec(),
+        )
         .test_value();
-    fs::write(&scenario_path, scenario_group.pack().test_value()).test_value();
+    fs::write(&player_path, standalone_player_group.pack().test_value()).test_value();
 
     let player_info = clonk_engine::ControlPlayerInfoEntry {
         id: 7,
@@ -14154,30 +14131,33 @@ fn runtime_network_client_join_reaches_running_render_after_dynamic_sync() {
             players: vec![player_info.clone()],
         }],
     };
-    let mut dynamic_group = MutableGroup::new("Dynamic.c4s");
-    dynamic_group
+    let mut combined_group = MutableGroup::new("Combined7.c4s");
+    combined_group
+        .add_file(
+            "Scenario.txt",
+            b"[Head]\nTitle=Runtime join\nNetworkGame=1\nNetworkRuntimeJoin=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n"
+                .to_vec(),
+        )
+        .test_value();
+    combined_group
+        .add_child("Defs.c4d", packed_network_definition("Defs.c4d", "CLNK"))
+        .test_value();
+    combined_group
         .add_file(
             "Game.txt",
             b"[Player7]\nStatus=1\nIndex=7\nID=7\nWealth=19\n".to_vec(),
         )
         .test_value();
-    dynamic_group
+    combined_group
         .add_file(
             "SavePlayerInfos.txt",
             clonk_network::encode_player_info_list_ini(&restore_infos).test_value(),
         )
         .test_value();
-    let mut player_group = MutableGroup::new("Late.c4p");
-    player_group
-        .add_file(
-            "Player.txt",
-            b"[Player]\nName=Late client\n[Preferences]\nControl=0\nMouse=0\n".to_vec(),
-        )
-        .test_value();
-    dynamic_group
+    combined_group
         .add_child("Late.c4p", player_group)
         .test_value();
-    fs::write(&dynamic_path, dynamic_group.pack().test_value()).test_value();
+    fs::write(&combined_path, combined_group.pack().test_value()).test_value();
 
     let resource = |resource_type: clonk_network::HostResourceType, id: i32, filename: &[u8]| {
         clonk_engine::NetworkResourceCore {
@@ -14224,7 +14204,7 @@ fn runtime_network_client_join_reaches_running_render_after_dynamic_sync() {
             control_mode: 2,
             target_tick: -1,
         },
-        dynamic: dynamic.clone(),
+        dynamic,
         parameters,
     };
     let go = clonk_network::NetworkStatus {
@@ -14232,6 +14212,11 @@ fn runtime_network_client_join_reaches_running_render_after_dynamic_sync() {
         control_mode: 2,
         target_tick: 23,
     };
+    let scenario_data = clonk_engine::Scenario::load_from_path_with(
+        &combined_path,
+        &InstallDefinitionResolver::new(None),
+    )
+    .test_value();
 
     let mut app = new_menu_app(320, 200);
     let (manager, event_tx, mut commands) =
@@ -14240,83 +14225,43 @@ fn runtime_network_client_join_reaches_running_render_after_dynamic_sync() {
     let mut settings = ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client");
     settings.resource_directory = directory.path().to_path_buf();
     app.network_mode = Some(NetworkMode::Client(settings));
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
-    app.startup_view = StartupView::NetworkLobby;
 
     event_tx
         .send(NetworkEvent::JoinData(join_data.clone()))
         .test_value();
     app.process_network_events().test_value();
-    assert_eq!(
-        commands.take_player_info_updates().len(),
-        1,
-        "JoinData must submit the local client's initial player-info packet before loading"
-    );
-    // The worker emits the transport connection notification after JoinData;
-    // it updates lobby/start-wait presentation only and must not substitute
-    // for the JoinData/resource/control transitions
-    // (C4Network2.cpp:1574-1623; C4GameLobby.cpp:669-675).
-    event_tx
-        .send(NetworkEvent::PeerConnected {
-            client_id: 7,
-            name: "Client".to_string(),
-            kind: clonk_network::ParticipantKind::Player,
-        })
-        .test_value();
-    app.process_network_events().test_value();
-    let removal_observer = thread::spawn(move || {
-        let (resource_id, completion) = commands.receive_resource_removal();
-        assert_eq!(resource_id, 71);
-        completion.send(Ok(())).test_value();
-        commands
-    });
-    // The chase status can arrive before either synchronized resource. The
-    // C++ client records that target and only enters InitGame after the
-    // scenario/dynamic retrievals complete (C4Network2.cpp:2017-2059;
-    // C4Game.cpp:2551-2598).
+    let initial_updates = commands.take_player_info_updates();
+    let [initial] = initial_updates.as_slice() else {
+        panic!("JoinData must submit exactly one local player-info packet");
+    };
+    assert_eq!(initial.client_id, 7);
+    assert_eq!(initial.flags, clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL);
+    assert!(initial.players.is_empty());
+
+    // This is the same completion event consumed by poll_loading after the
+    // production network loader finishes, but supplied synchronously through
+    // the prepared/preloaded path so no detached thread or scheduler race is
+    // part of this lifecycle assertion.
+    app.install_prepared_client_network_scenario(
+        go,
+        join_data,
+        combined_path.clone(),
+        scenario_data,
+        None,
+        Vec::new(),
+        false,
+    )
+    .test_value();
     event_tx
         .send(NetworkEvent::StatusRequested(go))
         .test_value();
     app.process_network_events().test_value();
-    event_tx
-        .send(NetworkEvent::ResourceComplete {
-            resource_id: scenario.id,
-            core: scenario.clone(),
-            path: scenario_path,
-            local: false,
-        })
-        .test_value();
-    event_tx
-        .send(NetworkEvent::ResourceComplete {
-            resource_id: dynamic.id,
-            core: dynamic.clone(),
-            path: dynamic_path,
-            local: false,
-        })
-        .test_value();
-    app.process_network_events().test_value();
-    let mut commands = removal_observer.test_join();
-
-    // The network worker's asynchronous loader is not the transition under
-    // test. Once RetrieveScenario has produced Combined7.c4s, load that
-    // exact artifact synchronously so this regression has no scheduler or
-    // sleep dependency.
-    let combined_path = directory.path().join("Combined7.c4s");
-    assert!(combined_path.exists(), "runtime JoinData was not merged");
-    let scenario_data = clonk_engine::Scenario::load_from_path_with(
-        &combined_path,
-        &InstallDefinitionResolver::new(None),
-    )
-    .test_value();
-    let frontend = app.loading_state.as_ref().test_ref().scenario.clone();
-    {
-        let loading = app.loading_state.as_mut().test_value();
-        let prepared = loading.prepared_go.as_mut().test_value();
-        prepared.save_game = false;
-        loading.finished = true;
-    }
-    app.activate_loaded_scenario(frontend, &scenario_data)
-        .test_value();
+    app.poll_loading().test_value();
+    assert!(matches!(app.mode, AppMode::Loading));
+    assert!(app
+        .loading_state
+        .as_ref()
+        .is_some_and(|loading| loading.finished));
     let prepared = app
         .loading_state
         .as_ref()
@@ -14324,12 +14269,11 @@ fn runtime_network_client_join_reaches_running_render_after_dynamic_sync() {
         .test_value();
     assert!(prepared.network_runtime_join);
     assert_eq!(prepared.runtime_join_players.len(), 1);
-    // `poll_loading` restores the prepared network state after activation
-    // before it attempts the C++ FinalInit/GO barrier.
-    app.mode = AppMode::Loading;
-    app.try_reach_loaded_network_go_barrier().test_value();
-    assert!(matches!(app.mode, AppMode::Loading));
-    assert_eq!(commands.take_framed_status_acknowledgements().len(), 1);
+    let acknowledgements = commands.take_framed_status_acknowledgements();
+    assert_eq!(acknowledgements.len(), 1);
+    assert_eq!(acknowledgements[0].0.state, go.state);
+    assert_eq!(acknowledgements[0].0.control_mode, go.control_mode);
+    assert_eq!(acknowledgements[0].0.target_tick, go.target_tick);
 
     event_tx
         .send(NetworkEvent::StatusCommitted(go))
@@ -14340,7 +14284,61 @@ fn runtime_network_client_join_reaches_running_render_after_dynamic_sync() {
     assert!(app.network_start_wait.is_none());
     assert!(app.local_controls.assignment(7).is_some());
     assert!(!app.control_clients.is_activated(7));
+    assert!(app
+        .engine
+        .players()
+        .any(|player| player.player_info_id() == 7));
 
+    // The local inactive client must use the production runtime player path,
+    // including publication and a non-empty CIF_AddPlayers request. Use a
+    // fresh stub only to keep this wire assertion independent from the GO
+    // acknowledgement commands above.
+    let (runtime_manager, _runtime_event_tx, runtime_commands) =
+        NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.network = Some(runtime_manager);
+    let wire_name =
+        LegacyCString::from_bytes(player_path.as_os_str().as_encoded_bytes().to_vec()).test_value();
+    let player_resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 7 << 16,
+        loadable: true,
+        filename: wire_name.clone(),
+        ..Default::default()
+    };
+    let runtime_observer =
+        thread::spawn(move || runtime_commands.complete_initial_client_join(vec![player_resource]));
+    let result = app.submit_runtime_network_player(&player_path.to_string_lossy());
+    drop(app.network.take());
+    let (order, publications, player_infos, acknowledgements) = runtime_observer.test_join();
+    result.test_value();
+    assert_eq!(order, vec!["publish", "player-info"]);
+    assert_eq!(publications.len(), 1);
+    assert_eq!(publications[0].source_path, player_path);
+    assert_eq!(publications[0].wire_name, wire_name);
+    assert_eq!(player_infos.len(), 1);
+    let [request] = player_infos.as_slice() else {
+        panic!("expected one runtime player-info request");
+    };
+    assert_eq!(request.client_id, 7);
+    assert_eq!(
+        request.flags,
+        clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+    );
+    let [player] = request.players.as_slice() else {
+        panic!("runtime AddPlayers request must contain the selected player");
+    };
+    assert_eq!(player.id, 0);
+    assert_eq!(player.name.as_bytes(), b"Late client");
+    assert_eq!(player.filename, wire_name);
+    assert_eq!(
+        player.resource.as_ref().map(|resource| resource.id),
+        Some(7 << 16)
+    );
+    assert!(acknowledgements.is_empty());
+
+    let (manager, event_tx, mut commands) =
+        NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.network = Some(manager);
     let initial_frame = app.engine.frame();
     let activate = clonk_engine::ClientUpdateControlData {
         update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
@@ -14361,7 +14359,8 @@ fn runtime_network_client_join_reaches_running_render_after_dynamic_sync() {
 
     let mut frame = vec![0x4c; 320 * 200 * 4];
     assert!(app.test_render(&mut frame));
-    assert!(frame.iter().any(|byte| *byte != 0x4c));
+    let rendered_bytes = frame.iter().filter(|byte| **byte != 0x4c).count();
+    assert!(rendered_bytes > 32, "rendered frame was effectively blank");
 }
 
 #[test]

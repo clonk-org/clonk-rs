@@ -2924,7 +2924,7 @@ impl GameApp {
             })
     }
 
-    fn install_prepared_client_network_scenario(
+    pub(crate) fn install_prepared_client_network_scenario(
         &mut self,
         status: clonk_network::NetworkStatus,
         join_data: clonk_network::JoinDataEnvelope,
