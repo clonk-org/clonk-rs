@@ -134,7 +134,8 @@ fn entries_for_diff(
         .collect()
 }
 
-/// `C4UpdatePackage::MakeUpdate` for a single (non-recursive) group pair.
+/// `C4UpdatePackage::MakeUpdate` for a single (non-recursive) group pair,
+/// appending another source version when `output_path` is an existing update.
 ///
 /// Writes `output`: the `[Update]` core, the full entry manifest, and every
 /// changed entry. `GrpChks1`/`GrpChks2` are the **file** CRCs of the two
@@ -194,13 +195,13 @@ pub(crate) fn generate_update(
     // Keep the existing package entries as the base so changed payloads from
     // earlier source versions remain available to the resulting package.
     let existing = if Path::new(output_path).exists() {
-        open(output_path).ok().map(|group| {
+        Some(open(output_path).map(|group| {
             let core = group
                 .read_entry_bytes(UPDATE_CORE_ENTRY)
                 .ok()
                 .map(|bytes| UpdateCore::from_ini(&String::from_utf8_lossy(&bytes)));
             (group, core)
-        })
+        })?)
     } else {
         None
     };

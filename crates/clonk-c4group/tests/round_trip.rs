@@ -301,6 +301,9 @@ fn c4group_preserves_previous_sources_when_generating_a_second_update() {
     source_one_group
         .add_file("Alpha.txt", b"one".to_vec())
         .expect("add first source entry");
+    source_one_group
+        .add_file("Beta.txt", b"target beta".to_vec())
+        .expect("add first unchanged entry");
     let source_one = directory.path().join("SourceOne.c4g");
     std::fs::write(
         &source_one,
@@ -310,7 +313,10 @@ fn c4group_preserves_previous_sources_when_generating_a_second_update() {
 
     let mut source_two_group = MutableGroup::new("SourceTwo.c4g");
     source_two_group
-        .add_file("Alpha.txt", b"two".to_vec())
+        .add_file("Alpha.txt", b"target alpha".to_vec())
+        .expect("add second unchanged entry");
+    source_two_group
+        .add_file("Beta.txt", b"two".to_vec())
         .expect("add second source entry");
     let source_two = directory.path().join("SourceTwo.c4g");
     std::fs::write(
@@ -321,7 +327,10 @@ fn c4group_preserves_previous_sources_when_generating_a_second_update() {
 
     let mut target_group = MutableGroup::new("Target.c4g");
     target_group
-        .add_file("Alpha.txt", b"target".to_vec())
+        .add_file("Alpha.txt", b"target alpha".to_vec())
+        .expect("add target entry");
+    target_group
+        .add_file("Beta.txt", b"target beta".to_vec())
         .expect("add target entry");
     let target = directory.path().join("Target.c4g");
     std::fs::write(&target, target_group.pack().expect("pack target")).expect("write target");
@@ -338,6 +347,7 @@ fn c4group_preserves_previous_sources_when_generating_a_second_update() {
         source_two.to_str().expect("utf-8 second source"),
         target.to_str().expect("utf-8 target"),
         "Title",
+        "-l",
         "-et",
         "AutoUpdate.txt",
         core.to_str().expect("utf-8 core"),
@@ -347,6 +357,9 @@ fn c4group_preserves_previous_sources_when_generating_a_second_update() {
         "stderr: {}",
         String::from_utf8_lossy(&result.stderr)
     );
+    let listing = String::from_utf8_lossy(&result.stdout);
+    assert!(listing.contains("Alpha.txt"), "listing was {listing:?}");
+    assert!(listing.contains("Beta.txt"), "listing was {listing:?}");
     let core = String::from_utf8(std::fs::read(&core).expect("read core")).expect("utf-8 core");
     assert!(core.contains("TargetCount=2"), "core was {core:?}");
 }
