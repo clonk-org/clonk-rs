@@ -182,3 +182,184 @@ fn c4group_cli_round_trips_native_command_matrix() {
         .expect("utf-8 path")]);
     assert!(!missing.status.success());
 }
+
+// Pinned oracle `src/c4group_ng.cpp:139-145,349-388` — the command loop keeps
+// walking after `-g`/`-y`, reopening the generated group before the next command.
+#[test]
+fn c4group_runs_a_command_after_generating_an_update() {
+    let directory = tempfile::tempdir().expect("temp dir");
+
+    let mut source_group = MutableGroup::new("Source.c4g");
+    source_group
+        .add_file("Alpha.txt", b"alpha".to_vec())
+        .expect("add source entry");
+    let source = directory.path().join("Source.c4g");
+    std::fs::write(&source, source_group.pack().expect("pack source")).expect("write source");
+
+    let mut target_group = MutableGroup::new("Target.c4g");
+    target_group
+        .add_file("Alpha.txt", b"alpha".to_vec())
+        .expect("add unchanged target entry");
+    target_group
+        .add_file("Added.txt", b"added".to_vec())
+        .expect("add changed target entry");
+    let target = directory.path().join("Target.c4g");
+    std::fs::write(&target, target_group.pack().expect("pack target")).expect("write target");
+
+    let package = directory.path().join("Update.c4u");
+    let generated = c4group(&[
+        package.to_str().expect("utf-8 package"),
+        "-g",
+        source.to_str().expect("utf-8 source"),
+        target.to_str().expect("utf-8 target"),
+        "Title",
+        "-l",
+    ]);
+    assert!(
+        generated.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    assert!(package.is_file(), "the update package was not created");
+    let listed = String::from_utf8_lossy(&generated.stdout);
+    assert!(listed.contains("AutoUpdate.txt"), "listing was {listed:?}");
+    assert!(
+        listed.contains("GRPUP_Entries.txt"),
+        "listing was {listed:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&generated.stderr).contains("not implemented"),
+        "stderr: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let applied = c4group(&[package.to_str().expect("utf-8 package"), "-y", "-l"]);
+    assert!(
+        applied.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let applied_listing = String::from_utf8_lossy(&applied.stdout);
+    assert!(
+        applied_listing.contains("AutoUpdate.txt"),
+        "listing was {applied_listing:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&applied.stderr).contains("not implemented"),
+        "stderr: {}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+}
+
+// `C4UpdatePackage::MakeUpdate` returns success even when `MkUp` finds no
+// changed entries: the metadata/manifest package is still written and the
+// command loop reopens it before continuing (`C4Update.cpp:651-744`).
+#[test]
+fn c4group_keeps_an_empty_update_for_following_commands() {
+    let directory = tempfile::tempdir().expect("temp dir");
+
+    let mut version = MutableGroup::new("Version.c4g");
+    version
+        .add_file("Alpha.txt", b"alpha".to_vec())
+        .expect("add version entry");
+    let version_bytes = version.pack().expect("pack version");
+    let source = directory.path().join("Source.c4g");
+    let target = directory.path().join("Target.c4g");
+    std::fs::write(&source, &version_bytes).expect("write source");
+    std::fs::write(&target, &version_bytes).expect("write target");
+
+    let package = directory.path().join("Empty.c4u");
+    let generated = c4group(&[
+        package.to_str().expect("utf-8 package"),
+        "-g",
+        source.to_str().expect("utf-8 source"),
+        target.to_str().expect("utf-8 target"),
+        "No changes",
+        "-l",
+    ]);
+    assert!(
+        generated.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    assert!(package.is_file(), "the empty update package was removed");
+    let listed = String::from_utf8_lossy(&generated.stdout);
+    assert!(listed.contains("AutoUpdate.txt"), "listing was {listed:?}");
+    assert!(
+        listed.contains("GRPUP_Entries.txt"),
+        "listing was {listed:?}"
+    );
+}
+
+// `C4UpdatePackage::MakeUpdate` appends another source version when the
+// output package already contains a compatible update (`C4Update.cpp:675-725`).
+#[test]
+fn c4group_preserves_previous_sources_when_generating_a_second_update() {
+    let directory = tempfile::tempdir().expect("temp dir");
+
+    let mut source_one_group = MutableGroup::new("SourceOne.c4g");
+    source_one_group
+        .add_file("Alpha.txt", b"one".to_vec())
+        .expect("add first source entry");
+    source_one_group
+        .add_file("Beta.txt", b"target beta".to_vec())
+        .expect("add first unchanged entry");
+    let source_one = directory.path().join("SourceOne.c4g");
+    std::fs::write(
+        &source_one,
+        source_one_group.pack().expect("pack first source"),
+    )
+    .expect("write first source");
+
+    let mut source_two_group = MutableGroup::new("SourceTwo.c4g");
+    source_two_group
+        .add_file("Alpha.txt", b"target alpha".to_vec())
+        .expect("add second unchanged entry");
+    source_two_group
+        .add_file("Beta.txt", b"two".to_vec())
+        .expect("add second source entry");
+    let source_two = directory.path().join("SourceTwo.c4g");
+    std::fs::write(
+        &source_two,
+        source_two_group.pack().expect("pack second source"),
+    )
+    .expect("write second source");
+
+    let mut target_group = MutableGroup::new("Target.c4g");
+    target_group
+        .add_file("Alpha.txt", b"target alpha".to_vec())
+        .expect("add target entry");
+    target_group
+        .add_file("Beta.txt", b"target beta".to_vec())
+        .expect("add target entry");
+    let target = directory.path().join("Target.c4g");
+    std::fs::write(&target, target_group.pack().expect("pack target")).expect("write target");
+
+    let package = directory.path().join("Multi.c4u");
+    let core = directory.path().join("AutoUpdate.txt");
+    let result = c4group(&[
+        package.to_str().expect("utf-8 package"),
+        "-g",
+        source_one.to_str().expect("utf-8 first source"),
+        target.to_str().expect("utf-8 target"),
+        "Title",
+        "-g",
+        source_two.to_str().expect("utf-8 second source"),
+        target.to_str().expect("utf-8 target"),
+        "Title",
+        "-l",
+        "-et",
+        "AutoUpdate.txt",
+        core.to_str().expect("utf-8 core"),
+    ]);
+    assert!(
+        result.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let listing = String::from_utf8_lossy(&result.stdout);
+    assert!(listing.contains("Alpha.txt"), "listing was {listing:?}");
+    assert!(listing.contains("Beta.txt"), "listing was {listing:?}");
+    let core = String::from_utf8(std::fs::read(&core).expect("read core")).expect("utf-8 core");
+    assert!(core.contains("TargetCount=2"), "core was {core:?}");
+}

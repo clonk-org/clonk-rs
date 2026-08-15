@@ -3,25 +3,17 @@
 //! `c4group_ng.cpp` opens each group in turn and runs the whole command list
 //! against it, printing the contents when no command was given (:110-134).
 //!
-//! Commands whose group primitives this port does not expose yet — `-g` and
-//! `-y`, update generation and application — report themselves on stderr and
-//! set a failing exit status rather than being silently ignored, because a
-//! silent success would read as an applied update. They depend on the
-//! `C4UpdatePackage` format (`C4Update.cpp`, 909 lines), where `C4GroupEx`
-//! reaches into `C4Group`'s private header and entry cores
-//! (`C4Update.cpp:149-200`); `clonk-resources` exposes no equivalent, so that
-//! is a separate subsystem port rather than a CLI concern.
+//! The update commands use the `C4UpdatePackage` format (`C4Update.cpp`, 909
+//! lines), where `C4GroupEx` reaches into `C4Group`'s private header and entry
+//! cores (`C4Update.cpp:149-200`). Their implementations close and reopen the
+//! current group so later commands observe the same state as the native loop.
 
 mod apply_update;
 mod cli;
 mod edit;
 mod make_update;
-// The `-g`/`-y` update commands are not wired yet: this is the manifest half,
-// landed with its regression test because it documents a proven C++ defect
-// that would otherwise be reproduced by the next implementer.
 #[allow(dead_code)]
 mod update_core;
-#[allow(dead_code)]
 mod update_entries;
 mod wildcard;
 
@@ -123,63 +115,29 @@ fn spawn_detached(command: &str) -> std::io::Result<()> {
 
 /// Runs every command against one group, reporting whether all succeeded.
 fn run_group(path: &str, line: &CommandLine) -> bool {
-    // `-g` creates its output group, so it runs before the open that every
-    // other command needs (`c4group_ng.cpp:350-379`).
-    if let [Command::GenerateUpdate {
-        source,
-        target,
-        title,
-    }] = line.commands.as_slice()
-    {
-        return match make_update::generate_update(source, target, path, title, false) {
-            Ok(true) => {
-                println!("Update package created.");
-                true
-            }
-            Ok(false) => {
-                println!("Update package not created.");
-                let _ = std::fs::remove_file(path);
-                false
-            }
+    // `hGroup.Open(szFilename, true)` (`c4group_ng.cpp:126-127`) creates a
+    // missing output group. Generation writes that group itself, so defer the
+    // open when `-g` is the first command and let its dispatch reopen it.
+    let mut group = if matches!(line.commands.first(), Some(Command::GenerateUpdate { .. })) {
+        None
+    } else {
+        match clonk_resources::Group::open(Path::new(path)) {
+            Ok(group) => Some(group),
             Err(error) => {
-                eprintln!("Error: {error}");
-                false
+                eprintln!("Error: {path}: {error}");
+                return false;
             }
-        };
-    }
-    if let [Command::ApplyUpdate] = line.commands.as_slice() {
-        println!("Applying update...");
-        return match apply_update::apply_update(path) {
-            Ok(apply_update::ApplyOutcome::Applied) => {
-                println!("Ok");
-                true
-            }
-            Ok(apply_update::ApplyOutcome::AlreadyUpdated) => {
-                println!("Already up to date.");
-                true
-            }
-            Err(error) => {
-                eprintln!("Error: {error}");
-                println!("Update failed.");
-                false
-            }
-        };
-    }
-    // `hGroup.Open(szFilename, true)` (:118).
-    let group = match clonk_resources::Group::open(Path::new(path)) {
-        Ok(group) => group,
-        Err(error) => {
-            eprintln!("Error: {path}: {error}");
-            return false;
         }
     };
     // "No commands: display contents" (:120-124).
     if line.commands.is_empty() {
-        return list_entries(&group, path, &[]);
+        return group
+            .as_ref()
+            .map(|group| list_entries(group, path, &[]))
+            .unwrap_or(false);
     }
     // Collected before testing: every command runs, as C++ walks the whole
     // list regardless of an earlier failure. `all` alone would short-circuit.
-    let mut group = Some(group);
     let results: Vec<bool> = line
         .commands
         .iter()
@@ -191,6 +149,17 @@ fn run_group(path: &str, line: &CommandLine) -> bool {
 /// Runs one command. `group` is taken by `Option` because a mutating command
 /// must close the read handle before repacking over the same path.
 fn run_command(group: &mut Option<clonk_resources::Group>, path: &str, command: &Command) -> bool {
+    if let Command::GenerateUpdate {
+        source,
+        target,
+        title,
+    } = command
+    {
+        return generate_update(group, path, source, target, title);
+    }
+    if let Command::ApplyUpdate = command {
+        return apply_update(path);
+    }
     let Some(open) = group.as_ref() else {
         eprintln!("Error: {path}: group is no longer open");
         return false;
@@ -232,6 +201,50 @@ fn run_command(group: &mut Option<clonk_resources::Group>, path: &str, command: 
                 "c4group: {} is not implemented yet",
                 command_name(unsupported)
             );
+            false
+        }
+    }
+}
+
+/// `-g` (`c4group_ng.cpp:349-377`) closes the current group before writing the
+/// update package and reopens it before the next command in the sequence.
+fn generate_update(
+    group: &mut Option<clonk_resources::Group>,
+    path: &str,
+    source: &str,
+    target: &str,
+    title: &str,
+) -> bool {
+    *group = None;
+    match make_update::generate_update(source, target, path, title, false) {
+        Ok(_) => {
+            println!("Update package created.");
+            reopen(group, path);
+            true
+        }
+        Err(error) => {
+            eprintln!("Error: {error}");
+            false
+        }
+    }
+}
+
+/// `-y` (`c4group_ng.cpp:379-388`) applies the package and then returns to the
+/// command loop so following commands keep their argument order.
+fn apply_update(path: &str) -> bool {
+    println!("Applying update...");
+    match apply_update::apply_update(path) {
+        Ok(apply_update::ApplyOutcome::Applied) => {
+            println!("Ok");
+            true
+        }
+        Ok(apply_update::ApplyOutcome::AlreadyUpdated) => {
+            println!("Already up to date.");
+            true
+        }
+        Err(error) => {
+            eprintln!("Error: {error}");
+            println!("Update failed.");
             false
         }
     }
