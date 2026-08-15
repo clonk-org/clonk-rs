@@ -566,14 +566,40 @@ impl GameApp {
         self.control_player_infos
             .set_rejoin_after_elimination_allowed(rejoin_allowed);
         let mut changed = false;
+        let mut changed_remote_clients = Vec::new();
         for player_info in retired_player_infos {
-            changed |= self
+            let client_id = self.control_player_infos.client_id_for_info(player_info);
+            if self
                 .control_player_infos
-                .mark_retired(player_info, game_part_frame);
+                .mark_retired(player_info, game_part_frame)
+            {
+                changed = true;
+                changed_remote_clients.extend(client_id.filter(|client_id| *client_id != 0));
+            }
         }
         if changed {
             self.prune_host_local_alternate_colors();
             self.publish_current_host_player_infos();
+        }
+        if matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
+            changed_remote_clients.sort_unstable();
+            changed_remote_clients.dedup();
+            for client_id in changed_remote_clients {
+                let Some(info) = self.control_player_infos.client_packet(client_id) else {
+                    continue;
+                };
+                // C++ mutates the shared PlayerInfo inside Player::Remove on
+                // every peer. Rust owns that mirror at the app boundary, so
+                // send the host's already-applied remote packet to repair a
+                // client that otherwise retains Joined and refuses the file.
+                if let Some(Err(error)) = self
+                    .network
+                    .as_ref()
+                    .map(|network| network.broadcast_preexecuted_player_info(info, Vec::new()))
+                {
+                    tracing::error!(%client_id, %error, "failed to broadcast retired remote PlayerInfo");
+                }
+            }
         }
     }
 

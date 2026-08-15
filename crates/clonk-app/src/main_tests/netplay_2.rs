@@ -7642,6 +7642,116 @@ fn active_network_host_runtime_join_publishes_admits_and_queues_join() {
 }
 
 #[test]
+fn active_network_host_broadcasts_remote_retirement_for_client_rejoin() {
+    // C4PlayerList::Remove calls SetRemoved on the shared C4PlayerInfo before
+    // deleting the live player on every peer. Rust mirrors that link outside
+    // the engine, so the authoritative host must also repair a remote client's
+    // retained list (src/C4PlayerList.cpp:219-267,398-409).
+    let mut app = new_running_sandbox_app();
+    app.control_clients.register(0, true, false);
+    app.control_clients.register(7, true, false);
+    let wire_name = LegacyCString::from_bytes(b"ClientRejoin.c4p".to_vec()).test_value();
+    let resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 7 << 16,
+        loadable: true,
+        ..Default::default()
+    };
+    app.control_player_infos.replace_snapshot(
+        41,
+        [clonk_engine::PlayerInfoControlData {
+            client_id: 7,
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 41,
+                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                    | clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                name: LegacyCString::from_bytes(b"Client Rejoin".to_vec()).test_value(),
+                filename: wire_name.clone(),
+                resource: Some(resource.clone()),
+                ..Default::default()
+            }],
+            by_client: 0,
+        }],
+    );
+    let retiring = app.local_owner + 1;
+    app.engine
+        .register_player(PlayerConfig::new(retiring, "Client Rejoin").with_player_info_id(41))
+        .test_value();
+    app.engine
+        .test_player_mut(retiring)
+        .set_at_client(clonk_engine::PlayerAtClient::new(7));
+    app.snapshot = app.engine.snapshot();
+
+    let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+
+    assert!(app
+        .engine
+        .execute_eliminate_player_control(&clonk_engine::EliminatePlayerControlData {
+            player: retiring,
+            by_client: 0,
+        })
+        .expect("execute remote player elimination"));
+    let players_before_tick = app.player_info_ids_by_player();
+    for _ in 0..60 {
+        app.snapshot = app.engine.test_tick();
+    }
+    app.mirror_retired_player_info(&players_before_tick);
+
+    let retirement_updates = commands.take_preexecuted_player_infos();
+    let [(info, join_players_on_echo)] = retirement_updates.as_slice() else {
+        panic!("expected one authoritative remote-retirement PlayerInfo");
+    };
+    assert_eq!((info.client_id, info.by_client), (7, 0));
+    assert!(join_players_on_echo.is_empty());
+    let [player] = info.players.as_slice() else {
+        panic!("expected the remote client's retained player row");
+    };
+    assert_eq!(player.id, 41);
+    assert_ne!(
+        player.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+        0,
+        "the remote client must receive the released profile before rejoining"
+    );
+
+    event_tx
+        .send(NetworkEvent::PlayerInfoUpdateRequest {
+            origin: 7,
+            request: clonk_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    name: LegacyCString::from_bytes(b"Client Rejoin".to_vec()).test_value(),
+                    filename: wire_name,
+                    resource: Some(resource),
+                    ..Default::default()
+                }],
+            },
+            by_host: false,
+        })
+        .test_value();
+    app.test_network_events();
+
+    let readmission_updates = commands.take_preexecuted_player_infos();
+    let [(info, join_players_on_echo)] = readmission_updates.as_slice() else {
+        panic!("expected one authoritative remote-client readmission");
+    };
+    let [player] = info.players.as_slice() else {
+        panic!("expected the readmitted remote player row");
+    };
+    assert_eq!((info.client_id, player.id), (7, 42));
+    assert_eq!(join_players_on_echo.len(), 1);
+    assert_eq!(join_players_on_echo[0].id, 42);
+}
+
+#[test]
 fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
     // C4PlayerList::Retire routes through Remove, which calls
     // C4PlayerInfo::SetRemoved before deleting the live player, so the host's
