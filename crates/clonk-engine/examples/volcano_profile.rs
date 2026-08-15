@@ -91,6 +91,30 @@ fn percentile(sorted: &[Duration], quantile: f64) -> Duration {
         .unwrap_or_default()
 }
 
+fn surface32_state(engine: &Engine) -> (usize, u64) {
+    let Some(grid) = engine
+        .landscape()
+        .and_then(|landscape| landscape.pixel_grid())
+    else {
+        return (0, 0);
+    };
+    let mut count = 0;
+    let mut checksum = 0xcbf2_9ce4_8422_2325;
+    for y in 0..grid.height() as i32 {
+        for x in 0..grid.width() as i32 {
+            let Some(color) = grid.surface32_pixel_at(x, y) else {
+                continue;
+            };
+            count += 1;
+            for value in [x as u32, y as u32, color] {
+                checksum ^= u64::from(value);
+                checksum = checksum.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    (count, checksum)
+}
+
 fn main() {
     let mut args = env::args().skip(1);
     let relative = args
@@ -108,70 +132,89 @@ fn main() {
         .next()
         .and_then(|value| value.parse().ok())
         .unwrap_or(60);
+    let volcanoes = args
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
     assert!(
         args.next().is_none(),
-        "usage: volcano_profile [scenario] [frames] [seed] [size]"
+        "usage: volcano_profile [scenario] [frames] [seed] [size] [volcanoes]"
     );
+    assert!(volcanoes > 0, "volcanoes must be positive");
 
     let mut engine = load(Path::new(&relative), seed);
     let (width, height) = engine
         .landscape()
         .and_then(|landscape| landscape.grid_dimensions())
         .expect("exact raster landscape");
-    let x = width / 2;
+    let center_x = width / 2;
     let y = height - 1;
     let lava = engine
         .materials()
         .id_of("Lava")
         .expect("Deep Sea has Lava")
         .index() as i32;
-    let id = engine
-        .spawn_object(SpawnConfig::new("FXV1").with_position(Vector2::new(50, 50)))
-        .expect("FXV1 spawns");
-    let index = engine
-        .find_object_index(id)
-        .expect("FXV1 remains after spawn");
-    engine
-        .call_object_function(
-            index,
-            "Activate",
-            vec![
-                Value::Int(x),
-                Value::Int(y),
-                Value::Int(size),
-                Value::Int(lava),
-                Value::Int(0),
-                Value::Int(10_000),
-            ],
-        )
-        .expect("FXV1 activation succeeds");
+    let mut ids = Vec::with_capacity(volcanoes);
+    let spacing = size.max(20) + 20;
+    for volcano_index in 0..volcanoes {
+        let offset = (volcano_index as i32 - volcanoes as i32 / 2) * spacing;
+        let x = (center_x + offset).clamp(0, width.saturating_sub(1));
+        let id = engine
+            .spawn_object(SpawnConfig::new("FXV1").with_position(Vector2::new(50 + offset, 50)))
+            .expect("FXV1 spawns");
+        let index = engine
+            .find_object_index(id)
+            .expect("FXV1 remains after spawn");
+        engine
+            .call_object_function(
+                index,
+                "Activate",
+                vec![
+                    Value::Int(x),
+                    Value::Int(y),
+                    Value::Int(size),
+                    Value::Int(lava),
+                    Value::Int(0),
+                    Value::Int(10_000),
+                ],
+            )
+            .expect("FXV1 activation succeeds");
+        ids.push(id);
+    }
 
     let mut samples = Vec::with_capacity(frames);
     for _ in 0..frames {
-        let Some(index) = engine.find_object_index(id) else {
+        let active_ids: Vec<_> = ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                engine
+                    .object_snapshot(*id)
+                    .is_some_and(|object| object.status.is_active())
+            })
+            .collect();
+        if active_ids.is_empty() {
             break;
-        };
+        }
         let started = Instant::now();
-        engine
-            .call_object_function(index, "Advance", Vec::new())
-            .expect("FXV1 Advance succeeds");
+        for id in active_ids {
+            let Some(index) = engine.find_object_index(id) else {
+                continue;
+            };
+            engine
+                .call_object_function(index, "Advance", Vec::new())
+                .expect("FXV1 Advance succeeds");
+        }
         samples.push(started.elapsed());
     }
     let mut sorted = samples.clone();
     sorted.sort_unstable();
     let total: Duration = samples.iter().sum();
-    let surface32_pixels = engine
-        .landscape()
-        .and_then(|landscape| landscape.pixel_grid())
-        .map(|grid| {
-            (0..grid.height() as i32)
-                .flat_map(|y| (0..grid.width() as i32).map(move |x| (x, y)))
-                .filter(|&(x, y)| grid.surface32_pixel_at(x, y).is_some())
-                .count()
-        })
-        .unwrap_or(0);
+    let (surface32_pixels, surface32_checksum) = surface32_state(&engine);
     println!("scenario={relative}");
-    println!("seed={seed} width={width} height={height} x={x} y={y} size={size}");
+    println!(
+        "seed={seed} width={width} height={height} x={center_x} y={y} size={size} volcanoes={volcanoes}"
+    );
     println!("samples={}", samples.len());
     println!(
         "total={total:?} mean={:?}",
@@ -184,5 +227,5 @@ fn main() {
         percentile(&sorted, 0.99),
         sorted.last().copied().unwrap_or_default()
     );
-    println!("surface32_pixels={surface32_pixels}");
+    println!("surface32_pixels={surface32_pixels} surface32_checksum=0x{surface32_checksum:016x}");
 }
