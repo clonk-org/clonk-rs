@@ -145,6 +145,16 @@ impl SectorMap {
         self.rebuild_ranks();
     }
 
+    pub(crate) fn set_master_order_if_changed(&mut self, ids: &[ObjectId]) -> bool {
+        // `set_master_order` keeps old entries after the incoming master list,
+        // so an equal prefix already has the exact resulting order.
+        if self.order.starts_with(ids) {
+            return false;
+        }
+        self.set_master_order(ids.iter().copied());
+        true
+    }
+
     pub(crate) fn add(&mut self, record: SectorObject) {
         if self.memberships.contains_key(&record.id) {
             self.remove(record.id);
