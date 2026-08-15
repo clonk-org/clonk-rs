@@ -3380,7 +3380,7 @@ impl GameApp {
         &mut self,
         source_path: &Path,
         wire_filename: &str,
-        require_activated_client: bool,
+        require_player_client: bool,
     ) -> Result<(), String> {
         let fallback_group_maker = || {
             self.configured_client_player_selection
@@ -3408,7 +3408,7 @@ impl GameApp {
             .ok_or_else(|| "network session is unavailable".to_string())?;
         let client_id = i32::try_from(network.local_client_id())
             .map_err(|_| "local client ID exceeds the PlayerInfo wire field".to_string())?;
-        if require_activated_client && !self.control_clients.is_activated(client_id) {
+        if require_player_client && !self.control_clients.is_activated(client_id) {
             return Err("network client is not active".to_string());
         }
 
