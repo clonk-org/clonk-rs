@@ -7473,6 +7473,7 @@ struct SolidMaskHostStateCache {
 struct HostRequestQueues {
     player_info_updates: Rc<RefCell<Vec<PlayerInfoUpdateRequest>>>,
     player_info_league_progress_updates: Vec<(i32, Option<Vec<u8>>)>,
+    pending_client_updates: Vec<ClientUpdateControlData>,
     pending_remove_player_controls: Vec<RemovePlayerControlData>,
     pending_game_goal_menu_requests: Vec<GameGoalMenuRequest>,
     pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
@@ -9987,6 +9988,7 @@ impl Engine {
             host_requests: HostRequestQueues {
                 player_info_updates: Rc::new(RefCell::new(Vec::new())),
                 player_info_league_progress_updates: Vec::new(),
+                pending_client_updates: Vec::new(),
                 pending_remove_player_controls: Vec::new(),
                 pending_game_goal_menu_requests: Vec::new(),
                 pause_game_requests: Rc::new(RefCell::new(Vec::new())),

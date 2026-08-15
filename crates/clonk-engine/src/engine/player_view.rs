@@ -220,8 +220,9 @@ impl Engine {
                 })
             {
                 self.eliminated_crew_owners.insert(id);
-                if let Some(player) = self.players.get_mut(&id) {
-                    player.eliminate();
+                let newly_eliminated = self.players.get_mut(&id).is_some_and(Player::eliminate);
+                if newly_eliminated {
+                    self.queue_client_deactivation_after_elimination(id);
                 }
             }
         }

@@ -737,6 +737,7 @@ impl Engine {
         }
         // Game.Input is not part of EngineState. A pre-load direct-removal
         // request must not fire against players from the restored game.
+        self.host_requests.pending_client_updates.clear();
         self.host_requests.pending_remove_player_controls.clear();
         // Sound instances are presentation state and are not serialized by
         // C4SoundSystem. Loading a game starts without channels or object
@@ -4144,6 +4145,7 @@ impl Engine {
                         .is_some_and(|player| player.eliminate())
                     {
                         self.eliminated_crew_owners.insert(player_id);
+                        self.queue_client_deactivation_after_elimination(player_id);
                     }
                 }
                 PlayerCommand::Surrender { player_id } => {

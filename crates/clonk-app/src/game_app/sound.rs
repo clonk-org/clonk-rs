@@ -911,6 +911,10 @@ impl GameApp {
                     advance_after_releasing_snapshot_landscape(&mut self.snapshot, || {
                         self.engine.tick()
                     });
+                // C4Player::Eliminate queues synchronized client deactivation
+                // during the simulation frame, before its presentation
+                // snapshot is consumed (src/C4Player.cpp:2015-2037).
+                self.flush_pending_client_updates();
                 // PauseGame is a process-local console request emitted from
                 // scripts during this tick. Native applies it immediately,
                 // then observes HaltCount at the start of the next Execute.

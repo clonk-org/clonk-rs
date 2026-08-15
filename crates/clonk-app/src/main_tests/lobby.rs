@@ -12184,6 +12184,172 @@ fn host_deactivates_playerless_remote_before_the_ready_control_gate() {
 }
 
 #[test]
+fn host_elimination_deactivates_remote_client_after_last_player() {
+    // C4Player::Eliminate queues a synchronized CUT_Activate(false) only
+    // after its last non-eliminated player at a remote client is gone
+    // (oracle 7d43b47b7d789b533f32d005e64596e0a07019cd
+    // src/C4Player.cpp:2015-2037).
+    let mut app = new_running_sandbox_app();
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    app.control_clients.register(3, true, false);
+    app.engine
+        .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(41))
+        .test_value();
+    app.engine
+        .test_player_mut(17)
+        .set_at_client(clonk_engine::PlayerAtClient::new(3));
+
+    let tick = app.local_control_submission_tick();
+    app.apply_ready_controls(
+        tick,
+        vec![NetworkControl::EliminatePlayer(
+            clonk_engine::EliminatePlayerControlData {
+                player: 17,
+                by_client: 0,
+            },
+        )],
+    )
+    .test_value();
+
+    assert_eq!(
+        commands.take_submitted_client_updates(),
+        vec![clonk_engine::ClientUpdateControlData {
+            update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 0,
+            by_client: 0,
+        }]
+    );
+    assert_eq!(
+        app.engine.player(17).map(clonk_engine::Player::status),
+        Some(clonk_engine::PlayerStatus::Eliminated)
+    );
+    assert_eq!(app.engine.snapshot().eliminated_crew_owners, vec![17]);
+    assert!(
+        app.control_clients.is_activated(3),
+        "the synchronized update must not execute locally at submission time"
+    );
+}
+
+#[test]
+fn host_automatic_elimination_deactivates_remote_client_after_last_player() {
+    // C4Player::Execute reaches C4Player::Eliminate on the Tick35 boundary;
+    // its synchronized early deactivation must not wait for player retirement
+    // (oracle 7d43b47b7d789b533f32d005e64596e0a07019cd
+    // src/C4Player.cpp:2015-2037).
+    let mut app = new_running_sandbox_app();
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    app.control_clients.register(3, true, false);
+    app.engine
+        .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(41))
+        .test_value();
+    app.engine
+        .test_player_mut(17)
+        .set_at_client(clonk_engine::PlayerAtClient::new(3));
+    assert!(app.engine.is_control_host());
+    assert!(!app.engine.player(17).test_value().no_elimination_check());
+    assert_eq!(
+        app.engine.player(17).test_value().status(),
+        clonk_engine::PlayerStatus::Active
+    );
+
+    for _ in 0..35 {
+        app.engine.tick().test_value();
+    }
+    assert_eq!(
+        app.engine.player(17).map(clonk_engine::Player::status),
+        Some(clonk_engine::PlayerStatus::Eliminated)
+    );
+    app.flush_pending_client_updates();
+
+    assert_eq!(
+        commands.take_submitted_client_updates(),
+        vec![clonk_engine::ClientUpdateControlData {
+            update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 0,
+            by_client: 0,
+        }]
+    );
+}
+
+#[test]
+fn host_elimination_does_not_deactivate_host_client() {
+    // C4Player::Eliminate gates this update on AtClient > C4ClientIDHost, so
+    // eliminating the host's last player leaves the host active
+    // (oracle 7d43b47b7d789b533f32d005e64596e0a07019cd
+    // src/C4Player.cpp:2023-2035).
+    let mut app = new_running_sandbox_app();
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    app.control_clients.register(0, true, false);
+    app.engine
+        .register_player(PlayerConfig::new(17, "Host").with_player_info_id(41))
+        .test_value();
+    app.engine
+        .test_player_mut(17)
+        .set_at_client(clonk_engine::PlayerAtClient::HOST);
+
+    app.apply_ready_controls(
+        app.local_control_submission_tick(),
+        vec![NetworkControl::EliminatePlayer(
+            clonk_engine::EliminatePlayerControlData {
+                player: 17,
+                by_client: 0,
+            },
+        )],
+    )
+    .test_value();
+
+    assert!(commands.take_submitted_client_updates().is_empty());
+    assert!(app.control_clients.is_activated(0));
+}
+
+#[test]
+fn host_elimination_keeps_remote_client_active_with_another_player() {
+    // C4Player::Eliminate scans every player at AtClient and suppresses the
+    // update when another player is still not eliminated
+    // (oracle 7d43b47b7d789b533f32d005e64596e0a07019cd
+    // src/C4Player.cpp:2026-2035).
+    let mut app = new_running_sandbox_app();
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    app.control_clients.register(3, true, false);
+    for player in [17, 18] {
+        app.engine
+            .register_player(PlayerConfig::new(player, format!("Remote {player}")))
+            .test_value();
+        app.engine
+            .test_player_mut(player)
+            .set_at_client(clonk_engine::PlayerAtClient::new(3));
+    }
+
+    app.apply_ready_controls(
+        app.local_control_submission_tick(),
+        vec![NetworkControl::EliminatePlayer(
+            clonk_engine::EliminatePlayerControlData {
+                player: 17,
+                by_client: 0,
+            },
+        )],
+    )
+    .test_value();
+
+    assert!(commands.take_submitted_client_updates().is_empty());
+    assert_eq!(
+        app.engine.player(18).map(clonk_engine::Player::status),
+        Some(clonk_engine::PlayerStatus::Active)
+    );
+    assert!(app.control_clients.is_activated(3));
+}
+
+#[test]
 fn frozen_lobby_executes_synchronized_activation_immediately() {
     // HandleControlPkt executes synchronized controls immediately while
     // the network is frozen in GS_Lobby, rather than waiting for a game
