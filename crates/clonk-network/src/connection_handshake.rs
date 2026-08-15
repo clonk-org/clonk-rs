@@ -539,6 +539,7 @@ where
                 record_admitted_pong(&connection, &mut liveness, packet);
             }
             ControlMessage::ConnectionRequest(request) => {
+                peer_is_port |= request.port_protocol;
                 authenticated_peer = Some(
                     handle_registered_peer_request(
                         transport,
@@ -1717,6 +1718,56 @@ mod tests {
         assert_eq!(outbound.local_connection_id, 11);
         assert_eq!(outbound.remote_connection_id, 7);
         assert_eq!(outbound.peer_core, alice_core);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn registered_peer_mesh_handshake_records_marker_from_inbound_request() {
+        // ConnRe can be stock-style and omit the marker while the inbound
+        // Conn still proves the peer understands trailing bytes
+        // (src/C4Packet2.cpp:145-149; src/StdCompiler.cpp:228-244).
+        let bob_core = request(4, b"Bob", 0).core;
+        let registry = BTreeMap::from([(bob_core.client_id, bob_core.clone())]);
+        let (inbound_stream, peer_stream) = duplex(4096);
+        let inbound_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(inbound_stream);
+            run_registered_peer_connection_handshake(
+                &mut transport,
+                request(3, b"Alice", 7),
+                &registry,
+            )
+            .await
+        });
+        let mut peer = ControlTransport::new(peer_stream);
+        assert!(matches!(
+            peer.read_message().await.unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+
+        let mut marked_request = request(4, b"Bob", 11);
+        marked_request.port_protocol = true;
+        peer.send_message(ControlMessage::ConnectionRequest(marked_request))
+            .await
+            .unwrap();
+        assert!(matches!(
+            peer.read_message().await.unwrap(),
+            ControlMessage::ConnectionReply(ConnectionReply { ok: true, .. })
+        ));
+        peer.send_message(ControlMessage::ConnectionReply(ConnectionReply {
+            ok: true,
+            message: wire_string(b"accepted"),
+            wrong_password: false,
+            port_protocol: false,
+        }))
+        .await
+        .unwrap();
+
+        let inbound = timeout(Duration::from_secs(1), inbound_task)
+            .await
+            .expect("registered peer should finish after a stock-style reply")
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbound.peer_core, bob_core);
+        assert!(inbound.peer_is_port);
     }
 
     #[tokio::test(flavor = "current_thread")]
