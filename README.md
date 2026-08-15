@@ -46,14 +46,14 @@ Options cover controls (four keyboard sets and four gamepad sets), graphics
 (resolution and scaling), and network settings. The in-game menu holds ten
 save-game slots.
 
-### Proximity voice chat
+### Network voice chat
 
-Network games between Clonk Rust clients support proximity voice. It is off by
-default: open **Options → Audio** and tick **Enable voice chat**. Nothing opens
-the microphone until you do, whatever the rest of this section says. A speaker
-icon appears above the Clonk each participant currently has selected. Enable it
-before hosting or joining; transport negotiation is fixed for that network
-connection.
+Network games between Clonk Rust clients support voice in the network lobby and
+proximity voice during play. It is off by default: open **Options → Audio** and
+tick **Enable voice chat**. Nothing opens the microphone until you do, whatever
+the rest of this section says. In a running game, a speaker icon appears above
+the Clonk each participant currently has selected. Enable voice before hosting
+or joining; transport negotiation is fixed for that network connection.
 
 The Audio sheet carries the settings you are likely to change — the opt-in,
 the playback volume, the push-to-talk key, and **Open mic (voice activated)**.
@@ -67,8 +67,8 @@ Once enabled, `ActivationMode` chooses how the microphone opens:
   while a key is held. That key is the backquote (`` ` ``) unless you change
   `PushToTalkKey`, which the Audio sheet's **Push to talk** button rebinds.
 - `VoiceActivated` (**Open mic** ticked) opens it whenever you could speak —
-  in a running game, with the window focused and a Clonk selected — and
-  transmits only while it hears you.
+  with the window focused, either as a joined lobby client or in a running game
+  with a Clonk selected — and transmits only while it hears you.
   `ActivationThreshold` (0–100) sets how loud that has to be, spread
   evenly over −60…0 dBFS rather than over raw amplitude, so the useful
   settings sit in the middle of the range rather than bunched at the bottom;
@@ -106,10 +106,11 @@ can be switched off on its own under **Options → Advanced → Voice**:
 All three start on. They follow the microphone opt-in rather than adding
 another one, and none of them changes the fixed 20 ms frames voice travels in.
 
-Speech fades linearly over 700 landscape pixels. Terrain does not block it, so
-a wall or cave between two Clonks has no effect beyond their distance. Voice
-uses best-effort UDP between peers that positively negotiate support; older
-LegacyClonk clients remain compatible but silent.
+Lobby speech is centered and plays at the configured volume, independent of
+players or crew. During play, speech fades linearly over 700 landscape pixels.
+Terrain does not block it, so a wall or cave between two Clonks has no effect
+beyond their distance. Voice uses best-effort UDP between peers that positively
+negotiate support; older LegacyClonk clients remain compatible but silent.
 
 Voice packets are encrypted. Each connection agrees its own key over the game's
 reliable control stream, so somebody watching the network cannot listen in, and
