@@ -3986,4 +3986,46 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             expect_eq(&label, frame, "y", i(fr, "y"), fixtoi(fix_y) as i64);
         }
     }
+
+    // 17. DFA_FLOAT clamps raw C4Fixed directions to FIXED100(Physical.Float),
+    // including the zero default for a real resource without [Physical]
+    // (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310). Resource provenance
+    // and the FXP1-shaped fixture are covered by the focused engine test; this
+    // bounded oracle keeps the raw clamp itself in the C++ golden.
+    for (idx, case) in golden["native_float"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let limit = fixed100(i(case, "physical_float") as i32);
+        let mut xdir = C4Fixed::from_raw(i(case, "xdir_before") as i32);
+        let mut ydir = C4Fixed::from_raw(i(case, "ydir_before") as i32);
+        if ydir < -limit {
+            ydir = -limit;
+        }
+        if ydir > limit {
+            ydir = limit;
+        }
+        if xdir > limit {
+            xdir = limit;
+        }
+        if xdir < -limit {
+            xdir = -limit;
+        }
+        expect_eq(
+            "native_float",
+            idx,
+            "xdir_after",
+            i(case, "xdir_after"),
+            i64::from(xdir.val()),
+        );
+        expect_eq(
+            "native_float",
+            idx,
+            "ydir_after",
+            i(case, "ydir_after"),
+            i64::from(ydir.val()),
+        );
+    }
 }

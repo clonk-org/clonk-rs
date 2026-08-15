@@ -142,11 +142,11 @@ pub struct Definition {
     /// `C4Def::Load` hands `Game.AddDirectoryForMonitoring` (`:558-560`).
     /// `None` for definitions built from script rather than a group.
     pub(crate) source_path: Option<std::path::PathBuf>,
-    /// True when a resource supplies non-default `[Physical]` metadata.
-    /// Resource-backed definitions use C++'s native procedure semantics even
-    /// when Float is omitted and therefore has its zero default; resources
-    /// without a physical section retain the additive movement-profile
-    /// fallback used by synthetic fixtures and presentation-only content.
+    /// True for definitions parsed from a C4 resource group. Resource-backed
+    /// definitions use C++'s native procedure semantics even when Float and
+    /// the whole `[Physical]` section are omitted and therefore default to
+    /// zero; script-built fixtures retain the additive movement-profile
+    /// fallback.
     pub(crate) resource_backed: bool,
     /// Shared compiled script: `host_world_context()` hands clones of this
     /// `Arc` to host functions so nested script calls (Find_Func, GameCall)
@@ -909,7 +909,7 @@ impl Definition {
             .unwrap_or_else(|| "Undefined".to_string());
         let mut definition =
             Definition::from_script(resource.core.id.clone(), name, resource.script.combined())?;
-        definition.resource_backed = resource.core.physical != PhysicalInfo::default();
+        definition.resource_backed = true;
         definition.description = resource.description().map(str::to_owned);
         definition.set_clonk_names(resource.clonk_names.clone());
         // Real content gets the C++ callback arguments (no parameters;

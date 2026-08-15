@@ -215,6 +215,68 @@ fn resource_float_without_float_physical_clamps_raw_velocity() {
 }
 
 #[test]
+fn zero_physical_resource_float_clamps_raw_velocity() {
+    let temp = tempfile::tempdir().test_value();
+    let definition_path = temp.path().join("Precipitation.c4d");
+    std::fs::create_dir(&definition_path).test_value();
+    std::fs::write(
+        definition_path.join("DefCore.txt"),
+        b"[DefCore]\nid=FXP1\nName=Wolke\n",
+    )
+    .test_value();
+    std::fs::write(
+        definition_path.join("ActMap.txt"),
+        b"[Action]\nName=Process\nProcedure=FLOAT\nLength=15\nDelay=2\nNextAction=Process\n",
+    )
+    .test_value();
+    std::fs::write(definition_path.join("Script.c"), b"#strict\n").test_value();
+
+    let group = clonk_resources::Group::open(&definition_path).test_value();
+    let resource = ResourceDefinitionData::load(&group).test_value();
+    assert_eq!(resource.core.physical, PhysicalInfo::default());
+
+    let mut definition = test_definition("FXP1", "Wolke", "#strict\n");
+    Engine::apply_resource_core(&mut definition, &resource.core);
+    definition.configure_actions(
+        Some("Process".to_string()),
+        HashMap::from([(
+            "Process".to_string(),
+            ActionSpec::default()
+                .with_procedure("FLOAT")
+                .with_length(15)
+                .with_delay(2)
+                .with_next("Process"),
+        )]),
+    );
+
+    let mut engine = Engine::with_seed(0);
+    engine.register_test_definition(definition);
+    let object = engine.spawn_test_object(
+        SpawnConfig::new("FXP1")
+            .with_action(ActionState::new("Process"))
+            .with_category(CATEGORY_OBJECT)
+            .with_mobile(true),
+    );
+    let index = engine.test_object_index(object);
+    engine.objects[index].set_fixed_velocity(FixedVec2::new(
+        C4Fixed::from_raw(123_456),
+        C4Fixed::from_raw(-654_321),
+    ));
+
+    engine.apply_physics_at_index(index).test_value();
+
+    assert_eq!(
+        engine.objects[index].fixed_velocity,
+        FixedVec2::ZERO,
+        concat!(
+            "zero-default C4PhysicalInfo still clamps DFA_FLOAT to ",
+            "FIXED100(Physical.Float)=0 (oracle-src-pinned ",
+            "src/C4InfoCore.cpp:239-242; src/C4Object.cpp:5291-5310)"
+        )
+    );
+}
+
+#[test]
 fn float_physical_preserves_hazard_bullet_velocity_above_synthetic_limit() {
     // Hazard's SHT1 Travel action uses DFA_FLOAT with Float=100000. C++
     // clamps xdir/ydir only to FIXED100(Float), then sets Mobile
