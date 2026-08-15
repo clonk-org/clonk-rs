@@ -1515,6 +1515,27 @@ public func SeedFull()
         );
     }
 
+    #[test]
+    fn unchanged_sector_master_order_needs_no_rank_refresh() {
+        // C4Object::ForcePosition updates sectors after an integer move
+        // (C4Movement.cpp:536-544); C4LSectors::Update retains existing links
+        // when position and shape area are unchanged (C4Sector.cpp:107-144).
+        let objects = [
+            find_world_object(1, "ROCK", 10, 10, 1),
+            find_world_object(2, "ROCK", 20, 10, 1),
+        ];
+        let landscape = Landscape::new(150, vec![120; 150]).test_value();
+        let definitions = HashMap::new();
+        let (width, height) = crate::compat::landscape_extent(&landscape);
+        let mut sectors = build_host_sector_map(objects.iter(), &definitions, width, height);
+
+        assert!(!sectors.set_master_order_if_changed(&[ObjectId::new(1)]));
+        assert!(sectors.set_master_order_if_changed(&[
+            ObjectId::new(2),
+            ObjectId::new(1),
+        ]));
+    }
+
     /// `C4FindObject::Find`/`FindMany` walk `Objs.First -> Next`, the forward
     /// C4GameObjects master list (C4FindObject.cpp:188-216), never a
     /// storage/creation order. `C4ObjectList::Add(stMain)` inserts a new

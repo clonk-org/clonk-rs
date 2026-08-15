@@ -5037,7 +5037,7 @@ impl HostWorldContext {
             return;
         };
         let sectors = Rc::make_mut(sectors);
-        sectors.set_master_order(master_order.iter().copied());
+        sectors.set_master_order_if_changed(master_order);
         sectors.update(record);
     }
 
