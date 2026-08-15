@@ -14,9 +14,9 @@
 //! also the screenshot and deterministic-test readback source.
 
 use clonk_graphics::{
-    ClipperProjection, GpuBlend, GpuCommand, GpuGammaMode, GpuObjectSprite, GpuPresentation,
-    GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSolidAlphaMode, GpuSolidVertex, GpuSpriteQuad,
-    GpuTextureFormat, GpuTextureId, GpuTextureResource, GpuVertex, Rect,
+    ClipperProjection, GpuBlend, GpuCommand, GpuGammaMode, GpuObjectSprite, GpuOuterModulation,
+    GpuPresentation, GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSolidAlphaMode, GpuSolidVertex,
+    GpuSpriteQuad, GpuTextureFormat, GpuTextureId, GpuTextureResource, GpuVertex, Rect,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -592,6 +592,7 @@ struct VertexOutput {
 @group(0) @binding(0) var gamma_lut: texture_2d<u32>;
 @group(1) @binding(0) var image: texture_2d<f32>;
 @group(1) @binding(1) var image_sampler: sampler;
+@group(1) @binding(2) var owner_image: texture_2d<f32>;
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
@@ -621,18 +622,24 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     return output;
 }
 
-fn tiled_texel(image_size: vec2<i32>, tile_origin: vec2<f32>, tile_size: f32, relative: vec2<i32>) -> vec4<f32> {
+fn tiled_texel(image_size: vec2<i32>, tile_origin: vec2<f32>, tile_size: f32, relative: vec2<i32>, owner_layer: bool) -> vec4<f32> {
     let size = max(i32(tile_size), 1);
     let local = clamp(relative, vec2<i32>(0), vec2<i32>(size - 1));
     let position = vec2<i32>(tile_origin) + local;
     if any(position < vec2<i32>(0)) || any(position >= image_size) {
         return vec4<f32>(1.0, 1.0, 1.0, 0.0);
     }
+    if owner_layer {
+        return textureLoad(owner_image, position, 0);
+    }
     return textureLoad(image, position, 0);
 }
 
-fn sample_native_tile(uv: vec2<f32>, tile_size: f32) -> vec4<f32> {
-    let image_size = vec2<i32>(textureDimensions(image));
+fn sample_native_tile(uv: vec2<f32>, tile_size: f32, owner_layer: bool) -> vec4<f32> {
+    var image_size = vec2<i32>(textureDimensions(image));
+    if owner_layer {
+        image_size = vec2<i32>(textureDimensions(owner_image));
+    }
     let size = max(tile_size, 1.0);
     let source_edge = uv * vec2<f32>(image_size);
     let tile_origin = floor(source_edge / vec2<f32>(size)) * size;
@@ -640,21 +647,27 @@ fn sample_native_tile(uv: vec2<f32>, tile_size: f32) -> vec4<f32> {
     let base = vec2<i32>(floor(source));
     let fraction = fract(source);
     let top = mix(
-        tiled_texel(image_size, tile_origin, size, base),
-        tiled_texel(image_size, tile_origin, size, base + vec2<i32>(1, 0)),
+        tiled_texel(image_size, tile_origin, size, base, owner_layer),
+        tiled_texel(image_size, tile_origin, size, base + vec2<i32>(1, 0), owner_layer),
         fraction.x,
     );
     let bottom = mix(
-        tiled_texel(image_size, tile_origin, size, base + vec2<i32>(0, 1)),
-        tiled_texel(image_size, tile_origin, size, base + vec2<i32>(1, 1)),
+        tiled_texel(image_size, tile_origin, size, base + vec2<i32>(0, 1), owner_layer),
+        tiled_texel(image_size, tile_origin, size, base + vec2<i32>(1, 1), owner_layer),
         fraction.x,
     );
     return mix(top, bottom, fraction.y);
 }
 
-fn sample_nearest(uv: vec2<f32>) -> vec4<f32> {
-    let image_size = vec2<i32>(textureDimensions(image));
+fn sample_nearest(uv: vec2<f32>, owner_layer: bool) -> vec4<f32> {
+    var image_size = vec2<i32>(textureDimensions(image));
+    if owner_layer {
+        image_size = vec2<i32>(textureDimensions(owner_image));
+    }
     let source = vec2<i32>(floor(uv * vec2<f32>(image_size)));
+    if owner_layer {
+        return textureLoad(owner_image, clamp(source, vec2<i32>(0), image_size - vec2<i32>(1)), 0);
+    }
     return textureLoad(image, clamp(source, vec2<i32>(0), image_size - vec2<i32>(1)), 0);
 }
 
@@ -675,11 +688,12 @@ fn apply_gamma(color: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let linear = (input.packed_flags & 2u) != 0u;
+    let owner_layer = (input.packed_flags & 32u) != 0u;
     var source: vec4<f32>;
     if linear {
-        source = sample_native_tile(input.uv, input.sample_tile_size);
+        source = sample_native_tile(input.uv, input.sample_tile_size, owner_layer);
     } else {
-        source = sample_nearest(input.uv);
+        source = sample_nearest(input.uv, owner_layer);
     }
     var rgb = source.rgb;
     var alpha = source.a;
@@ -1198,6 +1212,19 @@ pub enum GpuRendererError {
     },
     #[error("compact object sprite uses reserved packed flags {flags:#x}")]
     InvalidObjectSpriteFlags { flags: u32 },
+    #[error("compact owner-layer object sprite has no companion owner texture")]
+    ObjectOwnerLayerWithoutTexture,
+    #[error(
+        "compact object texture pair has different extents: {texture:?}={texture_extent:?}, {owner_texture:?}={owner_extent:?}"
+    )]
+    ObjectTextureExtentMismatch {
+        texture: GpuTextureId,
+        owner_texture: GpuTextureId,
+        texture_extent: [u32; 2],
+        owner_extent: [u32; 2],
+    },
+    #[error("replacement compact object batch changes outer-modulation policy at sprite {sprite}")]
+    MixedReplaceObjectOuterModulation { sprite: usize },
     #[error("GPU vertex stream exceeds wgpu's u32 draw range")]
     VertexRangeOverflow,
     #[error("GPU readback size overflow")]
@@ -1757,6 +1784,49 @@ struct QuadRunKey {
     blend: GpuBlend,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ObjectBindingKey {
+    texture: GpuTextureId,
+    owner_texture: Option<GpuTextureId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ObjectRunKey {
+    binding: ObjectBindingKey,
+    clip: Option<Rect>,
+    blend: GpuBlend,
+    gamma: bool,
+    replace_outer_applies: Option<bool>,
+}
+
+fn object_run_key(command: &GpuCommand) -> Option<ObjectRunKey> {
+    let GpuCommand::ObjectBatch {
+        texture,
+        owner_texture,
+        sprites,
+        clip,
+        blend,
+        gamma,
+    } = command
+    else {
+        return None;
+    };
+    Some(ObjectRunKey {
+        binding: ObjectBindingKey {
+            texture: *texture,
+            owner_texture: *owner_texture,
+        },
+        clip: *clip,
+        blend: *blend,
+        gamma: *gamma,
+        replace_outer_applies: (*blend == GpuBlend::Replace).then(|| {
+            sprites
+                .first()
+                .is_some_and(|sprite| sprite.outer_modulation() != GpuOuterModulation::Ignore)
+        }),
+    })
+}
+
 fn quad_run_key(command: &GpuCommand) -> Option<QuadRunKey> {
     match command {
         GpuCommand::Quad {
@@ -1775,19 +1845,6 @@ fn quad_run_key(command: &GpuCommand) -> Option<QuadRunKey> {
             blend: *blend,
         }),
         GpuCommand::SpriteBatch {
-            texture,
-            clip,
-            blend,
-            ..
-        } => Some(QuadRunKey {
-            binding: QuadBindingKey {
-                texture: *texture,
-                sampler: sampler_key(GpuSampler::Nearest),
-            },
-            clip: *clip,
-            blend: *blend,
-        }),
-        GpuCommand::ObjectBatch {
             texture,
             clip,
             blend,
@@ -1876,7 +1933,7 @@ impl SpriteProjection {
 enum DrawKind {
     Quad(QuadBindingKey),
     Sprite(QuadBindingKey),
-    ObjectSprite(QuadBindingKey),
+    ObjectSprite(ObjectRunKey),
     Landscape(LandscapeBindingKey),
     LandscapeInstance(LandscapeBindingKey),
     Solid { alpha_mode: GpuSolidAlphaMode },
@@ -2085,6 +2142,7 @@ pub struct RetainedGpuRenderer {
     texture_epoch: u64,
     textures: HashMap<GpuTextureId, CachedTexture>,
     quad_bind_groups: HashMap<QuadBindingKey, wgpu::BindGroup>,
+    object_bind_groups: HashMap<ObjectBindingKey, wgpu::BindGroup>,
     landscape_bind_groups: HashMap<LandscapeBindingKey, wgpu::BindGroup>,
 
     gamma_texture: wgpu::Texture,
@@ -2093,6 +2151,7 @@ pub struct RetainedGpuRenderer {
     gamma_revision: Option<u64>,
 
     quad_bind_group_layout: wgpu::BindGroupLayout,
+    object_bind_group_layout: wgpu::BindGroupLayout,
     landscape_bind_group_layout: wgpu::BindGroupLayout,
     present_bind_group_layout: wgpu::BindGroupLayout,
     quad_replace_pipeline: wgpu::RenderPipeline,
@@ -2232,6 +2291,15 @@ impl RetainedGpuRenderer {
                     sampler_layout_entry(1),
                 ],
             });
+        let object_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("lc_gpu_object_sprite_layout"),
+                entries: &[
+                    texture_layout_entry(0, wgpu::TextureSampleType::Float { filterable: true }),
+                    sampler_layout_entry(1),
+                    texture_layout_entry(2, wgpu::TextureSampleType::Float { filterable: true }),
+                ],
+            });
         let landscape_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("lc_gpu_landscape_layout"),
@@ -2268,6 +2336,15 @@ impl RetainedGpuRenderer {
             ],
             immediate_size: 0,
         });
+        let object_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("lc_gpu_object_sprite_pipeline_layout"),
+                bind_group_layouts: &[
+                    Some(&gamma_bind_group_layout),
+                    Some(&object_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
         let landscape_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("lc_gpu_landscape_pipeline_layout"),
@@ -2347,21 +2424,21 @@ impl RetainedGpuRenderer {
         let object_sprite_replace_pipeline = object_sprite_scene_pipeline(
             device,
             "lc_gpu_object_sprite_replace",
-            &quad_pipeline_layout,
+            &object_pipeline_layout,
             &object_sprite_shader,
             GpuBlend::Replace,
         );
         let object_sprite_normal_pipeline = object_sprite_scene_pipeline(
             device,
             "lc_gpu_object_sprite_normal",
-            &quad_pipeline_layout,
+            &object_pipeline_layout,
             &object_sprite_shader,
             GpuBlend::Normal,
         );
         let object_sprite_additive_pipeline = object_sprite_scene_pipeline(
             device,
             "lc_gpu_object_sprite_additive",
-            &quad_pipeline_layout,
+            &object_pipeline_layout,
             &object_sprite_shader,
             GpuBlend::Additive,
         );
@@ -2586,12 +2663,14 @@ impl RetainedGpuRenderer {
             texture_epoch: 0,
             textures: HashMap::new(),
             quad_bind_groups: HashMap::new(),
+            object_bind_groups: HashMap::new(),
             landscape_bind_groups: HashMap::new(),
             gamma_texture,
             _gamma_view: gamma_view,
             gamma_bind_group,
             gamma_revision: None,
             quad_bind_group_layout,
+            object_bind_group_layout,
             landscape_bind_group_layout,
             present_bind_group_layout,
             quad_replace_pipeline,
@@ -2960,11 +3039,15 @@ impl RetainedGpuRenderer {
         let solid_rect_instance_bytes = packed_solid_rect_instance_bytes(&solid_rect_instances);
         self.ensure_bind_groups(device, &calls)?;
         let mut used_quad_bindings = HashSet::new();
+        let mut used_object_bindings = HashSet::new();
         let mut used_landscape_bindings = HashSet::new();
         for call in &calls {
             match call.kind {
-                DrawKind::Quad(key) | DrawKind::Sprite(key) | DrawKind::ObjectSprite(key) => {
+                DrawKind::Quad(key) | DrawKind::Sprite(key) => {
                     used_quad_bindings.insert(key);
+                }
+                DrawKind::ObjectSprite(key) => {
+                    used_object_bindings.insert(key.binding);
                 }
                 DrawKind::Landscape(key) | DrawKind::LandscapeInstance(key) => {
                     used_landscape_bindings.insert(key);
@@ -2978,6 +3061,8 @@ impl RetainedGpuRenderer {
         // larger bounded LRU below and survive temporary invisibility.
         self.quad_bind_groups
             .retain(|key, _| used_quad_bindings.contains(key));
+        self.object_bind_groups
+            .retain(|key, _| used_object_bindings.contains(key));
         self.landscape_bind_groups
             .retain(|key, _| used_landscape_bindings.contains(key));
         self.ensure_vertex_buffer(device, vertex_bytes.len())?;
@@ -3201,6 +3286,7 @@ impl RetainedGpuRenderer {
         // sampler, so both have to be rebuilt against the new policy.
         self.textures.clear();
         self.quad_bind_groups.clear();
+        self.object_bind_groups.clear();
     }
 
     /// Opt in to alpha-weighted magnification of the landscape. C++ blits the
@@ -3339,6 +3425,7 @@ impl RetainedGpuRenderer {
             },
         );
         self.quad_bind_groups.clear();
+        self.object_bind_groups.clear();
         Ok(())
     }
 
@@ -3451,6 +3538,12 @@ impl RetainedGpuRenderer {
         let retained = self.textures.keys().copied().collect::<HashSet<_>>();
         self.quad_bind_groups
             .retain(|key, _| retained.contains(&key.texture) && !replaced.contains(&key.texture));
+        self.object_bind_groups.retain(|key, _| {
+            [Some(key.texture), key.owner_texture]
+                .into_iter()
+                .flatten()
+                .all(|id| retained.contains(&id) && !replaced.contains(&id))
+        });
         self.landscape_bind_groups.retain(|key, _| {
             [Some(key.base), key.mask, key.liquid]
                 .into_iter()
@@ -3607,9 +3700,12 @@ impl RetainedGpuRenderer {
                     if sprites.is_empty() {
                         continue;
                     }
-                    let run = quad_run_key(command)
+                    let run = object_run_key(command)
                         .expect("object batches always have a textured run key");
                     self.require_format(run.binding.texture, GpuTextureFormat::Rgba8)?;
+                    if let Some(owner_texture) = run.binding.owner_texture {
+                        self.require_format(owner_texture, GpuTextureFormat::Rgba8)?;
+                    }
                     let Some(projection) =
                         draw_projection(run.clip, scene.logical_extent, presentation)?
                     else {
@@ -3631,7 +3727,7 @@ impl RetainedGpuRenderer {
                             vertices: start..object_sprite_instance_count(object_sprite_instances)?,
                             scissor: projection.scissor,
                             blend: run.blend,
-                            kind: DrawKind::ObjectSprite(run.binding),
+                            kind: DrawKind::ObjectSprite(run),
                         },
                     );
                 }
@@ -3889,7 +3985,7 @@ impl RetainedGpuRenderer {
     ) -> Result<(), GpuRendererError> {
         for call in calls {
             match call.kind {
-                DrawKind::Quad(key) | DrawKind::Sprite(key) | DrawKind::ObjectSprite(key)
+                DrawKind::Quad(key) | DrawKind::Sprite(key)
                     if !self.quad_bind_groups.contains_key(&key) =>
                 {
                     let texture = self
@@ -3918,6 +4014,41 @@ impl RetainedGpuRenderer {
                         ],
                     });
                     self.quad_bind_groups.insert(key, bind_group);
+                }
+                DrawKind::ObjectSprite(run)
+                    if !self.object_bind_groups.contains_key(&run.binding) =>
+                {
+                    let key = run.binding;
+                    let texture = self
+                        .textures
+                        .get(&key.texture)
+                        .ok_or(GpuRendererError::MissingTexture(key.texture))?;
+                    let owner = match key.owner_texture {
+                        Some(id) => self
+                            .textures
+                            .get(&id)
+                            .ok_or(GpuRendererError::MissingTexture(id))?,
+                        None => texture,
+                    };
+                    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("lc_gpu_object_sprite_bind_group"),
+                        layout: &self.object_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&texture.view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&self.nearest_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(&owner.view),
+                            },
+                        ],
+                    });
+                    self.object_bind_groups.insert(key, bind_group);
                 }
                 DrawKind::Landscape(key) | DrawKind::LandscapeInstance(key)
                     if !self.landscape_bind_groups.contains_key(&key) =>
@@ -4285,8 +4416,8 @@ impl RetainedGpuRenderer {
                     });
                     pass.set_bind_group(
                         1,
-                        self.quad_bind_groups
-                            .get(&key)
+                        self.object_bind_groups
+                            .get(&key.binding)
                             .expect("object sprite binding was prepared"),
                         &[],
                     );
@@ -5391,14 +5522,45 @@ fn validate_scene(
             }
             GpuCommand::ObjectBatch {
                 texture,
+                owner_texture,
                 sprites,
                 clip,
+                blend,
                 ..
             } => {
                 if sprites.is_empty() {
                     continue;
                 }
                 require_declared_format(&resources, *texture, GpuTextureFormat::Rgba8)?;
+                if let Some(owner_texture) = owner_texture {
+                    require_declared_format(&resources, *owner_texture, GpuTextureFormat::Rgba8)?;
+                    let texture_extent = resources
+                        .get(texture)
+                        .expect("declared base texture was just validated")
+                        .extent;
+                    let owner_extent = resources
+                        .get(owner_texture)
+                        .expect("declared owner texture was just validated")
+                        .extent;
+                    if texture_extent != owner_extent {
+                        return Err(GpuRendererError::ObjectTextureExtentMismatch {
+                            texture: *texture,
+                            owner_texture: *owner_texture,
+                            texture_extent,
+                            owner_extent,
+                        });
+                    }
+                }
+                if *blend == GpuBlend::Replace {
+                    let outer_applies = sprites.first().is_some_and(|sprite| {
+                        sprite.outer_modulation() != GpuOuterModulation::Ignore
+                    });
+                    if let Some(sprite) = sprites.iter().position(|sprite| {
+                        (sprite.outer_modulation() != GpuOuterModulation::Ignore) != outer_applies
+                    }) {
+                        return Err(GpuRendererError::MixedReplaceObjectOuterModulation { sprite });
+                    }
+                }
                 let projection = draw_projection(*clip, scene.logical_extent, presentation)?;
                 for sprite in sprites {
                     if !sprite
@@ -5412,6 +5574,9 @@ fn validate_scene(
                         return Err(GpuRendererError::NonFiniteCoordinate);
                     }
                     validate_object_sprite_flags(*sprite)?;
+                    if sprite.owner_layer() && owner_texture.is_none() {
+                        return Err(GpuRendererError::ObjectOwnerLayerWithoutTexture);
+                    }
                     validate_object_sprite_sample_tile(*sprite)?;
                     if let Some(projection) = projection.as_ref() {
                         for position in sprite.positions {
@@ -8035,6 +8200,16 @@ mod tests {
             mask: None,
             liquid: None,
         };
+        let object = ObjectRunKey {
+            binding: ObjectBindingKey {
+                texture,
+                owner_texture: None,
+            },
+            clip: None,
+            blend: GpuBlend::Normal,
+            gamma: false,
+            replace_outer_applies: None,
+        };
         let call = |kind| DrawCall {
             vertices: 0..1,
             scissor: Scissor {
@@ -8056,7 +8231,7 @@ mod tests {
             calls: vec![
                 call(DrawKind::Quad(quad)),
                 call(DrawKind::Sprite(quad)),
-                call(DrawKind::ObjectSprite(quad)),
+                call(DrawKind::ObjectSprite(object)),
                 call(DrawKind::Landscape(landscape)),
                 call(DrawKind::LandscapeInstance(landscape)),
                 call(DrawKind::Solid {
@@ -8674,11 +8849,102 @@ mod tests {
             .expect("object shader has a fragment stage")
             .1;
         assert!(fragment.contains(
-            "var source: vec4<f32>;\n    if linear {\n        source = sample_native_tile(input.uv, input.sample_tile_size);\n    } else {\n        source = sample_nearest(input.uv);\n    }"
+            "var source: vec4<f32>;\n    if linear {\n        source = sample_native_tile(input.uv, input.sample_tile_size, owner_layer);\n    } else {\n        source = sample_nearest(input.uv, owner_layer);\n    }"
         ));
         assert_eq!(fragment.matches("sample_native_tile(").count(), 1);
         assert_eq!(fragment.matches("sample_nearest(").count(), 1);
         assert!(!fragment.contains("select("));
+    }
+
+    #[test]
+    fn compact_object_shader_selects_companion_texture_from_bit_five() {
+        assert!(OBJECT_SPRITE_SHADER
+            .contains("@group(1) @binding(2) var owner_image: texture_2d<f32>;"));
+        let fragment = OBJECT_SPRITE_SHADER
+            .split_once("@fragment")
+            .expect("object shader has a fragment stage")
+            .1;
+        assert!(fragment.contains("let owner_layer = (input.packed_flags & 32u) != 0u;"));
+        assert!(
+            fragment.contains("sample_native_tile(input.uv, input.sample_tile_size, owner_layer)")
+        );
+        assert!(fragment.contains("sample_nearest(input.uv, owner_layer)"));
+    }
+
+    #[test]
+    fn compact_object_run_key_splits_pair_gamma_and_required_replace_outer_boundaries() {
+        let texture = GpuTextureId::fresh();
+        let owner_a = GpuTextureId::fresh();
+        let owner_b = GpuTextureId::fresh();
+        let command = |owner_texture, gamma, blend, outer_modulation| GpuCommand::ObjectBatch {
+            texture,
+            owner_texture,
+            sprites: vec![GpuObjectSprite::new(
+                [[0.0, 0.0, 1.0]; 4],
+                [0.0, 0.0, 1.0, 1.0],
+                [0x00ff_ffff; 4],
+                GpuSampler::Nearest,
+                0.0,
+                false,
+                outer_modulation,
+            )],
+            clip: None,
+            blend,
+            gamma,
+        };
+        let base = object_run_key(&command(
+            Some(owner_a),
+            false,
+            GpuBlend::Replace,
+            GpuOuterModulation::Combine,
+        ))
+        .expect("object command has a run key");
+
+        assert_ne!(
+            base,
+            object_run_key(&command(
+                Some(owner_b),
+                false,
+                GpuBlend::Replace,
+                GpuOuterModulation::Combine,
+            ))
+            .expect("second resource pair has a run key")
+        );
+        assert_ne!(
+            base,
+            object_run_key(&command(
+                Some(owner_a),
+                true,
+                GpuBlend::Replace,
+                GpuOuterModulation::Combine,
+            ))
+            .expect("gamma boundary has a run key")
+        );
+        assert_ne!(
+            base,
+            object_run_key(&command(
+                Some(owner_a),
+                false,
+                GpuBlend::Replace,
+                GpuOuterModulation::Ignore,
+            ))
+            .expect("replace outer boundary has a run key")
+        );
+        assert_eq!(
+            object_run_key(&command(
+                Some(owner_a),
+                false,
+                GpuBlend::Normal,
+                GpuOuterModulation::Combine,
+            )),
+            object_run_key(&command(
+                Some(owner_a),
+                false,
+                GpuBlend::Normal,
+                GpuOuterModulation::Ignore,
+            )),
+            "non-replacement outer policy is carried per instance"
+        );
     }
 
     #[test]
@@ -8692,6 +8958,7 @@ mod tests {
             textures: vec![rgba_resource(texture, [255; 4])],
             commands: vec![GpuCommand::ObjectBatch {
                 texture,
+                owner_texture: None,
                 sprites: vec![GpuObjectSprite::new(
                     [[0.0, 0.0, 1.0]; 4],
                     [0.0, 0.0, 1.0, 1.0],
@@ -8745,6 +9012,142 @@ mod tests {
     }
 
     #[test]
+    fn compact_object_validation_rejects_owner_layer_without_companion() {
+        let texture = GpuTextureId::fresh();
+        let sprite = GpuObjectSprite::new(
+            [[0.0, 0.0, 1.0]; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Inherit,
+        )
+        .with_owner_layer();
+        let scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![rgba_resource(texture, [255; 4])],
+            vec![GpuCommand::ObjectBatch {
+                texture,
+                owner_texture: None,
+                sprites: vec![sprite],
+                clip: None,
+                blend: GpuBlend::Normal,
+                gamma: false,
+            }],
+        );
+
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(1, 1)),
+            Err(GpuRendererError::ObjectOwnerLayerWithoutTexture)
+        ));
+    }
+
+    #[test]
+    fn compact_object_validation_requires_compatible_owner_texture() {
+        let texture = GpuTextureId::fresh();
+        let owner_texture = GpuTextureId::fresh();
+        let sprite = GpuObjectSprite::new(
+            [[0.0, 0.0, 1.0]; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Inherit,
+        )
+        .with_owner_layer();
+        let command = GpuCommand::ObjectBatch {
+            texture,
+            owner_texture: Some(owner_texture),
+            sprites: vec![sprite],
+            clip: None,
+            blend: GpuBlend::Normal,
+            gamma: false,
+        };
+        let scene = |owner| {
+            let mut textures = vec![rgba_resource(texture, [255; 4])];
+            textures.extend(owner);
+            test_scene(
+                [1, 1],
+                Color::transparent(),
+                textures,
+                vec![command.clone()],
+            )
+        };
+        let presentation = GpuPresentation::identity(1, 1);
+
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(&scene(None), &presentation),
+            Err(GpuRendererError::MissingTexture(id)) if id == owner_texture
+        ));
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(
+                &scene(Some(r8_resource(owner_texture, 255))),
+                &presentation,
+            ),
+            Err(GpuRendererError::TextureFormatMismatch {
+                id,
+                expected: GpuTextureFormat::Rgba8,
+                actual: GpuTextureFormat::R8,
+            }) if id == owner_texture
+        ));
+        let mismatched = GpuTextureResource::immutable_rgba(
+            owner_texture,
+            2,
+            1,
+            Arc::from([255_u8; 8].as_slice()),
+        );
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(&scene(Some(mismatched)), &presentation),
+            Err(GpuRendererError::ObjectTextureExtentMismatch {
+                texture: actual_texture,
+                owner_texture: actual_owner,
+                texture_extent: [1, 1],
+                owner_extent: [2, 1],
+            }) if actual_texture == texture && actual_owner == owner_texture
+        ));
+    }
+
+    #[test]
+    fn compact_object_validation_rejects_mixed_replace_outer_policy() {
+        let texture = GpuTextureId::fresh();
+        let sprite = |outer_modulation| {
+            GpuObjectSprite::new(
+                [[0.0, 0.0, 1.0]; 4],
+                [0.0, 0.0, 1.0, 1.0],
+                [0x00ff_ffff; 4],
+                GpuSampler::Nearest,
+                0.0,
+                false,
+                outer_modulation,
+            )
+        };
+        let scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![rgba_resource(texture, [255; 4])],
+            vec![GpuCommand::ObjectBatch {
+                texture,
+                owner_texture: None,
+                sprites: vec![
+                    sprite(GpuOuterModulation::Combine),
+                    sprite(GpuOuterModulation::Ignore),
+                ],
+                clip: None,
+                blend: GpuBlend::Replace,
+                gamma: false,
+            }],
+        );
+
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(1, 1)),
+            Err(GpuRendererError::MixedReplaceObjectOuterModulation { sprite: 1 })
+        ));
+    }
+
+    #[test]
     fn compact_object_validation_rejects_reserved_packed_flags() {
         let texture = GpuTextureId::fresh();
         let sprite = GpuObjectSprite::new(
@@ -8782,6 +9185,7 @@ mod tests {
             textures: vec![rgba_resource(texture, [255; 4])],
             commands: vec![GpuCommand::ObjectBatch {
                 texture,
+                owner_texture: None,
                 sprites: vec![sprite],
                 clip: None,
                 blend: GpuBlend::Normal,
@@ -8835,6 +9239,39 @@ mod tests {
         assert_eq!(packed.sample_tile_size, 128.0);
         assert_eq!(packed.flags, sprite.packed_flags() | (1 << 4));
         assert!(std::mem::size_of::<PackedObjectSpriteInstance>() <= 96);
+    }
+
+    #[test]
+    fn compact_owner_selector_survives_packing_without_colliding_with_gamma() {
+        let projection = draw_projection(None, [1, 1], &GpuPresentation::identity(1, 1))
+            .expect("valid presentation")
+            .expect("object intersects presentation");
+        let sprite = GpuObjectSprite::new(
+            [
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Combine,
+        )
+        .with_owner_layer();
+
+        let without_gamma = packed_object_sprite_instance(sprite, false, &projection)
+            .expect("pack owner sprite without gamma");
+        let with_gamma = packed_object_sprite_instance(sprite, true, &projection)
+            .expect("pack owner sprite with gamma");
+
+        assert_eq!(without_gamma.flags & (1 << 5), 1 << 5);
+        assert_eq!(without_gamma.flags & (1 << 4), 0);
+        assert_eq!(with_gamma.flags & (1 << 5), 1 << 5);
+        assert_eq!(with_gamma.flags & (1 << 4), 1 << 4);
+        assert_eq!(std::mem::size_of::<PackedObjectSpriteInstance>(), 88);
     }
 
     #[test]
@@ -8902,6 +9339,7 @@ mod tests {
         };
         let compact = scene(vec![GpuCommand::ObjectBatch {
             texture,
+            owner_texture: None,
             sprites: vec![nearest, linear],
             clip: None,
             blend: GpuBlend::Normal,
@@ -8942,6 +9380,523 @@ mod tests {
         assert_eq!(compact_stats.object_sprite_instances, 2);
         assert_eq!(compact_stats.quad_instances, 0);
         assert_eq!(renderer.last_stats().draw_calls, 2);
+    }
+
+    #[test]
+    fn owner_texture_pair_matches_explicit_base_owner_painter_sequence() {
+        // LegacyClonk StdDDraw2.cpp:759-778 submits the base pass before the
+        // owner-color pass for each face.
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping compact owner-pair parity check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let owner_texture = GpuTextureId::fresh();
+        let base_resource = rgba_resource_2x1(texture, [220, 40, 20, 160], [20, 180, 60, 192]);
+        let owner_resource =
+            rgba_resource_2x1(owner_texture, [40, 80, 240, 144], [240, 200, 20, 112]);
+        let gamma = GpuGammaLut::from_ramp(&GammaRamp::from_control_points([
+            0x102030, 0x708090, 0xd0e0f0,
+        ]));
+        let positions = |left: f32, right: f32, w: [f32; 4]| {
+            [
+                [left * w[0], 0.0, w[0]],
+                [right * w[1], 0.0, w[1]],
+                [left * w[2], 2.0 * w[2], w[2]],
+                [right * w[3], 2.0 * w[3], w[3]],
+            ]
+        };
+        let normalized = |packed: u32| {
+            [
+                ((packed >> 16) & 0xff) as f32 / 255.0,
+                ((packed >> 8) & 0xff) as f32 / 255.0,
+                (packed & 0xff) as f32 / 255.0,
+                (packed >> 24) as f32 / 255.0,
+            ]
+        };
+        let generic_vertices = |sprite: GpuObjectSprite| {
+            let uv = [
+                [sprite.uv[0], sprite.uv[1]],
+                [sprite.uv[2], sprite.uv[1]],
+                [sprite.uv[0], sprite.uv[3]],
+                [sprite.uv[2], sprite.uv[3]],
+            ];
+            std::array::from_fn(|index| {
+                let vertex = GpuVertex::new(
+                    sprite.positions[index],
+                    uv[index],
+                    normalized(sprite.modulation[index]),
+                );
+                if sprite.sampler() == GpuSampler::Linear {
+                    vertex.with_sample_tile(0.0, 0.0, sprite.sample_tile_size)
+                } else {
+                    vertex
+                }
+            })
+        };
+        let mut renderer = test_renderer(&device, &queue);
+
+        for sampler in [GpuSampler::Nearest, GpuSampler::Linear] {
+            let sample_tile_size = if sampler == GpuSampler::Linear {
+                2.0
+            } else {
+                0.0
+            };
+            let sprite = |positions, uv, modulation, mod2| {
+                GpuObjectSprite::new(
+                    positions,
+                    uv,
+                    modulation,
+                    sampler,
+                    sample_tile_size,
+                    mod2,
+                    GpuOuterModulation::Combine,
+                )
+            };
+            let base_1 = sprite(
+                positions(0.0, 2.25, [1.0, 1.2, 0.9, 1.1]),
+                [0.0, 1.0, 0.5, 0.0],
+                [0x0010_f0c0, 0x1020_e0b0, 0x2030_d0a0, 0x3040_c090],
+                false,
+            );
+            let owner_1 = sprite(
+                base_1.positions,
+                base_1.uv,
+                [0x0020_c0ff, 0x1030_b0ef, 0x2040_a0df, 0x3050_90cf],
+                true,
+            )
+            .with_owner_layer();
+            let base_2 = sprite(
+                positions(0.75, 3.0, [1.1, 0.95, 1.25, 1.0]),
+                [1.0, 0.0, 0.5, 1.0],
+                [0x2040_ff80, 0x3050_ef70, 0x4060_df60, 0x5070_cf50],
+                true,
+            );
+            let owner_2 = sprite(
+                base_2.positions,
+                base_2.uv,
+                [0x1000_80ff, 0x2010_70ef, 0x3020_60df, 0x4030_50cf],
+                false,
+            )
+            .with_owner_layer();
+            for gamma_mode in [
+                GpuGammaMode::Disabled,
+                GpuGammaMode::Fragment,
+                GpuGammaMode::Monitor,
+            ] {
+                for blend in [GpuBlend::Normal, GpuBlend::Additive, GpuBlend::Replace] {
+                    let scene = |commands| GpuScene {
+                        logical_extent: [3, 2],
+                        clear: Color::new(11, 19, 31, 113),
+                        gamma: gamma.clone(),
+                        gamma_mode,
+                        textures: vec![base_resource.clone(), owner_resource.clone()],
+                        commands,
+                    };
+                    let compact = scene(vec![GpuCommand::ObjectBatch {
+                        texture,
+                        owner_texture: Some(owner_texture),
+                        sprites: vec![base_1, owner_1, base_2, owner_2],
+                        clip: None,
+                        blend,
+                        gamma: true,
+                    }]);
+                    let generic = |texture, sprite: GpuObjectSprite| GpuCommand::Quad {
+                        texture,
+                        owner_mask: None,
+                        vertices: generic_vertices(sprite),
+                        clip: None,
+                        blend,
+                        base_mod2: sprite.mod2(),
+                        owner_mod2: false,
+                        sampler: sprite.sampler(),
+                        gamma: true,
+                    };
+                    let expanded = scene(vec![
+                        generic(texture, base_1),
+                        generic(owner_texture, owner_1),
+                        generic(texture, base_2),
+                        generic(owner_texture, owner_2),
+                    ]);
+
+                    let compact_frame =
+                        render_identity_readback(&mut renderer, &device, &queue, &compact);
+                    let compact_stats = renderer.last_stats();
+                    let expanded_frame =
+                        render_identity_readback(&mut renderer, &device, &queue, &expanded);
+
+                    assert_eq!(
+                        compact_frame, expanded_frame,
+                        "{sampler:?}, {gamma_mode:?}, {blend:?} owner pair"
+                    );
+                    assert_eq!(compact_stats.object_sprite_instances, 4);
+                    assert_eq!(compact_stats.object_sprite_upload_bytes, 4 * 88);
+                    assert_eq!(compact_stats.quad_instances, 0);
+                    assert_eq!(compact_stats.draw_calls, 1);
+                    assert_eq!(renderer.last_stats().quad_instances, 4);
+                    assert_eq!(renderer.last_stats().draw_calls, 4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fog_chunked_owner_pair_with_ownclr_matches_explicit_painter_passes() {
+        // LegacyClonk StdDDraw2.cpp:759-778 paints base then owner, and
+        // StdDDraw2.cpp:773-777 leaves OWNCLR owner modulation untouched.
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping fogged owner-pair parity check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let owner_texture = GpuTextureId::fresh();
+        let resource = |id, owner: bool| {
+            let mut pixels = Vec::with_capacity(128 * 64 * 4);
+            for y in 0..64_u32 {
+                for x in 0..128_u32 {
+                    let pixel = if owner {
+                        [(x * 3) as u8, (y * 5) as u8, (x ^ y) as u8, 144]
+                    } else {
+                        [(x * 2) as u8, (y * 4) as u8, (x + y) as u8, 208]
+                    };
+                    pixels.extend_from_slice(&pixel);
+                }
+            }
+            GpuTextureResource::immutable_rgba(id, 128, 64, Arc::from(pixels.into_boxed_slice()))
+        };
+        let normalized = |packed: u32| {
+            [
+                ((packed >> 16) & 0xff) as f32 / 255.0,
+                ((packed >> 8) & 0xff) as f32 / 255.0,
+                (packed & 0xff) as f32 / 255.0,
+                (packed >> 24) as f32 / 255.0,
+            ]
+        };
+        let generic = |texture, sprite: GpuObjectSprite| {
+            let uv = [
+                [sprite.uv[0], sprite.uv[1]],
+                [sprite.uv[2], sprite.uv[1]],
+                [sprite.uv[0], sprite.uv[3]],
+                [sprite.uv[2], sprite.uv[3]],
+            ];
+            let vertices = std::array::from_fn(|index| {
+                let vertex = GpuVertex::new(
+                    sprite.positions[index],
+                    uv[index],
+                    normalized(sprite.modulation[index]),
+                )
+                .with_outer_modulation(sprite.outer_modulation());
+                if sprite.sampler() == GpuSampler::Linear {
+                    vertex.with_sample_tile(0.0, 0.0, sprite.sample_tile_size)
+                } else {
+                    vertex
+                }
+            });
+            GpuCommand::Quad {
+                texture,
+                owner_mask: None,
+                vertices,
+                clip: None,
+                blend: GpuBlend::Normal,
+                base_mod2: sprite.mod2(),
+                owner_mod2: false,
+                sampler: sprite.sampler(),
+                gamma: false,
+            }
+        };
+        let positions = |left: f32, right: f32| {
+            [
+                [left, 0.0, 1.0],
+                [right, 0.0, 1.0],
+                [left, 2.0, 1.0],
+                [right, 2.0, 1.0],
+            ]
+        };
+        let mut renderer = test_renderer(&device, &queue);
+
+        for sampler in [GpuSampler::Nearest, GpuSampler::Linear] {
+            let sample_tile_size = if sampler == GpuSampler::Linear {
+                64.0
+            } else {
+                0.0
+            };
+            let sprite = |positions, uv, modulation, outer_modulation| {
+                GpuObjectSprite::new(
+                    positions,
+                    uv,
+                    modulation,
+                    sampler,
+                    sample_tile_size,
+                    false,
+                    outer_modulation,
+                )
+            };
+            let base = [
+                sprite(
+                    positions(0.0, 2.0),
+                    [0.25, 0.0, 0.5, 1.0],
+                    [0x0010_f0c0, 0x1020_e0b0, 0x2030_d0a0, 0x3040_c090],
+                    GpuOuterModulation::Combine,
+                ),
+                sprite(
+                    positions(2.0, 4.0),
+                    [0.5, 0.0, 0.75, 1.0],
+                    [0x1040_ff80, 0x2050_ef70, 0x3060_df60, 0x4070_cf50],
+                    GpuOuterModulation::Combine,
+                ),
+            ];
+            let owner = [
+                sprite(
+                    base[0].positions,
+                    base[0].uv,
+                    [0x0020_c0ff, 0x1030_b0ef, 0x2040_a0df, 0x3050_90cf],
+                    GpuOuterModulation::Ignore,
+                )
+                .with_owner_layer(),
+                sprite(
+                    base[1].positions,
+                    base[1].uv,
+                    [0x1000_80ff, 0x2010_70ef, 0x3020_60df, 0x4030_50cf],
+                    GpuOuterModulation::Ignore,
+                )
+                .with_owner_layer(),
+            ];
+            let original_owner_modulation = owner.map(|sprite| sprite.modulation);
+            let mut compact_command = GpuCommand::ObjectBatch {
+                texture,
+                owner_texture: Some(owner_texture),
+                sprites: vec![base[0], base[1], owner[0], owner[1]],
+                clip: None,
+                blend: GpuBlend::Normal,
+                gamma: false,
+            };
+            compact_command
+                .apply_packed_c4_modulation(0x4080_ff40)
+                .expect("compact C4 colors accept enclosing modulation");
+            let mut generic_commands = vec![
+                generic(texture, base[0]),
+                generic(texture, base[1]),
+                generic(owner_texture, owner[0]),
+                generic(owner_texture, owner[1]),
+            ];
+            for command in &mut generic_commands {
+                command
+                    .apply_packed_c4_modulation(0x4080_ff40)
+                    .expect("generic C4 colors accept enclosing modulation");
+            }
+            let GpuCommand::ObjectBatch { sprites, .. } = &compact_command else {
+                unreachable!("the compact command remains an object batch");
+            };
+            assert_ne!(sprites[0].modulation, base[0].modulation);
+            assert_eq!(
+                [sprites[2].modulation, sprites[3].modulation],
+                original_owner_modulation,
+                "CLRSFC_OWNCLR suppresses enclosing modulation on owner layers"
+            );
+
+            let scene = |commands| GpuScene {
+                logical_extent: [4, 2],
+                clear: Color::new(9, 17, 25, 101),
+                gamma: GpuGammaLut::from_ramp(&GammaRamp::identity()),
+                gamma_mode: GpuGammaMode::Disabled,
+                textures: vec![resource(texture, false), resource(owner_texture, true)],
+                commands,
+            };
+            let compact = scene(vec![compact_command]);
+            let expanded = scene(generic_commands);
+            let compact_frame = render_identity_readback(&mut renderer, &device, &queue, &compact);
+            let compact_stats = renderer.last_stats();
+            let expanded_frame =
+                render_identity_readback(&mut renderer, &device, &queue, &expanded);
+
+            assert_eq!(compact_frame, expanded_frame, "{sampler:?} fog chunks");
+            assert_eq!(compact_stats.object_sprite_instances, 4);
+            assert_eq!(compact_stats.draw_calls, 1);
+            assert_eq!(renderer.last_stats().quad_instances, 4);
+            assert_eq!(
+                renderer.last_stats().draw_calls,
+                2,
+                "the explicit reference coalesces its adjacent base chunks and owner chunks"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_pair_draws_split_exactly_at_run_boundaries() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping compact owner-pair run check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let owner_a = GpuTextureId::fresh();
+        let owner_b = GpuTextureId::fresh();
+        let sprite = |outer_modulation| {
+            GpuObjectSprite::new(
+                [
+                    [0.0, 0.0, 1.0],
+                    [1.0, 0.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                ],
+                [0.0, 0.0, 1.0, 1.0],
+                [0x00ff_ffff; 4],
+                GpuSampler::Nearest,
+                0.0,
+                false,
+                outer_modulation,
+            )
+            .with_owner_layer()
+        };
+        let command =
+            |owner_texture, clip, blend, gamma, outer_modulation| GpuCommand::ObjectBatch {
+                texture,
+                owner_texture: Some(owner_texture),
+                sprites: vec![sprite(outer_modulation)],
+                clip,
+                blend,
+                gamma,
+            };
+        let scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Fragment,
+            textures: vec![
+                rgba_resource(texture, [0, 0, 0, 0]),
+                rgba_resource(owner_a, [255, 64, 16, 96]),
+                rgba_resource(owner_b, [16, 64, 255, 96]),
+            ],
+            commands: vec![
+                command(
+                    owner_a,
+                    None,
+                    GpuBlend::Normal,
+                    false,
+                    GpuOuterModulation::Combine,
+                ),
+                command(
+                    owner_a,
+                    None,
+                    GpuBlend::Normal,
+                    false,
+                    GpuOuterModulation::Combine,
+                ),
+                command(
+                    owner_b,
+                    None,
+                    GpuBlend::Normal,
+                    false,
+                    GpuOuterModulation::Combine,
+                ),
+                command(
+                    owner_a,
+                    None,
+                    GpuBlend::Normal,
+                    false,
+                    GpuOuterModulation::Combine,
+                ),
+                command(
+                    owner_a,
+                    Some(Rect::new(0, 0, 1, 1)),
+                    GpuBlend::Normal,
+                    false,
+                    GpuOuterModulation::Combine,
+                ),
+                command(
+                    owner_a,
+                    None,
+                    GpuBlend::Additive,
+                    false,
+                    GpuOuterModulation::Combine,
+                ),
+                command(
+                    owner_a,
+                    None,
+                    GpuBlend::Normal,
+                    true,
+                    GpuOuterModulation::Combine,
+                ),
+                command(
+                    owner_a,
+                    None,
+                    GpuBlend::Replace,
+                    false,
+                    GpuOuterModulation::Combine,
+                ),
+                command(
+                    owner_a,
+                    None,
+                    GpuBlend::Replace,
+                    false,
+                    GpuOuterModulation::Ignore,
+                ),
+            ],
+        };
+        let mut renderer = test_renderer(&device, &queue);
+
+        let _ = render_identity_readback(&mut renderer, &device, &queue, &scene);
+        let stats = renderer.last_stats();
+
+        assert_eq!(stats.object_sprite_instances, 9);
+        assert_eq!(stats.object_sprite_upload_bytes, 9 * 88);
+        assert_eq!(stats.object_sprite_draw_calls, 8);
+        assert_eq!(stats.draw_calls, 8);
+    }
+
+    #[test]
+    fn owner_pair_bind_group_is_invalidated_when_owner_view_is_recreated() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping owner bind-group invalidation check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let owner_texture = GpuTextureId::fresh();
+        let sprite = GpuObjectSprite::new(
+            [
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Combine,
+        )
+        .with_owner_layer();
+        let scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![
+                rgba_resource(texture, [0; 4]),
+                rgba_resource(owner_texture, [255; 4]),
+            ],
+            vec![GpuCommand::ObjectBatch {
+                texture,
+                owner_texture: Some(owner_texture),
+                sprites: vec![sprite],
+                clip: None,
+                blend: GpuBlend::Normal,
+                gamma: false,
+            }],
+        );
+        let mut renderer = test_renderer(&device, &queue);
+        let _ = render_identity_readback(&mut renderer, &device, &queue, &scene);
+        assert_eq!(renderer.object_bind_groups.len(), 1);
+
+        let replacement = GpuTextureResource::immutable_rgba(
+            owner_texture,
+            2,
+            1,
+            Arc::from([255_u8; 8].as_slice()),
+        );
+        renderer
+            .sync_textures(&device, &queue, &[replacement])
+            .expect("replace owner texture view");
+
+        assert!(renderer.object_bind_groups.is_empty());
     }
 
     #[test]
@@ -9062,6 +10017,7 @@ mod tests {
                 };
                 let compact = scene(vec![GpuCommand::ObjectBatch {
                     texture,
+                    owner_texture: None,
                     sprites,
                     clip: None,
                     blend: GpuBlend::Normal,
@@ -9208,6 +10164,7 @@ mod tests {
         let compact = scene(vec![
             GpuCommand::ObjectBatch {
                 texture: object_texture,
+                owner_texture: None,
                 sprites: object_sprites.clone(),
                 clip: None,
                 blend: GpuBlend::Normal,

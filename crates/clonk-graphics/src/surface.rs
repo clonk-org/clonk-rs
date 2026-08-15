@@ -772,6 +772,22 @@ impl Surface {
         true
     }
 
+    pub fn push_gpu_owner_object_sprite(
+        &mut self,
+        texture: GpuTextureId,
+        owner_texture: GpuTextureId,
+        sprite: GpuObjectSprite,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        gamma: bool,
+    ) -> bool {
+        let Some(scene) = self.gpu_scene.as_mut() else {
+            return false;
+        };
+        scene.push_owner_object_sprite(texture, owner_texture, sprite, clip, blend, gamma);
+        true
+    }
+
     pub fn push_gpu_solid_vertex(
         &mut self,
         vertex: GpuSolidVertex,
@@ -2162,6 +2178,57 @@ mod tests {
                 .first_object_run_capacity()
                 .is_some_and(|capacity| capacity >= OBJECTS),
             "the second capture grew its object instance vector inside the object walk"
+        );
+    }
+
+    #[test]
+    fn gpu_capture_reserves_a_warmed_owner_pair_run_before_appending() {
+        const OBJECTS: usize = 1_000;
+        let texture = GpuTextureId::fresh();
+        let owner_texture = GpuTextureId::fresh();
+        let base = GpuObjectSprite::new(
+            [[0.0, 0.0, 1.0]; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Combine,
+        );
+        let owner = base.with_owner_layer();
+        let mut destination = Surface::new(800, 600, PixelFormat::Rgba8888);
+
+        destination.begin_gpu_scene_capture();
+        for _ in 0..OBJECTS {
+            for sprite in [base, owner] {
+                assert!(destination.push_gpu_owner_object_sprite(
+                    texture,
+                    owner_texture,
+                    sprite,
+                    None,
+                    GpuBlend::Normal,
+                    false,
+                ));
+            }
+        }
+        let _ = destination.take_gpu_scene_capture().expect("warm capture");
+
+        destination.begin_gpu_scene_capture();
+        assert!(destination.push_gpu_owner_object_sprite(
+            texture,
+            owner_texture,
+            base,
+            None,
+            GpuBlend::Normal,
+            false,
+        ));
+        assert!(
+            destination
+                .gpu_scene_capture()
+                .expect("second capture")
+                .first_object_run_capacity()
+                .is_some_and(|capacity| capacity >= OBJECTS * 2),
+            "the second capture grew its owner instance vector inside the object walk"
         );
     }
 

@@ -288,10 +288,13 @@ pub struct GpuObjectSprite {
 impl GpuObjectSprite {
     pub const FLAG_MOD2: u32 = 1 << 0;
     pub const FLAG_LINEAR: u32 = 1 << 1;
+    /// Select the companion owner texture in a paired object batch. Bit four
+    /// remains reserved for the renderer-only fragment-gamma flag.
+    pub const FLAG_OWNER_LAYER: u32 = 1 << 5;
     const OUTER_MODULATION_SHIFT: u32 = 2;
     const OUTER_MODULATION_MASK: u32 = 0b11 << Self::OUTER_MODULATION_SHIFT;
     const DEFINED_FLAGS_MASK: u32 =
-        Self::FLAG_MOD2 | Self::FLAG_LINEAR | Self::OUTER_MODULATION_MASK;
+        Self::FLAG_MOD2 | Self::FLAG_LINEAR | Self::OUTER_MODULATION_MASK | Self::FLAG_OWNER_LAYER;
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -332,6 +335,15 @@ impl GpuObjectSprite {
 
     pub const fn mod2(self) -> bool {
         self.flags & Self::FLAG_MOD2 != 0
+    }
+
+    pub const fn owner_layer(self) -> bool {
+        self.flags & Self::FLAG_OWNER_LAYER != 0
+    }
+
+    pub const fn with_owner_layer(mut self) -> Self {
+        self.flags |= Self::FLAG_OWNER_LAYER;
+        self
     }
 
     /// Packed renderer transport bits produced by the safe constructor.
@@ -444,6 +456,10 @@ pub enum GpuCommand {
     },
     ObjectBatch {
         texture: GpuTextureId,
+        /// Optional companion texture selected by
+        /// [`GpuObjectSprite::owner_layer`]. Keeping the pair on one command
+        /// lets adjacent faces retain base/owner primitive order in one draw.
+        owner_texture: Option<GpuTextureId>,
         sprites: Vec<GpuObjectSprite>,
         clip: Option<Rect>,
         blend: GpuBlend,
@@ -998,6 +1014,7 @@ pub struct GpuScene {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ObjectBatchKey {
     texture: GpuTextureId,
+    owner_texture: Option<GpuTextureId>,
     clip: Option<Rect>,
     blend: GpuBlend,
     gamma: bool,
@@ -1009,6 +1026,7 @@ struct ObjectBatchKey {
 impl ObjectBatchKey {
     fn new(
         texture: GpuTextureId,
+        owner_texture: Option<GpuTextureId>,
         clip: Option<Rect>,
         blend: GpuBlend,
         gamma: bool,
@@ -1016,6 +1034,7 @@ impl ObjectBatchKey {
     ) -> Self {
         Self {
             texture,
+            owner_texture,
             clip,
             blend,
             gamma,
@@ -1189,6 +1208,7 @@ impl GpuSceneRecorder {
         for command in &self.commands {
             let GpuCommand::ObjectBatch {
                 texture,
+                owner_texture,
                 sprites,
                 clip,
                 blend,
@@ -1201,7 +1221,7 @@ impl GpuSceneRecorder {
                 continue;
             };
             retained.push(ObjectRunCapacityHint {
-                key: ObjectBatchKey::new(*texture, *clip, *blend, *gamma, sprite),
+                key: ObjectBatchKey::new(*texture, *owner_texture, *clip, *blend, *gamma, sprite),
                 capacity: sprites.capacity().max(sprites.len()).max(1),
             });
         }
@@ -1322,6 +1342,7 @@ impl GpuSceneRecorder {
         self.commands.last().is_some_and(|command| {
             let GpuCommand::ObjectBatch {
                 texture,
+                owner_texture,
                 sprites,
                 clip,
                 blend,
@@ -1331,7 +1352,7 @@ impl GpuSceneRecorder {
                 return false;
             };
             sprites.first().copied().is_some_and(|sprite| {
-                ObjectBatchKey::new(*texture, *clip, *blend, *gamma, sprite) == key
+                ObjectBatchKey::new(*texture, *owner_texture, *clip, *blend, *gamma, sprite) == key
             })
         })
     }
@@ -1339,6 +1360,7 @@ impl GpuSceneRecorder {
     fn push_object_batch_run(
         &mut self,
         texture: GpuTextureId,
+        owner_texture: Option<GpuTextureId>,
         mut sprites: Vec<GpuObjectSprite>,
         clip: Option<Rect>,
         blend: GpuBlend,
@@ -1347,11 +1369,10 @@ impl GpuSceneRecorder {
         let Some(first) = sprites.first().copied() else {
             return;
         };
-        let key = ObjectBatchKey::new(texture, clip, blend, gamma, first);
-        debug_assert!(sprites
-            .iter()
-            .copied()
-            .all(|sprite| ObjectBatchKey::new(texture, clip, blend, gamma, sprite) == key));
+        let key = ObjectBatchKey::new(texture, owner_texture, clip, blend, gamma, first);
+        debug_assert!(sprites.iter().copied().all(|sprite| {
+            ObjectBatchKey::new(texture, owner_texture, clip, blend, gamma, sprite) == key
+        }));
 
         if self.last_object_batch_matches(key) {
             let Some(GpuCommand::ObjectBatch {
@@ -1370,6 +1391,7 @@ impl GpuSceneRecorder {
         }
         self.commands.push(GpuCommand::ObjectBatch {
             texture,
+            owner_texture,
             sprites,
             clip,
             blend,
@@ -1380,6 +1402,7 @@ impl GpuSceneRecorder {
     fn push_object_batch(
         &mut self,
         texture: GpuTextureId,
+        owner_texture: Option<GpuTextureId>,
         sprites: Vec<GpuObjectSprite>,
         clip: Option<Rect>,
         blend: GpuBlend,
@@ -1389,7 +1412,7 @@ impl GpuSceneRecorder {
             return;
         };
         if blend != GpuBlend::Replace {
-            self.push_object_batch_run(texture, sprites, clip, blend, gamma);
+            self.push_object_batch_run(texture, owner_texture, sprites, clip, blend, gamma);
             return;
         }
 
@@ -1397,7 +1420,7 @@ impl GpuSceneRecorder {
         if sprites.iter().all(|sprite| {
             (sprite.outer_modulation() != GpuOuterModulation::Ignore) == first_outer_applies
         }) {
-            self.push_object_batch_run(texture, sprites, clip, blend, gamma);
+            self.push_object_batch_run(texture, owner_texture, sprites, clip, blend, gamma);
             return;
         }
 
@@ -1406,12 +1429,19 @@ impl GpuSceneRecorder {
         for sprite in sprites {
             let outer_applies = sprite.outer_modulation() != GpuOuterModulation::Ignore;
             if !run.is_empty() && outer_applies != run_outer_applies {
-                self.push_object_batch_run(texture, std::mem::take(&mut run), clip, blend, gamma);
+                self.push_object_batch_run(
+                    texture,
+                    owner_texture,
+                    std::mem::take(&mut run),
+                    clip,
+                    blend,
+                    gamma,
+                );
                 run_outer_applies = outer_applies;
             }
             run.push(sprite);
         }
-        self.push_object_batch_run(texture, run, clip, blend, gamma);
+        self.push_object_batch_run(texture, owner_texture, run, clip, blend, gamma);
     }
 
     pub fn add_texture(&mut self, resource: GpuTextureResource) {
@@ -1439,13 +1469,14 @@ impl GpuSceneRecorder {
         }
         if let GpuCommand::ObjectBatch {
             texture,
+            owner_texture,
             sprites,
             clip,
             blend,
             gamma,
         } = command
         {
-            self.push_object_batch(texture, sprites, clip, blend, gamma);
+            self.push_object_batch(texture, owner_texture, sprites, clip, blend, gamma);
             return;
         }
         if let GpuCommand::Solid {
@@ -1499,7 +1530,31 @@ impl GpuSceneRecorder {
         blend: GpuBlend,
         gamma: bool,
     ) {
-        let key = ObjectBatchKey::new(texture, clip, blend, gamma, sprite);
+        self.push_object_sprite_layer(texture, None, sprite, clip, blend, gamma);
+    }
+
+    pub fn push_owner_object_sprite(
+        &mut self,
+        texture: GpuTextureId,
+        owner_texture: GpuTextureId,
+        sprite: GpuObjectSprite,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        gamma: bool,
+    ) {
+        self.push_object_sprite_layer(texture, Some(owner_texture), sprite, clip, blend, gamma);
+    }
+
+    fn push_object_sprite_layer(
+        &mut self,
+        texture: GpuTextureId,
+        owner_texture: Option<GpuTextureId>,
+        sprite: GpuObjectSprite,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        gamma: bool,
+    ) {
+        let key = ObjectBatchKey::new(texture, owner_texture, clip, blend, gamma, sprite);
         if self.last_object_batch_matches(key) {
             let Some(GpuCommand::ObjectBatch { sprites, .. }) = self.commands.last_mut() else {
                 unreachable!("the compatible command was an object batch");
@@ -1511,6 +1566,7 @@ impl GpuSceneRecorder {
         sprites.push(sprite);
         self.commands.push(GpuCommand::ObjectBatch {
             texture,
+            owner_texture,
             sprites,
             clip,
             blend,
@@ -1674,9 +1730,13 @@ impl GpuSceneRecorder {
                 }
                 GpuCommand::SpriteBatch { .. } => {}
                 GpuCommand::ObjectBatch {
-                    texture, sprites, ..
+                    texture,
+                    owner_texture,
+                    sprites,
+                    ..
                 } if !sprites.is_empty() => {
                     referenced.insert(*texture);
+                    referenced.extend(owner_texture.iter().copied());
                 }
                 GpuCommand::ObjectBatch { .. } => {}
                 GpuCommand::Landscape {
@@ -1871,6 +1931,177 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_owner_pairs_keep_base_owner_order_in_one_resource_run() {
+        let texture = GpuTextureId::fresh();
+        let owner_texture = GpuTextureId::fresh();
+        let base = object_sprite(GpuOuterModulation::Combine);
+        let owner = object_sprite(GpuOuterModulation::Combine).with_owner_layer();
+        let mut recorder = GpuSceneRecorder::default();
+
+        for _ in 0..2 {
+            recorder.push_owner_object_sprite(
+                texture,
+                owner_texture,
+                base,
+                None,
+                GpuBlend::Normal,
+                false,
+            );
+            recorder.push_owner_object_sprite(
+                texture,
+                owner_texture,
+                owner,
+                None,
+                GpuBlend::Normal,
+                false,
+            );
+        }
+
+        let [GpuCommand::ObjectBatch {
+            texture: actual_base,
+            owner_texture: Some(actual_owner),
+            sprites,
+            ..
+        }] = recorder.commands.as_slice()
+        else {
+            panic!("compatible owner pairs did not retain one ordered resource run");
+        };
+        assert_eq!((*actual_base, *actual_owner), (texture, owner_texture));
+        assert_eq!(
+            sprites
+                .iter()
+                .map(|sprite| sprite.owner_layer())
+                .collect::<Vec<_>>(),
+            [false, true, false, true]
+        );
+    }
+
+    #[test]
+    fn changed_owner_texture_splits_an_object_resource_pair_run() {
+        let texture = GpuTextureId::fresh();
+        let owner_textures = [GpuTextureId::fresh(), GpuTextureId::fresh()];
+        let sprite = object_sprite(GpuOuterModulation::Combine);
+        let mut recorder = GpuSceneRecorder::default();
+
+        for owner_texture in owner_textures {
+            recorder.push_owner_object_sprite(
+                texture,
+                owner_texture,
+                sprite,
+                None,
+                GpuBlend::Normal,
+                false,
+            );
+        }
+
+        assert_eq!(recorder.commands.len(), 2);
+        assert_eq!(
+            recorder
+                .commands
+                .iter()
+                .map(|command| match command {
+                    GpuCommand::ObjectBatch { owner_texture, .. } => *owner_texture,
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            owner_textures.map(Some)
+        );
+    }
+
+    #[test]
+    fn object_pair_run_key_preserves_every_required_painter_boundary() {
+        let base = GpuTextureId::fresh();
+        let owner = GpuTextureId::fresh();
+        let clip = Rect::new(1, 2, 30, 40);
+        let combined = object_sprite(GpuOuterModulation::Combine);
+        let ignored = object_sprite(GpuOuterModulation::Ignore);
+        let key = ObjectBatchKey::new(
+            base,
+            Some(owner),
+            Some(clip),
+            GpuBlend::Normal,
+            false,
+            combined,
+        );
+
+        assert_eq!(
+            key,
+            ObjectBatchKey::new(
+                base,
+                Some(owner),
+                Some(clip),
+                GpuBlend::Normal,
+                false,
+                ignored.with_owner_layer(),
+            ),
+            "ordinary blending keeps per-instance outer and layer policy inside one run"
+        );
+        for changed in [
+            ObjectBatchKey::new(
+                GpuTextureId::fresh(),
+                Some(owner),
+                Some(clip),
+                GpuBlend::Normal,
+                false,
+                combined,
+            ),
+            ObjectBatchKey::new(
+                base,
+                Some(GpuTextureId::fresh()),
+                Some(clip),
+                GpuBlend::Normal,
+                false,
+                combined,
+            ),
+            ObjectBatchKey::new(
+                base,
+                Some(owner),
+                Some(Rect::new(2, 2, 30, 40)),
+                GpuBlend::Normal,
+                false,
+                combined,
+            ),
+            ObjectBatchKey::new(
+                base,
+                Some(owner),
+                Some(clip),
+                GpuBlend::Additive,
+                false,
+                combined,
+            ),
+            ObjectBatchKey::new(
+                base,
+                Some(owner),
+                Some(clip),
+                GpuBlend::Normal,
+                true,
+                combined,
+            ),
+        ] {
+            assert_ne!(key, changed);
+        }
+        assert_ne!(
+            ObjectBatchKey::new(
+                base,
+                Some(owner),
+                Some(clip),
+                GpuBlend::Replace,
+                false,
+                combined,
+            ),
+            ObjectBatchKey::new(
+                base,
+                Some(owner),
+                Some(clip),
+                GpuBlend::Replace,
+                false,
+                ignored,
+            ),
+            "Replace must split layers whose enclosing modulation changes blend semantics"
+        );
+    }
+
+    #[test]
     fn pushed_object_batches_coalesce_at_the_surface_command_boundary() {
         let texture = GpuTextureId::fresh();
         let sprite = GpuObjectSprite::new(
@@ -1884,6 +2115,7 @@ mod tests {
         );
         let batch = |sprite| GpuCommand::ObjectBatch {
             texture,
+            owner_texture: None,
             sprites: vec![sprite],
             clip: None,
             blend: GpuBlend::Normal,
@@ -1938,6 +2170,7 @@ mod tests {
     fn replace_object_batch_splits_outer_modulation_blend_classes() {
         let mixed = GpuCommand::ObjectBatch {
             texture: GpuTextureId::fresh(),
+            owner_texture: None,
             sprites: vec![
                 object_sprite(GpuOuterModulation::Ignore),
                 object_sprite(GpuOuterModulation::Combine),

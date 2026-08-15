@@ -3235,6 +3235,380 @@ mod tests {
     }
 
     #[test]
+    fn compact_owner_capture_avoids_generic_quad_fallback() {
+        let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
+        let mask = ColorByOwnerMask::new(2, 2, Arc::from([255_u8; 4]));
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_object_sprite(
+            &mut surface,
+            (0.0, 0.0, 4.0, 4.0),
+            (0.0, 0.0, 4.0, 4.0),
+            &GraphicsTransform::identity(),
+            &image,
+            Some(&mask),
+            FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            Some(0x00ff_0000),
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Nearest,
+            false,
+        ));
+
+        let capture = surface.gpu_scene_capture().test_value();
+        assert_eq!(capture.capture_stats().generic_sprite_fallbacks, 0);
+        assert_eq!(capture.capture_stats().owner_mask_fallbacks, 0);
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [4, 4],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
+        assert_eq!(scene.textures.len(), 2);
+        let [GpuCommand::ObjectBatch {
+            owner_texture: Some(_),
+            sprites,
+            ..
+        }] = scene.commands.as_slice()
+        else {
+            panic!("compact owner capture did not retain one paired object run");
+        };
+        assert_eq!(sprites.len(), 2);
+        assert!(!sprites[0].owner_layer());
+        assert!(sprites[1].owner_layer());
+    }
+
+    #[test]
+    fn compact_owner_capture_maps_ownclr_to_ignored_outer_modulation() {
+        // LegacyClonk StdDDraw2.cpp:773-777 skips global modulation for the
+        // owner pass when C4GFXBLIT_CLRSFC_OWNCLR is set.
+        let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
+        let mask = ColorByOwnerMask::new(2, 2, Arc::from([255_u8; 4]));
+        let global_modulation = 0x0040_80c0;
+        let owner_color = 0x0020_4060;
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_object_sprite(
+            &mut surface,
+            (0.0, 0.0, 4.0, 4.0),
+            (0.0, 0.0, 4.0, 4.0),
+            &GraphicsTransform::identity(),
+            &image,
+            Some(&mask),
+            FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            Some(owner_color),
+            SpriteBlitState {
+                mode: C4GFXBLIT_CLRSFC_OWNCLR,
+                modulation: Some(global_modulation),
+                ..SpriteBlitState::normal()
+            },
+            None,
+            None,
+            GpuSampler::Nearest,
+            false,
+        ));
+
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [4, 4],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
+        let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
+            panic!("OWNCLR owner capture did not retain one paired object run");
+        };
+        assert_eq!(sprites.len(), 2);
+        assert_eq!(sprites[0].modulation, [global_modulation; 4]);
+        assert_eq!(sprites[0].outer_modulation(), GpuOuterModulation::Combine);
+        assert_eq!(
+            sprites[1].modulation, [owner_color; 4],
+            "CLRSFC_OWNCLR must not fold the global color into the owner layer"
+        );
+        assert_eq!(sprites[1].outer_modulation(), GpuOuterModulation::Ignore);
+    }
+
+    #[test]
+    fn full_rgba_owner_capture_retains_the_exact_base_and_overlay_resources() {
+        let base_pixels = [
+            10, 20, 30, 255, 40, 50, 60, 192, 70, 80, 90, 128, 100, 110, 120, 64,
+        ];
+        let overlay_pixels = [
+            120, 110, 100, 64, 90, 80, 70, 128, 60, 50, 40, 192, 30, 20, 10, 255,
+        ];
+        let image = ImageData::new(2, 2, base_pixels.to_vec());
+        let mask = ColorByOwnerMask::new(2, 2, Arc::from(overlay_pixels));
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_object_sprite(
+            &mut surface,
+            (0.0, 0.0, 4.0, 4.0),
+            (0.0, 0.0, 4.0, 4.0),
+            &GraphicsTransform::identity(),
+            &image,
+            Some(&mask),
+            FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            Some(0x0040_80c0),
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Nearest,
+            false,
+        ));
+
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [4, 4],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
+        let [GpuCommand::ObjectBatch {
+            texture,
+            owner_texture: Some(owner_texture),
+            sprites,
+            ..
+        }] = scene.commands.as_slice()
+        else {
+            panic!("full-RGBA owner capture did not retain one paired object run");
+        };
+        assert_eq!(sprites.len(), 2);
+        let base = scene
+            .textures
+            .iter()
+            .find(|resource| resource.id == *texture)
+            .test_value();
+        let overlay = scene
+            .textures
+            .iter()
+            .find(|resource| resource.id == *owner_texture)
+            .test_value();
+        assert_eq!(base.pixels.as_ref(), &base_pixels);
+        assert_eq!(overlay.pixels.as_ref(), &overlay_pixels);
+    }
+
+    #[test]
+    fn malformed_owner_mask_falls_back_before_retaining_either_layer() {
+        let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
+        let malformed = ColorByOwnerMask::new(2, 2, Arc::from([255_u8; 3]));
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(!capture_gpu_object_sprite(
+            &mut surface,
+            (0.0, 0.0, 4.0, 4.0),
+            (0.0, 0.0, 4.0, 4.0),
+            &GraphicsTransform::identity(),
+            &image,
+            Some(&malformed),
+            FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            Some(0x00ff_0000),
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Nearest,
+            false,
+        ));
+
+        let capture = surface.gpu_scene_capture().test_value();
+        assert_eq!(capture.capture_stats().generic_sprite_fallbacks, 0);
+        assert_eq!(capture.capture_stats().owner_mask_fallbacks, 0);
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [4, 4],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
+        assert!(scene.commands.is_empty());
+        assert!(scene.textures.is_empty());
+    }
+
+    #[test]
+    fn malformed_owner_mask_wrapper_recovers_without_a_partial_compact_pair() {
+        let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
+        let malformed = ColorByOwnerMask::new(2, 2, Arc::from([255_u8; 3]));
+        let source = FloatSourceRect {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 2.0,
+        };
+        let draw = |surface: &mut Surface| {
+            draw_object_image_region_float_source(
+                surface,
+                &GuiRect::new(0.0, 0.0, 4.0, 4.0),
+                &image,
+                Some(&malformed),
+                &source,
+                BlitSampling::Nearest,
+                false,
+                Some(0x00ff_0000),
+                SpriteBlitState::normal(),
+                None,
+                None,
+            );
+        };
+        let mut cpu = Surface::new(4, 4, PixelFormat::Rgba8888);
+        draw(&mut cpu);
+        assert!(cpu.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0));
+
+        let mut retained = Surface::new(4, 4, PixelFormat::Rgba8888);
+        retained.begin_gpu_scene_capture();
+        draw(&mut retained);
+        let scene = retained.take_gpu_scene_capture().test_value().into_scene(
+            [4, 4],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
+
+        assert!(!scene.commands.is_empty(), "fallback output was dropped");
+        assert!(scene.commands.iter().all(|command| !matches!(
+            command,
+            GpuCommand::ObjectBatch {
+                owner_texture: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn compact_fogged_owner_capture_avoids_generic_quad_fallback() {
+        let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
+        let mask = ColorByOwnerMask::new(2, 2, Arc::from([255_u8; 4]));
+        let fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 2,
+                resolution_y: 2,
+                width: 3,
+                height: 3,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: vec![0x00ff_ffff; 9],
+            }),
+            zoom: 1.0,
+        };
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_object_sprite(
+            &mut surface,
+            (0.0, 0.0, 4.0, 4.0),
+            (0.0, 0.0, 4.0, 4.0),
+            &GraphicsTransform::identity(),
+            &image,
+            Some(&mask),
+            FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            Some(0x00ff_0000),
+            SpriteBlitState::normal(),
+            None,
+            Some(&fog),
+            GpuSampler::Nearest,
+            false,
+        ));
+
+        let capture = surface.gpu_scene_capture().test_value();
+        assert_eq!(capture.capture_stats().generic_sprite_fallbacks, 0);
+        assert_eq!(capture.capture_stats().owner_mask_fallbacks, 0);
+        assert_eq!(capture.capture_stats().spatial_fog_fallbacks, 0);
+    }
+
+    #[test]
+    fn compact_fogged_owner_capture_keeps_each_base_chunk_before_owner_chunks() {
+        // LegacyClonk StdDDraw2.cpp:759-778 paints the base layer before the
+        // owner layer; retain that ordering while compacting both layers.
+        let image = ImageData::new(128, 128, [64, 128, 192, 255].repeat(128 * 128));
+        let mask = ColorByOwnerMask::new(128, 128, Arc::from(vec![255_u8; 128 * 128]));
+        let fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 2,
+                resolution_y: 2,
+                width: 33,
+                height: 33,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: vec![0x00ff_ffff; 33 * 33],
+            }),
+            zoom: 1.0,
+        };
+        let mut surface = Surface::new(64, 64, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_object_sprite(
+            &mut surface,
+            (0.0, 0.0, 64.0, 64.0),
+            (0.0, 0.0, 64.0, 64.0),
+            &GraphicsTransform::identity(),
+            &image,
+            Some(&mask),
+            FloatSourceRect {
+                x: 32.0,
+                y: 0.0,
+                width: 64.0,
+                height: 64.0,
+            },
+            false,
+            Some(0x00ff_0000),
+            SpriteBlitState::normal(),
+            None,
+            Some(&fog),
+            GpuSampler::Nearest,
+            false,
+        ));
+
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [64, 64],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
+        let [GpuCommand::ObjectBatch {
+            owner_texture: Some(_),
+            sprites,
+            ..
+        }] = scene.commands.as_slice()
+        else {
+            panic!("fogged owner chunks did not remain one paired object run");
+        };
+        assert_eq!(sprites.len(), 4);
+        assert_eq!(
+            sprites
+                .iter()
+                .map(|sprite| sprite.owner_layer())
+                .collect::<Vec<_>>(),
+            [false, false, true, true]
+        );
+    }
+
+    #[test]
     fn rejected_generic_sprite_does_not_report_a_retained_fallback() {
         let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
         let mask = ColorByOwnerMask::new(2, 2, Arc::from([255_u8; 4]));
@@ -18706,6 +19080,105 @@ mod tests {
         assert_eq!(sprites[1].modulation[0], 0x0040_0002);
         assert_eq!(sprites[0].sampler(), GpuSampler::Nearest);
         assert_eq!(sprites[1].sampler(), GpuSampler::Linear);
+    }
+
+    #[test]
+    fn thousand_owner_faces_capture_as_one_ordered_compact_pair_run() {
+        const OBJECTS: usize = 1_000;
+        let mut template = make_snapshot().objects.remove(0);
+        template.definition_id = "OwnerCrew".to_string();
+        template.crew_member = false;
+        template.action = clonk_engine::ActionState::new("Walk");
+        let objects = (0..OBJECTS)
+            .map(|index| {
+                let mut object = template.clone();
+                object.id = ObjectId::new(index as u64 + 1);
+                object.position =
+                    Vector2::new(20 + (index % 40) as i32 * 15, 20 + (index / 40) as i32 * 15);
+                object.action.phase = (index % 20) as i32;
+                object.direction = if index % 2 == 0 {
+                    Direction::Left
+                } else {
+                    Direction::Right
+                };
+                object.draw_transform =
+                    (index % 2 != 0).then(|| DrawTransform::from_components(-1.0, 1.0, 0.0, 0.0));
+                object.color = 0x0001_0000 | (index as u32 + 1);
+                object
+            })
+            .collect::<Vec<_>>();
+        let walk = DefinitionActionGraphics {
+            facet: Some(clonk_engine::DefinitionActionFacet {
+                x: 0,
+                y: 0,
+                width: 15,
+                height: 15,
+                target_x: 0,
+                target_y: 0,
+            }),
+            directions: 2,
+            flip_dir: Some(1),
+            length: Some(20),
+            ..DefinitionActionGraphics::default()
+        };
+        let sprite = DefinitionSprite {
+            actions: HashMap::from([("Walk".to_string(), walk)]),
+            color_mask: Some(ColorByOwnerMask::new(
+                300,
+                110,
+                Arc::from(vec![255; 300 * 110].into_boxed_slice()),
+            )),
+            shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
+            stretch_growth: true,
+            ..test_sprite(ImageData::new(300, 110, vec![255; 300 * 110 * 4]))
+        };
+        let mut graphics = test_graphics_with(
+            640,
+            420,
+            420,
+            "owner compact capture",
+            Arc::new(HashMap::from([("OwnerCrew".to_string(), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let gamma = clonk_graphics::GammaRamp::standard();
+        graphics.begin_gpu_scene_capture();
+
+        graphics.draw_objects(
+            &objects,
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            Some(&gamma),
+        );
+
+        let stats = graphics
+            .surface()
+            .gpu_scene_capture()
+            .test_value()
+            .capture_stats();
+        assert_eq!(stats.generic_sprite_fallbacks, 0);
+        assert_eq!(stats.owner_mask_fallbacks, 0);
+        let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
+        let [GpuCommand::ObjectBatch {
+            owner_texture: Some(_),
+            sprites,
+            ..
+        }] = scene.commands.as_slice()
+        else {
+            panic!("representable owner faces did not form one paired compact run");
+        };
+        assert_eq!(sprites.len(), OBJECTS * 2);
+        assert!(sprites
+            .chunks_exact(2)
+            .all(|pair| !pair[0].owner_layer() && pair[1].owner_layer()));
+        let bytes = sprites.len() * std::mem::size_of::<GpuObjectSprite>();
+        assert_eq!(bytes, 176_000);
+        assert!(bytes <= 176 * 1024);
     }
 
     #[test]

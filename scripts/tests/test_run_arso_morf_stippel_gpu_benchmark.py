@@ -182,8 +182,8 @@ def retained_gpu_profile_v2_for_durations(durations):
 
 def enable_retained_gpu_timestamps(profile):
     timestamp_bit = 1 << 7
-    profile["fingerprint"]["adapter_feature_bits"] = [timestamp_bit, 0]
-    profile["fingerprint"]["device"]["feature_bits"] = [timestamp_bit, 0]
+    profile["fingerprint"]["adapter_feature_bits"] = [0, timestamp_bit]
+    profile["fingerprint"]["device"]["feature_bits"] = [0, timestamp_bit]
     profile["timestamp_queries"].update(
         {"supported": True, "enabled": True}
     )
@@ -222,6 +222,28 @@ def enable_retained_gpu_timestamps(profile):
                 ],
             }
         )
+    return profile
+
+
+def retained_gpu_profile_with_rollover():
+    profile = enable_retained_gpu_timestamps(
+        retained_gpu_profile_for_durations([5_000_000, 7_000_000])
+    )
+    presentation = profile["gpu_timestamp_frames"][1]["passes"][-1]
+    scene, monitor = profile["gpu_timestamp_frames"][1]["passes"][:2]
+    scene.update({"end_tick": 1_150, "duration_ns": 50.0})
+    monitor.update(
+        {"begin_tick": 1_140, "end_tick": 1_145, "duration_ns": 5.0}
+    )
+    presentation.update(
+        {
+            "begin_tick": 2_500,
+            "end_tick": 2_000,
+            "duration_ns": None,
+            "validity": "counter_rollover",
+        }
+    )
+    profile["timestamp_queries"]["readback_errors"] = 1
     return profile
 
 
@@ -769,6 +791,18 @@ class RetainedGpuProfileTests(unittest.TestCase):
         ):
             MODULE.parse_retained_gpu_profile([line], required=True)
 
+    def test_enabled_timestamps_use_wgpu_native_then_web_feature_words(self):
+        profile = enable_retained_gpu_timestamps(retained_gpu_profile())
+
+        parsed = MODULE.parse_retained_gpu_profile(
+            ["LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)],
+            required=True,
+        )
+
+        self.assertEqual(
+            parsed["fingerprint"]["device"]["feature_bits"], [0, 1 << 7]
+        )
+
     def test_gpu_timestamp_period_must_exactly_match_device_fingerprint(self):
         profile = enable_retained_gpu_timestamps(retained_gpu_profile())
         profile["gpu_timestamp_frames"][0]["timestamp_period_ns"] = 1.0000000005
@@ -801,6 +835,158 @@ class RetainedGpuProfileTests(unittest.TestCase):
 
         self.assertIn('"begin_tick": 250', line)
         self.assertIn('"end_tick": 5', line)
+
+    def test_explicit_strict_timestamp_policy_rejects_rollover_samples(self):
+        profile = retained_gpu_profile_with_rollover()
+        line = "LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)
+
+        with self.assertRaisesRegex(
+            MODULE.BenchmarkFailure,
+            "retained GPU timestamp telemetry readback_errors is nonzero",
+        ):
+            MODULE.parse_retained_gpu_profile(
+                [line],
+                required=True,
+                timestamp_sample_policy="strict",
+            )
+
+    def test_tolerant_raw_policy_accepts_valid_scene_and_rollover_presentation(self):
+        profile = retained_gpu_profile_with_rollover()
+
+        parsed = MODULE.parse_retained_gpu_profile(
+            ["LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)],
+            required=True,
+            timestamp_sample_policy="tolerant_raw",
+        )
+
+        self.assertEqual(parsed, profile)
+
+    def test_tolerant_raw_policy_requires_valid_sample_for_every_rendered_pass(self):
+        profile = retained_gpu_profile_with_rollover()
+        presentation = profile["gpu_timestamp_frames"][0]["passes"][-1]
+        presentation.update(
+            {
+                "begin_tick": 500,
+                "end_tick": 400,
+                "duration_ns": None,
+                "validity": "counter_rollover",
+            }
+        )
+        profile["timestamp_queries"]["readback_errors"] = 2
+
+        with self.assertRaisesRegex(
+            MODULE.BenchmarkFailure,
+            "retained GPU timestamp passes have no valid samples: presentation",
+        ):
+            MODULE.parse_retained_gpu_profile(
+                ["LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)],
+                required=True,
+                timestamp_sample_policy="tolerant_raw",
+            )
+
+    def test_tolerant_raw_policy_accepts_enumerated_non_rollover_dispositions(self):
+        for validity in ("invalid_period", "invalid_duration"):
+            with self.subTest(validity=validity):
+                profile = retained_gpu_profile_with_rollover()
+                presentation = profile["gpu_timestamp_frames"][1]["passes"][-1]
+                presentation.update(
+                    {
+                        "begin_tick": 2_000,
+                        "end_tick": 2_500,
+                        "validity": validity,
+                    }
+                )
+
+                parsed = MODULE.parse_retained_gpu_profile(
+                    ["LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)],
+                    required=True,
+                    timestamp_sample_policy="tolerant_raw",
+                )
+
+                self.assertEqual(
+                    parsed["gpu_timestamp_frames"][1]["passes"][-1][
+                        "validity"
+                    ],
+                    validity,
+                )
+
+    def test_tolerant_raw_policy_rejects_malformed_invalid_samples(self):
+        cases = (
+            (
+                {"validity": "driver_magic"},
+                "invalid validity value",
+            ),
+            (
+                {"duration_ns": 500.0},
+                "invalid retained GPU timestamp sample must have null duration",
+            ),
+            (
+                {"end_tick": 2_600},
+                "counter_rollover ticks do not roll over",
+            ),
+            (
+                {"begin_tick": True},
+                "presentation begin_tick must be a nonnegative integer",
+            ),
+        )
+        for mutation, message in cases:
+            with self.subTest(mutation=mutation):
+                profile = retained_gpu_profile_with_rollover()
+                profile["gpu_timestamp_frames"][1]["passes"][-1].update(
+                    mutation
+                )
+
+                with self.assertRaisesRegex(MODULE.BenchmarkFailure, message):
+                    MODULE.parse_retained_gpu_profile(
+                        [
+                            "LC_APP_RETAINED_GPU_PROFILE "
+                            + json.dumps(profile)
+                        ],
+                        required=True,
+                        timestamp_sample_policy="tolerant_raw",
+                    )
+
+    def test_tolerant_raw_policy_reconciles_invalid_frames_with_readback_errors(self):
+        profile = retained_gpu_profile_with_rollover()
+        profile["timestamp_queries"]["readback_errors"] = 0
+
+        with self.assertRaisesRegex(
+            MODULE.BenchmarkFailure,
+            "readback_errors are fewer than frames containing invalid dispositions",
+        ):
+            MODULE.parse_retained_gpu_profile(
+                ["LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)],
+                required=True,
+                timestamp_sample_policy="tolerant_raw",
+            )
+
+        profile = enable_retained_gpu_timestamps(retained_gpu_profile())
+        profile["timestamp_queries"]["readback_errors"] = 1
+        parsed = MODULE.parse_retained_gpu_profile(
+            ["LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)],
+            required=True,
+            timestamp_sample_policy="tolerant_raw",
+        )
+        self.assertEqual(parsed["timestamp_queries"]["readback_errors"], 1)
+
+    def test_tolerant_raw_policy_keeps_loss_and_discontinuity_telemetry_strict(self):
+        for key in ("dropped_frames", "device_discontinuities"):
+            with self.subTest(key=key):
+                profile = retained_gpu_profile_with_rollover()
+                profile["timestamp_queries"][key] = 1
+
+                with self.assertRaisesRegex(
+                    MODULE.BenchmarkFailure,
+                    f"retained GPU timestamp telemetry {key} is nonzero",
+                ):
+                    MODULE.parse_retained_gpu_profile(
+                        [
+                            "LC_APP_RETAINED_GPU_PROFILE "
+                            + json.dumps(profile)
+                        ],
+                        required=True,
+                        timestamp_sample_policy="tolerant_raw",
+                    )
 
     def test_requires_gpu_timestamp_frames_in_cpu_sample_order(self):
         profile = enable_retained_gpu_timestamps(
@@ -926,9 +1112,23 @@ class RetainedGpuProfileTests(unittest.TestCase):
         self.assertFalse(parsed["timestamp_queries"]["supported"])
         self.assertEqual(parsed["fingerprint"]["device"]["feature_bits"], [0, 0])
 
+    def test_tolerant_policy_rejects_readback_errors_when_timestamps_are_disabled(self):
+        profile = retained_gpu_profile()
+        profile["timestamp_queries"]["readback_errors"] = 1
+
+        with self.assertRaisesRegex(
+            MODULE.BenchmarkFailure,
+            "retained GPU timestamp telemetry readback_errors is nonzero",
+        ):
+            MODULE.parse_retained_gpu_profile(
+                ["LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)],
+                required=True,
+                timestamp_sample_policy="tolerant_raw",
+            )
+
     def test_disabled_supported_timestamp_queries_keep_device_features_empty(self):
         profile = retained_gpu_profile()
-        profile["fingerprint"]["adapter_feature_bits"] = [1 << 7, 0]
+        profile["fingerprint"]["adapter_feature_bits"] = [0, 1 << 7]
         profile["timestamp_queries"].update(
             {"requested": False, "supported": True, "enabled": False}
         )
@@ -1351,6 +1551,48 @@ class PairedBenchmarkTests(unittest.TestCase):
             provenance["sha256"],
             "99470767eb36321a2b5ebe7dc1e9a085fdcf6ac9153712ee554804c438044975",
         )
+
+    def test_source_provenance_ignores_only_root_runtime_update_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(
+                ["git", "init", "--quiet"], cwd=root, check=True
+            )
+            (root / "Cargo.lock").write_text("fixture\n", encoding="utf-8")
+            subprocess.run(["git", "add", "Cargo.lock"], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Benchmark Test",
+                    "-c",
+                    "user.email=benchmark@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture",
+                ],
+                cwd=root,
+                check=True,
+            )
+            (root / ".clonk-update.lock").write_text("", encoding="utf-8")
+
+            lock_only = MODULE.collect_source_provenance(root)
+
+            (root / "unrelated.tmp").write_text("drift\n", encoding="utf-8")
+            (root / "nested").mkdir()
+            (root / "nested" / ".clonk-update.lock").write_text(
+                "drift\n", encoding="utf-8"
+            )
+            with_unrelated = MODULE.collect_source_provenance(root)
+
+        self.assertEqual(lock_only["untracked_files"], {})
+        self.assertFalse(lock_only["dirty"])
+        self.assertEqual(
+            set(with_unrelated["untracked_files"]),
+            {"nested/.clonk-update.lock", "unrelated.tmp"},
+        )
+        self.assertTrue(with_unrelated["dirty"])
 
     def test_single_candidate_run_forces_and_requires_timestamp_profile(self):
         with tempfile.TemporaryDirectory() as temporary:
