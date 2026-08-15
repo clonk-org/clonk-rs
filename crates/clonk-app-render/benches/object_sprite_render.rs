@@ -19,6 +19,10 @@ const FRAME_EXTENT: [u32; 2] = [800, 600];
 const OBJECT_COLUMNS: usize = 40;
 const ADJACENT_RESOURCE_RUNS: usize = 1;
 const AMORTIZED_FRAMES: u32 = 16;
+const OBJECT_INSTANCE_BYTES: usize = 88;
+const QUAD_INSTANCE_BYTES: usize = 232;
+const OWNER_INSTANCES: usize = OBJECTS * 2;
+const OWNER_INSTANCE_BUDGET: usize = 176 * 1024;
 
 fn st5b_texture(texture: GpuTextureId) -> GpuTextureResource {
     let mut pixels = Vec::with_capacity((SHEET_WIDTH * SHEET_HEIGHT * 4) as usize);
@@ -99,6 +103,20 @@ fn object_sprite(index: usize) -> GpuObjectSprite {
         index.is_multiple_of(7),
         GpuOuterModulation::Combine,
     )
+}
+
+fn owner_sprite(index: usize) -> GpuObjectSprite {
+    let base = object_sprite(index);
+    GpuObjectSprite::new(
+        base.positions,
+        base.uv,
+        std::array::from_fn(|corner| packed_modulation(index + OBJECTS, corner)),
+        base.sampler(),
+        base.sample_tile_size,
+        index.is_multiple_of(11),
+        GpuOuterModulation::Combine,
+    )
+    .with_owner_layer()
 }
 
 fn normalized_c4(packed: u32) -> [f32; 4] {
@@ -219,6 +237,83 @@ fn scenes() -> (GpuScene, GpuScene) {
     (compact, generic)
 }
 
+fn owner_scenes() -> (GpuScene, GpuScene) {
+    let texture = GpuTextureId::fresh();
+    let owner_texture = GpuTextureId::fresh();
+    let resource = st5b_texture(texture);
+    let owner_resource = st5b_texture(owner_texture);
+    let sprites = (0..OBJECTS)
+        .map(|index| (object_sprite(index), owner_sprite(index)))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        std::mem::size_of::<GpuObjectSprite>(),
+        OBJECT_INSTANCE_BYTES
+    );
+    let mut recorder = GpuSceneRecorder::default();
+    recorder.add_texture(resource);
+    recorder.add_texture(owner_resource);
+    for (base, owner) in &sprites {
+        recorder.push_owner_object_sprite(
+            texture,
+            owner_texture,
+            *base,
+            None,
+            GpuBlend::Normal,
+            false,
+        );
+        recorder.push_owner_object_sprite(
+            texture,
+            owner_texture,
+            *owner,
+            None,
+            GpuBlend::Normal,
+            false,
+        );
+    }
+    let mut compact = recorder.into_scene(
+        FRAME_EXTENT,
+        Color::opaque(16, 24, 32),
+        &GammaRamp::identity(),
+    );
+    compact.gamma_mode = GpuGammaMode::Disabled;
+    let [GpuCommand::ObjectBatch {
+        texture: actual_texture,
+        owner_texture: Some(actual_owner_texture),
+        sprites: compact_sprites,
+        ..
+    }] = compact.commands.as_slice()
+    else {
+        panic!("one adjacent owner texture-pair run did not form one object batch");
+    };
+    assert_eq!(
+        (*actual_texture, *actual_owner_texture),
+        (texture, owner_texture)
+    );
+    assert_eq!(compact_sprites.len(), OWNER_INSTANCES);
+    assert!(compact_sprites.chunks_exact(2).all(|pair| {
+        !pair[0].owner_layer()
+            && pair[1].owner_layer()
+            && pair[0].positions == pair[1].positions
+            && pair[0].uv == pair[1].uv
+    }));
+    assert_eq!(compact_sprites.len() * OBJECT_INSTANCE_BYTES, 176_000);
+    assert!(compact_sprites.len() * OBJECT_INSTANCE_BYTES <= OWNER_INSTANCE_BUDGET);
+
+    let mut generic = compact.clone();
+    generic.commands = sprites
+        .iter()
+        .flat_map(|(base, owner)| {
+            [
+                generic_quad(texture, *base),
+                generic_quad(owner_texture, *owner),
+            ]
+        })
+        .collect();
+    assert_eq!(generic.commands.len(), OWNER_INSTANCES);
+    (compact, generic)
+}
+
 fn benchmark_device() -> (tokio::runtime::Runtime, wgpu::Device, wgpu::Queue) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -293,6 +388,7 @@ fn render_completed_frame(
 
 fn bench_object_sprite_render(c: &mut Criterion) {
     let (compact, generic) = scenes();
+    let (owner_compact, owner_generic) = owner_scenes();
     let (_runtime, device, queue) = benchmark_device();
     let presentation = GpuPresentation::identity(FRAME_EXTENT[0], FRAME_EXTENT[1]);
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -313,6 +409,10 @@ fn bench_object_sprite_render(c: &mut Criterion) {
     let mut compact_renderer =
         RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
     let mut generic_renderer =
+        RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    let mut owner_compact_renderer =
+        RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    let mut owner_generic_renderer =
         RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
 
     let compact_stats = render_completed_frame(
@@ -351,6 +451,52 @@ fn bench_object_sprite_render(c: &mut Criterion) {
 
     println!(
         "object sprite benchmark raw stats: compact={compact_stats:?}, generic={generic_stats:?}"
+    );
+
+    let owner_compact_stats = render_completed_frame(
+        &mut owner_compact_renderer,
+        &device,
+        &queue,
+        &target_view,
+        &owner_compact,
+        &presentation,
+    );
+    assert_eq!(owner_compact_stats.draw_calls, ADJACENT_RESOURCE_RUNS);
+    assert_eq!(
+        owner_compact_stats.total_draw_calls,
+        ADJACENT_RESOURCE_RUNS + 1
+    );
+    assert_eq!(owner_compact_stats.object_sprite_instances, OWNER_INSTANCES);
+    assert_eq!(owner_compact_stats.quad_instances, 0);
+    assert_eq!(owner_compact_stats.quad_instance_upload_bytes, 0);
+    assert_eq!(
+        owner_compact_stats.object_sprite_upload_bytes,
+        OWNER_INSTANCES * OBJECT_INSTANCE_BYTES
+    );
+    assert_eq!(owner_compact_stats.object_sprite_upload_bytes, 176_000);
+    assert!(owner_compact_stats.object_sprite_upload_bytes <= OWNER_INSTANCE_BUDGET);
+
+    let owner_generic_stats = render_completed_frame(
+        &mut owner_generic_renderer,
+        &device,
+        &queue,
+        &target_view,
+        &owner_generic,
+        &presentation,
+    );
+    assert_eq!(owner_generic_stats.draw_calls, OWNER_INSTANCES);
+    assert_eq!(owner_generic_stats.total_draw_calls, OWNER_INSTANCES + 1);
+    assert_eq!(owner_generic_stats.quad_instances, OWNER_INSTANCES);
+    assert_eq!(owner_generic_stats.object_sprite_instances, 0);
+    assert_eq!(owner_generic_stats.object_sprite_upload_bytes, 0);
+    assert_eq!(
+        owner_generic_stats.quad_instance_upload_bytes,
+        OWNER_INSTANCES * QUAD_INSTANCE_BYTES
+    );
+    assert_eq!(owner_generic_stats.quad_instance_upload_bytes, 464_000);
+    println!(
+        "owner object sprite benchmark raw stats: compact={owner_compact_stats:?}, \
+         generic={owner_generic_stats:?}"
     );
 
     let mut group = c.benchmark_group("object_sprite_render");
@@ -405,6 +551,60 @@ fn bench_object_sprite_render(c: &mut Criterion) {
                 &queue,
                 &target_view,
                 &generic,
+                &presentation,
+            )
+        });
+    });
+    group.bench_function("compact_1000_owner_pairs", |b| {
+        b.iter(|| {
+            render_completed_frame(
+                &mut owner_compact_renderer,
+                &device,
+                &queue,
+                &target_view,
+                &owner_compact,
+                &presentation,
+            )
+        });
+    });
+    group.bench_function("compact_1000_owner_pairs_amortized", |b| {
+        b.iter_custom(|iterations| {
+            let start = Instant::now();
+            for _ in 0..iterations {
+                for _ in 0..AMORTIZED_FRAMES {
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("lc_owner_object_sprite_benchmark_encoder"),
+                        });
+                    owner_compact_renderer
+                        .render(
+                            &device,
+                            &queue,
+                            &mut encoder,
+                            &target_view,
+                            &owner_compact,
+                            &presentation,
+                            false,
+                        )
+                        .expect("render compact owner object-sprite benchmark scene");
+                    queue.submit([encoder.finish()]);
+                    black_box(owner_compact_renderer.last_stats());
+                }
+                device
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .expect("wait for amortized owner object-sprite submissions");
+            }
+            start.elapsed() / AMORTIZED_FRAMES
+        });
+    });
+    group.bench_function("generic_1000_owner_pairs", |b| {
+        b.iter(|| {
+            render_completed_frame(
+                &mut owner_generic_renderer,
+                &device,
+                &queue,
+                &target_view,
+                &owner_generic,
                 &presentation,
             )
         });

@@ -281,8 +281,10 @@ fn capture_compact_fogged_object_sprite(
     fog_dest: (f32, f32, f32, f32),
     transform: &GraphicsTransform,
     image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
     source: FloatSourceRect,
     flip_x: bool,
+    owner_color: Option<u32>,
     blit: SpriteBlitState,
     gamma: Option<&clonk_graphics::GammaRamp>,
     fog: &FogDrawContext,
@@ -327,7 +329,36 @@ fn capture_compact_fogged_object_sprite(
     }
 
     let tile_size = cpp_tex_size(image.width(), image.height()) as f32;
-    let mut captured = [None; 4];
+    let owner_layers = match (mask, owner_color) {
+        (Some(mask), Some(mut owner_modulation)) => {
+            if let Some(global) = blit.modulation {
+                if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR == 0 {
+                    owner_modulation = modulate_c4_colors(owner_modulation, global);
+                }
+            }
+            let Some((base, owner)) = mask.gpu_layer_resources(image) else {
+                return false;
+            };
+            Some((
+                base,
+                owner,
+                owner_modulation,
+                blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0,
+                if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR != 0 {
+                    GpuOuterModulation::Ignore
+                } else {
+                    GpuOuterModulation::Combine
+                },
+            ))
+        }
+        _ => None,
+    };
+    let base_resource = owner_layers
+        .as_ref()
+        .map(|(base, ..)| base.clone())
+        .unwrap_or_else(|| image.gpu_texture_resource());
+    let mut base_captured = [None; 4];
+    let mut owner_captured = [None; 4];
     let mut captured_count = 0;
     for &(top, bottom) in y_ranges.iter().take(y_count) {
         for &(left, right) in x_ranges.iter().take(x_count) {
@@ -374,31 +405,54 @@ fn capture_compact_fogged_object_sprite(
             {
                 return false;
             }
-            let (modulation, mod2) = captured_sprite_modulation(
+            let (base_modulation, base_mod2) = captured_sprite_modulation(
                 blit.modulation.unwrap_or(0x00ff_ffff),
                 Some(fog_modulation),
                 blit.mode & C4GFXBLIT_MOD2 != 0,
                 blit.renderer_config,
             );
-            captured[captured_count] = Some(GpuObjectSprite::new(
+            let uv_rect = [uv[0][0], uv[0][1], uv[3][0], uv[3][1]];
+            let sample_tile_size = if sampler == GpuSampler::Linear {
+                tile_size
+            } else {
+                0.0
+            };
+            base_captured[captured_count] = Some(GpuObjectSprite::new(
                 positions,
-                [uv[0][0], uv[0][1], uv[3][0], uv[3][1]],
-                modulation.map(packed_c4_modulation),
+                uv_rect,
+                base_modulation.map(packed_c4_modulation),
                 sampler,
-                if sampler == GpuSampler::Linear {
-                    tile_size
-                } else {
-                    0.0
-                },
-                mod2,
+                sample_tile_size,
+                base_mod2,
                 GpuOuterModulation::Combine,
             ));
+            if let Some((_, _, owner_modulation, owner_mod2, owner_outer_modulation)) =
+                owner_layers.as_ref()
+            {
+                let (owner_modulation, owner_mod2) = captured_sprite_modulation(
+                    *owner_modulation,
+                    Some(fog_modulation),
+                    *owner_mod2,
+                    blit.renderer_config,
+                );
+                owner_captured[captured_count] = Some(
+                    GpuObjectSprite::new(
+                        positions,
+                        uv_rect,
+                        owner_modulation.map(packed_c4_modulation),
+                        sampler,
+                        sample_tile_size,
+                        owner_mod2,
+                        *owner_outer_modulation,
+                    )
+                    .with_owner_layer(),
+                );
+            }
             captured_count += 1;
         }
     }
 
-    let resource = image.gpu_texture_resource();
-    let texture = resource.id;
+    let texture = base_resource.id;
     let clip = surface.clip();
     let blend = if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
         GpuBlend::Additive
@@ -406,9 +460,34 @@ fn capture_compact_fogged_object_sprite(
         GpuBlend::Normal
     };
     let gamma = gamma.is_some_and(|gamma| !gamma.is_passthrough());
-    let _ = surface.add_gpu_texture(resource);
-    for sprite in captured.into_iter().take(captured_count).flatten() {
-        let _ = surface.push_gpu_object_sprite(texture, sprite, clip, blend, gamma);
+    let _ = surface.add_gpu_texture(base_resource);
+    if let Some((_, owner_resource, ..)) = owner_layers {
+        let owner_texture = owner_resource.id;
+        let _ = surface.add_gpu_texture(owner_resource);
+        for sprite in base_captured.into_iter().take(captured_count).flatten() {
+            let _ = surface.push_gpu_owner_object_sprite(
+                texture,
+                owner_texture,
+                sprite,
+                clip,
+                blend,
+                gamma,
+            );
+        }
+        for sprite in owner_captured.into_iter().take(captured_count).flatten() {
+            let _ = surface.push_gpu_owner_object_sprite(
+                texture,
+                owner_texture,
+                sprite,
+                clip,
+                blend,
+                gamma,
+            );
+        }
+    } else {
+        for sprite in base_captured.into_iter().take(captured_count).flatten() {
+            let _ = surface.push_gpu_object_sprite(texture, sprite, clip, blend, gamma);
+        }
     }
     true
 }
@@ -588,12 +667,22 @@ fn capture_gpu_sprite_impl(
     }
 
     if compact_object
-        && mask.is_none()
         && retained_resource.is_none()
         && !inclusive_source_end
         && fog.is_some_and(|fog| {
             capture_compact_fogged_object_sprite(
-                surface, dest, fog_dest, transform, image, source, flip_x, blit, gamma, fog,
+                surface,
+                dest,
+                fog_dest,
+                transform,
+                image,
+                mask,
+                source,
+                flip_x,
+                owner_color,
+                blit,
+                gamma,
+                fog,
                 sampler,
             )
         })
@@ -625,7 +714,7 @@ fn capture_gpu_sprite_impl(
     if fog_sampler.is_none()
         && blit.fog_modulation.is_none()
         && texture_indent == 0.0
-        && mask.is_none()
+        && (mask.is_none() || compact_object)
         && !physical_texture_tiles
     {
         let sample_width = if inclusive_source_end {
@@ -676,19 +765,52 @@ fn capture_gpu_sprite_impl(
             return false;
         }
 
-        let main_modulation = blit.modulation.unwrap_or(0x00ff_ffff);
-        let (modulation, mod2) = captured_sprite_modulation(
-            main_modulation,
+        let (base_modulation, base_mod2) = captured_sprite_modulation(
+            blit.modulation.unwrap_or(0x00ff_ffff),
             None,
             blit.mode & C4GFXBLIT_MOD2 != 0,
             blit.renderer_config,
         );
-        let outer_modulation = if blit.modulation.is_some() {
+        let base_outer_modulation = if blit.modulation.is_some() {
             GpuOuterModulation::Combine
         } else {
             GpuOuterModulation::Inherit
         };
-        let base_resource = retained_resource.unwrap_or_else(|| image.gpu_texture_resource());
+        let owner_layers = match (mask, owner_color) {
+            (Some(mask), Some(mut owner_modulation)) => {
+                if let Some(global) = blit.modulation {
+                    if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR == 0 {
+                        owner_modulation = modulate_c4_colors(owner_modulation, global);
+                    }
+                }
+                let Some((base, owner)) = mask.gpu_layer_resources(image) else {
+                    return false;
+                };
+                let (owner_modulation, owner_mod2) = captured_sprite_modulation(
+                    owner_modulation,
+                    None,
+                    blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0,
+                    blit.renderer_config,
+                );
+                let owner_outer_modulation = if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR != 0 {
+                    GpuOuterModulation::Ignore
+                } else {
+                    GpuOuterModulation::Combine
+                };
+                Some((
+                    base,
+                    owner,
+                    owner_modulation,
+                    owner_mod2,
+                    owner_outer_modulation,
+                ))
+            }
+            _ => None,
+        };
+        let base_resource = owner_layers
+            .as_ref()
+            .map(|(base, ..)| base.clone())
+            .unwrap_or_else(|| retained_resource.unwrap_or_else(|| image.gpu_texture_resource()));
         let blend = if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
             GpuBlend::Additive
         } else {
@@ -698,33 +820,69 @@ fn capture_gpu_sprite_impl(
         if compact_object {
             let texture = base_resource.id;
             let clip = surface.clip();
-            let _ = surface.add_gpu_texture(base_resource);
-            let _ = surface.push_gpu_object_sprite(
-                texture,
-                GpuObjectSprite::new(
-                    positions,
-                    [uv[0][0], uv[0][1], uv[3][0], uv[3][1]],
-                    modulation.map(packed_c4_modulation),
-                    sampler,
-                    if sampler == GpuSampler::Linear {
-                        tile_size
-                    } else {
-                        0.0
-                    },
-                    mod2,
-                    outer_modulation,
-                ),
-                clip,
-                blend,
-                gamma,
+            let uv_rect = [uv[0][0], uv[0][1], uv[3][0], uv[3][1]];
+            let sample_tile_size = if sampler == GpuSampler::Linear {
+                tile_size
+            } else {
+                0.0
+            };
+            let base_sprite = GpuObjectSprite::new(
+                positions,
+                uv_rect,
+                base_modulation.map(packed_c4_modulation),
+                sampler,
+                sample_tile_size,
+                base_mod2,
+                base_outer_modulation,
             );
+            let owner_sprite = owner_layers.as_ref().map(
+                |(_, _, owner_modulation, owner_mod2, owner_outer_modulation)| {
+                    GpuObjectSprite::new(
+                        positions,
+                        uv_rect,
+                        owner_modulation.map(packed_c4_modulation),
+                        sampler,
+                        sample_tile_size,
+                        *owner_mod2,
+                        *owner_outer_modulation,
+                    )
+                    .with_owner_layer()
+                },
+            );
+            if let Some((_, owner_resource, ..)) = owner_layers {
+                let Some(owner_sprite) = owner_sprite else {
+                    return false;
+                };
+                let owner_texture = owner_resource.id;
+                let _ = surface.add_gpu_texture(base_resource);
+                let _ = surface.add_gpu_texture(owner_resource);
+                let _ = surface.push_gpu_owner_object_sprite(
+                    texture,
+                    owner_texture,
+                    base_sprite,
+                    clip,
+                    blend,
+                    gamma,
+                );
+                let _ = surface.push_gpu_owner_object_sprite(
+                    texture,
+                    owner_texture,
+                    owner_sprite,
+                    clip,
+                    blend,
+                    gamma,
+                );
+            } else {
+                let _ = surface.add_gpu_texture(base_resource);
+                let _ = surface.push_gpu_object_sprite(texture, base_sprite, clip, blend, gamma);
+            }
             return true;
         }
         let sample_tile = (sampler == GpuSampler::Linear).then_some([0.0, 0.0, tile_size]);
         let vertices = std::array::from_fn(|index| {
-            let vertex = GpuVertex::new(positions[index], uv[index], modulation[index])
-                .with_outer_modulation(outer_modulation)
-                .with_owner_outer_modulation(outer_modulation);
+            let vertex = GpuVertex::new(positions[index], uv[index], base_modulation[index])
+                .with_outer_modulation(base_outer_modulation)
+                .with_owner_outer_modulation(base_outer_modulation);
             sample_tile.map_or(vertex, |[x, y, size]| vertex.with_sample_tile(x, y, size))
         });
         let command = GpuCommand::Quad {
@@ -733,7 +891,7 @@ fn capture_gpu_sprite_impl(
             vertices,
             clip: surface.clip(),
             blend,
-            base_mod2: mod2,
+            base_mod2,
             owner_mod2: false,
             sampler,
             gamma,
