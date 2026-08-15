@@ -793,6 +793,12 @@ pub enum LandscapeOperation {
         position: Vector2,
         color: u32,
     },
+    /// A contiguous run of FnSetLandscapePixel calls. The vector is only an
+    /// allocation/dispatch optimization; the authoritative fold applies the
+    /// entries in order, exactly like repeated SetLandscapePixel operations.
+    SetLandscapePixels {
+        writes: Vec<(Vector2, u32)>,
+    },
     /// FnSetSkyParallax (C4Script.cpp:4955-4970) — Sky is a C4Landscape
     /// member; the raw int args carry the SkyPar_KEEP magic through to
     /// `SkyState::apply_parallax`.
@@ -805,6 +811,31 @@ pub enum LandscapeOperation {
         x: i32,
         y: i32,
     },
+}
+
+impl LandscapeOperation {
+    pub(crate) fn is_set_landscape_pixel(&self) -> bool {
+        matches!(
+            self,
+            Self::SetLandscapePixel { .. } | Self::SetLandscapePixels { .. }
+        )
+    }
+
+    pub(crate) fn append_set_landscape_pixel(&mut self, position: Vector2, color: u32) {
+        match self {
+            Self::SetLandscapePixel {
+                position: first_position,
+                color: first_color,
+            } => {
+                let first = (*first_position, *first_color);
+                *self = Self::SetLandscapePixels {
+                    writes: vec![first, (position, color)],
+                };
+            }
+            Self::SetLandscapePixels { writes } => writes.push((position, color)),
+            _ => unreachable!("only SetLandscapePixel operations append here"),
+        }
+    }
 }
 
 pub(crate) fn blast_threshold(radius: i32) -> i64 {
@@ -1751,10 +1782,7 @@ pub(crate) fn set_landscape_pixel(args: &[Value]) -> Result<Value, RuntimeError>
             .map_or(Vector2::new(x, y), |(_, base)| {
                 Vector2::new(base.x.saturating_add(x), base.y.saturating_add(y))
             });
-        context.register_landscape_operation(LandscapeOperation::SetLandscapePixel {
-            position,
-            color,
-        });
+        context.register_set_landscape_pixel(position, color);
         Ok(Value::Nil)
     })
 }

@@ -187,6 +187,41 @@ struct LandscapeGpuTile {
     dirty: Vec<SurfaceRect>,
 }
 
+fn union_surface_rect(left: SurfaceRect, right: SurfaceRect) -> SurfaceRect {
+    let x = i64::from(left.x).min(i64::from(right.x));
+    let y = i64::from(left.y).min(i64::from(right.y));
+    let right_edge = (i64::from(left.x) + i64::from(left.width))
+        .max(i64::from(right.x) + i64::from(right.width));
+    let bottom_edge = (i64::from(left.y) + i64::from(left.height))
+        .max(i64::from(right.y) + i64::from(right.height));
+    SurfaceRect::new(
+        i32::try_from(x).unwrap_or(if x.is_negative() { i32::MIN } else { i32::MAX }),
+        i32::try_from(y).unwrap_or(if y.is_negative() { i32::MIN } else { i32::MAX }),
+        u32::try_from(right_edge.saturating_sub(x)).unwrap_or(u32::MAX),
+        u32::try_from(bottom_edge.saturating_sub(y)).unwrap_or(u32::MAX),
+    )
+}
+
+fn surface_rect_area(rect: SurfaceRect) -> u64 {
+    u64::from(rect.width).saturating_mul(u64::from(rect.height))
+}
+
+fn can_merge_surface_rects(left: SurfaceRect, right: SurfaceRect) -> bool {
+    let left_right = i64::from(left.x) + i64::from(left.width);
+    let right_right = i64::from(right.x) + i64::from(right.width);
+    let left_bottom = i64::from(left.y) + i64::from(left.height);
+    let right_bottom = i64::from(right.y) + i64::from(right.height);
+    let horizontal_overlap = i64::from(left.x) < right_right && i64::from(right.x) < left_right;
+    let vertical_overlap = i64::from(left.y) < right_bottom && i64::from(right.y) < left_bottom;
+    let horizontal_touch = left_right == i64::from(right.x) || right_right == i64::from(left.x);
+    let vertical_touch = left_bottom == i64::from(right.y) || right_bottom == i64::from(left.y);
+    let aligned = (horizontal_overlap && (vertical_overlap || vertical_touch))
+        || (vertical_overlap && horizontal_touch);
+    aligned
+        && surface_rect_area(union_surface_rect(left, right))
+            <= surface_rect_area(left).saturating_add(surface_rect_area(right))
+}
+
 impl LandscapeRenderCache {
     pub(crate) fn gpu_texture_id(&self) -> GpuTextureId {
         self.gpu_texture_id
@@ -250,11 +285,30 @@ impl LandscapeRenderCache {
             return;
         }
         self.gpu_revision = self.gpu_revision.wrapping_add(1);
-        self.gpu_dirty
-            .extend(regions.iter().filter_map(|&(x, y, width, height)| {
-                (width != 0 && height != 0)
-                    .then_some(SurfaceRect::new(x as i32, y as i32, width, height))
-            }));
+        for region in regions.iter().filter_map(|&(x, y, width, height)| {
+            (width != 0 && height != 0)
+                .then_some(SurfaceRect::new(x as i32, y as i32, width, height))
+        }) {
+            let mut merged = region;
+            let mut first_index = None;
+            let mut index = 0;
+            while index < self.gpu_dirty.len() {
+                let existing = self.gpu_dirty[index];
+                if can_merge_surface_rects(existing, merged) {
+                    merged = union_surface_rect(existing, merged);
+                    first_index = Some(first_index.map_or(index, |first: usize| first.min(index)));
+                    self.gpu_dirty.remove(index);
+                    index = 0;
+                } else {
+                    index += 1;
+                }
+            }
+            if let Some(index) = first_index {
+                self.gpu_dirty.insert(index, merged);
+            } else {
+                self.gpu_dirty.push(merged);
+            }
+        }
         if self.gpu_dirty.len() > 128 {
             self.gpu_dirty.clear();
             self.gpu_dirty
