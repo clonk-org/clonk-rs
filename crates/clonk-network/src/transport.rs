@@ -51,6 +51,15 @@ const PID_CONTROL_REQ: u8 = 0x41;
 const PID_CONTROL_PKT: u8 = 0x42;
 const PID_EXEC_SYNC_CTRL: u8 = 0x43;
 
+/// Rust-only capability marker appended to the fixed C++ Conn/ConnRe fields.
+///
+/// The pinned C++ decoder compiles the known fields and does not require the
+/// binary reader to reach EOF (`src/C4Packet2.cpp:145-149`;
+/// `src/StdCompiler.cpp:228-244`). Stock peers therefore ignore this marker,
+/// while a Rust peer can use it as positive evidence before sending a
+/// port-only packet ID.
+pub(crate) const PORT_PROTOCOL_MARKER: [u8; 4] = [b'L', b'C', b'P', 1];
+
 pub const NETWORK_STATE_NONE: u8 = 0;
 pub const NETWORK_STATE_INIT: u8 = 1;
 pub const NETWORK_STATE_LOBBY: u8 = 2;
@@ -73,6 +82,8 @@ pub struct ConnectionRequest {
     pub build: i32,
     pub password: LegacyCString,
     pub connection_id: u32,
+    /// True when the sender understands the Rust port-only capability packet.
+    pub port_protocol: bool,
 }
 
 /// Exact payload of `C4PacketConnRe` (`src/C4Network2IO.cpp:1630-1642`).
@@ -81,6 +92,8 @@ pub struct ConnectionReply {
     pub ok: bool,
     pub message: LegacyCString,
     pub wrong_password: bool,
+    /// True when the sender understands the Rust port-only capability packet.
+    pub port_protocol: bool,
 }
 
 /// Exact `C4PacketPing` body shared by `PID_Ping` and `PID_Pong`
@@ -1205,11 +1218,13 @@ pub fn decode_connection_request_payload(data: &[u8]) -> Result<ConnectionReques
     let build = reader.read_packed_i32()?;
     let password = reader.read_c_string()?;
     let connection_id = reader.read_packed_u32()?;
+    let port_protocol = reader.remaining() == PORT_PROTOCOL_MARKER;
     Ok(ConnectionRequest {
         core,
         build,
         password,
         connection_id,
+        port_protocol,
     })
 }
 
@@ -1229,6 +1244,9 @@ pub fn encode_connection_request_payload(
     encode_packed_i32(request.build, &mut data);
     append_c_string(&mut data, &request.password);
     encode_varint(request.connection_id, &mut data);
+    if request.port_protocol {
+        data.extend_from_slice(&PORT_PROTOCOL_MARKER);
+    }
     Ok(data)
 }
 
@@ -1239,6 +1257,7 @@ pub fn decode_connection_reply_payload(data: &[u8]) -> Result<ConnectionReply, T
         ok: reader.read_bool()?,
         message: reader.read_c_string()?,
         wrong_password: reader.read_bool()?,
+        port_protocol: reader.remaining() == PORT_PROTOCOL_MARKER,
     };
     Ok(reply)
 }
@@ -1249,6 +1268,9 @@ pub fn encode_connection_reply_payload(reply: &ConnectionReply) -> Result<Vec<u8
     data.push(u8::from(reply.ok));
     append_c_string(&mut data, &reply.message);
     data.push(u8::from(reply.wrong_password));
+    if reply.port_protocol {
+        data.extend_from_slice(&PORT_PROTOCOL_MARKER);
+    }
     Ok(data)
 }
 
@@ -1343,6 +1365,10 @@ impl<'a> ConnectionPayloadReader<'a> {
         )?;
         self.offset += consumed;
         Ok(value)
+    }
+
+    fn remaining(&self) -> &[u8] {
+        &self.data[self.offset..]
     }
 }
 
@@ -2453,6 +2479,7 @@ mod tests {
             build: crate::CURRENT_GAME_BUILD + 2,
             password: LegacyCString::from_bytes(b"s3cret".to_vec()).unwrap(),
             connection_id: 0x0102_0304,
+            port_protocol: false,
         };
         let (client, mut server) = duplex(128);
         let mut transport = ControlTransport::new(client);
@@ -2484,6 +2511,7 @@ mod tests {
             ok: false,
             message: LegacyCString::from_bytes(b"wrong password".to_vec()).unwrap(),
             wrong_password: true,
+            port_protocol: false,
         };
         let (client, mut server) = duplex(128);
         let mut transport = ControlTransport::new(client);
@@ -2526,6 +2554,7 @@ mod tests {
         assert_eq!(request.core.name.as_bytes(), b"Alice");
         assert_eq!(request.build, 362);
         assert_eq!(request.connection_id, 0x0102_0304);
+        assert!(!request.port_protocol);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2546,18 +2575,61 @@ mod tests {
         assert!(!reply.ok);
         assert_eq!(reply.message.as_bytes(), b"wrong password");
         assert!(reply.wrong_password);
+        assert!(!reply.port_protocol);
     }
 
     #[test]
     fn cpp_connection_decoder_ignores_trailing_payload_bytes() {
         // CompileFromBuf does not require StdCompilerBinRead to be at EOF
-        // (src/StdCompiler.h:372-385; src/StdCompiler.cpp:241-244).
+        // (src/C4Packet2.cpp:145-149; src/StdCompiler.cpp:228-244).
         let reply = decode_connection_reply_payload(&[0x01, 0x00, 0x00, 0xaa])
             .expect("C++ ignores data after the compiled ConnRe fields");
 
         assert!(reply.ok);
         assert!(reply.message.is_empty());
         assert!(!reply.wrong_password);
+        assert!(!reply.port_protocol);
+    }
+
+    #[test]
+    fn port_marker_round_trips_after_cpp_connection_fields() {
+        // The marker follows only the known Conn fields; stock C++ compiles
+        // those fields without requiring EOF (oracle-src-pinned
+        // src/C4Packet2.cpp:145-149; src/StdCompiler.cpp:228-244).
+        let request = ConnectionRequest {
+            core: ClientCoreControlData {
+                client_id: -1,
+                name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                nick: LegacyCString::from_bytes(b"Ali".to_vec()).unwrap(),
+                ..Default::default()
+            },
+            build: 362,
+            password: LegacyCString::default(),
+            connection_id: 11,
+            port_protocol: true,
+        };
+
+        let payload = encode_connection_request_payload(&request).unwrap();
+        assert!(payload.ends_with(&PORT_PROTOCOL_MARKER));
+        assert!(
+            decode_connection_request_payload(&payload)
+                .unwrap()
+                .port_protocol
+        );
+
+        let reply = ConnectionReply {
+            ok: true,
+            message: LegacyCString::default(),
+            wrong_password: false,
+            port_protocol: true,
+        };
+        let payload = encode_connection_reply_payload(&reply).unwrap();
+        assert!(payload.ends_with(&PORT_PROTOCOL_MARKER));
+        assert!(
+            decode_connection_reply_payload(&payload)
+                .unwrap()
+                .port_protocol
+        );
     }
 
     #[test]
@@ -2577,6 +2649,7 @@ mod tests {
             build: 362,
             password: LegacyCString::default(),
             connection_id: 0,
+            port_protocol: false,
         };
 
         assert_eq!(

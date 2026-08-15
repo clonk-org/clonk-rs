@@ -638,13 +638,17 @@ pub(crate) async fn run_client_loop_with_addresses<S>(
 {
     let liveness = resource_state.liveness.clone();
     let mut routes = ClientRouteManager::new();
-    routes.add_route(
+    // The duplex test peer stands in for an already-established Rust
+    // connection; production routes get the same evidence from the
+    // trailing connection marker during the handshake.
+    routes.add_route_with_peer_capabilities(
         0,
         0,
         crate::NetworkProtocol::Tcp,
         host_peer_addr,
         transport,
         liveness,
+        true,
     );
     let (_voice_command_tx, voice_commands) =
         mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
@@ -1060,13 +1064,14 @@ pub(crate) async fn run_client_loop_with_routes(
                         .udp_outbound
                         .take()
                         .expect("established secondary UDP route has an outbox sender");
-                    transport.add_udp_route(
+                    transport.add_udp_route_with_peer_capabilities(
                         route.local_connection_id,
                         route.remote_connection_id,
                         Some(route.peer_addr),
                         route.transport,
                         route.liveness,
                         outbound,
+                        route.peer_is_port,
                     );
                 } else if udp_reconnect.is_some() {
                     udp_retry_at = Some(tokio::time::Instant::now() + CLIENT_ROUTE_RETRY_INTERVAL);
@@ -1084,13 +1089,14 @@ pub(crate) async fn run_client_loop_with_routes(
                 pending_tcp.take();
                 if let Some(route) = route {
                     tcp_retry_at = None;
-                    transport.add_route(
+                    transport.add_route_with_peer_capabilities(
                         route.local_connection_id,
                         route.remote_connection_id,
                         crate::NetworkProtocol::Tcp,
                         Some(route.peer_addr),
                         route.transport,
                         route.liveness,
+                        route.peer_is_port,
                     );
                 } else if tcp_reconnect.is_some() {
                     tcp_retry_at = Some(tokio::time::Instant::now() + CLIENT_ROUTE_RETRY_INTERVAL);
@@ -1338,6 +1344,7 @@ pub(crate) async fn run_client_loop_with_routes(
                                     )
                                     .unwrap_or_default(),
                                     wrong_password: false,
+                                    port_protocol: false,
                                 },
                             ))
                             .await
@@ -2855,6 +2862,7 @@ mod tests {
                     message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
                         .unwrap_or_default(),
                     wrong_password: false,
+                    port_protocol: false,
                 }),
             ))
             .expect("queue graceful part");

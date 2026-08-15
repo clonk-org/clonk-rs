@@ -18,12 +18,13 @@
 //! in [`crate::host_restart`]). It is not a licence for new port-only IDs on a
 //! live session.
 //!
-//! What the range does buy: a stock peer cannot *send* any of these IDs — it
-//! does not know them — so receiving an announcement is positive evidence that
-//! the sender is this port, and a peer that never announces stays absent from
-//! the registry. The default for such a peer is therefore always the
-//! C++-compatible path: a capability is enabled only on positive evidence,
-//! never assumed from a version number.
+//! The positive peer marker is carried in a fixed extension after the known
+//! `PID_Conn`/`PID_ConnRe` fields. The pinned C++ compiler reads those fields
+//! without requiring EOF (`src/C4Packet2.cpp:145-149;
+//! src/StdCompiler.cpp:228-244`), so stock peers ignore the marker while this
+//! port can know the peer before sending any port-only ID. A missing marker
+//! means stock C++ and keeps the C++-compatible path; capabilities are never
+//! assumed from a version number or from the absence of a parse error.
 
 use std::collections::BTreeMap;
 

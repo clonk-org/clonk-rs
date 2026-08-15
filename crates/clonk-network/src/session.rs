@@ -746,6 +746,7 @@ mod tests {
                         udp: None,
                     },
                     voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                    peer_is_port: true,
                 },
             )
             .is_none());
@@ -798,6 +799,26 @@ mod tests {
         assert!(host.try_recv().is_err());
     }
 
+    #[tokio::test]
+    async fn first_host_routed_control_skips_port_capability_for_stock_peer() {
+        let mut routes = ClientRouteManager::new();
+        let mut host =
+            add_test_route_queue(&mut routes, 1, HOST_CLIENT_ID, crate::NetworkProtocol::Tcp);
+        routes.routes.get_mut(&1).test_value().peer_is_port = false;
+        let first = legacy_packet(7, 73, 0x31);
+
+        routes
+            .send_message(ControlMessage::Control(first.clone()))
+            .await
+            .test_value();
+
+        assert!(matches!(
+            host.try_recv().test_value(),
+            ClientRouteCommand::Message(ControlMessage::Control(packet)) if packet == first
+        ));
+        assert!(host.try_recv().is_err());
+    }
+
     fn host_state_with_test_route(client_id: ClientId, outbound: HostOutboundSender) -> HostState {
         let config = HostConfig::default();
         let backlog_limit = config.backlog_limit;
@@ -837,6 +858,7 @@ mod tests {
                     ping: RoutePingLag::default(),
                     outbound,
                     voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                    peer_is_port: false,
                 },
             )]),
             accepted_route_waiters: Vec::new(),
@@ -971,6 +993,7 @@ mod tests {
             connection_id,
             91,
             core,
+            false,
             "127.0.0.1:11113".parse().test_value(),
             crate::NetworkProtocol::Tcp,
             outbound,
@@ -1038,6 +1061,36 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn accepted_udp_route_skips_voice_capability_for_stock_peer() {
+        let connection_id = 43;
+        let client_id = 7;
+        let (mut state, core) = host_state_with_pending_accept(connection_id, client_id);
+        let (outbound, mut outbound_rx) = HostOutboundSender::channel();
+        let (setup_tx, setup_rx) = oneshot::channel();
+
+        handle_client_accepted(
+            connection_id,
+            93,
+            core,
+            false,
+            "127.0.0.1:11115".parse().test_value(),
+            crate::NetworkProtocol::Udp,
+            outbound,
+            setup_tx,
+            &mut state,
+        )
+        .await;
+        assert!(setup_rx.await.unwrap().is_ok());
+
+        while let Ok(message) = outbound_rx.try_recv() {
+            assert!(!matches!(
+                message,
+                HostOutboundMessage::Message(ControlMessage::PortCapabilities(_))
+            ));
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn rejected_host_join_prefix_fully_removes_the_accepted_route() {
         // A failed SendMsg during synchronous OnClientConnect falls through
@@ -1063,6 +1116,7 @@ mod tests {
             connection_id,
             92,
             core,
+            false,
             "127.0.0.1:11114".parse().test_value(),
             crate::NetworkProtocol::Tcp,
             outbound,
@@ -1159,6 +1213,7 @@ mod tests {
                 ping: second_ping,
                 outbound: second_outbound,
                 voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
             },
         );
 
@@ -1195,6 +1250,7 @@ mod tests {
                 ping: RoutePingLag::default(),
                 outbound: first_udp,
                 voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
             },
         );
         let second_id = 8;
@@ -1221,6 +1277,7 @@ mod tests {
                 ping: RoutePingLag::default(),
                 outbound: second_tcp,
                 voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
             },
         );
         let message = ControlMessage::Status(NetworkStatus {
@@ -1576,6 +1633,7 @@ mod tests {
                 ping: RoutePingLag::default(),
                 outbound: live,
                 voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
             },
         );
 
@@ -4949,6 +5007,7 @@ mod tests {
                 build: CURRENT_GAME_BUILD,
                 password: clonk_engine::LegacyCString::default(),
                 connection_id: 99,
+                port_protocol: false,
             },
         ))
         .await
@@ -6167,6 +6226,7 @@ mod tests {
                 build: CURRENT_GAME_BUILD,
                 password: clonk_engine::LegacyCString::default(),
                 connection_id: remote_connection_id,
+                port_protocol: true,
             },
         ))
         .await
@@ -6191,6 +6251,7 @@ mod tests {
             message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
                 .unwrap(),
             wrong_password: false,
+            port_protocol: false,
         }))
         .await
         .test_value();
@@ -7357,6 +7418,7 @@ mod tests {
                 build: CURRENT_GAME_BUILD,
                 password: clonk_engine::LegacyCString::default(),
                 connection_id: 0,
+                port_protocol: false,
             },
         )
         .await
@@ -10080,6 +10142,7 @@ mod tests {
                     build: CURRENT_GAME_BUILD,
                     password: clonk_engine::LegacyCString::default(),
                     connection_id: 17,
+                    port_protocol: false,
                 },
             ))
             .await
@@ -10097,6 +10160,7 @@ mod tests {
                 ok: true,
                 message: accepted_message,
                 wrong_password: false,
+                port_protocol: true,
             })
         );
 
@@ -10144,6 +10208,7 @@ mod tests {
             message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
                 .test_value(),
             wrong_password: false,
+            port_protocol: false,
         });
         for route in [&mut canonical, &mut secondary] {
             assert!(raw_client_received_message(route, &close, EVENT_WAIT).await);
@@ -10196,6 +10261,7 @@ mod tests {
             message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
                 .test_value(),
             wrong_password: false,
+            port_protocol: false,
         });
         assert!(raw_client_received_message(&mut canonical, &close, EVENT_WAIT).await);
 
@@ -10205,6 +10271,7 @@ mod tests {
                 message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
                     .unwrap(),
                 wrong_password: false,
+                port_protocol: false,
             }))
             .await
             .test_value();
@@ -10317,6 +10384,7 @@ mod tests {
                 message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
                     .unwrap(),
                 wrong_password: false,
+                port_protocol: false,
             }))
             .await
             .test_value();
@@ -10406,6 +10474,7 @@ mod tests {
                     build: CURRENT_GAME_BUILD,
                     password: clonk_engine::LegacyCString::default(),
                     connection_id: 41,
+                    port_protocol: false,
                 },
             ))
             .await
@@ -10558,6 +10627,7 @@ mod tests {
                     build: CURRENT_GAME_BUILD,
                     password: clonk_engine::LegacyCString::default(),
                     connection_id: remote_connection_id,
+                    port_protocol: false,
                 },
             ))
             .await
@@ -10580,6 +10650,7 @@ mod tests {
                 message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
                     .unwrap(),
                 wrong_password: false,
+                port_protocol: false,
             }))
             .await
             .test_value();
@@ -10753,6 +10824,7 @@ mod tests {
                         build: CURRENT_GAME_BUILD,
                         password: clonk_engine::LegacyCString::default(),
                         connection_id: remote_connection_id,
+                        port_protocol: false,
                     },
                 ))
                 .await
@@ -10777,6 +10849,7 @@ mod tests {
                     )
                     .unwrap(),
                     wrong_password: false,
+                    port_protocol: true,
                 }))
                 .await
                 .test_value();
@@ -10959,6 +11032,7 @@ mod tests {
                         build: CURRENT_GAME_BUILD,
                         password: clonk_engine::LegacyCString::default(),
                         connection_id: remote_connection_id,
+                        port_protocol: false,
                     },
                 ))
                 .await
@@ -10983,6 +11057,7 @@ mod tests {
                     )
                     .unwrap(),
                     wrong_password: false,
+                    port_protocol: false,
                 }))
                 .await
                 .test_value();
@@ -11560,6 +11635,7 @@ mod tests {
             build: CURRENT_GAME_BUILD,
             password: clonk_engine::LegacyCString::default(),
             connection_id: 0,
+            port_protocol: false,
         };
 
         let bootstrap = run_client_connection_handshake(&mut transport, request)
@@ -11827,6 +11903,7 @@ mod tests {
                 build: CURRENT_GAME_BUILD,
                 password: clonk_engine::LegacyCString::default(),
                 connection_id: 9,
+                port_protocol: false,
             };
             let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
             let admission = tokio::spawn(async move {
@@ -12062,6 +12139,7 @@ mod tests {
                     build: CURRENT_GAME_BUILD,
                     password: clonk_engine::LegacyCString::default(),
                     connection_id: 11,
+                    port_protocol: false,
                 },
             ))
             .await
@@ -12071,6 +12149,7 @@ mod tests {
                 ok: true,
                 message: clonk_engine::LegacyCString::default(),
                 wrong_password: false,
+                port_protocol: false,
             }))
             .await
             .test_value();
@@ -12336,6 +12415,7 @@ mod tests {
                 message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
                     .unwrap(),
                 wrong_password: false,
+                port_protocol: false,
             })
             .test_value();
 
@@ -12510,6 +12590,7 @@ mod tests {
                 build: CURRENT_GAME_BUILD,
                 password: clonk_engine::LegacyCString::default(),
                 connection_id: 9,
+                port_protocol: false,
             };
             let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
             let admission = tokio::spawn(async move {
@@ -12649,6 +12730,7 @@ mod tests {
                 build: CURRENT_GAME_BUILD,
                 password: clonk_engine::LegacyCString::default(),
                 connection_id: 9,
+                port_protocol: false,
             };
             let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
             let admission = tokio::spawn(async move {
@@ -12792,6 +12874,7 @@ mod tests {
                 build: CURRENT_GAME_BUILD,
                 password: clonk_engine::LegacyCString::default(),
                 connection_id: 9,
+                port_protocol: false,
             };
             let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
             let admission = tokio::spawn(async move {
@@ -15338,6 +15421,7 @@ mod tests {
                     build: CURRENT_GAME_BUILD,
                     password: clonk_engine::LegacyCString::default(),
                     connection_id: 77,
+                    port_protocol: false,
                 },
             ))
             .await
@@ -15496,6 +15580,7 @@ mod tests {
                     build: CURRENT_GAME_BUILD,
                     password: clonk_engine::LegacyCString::default(),
                     connection_id: 77,
+                    port_protocol: false,
                 },
             ))
             .await
@@ -15651,6 +15736,7 @@ mod tests {
                     build: CURRENT_GAME_BUILD,
                     password: clonk_engine::LegacyCString::default(),
                     connection_id: 29,
+                    port_protocol: false,
                 },
             ))
             .await
@@ -16141,6 +16227,7 @@ mod tests {
                 message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
                     .unwrap(),
                 wrong_password: false,
+                port_protocol: false,
             }))
             .await
             .test_value();
@@ -16170,6 +16257,7 @@ mod tests {
                 ok: true,
                 message: clonk_engine::LegacyCString::from_bytes(b"duplicate".to_vec()).unwrap(),
                 wrong_password: false,
+                port_protocol: false,
             }))
             .await
             .test_value();
@@ -16213,6 +16301,7 @@ mod tests {
                 message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
                     .unwrap(),
                 wrong_password: false,
+                port_protocol: false,
             }))
             .await
             .test_value();
@@ -16388,6 +16477,7 @@ mod tests {
                 ping: RoutePingLag::default(),
                 outbound: fallback,
                 voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
             },
         );
         let (host_tx, mut host_rx) = mpsc::unbounded_channel();
@@ -17781,6 +17871,7 @@ mod tests {
             build: CURRENT_GAME_BUILD,
             password: clonk_engine::LegacyCString::default(),
             connection_id: 0,
+            port_protocol: false,
         };
         let handshake = run_client_connection_handshake(&mut transport, request)
             .await
@@ -17816,6 +17907,7 @@ mod tests {
                     build: CURRENT_GAME_BUILD,
                     password: clonk_engine::LegacyCString::default(),
                     connection_id: remote_connection_id,
+                    port_protocol: false,
                 },
             ))
             .await
@@ -17838,6 +17930,7 @@ mod tests {
                 message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
                     .unwrap(),
                 wrong_password: false,
+                port_protocol: false,
             }))
             .await
             .test_value();
@@ -17883,6 +17976,7 @@ mod tests {
                     build: CURRENT_GAME_BUILD,
                     password: clonk_engine::LegacyCString::default(),
                     connection_id: remote_connection_id,
+                    port_protocol: false,
                 },
             ))
             .await

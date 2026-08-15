@@ -19,6 +19,7 @@ pub(crate) enum HostLoopMessage {
         connection_id: u32,
         remote_connection_id: u32,
         core: clonk_engine::ClientCoreControlData,
+        peer_is_port: bool,
         peer_addr: SocketAddr,
         protocol: crate::NetworkProtocol,
         outbound: HostOutboundSender,
