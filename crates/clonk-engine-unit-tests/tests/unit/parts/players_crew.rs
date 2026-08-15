@@ -1196,6 +1196,27 @@ fn player_lifecycle_repeated_surrender_does_not_restart_retire_delay() -> Result
 }
 
 #[test]
+fn player_lifecycle_eliminate_is_noop_after_surrender() -> Result<(), EngineError> {
+    // C4Player::Surrender sets both Surrendered and Eliminated, so a later
+    // C4Player::Eliminate returns before changing state or running its early
+    // client-deactivation check (C4Player.cpp:971-979,2015-2037).
+    let mut engine = Engine::new();
+    engine.set_control_host(true);
+    engine.register_test_player(PlayerConfig::new(1, "Surrendering"));
+    engine.player_mut(1)?.set_at_client(PlayerAtClient::new(3));
+    engine.set_player_surrendered(1, true)?;
+
+    engine.apply_player_commands(vec![PlayerCommand::Eliminate { player_id: 1 }])?;
+
+    assert_eq!(
+        engine.player(1).map(Player::status),
+        Some(PlayerStatus::Surrendered)
+    );
+    assert!(engine.take_pending_client_updates().is_empty());
+    Ok(())
+}
+
+#[test]
 fn player_lifecycle_fresh_autostop_clears_only_owned_inactive_crew_definitions(
 ) -> Result<(), EngineError> {
     // Fresh InitControl also transitions from the default FreeScroll
