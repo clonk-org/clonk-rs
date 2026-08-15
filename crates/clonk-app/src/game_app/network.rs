@@ -456,7 +456,7 @@ impl GameApp {
             LeaguePlayerAuthContinuation::InitialClient { request, .. } => {
                 let submitted = self.network.as_ref().is_some_and(|network| {
                     network
-                        .submit_player_info_update(request)
+                        .submit_join_player_info_update(request)
                         .inspect_err(
                             |error| tracing::error!(%error, "failed to submit initial PlayerInfo"),
                         )
@@ -3263,7 +3263,7 @@ impl GameApp {
                 }
             };
         }
-        LeaguePlayerAuthStatus::Completed(match network.submit_player_info_update(request) {
+        LeaguePlayerAuthStatus::Completed(match network.submit_join_player_info_update(request) {
             Ok(()) => true,
             Err(error) => {
                 tracing::error!(%error, "failed to submit initial PlayerInfo");
@@ -3380,7 +3380,7 @@ impl GameApp {
         &mut self,
         source_path: &Path,
         wire_filename: &str,
-        require_activated_client: bool,
+        require_player_client: bool,
     ) -> Result<(), String> {
         let fallback_group_maker = || {
             self.configured_client_player_selection
@@ -3408,8 +3408,15 @@ impl GameApp {
             .ok_or_else(|| "network session is unavailable".to_string())?;
         let client_id = i32::try_from(network.local_client_id())
             .map_err(|_| "local client ID exceeds the PlayerInfo wire field".to_string())?;
-        if require_activated_client && !self.control_clients.is_activated(client_id) {
-            return Err("network client is not active".to_string());
+        let client = self.control_clients.state(client_id);
+        // JoinLocalPlayer permits an inactive client so its AddPlayers request
+        // can trigger activation, but bars observers in every game state
+        // (src/C4Network2Players.cpp:78-137).
+        if client.is_some_and(|client| client.observer) {
+            return Err("network observers cannot join players".to_string());
+        }
+        if require_player_client && client.is_none() {
+            return Err("local network client is unavailable".to_string());
         }
 
         let source_path = source_path.to_path_buf();
@@ -3500,7 +3507,7 @@ impl GameApp {
             .ok_or_else(|| "network session is unavailable".to_string())?;
         if !host {
             return network
-                .submit_player_info_update(request)
+                .submit_join_player_info_update(request)
                 .map_err(|error| error.to_string());
         }
 

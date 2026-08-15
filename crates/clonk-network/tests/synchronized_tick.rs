@@ -8,8 +8,8 @@ use clonk_engine::{
 use clonk_network::{
     connect_client, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, ClientConfig, ClientEvent,
-    ControlDelivery, ControlPacket, HostConfig, HostEvent, LegacyControlFrame, ParticipantKind,
-    PlayerInfoUpdateRequest, BROADCAST_CLIENT_ID,
+    ControlDelivery, ControlPacket, HostConfig, HostEvent, LegacyControlFrame, NetworkStatus,
+    ParticipantKind, PlayerInfoUpdateRequest, BROADCAST_CLIENT_ID, NETWORK_STATE_GO,
 };
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -168,6 +168,112 @@ async fn inactive_joined_client_does_not_block_host_lockstep() {
 
     client.shutdown().await.expect("shut down client session");
     host.shutdown().await.expect("shut down host session");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn running_host_with_join_allowed_completes_late_join_after_fresh_snapshot() {
+    // A running host keeps accepting unknown clients while fAllowJoin is true.
+    // When its dynamic predates the live control tick, SendJoinData retains the
+    // joining client until OnGameSynchronized publishes a fresh dynamic
+    // (oracle 7d43b47b7d789b533f32d005e64596e0a07019cd
+    // src/C4Network2.cpp:510-514,1099-1115,1395-1445,1768-1775,
+    // 1820-1849,1945-1971).
+    const START_TICK: u32 = 23;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind running host listener");
+    let address = listener.local_addr().expect("running host address");
+    let config = HostConfig {
+        start_tick: START_TICK,
+        initial_status: NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: START_TICK as i32,
+        },
+        allow_join: true,
+        ..Default::default()
+    };
+    // JoinData compiles C4Network2Status in reference form: state and control
+    // mode survive, while iTargetTick is omitted and decodes to -1
+    // (src/C4Network2.cpp:54-55,108-123;
+    // src/C4Network2IO.cpp:1683-1692).
+    let expected_status = NetworkStatus {
+        target_tick: -1,
+        ..config.initial_status
+    };
+    let mut fresh_snapshot = config
+        .initial_join_snapshot
+        .clone()
+        .expect("default host snapshot");
+    assert!(fresh_snapshot.dynamic_tick < START_TICK as i32);
+    let stale_dynamic = fresh_snapshot.dynamic.clone();
+
+    let mut host = clonk_network::start_host(listener, config)
+        .await
+        .expect("start running host session");
+    let mut host_events = host.take_event_receiver();
+    let mut client_task = tokio::spawn(connect_client(
+        address,
+        ClientConfig::new("late-client", ParticipantKind::Player),
+    ));
+
+    wait_for_join(&mut host_events, 1).await;
+    loop {
+        match timeout(EVENT_WAIT, host_events.recv()).await {
+            Ok(Some(HostEvent::JoinDataNeeded {
+                client_id: 1,
+                current_control_tick: START_TICK,
+            })) => break,
+            Ok(Some(HostEvent::TransportError { error, .. })) => {
+                panic!("transport error before runtime JoinData request: {error}")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("host event stream ended before runtime JoinData request"),
+            Err(_) => panic!("timed out waiting for runtime JoinData request"),
+        }
+    }
+    assert!(
+        timeout(QUIET_WINDOW, &mut client_task).await.is_err(),
+        "the late client must wait while the host snapshot is stale"
+    );
+
+    fresh_snapshot.dynamic_tick = START_TICK as i32;
+    fresh_snapshot.dynamic.id = START_TICK as i32;
+    fresh_snapshot.dynamic.file_crc = START_TICK;
+    fresh_snapshot.dynamic.contents_crc = START_TICK;
+    fresh_snapshot.dynamic.filename =
+        LegacyCString::from_bytes(b"FreshDynamic.c4d".to_vec()).expect("static dynamic name");
+    assert_ne!(fresh_snapshot.dynamic, stale_dynamic);
+    host.publish_join_snapshot(fresh_snapshot.clone())
+        .await
+        .expect("publish fresh runtime snapshot");
+    let mut client = timeout(EVENT_WAIT, &mut client_task)
+        .await
+        .expect("late client receives fresh JoinData")
+        .expect("late client task completes")
+        .expect("late client connects");
+    let join_data = client.take_join_data().expect("late-client JoinData");
+
+    assert_eq!(join_data.status, expected_status);
+    assert_eq!(join_data.start_control_tick, START_TICK as i32);
+    assert_eq!(join_data.dynamic, fresh_snapshot.dynamic);
+    let late_core = join_data
+        .parameters
+        .clients
+        .clients
+        .iter()
+        .find(|core| core.client_id == 1)
+        .expect("fresh registry contains the admitted late client");
+    assert!(!late_core.activated);
+    assert!(!late_core.observer);
+
+    client
+        .shutdown()
+        .await
+        .expect("shut down late client session");
+    host.shutdown()
+        .await
+        .expect("shut down running host session");
 }
 
 #[tokio::test(flavor = "multi_thread")]

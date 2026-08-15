@@ -1368,13 +1368,19 @@ struct ClientActivationState {
 }
 
 impl ClientActivationState {
-    fn arm_for_queued_player_info(&mut self, request: &clonk_network::PlayerInfoUpdateRequest) {
-        if request.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL != 0
+    fn arm_for_queued_player_info(
+        &mut self,
+        request: &clonk_network::PlayerInfoUpdateRequest,
+        local_client_id: ClientId,
+    ) -> bool {
+        if u32::try_from(request.client_id) == Ok(local_client_id)
             && !request.players.is_empty()
             && self.local == LocalClientActivation::Deactivated
         {
             self.armed = true;
+            return true;
         }
+        false
     }
 
     fn arm_for_queued_control(&mut self) {
@@ -1983,7 +1989,7 @@ impl TestNetworkCommands {
                     publications.push(request);
                     let _ = completion.send(result);
                 }
-                Ok(NetworkCommand::SubmitPlayerInfoUpdate(request)) => {
+                Ok(NetworkCommand::SubmitJoinPlayerInfoUpdate(request)) => {
                     order.push("player-info");
                     player_infos.push(request);
                 }
@@ -2049,7 +2055,7 @@ impl TestNetworkCommands {
                     auth_players.push(player);
                     let _ = completion.send(response);
                 }
-                Ok(NetworkCommand::SubmitPlayerInfoUpdate(request)) => {
+                Ok(NetworkCommand::SubmitJoinPlayerInfoUpdate(request)) => {
                     order.push("player-info");
                     player_infos.push(request);
                     break;
@@ -2280,8 +2286,12 @@ impl TestNetworkCommands {
     pub fn take_player_info_updates(&mut self) -> Vec<clonk_network::PlayerInfoUpdateRequest> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
-            if let NetworkCommand::SubmitPlayerInfoUpdate(request) = command {
-                submitted.push(request);
+            match command {
+                NetworkCommand::SubmitPlayerInfoUpdate(request)
+                | NetworkCommand::SubmitJoinPlayerInfoUpdate(request) => {
+                    submitted.push(request);
+                }
+                _ => {}
             }
         }
         submitted
@@ -2960,6 +2970,7 @@ enum NetworkCommand {
         completion: Sender<std::result::Result<(), String>>,
     },
     SubmitPlayerInfoUpdate(clonk_network::PlayerInfoUpdateRequest),
+    SubmitJoinPlayerInfoUpdate(clonk_network::PlayerInfoUpdateRequest),
     BroadcastPlayerInfo(PlayerInfoControlData),
     BroadcastPreexecutedPlayerInfo {
         info: PlayerInfoControlData,
@@ -3828,6 +3839,27 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitPlayerInfoUpdate(request))
             .map_err(|_| anyhow!("network worker is not accepting player-info updates"))
+    }
+
+    pub fn submit_join_player_info_update(
+        &self,
+        request: clonk_network::PlayerInfoUpdateRequest,
+    ) -> Result<()> {
+        if self.role != NetworkRole::Client {
+            return Err(anyhow!(
+                "only a network client may submit a join player-info request"
+            ));
+        }
+        let local_client_id = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the player-info wire field"))?;
+        if request.client_id != local_client_id {
+            return Err(anyhow!(
+                "join player-info request does not belong to the local client"
+            ));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitJoinPlayerInfoUpdate(request))
+            .map_err(|_| anyhow!("network worker is not accepting join player-info requests"))
     }
 
     pub fn submit_client_update(
@@ -6544,7 +6576,8 @@ async fn run_host_worker_with_voice_enabled(
                             "host attempted to remove a client network resource".to_string(),
                         ));
                     }
-                    NetworkCommand::SubmitPlayerInfoUpdate(request) => {
+                    NetworkCommand::SubmitPlayerInfoUpdate(request)
+                    | NetworkCommand::SubmitJoinPlayerInfoUpdate(request) => {
                         let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
                             origin: HOST_CLIENT_ID,
                             request,
@@ -7970,16 +8003,17 @@ async fn run_client_worker_with_voice_enabled(
                         let _ = completion.send(result);
                     }
                     NetworkCommand::SubmitPlayerInfoUpdate(request) => {
-                        let arms_activation = request.flags
-                            & clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL
-                            != 0
-                            && !request.players.is_empty();
+                        client
+                            .submit_player_info_update(request)
+                            .await
+                            .map_err(|err| anyhow!("client PlayerInfo update failed: {err}"))?;
+                    }
+                    NetworkCommand::SubmitJoinPlayerInfoUpdate(request) => {
                         client
                             .submit_player_info_update(request.clone())
                             .await
                             .map_err(|err| anyhow!("client PlayerInfo update failed: {err}"))?;
-                        if arms_activation {
-                            client_activation.arm_for_queued_player_info(&request);
+                        if client_activation.arm_for_queued_player_info(&request, client_id) {
                             request_client_activation_if_due(
                                 &client,
                                 &mut client_activation,
@@ -11526,10 +11560,10 @@ Message=Server says Andr\xe9\r\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_worker_sends_status_ack_before_delayed_activation() {
-        // The initial PlayerInfo request arms RequestActivate while the client
-        // is still chasing. CheckStatusReached sends PID_StatusAck first and
-        // PID_ClientActReq immediately afterwards with Game.FrameCounter
-        // (src/C4Network2Players.cpp:124-136;
+        // RequestPlayerInfoUpdate does not activate a client just because its
+        // retained packet flags include CIF_AddPlayers. Only JoinLocalPlayer
+        // requests activation after sending its nonempty join request
+        // (src/C4Network2Players.cpp:124-157;
         // src/C4Network2.cpp:2041-2058,2116-2145).
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let address = listener.local_addr().test_value();
@@ -11551,7 +11585,7 @@ Message=Server says Andr\xe9\r\n\
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
         let (command_tx, command_rx) = tokio_mpsc::channel(16);
-        let (event_tx, _event_rx) = NetworkEventSender::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, _local_id_rx) = mpsc::channel();
         let worker = tokio::spawn(async move {
@@ -11585,11 +11619,15 @@ Message=Server says Andr\xe9\r\n\
         let wire_client_id = i32::try_from(client_id).test_value();
         let request = clonk_network::PlayerInfoUpdateRequest {
             client_id: wire_client_id,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                name: legacy_string(b"Worker Player"),
+                league_progress_data_is_null: false,
+                ..Default::default()
+            }],
         };
         command_tx
-            .send(NetworkCommand::SubmitPlayerInfoUpdate(request))
+            .send(NetworkCommand::SubmitPlayerInfoUpdate(request.clone()))
             .await
             .test_value();
         command_tx
@@ -11602,17 +11640,28 @@ Message=Server says Andr\xe9\r\n\
             .test_value();
 
         let mut protocol_order = Vec::new();
-        while protocol_order.len() < 3 {
+        while protocol_order.len() < 2 {
             match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
                 .await
                 .test_value()
             {
-                Some(HostEvent::PlayerInfoUpdate { .. }) => protocol_order.push(("player-info", 0)),
-                Some(HostEvent::StatusAck { status, .. }) => {
+                Some(HostEvent::PlayerInfoUpdate {
+                    client_id: origin,
+                    request: actual,
+                }) => {
+                    assert_eq!(origin, client_id);
+                    assert_eq!(actual, request);
+                    protocol_order.push(("player-info", 0));
+                }
+                Some(HostEvent::StatusAck {
+                    client_id: origin,
+                    status,
+                }) => {
+                    assert_eq!(origin, client_id);
                     protocol_order.push(("status-ack", status.target_tick));
                 }
-                Some(HostEvent::ActivationRequest { tick, .. }) => {
-                    protocol_order.push(("activation", tick));
+                Some(HostEvent::ActivationRequest { .. }) => {
+                    panic!("ordinary PlayerInfo update requested client activation")
                 }
                 Some(_) => continue,
                 None => panic!("host event stream ended during initial client protocol"),
@@ -11623,6 +11672,83 @@ Message=Server says Andr\xe9\r\n\
             vec![
                 ("player-info", 0),
                 ("status-ack", expected_status.target_tick.saturating_add(3)),
+            ]
+        );
+        loop {
+            match tokio::time::timeout(Duration::from_millis(100), host_events.recv()).await {
+                Ok(Some(HostEvent::ActivationRequest { .. })) => {
+                    panic!("ordinary PlayerInfo update requested delayed client activation")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended while checking activation silence"),
+                Err(_) => break,
+            }
+        }
+
+        let delayed_status = NetworkStatus {
+            state: clonk_network::NETWORK_STATE_PAUSE,
+            control_mode: 0,
+            target_tick: expected_status.target_tick.saturating_add(4),
+        };
+        host.change_status(delayed_status).await.test_value();
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(2)).test_value() {
+                NetworkEvent::StatusRequested(actual) if actual == delayed_status => break,
+                _ => continue,
+            }
+        }
+        command_tx
+            .send(NetworkCommand::SubmitJoinPlayerInfoUpdate(request.clone()))
+            .await
+            .test_value();
+        command_tx
+            .send(NetworkCommand::AcknowledgeRequestedStatus {
+                status: delayed_status,
+                current_control_tick: delayed_status.target_tick,
+                current_frame: 41,
+            })
+            .await
+            .test_value();
+        let mut join_protocol = Vec::new();
+        while join_protocol.len() < 3 {
+            match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .test_value()
+            {
+                Some(HostEvent::PlayerInfoUpdate {
+                    client_id: origin,
+                    request: actual,
+                }) => {
+                    assert_eq!(origin, client_id);
+                    assert_eq!(actual, request);
+                    join_protocol.push(("player-info", 0));
+                }
+                Some(HostEvent::StatusAck {
+                    client_id: origin,
+                    status,
+                }) => {
+                    assert_eq!(origin, client_id);
+                    join_protocol.push(("status-ack", status.target_tick));
+                }
+                Some(HostEvent::ActivationRequest {
+                    client_id: origin,
+                    tick,
+                    waited_for,
+                    ping_ms: _,
+                }) => {
+                    assert_eq!(origin, client_id);
+                    assert!(waited_for);
+                    join_protocol.push(("activation", tick));
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended during join-player protocol"),
+            }
+        }
+        assert_eq!(
+            join_protocol,
+            vec![
+                ("player-info", 0),
+                ("status-ack", delayed_status.target_tick),
                 ("activation", 41),
             ]
         );
@@ -12710,10 +12836,29 @@ Message=Server says Andr\xe9\r\n\
         };
         let now = tokio::time::Instant::now();
 
-        activation.arm_for_queued_player_info(&request);
+        activation.arm_for_queued_player_info(&request, 7);
         assert_eq!(activation.request_tick_if_due(now, 40), None);
 
         activation.status_reached();
+        assert_eq!(activation.request_tick_if_due(now, 41), Some(41));
+    }
+
+    #[test]
+    fn add_players_request_arms_deactivated_client_activation() {
+        // JoinLocalPlayer requests activation after any nonempty join request,
+        // including CIF_AddPlayers from a running game
+        // (src/C4Network2Players.cpp:124-136).
+        let mut activation = ClientActivationState::default();
+        let request = clonk_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
+        };
+        let now = tokio::time::Instant::now();
+        activation.status_reached();
+
+        activation.arm_for_queued_player_info(&request, 7);
+
         assert_eq!(activation.request_tick_if_due(now, 41), Some(41));
     }
 
@@ -12776,7 +12921,7 @@ Message=Server says Andr\xe9\r\n\
             players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
         };
         let first_sent_at = tokio::time::Instant::now();
-        activation.arm_for_queued_player_info(&request);
+        activation.arm_for_queued_player_info(&request, 7);
         activation.status_reached();
         activation.mark_requested(first_sent_at);
 
@@ -12806,7 +12951,7 @@ Message=Server says Andr\xe9\r\n\
             players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
         };
         let first_sent_at = tokio::time::Instant::now();
-        activation.arm_for_queued_player_info(&request);
+        activation.arm_for_queued_player_info(&request, 7);
         activation.status_reached();
         activation.mark_requested(first_sent_at);
 
@@ -12832,7 +12977,7 @@ Message=Server says Andr\xe9\r\n\
             players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
         };
         let first_sent_at = tokio::time::Instant::now();
-        activation.arm_for_queued_player_info(&request);
+        activation.arm_for_queued_player_info(&request, 7);
         activation.status_reached();
         activation.mark_requested(first_sent_at);
         let retry_at = first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL;
@@ -12884,7 +13029,7 @@ Message=Server says Andr\xe9\r\n\
             flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
             players: Vec::new(),
         };
-        activation.arm_for_queued_player_info(&request);
+        activation.arm_for_queued_player_info(&request, 7);
         activation.status_reached();
 
         assert_eq!(
@@ -12905,7 +13050,7 @@ Message=Server says Andr\xe9\r\n\
             players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
         };
         let first_sent_at = tokio::time::Instant::now();
-        activation.arm_for_queued_player_info(&request);
+        activation.arm_for_queued_player_info(&request, 7);
         activation.status_reached();
         activation.mark_requested(first_sent_at);
 
@@ -12953,7 +13098,7 @@ Message=Server says Andr\xe9\r\n\
         );
 
         manager
-            .submit_player_info_update(request.clone())
+            .submit_join_player_info_update(request.clone())
             .test_value();
         manager
             .acknowledge_requested_status_at_frame(23, 41)
@@ -12961,7 +13106,7 @@ Message=Server says Andr\xe9\r\n\
 
         assert!(matches!(
             commands.command_rx.blocking_recv(),
-            Some(NetworkCommand::SubmitPlayerInfoUpdate(actual)) if actual == request
+            Some(NetworkCommand::SubmitJoinPlayerInfoUpdate(actual)) if actual == request
         ));
         assert!(matches!(
             commands.command_rx.blocking_recv(),
@@ -12971,6 +13116,30 @@ Message=Server says Andr\xe9\r\n\
                 current_frame: 41,
             }) if actual == status
         ));
+    }
+
+    #[test]
+    fn client_manager_binds_join_player_info_to_its_local_client() {
+        // C4ClientPlayerInfos constructs JoinLocalPlayer packets with
+        // Game.Control.ClientID; activation therefore belongs only to that
+        // local client (src/C4PlayerInfo.cpp:357-374;
+        // src/C4Network2Players.cpp:124-136).
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let request = clonk_network::PlayerInfoUpdateRequest {
+            client_id: 8,
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
+        };
+
+        assert_eq!(
+            manager
+                .submit_join_player_info_update(request)
+                .expect_err("another client's join request is rejected")
+                .to_string(),
+            "join player-info request does not belong to the local client"
+        );
+        assert!(commands.command_rx.try_recv().is_err());
     }
 
     #[test]
