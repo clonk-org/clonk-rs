@@ -37,6 +37,8 @@ pub struct ClientConnectionHandshake {
     pub pending_ready_checks: Vec<ReadyCheckPacket>,
     /// Lobby countdown packets received after admission but before JoinData.
     pub pending_lobby_countdowns: Vec<LobbyCountdownPacket>,
+    /// Positive evidence that the remote host understands port-only packets.
+    pub peer_is_port: bool,
     pub liveness: ConnectionLivenessState,
 }
 
@@ -49,6 +51,8 @@ pub(crate) struct ClientRouteHandshake {
     pub local_connection_id: u32,
     pub remote_connection_id: u32,
     pub peer_core: ClientCoreControlData,
+    /// Positive evidence that the remote peer understands port-only packets.
+    pub peer_is_port: bool,
     pub liveness: ConnectionLivenessState,
 }
 
@@ -69,6 +73,8 @@ pub struct HostConnectionHandshake {
     pub local_connection_id: u32,
     pub remote_connection_id: u32,
     pub peer_core: ClientCoreControlData,
+    /// Positive evidence that the incoming client understands port-only packets.
+    pub peer_is_port: bool,
     pub liveness: ConnectionLivenessState,
 }
 
@@ -310,6 +316,7 @@ where
     let mut connection = LegacyConnection::new(local_request);
     send_initial_request(transport, &mut connection).await?;
     let mut buffered_messages = VecDeque::new();
+    let mut peer_is_port = false;
 
     loop {
         let message = match buffered_messages.pop_front() {
@@ -324,6 +331,7 @@ where
                 record_admitted_pong(&connection, &mut liveness, packet);
             }
             ControlMessage::ConnectionRequest(request) => {
+                peer_is_port |= request.port_protocol;
                 let (decision, received_while_deciding) = request_host_admission_decision(
                     transport,
                     admission_tx,
@@ -348,6 +356,7 @@ where
                 }
             }
             ControlMessage::ConnectionReply(reply) => {
+                peer_is_port |= reply.port_protocol;
                 if let Some(peer_core) = handle_peer_reply(&mut connection, reply)? {
                     liveness.mark_accepted();
                     let remote_connection_id = connection.remote_connection_id().ok_or(
@@ -359,6 +368,7 @@ where
                         local_connection_id,
                         remote_connection_id,
                         peer_core,
+                        peer_is_port,
                         liveness,
                     });
                 }
@@ -431,6 +441,7 @@ where
 
     let mut authenticated_peer_request = false;
     let mut associated_peer = None;
+    let mut peer_is_port = false;
     loop {
         let message = read_handshake_message(transport, &mut liveness).await?;
         match message {
@@ -441,6 +452,7 @@ where
                 record_admitted_pong(&connection, &mut liveness, packet);
             }
             ControlMessage::ConnectionRequest(request) => {
+                peer_is_port |= request.port_protocol;
                 handle_known_peer_request(
                     transport,
                     &mut connection,
@@ -455,6 +467,7 @@ where
                 }
             }
             ControlMessage::ConnectionReply(reply) => {
+                peer_is_port |= reply.port_protocol;
                 if let Some(peer_core) = handle_peer_reply(&mut connection, reply)? {
                     liveness.mark_accepted();
                     associated_peer = Some(peer_core);
@@ -484,6 +497,7 @@ where
             local_connection_id,
             remote_connection_id,
             peer_core: peer_core.clone(),
+            peer_is_port,
             liveness,
         });
     }
@@ -514,6 +528,7 @@ where
 
     let mut authenticated_peer = None;
     let mut associated_peer = None;
+    let mut peer_is_port = false;
     loop {
         let message = read_handshake_message(transport, &mut liveness).await?;
         match message {
@@ -539,6 +554,7 @@ where
                 }
             }
             ControlMessage::ConnectionReply(reply) => {
+                peer_is_port |= reply.port_protocol;
                 if let Some(peer_core) = handle_peer_reply(&mut connection, reply)? {
                     liveness.mark_accepted();
                     associated_peer = Some(peer_core);
@@ -567,6 +583,7 @@ where
             local_connection_id,
             remote_connection_id,
             peer_core: associated_peer.clone(),
+            peer_is_port,
             liveness,
         });
     }
@@ -586,6 +603,7 @@ where
     send_initial_request(transport, &mut connection).await?;
 
     let mut registered_host = None;
+    let mut peer_is_port = false;
     let peer_core = loop {
         let message = read_handshake_message(transport, &mut liveness).await?;
         match message {
@@ -596,6 +614,7 @@ where
                 record_admitted_pong(&connection, &mut liveness, packet);
             }
             ControlMessage::ConnectionRequest(request) => {
+                peer_is_port |= request.port_protocol;
                 handle_peer_request(
                     transport,
                     &mut connection,
@@ -609,6 +628,7 @@ where
                 }
             }
             ControlMessage::ConnectionReply(reply) => {
+                peer_is_port |= reply.port_protocol;
                 if let Some(peer_core) = handle_peer_reply(&mut connection, reply)? {
                     liveness.mark_accepted();
                     break peer_core;
@@ -667,6 +687,7 @@ where
                     pending_addresses,
                     pending_ready_checks,
                     pending_lobby_countdowns,
+                    peer_is_port,
                     liveness,
                 });
             }
@@ -1305,6 +1326,7 @@ mod tests {
             build: 362,
             password: LegacyCString::default(),
             connection_id,
+            port_protocol: true,
         }
     }
 
@@ -1313,6 +1335,7 @@ mod tests {
             ok: true,
             message: wire_string(message),
             wrong_password: false,
+            port_protocol: true,
         }
     }
 
@@ -1370,6 +1393,88 @@ mod tests {
         assert_eq!(host.remote_connection_id, 11);
         assert_eq!(client.local_connection_id, 11);
         assert_eq!(client.remote_connection_id, 7);
+        assert!(host.peer_is_port);
+        assert!(client.peer_is_port);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_handshake_treats_an_unmarked_cpp_reply_as_stock() {
+        let expected_join_data = join_data();
+        let (client_stream, host_stream) = duplex(4096);
+        let client_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, request(-1, b"Alice", 11)).await
+        });
+        let mut host = ControlTransport::new(host_stream);
+        assert!(matches!(
+            host.read_message().await.unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+
+        let mut host_request = request(0, b"Host", 7);
+        host_request.port_protocol = false;
+        host.send_message(ControlMessage::ConnectionRequest(host_request))
+            .await
+            .unwrap();
+        assert!(matches!(
+            host.read_message().await.unwrap(),
+            ControlMessage::ConnectionReply(ConnectionReply { ok: true, .. })
+        ));
+
+        let mut host_reply = accepted(b"join accepted");
+        host_reply.port_protocol = false;
+        host.send_message(ControlMessage::ConnectionReply(host_reply))
+            .await
+            .unwrap();
+        host.send_message(ControlMessage::JoinData(Box::new(expected_join_data)))
+            .await
+            .unwrap();
+
+        assert!(!client_task.await.unwrap().unwrap().peer_is_port);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_handshake_treats_an_unmarked_cpp_request_as_stock() {
+        let (host_stream, peer_stream) = duplex(4096);
+        let (admission_tx, mut admission_rx) = mpsc::channel(1);
+        let host_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(host_stream);
+            run_host_connection_handshake(&mut transport, request(0, b"Host", 7), &admission_tx)
+                .await
+        });
+        let peer_task = tokio::spawn(async move {
+            let mut peer = ControlTransport::new(peer_stream);
+            assert!(matches!(
+                peer.read_message().await.unwrap(),
+                ControlMessage::ConnectionRequest(_)
+            ));
+            let mut incoming = request(-1, b"Alice", 11);
+            incoming.port_protocol = false;
+            peer.send_message(ControlMessage::ConnectionRequest(incoming))
+                .await
+                .unwrap();
+            assert!(matches!(
+                peer.read_message().await.unwrap(),
+                ControlMessage::ConnectionReply(ConnectionReply { ok: true, .. })
+            ));
+            let mut reply = accepted(b"accepted");
+            reply.port_protocol = false;
+            peer.send_message(ControlMessage::ConnectionReply(reply))
+                .await
+                .unwrap();
+        });
+
+        let admission = admission_rx.recv().await.unwrap();
+        admission
+            .decision_tx
+            .send(AdmissionDecision::Accept {
+                peer_core: admission.request.core,
+                before_reply: Vec::new(),
+                message: wire_string(b"accepted"),
+            })
+            .unwrap();
+        assert!(!host_task.await.unwrap().unwrap().peer_is_port);
+        peer_task.await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1450,8 +1555,9 @@ mod tests {
             ControlMessage::ConnectionReply(ConnectionReply {
                 ok: false,
                 ref message,
-                wrong_password: false,
-            }) if message.as_bytes() == expected.as_bytes()
+                    wrong_password: false,
+                    ..
+                }) if message.as_bytes() == expected.as_bytes()
         ));
 
         assert!(matches!(
@@ -1537,6 +1643,7 @@ mod tests {
                     ok: false,
                     ref message,
                     wrong_password: false,
+                    ..
                 }) if message.as_bytes() == expected_message
             ));
             task.await.unwrap().unwrap_err()
@@ -1641,8 +1748,9 @@ mod tests {
             ControlMessage::ConnectionReply(ConnectionReply {
                 ok: false,
                 ref message,
-                wrong_password: false,
-            }) if message.as_bytes() == b"connection denied"
+                    wrong_password: false,
+                    ..
+                }) if message.as_bytes() == b"connection denied"
         ));
         assert!(matches!(
             task.await.unwrap(),
@@ -2387,6 +2495,7 @@ mod tests {
                 ok: false,
                 message: wire_string(b"wrong password"),
                 wrong_password: true,
+                port_protocol: false,
             })
         );
         assert!(matches!(
@@ -2640,6 +2749,7 @@ mod tests {
                 ok: false,
                 message: wire_string(b"not host"),
                 wrong_password: false,
+                port_protocol: false,
             })
         );
         assert!(matches!(

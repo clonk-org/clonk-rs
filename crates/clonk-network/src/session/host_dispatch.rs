@@ -26,6 +26,7 @@ pub(crate) async fn handle_client_message(
                 .peer_capabilities
                 .record(client_id as i32, capabilities);
             if let Some(route) = state.accepted_routes.get_mut(&connection_id) {
+                route.peer_is_port = true;
                 if state.config.voice_enabled && route.protocol == crate::NetworkProtocol::Udp {
                     route.voice_auth.record_peer_capabilities(capabilities);
                 }
@@ -668,6 +669,7 @@ pub(crate) async fn handle_client_disconnected(
         outbound: _outbound,
         ping: _,
         voice_auth: _,
+        peer_is_port: _,
     }) = disconnected_route
     {
         debug_assert_eq!(route_client_id, client_id);
@@ -1693,6 +1695,7 @@ async fn close_removed_client_connections(client_id: ClientId, state: &mut HostS
         message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
             .unwrap_or_default(),
         wrong_password: false,
+        port_protocol: false,
     };
     for (_, outbound) in routes {
         if outbound.try_close(reply.clone()).is_err() {

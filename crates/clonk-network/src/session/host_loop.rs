@@ -644,6 +644,7 @@ pub(crate) async fn run_host(
                         connection_id,
                         remote_connection_id,
                         core,
+                        peer_is_port,
                         peer_addr,
                         protocol,
                         outbound,
@@ -653,6 +654,7 @@ pub(crate) async fn run_host(
                             connection_id,
                             remote_connection_id,
                             core,
+                            peer_is_port,
                             peer_addr,
                             protocol,
                             outbound,
@@ -1108,6 +1110,7 @@ pub(crate) fn spawn_host_transport<S>(
             build: CURRENT_GAME_BUILD,
             password: clonk_engine::LegacyCString::default(),
             connection_id,
+            port_protocol: true,
         };
         let mut transport = crate::ControlTransport::new(stream);
         if matches!(protocol, crate::NetworkProtocol::Tcp) {
@@ -1130,6 +1133,7 @@ pub(crate) fn spawn_host_transport<S>(
             local_connection_id,
             remote_connection_id,
             peer_core,
+            peer_is_port,
             liveness,
         } = handshake;
         debug_assert_eq!(local_connection_id, connection_id);
@@ -1194,6 +1198,7 @@ pub(crate) fn spawn_host_transport<S>(
                 connection_id,
                 remote_connection_id,
                 core: peer_core,
+                peer_is_port,
                 peer_addr: addr,
                 protocol,
                 outbound: outbound.clone(),
@@ -1339,6 +1344,7 @@ pub(crate) async fn handle_client_accepted(
     connection_id: u32,
     remote_connection_id: u32,
     core: clonk_engine::ClientCoreControlData,
+    peer_is_port: bool,
     peer_addr: SocketAddr,
     protocol: crate::NetworkProtocol,
     outbound: HostOutboundSender,
@@ -1377,19 +1383,22 @@ pub(crate) async fn handle_client_accepted(
             ping: RoutePingLag::default(),
             outbound: outbound.clone(),
             voice_auth,
+            peer_is_port,
         },
     );
     state.invalidate_control_send_time();
     debug_assert!(replaced_route.is_none());
-    if let Some(announcement) = voice_announcement {
-        if let Some(cookie) = state
-            .accepted_routes
-            .get(&connection_id)
-            .and_then(|route| route.voice_auth.receive_cookie())
-        {
-            outbound.set_voice_receive_cookie(cookie);
+    if peer_is_port {
+        if let Some(announcement) = voice_announcement {
+            if let Some(cookie) = state
+                .accepted_routes
+                .get(&connection_id)
+                .and_then(|route| route.voice_auth.receive_cookie())
+            {
+                outbound.set_voice_receive_cookie(cookie);
+            }
+            let _ = outbound.try_send(ControlMessage::PortCapabilities(announcement));
         }
-        let _ = outbound.try_send(ControlMessage::PortCapabilities(announcement));
     }
     if state.clients.contains_key(&client_id) {
         if setup_tx.send(Ok(())).is_err() {

@@ -361,6 +361,7 @@ impl LegacyConnection {
                         ok: true,
                         message,
                         wrong_password: false,
+                        port_protocol: true,
                     },
                     before_reply,
                 )
@@ -373,6 +374,7 @@ impl LegacyConnection {
                     ok: false,
                     message,
                     wrong_password,
+                    port_protocol: false,
                 },
                 Vec::new(),
             ),
@@ -458,6 +460,7 @@ mod tests {
             build: 362,
             password: LegacyCString::default(),
             connection_id,
+            port_protocol: false,
         }
     }
 
@@ -466,6 +469,7 @@ mod tests {
             ok: true,
             message: LegacyCString::from_bytes(message.to_vec()).unwrap(),
             wrong_password: false,
+            port_protocol: true,
         }
     }
 

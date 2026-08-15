@@ -1161,6 +1161,7 @@ where
         build: compatibility_build,
         password: password.clone(),
         connection_id: primary_connection_id,
+        port_protocol: true,
     };
     let mut transport = crate::ControlTransport::new(stream);
     if matches!(host_protocol, crate::NetworkProtocol::Tcp) {
@@ -1203,6 +1204,7 @@ where
     let primary_remote_connection_id = bootstrap.remote_connection_id;
     debug_assert_eq!(primary_local_connection_id, primary_connection_id);
     let primary_liveness = bootstrap.liveness.clone();
+    let primary_peer_is_port = bootstrap.peer_is_port;
     let host_core = bootstrap.peer_core.clone();
     let mut join_data = bootstrap.join_data;
     if join_data.client_id < 0 {
@@ -1291,22 +1293,24 @@ where
     };
     let mut routes = ClientRouteManager::new().with_voice_enabled(voice_enabled);
     if let Some(outbound) = udp_outbound {
-        routes.add_udp_route(
+        routes.add_udp_route_with_peer_capabilities(
             primary_local_connection_id,
             primary_remote_connection_id,
             host_peer_addr,
             transport,
             primary_liveness,
             outbound,
+            primary_peer_is_port,
         );
     } else {
-        routes.add_route(
+        routes.add_route_with_peer_capabilities(
             primary_local_connection_id,
             primary_remote_connection_id,
             host_protocol,
             host_peer_addr,
             transport,
             primary_liveness,
+            primary_peer_is_port,
         );
     }
     #[cfg(test)]
@@ -1591,6 +1595,7 @@ pub(crate) struct ConnectedClientRoute<S> {
     pub(crate) transport: crate::ControlTransport<S>,
     pub(crate) liveness: ConnectionLivenessState,
     pub(crate) udp_outbound: Option<crate::udp_session::ReliableUdpRouteSender>,
+    pub(crate) peer_is_port: bool,
 }
 
 pub(crate) type PendingClientRoute = tokio::task::JoinHandle<
@@ -1625,6 +1630,7 @@ impl ClientHandshakeRequestTemplate {
             build: self.compatibility_build,
             password: self.password.clone(),
             connection_id,
+            port_protocol: true,
         }
     }
 }
@@ -1694,6 +1700,7 @@ pub(crate) async fn connect_mesh_tcp_route(
             transport,
             liveness: handshake.liveness,
             udp_outbound: None,
+            peer_is_port: handshake.peer_is_port,
         },
     })
 }
@@ -1746,6 +1753,7 @@ pub(crate) async fn connect_mesh_udp_route(
             transport,
             liveness: handshake.liveness,
             udp_outbound: Some(udp_outbound),
+            peer_is_port: handshake.peer_is_port,
         },
     })
 }
@@ -1800,6 +1808,7 @@ pub(crate) async fn connect_mesh_tcp_socket_route(
             transport,
             liveness: handshake.liveness,
             udp_outbound: None,
+            peer_is_port: handshake.peer_is_port,
         },
     })
 }
@@ -1855,6 +1864,7 @@ pub(crate) async fn accept_mesh_tcp_route(
             transport,
             liveness: handshake.liveness,
             udp_outbound: None,
+            peer_is_port: handshake.peer_is_port,
         },
     })
 }
@@ -1897,6 +1907,7 @@ pub(crate) async fn accept_mesh_udp_route(
             transport,
             liveness: handshake.liveness,
             udp_outbound: Some(udp_outbound),
+            peer_is_port: handshake.peer_is_port,
         },
     })
 }
@@ -2107,7 +2118,7 @@ pub(crate) fn add_connected_mesh_route(
             peer_core: _,
             route,
         } => {
-            let first_peer_route = routes.add_peer_route(
+            let first_peer_route = routes.add_peer_route_with_peer_capabilities(
                 peer_id,
                 initiator_id,
                 route.local_connection_id,
@@ -2116,6 +2127,7 @@ pub(crate) fn add_connected_mesh_route(
                 Some(route.peer_addr),
                 route.transport,
                 route.liveness,
+                route.peer_is_port,
             );
             first_peer_route.then_some(peer_id)
         }
@@ -2129,7 +2141,7 @@ pub(crate) fn add_connected_mesh_route(
                 .udp_outbound
                 .take()
                 .expect("established UDP mesh route has an outbox sender");
-            let first_peer_route = routes.add_udp_peer_route(
+            let first_peer_route = routes.add_udp_peer_route_with_peer_capabilities(
                 peer_id,
                 initiator_id,
                 route.local_connection_id,
@@ -2138,6 +2150,7 @@ pub(crate) fn add_connected_mesh_route(
                 route.transport,
                 route.liveness,
                 outbound,
+                route.peer_is_port,
             );
             first_peer_route.then_some(peer_id)
         }
@@ -2270,6 +2283,7 @@ pub(crate) async fn connect_secondary_tcp_route(
         transport,
         liveness: handshake.liveness,
         udp_outbound: None,
+        peer_is_port: handshake.peer_is_port,
     })
 }
 
@@ -2316,6 +2330,7 @@ pub(crate) async fn connect_secondary_udp_route(
         transport,
         liveness: handshake.liveness,
         udp_outbound: Some(udp_outbound),
+        peer_is_port: handshake.peer_is_port,
     })
 }
 

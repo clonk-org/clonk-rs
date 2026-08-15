@@ -627,6 +627,7 @@ pub(crate) struct ClientRouteEntry {
     pub(crate) ping: RoutePingLag,
     pub(crate) outbound: ClientRouteSender,
     pub(crate) voice_auth: crate::voice::VoiceRouteAuthentication,
+    pub(crate) peer_is_port: bool,
 }
 
 pub(crate) enum ClientRouteEvent {
@@ -730,6 +731,7 @@ impl ClientRouteManager {
         !self.replay_packets.is_empty() || !self.event_rx.is_empty()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn add_route<S>(
         &mut self,
         local_connection_id: u32,
@@ -754,6 +756,33 @@ impl ClientRouteManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_route_with_peer_capabilities<S>(
+        &mut self,
+        local_connection_id: u32,
+        remote_connection_id: u32,
+        protocol: crate::NetworkProtocol,
+        peer_addr: Option<SocketAddr>,
+        transport: crate::ControlTransport<S>,
+        liveness: ConnectionLivenessState,
+        peer_is_port: bool,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.add_peer_route_with_udp_and_capabilities(
+            HOST_CLIENT_ID,
+            HOST_CLIENT_ID,
+            local_connection_id,
+            remote_connection_id,
+            protocol,
+            peer_addr,
+            transport,
+            liveness,
+            None,
+            peer_is_port,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub(crate) fn add_udp_route<S>(
         &mut self,
         local_connection_id: u32,
@@ -777,10 +806,37 @@ impl ClientRouteManager {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_udp_route_with_peer_capabilities<S>(
+        &mut self,
+        local_connection_id: u32,
+        remote_connection_id: u32,
+        peer_addr: Option<SocketAddr>,
+        transport: crate::ControlTransport<S>,
+        liveness: ConnectionLivenessState,
+        outbound: crate::udp_session::ReliableUdpRouteSender,
+        peer_is_port: bool,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.add_peer_route_with_udp_and_capabilities(
+            HOST_CLIENT_ID,
+            HOST_CLIENT_ID,
+            local_connection_id,
+            remote_connection_id,
+            crate::NetworkProtocol::Udp,
+            peer_addr,
+            transport,
+            liveness,
+            Some(outbound),
+            peer_is_port,
+        );
+    }
+
     // Each argument is a distinct piece of classic route identity or owned
     // task state; keeping them explicit prevents local/remote IDs from being
     // silently conflated.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub(crate) fn add_peer_route<S>(
         &mut self,
         peer_id: ClientId,
@@ -809,6 +865,36 @@ impl ClientRouteManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_peer_route_with_peer_capabilities<S>(
+        &mut self,
+        peer_id: ClientId,
+        initiator_id: ClientId,
+        local_connection_id: u32,
+        remote_connection_id: u32,
+        protocol: crate::NetworkProtocol,
+        peer_addr: Option<SocketAddr>,
+        transport: crate::ControlTransport<S>,
+        liveness: ConnectionLivenessState,
+        peer_is_port: bool,
+    ) -> bool
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.add_peer_route_with_udp_and_capabilities(
+            peer_id,
+            initiator_id,
+            local_connection_id,
+            remote_connection_id,
+            protocol,
+            peer_addr,
+            transport,
+            liveness,
+            None,
+            peer_is_port,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub(crate) fn add_udp_peer_route<S>(
         &mut self,
         peer_id: ClientId,
@@ -837,6 +923,36 @@ impl ClientRouteManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_udp_peer_route_with_peer_capabilities<S>(
+        &mut self,
+        peer_id: ClientId,
+        initiator_id: ClientId,
+        local_connection_id: u32,
+        remote_connection_id: u32,
+        peer_addr: Option<SocketAddr>,
+        transport: crate::ControlTransport<S>,
+        liveness: ConnectionLivenessState,
+        outbound: crate::udp_session::ReliableUdpRouteSender,
+        peer_is_port: bool,
+    ) -> bool
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.add_peer_route_with_udp_and_capabilities(
+            peer_id,
+            initiator_id,
+            local_connection_id,
+            remote_connection_id,
+            crate::NetworkProtocol::Udp,
+            peer_addr,
+            transport,
+            liveness,
+            Some(outbound),
+            peer_is_port,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn add_peer_route_with_udp<S>(
         &mut self,
         peer_id: ClientId,
@@ -848,6 +964,37 @@ impl ClientRouteManager {
         transport: crate::ControlTransport<S>,
         liveness: ConnectionLivenessState,
         udp: Option<crate::udp_session::ReliableUdpRouteSender>,
+    ) -> bool
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.add_peer_route_with_udp_and_capabilities(
+            peer_id,
+            initiator_id,
+            local_connection_id,
+            remote_connection_id,
+            protocol,
+            peer_addr,
+            transport,
+            liveness,
+            udp,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_peer_route_with_udp_and_capabilities<S>(
+        &mut self,
+        peer_id: ClientId,
+        initiator_id: ClientId,
+        local_connection_id: u32,
+        remote_connection_id: u32,
+        protocol: crate::NetworkProtocol,
+        peer_addr: Option<SocketAddr>,
+        transport: crate::ControlTransport<S>,
+        liveness: ConnectionLivenessState,
+        udp: Option<crate::udp_session::ReliableUdpRouteSender>,
+        peer_is_port: bool,
     ) -> bool
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -912,6 +1059,7 @@ impl ClientRouteManager {
                     udp,
                 },
                 voice_auth,
+                peer_is_port,
             },
         );
         self.control_send_time_dirty = true;
@@ -952,17 +1100,19 @@ impl ClientRouteManager {
                 .expect("new client route exists")
                 .outbound
                 .retire();
-        } else if let Some(announcement) = voice_announcement {
-            let route = self
-                .routes
-                .get(&local_connection_id)
-                .expect("new client route exists");
-            if let Some(cookie) = route.voice_auth.receive_cookie() {
-                route.outbound.set_voice_receive_cookie(cookie);
+        } else if peer_is_port {
+            if let Some(announcement) = voice_announcement {
+                let route = self
+                    .routes
+                    .get(&local_connection_id)
+                    .expect("new client route exists");
+                if let Some(cookie) = route.voice_auth.receive_cookie() {
+                    route.outbound.set_voice_receive_cookie(cookie);
+                }
+                let _ = route.outbound.send(ClientRouteCommand::Message(
+                    ControlMessage::PortCapabilities(announcement),
+                ));
             }
-            let _ = route.outbound.send(ClientRouteCommand::Message(
-                ControlMessage::PortCapabilities(announcement),
-            ));
         }
         !peer_was_connected && new_route_wins
     }
@@ -1031,13 +1181,18 @@ impl ClientRouteManager {
         if matches!(&message, ControlMessage::Control(_))
             && !self.control_wait_attribution_announced_to_host
         {
-            let capabilities = crate::PortCapabilities::from_bits(
-                crate::PortCapabilities::CONTROL_WAIT_ATTRIBUTION,
-            );
-            self.try_send_to(
-                HOST_CLIENT_ID,
-                ControlMessage::PortCapabilities(capabilities),
-            )?;
+            let host_is_port = self.routes.values().any(|route| {
+                route.peer_id == HOST_CLIENT_ID && route.peer_is_port && !route.outbound.is_closed()
+            });
+            if host_is_port {
+                let capabilities = crate::PortCapabilities::from_bits(
+                    crate::PortCapabilities::CONTROL_WAIT_ATTRIBUTION,
+                );
+                self.try_send_to(
+                    HOST_CLIENT_ID,
+                    ControlMessage::PortCapabilities(capabilities),
+                )?;
+            }
             self.control_wait_attribution_announced_to_host = true;
         }
         self.try_send_to(HOST_CLIENT_ID, message)
@@ -1817,6 +1972,7 @@ mod udp_outbox_tests {
             ok: false,
             message: clonk_engine::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
             wrong_password: false,
+            port_protocol: false,
         }));
 
         assert!(!udp_route_exit_notifies_disconnect(true, &close_rx));

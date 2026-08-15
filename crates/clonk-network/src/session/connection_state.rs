@@ -407,6 +407,7 @@ pub(crate) struct AcceptedConnectionRoute {
     pub(crate) ping: RoutePingLag,
     pub(crate) outbound: HostOutboundSender,
     pub(crate) voice_auth: crate::voice::VoiceRouteAuthentication,
+    pub(crate) peer_is_port: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1318,6 +1319,7 @@ mod udp_sender_tests {
             ok: false,
             message: clonk_engine::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
             wrong_password: false,
+            port_protocol: false,
         };
         let queued = std::cell::Cell::new(false);
 
@@ -1342,6 +1344,7 @@ mod udp_sender_tests {
             ok: false,
             message: clonk_engine::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
             wrong_password: false,
+            port_protocol: false,
         };
 
         assert!(outbound.try_close(reply.clone()).is_ok());
