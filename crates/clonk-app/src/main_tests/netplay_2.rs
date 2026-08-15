@@ -2,7 +2,7 @@
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
 #[test]
-fn push_to_talk_key_falls_through_outside_a_running_game() {
+fn push_to_talk_key_falls_through_in_an_offline_menu() {
     let mut app = new_classic_running_sandbox_app();
     app.audio.test_mut().options.voice_enabled = true;
     app.mode = AppMode::Menu;
