@@ -1,5 +1,4 @@
-//! Proximity voice chat: source authentication, speaking state and the
-//! positional mix.
+//! Network voice chat: source authorization, speaking state and playout.
 //!
 //! This is a deliberate Rust-only extension (clonk-org/clonk-rs#301), **not a
 //! parity claim** — there is no C++ oracle for any of it. It is opt-in: nothing
@@ -23,18 +22,23 @@
 //!
 //! Source identity is authenticated rather than trusted: each admitted UDP
 //! route exchanges an unpredictable media cookie over its reliable control
-//! stream, the receiving route supplies the source client ID, and
-//! [`authenticated_selected_voice_crew`] revalidates that the claimed player
-//! belongs to that client before resolving the live selected
-//! `PlayerState.cursor`.
+//! stream and the receiving route supplies the source client ID. In a running
+//! game, [`authenticated_selected_voice_crew`] additionally revalidates that
+//! the claimed player belongs to that client before resolving the live
+//! selected `PlayerState.cursor`. A lobby instead authorizes synchronized
+//! client membership and the reserved [`LOBBY_VOICE_PLAYER_ID`] scope, so an
+//! observer or a client with zero or several player profiles still has exactly
+//! one voice identity. That lobby policy deliberately does not broaden the
+//! unresolved in-game observer/multiple-local-player policy
+//! (clonk-org/clonk-rs#419).
 //!
-//! Playback uses the existing linear 700-pixel positional mix; the speaker
-//! glyph additionally obeys per-viewport object/FoW visibility. Several
-//! speakers at once would otherwise sum straight into the output clamp, so the
-//! audio mixer limits the summed voice bus to its own ceiling — voice is the
-//! one source it may attenuate, because the sound and music paths owe
-//! SDL_mixer's arithmetic. Landscape
-//! openness and obstacles deliberately do not occlude speech
+//! Lobby playback is centered and non-positional. Running-game playback uses
+//! the existing linear 700-pixel positional mix; the speaker glyph additionally
+//! obeys per-viewport object/FoW visibility. Several speakers at once would
+//! otherwise sum straight into the output clamp, so the audio mixer limits the
+//! summed voice bus to its own ceiling — voice is the one source it may
+//! attenuate, because the sound and music paths owe SDL_mixer's arithmetic.
+//! Landscape openness and obstacles deliberately do not occlude speech
 //! (clonk-org/clonk-rs#418).
 //!
 //! The media lane is encrypted (clonk-org/clonk-rs#426): each route agrees its
@@ -45,8 +49,8 @@
 //! control stream — the limitation the rest of the protocol already carries.
 //! The seal keeps no replay window, deliberately, since that would put per-
 //! connection state on a lane whose droppability is the point; a repeated frame
-//! is instead refused here, by [`VoiceActivityTracker::note_frame`], which
-//! accepts only a stream epoch and sequence that advance.
+//! is instead refused here by [`VoiceActivityTracker`]'s shared epoch and
+//! sequence window.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -62,6 +66,9 @@ use clonk_engine::{ObjectSnapshot, PlayerStatus, SimulationSnapshot};
 use crate::settings::VoiceActivation;
 
 pub(crate) const SPEAKING_HANGOVER: Duration = Duration::from_millis(250);
+/// A lobby speaker belongs to an authenticated network client, not to one of
+/// its zero or more synchronized player profiles.
+pub(crate) const LOBBY_VOICE_PLAYER_ID: i32 = clonk_engine::OWNER_NONE;
 const VOICE_FRAME_DURATION: Duration = Duration::from_millis(20);
 const INITIAL_VOICE_JITTER_FRAMES: usize = 4;
 const MIN_VOICE_JITTER_FRAMES: usize = 2;
@@ -71,6 +78,12 @@ const VOICE_SEQUENCE_WINDOW_FRAMES: usize = u64::BITS as usize;
 const MIN_VOICE_JITTER_OBSERVATIONS: usize = 3;
 const VOICE_PLAYOUT_GUARD_FRAMES: usize = 2;
 const VOICE_CAPTURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VoiceChatContext {
+    Running,
+    Lobby,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PushToTalkAction {
@@ -117,7 +130,9 @@ struct SpeakerActivity {
     latest_sequence: u16,
     seen_sequences: u64,
     playout_floor: Option<u16>,
+    requires_new_epoch: bool,
     last_frame_at: Instant,
+    visually_active: bool,
 }
 
 #[derive(Debug, Default)]
@@ -526,6 +541,7 @@ fn concealed_voice_frame(
 }
 
 pub(crate) struct VoiceChatState {
+    context: Option<VoiceChatContext>,
     activity: VoiceActivityTracker,
     capture: Option<Box<dyn VoiceFrameSource>>,
     capture_opener: VoiceCaptureOpener,
@@ -568,6 +584,7 @@ impl VoiceChatState {
         S: VoiceFrameSource + 'static,
     {
         Self {
+            context: None,
             activity: VoiceActivityTracker::default(),
             capture: None,
             capture_opener: Box::new(move |options| {
@@ -599,6 +616,33 @@ impl VoiceChatState {
     /// next frame, whether or not one is open.
     pub(crate) fn set_processing(&self, config: VoiceProcessingConfig) {
         self.processing.set(config);
+    }
+
+    /// Ends capture and queued playout when speech crosses a lobby/game/
+    /// inactive boundary. A retained network session keeps its replay
+    /// tombstones, so delayed datagrams cannot reopen speech in the next
+    /// context; [`Self::clear`] remains the full session teardown.
+    pub(crate) fn reconcile_context(
+        &mut self,
+        context: Option<VoiceChatContext>,
+    ) -> Vec<(i32, i32)> {
+        if self.context == context {
+            return Vec::new();
+        }
+        let previous = self.context;
+        self.context = context;
+        if previous.is_none() {
+            return Vec::new();
+        }
+
+        self.stop_capture();
+        self.activity.seal_context();
+        let removed = self.remote_streams.keys().copied().collect::<Vec<_>>();
+        for &speaker in &removed {
+            self.advance_replay_floor_past_accepted(speaker);
+        }
+        self.remote_streams.clear();
+        removed
     }
 
     /// `key` is the push-to-talk key whose release closes this capture again;
@@ -862,12 +906,80 @@ impl VoiceChatState {
         disposition
     }
 
+    fn note_authenticated_remote_frame(
+        &mut self,
+        client_id: i32,
+        player_id: i32,
+        stream_epoch: u32,
+        sequence: u16,
+        received_at: Instant,
+    ) -> VoiceFrameDisposition {
+        let disposition = self.activity.note_authenticated_frame(
+            client_id,
+            player_id,
+            stream_epoch,
+            sequence,
+            received_at,
+        );
+        if matches!(
+            disposition,
+            VoiceFrameDisposition::Accepted | VoiceFrameDisposition::AcceptedNewEpoch
+        ) {
+            let stream = self
+                .remote_streams
+                .entry((client_id, player_id))
+                .or_default();
+            if disposition == VoiceFrameDisposition::AcceptedNewEpoch {
+                stream.jitter = RemoteVoiceJitterBuffer::default();
+            }
+            stream.stream_epoch = stream_epoch;
+            stream.last_frame_at = Some(received_at);
+        }
+        disposition
+    }
+
     pub(crate) fn accept_remote_frame(
         &mut self,
         snapshot: &SimulationSnapshot,
         frame: &clonk_network::VoiceFrame,
         received_at: Instant,
     ) -> Option<AcceptedRemoteVoiceFrame> {
+        let (client_id, samples) = self.prepare_remote_frame(frame)?;
+        let disposition = self.note_remote_frame(
+            snapshot,
+            client_id,
+            frame.player_id,
+            frame.stream_epoch,
+            frame.sequence,
+            received_at,
+        );
+        self.finish_remote_frame(frame, received_at, client_id, samples, disposition)
+    }
+
+    /// Admit a decoded media frame after the caller has authorized its
+    /// client-scoped identity. Transport authenticates the client ID; the
+    /// caller still owns the context-specific scope check. The sequence/epoch
+    /// replay window remains here exactly as it is for positional speech.
+    pub(crate) fn accept_authorized_remote_frame(
+        &mut self,
+        frame: &clonk_network::VoiceFrame,
+        received_at: Instant,
+    ) -> Option<AcceptedRemoteVoiceFrame> {
+        let (client_id, samples) = self.prepare_remote_frame(frame)?;
+        let disposition = self.note_authenticated_remote_frame(
+            client_id,
+            frame.player_id,
+            frame.stream_epoch,
+            frame.sequence,
+            received_at,
+        );
+        self.finish_remote_frame(frame, received_at, client_id, samples, disposition)
+    }
+
+    fn prepare_remote_frame(
+        &self,
+        frame: &clonk_network::VoiceFrame,
+    ) -> Option<(i32, [i16; clonk_audio::VOICE_FRAME_SAMPLES])> {
         let samples = decode_voice_frame(&frame.payload).ok()?;
         let client_id = i32::try_from(frame.client_id).ok()?;
         if self
@@ -880,14 +992,17 @@ impl VoiceChatState {
         {
             return None;
         }
-        let disposition = self.note_remote_frame(
-            snapshot,
-            client_id,
-            frame.player_id,
-            frame.stream_epoch,
-            frame.sequence,
-            received_at,
-        );
+        Some((client_id, samples))
+    }
+
+    fn finish_remote_frame(
+        &mut self,
+        frame: &clonk_network::VoiceFrame,
+        received_at: Instant,
+        client_id: i32,
+        samples: [i16; clonk_audio::VOICE_FRAME_SAMPLES],
+        disposition: VoiceFrameDisposition,
+    ) -> Option<AcceptedRemoteVoiceFrame> {
         match disposition {
             VoiceFrameDisposition::Accepted | VoiceFrameDisposition::AcceptedNewEpoch => {
                 let inserted = self
@@ -1025,6 +1140,7 @@ impl VoiceChatState {
     }
 
     pub(crate) fn clear(&mut self) -> Vec<(i32, i32)> {
+        self.context = None;
         self.stop_capture();
         self.activity.clear();
         let removed = self.remote_streams.keys().copied().collect();
@@ -1077,10 +1193,24 @@ impl VoiceActivityTracker {
             return VoiceFrameDisposition::UnknownPlayer;
         }
 
+        self.note_authenticated_frame(client_id, player_id, stream_epoch, sequence, received_at)
+    }
+
+    fn note_authenticated_frame(
+        &mut self,
+        client_id: i32,
+        player_id: i32,
+        stream_epoch: u32,
+        sequence: u16,
+        received_at: Instant,
+    ) -> VoiceFrameDisposition {
         let key = (client_id, player_id);
         let mut disposition = VoiceFrameDisposition::Accepted;
         if let Some(activity) = self.speakers.get_mut(&key) {
             if activity.stream_epoch == stream_epoch {
+                if activity.requires_new_epoch {
+                    return VoiceFrameDisposition::DuplicateOrLate;
+                }
                 if activity.playout_floor.is_some_and(|playout_floor| {
                     sequence.wrapping_sub(playout_floor) > u16::MAX / 2
                 }) {
@@ -1117,9 +1247,11 @@ impl VoiceActivityTracker {
                 activity.latest_sequence = sequence;
                 activity.seen_sequences = 1;
                 activity.playout_floor = None;
+                activity.requires_new_epoch = false;
             }
             activity.stream_epoch = stream_epoch;
             activity.last_frame_at = received_at;
+            activity.visually_active = true;
         } else {
             self.speakers.insert(
                 key,
@@ -1128,7 +1260,9 @@ impl VoiceActivityTracker {
                     latest_sequence: sequence,
                     seen_sequences: 1,
                     playout_floor: None,
+                    requires_new_epoch: false,
                     last_frame_at: received_at,
+                    visually_active: true,
                 },
             );
         }
@@ -1140,8 +1274,8 @@ impl VoiceActivityTracker {
             .speakers
             .iter()
             .filter_map(|(&speaker, activity)| {
-                now.saturating_duration_since(activity.last_frame_at)
-                    .lt(&SPEAKING_HANGOVER)
+                (activity.visually_active
+                    && now.saturating_duration_since(activity.last_frame_at) < SPEAKING_HANGOVER)
                     .then_some(speaker)
             })
             .collect::<Vec<_>>();
@@ -1161,6 +1295,14 @@ impl VoiceActivityTracker {
             now.saturating_duration_since(started_at) >= SPEAKING_HANGOVER
         }) {
             self.local_speaker = None;
+        }
+    }
+
+    pub(crate) fn seal_context(&mut self) {
+        self.local_speaker = None;
+        for activity in self.speakers.values_mut() {
+            activity.visually_active = false;
+            activity.requires_new_epoch = true;
         }
     }
 
@@ -1790,6 +1932,81 @@ mod tests {
             voice.note_remote_frame(&snapshot, 7, 17, 5, 9, start + SPEAKING_HANGOVER,),
             VoiceFrameDisposition::DuplicateOrLate,
         );
+    }
+
+    #[test]
+    fn voice_context_changes_discard_playback_but_preserve_replay_tombstones() {
+        let start = Instant::now();
+        let mut voice = VoiceChatState::default();
+        let frame = |stream_epoch, sequence| clonk_network::VoiceFrame {
+            client_id: 7,
+            player_id: LOBBY_VOICE_PLAYER_ID,
+            stream_epoch,
+            sequence,
+            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .to_vec(),
+        };
+
+        assert!(voice
+            .reconcile_context(Some(VoiceChatContext::Lobby))
+            .is_empty());
+        assert!(voice
+            .accept_authorized_remote_frame(&frame(5, 100), start)
+            .is_some());
+        assert_eq!(
+            voice.reconcile_context(Some(VoiceChatContext::Running)),
+            vec![(7, LOBBY_VOICE_PLAYER_ID)],
+        );
+        assert!(voice.active_speakers(start).is_empty());
+        assert!(voice
+            .reconcile_context(Some(VoiceChatContext::Lobby))
+            .is_empty());
+        assert!(voice
+            .accept_authorized_remote_frame(&frame(5, 100), start)
+            .is_none());
+        assert!(voice
+            .accept_authorized_remote_frame(&frame(5, 101), start)
+            .is_none());
+        assert!(voice
+            .accept_authorized_remote_frame(&frame(6, 0), start)
+            .is_some());
+    }
+
+    #[test]
+    fn inactive_voice_context_discards_playback_but_preserves_replay_tombstones() {
+        let start = Instant::now();
+        let mut voice = VoiceChatState::default();
+        let frame = |stream_epoch, sequence| clonk_network::VoiceFrame {
+            client_id: 7,
+            player_id: LOBBY_VOICE_PLAYER_ID,
+            stream_epoch,
+            sequence,
+            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .to_vec(),
+        };
+
+        assert!(voice
+            .reconcile_context(Some(VoiceChatContext::Lobby))
+            .is_empty());
+        assert!(voice
+            .accept_authorized_remote_frame(&frame(5, 100), start)
+            .is_some());
+        assert_eq!(
+            voice.reconcile_context(None),
+            vec![(7, LOBBY_VOICE_PLAYER_ID)],
+        );
+        assert!(voice
+            .reconcile_context(Some(VoiceChatContext::Lobby))
+            .is_empty());
+        assert!(voice
+            .accept_authorized_remote_frame(&frame(5, 100), start)
+            .is_none());
+        assert!(voice
+            .accept_authorized_remote_frame(&frame(5, 101), start)
+            .is_none());
+        assert!(voice
+            .accept_authorized_remote_frame(&frame(6, 0), start)
+            .is_some());
     }
 
     #[test]

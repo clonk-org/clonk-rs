@@ -2,12 +2,281 @@
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
 #[test]
-fn push_to_talk_key_falls_through_outside_a_running_game() {
+fn push_to_talk_key_falls_through_in_an_offline_menu() {
     let mut app = new_classic_running_sandbox_app();
     app.audio.test_mut().options.voice_enabled = true;
     app.mode = AppMode::Menu;
 
     assert!(!app.handle_voice_key(VirtualKeyCode::Backquote, ElementState::Pressed));
+}
+
+#[test]
+fn push_to_talk_opens_capture_in_a_network_lobby() {
+    struct TestVoiceSource;
+
+    impl crate::voice_chat::VoiceFrameSource for TestVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            vec![clonk_audio::VoiceInputFrame {
+                payload: clonk_audio::encode_voice_frame(
+                    &[1_000; clonk_audio::VOICE_FRAME_SAMPLES],
+                ),
+                level: 1.0,
+            }]
+        }
+    }
+
+    let mut app = new_menu_app(320, 200);
+    app.startup_view = StartupView::NetworkLobby;
+    app.network_lobby = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
+    app.control_clients.register(7, false, true);
+    let (manager, _events, mut voice) = NetworkManager::test_stub_with_voice_for_client_id(7);
+    app.network = Some(manager);
+    app.audio.test_mut().options.voice_enabled = true;
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(|_| Ok(TestVoiceSource));
+
+    app.handle_key(VirtualKeyCode::Backquote, ElementState::Pressed)
+        .test_value();
+    assert!(app.voice_chat.capture_active());
+    assert!(app.key_event_suppresses_text);
+    app.update_voice_chat();
+    let outbound = voice.try_recv_outbound().test_value();
+    assert_eq!(outbound.player_id, crate::voice_chat::LOBBY_VOICE_PLAYER_ID);
+    assert!(app.voice_chat.capture_active());
+    app.handle_key(VirtualKeyCode::Backquote, ElementState::Released)
+        .test_value();
+    assert!(!app.voice_chat.capture_active());
+}
+
+#[test]
+fn network_lobby_voice_activation_uses_a_client_scoped_wire_identity() {
+    use std::cell::RefCell;
+
+    struct OneFrameVoiceSource {
+        frames: RefCell<Vec<clonk_audio::VoiceInputFrame>>,
+    }
+
+    impl crate::voice_chat::VoiceFrameSource for OneFrameVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            std::mem::take(&mut *self.frames.borrow_mut())
+        }
+    }
+
+    let mut app = new_menu_app(320, 200);
+    install_test_classic_host_lobby(&mut app);
+    let (manager, _events, mut voice) = NetworkManager::test_stub_with_voice_for_client_id(0);
+    app.network = Some(manager);
+    let options = &mut app.audio.test_mut().options;
+    options.voice_enabled = true;
+    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    options.voice_activation_threshold = 0.0;
+    let payload = clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]);
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+        Ok(OneFrameVoiceSource {
+            frames: RefCell::new(vec![clonk_audio::VoiceInputFrame {
+                payload,
+                level: 1.0,
+            }]),
+        })
+    });
+    let simulation_before_voice = app.engine.snapshot();
+    let admitted_at = Instant::now();
+
+    app.update_voice_chat_at(admitted_at);
+
+    assert!(app.voice_chat.capture_active());
+    assert_eq!(app.voice_chat.capture_key(), None);
+    let outbound = voice.try_recv_outbound().test_value();
+    assert_eq!(outbound.player_id, crate::voice_chat::LOBBY_VOICE_PLAYER_ID);
+    assert!(app
+        .voice_chat
+        .active_speakers(admitted_at)
+        .contains(&(0, crate::voice_chat::LOBBY_VOICE_PLAYER_ID)));
+    assert_eq!(app.engine.snapshot(), simulation_before_voice);
+}
+
+#[test]
+fn network_lobby_voice_plays_authenticated_clients_non_positionally() {
+    let mut app = new_menu_app(320, 200);
+    install_test_classic_host_lobby(&mut app);
+    app.audio.test_mut().system = clonk_audio::AudioSystem::new_manual_with_resampling(
+        8,
+        clonk_audio::ResamplingMode::Linear,
+    );
+    app.audio.test_mut().options.voice_enabled = true;
+    let (manager, _events, voice) = NetworkManager::test_stub_with_voice_for_client_id(0);
+    app.network = Some(manager);
+    let remote_client = 7;
+    app.control_clients.register(remote_client, false, true);
+    let admitted_at = Instant::now();
+    let simulation_before_voice = app.engine.snapshot();
+    for sequence in [0, 0, 1, 2, 3] {
+        voice
+            .send_inbound(clonk_network::VoiceFrame {
+                client_id: remote_client as u32,
+                player_id: crate::voice_chat::LOBBY_VOICE_PLAYER_ID,
+                stream_epoch: 3,
+                sequence,
+                payload: clonk_audio::encode_voice_frame(
+                    &[2_000; clonk_audio::VOICE_FRAME_SAMPLES],
+                )
+                .to_vec(),
+            })
+            .test_value();
+    }
+
+    app.update_voice_chat_at(admitted_at);
+
+    let stream_id =
+        crate::voice_chat::voice_stream_id(remote_client, crate::voice_chat::LOBBY_VOICE_PLAYER_ID);
+    assert_eq!(
+        app.audio
+            .test_ref()
+            .system
+            .voice_stream_stats(stream_id)
+            .queued_frames,
+        4,
+    );
+    let mut mixed = [0_i16; 2];
+    app.audio.test_ref().system.mixer().mix_i16(&mut mixed);
+    assert_ne!(mixed, [0, 0]);
+    assert_eq!(mixed[0], mixed[1], "lobby voice is centered");
+    assert!(app
+        .voice_chat
+        .active_speakers(admitted_at)
+        .contains(&(remote_client, crate::voice_chat::LOBBY_VOICE_PLAYER_ID)));
+    assert_eq!(app.engine.snapshot(), simulation_before_voice);
+
+    app.mode = AppMode::Loading;
+    app.update_voice_chat_at(admitted_at + Duration::from_millis(20));
+    assert_eq!(
+        app.audio
+            .test_ref()
+            .system
+            .voice_stream_stats(stream_id)
+            .queued_frames,
+        0,
+        "an inactive transition must remove already-queued lobby speech",
+    );
+
+    app.mode = AppMode::Menu;
+    for sequence in 0..=4 {
+        voice
+            .send_inbound(clonk_network::VoiceFrame {
+                client_id: remote_client as u32,
+                player_id: crate::voice_chat::LOBBY_VOICE_PLAYER_ID,
+                stream_epoch: 3,
+                sequence,
+                payload: clonk_audio::encode_voice_frame(
+                    &[2_000; clonk_audio::VOICE_FRAME_SAMPLES],
+                )
+                .to_vec(),
+            })
+            .test_value();
+    }
+    app.update_voice_chat_at(admitted_at + Duration::from_millis(40));
+    assert_eq!(
+        app.audio
+            .test_ref()
+            .system
+            .voice_stream_stats(stream_id)
+            .queued_frames,
+        0,
+        "the retained route must not replay lobby frames after an inactive transition",
+    );
+    assert!(app.voice_chat.remote_streams.is_empty());
+
+    for sequence in 0..4 {
+        voice
+            .send_inbound(clonk_network::VoiceFrame {
+                client_id: remote_client as u32,
+                player_id: crate::voice_chat::LOBBY_VOICE_PLAYER_ID,
+                stream_epoch: 4,
+                sequence,
+                payload: clonk_audio::encode_voice_frame(
+                    &[2_000; clonk_audio::VOICE_FRAME_SAMPLES],
+                )
+                .to_vec(),
+            })
+            .test_value();
+    }
+    app.update_voice_chat_at(admitted_at + Duration::from_millis(60));
+    assert_eq!(
+        app.audio
+            .test_ref()
+            .system
+            .voice_stream_stats(stream_id)
+            .queued_frames,
+        4,
+        "a fresh capture epoch may speak after the retained transition",
+    );
+}
+
+#[test]
+fn network_lobby_voice_rejects_unknown_clients_and_non_lobby_scopes() {
+    let mut app = new_menu_app(320, 200);
+    install_test_classic_host_lobby(&mut app);
+    app.audio.test_mut().options.voice_enabled = true;
+    let (manager, _events, voice) = NetworkManager::test_stub_with_voice_for_client_id(0);
+    app.network = Some(manager);
+    let known_client = 7;
+    app.control_clients.register(known_client, false, true);
+    let admitted_at = Instant::now();
+    for (client_id, player_id) in [
+        (8, crate::voice_chat::LOBBY_VOICE_PLAYER_ID),
+        (known_client, 17),
+    ] {
+        voice
+            .send_inbound(clonk_network::VoiceFrame {
+                client_id: client_id as u32,
+                player_id,
+                stream_epoch: 1,
+                sequence: 0,
+                payload: clonk_audio::encode_voice_frame(
+                    &[2_000; clonk_audio::VOICE_FRAME_SAMPLES],
+                )
+                .to_vec(),
+            })
+            .test_value();
+    }
+
+    app.update_voice_chat_at(admitted_at);
+
+    assert!(app.voice_chat.remote_streams.is_empty());
+    assert!(app.voice_chat.active_speakers(admitted_at).is_empty());
+}
+
+#[test]
+fn voice_capture_does_not_cross_the_game_and_lobby_identity_boundary() {
+    struct SilentVoiceSource;
+
+    impl crate::voice_chat::VoiceFrameSource for SilentVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            Vec::new()
+        }
+    }
+
+    let mut app = new_classic_running_sandbox_app();
+    app.engine
+        .test_player_mut(app.local_owner)
+        .set_at_client(clonk_engine::PlayerAtClient::new(0));
+    app.snapshot = app.engine.snapshot();
+    let (manager, _events, _voice) = NetworkManager::test_stub_with_voice_for_client_id(0);
+    app.network = Some(manager);
+    app.audio.test_mut().options.voice_enabled = true;
+    app.voice_chat =
+        crate::voice_chat::VoiceChatState::with_source_opener(|_| Ok(SilentVoiceSource));
+    app.update_voice_chat();
+    assert!(app.handle_voice_key(VirtualKeyCode::Backquote, ElementState::Pressed));
+    assert!(app.voice_chat.capture_active());
+
+    app.mode = AppMode::Menu;
+    install_test_classic_host_lobby(&mut app);
+    app.update_voice_chat();
+
+    assert!(
+        !app.voice_chat.capture_active(),
+        "a held in-game capture must not silently become lobby speech",
+    );
 }
 
 #[test]

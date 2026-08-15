@@ -10,12 +10,40 @@ impl GameApp {
     fn local_voice_identity(&self) -> Option<(i32, i32)> {
         let network = self.network.as_ref()?;
         let client_id = i32::try_from(network.local_client_id()).ok()?;
-        crate::voice_chat::authenticated_selected_voice_crew(
-            &self.snapshot,
-            client_id,
-            self.local_owner,
-        )?;
-        Some((client_id, self.local_owner))
+        if self.mode == AppMode::Running {
+            crate::voice_chat::authenticated_selected_voice_crew(
+                &self.snapshot,
+                client_id,
+                self.local_owner,
+            )?;
+            return Some((client_id, self.local_owner));
+        }
+        (self.network_lobby_voice_active() && self.control_clients.contains(client_id))
+            .then_some((client_id, crate::voice_chat::LOBBY_VOICE_PLAYER_ID))
+    }
+
+    fn network_lobby_voice_active(&self) -> bool {
+        self.league_player_auth_lobby_active()
+    }
+
+    fn voice_chat_context_active(&self) -> bool {
+        self.voice_chat_context().is_some()
+    }
+
+    fn voice_chat_context(&self) -> Option<crate::voice_chat::VoiceChatContext> {
+        if self.mode == AppMode::Running {
+            Some(crate::voice_chat::VoiceChatContext::Running)
+        } else if self.network_lobby_voice_active() {
+            Some(crate::voice_chat::VoiceChatContext::Lobby)
+        } else {
+            None
+        }
+    }
+
+    fn authenticated_lobby_voice_client(&self, client_id: i32, player_id: i32) -> bool {
+        self.network_lobby_voice_active()
+            && player_id == crate::voice_chat::LOBBY_VOICE_PLAYER_ID
+            && self.control_clients.contains(client_id)
     }
 
     fn voice_activation(&self) -> Option<crate::settings::VoiceActivation> {
@@ -45,7 +73,7 @@ impl GameApp {
             });
         let keyboard_scope_available = !self.runtime_gui_has_keyboard_focus()
             && !self.runtime_top_default_dialog_is_exclusive();
-        let eligible = self.mode == AppMode::Running
+        let eligible = self.voice_chat_context_active()
             && self.window_active
             && keyboard_scope_available
             && self
@@ -58,7 +86,7 @@ impl GameApp {
             configured_key,
             // A player on voice activation is not holding a key to talk, so the
             // configured key stays the game's to bind.
-            self.mode == AppMode::Running
+            self.voice_chat_context_active()
                 && self.voice_chat_enabled()
                 && keyboard_scope_available
                 && self.voice_activation().is_none(),
@@ -75,7 +103,7 @@ impl GameApp {
             }
             crate::voice_chat::PushToTalkAction::Start => {}
         }
-        if self.mode != AppMode::Running
+        if !self.voice_chat_context_active()
             || !self.window_active
             || self
                 .network
@@ -163,11 +191,17 @@ impl GameApp {
             .network
             .as_ref()
             .is_some_and(NetworkManager::voice_available);
-        if self.mode != AppMode::Running || !self.voice_chat_enabled() || !voice_available {
+        if !self.voice_chat_enabled() || !voice_available {
             let removed = self.voice_chat.clear();
             self.remove_voice_playback(removed);
             return;
         }
+        let context = self.voice_chat_context();
+        let removed = self.voice_chat.reconcile_context(context);
+        self.remove_voice_playback(removed);
+        let Some(context) = context else {
+            return;
+        };
 
         // Whatever the player has set right now, handed to a capture that may
         // already be open: the stages are switched, not reopened.
@@ -189,15 +223,20 @@ impl GameApp {
             .map_or(0.0, |audio| audio.options.voice_volume);
 
         for frame in received {
-            let Some(_position) = i32::try_from(frame.client_id).ok().and_then(|client_id| {
-                voice_source_position(&self.snapshot, client_id, frame.player_id)
-            }) else {
+            let Some(client_id) = i32::try_from(frame.client_id).ok() else {
                 continue;
             };
-            let Some(accepted) = self
-                .voice_chat
-                .accept_remote_frame(&self.snapshot, &frame, now)
-            else {
+            let accepted = if context == crate::voice_chat::VoiceChatContext::Running {
+                voice_source_position(&self.snapshot, client_id, frame.player_id).and_then(|_| {
+                    self.voice_chat
+                        .accept_remote_frame(&self.snapshot, &frame, now)
+                })
+            } else if self.authenticated_lobby_voice_client(client_id, frame.player_id) {
+                self.voice_chat.accept_authorized_remote_frame(&frame, now)
+            } else {
+                None
+            };
+            let Some(accepted) = accepted else {
                 continue;
             };
             if accepted.reset_stream {
@@ -214,14 +253,20 @@ impl GameApp {
             .copied()
             .collect::<Vec<_>>();
         for (client_id, player_id) in active_streams {
-            let Some(position) = voice_source_position(&self.snapshot, client_id, player_id) else {
+            let mix = if context == crate::voice_chat::VoiceChatContext::Running {
+                voice_source_position(&self.snapshot, client_id, player_id).map(|position| {
+                    compute_object_positional_mix(position, &self.snapshot, &viewports)
+                })
+            } else {
+                self.authenticated_lobby_voice_client(client_id, player_id)
+                    .then_some((1.0, 0.0))
+            };
+            let Some((audibility, pan)) = mix else {
                 self.voice_chat
                     .discard_remote_playback(client_id, player_id);
                 self.remove_voice_playback([(client_id, player_id)]);
                 continue;
             };
-            let (audibility, pan) =
-                compute_object_positional_mix(position, &self.snapshot, &viewports);
             if let Some(audio) = self.audio.as_ref() {
                 let stream_id = crate::voice_chat::voice_stream_id(client_id, player_id);
                 let queued_frames = audio.system.voice_stream_stats(stream_id).queued_frames;
