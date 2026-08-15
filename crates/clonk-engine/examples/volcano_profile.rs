@@ -183,6 +183,14 @@ fn main() {
     }
 
     let mut samples = Vec::with_capacity(frames);
+    let mut render_anchor = engine
+        .landscape()
+        .and_then(|landscape| landscape.pixel_grid())
+        .map(|grid| grid.render_anchor());
+    let mut dirty_rects = 0usize;
+    let mut dirty_area = 0u64;
+    let mut dirty_full_rebuilds = 0usize;
+    let mut dirty_max = 0usize;
     for _ in 0..frames {
         let active_ids: Vec<_> = ids
             .iter()
@@ -205,6 +213,23 @@ fn main() {
                 .call_object_function(index, "Advance", Vec::new())
                 .expect("FXV1 Advance succeeds");
         }
+        let grid = engine
+            .landscape()
+            .and_then(|landscape| landscape.pixel_grid())
+            .expect("forced volcano has an exact raster landscape");
+        if let Some(previous) = render_anchor.take() {
+            match grid.render_dirty_rects_since_anchor(&previous) {
+                Some(rects) => {
+                    dirty_max = dirty_max.max(rects.len());
+                    dirty_rects = dirty_rects.saturating_add(rects.len());
+                    dirty_area = dirty_area.saturating_add(rects.iter().fold(0, |area, rect| {
+                        area.saturating_add(u64::from(rect.width()) * u64::from(rect.height()))
+                    }));
+                }
+                None => dirty_full_rebuilds = dirty_full_rebuilds.saturating_add(1),
+            }
+        }
+        render_anchor = Some(grid.render_anchor());
         samples.push(started.elapsed());
     }
     let mut sorted = samples.clone();
@@ -216,6 +241,9 @@ fn main() {
         "seed={seed} width={width} height={height} x={center_x} y={y} size={size} volcanoes={volcanoes}"
     );
     println!("samples={}", samples.len());
+    println!(
+        "dirty_rects={dirty_rects} dirty_area={dirty_area} dirty_max={dirty_max} dirty_full_rebuilds={dirty_full_rebuilds}"
+    );
     println!(
         "total={total:?} mean={:?}",
         total / samples.len().max(1) as u32

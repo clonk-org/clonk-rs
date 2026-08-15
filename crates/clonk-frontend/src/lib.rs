@@ -205,6 +205,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     trait TestValueExt<T> {
         fn test_value(self) -> T;
@@ -20020,5 +20021,209 @@ mod tests {
             32,
             "incompatible landscape dimensions require a complete new cache"
         );
+    }
+
+    #[test]
+    #[ignore = "manual FXV1 render dirty/upload timing probe"]
+    fn profile_forced_deep_volcano_render_dirty_regions() {
+        fn load_deep(seed: u64) -> Engine {
+            let repository = test_support::repo_root();
+            let content = repository.join("content");
+            let scenario_path = content.join("FarWorlds.c4f/Deep.c4s");
+            let scenario = Scenario::load_from_path_with_seed(
+                &scenario_path,
+                &RepositoryContentResolver {
+                    root: content.clone(),
+                },
+                seed,
+            )
+            .test_value();
+            let material_group = Group::open(content.join("Material.c4g")).test_value();
+            let materials = MaterialLibrary::from_group(&material_group).test_value();
+            let system_group = Group::open(repository.join("planet/System.c4g")).test_value();
+            let system_scripts = load_system_scripts(&system_group).test_value();
+            let mut engine = Engine::with_seed(seed);
+            engine.configure_materials_from_library(&materials);
+            engine.install_global_scripts(&system_scripts);
+            engine.set_standard_names(
+                system_group
+                    .read_file("Names.txt")
+                    .ok()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+            );
+            scenario.apply(&mut engine).test_value();
+            engine
+        }
+
+        fn percentile(sorted: &[Duration], quantile: f64) -> Duration {
+            sorted
+                .get(((sorted.len().saturating_sub(1)) as f64 * quantile).round() as usize)
+                .copied()
+                .unwrap_or_default()
+        }
+
+        fn surface32_state(engine: &Engine) -> (usize, u64) {
+            let Some(grid) = engine.landscape().and_then(Landscape::pixel_grid) else {
+                return (0, 0);
+            };
+            let mut count = 0;
+            let mut checksum = 0xcbf2_9ce4_8422_2325;
+            for y in 0..grid.height() as i32 {
+                for x in 0..grid.width() as i32 {
+                    let Some(color) = grid.surface32_pixel_at(x, y) else {
+                        continue;
+                    };
+                    count += 1;
+                    for value in [x as u32, y as u32, color] {
+                        checksum ^= u64::from(value);
+                        checksum = checksum.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                }
+            }
+            (count, checksum)
+        }
+
+        fn profile(volcanoes: usize, size: i32, frames: usize) {
+            let seed = 424_242;
+            let mut engine = load_deep(seed);
+            let (width, height) = engine
+                .landscape()
+                .test_value()
+                .grid_dimensions()
+                .test_value();
+            let center_x = width / 2;
+            let y = height - 1;
+            let lava = engine.materials().id_of("Lava").test_value().index() as i32;
+            let spacing = size.max(20) + 20;
+            let mut ids = Vec::with_capacity(volcanoes);
+            for volcano_index in 0..volcanoes {
+                let offset = (volcano_index as i32 - volcanoes as i32 / 2) * spacing;
+                let x = (center_x + offset).clamp(0, width.saturating_sub(1));
+                let id = engine
+                    .spawn_object(
+                        SpawnConfig::new("FXV1").with_position(Vector2::new(50 + offset, 50)),
+                    )
+                    .test_value();
+                let index = engine.find_object_index(id).test_value();
+                engine
+                    .call_object_function(
+                        index,
+                        "Activate",
+                        vec![
+                            clonk_script::Value::Int(x),
+                            clonk_script::Value::Int(y),
+                            clonk_script::Value::Int(size),
+                            clonk_script::Value::Int(lava),
+                            clonk_script::Value::Int(0),
+                            clonk_script::Value::Int(10_000),
+                        ],
+                    )
+                    .test_value();
+                ids.push(id);
+            }
+
+            let gamma = clonk_graphics::GammaRamp::standard();
+            let mut captured = test_graphics(320, 180, 180, "FXV1 render capture");
+            captured.begin_gpu_scene_capture();
+            assert!(captured.draw_ground_textured(engine.landscape(), None));
+            captured.finish_gpu_scene_capture(&gamma).test_value();
+            let mut software = test_graphics(320, 180, 180, "FXV1 render software");
+            assert!(software.draw_ground_textured(engine.landscape(), None));
+            software
+                .landscape_cache
+                .as_mut()
+                .test_value()
+                .gpu_dirty
+                .clear();
+
+            let mut capture_samples = Vec::with_capacity(frames);
+            let mut software_samples = Vec::with_capacity(frames);
+            let mut captured_dirty_rects = 0usize;
+            let mut captured_dirty_bytes = 0u64;
+            let mut software_dirty_rects = 0usize;
+            for _ in 0..frames {
+                let active_ids: Vec<_> = ids
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        engine
+                            .object_snapshot(*id)
+                            .is_some_and(|object| object.status.is_active())
+                    })
+                    .collect();
+                if active_ids.is_empty() {
+                    break;
+                }
+                for id in active_ids {
+                    let Some(index) = engine.find_object_index(id) else {
+                        continue;
+                    };
+                    engine
+                        .call_object_function(index, "Advance", Vec::new())
+                        .test_value();
+                }
+
+                let started = Instant::now();
+                captured.begin_gpu_scene_capture();
+                assert!(captured.draw_ground_textured(engine.landscape(), None));
+                let scene = captured.finish_gpu_scene_capture(&gamma).test_value();
+                capture_samples.push(started.elapsed());
+                for texture in scene.textures {
+                    captured_dirty_rects = captured_dirty_rects.saturating_add(texture.dirty.len());
+                    captured_dirty_bytes = captured_dirty_bytes.saturating_add(
+                        texture.dirty.iter().fold(0, |bytes, rect| {
+                            bytes.saturating_add(
+                                u64::from(rect.width)
+                                    * u64::from(rect.height)
+                                    * texture.format.bytes_per_pixel() as u64,
+                            )
+                        }),
+                    );
+                }
+
+                let started = Instant::now();
+                assert!(software.draw_ground_textured(engine.landscape(), None));
+                software_samples.push(started.elapsed());
+                let cache = software.landscape_cache.as_mut().test_value();
+                software_dirty_rects = software_dirty_rects.saturating_add(cache.gpu_dirty.len());
+                cache.gpu_dirty.clear();
+            }
+            capture_samples.sort_unstable();
+            software_samples.sort_unstable();
+            let (surface32_pixels, surface32_checksum) = surface32_state(&engine);
+            println!(
+                "render_workload=volcanoes:{volcanoes},size:{size},frames:{} capture_dirty_rects={captured_dirty_rects} capture_dirty_bytes={captured_dirty_bytes} software_dirty_rects={software_dirty_rects} surface32_pixels={surface32_pixels} surface32_checksum=0x{surface32_checksum:016x} capture_mean={:?} capture_p50={:?} capture_p95={:?} capture_p99={:?} capture_max={:?} software_mean={:?} software_p50={:?} software_p95={:?} software_p99={:?} software_max={:?}",
+                capture_samples.len(),
+                capture_samples.iter().sum::<Duration>()
+                    / capture_samples.len().max(1) as u32,
+                percentile(&capture_samples, 0.50),
+                percentile(&capture_samples, 0.95),
+                percentile(&capture_samples, 0.99),
+                capture_samples.last().copied().unwrap_or_default(),
+                software_samples.iter().sum::<Duration>()
+                    / software_samples.len().max(1) as u32,
+                percentile(&software_samples, 0.50),
+                percentile(&software_samples, 0.95),
+                percentile(&software_samples, 0.99),
+                software_samples.last().copied().unwrap_or_default(),
+            );
+        }
+
+        profile(1, 60, 22);
+        profile(4, 60, 100);
+        profile(4, 200, 100);
+    }
+
+    #[test]
+    fn retained_landscape_dirty_regions_merge_overlapping_uploads() {
+        // CStdGL::BlitLandscape uploads each retained source rectangle as a
+        // locked texture patch (StdGL.cpp:261-270); overlapping patches are
+        // presentation-equivalent when one union covers both complete source
+        // regions. This test pins the renderer-side upload coalescing rule.
+        let grid = PixelGrid::new(32, 32, vec![0; 32 * 32], vec![0], vec![None], vec![None]);
+        let mut cache = LandscapeRenderCache::new(grid, 32, 32, false, (0, 0, true, true, None));
+        cache.record_gpu_update(&[(2, 3, 3, 3), (4, 4, 2, 2), (20, 20, 1, 1)]);
+        assert_eq!(cache.gpu_dirty.len(), 2);
+        assert!(cache.gpu_dirty.contains(&SurfaceRect::new(2, 3, 4, 3)));
     }
 }
