@@ -7645,6 +7645,86 @@ fn active_network_client_runtime_join_publishes_before_add_request() {
 }
 
 #[test]
+fn deactivated_network_client_can_request_runtime_player_join() {
+    // JoinLocalPlayer permits an inactive non-observer to send its
+    // CIF_AddPlayers PID_PlayerInfoUpdReq, then requests activation
+    // (src/C4Network2Players.cpp:78-137).
+    let directory = tempdir();
+    let player_path = directory.path().join("Rejoin.c4p");
+    let mut player_group = clonk_resources::MutableGroup::new("Rejoin.c4p");
+    player_group
+        .add_file_with_metadata(
+            "Player.txt",
+            b"[Player]\nName=Rejoin\n[Preferences]\nColorDw=6636321\n".to_vec(),
+            1,
+            false,
+        )
+        .test_value();
+    fs::write(&player_path, player_group.pack().test_value()).test_value();
+
+    let mut app = new_running_sandbox_app();
+    let (manager, _event_tx, commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.control_clients.register(7, false, false);
+
+    let wire_name = clonk_engine::LegacyCString::from_bytes(
+        player_path.as_os_str().as_encoded_bytes().to_vec(),
+    )
+    .test_value();
+    let resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 7 << 16,
+        loadable: true,
+        filename: wire_name,
+        ..Default::default()
+    };
+    let command_observer =
+        thread::spawn(move || commands.complete_initial_client_join(vec![resource]));
+
+    let result = app.submit_runtime_network_player(&player_path.to_string_lossy());
+    drop(app.network.take());
+    let (order, _, player_infos, _) = command_observer.test_join();
+
+    result.test_value();
+    assert_eq!(order, vec!["publish", "player-info"]);
+    let [request] = player_infos.as_slice() else {
+        panic!("expected one runtime player-info request");
+    };
+    assert_eq!(request.client_id, 7);
+    assert_eq!(
+        request.flags,
+        clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+    );
+}
+
+#[test]
+fn network_observer_cannot_request_lobby_player_join() {
+    // JoinLocalPlayer rejects an observer before opening the selected player,
+    // including the /joinplr route used while a lobby is active
+    // (src/C4Network2Players.cpp:78-85; src/C4GameLobby.cpp:516-526).
+    let directory = tempdir();
+    let missing_player = directory.path().join("Observer.c4p");
+    let mut app = new_state_only_running_sandbox_app();
+    let (manager, _event_tx, _commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Observer",
+    )));
+    app.control_clients.register(7, false, true);
+
+    assert_eq!(
+        app.submit_network_player_path(&missing_player, "Observer.c4p", false)
+            .expect_err("an observer cannot add a lobby player"),
+        "network observers cannot join players"
+    );
+}
+
+#[test]
 fn active_network_host_runtime_join_publishes_admits_and_queues_join() {
     // JoinLocalPlayer(file, true) first lets LoadFromLocalFile publish an
     // NRT_Player. A host handles CIF_AddPlayers directly, assigns the next
@@ -7740,11 +7820,14 @@ fn active_network_host_runtime_join_publishes_admits_and_queues_join() {
 }
 
 #[test]
-fn active_network_host_broadcasts_remote_retirement_for_client_rejoin() {
+fn inactive_remote_client_readds_retired_profile_after_activation_go() {
     // C4PlayerList::Remove calls SetRemoved on the shared C4PlayerInfo before
     // deleting the live player on every peer. Rust mirrors that link outside
     // the engine, so the authoritative host must also repair a remote client's
-    // retained list (src/C4PlayerList.cpp:219-267,398-409).
+    // retained list. An inactive requester is admitted before activation, then
+    // OnStatusGoReached issues its deferred JoinPlayer
+    // (src/C4PlayerList.cpp:219-267,398-409;
+    // src/C4Network2Players.cpp:160-270,465-482).
     let mut app = new_running_sandbox_app();
     app.control_clients.register(0, true, false);
     app.control_clients.register(7, true, false);
@@ -7817,6 +7900,8 @@ fn active_network_host_broadcasts_remote_retirement_for_client_rejoin() {
         0,
         "the remote client must receive the released profile before rejoining"
     );
+    app.control_clients.register(7, false, false);
+    let expected_resource = resource.clone();
 
     event_tx
         .send(NetworkEvent::PlayerInfoUpdateRequest {
@@ -7845,8 +7930,71 @@ fn active_network_host_broadcasts_remote_retirement_for_client_rejoin() {
         panic!("expected the readmitted remote player row");
     };
     assert_eq!((info.client_id, player.id), (7, 42));
-    assert_eq!(join_players_on_echo.len(), 1);
-    assert_eq!(join_players_on_echo[0].id, 42);
+    assert!(
+        join_players_on_echo.is_empty(),
+        "the inactive client must wait for synchronized activation"
+    );
+
+    let frame = i32::try_from(app.engine.frame()).test_value();
+    event_tx
+        .send(NetworkEvent::ActivationRequest {
+            client_id: 7,
+            tick: frame,
+            waited_for: true,
+            ping_ms: 0,
+        })
+        .test_value();
+    app.test_network_events();
+    let activations = commands.take_submitted_client_updates();
+    let [activation] = activations.as_slice() else {
+        panic!("expected the host-authored activation control");
+    };
+    let activation = activation.clone();
+    assert_eq!(
+        activation,
+        clonk_engine::ClientUpdateControlData {
+            update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 7,
+            data: 1,
+            by_client: 0,
+        }
+    );
+    let tick = app.local_control_submission_tick();
+    app.network_control_running = false;
+    event_tx
+        .send(NetworkEvent::ScheduledSync {
+            tick,
+            controls: vec![NetworkControl::ClientUpdate(activation)],
+        })
+        .test_value();
+    app.test_network_events();
+    assert!(!app.control_clients.is_activated(7));
+    assert!(app.network_sync.scheduled.contains_key(&tick));
+    assert!(commands.take_submitted_join_players().is_empty());
+
+    event_tx
+        .send(NetworkEvent::StatusCommitted(
+            clonk_network::NetworkStatus {
+                state: clonk_network::NETWORK_STATE_GO,
+                control_mode: 1,
+                target_tick: i32::try_from(tick).test_value(),
+            },
+        ))
+        .test_value();
+    app.test_network_events();
+
+    assert!(app.control_clients.is_activated(7));
+    let joins = commands.take_submitted_join_players();
+    let [(join_tick, join)] = joins.as_slice() else {
+        panic!("expected one deferred remote-client JoinPlayer");
+    };
+    assert_eq!(*join_tick, tick);
+    assert_eq!((join.at_client, join.info_id), (7, 42));
+    assert_eq!(join.by_client, 0);
+    assert_eq!(
+        join.source,
+        clonk_engine::JoinPlayerSource::Resource(expected_resource)
+    );
 }
 
 #[test]
