@@ -1732,7 +1732,9 @@ fn serialize_players(
         if at_client_name != "Local" {
             writer.field(0, "AtClientName", at_client_name);
         }
-        field_i32(&mut writer, 0, "Index", player.id, -1);
+        // C4Player::CompileFunc defaults a missing Index to C4P_Number_None
+        // (-5), so an explicit -1 must remain serialized (C4Player.cpp:1563).
+        field_i32(&mut writer, 0, "Index", player.id, -5);
         field_i32(&mut writer, 0, "ID", player.player_info_id, 0);
         field_i32(
             &mut writer,
@@ -5702,6 +5704,26 @@ mod tests {
         assert!(bytes
             .windows(b"MessageBuf= message \\ raw \r\n".len())
             .any(|window| window == b"MessageBuf= message \\ raw \r\n"));
+    }
+
+    #[test]
+    fn runtime_player_serializes_explicit_negative_index() {
+        // C4Player::CompileFunc uses C4P_Number_None (-5), not -1, as the
+        // omitted Index default (C4Player.cpp:1560-1564). An explicit -1
+        // therefore remains present in the C++ Game.txt output.
+        let player = PlayerState {
+            id: -1,
+            player_info_id: 7,
+            ..PlayerState::default()
+        };
+        let text = String::from_utf8(serialize_players(
+            &Engine::new(),
+            &[player],
+            &mut LegacyStringTable::default(),
+        ))
+        .expect("runtime player section is UTF-8");
+
+        assert!(text.lines().any(|line| line == "Index=-1"));
     }
 
     #[test]
