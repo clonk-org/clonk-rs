@@ -581,7 +581,7 @@ pub fn substitute_resource_arguments(template: &str, arguments: &[&str]) -> Stri
 }
 
 /// Display toggles and renderer flags, with defaults from
-/// C4Config.cpp:381,446-465. The interactive subset is shown by
+/// C4Config.cpp:381,446-468. The interactive subset is shown by
 /// `ActivateDisplay` (C4MainMenu.cpp:582-641).
 #[derive(Clone, Copy, Debug)]
 pub struct DisplayFlags {
@@ -593,6 +593,9 @@ pub struct DisplayFlags {
     pub show_player_hud_always: bool,
     pub splitscreen_dividers: bool,
     pub fire_particles: bool,
+    /// `Config.Graphics.PXSGfx`, the presentation-only gate for material
+    /// particle sprites (C4Config.cpp:468; C4PXS.cpp:248-307).
+    pub pxs_gfx: bool,
     pub upper_board: UpperBoardMode,
     pub fps: bool,
     pub clock: bool,
@@ -622,6 +625,7 @@ impl Default for DisplayFlags {
             show_player_hud_always: true,
             splitscreen_dividers: true,
             fire_particles: true,
+            pxs_gfx: true,
             upper_board: UpperBoardMode::Full,
             fps: false,
             clock: false,

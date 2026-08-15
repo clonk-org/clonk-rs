@@ -686,6 +686,9 @@ pub struct GraphicsSystem {
     /// script-created fire. The object fire facet stays unconditional either
     /// way, as C++'s does.
     draws_fire_particles: bool,
+    /// `Config.Graphics.PXSGfx`, applied independently of the immutable
+    /// CStdGL device/resource configuration (C4PXS.cpp:248-307).
+    pxs_gfx: bool,
     /// `Config.Graphics.ShowPortraits` / `ShowCommands` / `ShowCommandKeys`
     /// (src/C4Config.cpp:448-450, default true).
     pub(crate) show_portraits: bool,
@@ -852,6 +855,7 @@ impl GraphicsSystem {
             show_player_hud_always: true,
             splitscreen_dividers: true,
             draws_fire_particles: true,
+            pxs_gfx: true,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -2646,6 +2650,17 @@ impl GraphicsSystem {
     /// Whether flame particles are currently drawn at all.
     pub fn draws_fire_particles(&self) -> bool {
         self.draws_fire_particles
+    }
+
+    /// Enables or disables graphical material-particle sprites. Disabling
+    /// this restores C++'s palette-pixel/velocity-line PXS presentation.
+    pub fn set_pxs_graphics(&mut self, enabled: bool) {
+        self.pxs_gfx = enabled;
+    }
+
+    /// Whether material particles currently use their graphical sprites.
+    pub fn pxs_graphics_enabled(&self) -> bool {
+        self.pxs_gfx
     }
 
     /// Stores the HUD state drawn by [`Self::render_frame`] — the Rust
@@ -5376,6 +5391,7 @@ impl GraphicsSystem {
         // pixel/velocity line first, then every material sprite. Thus a
         // graphical PXS overlays every old-style PXS regardless of slot
         // order (C4PXS.cpp:248-307).
+        let pxs_gfx = self.pxs_gfx;
         for particle in particles {
             if !self.pxs_visible(particle) {
                 continue;
@@ -5383,10 +5399,14 @@ impl GraphicsSystem {
             let Some(material) = resolve(&particle.definition_id) else {
                 continue;
             };
-            if self.pxs_graphics(material).is_some() {
+            if pxs_gfx && self.pxs_graphics(material).is_some() {
                 continue;
             }
             self.draw_old_style_pxs(particle, material, lighting, gamma);
+        }
+
+        if !pxs_gfx {
+            return;
         }
 
         let mut compacted_slot = 0u32;

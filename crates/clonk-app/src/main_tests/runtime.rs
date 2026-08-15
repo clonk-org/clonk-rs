@@ -5556,6 +5556,47 @@ fn console_viewport_render_uses_the_windows_own_extent_and_identity() {
     assert!(app.render_console_viewport(u64::MAX, 320, 200).is_none());
 }
 
+#[test]
+fn console_viewport_render_applies_the_live_pxs_graphics_flag() {
+    // A windowed viewport still reaches the same C4PXSSystem::Draw flag
+    // (src/C4GraphicsSystem.cpp:167-169; src/C4PXS.cpp:259-260,279-281).
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+        .test_value();
+    let identity = app.physical_viewports.last().test_value().physical_identity;
+    app.display_flags.pxs_gfx = false;
+    assert!(app.graphics.pxs_graphics_enabled());
+
+    assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+    assert!(
+        !app.graphics.pxs_graphics_enabled(),
+        "the detached viewport must honor the same live flag as the main PXS draw"
+    );
+}
+
+#[test]
+fn console_shell_render_applies_the_live_pxs_graphics_flag() {
+    // C4GraphicsSystem::Execute renders every viewport before its
+    // fullscreen-only chrome, so console and fullscreen draws reach the same
+    // global PXSGfx check
+    // (src/C4GraphicsSystem.cpp:167-177; src/C4PXS.cpp:259-260,279-281).
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.display_flags.pxs_gfx = false;
+    assert!(app.graphics.pxs_graphics_enabled());
+    let frame_len = app.graphics.surface().pixels().len();
+    let mut frame = vec![0; frame_len];
+
+    assert!(app.test_render(&mut frame));
+
+    assert!(
+        !app.graphics.pxs_graphics_enabled(),
+        "the console shell must synchronize the flag before its early return"
+    );
+}
+
 // The editor's first end-to-end gesture: a window-local click reaches the
 // selection. C4Viewport converts the pointer through that viewport's own
 // ViewX/ViewY (C4Viewport.cpp:181), C4EditCursor::Move picks the target

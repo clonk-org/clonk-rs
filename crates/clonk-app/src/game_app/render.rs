@@ -1372,6 +1372,7 @@ impl GameApp {
         let _renderer_config_guard = clonk_frontend::activate_advanced_renderer_config(
             self.graphics.advanced_renderer_config(),
         );
+        self.graphics.set_pxs_graphics(self.display_flags.pxs_gfx);
         if self.console_mode {
             self.sync_developer_console_view();
             let font = self.assets.font_arc();
@@ -4260,6 +4261,7 @@ impl GameApp {
         width: u32,
         height: u32,
     ) -> Option<clonk_graphics::Surface> {
+        self.graphics.set_pxs_graphics(self.display_flags.pxs_gfx);
         let Self {
             snapshot,
             graphics,
@@ -4389,6 +4391,7 @@ impl GameApp {
             self.display_flags.show_player_hud_always,
             self.display_flags.splitscreen_dividers,
         );
+        self.graphics.set_pxs_graphics(self.display_flags.pxs_gfx);
         // Only the measured-cost governor suppresses the flame draws. The
         // static `Config.Graphics.FireParticles` is honoured engine-side by
         // `Engine::set_fire_particles`, where C++ folds it into
