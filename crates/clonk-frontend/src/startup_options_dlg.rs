@@ -1349,6 +1349,16 @@ pub enum SoundVolumeId {
 impl SoundVolumeId {
     pub const ALL: [Self; 3] = [Self::Music, Self::SoundEffects, Self::Voice];
 
+    /// C++'s music and sound-effect controls keep their `0..=100` callback
+    /// domain. Voice is port-only and extends the upper half as boost, with
+    /// `100` remaining unity gain.
+    pub const fn maximum(self) -> u8 {
+        match self {
+            Self::Music | Self::SoundEffects => 100,
+            Self::Voice => 200,
+        }
+    }
+
     const fn index(self) -> usize {
         match self {
             Self::Music => 0,
@@ -1383,8 +1393,9 @@ pub enum SoundSheetAction {
     TestSound(SoundSheetSound),
 }
 
-/// Live values displayed by the Audio sheet. Volumes use the C++ callback
-/// domain `0..=100`, not normalized mixer floats.
+/// Live values displayed by the Audio sheet. Music and sound effects use the
+/// C++ callback domain `0..=100`; port-only voice uses `0..=200`, with `100`
+/// as unity gain. None of them are normalized mixer floats.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SoundSheetState {
     pub frontend_music: bool,
@@ -1434,7 +1445,7 @@ impl SoundSheetState {
     #[must_use]
     pub fn with_voice(mut self, enabled: bool, volume: u8, push_to_talk_key: String) -> Self {
         self.voice_enabled = enabled;
-        self.voice_volume = volume.min(100);
+        self.voice_volume = volume.min(SoundVolumeId::Voice.maximum());
         self.push_to_talk_key = push_to_talk_key;
         self
     }
@@ -1479,9 +1490,9 @@ impl SoundSheetState {
 
     fn set_volume(&mut self, id: SoundVolumeId, value: u8) {
         match id {
-            SoundVolumeId::Music => self.music_volume = value.min(100),
-            SoundVolumeId::SoundEffects => self.sound_effects_volume = value.min(100),
-            SoundVolumeId::Voice => self.voice_volume = value.min(100),
+            SoundVolumeId::Music => self.music_volume = value.min(id.maximum()),
+            SoundVolumeId::SoundEffects => self.sound_effects_volume = value.min(id.maximum()),
+            SoundVolumeId::Voice => self.voice_volume = value.min(id.maximum()),
         }
     }
 }
@@ -3560,7 +3571,8 @@ impl OptionsDlgState {
         let max_scroll = sound_slider_max_scroll(rect).max(1);
         let scroll_pos = scroll_pos.clamp(0, max_scroll);
         self.sound_slider_positions[id.index()] = Some(scroll_pos);
-        let value = (scroll_pos * 100 / max_scroll).clamp(0, 100) as u8;
+        let maximum = i32::from(id.maximum());
+        let value = (scroll_pos * maximum / max_scroll).clamp(0, maximum) as u8;
         self.sound.set_volume(id, value);
         let mut actions = vec![Self::sound_action(SoundSheetAction::VolumeChanged {
             id,
@@ -3583,14 +3595,15 @@ impl OptionsDlgState {
                 let rect = layout.sound.slider(id);
                 let max_scroll = sound_slider_max_scroll(rect);
                 self.sound_slider_positions[id.index()] =
-                    Some(i32::from(self.sound.volume(id)) * max_scroll / 100);
+                    Some(i32::from(self.sound.volume(id)) * max_scroll / i32::from(id.maximum()));
             }
         }
     }
 
     fn sound_slider_position(&self, id: SoundVolumeId, rect: IntRect) -> i32 {
         self.sound_slider_positions[id.index()].unwrap_or_else(|| {
-            i32::from(self.sound.volume(id)) * sound_slider_max_scroll(rect) / 100
+            i32::from(self.sound.volume(id)) * sound_slider_max_scroll(rect)
+                / i32::from(id.maximum())
         })
     }
 }
@@ -7425,6 +7438,39 @@ mod tests {
         assert!(voice.volume_slider.x > voice.volume_label.x);
     }
 
+    #[test]
+    fn voice_volume_clamps_at_200_while_cpp_volumes_clamp_at_100() {
+        let sound = SoundSheetState::new(true, true, true, true, u8::MAX, u8::MAX).with_voice(
+            true,
+            u8::MAX,
+            "T".into(),
+        );
+
+        assert_eq!(sound.music_volume, 100);
+        assert_eq!(sound.sound_effects_volume, 100);
+        assert_eq!(sound.voice_volume, 200);
+    }
+
+    #[test]
+    fn voice_volume_seed_maps_unity_to_midpoint_and_boost_to_track_end() {
+        let (unity, unity_layout) =
+            live_sound_state(SoundSheetState::default().with_voice(true, 100, "T".into()));
+        let unity_slider = unity_layout.sound.slider(SoundVolumeId::Voice);
+        let maximum_scroll = sound_slider_max_scroll(unity_slider);
+        assert_eq!(
+            unity.sound_slider_position(SoundVolumeId::Voice, unity_slider),
+            maximum_scroll / 2,
+        );
+
+        let (boosted, boosted_layout) =
+            live_sound_state(SoundSheetState::default().with_voice(true, 200, "T".into()));
+        let boosted_slider = boosted_layout.sound.slider(SoundVolumeId::Voice);
+        assert_eq!(
+            boosted.sound_slider_position(SoundVolumeId::Voice, boosted_slider),
+            sound_slider_max_scroll(boosted_slider),
+        );
+    }
+
     /// The port-only controls answer the pointer exactly like the C++ controls
     /// beside them: the opt-in toggles on left-up with an `ArrowHit`, the bar
     /// drags, and the key button asks the app to open its capture modal. Only
@@ -7490,8 +7536,14 @@ mod tests {
         );
         assert_eq!(state.sound().voice_volume, 0);
         let loud = GuiPoint::new((bar.x + bar.w - 24) as f32, (bar.y + bar.h / 2) as f32);
-        state.handle_pointer_up(loud);
-        assert_eq!(state.sound().voice_volume, 100);
+        assert_eq!(
+            state.handle_pointer_up(loud),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                id: SoundVolumeId::Voice,
+                value: 200,
+            })]
+        );
+        assert_eq!(state.sound().voice_volume, 200);
 
         // Key button: a completed press asks the app for the capture modal.
         let button = rect_center(voice.push_to_talk_button);
@@ -7500,6 +7552,32 @@ mod tests {
             state.handle_pointer_up(button),
             vec![OptionsDlgAction::BeginVoicePushToTalkCapture]
         );
+    }
+
+    #[test]
+    fn voice_slider_arrow_steps_in_the_200_percent_domain_without_test_sound() {
+        let (mut state, layout) = live_sound_state(SoundSheetState::default());
+        let slider = layout.sound.slider(SoundVolumeId::Voice);
+        let increment = GuiPoint::new((slider.x + slider.w - 2) as f32, (slider.y + 2) as f32);
+        assert_eq!(
+            state.handle_pointer_down(increment),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))]
+        );
+
+        let maximum_scroll = sound_slider_max_scroll(slider);
+        let unity_position = 100 * maximum_scroll / 200;
+        let expected = ((unity_position + 1) * 200 / maximum_scroll) as u8;
+        assert_eq!(
+            state.advance_frame(),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                id: SoundVolumeId::Voice,
+                value: expected,
+            })],
+        );
+        assert!(expected > 100);
+        assert_eq!(state.sound().voice_volume, expected);
     }
 
     /// 640x480 leaves only 50px below the Volume group -- less than one titled

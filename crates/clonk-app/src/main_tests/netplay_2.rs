@@ -326,6 +326,104 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
 }
 
 #[test]
+fn voice_volume_action_scales_remote_playback_gain_above_unity() {
+    use clonk_frontend::startup_options_dlg::{OptionsDlgAction, SoundSheetAction, SoundVolumeId};
+
+    fn render_first_remote_sample(voice_volume: u8) -> i16 {
+        let mut app = new_classic_running_sandbox_app();
+        app.audio.test_mut().system = clonk_audio::AudioSystem::new_manual_with_resampling(
+            8,
+            clonk_audio::ResamplingMode::Linear,
+        );
+        let local_client = 7;
+        let local_player = app.local_owner;
+        app.engine
+            .test_player_mut(local_player)
+            .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+        let local_position = app
+            .engine
+            .player(local_player)
+            .and_then(|player| player.cursor())
+            .and_then(|cursor| {
+                app.engine
+                    .snapshot()
+                    .object(cursor)
+                    .map(|object| object.position)
+            })
+            .test_value();
+
+        let remote_client = 3;
+        let remote_player = 17;
+        app.engine
+            .register_player(PlayerConfig::new(remote_player, "Remote"))
+            .test_value();
+        app.engine
+            .test_player_mut(remote_player)
+            .set_at_client(clonk_engine::PlayerAtClient::new(remote_client));
+        let remote_cursor = app.engine.spawn_test_object(
+            SpawnConfig::new("CLNK")
+                .with_owner(remote_player)
+                .with_position(local_position),
+        );
+        app.engine
+            .test_player_mut(remote_player)
+            .set_cursor(Some(remote_cursor));
+        app.snapshot = app.engine.snapshot();
+        let viewport_inputs = collect_viewport_inputs(&app.snapshot).test_value();
+        app.graphics.render_frame(&app.snapshot, &viewport_inputs);
+
+        let (manager, _events, voice) =
+            NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.audio.test_mut().options.voice_enabled = true;
+        app.process_options_dialog_actions(vec![OptionsDlgAction::Sound(
+            SoundSheetAction::VolumeChanged {
+                id: SoundVolumeId::Voice,
+                value: voice_volume,
+            },
+        )])
+        .test_value();
+        assert_eq!(
+            app.audio.test_ref().options.voice_volume_percent(),
+            i32::from(voice_volume),
+        );
+
+        let now = Instant::now();
+        for sequence in 0..4 {
+            voice
+                .send_inbound(clonk_network::VoiceFrame {
+                    client_id: remote_client as u32,
+                    player_id: remote_player,
+                    stream_epoch: 1,
+                    sequence,
+                    payload: clonk_audio::encode_voice_frame(
+                        &[4_000; clonk_audio::VOICE_FRAME_SAMPLES],
+                    )
+                    .to_vec(),
+                })
+                .test_value();
+        }
+        app.update_voice_chat_at(now);
+
+        let mut output = [0_i16; 2];
+        app.audio.test_ref().system.mixer().mix_i16(&mut output);
+        output[0]
+    }
+
+    let unity_volume = render_first_remote_sample(100);
+    let boosted_volume = render_first_remote_sample(200);
+    assert!(
+        unity_volume > 0,
+        "the remote frame must reach live playback"
+    );
+    assert!(
+        (i32::from(boosted_volume) - i32::from(unity_volume) * 2).abs() <= 1,
+        "the app must pass 200% as exactly twice the queued gain of 100%: \
+         unity={unity_volume}, boosted={boosted_volume}",
+    );
+}
+
+#[test]
 fn voice_activation_opens_the_microphone_on_speech_and_leaves_the_key_to_the_game() {
     use std::cell::RefCell;
 

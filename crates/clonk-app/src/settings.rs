@@ -7,6 +7,8 @@ use clonk_platform::AppPaths;
 use std::io::ErrorKind;
 use winit::keyboard::KeyCode as VirtualKeyCode;
 
+pub(crate) const MAX_VOICE_VOLUME_PERCENT: i32 = 200;
+
 const DEFAULT_MAX_CHANNELS: usize = 1024;
 const MAX_CHANNELS_LIMIT: usize = 1024;
 // C++ resolution defaults (C4Config.cpp:440-441).
@@ -72,6 +74,8 @@ pub struct AudioOptions {
     pub music_volume: f32,
     /// Port-only, explicit microphone opt-in. LegacyClonk has no voice chat.
     pub voice_enabled: bool,
+    /// Remote-playback gain in `0.0..=2.0`; `1.0` is unity and the upper half
+    /// boosts quiet speech without changing the music or sound-effect ranges.
     pub voice_volume: f32,
     /// Opaque CPAL microphone endpoint ID. `None` follows the system default
     /// instead of pinning one host-provided endpoint.
@@ -229,7 +233,7 @@ impl AudioOptions {
 
         if let Some(raw) = config.get_in(Some("Voice"), "Volume") {
             if let Some(value) = parse_native_config_integer(raw) {
-                self.voice_volume = value.clamp(0, 100) as f32 / 100.0;
+                self.set_voice_volume_percent(value);
             }
         }
 
@@ -306,25 +310,29 @@ impl AudioOptions {
     }
 
     pub(crate) fn music_volume_percent(&self) -> i32 {
-        normalized_volume_percent(self.music_volume)
+        normalized_volume_percent(self.music_volume, 100)
     }
 
     pub(crate) fn sound_volume_percent(&self) -> i32 {
-        normalized_volume_percent(self.sound_volume)
+        normalized_volume_percent(self.sound_volume, 100)
     }
 
-    /// `Config.Voice.Volume`, in the `0..=100` domain the Audio sheet's bar and
-    /// the Advanced editor's row both use.
+    /// `Config.Voice.Volume`, in the `0..=200` domain the Audio sheet's bar and
+    /// the Advanced editor's row both use. `100` is unity gain.
     pub(crate) fn voice_volume_percent(&self) -> i32 {
-        normalized_volume_percent(self.voice_volume)
+        normalized_volume_percent(self.voice_volume, MAX_VOICE_VOLUME_PERCENT)
     }
 
     pub(crate) fn set_music_volume_percent(&mut self, value: i32) {
-        self.music_volume = normalized_volume(value);
+        self.music_volume = normalized_volume(value, 100);
     }
 
     pub(crate) fn set_sound_volume_percent(&mut self, value: i32) {
-        self.sound_volume = normalized_volume(value);
+        self.sound_volume = normalized_volume(value, 100);
+    }
+
+    pub(crate) fn set_voice_volume_percent(&mut self, value: i32) {
+        self.voice_volume = normalized_volume(value, MAX_VOICE_VOLUME_PERCENT);
     }
 
     /// Writes exactly the six values owned by the classic startup Sound
@@ -388,13 +396,13 @@ impl AudioOptions {
     }
 }
 
-fn normalized_volume(value: i32) -> f32 {
-    value.clamp(0, 100) as f32 / 100.0
+fn normalized_volume(value: i32, maximum_percent: i32) -> f32 {
+    value.clamp(0, maximum_percent) as f32 / 100.0
 }
 
-fn normalized_volume_percent(value: f32) -> i32 {
+fn normalized_volume_percent(value: f32, maximum_percent: i32) -> i32 {
     if value.is_finite() {
-        (value.clamp(0.0, 1.0) * 100.0).round() as i32
+        ((value * 100.0).round() as i32).clamp(0, maximum_percent)
     } else {
         0
     }
@@ -526,6 +534,20 @@ mod tests {
         options.sound_volume = f32::NAN;
         assert_eq!(options.music_volume_percent(), 56);
         assert_eq!(options.sound_volume_percent(), 0);
+    }
+
+    #[test]
+    fn voice_volume_percent_supports_boost_while_classic_volumes_stay_bounded() {
+        let options = AudioOptions {
+            music_volume: 1.75,
+            sound_volume: 1.75,
+            voice_volume: 1.75,
+            ..AudioOptions::default()
+        };
+
+        assert_eq!(options.music_volume_percent(), 100);
+        assert_eq!(options.sound_volume_percent(), 100);
+        assert_eq!(options.voice_volume_percent(), 175);
     }
 
     #[test]
@@ -715,6 +737,32 @@ mod tests {
         assert!(options.voice_enabled);
         assert_eq!(options.voice_volume, 0.37);
         assert_eq!(options.voice_push_to_talk, VirtualKeyCode::KeyT);
+    }
+
+    #[test]
+    fn voice_volume_config_round_trips_boost_and_clamps_above_200_percent() {
+        let mut boosted_config = Config::new();
+        boosted_config.set_in(Some("Voice"), "Volume", "175");
+        let mut boosted = AudioOptions::default();
+        boosted.apply_config(&boosted_config);
+
+        assert_eq!(boosted.voice_volume, 1.75);
+        assert_eq!(boosted.voice_volume_percent(), 175);
+        boosted.write_startup_voice_config(&mut boosted_config);
+        assert_eq!(boosted_config.get_in(Some("Voice"), "Volume"), Some("175"));
+
+        let mut excessive_config = Config::new();
+        excessive_config.set_in(Some("Voice"), "Volume", "250");
+        let mut excessive = AudioOptions::default();
+        excessive.apply_config(&excessive_config);
+
+        assert_eq!(excessive.voice_volume, 2.0);
+        assert_eq!(excessive.voice_volume_percent(), 200);
+        excessive.write_startup_voice_config(&mut excessive_config);
+        assert_eq!(
+            excessive_config.get_in(Some("Voice"), "Volume"),
+            Some("200"),
+        );
     }
 
     #[test]

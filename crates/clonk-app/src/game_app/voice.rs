@@ -179,6 +179,10 @@ impl GameApp {
         let expired = self.voice_chat.expire_playback(now);
         self.remove_voice_playback(expired);
         let viewports = self.graphics.active_viewport_projections();
+        // This is already a gain, not the classic `0..=100` UI value: `1.0`
+        // is unity and `2.0` is the voice-only boost ceiling. The mixer accepts
+        // that same contract, so applying another normalization here would
+        // make the upper half of the slider quieter instead of louder.
         let voice_volume = self
             .audio
             .as_ref()
