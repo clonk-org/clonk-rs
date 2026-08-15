@@ -57,6 +57,8 @@ NATIVE_TICK_SECONDS = 0.028
 PRESENTATION_WARMUP_SECONDS = 2
 APP_TIMEOUT_GRACE_SECONDS = 30
 BENCHMARK_LOG_FILTER = "info,wgpu_core::device=warn"
+TIMESTAMP_SAMPLE_POLICY_STRICT = "strict"
+TIMESTAMP_SAMPLE_POLICY_TOLERANT_RAW = "tolerant_raw"
 
 
 class BenchmarkFailure(RuntimeError):
@@ -349,7 +351,14 @@ def _exact_bool(value, label):
     return value
 
 
-def validate_retained_gpu_profile(profile):
+def validate_retained_gpu_profile(
+    profile, *, timestamp_sample_policy=TIMESTAMP_SAMPLE_POLICY_STRICT
+):
+    if timestamp_sample_policy not in {
+        TIMESTAMP_SAMPLE_POLICY_STRICT,
+        TIMESTAMP_SAMPLE_POLICY_TOLERANT_RAW,
+    }:
+        raise BenchmarkFailure("unknown retained GPU timestamp sample policy")
     schema_version = profile.get("schema_version")
     if type(schema_version) is not int or schema_version not in (1, 2):
         raise BenchmarkFailure("retained GPU profile schema_version must be 1 or 2")
@@ -535,19 +544,33 @@ def validate_retained_gpu_profile(profile):
             "retained GPU timestamp enabled status disagrees with request/support"
         )
     timestamp_bit = 1 << 7
-    if supported != bool(adapter_features[0] & timestamp_bit):
+    if supported != bool(adapter_features[1] & timestamp_bit):
         raise BenchmarkFailure(
             "retained GPU timestamp support disagrees with adapter features"
         )
-    expected_device_features = [timestamp_bit, 0] if enabled else [0, 0]
+    expected_device_features = [0, timestamp_bit] if enabled else [0, 0]
     if device_features != expected_device_features:
         raise BenchmarkFailure(
             "retained GPU device features do not match timestamp-query status"
         )
-    for key in ("dropped_frames", "readback_errors", "device_discontinuities"):
-        if _exact_nonnegative_integer(
+    timestamp_telemetry = {
+        key: _exact_nonnegative_integer(
             timestamp_queries.get(key), f"retained GPU timestamp_queries.{key}"
-        ) != 0:
+        )
+        for key in ("dropped_frames", "readback_errors", "device_discontinuities")
+    }
+    required_zero_telemetry = ("dropped_frames", "device_discontinuities")
+    if (
+        timestamp_sample_policy == TIMESTAMP_SAMPLE_POLICY_STRICT
+        or not enabled
+    ):
+        required_zero_telemetry = (
+            "dropped_frames",
+            "readback_errors",
+            "device_discontinuities",
+        )
+    for key in required_zero_telemetry:
+        if timestamp_telemetry[key] != 0:
             raise BenchmarkFailure(f"retained GPU timestamp telemetry {key} is nonzero")
 
     frames = profile.get("frames")
@@ -815,6 +838,8 @@ def validate_retained_gpu_profile(profile):
         "monitor_gamma",
         "presentation",
     }
+    valid_sample_counts = {pass_name: 0 for pass_name in allowed_passes}
+    invalid_frame_count = 0
     for gpu_value in gpu_frames:
         gpu = _require_mapping(gpu_value, "retained GPU timestamp frame")
         frame_id = _exact_nonnegative_integer(
@@ -848,6 +873,7 @@ def validate_retained_gpu_profile(profile):
         observed_passes = []
         observed_pass_names = set()
         previous_end_tick = None
+        frame_has_invalid_sample = False
         for pass_value in passes:
             sample = _require_mapping(
                 pass_value, f"retained GPU timestamp frame {frame_id} pass"
@@ -878,12 +904,32 @@ def validate_retained_gpu_profile(profile):
                     "retained GPU timestamp sample has an invalid validity value"
                 )
             if validity != "valid":
-                raise BenchmarkFailure(
-                    f"retained GPU timestamp sample is not valid: {validity}"
-                )
+                if timestamp_sample_policy == TIMESTAMP_SAMPLE_POLICY_STRICT:
+                    raise BenchmarkFailure(
+                        f"retained GPU timestamp sample is not valid: {validity}"
+                    )
+                if sample.get("duration_ns") is not None:
+                    raise BenchmarkFailure(
+                        "invalid retained GPU timestamp sample must have null duration"
+                    )
+                if validity == "counter_rollover" and end >= begin:
+                    raise BenchmarkFailure(
+                        "retained GPU counter_rollover ticks do not roll over"
+                    )
+                if validity != "counter_rollover" and end < begin:
+                    raise BenchmarkFailure(
+                        "retained GPU timestamp sample with reversed ticks must be "
+                        "counter_rollover"
+                    )
+                frame_has_invalid_sample = True
+                continue
             if end < begin:
                 raise BenchmarkFailure("retained GPU timestamp ends before it begins")
-            if previous_end_tick is not None and begin < previous_end_tick:
+            if (
+                timestamp_sample_policy == TIMESTAMP_SAMPLE_POLICY_STRICT
+                and previous_end_tick is not None
+                and begin < previous_end_tick
+            ):
                 raise BenchmarkFailure(
                     "retained GPU timestamp intervals are not ordered in "
                     f"frame {frame_id}"
@@ -901,6 +947,8 @@ def validate_retained_gpu_profile(profile):
                 raise BenchmarkFailure(
                     "GPU timestamp duration does not match raw ticks"
                 )
+            valid_sample_counts[pass_name] += 1
+        invalid_frame_count += int(frame_has_invalid_sample)
         gpu_by_id[frame_id] = observed_passes
     if frame_ids != gpu_frame_ids:
         raise BenchmarkFailure(
@@ -910,6 +958,7 @@ def validate_retained_gpu_profile(profile):
         raise BenchmarkFailure(
             "retained GPU timestamp renderer generation changed without telemetry"
         )
+    required_passes = set()
     for frame in frames:
         frame_id = frame["timestamp_frame_id"]
         renderer = _require_mapping(
@@ -932,10 +981,31 @@ def validate_retained_gpu_profile(profile):
             raise BenchmarkFailure(
                 f"retained GPU timestamp passes do not match frame {frame_id} draws"
             )
+        required_passes.update(expected_passes)
+    if timestamp_sample_policy == TIMESTAMP_SAMPLE_POLICY_TOLERANT_RAW:
+        if timestamp_telemetry["readback_errors"] < invalid_frame_count:
+            raise BenchmarkFailure(
+                "retained GPU timestamp readback_errors are fewer than frames "
+                "containing invalid dispositions"
+            )
+        missing_valid_passes = sorted(
+            pass_name
+            for pass_name in required_passes
+            if valid_sample_counts[pass_name] == 0
+        )
+        if missing_valid_passes:
+            raise BenchmarkFailure(
+                "retained GPU timestamp passes have no valid samples: "
+                + ", ".join(missing_valid_passes)
+            )
 
 
 def parse_retained_gpu_profile(
-    lines, *, required, minimum_schema_version=None
+    lines,
+    *,
+    required,
+    minimum_schema_version=None,
+    timestamp_sample_policy=TIMESTAMP_SAMPLE_POLICY_STRICT,
 ):
     marker = f"{RETAINED_GPU_PROFILE_PREFIX} "
     matches = [line.strip()[len(marker) :] for line in lines if line.startswith(marker)]
@@ -958,7 +1028,9 @@ def parse_retained_gpu_profile(
         raise BenchmarkFailure(f"invalid retained GPU profile JSON: {error}") from error
     if not isinstance(profile, dict):
         raise BenchmarkFailure("retained GPU profile must be a JSON object")
-    validate_retained_gpu_profile(profile)
+    validate_retained_gpu_profile(
+        profile, timestamp_sample_policy=timestamp_sample_policy
+    )
     if (
         minimum_schema_version is not None
         and profile["schema_version"] < minimum_schema_version
@@ -1325,6 +1397,7 @@ def collect_source_provenance(root):
             ".",
             ":(exclude)content",
             ":(exclude)target",
+            ":(top,exclude).clonk-update.lock",
         ),
     )
     cargo_lock = root / "Cargo.lock"
