@@ -217,15 +217,10 @@ fn generate_update(
 ) -> bool {
     *group = None;
     match make_update::generate_update(source, target, path, title, false) {
-        Ok(true) => {
+        Ok(_) => {
             println!("Update package created.");
             reopen(group, path);
             true
-        }
-        Ok(false) => {
-            println!("Update package not created.");
-            let _ = std::fs::remove_file(path);
-            false
         }
         Err(error) => {
             eprintln!("Error: {error}");

@@ -250,3 +250,43 @@ fn c4group_runs_a_command_after_generating_an_update() {
         String::from_utf8_lossy(&applied.stderr)
     );
 }
+
+// `C4UpdatePackage::MakeUpdate` returns success even when `MkUp` finds no
+// changed entries: the metadata/manifest package is still written and the
+// command loop reopens it before continuing (`C4Update.cpp:651-744`).
+#[test]
+fn c4group_keeps_an_empty_update_for_following_commands() {
+    let directory = tempfile::tempdir().expect("temp dir");
+
+    let mut version = MutableGroup::new("Version.c4g");
+    version
+        .add_file("Alpha.txt", b"alpha".to_vec())
+        .expect("add version entry");
+    let version_bytes = version.pack().expect("pack version");
+    let source = directory.path().join("Source.c4g");
+    let target = directory.path().join("Target.c4g");
+    std::fs::write(&source, &version_bytes).expect("write source");
+    std::fs::write(&target, &version_bytes).expect("write target");
+
+    let package = directory.path().join("Empty.c4u");
+    let generated = c4group(&[
+        package.to_str().expect("utf-8 package"),
+        "-g",
+        source.to_str().expect("utf-8 source"),
+        target.to_str().expect("utf-8 target"),
+        "No changes",
+        "-l",
+    ]);
+    assert!(
+        generated.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    assert!(package.is_file(), "the empty update package was removed");
+    let listed = String::from_utf8_lossy(&generated.stdout);
+    assert!(listed.contains("AutoUpdate.txt"), "listing was {listed:?}");
+    assert!(
+        listed.contains("GRPUP_Entries.txt"),
+        "listing was {listed:?}"
+    );
+}
