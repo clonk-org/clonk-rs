@@ -3,6 +3,38 @@
 // Mostly: players, landscape, effects.
 
     #[test]
+    fn set_landscape_pixel_batches_only_adjacent_calls() {
+        // FnSetLandscapePixel is void and records a caller-relative
+        // presentation write (C4Script.cpp:5082-5088). The queue may fold
+        // adjacent writes, but SetMatAdjust is a real ordered landscape call
+        // (C4Script.cpp:4626-4630) and must split the runs.
+        let (result, outcome) = with_object_host_context(|| {
+            set_landscape_pixel(&[Value::Int(1), Value::Int(2), Value::Int(3)])?;
+            set_landscape_pixel(&[Value::Int(2), Value::Int(2), Value::Int(4)])?;
+            set_mat_adjust(&[Value::Int(5)])?;
+            set_landscape_pixel(&[Value::Int(3), Value::Int(2), Value::Int(6)])?;
+            set_landscape_pixel(&[Value::Int(4), Value::Int(2), Value::Int(7)])?;
+            Ok::<_, RuntimeError>(())
+        });
+
+        assert_eq!(result.expect("SetLandscapePixel calls succeed"), ());
+        assert!(matches!(
+            outcome.landscape.as_slice(),
+            [
+                LandscapeOperation::SetLandscapePixels { writes: first },
+                LandscapeOperation::MatAdjust { modulation: 5 },
+                LandscapeOperation::SetLandscapePixels { writes: second },
+            ] if first == &[
+                (Vector2::new(1, 2), 3),
+                (Vector2::new(2, 2), 4),
+            ] && second == &[
+                (Vector2::new(3, 2), 6),
+                (Vector2::new(4, 2), 7),
+            ]
+        ));
+    }
+
+    #[test]
     fn draw_material_quad_resolves_and_queues_global_vertices() {
         // FnDrawMaterialQuad passes its material string, four GLOBAL points,
         // and fSub straight to C4Landscape::DrawQuad (C4Script.cpp:5111-5115).
@@ -2753,4 +2785,3 @@ func ProbeBadIndex(definition) {
         });
         result.test_value();
     }
-

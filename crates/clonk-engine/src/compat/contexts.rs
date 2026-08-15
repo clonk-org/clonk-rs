@@ -4147,6 +4147,40 @@ impl EffectHostContext {
         self.pending_landscape_ops.push(operation);
     }
 
+    /// Queue adjacent SetLandscapePixel calls as one ordered operation. The
+    /// solid-mask stream is checked as well: a mask Remove/Put between two
+    /// pixel calls is a real C++ ordering boundary and must prevent merging.
+    pub(crate) fn register_set_landscape_pixel(&mut self, position: Vector2, color: u32) {
+        let can_merge = self
+            .pending_landscape_ops
+            .last()
+            .is_some_and(LandscapeOperation::is_set_landscape_pixel)
+            && self.solid_mask_operations.last().is_some_and(|operation| {
+                matches!(
+                    operation,
+                    crate::HostSolidMaskOperation::Landscape { operation }
+                        if operation.is_set_landscape_pixel()
+                )
+            });
+        if can_merge {
+            self.pending_landscape_ops
+                .last_mut()
+                .expect("checked pending landscape operation")
+                .append_set_landscape_pixel(position, color);
+            if let Some(crate::HostSolidMaskOperation::Landscape { operation }) =
+                self.solid_mask_operations.last_mut()
+            {
+                operation.append_set_landscape_pixel(position, color);
+            }
+            return;
+        }
+
+        self.register_landscape_operation(LandscapeOperation::SetLandscapePixel {
+            position,
+            color,
+        });
+    }
+
     /// DrawMatChunks must use this callback's LIVE mask vector: an earlier
     /// SetPosition/DoCon may already have removed or re-put a mask without
     /// changing the entry snapshot stored on HostWorldContext.

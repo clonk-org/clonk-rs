@@ -1496,6 +1496,80 @@ impl PixelGrid {
         true
     }
 
+    /// Apply adjacent C4Surface::SetPixDw calls in their original order while
+    /// opening the shared presentation storage and dirty lineage once. The
+    /// per-pixel revision/token and dirty-rectangle updates intentionally stay
+    /// inside the loop: duplicate coordinates, transparent canonicalization,
+    /// and render ancestry must remain identical to repeated
+    /// [`Self::set_surface32_pixel`] calls.
+    pub(crate) fn set_surface32_pixels(
+        &mut self,
+        writes: impl IntoIterator<Item = (i32, i32, u32)>,
+    ) {
+        let mut surface32_pixels = std::mem::take(&mut self.surface32_pixels);
+        let mut changed = false;
+        let mut storage_was_shared = false;
+
+        for (x, y, color) in writes {
+            let Some(slot) = self.slot(x, y) else {
+                continue;
+            };
+            if self
+                .pending_surface32_relights
+                .iter()
+                .any(|rect| rect.contains(x, y))
+            {
+                // C++ performs this write immediately, but Draw::DoRelights
+                // rebuilds the queued region before it can be presented.
+                continue;
+            }
+            // C4Surface::SetPixDw canonicalizes fully transparent pixels so
+            // stale RGB data cannot leak through later filtering.
+            let color = if color >> 24 == 0xff {
+                0xff00_0000
+            } else {
+                color
+            };
+            let old = surface32_pixels.get(&slot).copied();
+            if old == Some(color) {
+                continue;
+            }
+
+            if !changed {
+                // This is the same decision as begin_surface32_change(), but
+                // the Arc is held in a local while the batch runs so later
+                // pixels never repeat its COW bookkeeping.
+                storage_was_shared = Arc::strong_count(&surface32_pixels) > 1;
+                if Arc::strong_count(&self.surface32_render_lineage.0) > 1 {
+                    self.surface32_render_lineage = RuntimeRenderLineage::default();
+                    storage_was_shared = true;
+                }
+                changed = true;
+            }
+            Arc::make_mut(&mut surface32_pixels).insert(slot, color);
+            let base_revision = self.surface32_revision;
+            let base_token = self.surface32_render_token;
+            self.surface32_revision = self.surface32_revision.wrapping_add(1);
+            self.surface32_render_token = Self::advance_surface32_render_token(
+                base_token,
+                self.surface32_revision,
+                x,
+                y,
+                old,
+                Some(color),
+            );
+            self.record_surface32_change(
+                base_revision,
+                base_token,
+                PixelGridDirtyRect::single(x, y),
+                storage_was_shared,
+            );
+            storage_was_shared = false;
+        }
+
+        self.surface32_pixels = surface32_pixels;
+    }
+
     /// A later material relight rebuilds Surface32 from Surface8 in this
     /// expanded region, replacing any cosmetic SetLandscapePixel writes.
     fn clear_surface32_rect(&mut self, x: i32, y: i32, width: i32, height: i32) {
@@ -4714,6 +4788,18 @@ impl Landscape {
         self.pixels
             .as_mut()
             .is_some_and(|grid| grid.set_surface32_pixel(x, y, color))
+    }
+
+    /// Apply a contiguous stream of presentation-only SetPixDw writes while
+    /// retaining each write's ordered Surface32 state transition.
+    pub(crate) fn set_surface32_pixels(&mut self, writes: &[(Vector2, u32)]) {
+        if let Some(grid) = self.pixels.as_mut() {
+            grid.set_surface32_pixels(
+                writes
+                    .iter()
+                    .map(|(position, color)| (position.x, position.y, *color)),
+            );
+        }
     }
 
     pub(crate) fn finish_surface32_draw(&mut self) {
@@ -9508,6 +9594,64 @@ func MoveMask(int x, int y)
             revision,
             "failed resolution never enters PrepareChange"
         );
+    }
+
+    #[test]
+    fn batched_surface32_writes_match_ordered_single_pixel_writes() {
+        // C4Surface::SetPixDw canonicalizes transparent writes and advances
+        // the presentation lineage per call (C4Surface.cpp:726-728;
+        // C4Landscape.cpp:2497-2501). A volcano's adjacent SetLandscapePixel
+        // calls may share the storage transaction, but must retain that exact
+        // ordered result.
+        let base = raster_grid_landscape(8, 4, vec![0; 32]);
+        let writes = [
+            (Vector2::new(1, 1), 0x0011_2233),
+            (Vector2::new(2, 1), 0xff44_5566),
+            (Vector2::new(1, 1), 0x0077_8899),
+            (Vector2::new(1, 1), 0xffaa_bbcc),
+            (Vector2::new(7, 3), 0x0012_3456),
+            (Vector2::new(6, 3), 0x0066_7788),
+        ];
+        let mut sequential = base.clone();
+        let mut batched = base;
+        let sequential_anchor = sequential
+            .pixel_grid()
+            .expect("sequential grid")
+            .render_anchor();
+        let batched_anchor = batched.pixel_grid().expect("batched grid").render_anchor();
+
+        for (position, color) in writes {
+            assert!(sequential.set_surface32_pixel(position.x, position.y, color));
+        }
+        batched.set_surface32_pixels(&writes);
+
+        assert_eq!(sequential, batched);
+        assert_eq!(
+            sequential
+                .pixel_grid()
+                .expect("sequential grid")
+                .render_dirty_rects_since_anchor(&sequential_anchor),
+            batched
+                .pixel_grid()
+                .expect("batched grid")
+                .render_dirty_rects_since_anchor(&batched_anchor),
+        );
+
+        // C4Landscape::SetPix queues a relight around the material write
+        // (C4Landscape.cpp:2497-2501); SetLandscapePixel still returns
+        // successfully, but its cosmetic cell is discarded until that queue
+        // is finished. The batch must take the same path.
+        sequential.grid_set_byte(2, 0, 1);
+        batched.grid_set_byte(2, 0, 1);
+        let relit_writes = [
+            (Vector2::new(2, 1), 0x0044_5566),
+            (Vector2::new(3, 2), 0x0077_8899),
+        ];
+        for (position, color) in relit_writes {
+            assert!(sequential.set_surface32_pixel(position.x, position.y, color));
+        }
+        batched.set_surface32_pixels(&relit_writes);
+        assert_eq!(sequential, batched);
     }
 
     #[test]

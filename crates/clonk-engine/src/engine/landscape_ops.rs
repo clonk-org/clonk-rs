@@ -240,6 +240,14 @@ impl Engine {
                         let _ = landscape.set_surface32_pixel(position.x, position.y, color);
                     }
                 }
+                LandscapeOperation::SetLandscapePixels { writes } => {
+                    // Adjacent FnSetLandscapePixel calls share one storage
+                    // transaction, while the per-write revision/token and
+                    // dirty-record sequence remains ordered in the landscape.
+                    if let Some(landscape) = &mut self.landscape {
+                        landscape.set_surface32_pixels(&writes);
+                    }
+                }
                 LandscapeOperation::SkyParallax {
                     mode,
                     par_x,
