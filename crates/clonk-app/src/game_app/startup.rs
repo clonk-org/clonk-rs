@@ -865,8 +865,10 @@ impl GameApp {
         Ok(())
     }
 
-    /// `Config.Voice.Volume` from the port-only Audio-sheet bar. The positional
-    /// mix multiplies this in every frame, so it is live immediately.
+    /// `Config.Voice.Volume` from the port-only Audio-sheet bar. Voice alone
+    /// has a `0..=200` range: `100` is unity and the upper half lets quiet
+    /// speech be boosted. The positional mix multiplies this in every frame,
+    /// so it is live immediately.
     pub(crate) fn set_startup_voice_volume(&mut self, value: i32) -> Result<(), EngineError> {
         let audio = self.audio.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
@@ -875,7 +877,7 @@ impl GameApp {
                 },
             ))
         })?;
-        audio.options.voice_volume = value.clamp(0, 100) as f32 / 100.0;
+        audio.options.set_voice_volume_percent(value);
         Ok(())
     }
 

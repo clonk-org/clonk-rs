@@ -3091,9 +3091,11 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     let options_layout =
         clonk_frontend::startup_options_dlg::options_dlg_layout(1280, 720, gui, book);
     let checkbox = options_layout.timestamps_check;
-    // The port-only voice-activation checkbox, clicked further down through the
-    // same real pointer path (clonk-org/clonk-rs#422).
-    let activation_check = options_layout.sound.voice.test_value().activation_check;
+    // The port-only voice controls, changed further down through the same real
+    // pointer path (clonk-org/clonk-rs#422).
+    let voice_group = options_layout.sound.voice.as_ref().test_value();
+    let activation_check = voice_group.activation_check;
+    let voice_volume_slider = voice_group.volume_slider;
     let point = PhysicalPosition::new(
         f64::from(checkbox.x + checkbox.h / 2),
         f64::from(checkbox.y + checkbox.h / 2),
@@ -3158,6 +3160,21 @@ fn options_dialog_saves_log_timestamps_when_closed() {
         .test_value()
         .restore_sheet(clonk_frontend::startup_options_dlg::OptionsSheet::Sound);
     app.test_cursor(PhysicalPosition::new(
+        f64::from(voice_volume_slider.x + voice_volume_slider.w - 24),
+        f64::from(voice_volume_slider.y + voice_volume_slider.h / 2),
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    assert_eq!(
+        app.audio
+            .as_ref()
+            .expect("test audio")
+            .options
+            .voice_volume_percent(),
+        200,
+        "the Voice slider's right endpoint is the port-only boost ceiling",
+    );
+    app.test_cursor(PhysicalPosition::new(
         f64::from(activation_check.x + activation_check.h / 2),
         f64::from(activation_check.y + activation_check.h / 2),
     ));
@@ -3201,7 +3218,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     // persisted as the canonical token `VoiceActivationMode::parse` accepts --
     // a localized label here would silently read back as push-to-talk.
     assert_eq!(config.get_in(Some("Voice"), "Enabled"), Some("false"));
-    assert_eq!(config.get_in(Some("Voice"), "Volume"), Some("100"));
+    assert_eq!(config.get_in(Some("Voice"), "Volume"), Some("200"));
     assert_eq!(
         config.get_in(Some("Voice"), "ActivationMode"),
         Some(crate::settings::VoiceActivationMode::VOICE_ACTIVATED)

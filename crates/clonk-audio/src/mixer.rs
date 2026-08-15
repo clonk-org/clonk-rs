@@ -48,6 +48,9 @@ fn sdl_mixer_pan_steps(pan: f32) -> (i32, i32) {
 /// below full scale leaves the game's own audio room in the output range even
 /// while several people talk at once.
 const VOICE_BUS_CEILING: f32 = 0.707_945_8;
+/// Per-stream volume may explicitly boost voice by +6.02 dB while preserving
+/// the established `1.0` unity-gain contract.
+const MAX_VOICE_STREAM_VOLUME: f32 = 2.0;
 /// How long the limiter takes to hand most of its gain back once the peak
 /// drops. Short enough to follow the gaps between syllables, long enough that
 /// a speaker joining or leaving does not step the others' level audibly.
@@ -1737,7 +1740,7 @@ impl VoiceStreamPlayback {
     }
 
     fn set_mix(&mut self, volume: f32, pan: f32) {
-        self.volume = volume.clamp(0.0, 1.0);
+        self.volume = volume.clamp(0.0, MAX_VOICE_STREAM_VOLUME);
         self.pan = pan.clamp(-1.0, 1.0);
         self.recalculate_gains();
     }
@@ -2347,6 +2350,21 @@ mod tests {
             (0.27..0.28).contains(&boundary_sample),
             "boundary interpolation was {boundary_sample}"
         );
+    }
+
+    #[test]
+    fn voice_volume_control_reaches_six_decibel_boost_above_unity() {
+        let render = |volume| {
+            let mixer = AudioMixer::new(VOICE_SAMPLE_RATE, 0);
+            mixer.queue_voice_stream_with_mix(76, [8_192; VOICE_FRAME_SAMPLES], volume, 0.0);
+            let mut output = [0.0_f32; 2];
+            mixer.mix_f32(&mut output);
+            output[0]
+        };
+
+        let source_level = 8_192.0 / 32_768.0;
+        assert!((render(1.0) - source_level).abs() < 0.000_1);
+        assert!((render(2.0) - source_level * 2.0).abs() < 0.000_1);
     }
 
     #[test]

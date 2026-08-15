@@ -15,7 +15,7 @@ use clonk_frontend::startup_options_advanced::{
 };
 
 use crate::input::advanced_config_default_raw_keyboard_keys;
-use crate::settings::VoiceActivationMode;
+use crate::settings::{VoiceActivationMode, MAX_VOICE_VOLUME_PERCENT};
 
 const I32_MIN: i128 = i32::MIN as i128;
 const I32_MAX: i128 = i32::MAX as i128;
@@ -545,7 +545,14 @@ fn voice(config: &Config, input_devices: &[VoiceInputDevice]) -> AdvancedConfigS
             // this editor is the only surface for InputDevice and the remaining
             // Voice keys.
             bool_row(config, section, "Enabled", false),
-            int_row(config, section, "Volume", 100, 0, 100),
+            int_row(
+                config,
+                section,
+                "Volume",
+                100,
+                0,
+                i128::from(MAX_VOICE_VOLUME_PERCENT),
+            ),
             voice_input_device_row(config, input_devices),
             i32_row(config, section, "PushToTalkKey", default_push_to_talk),
             enum_row(
@@ -880,7 +887,7 @@ mod tests {
             Some(AdvancedConfigValue::Integer {
                 value: 100,
                 min: 0,
-                max: 100,
+                max: 200,
             })
         ));
         assert!(matches!(
