@@ -290,3 +290,63 @@ fn c4group_keeps_an_empty_update_for_following_commands() {
         "listing was {listed:?}"
     );
 }
+
+// `C4UpdatePackage::MakeUpdate` appends another source version when the
+// output package already contains a compatible update (`C4Update.cpp:675-725`).
+#[test]
+fn c4group_preserves_previous_sources_when_generating_a_second_update() {
+    let directory = tempfile::tempdir().expect("temp dir");
+
+    let mut source_one_group = MutableGroup::new("SourceOne.c4g");
+    source_one_group
+        .add_file("Alpha.txt", b"one".to_vec())
+        .expect("add first source entry");
+    let source_one = directory.path().join("SourceOne.c4g");
+    std::fs::write(
+        &source_one,
+        source_one_group.pack().expect("pack first source"),
+    )
+    .expect("write first source");
+
+    let mut source_two_group = MutableGroup::new("SourceTwo.c4g");
+    source_two_group
+        .add_file("Alpha.txt", b"two".to_vec())
+        .expect("add second source entry");
+    let source_two = directory.path().join("SourceTwo.c4g");
+    std::fs::write(
+        &source_two,
+        source_two_group.pack().expect("pack second source"),
+    )
+    .expect("write second source");
+
+    let mut target_group = MutableGroup::new("Target.c4g");
+    target_group
+        .add_file("Alpha.txt", b"target".to_vec())
+        .expect("add target entry");
+    let target = directory.path().join("Target.c4g");
+    std::fs::write(&target, target_group.pack().expect("pack target")).expect("write target");
+
+    let package = directory.path().join("Multi.c4u");
+    let core = directory.path().join("AutoUpdate.txt");
+    let result = c4group(&[
+        package.to_str().expect("utf-8 package"),
+        "-g",
+        source_one.to_str().expect("utf-8 first source"),
+        target.to_str().expect("utf-8 target"),
+        "Title",
+        "-g",
+        source_two.to_str().expect("utf-8 second source"),
+        target.to_str().expect("utf-8 target"),
+        "Title",
+        "-et",
+        "AutoUpdate.txt",
+        core.to_str().expect("utf-8 core"),
+    ]);
+    assert!(
+        result.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let core = String::from_utf8(std::fs::read(&core).expect("read core")).expect("utf-8 core");
+    assert!(core.contains("TargetCount=2"), "core was {core:?}");
+}

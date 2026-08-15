@@ -184,7 +184,28 @@ pub(crate) fn generate_update(
         false,
     );
 
-    let core = UpdateCore {
+    let source_checksum = group_file_crc(&source_bytes);
+    let target_checksum = group_file_crc(&target_bytes);
+    let source_contents_crc = contents_crc(&source)?;
+    let target_contents_crc = contents_crc(&target)?;
+
+    // `C4UpdatePackage::MakeUpdate` appends another source version when the
+    // output already contains a compatible update (`C4Update.cpp:675-725`).
+    // Keep the existing package entries as the base so changed payloads from
+    // earlier source versions remain available to the resulting package.
+    let existing = if Path::new(output_path).exists() {
+        open(output_path).ok().map(|group| {
+            let core = group
+                .read_entry_bytes(UPDATE_CORE_ENTRY)
+                .ok()
+                .map(|bytes| UpdateCore::from_ini(&String::from_utf8_lossy(&bytes)));
+            (group, core)
+        })
+    } else {
+        None
+    };
+
+    let mut core = UpdateCore {
         // `FormatWithNull(Name, "{} Update", GetFilename(strFile1))` when no
         // title is given (`C4Update.cpp`).
         name: if title.is_empty() {
@@ -195,19 +216,57 @@ pub(crate) fn generate_update(
         dest_path: source_path.to_owned(),
         group_update: true,
         allow_missing_target,
-        source_checksums: vec![group_file_crc(&source_bytes)],
-        target_checksum: group_file_crc(&target_bytes),
-        // Without these, `Execute`'s verdict can only succeed by reproducing
-        // the target byte for byte; with them an equivalent repack passes.
-        source_contents_crcs: vec![contents_crc(&source)?],
-        target_contents_crc: contents_crc(&target)?,
+        source_checksums: vec![source_checksum],
+        target_checksum,
+        source_contents_crcs: vec![source_contents_crc],
+        target_contents_crc,
     };
 
-    let mut update = clonk_resources::MutableGroup::new(file_name(output_path));
+    let mut update = if let Some((existing, Some(previous))) = existing {
+        let target_matches = if previous.target_contents_crc != 0 {
+            previous.target_contents_crc == target_contents_crc
+        } else {
+            previous.target_checksum == target_checksum
+        };
+        if !target_matches {
+            return Err(format!(
+                "{output_path}: target does not match the existing update package"
+            ));
+        }
+        if previous.source_checksums.contains(&source_checksum)
+            || previous
+                .source_contents_crcs
+                .iter()
+                .any(|checksum| *checksum != 0 && *checksum == source_contents_crc)
+        {
+            return Err(format!(
+                "{output_path}: update package already supports this source version"
+            ));
+        }
+        if previous.source_checksums.len() >= crate::update_core::MAX_UPDATE_GROUP_COUNT {
+            return Err(format!(
+                "{output_path}: update package has too many source versions"
+            ));
+        }
+        let previous_source_count = previous.source_checksums.len();
+        core.source_checksums = previous.source_checksums;
+        core.source_checksums.push(source_checksum);
+        core.source_contents_crcs = previous.source_contents_crcs;
+        core.source_contents_crcs.resize(previous_source_count, 0);
+        core.source_contents_crcs.push(source_contents_crc);
+        let filename = file_name(output_path);
+        crate::edit::to_mutable(&existing, &filename).map_err(|error| error.to_string())?
+    } else if let Some((existing, None)) = existing {
+        let filename = file_name(output_path);
+        crate::edit::to_mutable(&existing, &filename).map_err(|error| error.to_string())?
+    } else {
+        clonk_resources::MutableGroup::new(file_name(output_path))
+    };
     let put = |update: &mut clonk_resources::MutableGroup,
                name: &str,
                bytes: Vec<u8>|
      -> Result<(), String> {
+        update.remove_entry(name);
         update
             .add_file_bytes(name, bytes)
             .map_err(|error| format!("{name}: {error}"))
