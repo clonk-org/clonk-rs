@@ -182,3 +182,71 @@ fn c4group_cli_round_trips_native_command_matrix() {
         .expect("utf-8 path")]);
     assert!(!missing.status.success());
 }
+
+// Pinned oracle `src/c4group_ng.cpp:139-145,349-388` — the command loop keeps
+// walking after `-g`/`-y`, reopening the generated group before the next command.
+#[test]
+fn c4group_runs_a_command_after_generating_an_update() {
+    let directory = tempfile::tempdir().expect("temp dir");
+
+    let mut source_group = MutableGroup::new("Source.c4g");
+    source_group
+        .add_file("Alpha.txt", b"alpha".to_vec())
+        .expect("add source entry");
+    let source = directory.path().join("Source.c4g");
+    std::fs::write(&source, source_group.pack().expect("pack source")).expect("write source");
+
+    let mut target_group = MutableGroup::new("Target.c4g");
+    target_group
+        .add_file("Alpha.txt", b"alpha".to_vec())
+        .expect("add unchanged target entry");
+    target_group
+        .add_file("Added.txt", b"added".to_vec())
+        .expect("add changed target entry");
+    let target = directory.path().join("Target.c4g");
+    std::fs::write(&target, target_group.pack().expect("pack target")).expect("write target");
+
+    let package = directory.path().join("Update.c4u");
+    let generated = c4group(&[
+        package.to_str().expect("utf-8 package"),
+        "-g",
+        source.to_str().expect("utf-8 source"),
+        target.to_str().expect("utf-8 target"),
+        "Title",
+        "-l",
+    ]);
+    assert!(
+        generated.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    assert!(package.is_file(), "the update package was not created");
+    let listed = String::from_utf8_lossy(&generated.stdout);
+    assert!(listed.contains("AutoUpdate.txt"), "listing was {listed:?}");
+    assert!(
+        listed.contains("GRPUP_Entries.txt"),
+        "listing was {listed:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&generated.stderr).contains("not implemented"),
+        "stderr: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let applied = c4group(&[package.to_str().expect("utf-8 package"), "-y", "-l"]);
+    assert!(
+        applied.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let applied_listing = String::from_utf8_lossy(&applied.stdout);
+    assert!(
+        applied_listing.contains("AutoUpdate.txt"),
+        "listing was {applied_listing:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&applied.stderr).contains("not implemented"),
+        "stderr: {}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+}
