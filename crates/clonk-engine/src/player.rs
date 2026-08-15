@@ -1801,7 +1801,10 @@ impl Player {
     /// C4Player::Eliminate's one-way state transition and 60-frame retire
     /// delay (C4Player.cpp:2015-2021; C4Constants.h:36).
     pub(crate) fn eliminate(&mut self) -> bool {
-        if self.status == PlayerStatus::Eliminated {
+        // C4Player::Surrender sets both Surrendered and Eliminated, so the
+        // native Eliminated bool—not just the folded status enum—guards this
+        // one-way transition (C4Player.cpp:971-979,2015-2017).
+        if self.eliminated_value != 0 {
             return false;
         }
         self.status_value = Some(

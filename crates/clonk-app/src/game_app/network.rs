@@ -1213,6 +1213,23 @@ impl GameApp {
         }
     }
 
+    /// Submit the host-authored `CID_ClientUpdate(CUT_Activate, false)`
+    /// requests emitted by `C4Player::Eliminate` after the engine has applied
+    /// a control or simulation frame. The update remains synchronized
+    /// (`src/C4Player.cpp:2015-2037`).
+    pub(crate) fn flush_pending_client_updates(&mut self) {
+        let updates = self.engine.take_pending_client_updates();
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        for update in updates {
+            let client_id = update.client_id;
+            if let Err(error) = network.submit_client_update(update) {
+                tracing::error!(%error, %client_id, "failed to submit elimination client update");
+            }
+        }
+    }
+
     pub(crate) fn runtime_network_is_paused(&self) -> bool {
         debug_assert!(self.network.is_some());
         // C4Network2::isRunning requires both GS_Go and a fully acknowledged

@@ -2732,6 +2732,45 @@ impl Engine {
             )
     }
 
+    /// Queue C++ `C4Player::Eliminate`'s synchronized early deactivation for
+    /// a remote client that has no remaining live player
+    /// (`src/C4Player.cpp:2015-2037`). The request is host-owned and remains
+    /// outside deterministic state until the app assigns it to a control
+    /// tick.
+    pub(crate) fn queue_client_deactivation_after_elimination(&mut self, player_id: i32) {
+        if !self.control_host {
+            return;
+        }
+        let Some(player) = self.players.get(&player_id) else {
+            return;
+        };
+        if player.status() != PlayerStatus::Eliminated {
+            return;
+        }
+        let at_client = player.at_client();
+        if at_client.get() <= PlayerAtClient::HOST.get() {
+            return;
+        }
+        let client_has_live_player = self.players().any(|candidate| {
+            candidate.at_client() == at_client
+                && !matches!(
+                    candidate.status(),
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                )
+        });
+        if client_has_live_player {
+            return;
+        }
+        self.host_requests
+            .pending_client_updates
+            .push(ClientUpdateControlData {
+                update_type: CLIENT_UPDATE_ACTIVATE,
+                client_id: at_client.get(),
+                data: 0,
+                by_client: 0,
+            });
+    }
+
     /// Drain each player's control/action counters in exact native
     /// `C4PlayerList` link order for one network-statistics control sample.
     /// Players with no input are included with zero counts.

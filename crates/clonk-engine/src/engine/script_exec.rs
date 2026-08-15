@@ -1121,6 +1121,13 @@ impl Engine {
         std::mem::take(&mut self.host_requests.player_info_league_progress_updates)
     }
 
+    /// Drain host-authored `CID_ClientUpdate(CUT_Activate, false)` requests
+    /// emitted by `C4Player::Eliminate` in execution order. The embedding
+    /// control layer assigns them to a synchronized tick.
+    pub fn take_pending_client_updates(&mut self) -> Vec<ClientUpdateControlData> {
+        std::mem::take(&mut self.host_requests.pending_client_updates)
+    }
+
     /// Drain host-authored `CID_RemovePlr` requests in script call order.
     /// The embedding control layer assigns them to a not-yet-executed tick.
     pub fn take_pending_remove_player_controls(&mut self) -> Vec<RemovePlayerControlData> {

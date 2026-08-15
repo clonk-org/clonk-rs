@@ -6981,6 +6981,10 @@ impl GameApp {
                     }
                 }
             };
+            // `C4Player::Eliminate` queues its synchronized client update at
+            // the point of the state transition, even if a later control in
+            // this batch reports an error.
+            self.flush_pending_client_updates();
             // Process-local SetPreSend effects happen at this packet's exact
             // position. In particular, apply them before a later ClientRemove
             // tears down the network clock and local-name registry. Drain even
