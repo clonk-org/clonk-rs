@@ -4,6 +4,24 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-08-15
+
+### Bug fixes
+
+- Preserve shader landscape output across frames (#490)
+- Honor PXSGfx particle rendering option (#489)
+- Allow inactive network clients to re-add players (#488)
+- Add adjustable voice playback boost (#484)
+- Broadcast retired profiles to network clients (#483)
+
+### Features
+
+- Support voice chat in network lobbies (#487)
+
+### Performance
+
+- Compact owner-color object passes (#486)
+
 ## [0.12.1] - 2026-08-14
 
 ### Bug fixes
