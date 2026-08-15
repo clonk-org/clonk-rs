@@ -1760,15 +1760,46 @@ impl<'a> GpuSceneLayer<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CachedTextureContents {
+    Source,
+    ShaderLandscape,
+}
+
 #[derive(Debug)]
 struct CachedTexture {
+    /// CPU resource identity represented by the current GPU view. A shader
+    /// landscape keeps this identity even though its actual extent differs.
     revision: u64,
+    source_extent: [u32; 2],
+    source_format: GpuTextureFormat,
+    contents: CachedTextureContents,
+    /// Actual GPU view descriptor; downstream sampling uses this extent.
     extent: [u32; 2],
     format: GpuTextureFormat,
     byte_len: u64,
     last_used_epoch: u64,
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
+}
+
+impl CachedTexture {
+    fn source_matches(&self, resource: &GpuTextureResource) -> bool {
+        self.revision == resource.revision
+            && self.source_extent == resource.extent
+            && self.source_format == resource.format
+    }
+
+    fn preserves_shader_output(
+        &self,
+        shader_landscape: bool,
+        pending_shader_landscape: Option<GpuTextureId>,
+        resource: &GpuTextureResource,
+    ) -> bool {
+        shader_landscape
+            && self.contents == CachedTextureContents::ShaderLandscape
+            && (self.source_matches(resource) || pending_shader_landscape == Some(resource.id))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -3014,7 +3045,7 @@ impl RetainedGpuRenderer {
         } else {
             texture_sync_finished
         };
-        self.compose_shader_landscape(device, queue, encoder, shader_timestamp_writes)?;
+        self.compose_shader_landscape(device, queue, encoder, &resources, shader_timestamp_writes)?;
         self.last_stats.shader_landscape_draw_calls = shader_landscape_draw_calls;
 
         let stream_started = Instant::now();
@@ -3311,7 +3342,12 @@ impl RetainedGpuRenderer {
     /// identical arithmetic per fragment, which is what lets `landscape_detail`
     /// resolve finer material art (`ShaderLandscapeComposer`).
     pub fn set_shader_landscape(&mut self, shader: bool) {
+        if self.shader_landscape == shader {
+            return;
+        }
         self.shader_landscape = shader;
+        self.pending_shader_landscape = None;
+        self.invalidate_shader_landscape_outputs();
     }
 
     pub fn shader_landscape(&self) -> bool {
@@ -3324,11 +3360,24 @@ impl RetainedGpuRenderer {
     /// tiling period instead of stretching it. Clamped to the range the
     /// composer accepts — 0 is a validation error there.
     pub fn set_landscape_detail(&mut self, detail: u32) {
-        self.landscape_detail = detail.clamp(1, MAX_LANDSCAPE_DETAIL);
+        let detail = detail.clamp(1, MAX_LANDSCAPE_DETAIL);
+        if self.landscape_detail == detail {
+            return;
+        }
+        self.landscape_detail = detail;
+        self.invalidate_shader_landscape_outputs();
     }
 
     pub fn landscape_detail(&self) -> u32 {
         self.landscape_detail
+    }
+
+    fn invalidate_shader_landscape_outputs(&mut self) {
+        self.textures
+            .retain(|_, texture| matches!(texture.contents, CachedTextureContents::Source));
+        self.quad_bind_groups.clear();
+        self.object_bind_groups.clear();
+        self.landscape_bind_groups.clear();
     }
 
     /// Hand the next frame's landscape composition inputs to the renderer.
@@ -3355,6 +3404,7 @@ impl RetainedGpuRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
+        resources: &[GpuTextureResource],
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) -> Result<(), GpuRendererError> {
         // Always take the plan: a frame that does not compose must not leave a
@@ -3364,6 +3414,17 @@ impl RetainedGpuRenderer {
         };
         if !self.shader_landscape {
             return Ok(());
+        }
+        let source = resources
+            .iter()
+            .find(|resource| resource.id == id)
+            .ok_or(GpuRendererError::MissingTexture(id))?;
+        if source.format != GpuTextureFormat::Rgba8 {
+            return Err(GpuRendererError::TextureFormatMismatch {
+                id,
+                expected: GpuTextureFormat::Rgba8,
+                actual: source.format,
+            });
         }
         let slots: Vec<ShaderLandscapeSlot> = plan
             .slots
@@ -3413,9 +3474,10 @@ impl RetainedGpuRenderer {
         self.textures.insert(
             id,
             CachedTexture {
-                // The composed plane has no CPU backing to diff against, so it
-                // is rebuilt whole whenever a plan arrives.
-                revision: 0,
+                revision: source.revision,
+                source_extent: source.extent,
+                source_format: source.format,
+                contents: CachedTextureContents::ShaderLandscape,
                 extent,
                 format: GpuTextureFormat::Rgba8,
                 byte_len,
@@ -3426,6 +3488,7 @@ impl RetainedGpuRenderer {
         );
         self.quad_bind_groups.clear();
         self.object_bind_groups.clear();
+        self.landscape_bind_groups.clear();
         Ok(())
     }
 
@@ -3437,6 +3500,10 @@ impl RetainedGpuRenderer {
     ) -> Result<(), GpuRendererError> {
         let mut live = HashSet::with_capacity(resources.len());
         let mut replaced = HashSet::new();
+        let pending_shader_landscape = self
+            .shader_landscape
+            .then(|| self.pending_shader_landscape.as_ref().map(|(id, _)| *id))
+            .flatten();
         for resource in resources {
             if !live.insert(resource.id) {
                 return Err(GpuRendererError::DuplicateTexture(resource.id));
@@ -3451,9 +3518,28 @@ impl RetainedGpuRenderer {
                 });
             }
 
-            let recreate = self.textures.get(&resource.id).is_none_or(|cached| {
-                cached.extent != resource.extent || cached.format != resource.format
-            });
+            let (preserve_shader_output, recreate) =
+                self.textures
+                    .get(&resource.id)
+                    .map_or((false, true), |cached| {
+                        let preserve = cached.preserves_shader_output(
+                            self.shader_landscape,
+                            pending_shader_landscape,
+                            resource,
+                        );
+                        let recreate = !preserve
+                            && (cached.contents == CachedTextureContents::ShaderLandscape
+                                || cached.source_extent != resource.extent
+                                || cached.source_format != resource.format);
+                        (preserve, recreate)
+                    });
+            if preserve_shader_output {
+                self.textures
+                    .get_mut(&resource.id)
+                    .expect("preserved shader landscape exists")
+                    .last_used_epoch = self.texture_epoch;
+                continue;
+            }
             if recreate {
                 let texture = create_source_texture(device, resource, self.mipmaps);
                 let upload = upload_full(queue, &texture, resource);
@@ -3464,6 +3550,9 @@ impl RetainedGpuRenderer {
                     resource.id,
                     CachedTexture {
                         revision: resource.revision,
+                        source_extent: resource.extent,
+                        source_format: resource.format,
+                        contents: CachedTextureContents::Source,
                         extent: resource.extent,
                         format: resource.format,
                         byte_len: resource.pixels.len() as u64,
@@ -11679,6 +11768,92 @@ mod tests {
             .collect()
     }
 
+    fn shader_landscape_plan_fixture(extent: [u32; 2]) -> clonk_graphics::ShaderLandscapePlan {
+        let (atlas_extent, atlas, _) = shader_landscape_atlas();
+        clonk_graphics::ShaderLandscapePlan {
+            extent,
+            index_plane: shader_landscape_index_plane(extent),
+            shading_plane: None,
+            atlas,
+            atlas_extent,
+            slots: shader_landscape_slots()
+                .iter()
+                .map(|slot| {
+                    let mut words = [0_u32; 16];
+                    words[0..4].copy_from_slice(&slot.colors);
+                    words[4..8].copy_from_slice(&slot.params);
+                    words[8..12].copy_from_slice(&slot.primary);
+                    words[12..16].copy_from_slice(&slot.overlay);
+                    words
+                })
+                .collect(),
+        }
+    }
+
+    fn shader_landscape_scene_fixture(
+        base: GpuTextureId,
+        logical_extent: [u32; 2],
+        source_extent: [u32; 2],
+        revision: u64,
+    ) -> GpuScene {
+        let corner = |x: f32, y: f32, u: f32, v: f32| GpuVertex {
+            position: [x, y, 1.0],
+            uv: [u, v],
+            modulation: [1.0, 1.0, 1.0, 0.0],
+            owner_modulation: [0.0; 4],
+            outer_modulation: clonk_graphics::GpuOuterModulation::default(),
+            owner_outer_modulation: clonk_graphics::GpuOuterModulation::default(),
+            sample_tile: [0.0; 4],
+        };
+        let mut resource = GpuTextureResource::immutable_rgba(
+            base,
+            source_extent[0],
+            source_extent[1],
+            vec![0_u8; (source_extent[0] * source_extent[1] * 4) as usize].into(),
+        );
+        resource.revision = revision;
+        let vertices = [
+            corner(0.0, 0.0, 0.0, 0.0),
+            corner(logical_extent[0] as f32, 0.0, 1.0, 0.0),
+            corner(0.0, logical_extent[1] as f32, 0.0, 1.0),
+            corner(logical_extent[0] as f32, logical_extent[1] as f32, 1.0, 1.0),
+        ];
+        let transparent_vertices = vertices.map(|vertex| GpuVertex {
+            modulation: [1.0; 4],
+            outer_modulation: clonk_graphics::GpuOuterModulation::Ignore,
+            ..vertex
+        });
+        GpuScene {
+            logical_extent,
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![resource],
+            commands: vec![
+                GpuCommand::Landscape {
+                    base,
+                    liquid_mask: None,
+                    liquid: None,
+                    vertices,
+                    clip: None,
+                    phase: [0.0; 3],
+                    gamma: false,
+                },
+                GpuCommand::Quad {
+                    texture: base,
+                    owner_mask: None,
+                    vertices: transparent_vertices,
+                    clip: None,
+                    blend: GpuBlend::Normal,
+                    base_mod2: false,
+                    owner_mod2: false,
+                    sampler: GpuSampler::Nearest,
+                    gamma: false,
+                },
+            ],
+        }
+    }
+
     fn shader_landscape_shading_plane(extent: [u32; 2]) -> Vec<u8> {
         (0..extent[0] * extent[1])
             .flat_map(|index| {
@@ -12070,6 +12245,207 @@ mod tests {
             renderer.pending_shader_landscape.is_none(),
             "the plan must be taken even when it is not composed"
         );
+    }
+
+    #[test]
+    fn shader_landscape_output_lifecycle_survives_revisioned_frames_and_recovery() {
+        // This consumes immutable retained scenes and renderer configuration
+        // only; no landscape simulation or relight state participates.
+        let (runtime, _instance, _adapter, device, queue) =
+            test_wgpu_device("lc_gpu_shader_landscape_retention_test_device", true)
+                .expect("shader landscape retention requires a working wgpu adapter");
+        for (detail, extent, source_extent) in [(1, [12, 12], [12, 12]), (3, [13, 7], [16, 16])] {
+            let plan = shader_landscape_plan_fixture(extent);
+            let base = GpuTextureId::fresh();
+            let scene = shader_landscape_scene_fixture(base, extent, source_extent, 1);
+            let mut renderer = test_renderer(&device, &queue);
+            renderer.set_shader_landscape(true);
+            renderer.set_landscape_detail(detail);
+            renderer.set_pending_shader_landscape(Some((base, plan.clone())));
+            let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let composed = render_identity_readback(&mut renderer, &device, &queue, &scene);
+            assert_eq!(renderer.last_stats().full_upload_calls, 1);
+            let cached = renderer.textures.get(&base).expect("composed landscape");
+            assert_eq!(cached.source_extent, source_extent);
+            assert_eq!(
+                cached.extent,
+                [extent[0] * detail, extent[1] * detail],
+                "detail {detail}: the composed view extent must remain distinct from its CPU \
+                 source extent"
+            );
+            assert_eq!(renderer.quad_bind_groups.len(), 1);
+            assert_eq!(renderer.landscape_bind_groups.len(), 1);
+
+            renderer.set_pending_shader_landscape(None);
+            let unchanged = render_identity_readback(&mut renderer, &device, &queue, &scene);
+            assert_eq!(
+                renderer.last_stats().full_upload_calls,
+                0,
+                "detail {detail}: an unchanged CPU resource must not overwrite the \
+                 authoritative shader output"
+            );
+            assert_eq!(
+                unchanged, composed,
+                "detail {detail}: the shader-composed landscape must remain authoritative without \
+                 a new plan"
+            );
+
+            let mut changed_scene = scene.clone();
+            changed_scene.textures[0].revision = 2;
+            changed_scene.textures[0].base_revision = Some(1);
+            changed_scene.textures[0].dirty = vec![Rect::new(0, 0, 1, 1)];
+            let mut changed_plan = plan.clone();
+            changed_plan.atlas.fill(255);
+            renderer.set_pending_shader_landscape(Some((base, changed_plan)));
+            let changed = render_identity_readback(&mut renderer, &device, &queue, &changed_scene);
+            assert_eq!(
+                (
+                    renderer.last_stats().full_upload_calls,
+                    renderer.last_stats().dirty_upload_calls,
+                ),
+                (0, 0),
+                "detail {detail}: a fresh plan supersedes the CPU delta without uploading it into \
+                 the render-only shader output"
+            );
+            assert_ne!(
+                changed, composed,
+                "detail {detail}: the second plan must draw through its newly composed texture \
+                 view"
+            );
+
+            renderer.set_pending_shader_landscape(None);
+            let changed_unchanged =
+                render_identity_readback(&mut renderer, &device, &queue, &changed_scene);
+            assert_eq!(renderer.last_stats().full_upload_calls, 0);
+            assert_eq!(renderer.last_stats().dirty_upload_calls, 0);
+            assert_eq!(
+                changed_unchanged, changed,
+                "detail {detail}: the second composed output must survive its unchanged frame"
+            );
+
+            if detail == 1 {
+                renderer.set_landscape_detail(2);
+                assert!(!renderer.textures.contains_key(&base));
+                assert!(renderer.quad_bind_groups.is_empty());
+                assert!(renderer.landscape_bind_groups.is_empty());
+                let after_detail_change =
+                    render_identity_readback(&mut renderer, &device, &queue, &changed_scene);
+                assert_eq!(
+                    (
+                        renderer.last_stats().created_source_textures,
+                        renderer.last_stats().full_upload_calls,
+                    ),
+                    (1, 1),
+                    "changing detail must retire the old shader output and restore the complete \
+                     CPU resource"
+                );
+                assert!(matches!(
+                    renderer
+                        .textures
+                        .get(&base)
+                        .expect("restored CPU landscape")
+                        .contents,
+                    CachedTextureContents::Source
+                ));
+                assert_ne!(
+                    after_detail_change, changed,
+                    "the old detail-1 output cannot remain authoritative at detail 2"
+                );
+
+                let mut detail_plan = plan.clone();
+                detail_plan.atlas.fill(255);
+                renderer.set_pending_shader_landscape(Some((base, detail_plan.clone())));
+                let detail_composed =
+                    render_identity_readback(&mut renderer, &device, &queue, &changed_scene);
+                assert_ne!(detail_composed, after_detail_change);
+                assert_eq!(renderer.quad_bind_groups.len(), 1);
+                assert_eq!(renderer.landscape_bind_groups.len(), 1);
+
+                renderer.set_shader_landscape(false);
+                assert!(!renderer.textures.contains_key(&base));
+                assert!(renderer.quad_bind_groups.is_empty());
+                assert!(renderer.landscape_bind_groups.is_empty());
+                renderer.set_pending_shader_landscape(Some((base, detail_plan.clone())));
+                let disabled =
+                    render_identity_readback(&mut renderer, &device, &queue, &changed_scene);
+                assert_eq!(disabled, after_detail_change);
+                assert!(renderer.pending_shader_landscape.is_none());
+                assert!(matches!(
+                    renderer
+                        .textures
+                        .get(&base)
+                        .expect("disabled CPU landscape")
+                        .contents,
+                    CachedTextureContents::Source
+                ));
+                assert_eq!(renderer.quad_bind_groups.len(), 1);
+                assert_eq!(renderer.landscape_bind_groups.len(), 1);
+
+                changed_scene.textures[0].revision = 4;
+                changed_scene.textures[0].base_revision = Some(3);
+                changed_scene.textures[0].dirty = vec![Rect::new(1, 1, 1, 1)];
+                let disabled_after_skipped_revision =
+                    render_identity_readback(&mut renderer, &device, &queue, &changed_scene);
+                assert_eq!(disabled_after_skipped_revision, disabled);
+                assert_eq!(renderer.last_stats().full_upload_calls, 1);
+                assert_eq!(renderer.last_stats().dirty_upload_calls, 0);
+
+                renderer.set_shader_landscape(true);
+                assert!(renderer.textures.contains_key(&base));
+                assert!(renderer.quad_bind_groups.is_empty());
+                assert!(renderer.landscape_bind_groups.is_empty());
+                let enabled_without_plan =
+                    render_identity_readback(&mut renderer, &device, &queue, &changed_scene);
+                assert_eq!(enabled_without_plan, disabled);
+                assert_eq!(renderer.last_stats().full_upload_calls, 0);
+
+                renderer.set_pending_shader_landscape(Some((base, detail_plan.clone())));
+                let enabled =
+                    render_identity_readback(&mut renderer, &device, &queue, &changed_scene);
+                assert_eq!(enabled, detail_composed);
+
+                let generation = renderer.generation();
+                renderer.recreate(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+                assert_ne!(renderer.generation(), generation);
+                assert!(renderer.textures.is_empty());
+                assert!(renderer.quad_bind_groups.is_empty());
+                assert!(renderer.landscape_bind_groups.is_empty());
+                let recovered_cpu =
+                    render_identity_readback(&mut renderer, &device, &queue, &changed_scene);
+                assert_eq!(recovered_cpu, disabled);
+                assert_eq!(renderer.last_stats().created_source_textures, 1);
+                assert_eq!(renderer.last_stats().full_upload_calls, 1);
+
+                renderer.set_pending_shader_landscape(Some((base, detail_plan)));
+                let recovered_shader =
+                    render_identity_readback(&mut renderer, &device, &queue, &changed_scene);
+                assert_eq!(recovered_shader, detail_composed);
+            } else {
+                let mut invalidated_scene = changed_scene.clone();
+                invalidated_scene.textures[0].revision = 3;
+                invalidated_scene.textures[0].base_revision = Some(2);
+                invalidated_scene.textures[0].dirty = vec![Rect::new(1, 1, 1, 1)];
+                let invalidated =
+                    render_identity_readback(&mut renderer, &device, &queue, &invalidated_scene);
+                assert_ne!(invalidated, changed);
+                assert_eq!(renderer.last_stats().created_source_textures, 1);
+                assert_eq!(renderer.last_stats().full_upload_calls, 1);
+                assert!(matches!(
+                    renderer
+                        .textures
+                        .get(&base)
+                        .expect("invalidated CPU landscape")
+                        .contents,
+                    CachedTextureContents::Source
+                ));
+            }
+            let validation = runtime.block_on(validation_scope.pop());
+            assert!(
+                validation.is_none(),
+                "detail {detail}: the unchanged frame reported a wgpu validation error: \
+                 {validation:?}"
+            );
+        }
     }
 
     #[test]
