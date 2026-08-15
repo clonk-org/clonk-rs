@@ -980,36 +980,64 @@ cargo bench -p clonk-app-render --features bench --bench object_sprite_render --
 cargo bench -p clonk-app-render --features bench --bench particle_render --locked
 ```
 
-The two object suites use 1,000 ST5B-shaped faces (15x15, 20 phases,
-alternating transforms and sampling, unique modulation). `object_capture` runs
-unfogged and with an exact 64-pixel fog-chunk crossing through an explicit
-reverse painter order. Its scoped counting allocator compares one object with
-1,000 after warming the same
-retained ordering maps, sets, phase lists and capture storage; equality is the
-gate, so allocations may remain per frame/resource run but cannot scale per
-representable object. The scope starts after `ObjectSnapshot` and render-order
-construction: engine snapshot cloning intentionally remains outside this
-presentation-only claim. The raw line reports both one/1,000 allocation
-calls/bytes, compact instance/upload bytes, captured commands, generic fallback
-count, and fog-expanded instances.
+The two object suites retain the original 1,000 ST5B-shaped faces (15x15, 20
+phases, alternating transforms and sampling, unique modulation) and add 1,000
+owner-colored crew faces. The owner capture fixture uses HZCK's 16x20 face and
+256x420 sheet dimensions, 15 deterministic phases, distinct live object colors
+and a full-RGBA owner overlay. Its four-pixel source offset makes phases 3, 7
+and 11 cross a 64-pixel fog boundary. Both fixtures use explicit reverse
+painter order.
 
-`object_sprite_render` submits the same ordered source once through the compact
-path and once as generic quads, waits for each GPU completion, and reports both
-`GpuRendererStats` records. Structural gates require an 88-byte object instance
-(below the 96-byte budget), one compact resource-run command/scene draw and
-88,000 instance-upload bytes, versus 1,000 alternating-sampler generic scene
-draws and 232,000 generic instance-upload bytes. Including the fixed final
-presentation pass, the raw GPU draw totals are 2 and 1,001 respectively. These
-are representation counts, not a substitute for the real presentation cadence
+`object_capture` runs each fixture unfogged and fogged. Its scoped counting
+allocator compares one object with 1,000 after warming the same retained
+ordering maps, sets, phase lists, texture resources and capture storage.
+Equality of both allocation calls and bytes is the gate, so allocations may
+remain per frame/resource run but cannot scale with represented objects or
+fog-expanded chunks. The scope starts after `ObjectSnapshot` and render-order
+construction: engine snapshot cloning intentionally remains outside this
+presentation-only claim. The raw owner line reports the mask form, one/1,000
+allocation calls and bytes, compact instance/upload bytes, captured commands,
+generic-quad count, and fog-expanded instances. The unfogged structural gate
+is exactly 2,000 base/owner instances in
+`base1, owner1, base2, owner2, ...` order, zero generic quads and 176,000 bytes,
+which is below the 176 KiB acceptance ceiling.
+
+The 2026-08-14 assertion run (`cargo bench ... -- --test`) recorded 2,000
+unfogged owner instances and 2,400 fog-expanded owner instances. Unfogged
+capture made 6 allocation calls totaling 182,936 bytes for both one and 1,000
+objects; fogged capture made 8 calls totaling 363,848 bytes for both the
+one-object/one-chunk probe and the 1,000-object/1,200-chunk workload. These are
+warm capture allocations, not instance-upload bytes; the separately asserted
+uploads were 176,000 and 211,200 bytes.
+
+`object_sprite_render` submits the same ordered single-layer source once through
+the compact path and once as generic quads, then repeats the comparison with an
+ordered base/owner texture pair. It waits for each GPU completion and reports
+all four `GpuRendererStats` records. The original structural gates remain an
+88-byte object instance, one compact resource-run scene draw and 88,000 upload
+bytes, versus 1,000 generic scene draws and 232,000 generic upload bytes. The
+owner-pair gates require one scene draw containing 2,000 ordered 88-byte compact
+instances and 176,000 upload bytes, versus 2,000 alternating base/owner generic
+draws and 464,000 generic upload bytes. Including the fixed final presentation
+pass, the corresponding totals are 2 and 2,001. These are representation
+counts, not a substitute for the visible real-content presentation cadence
 below.
 
-The object renderer also has a `compact_1000_st5b_amortized` throughput case.
-It performs the same retained build, upload, encoding, submission and statistics
-work for 16 frames, but waits for device completion only after the batch. The
-particle renderer's `2000_fire_and_fire2_amortized` case uses the same cadence
-for 1,000 normal and 1,000 additive particle sprites. These are steady
-submission-throughput measurements, not GPU-only timing or single-frame
-latency; keep the original completion-per-frame cases when diagnosing latency.
+Run the structural and allocation gates once without collecting Criterion
+timing samples by appending `-- --test` to either object benchmark command.
+The 2026-08-14 Metal assertion run reported one owner-pair scene draw, 2,000
+compact instances and 176,000 upload bytes, versus 2,000 generic scene draws,
+2,000 generic instances and 464,000 upload bytes. Total draws including final
+presentation were 2 and 2,001.
+
+The object renderer has `compact_1000_st5b_amortized` and
+`compact_1000_owner_pairs_amortized` throughput cases. Each performs the same
+retained build, upload, encoding, submission and statistics work for 16 frames,
+but waits for device completion only after the batch. The particle renderer's
+`2000_fire_and_fire2_amortized` case uses the same cadence for 1,000 normal and
+1,000 additive particle sprites. These are steady submission-throughput
+measurements, not GPU-only timing or single-frame latency; keep the original
+completion-per-frame cases when diagnosing latency.
 
 To measure the default, timestamp-disabled instrumentation overhead, build
 separate retained baseline and candidate executables and explicitly remove
@@ -1233,6 +1261,102 @@ all eight samples are invalid. Counter rollover and other invalid samples remain
 visible rather than being converted into durations. When the request is disabled
 or unsupported, no timestamp device is created, both effective optional feature
 sets stay empty, and the raw duration is explicitly `unavailable`.
+
+### Hazard 24-player owner-color A/B benchmark
+
+The visible owner-color acceptance runner compares two already-built app
+executables on the real Hazard `DM_Baldoon` scenario:
+
+```sh
+python3 scripts/run_hazard_24_player_gpu_benchmark.py \
+  --baseline-binary /absolute/base/clonk-app \
+  --candidate-binary /absolute/candidate/clonk-app \
+  --baseline-source-root /absolute/base/source \
+  --candidate-source-root "$PWD" \
+  --clients 1
+```
+
+The default is 12 rendered clients; `--clients 1` assigns all 24 ordered player
+profiles to one visible client and was used for the reference below to avoid
+desktop window-occlusion throttling. Both layouts still require exactly 24
+synchronized players, 24 players with live crew, and 24 live crew objects.
+The byte-hashed scenario contract pins `Crew=HZCK=1` for all four player
+templates, so that runtime census establishes 24 live HZCK crew even though the
+runtime report does not expose definition IDs.
+
+The runner never builds either executable. It records each executable's bytes,
+each source tree, Cargo.lock, harnesses, scenario/runtime data, settings, and
+the normalized retained-GPU adapter/config fingerprint independently. It
+requires initial and final provenance to match and permits only the executable
+identity to differ between the paired input fingerprints. This is exact
+artifact and source provenance, but it is not a cryptographic attestation that
+an arbitrary supplied executable was built from the accompanying source root.
+
+Both arms request timestamp queries. Unsupported adapters remain a valid,
+explicit `unavailable` result; supported arms must have the same normalized
+GPU fingerprint. Hazard opts into the retained-profile validator's raw Metal
+timestamp policy: dropped frames and device discontinuities still fail, every
+raw tick and disposition is validated and retained, and each rendered pass
+must have at least one valid sample. Counter-rollover samples are excluded only
+from timing distributions. The ordinary Arso-Morf validator remains strict.
+
+The 2026-08-14 reference used a single frontmost 800x600 client on an
+AC-powered Apple M4 Max running macOS 26.5.2 and Metal. Both named source roots
+were at commit `be647b87b7b6d3b38b84fce2bfe2a40977cfe8ab`; the candidate additionally
+had tracked patch SHA-256
+`c57c18360e523d3de75f22592cdd5a320cc1d04396873b6e021a34e01e53a21b`.
+The paired shared-input fingerprint was
+`7e17d2c8af0e4c042db6e0cc265daab1257b1b63296ca6e66cd17fca1533b5c1`,
+and both arms' normalized GPU fingerprint was
+`dc4386fb78b5ee64d354ca102a8a10c51a4976f0884a0b9bd8ec51ab7d9aa213`.
+Each arm completed 2,308 simulation, refreshed, and presented frames in about
+60.0 seconds: 38.462 baseline FPS and 38.461 candidate FPS, with zero automatic
+skips, network lag, ping, or loss. All 5,760 input probes succeeded in each arm;
+candidate p99 input latency was 73.614ms against 75.643ms for baseline.
+
+The retained per-frame distributions were:
+
+| Metric | Baseline p50 / p95 / p99 | Candidate p50 / p95 / p99 |
+| --- | ---: | ---: |
+| End-to-end graphics CPU | 9.677 / 11.857 / 12.249ms | 9.743 / 10.168 / 10.858ms |
+| Stream packing/upload CPU | 0.431 / 0.487 / 0.573ms | 0.435 / 0.482 / 0.524ms |
+| Valid GPU `Scene` pass | 0.544 / 0.930 / 1.090ms | 0.547 / 0.919 / 1.032ms |
+| Scene draw calls | 2,078 / 2,100 / 2,111 | 1,936 / 1,950 / 1,955 |
+| Total draw calls | 2,080 / 2,102 / 2,113 | 1,938 / 1,952 / 1,957 |
+| Object draw calls | 366 / 372 / 372 | 398 / 400 / 400 |
+| Generic-quad draw calls | 1,647 / 1,669 / 1,679 | 1,451 / 1,465 / 1,470 |
+| Object-instance upload | 85,536 / 86,592 / 87,296 B | 96,712 / 97,064 / 97,064 B |
+| Generic-quad upload | 775,808 / 800,632 / 804,344 B | 745,184 / 759,800 / 763,976 B |
+| Generic sprite fallbacks | 512 / 599 / 617 | 497 / 548 / 565 |
+| Owner-mask fallbacks | 94 / 94 / 94 | 0 / 0 / 0 |
+
+At the median, owner-mask fallback fell 100%, scene draws fell 6.83%, total
+draws fell 6.83%, and generic-quad upload fell 3.95%. Compact object upload
+rose 13.07% because the formerly generic owner layers moved into the 88-byte
+object stream. Median end-to-end, packing, and valid `Scene` timings changed by
++0.68%, +0.90%, and +0.57%; their tails improved, but this single sequential
+campaign ran alongside unrelated desktop activity and is not a statistically
+controlled performance-improvement claim. It proves the structural conversion,
+the observed zero owner-mask fallback result, painter-visible presentation, and
+native-tick budget.
+
+Metal retained 2,278/2,308 valid baseline and 2,279/2,308 valid candidate
+`Scene` samples. The corresponding monitor-gamma counts were 2,140 and 2,204;
+presentation counts were 82 and 99. Every other sample was an explicit
+`counter_rollover`; readback-error telemetry was 3,755 and 3,680, with zero
+dropped frames and discontinuities. Four setup campaigns were rejected before
+this result: the 12-window run was occlusion-starved, the first one-client run
+was not foreground, a partial-foreground run exposed the Metal rollover
+handling, and one candidate launch lost an activation race. None contributes
+to the table.
+
+The final `summary.json`, baseline evidence, and candidate evidence SHA-256
+values were respectively
+`c9354927f53b24fe5c8f4ee7bb7060f1a306f7a3165e17bbc4ea8ded9c64bdf6`,
+`7dd41934dff220e13e032d980aee9bc1826c2b4778ebbb894f0f385574236513`,
+and `2636c54e30f6483e19b5a8a7cd0034c92895853024c15f5827aeeb7520343681`.
+The local raw bundle is retained through review and landing, then intentionally
+deleted after these aggregates and hashes are recorded to conserve disk space.
 
 ### Deep Sea retained-GPU presentation benchmark
 
