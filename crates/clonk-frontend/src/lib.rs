@@ -10459,6 +10459,73 @@ mod tests {
     }
 
     #[test]
+    fn pxs_graphics_toggle_switches_a_sheet_material_between_line_and_sprite() {
+        // With PXSGfx disabled, the first pass must not skip materials with a
+        // sheet and the second graphical pass must not run
+        // (src/C4PXS.cpp:259-260,279-281).
+        let mut graphics = test_graphics(8, 8, 8, "PXS disabled");
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics.set_pxs_graphics(false);
+        graphics.set_material_texture_surfaces(Arc::new(HashMap::from([(
+            "snow".to_string(),
+            MaterialTextureSurface::surface32(ImageData::new(1, 1, vec![255, 0, 0, 255])),
+        )])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([
+            (
+                "snow".to_string(),
+                MaterialRenderInfo::new([0, 255, 0, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25)
+                    .with_pxs_graphics(Some("Snow".to_string()), [0, 0, 1, 1, 1, 0], 1),
+            ),
+            (
+                "ash".to_string(),
+                MaterialRenderInfo::new([20, 40, 60, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25),
+            ),
+        ])));
+        let particles = [
+            pxs_particle("snow", [5 << 16, 4 << 16, 2 << 16, 0], 0),
+            pxs_particle("ash", [2 << 16, 6 << 16, 0, 0], 1),
+        ];
+
+        graphics.draw_pxs(&particles, 1.0, None);
+
+        assert_eq!(
+            graphics.surface().get_pixel(3, 4),
+            Some(Color::opaque(0, 157, 0)),
+            "disabled sheet graphics must use the old-style velocity line"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(6, 4),
+            Some(Color::opaque(0, 0, 0)),
+            "the graphical second pass must stay disabled"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(2, 6),
+            Some(Color::opaque(20, 40, 60)),
+            "a material without a sheet must retain its fallback"
+        );
+
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics.set_pxs_graphics(true);
+        graphics.draw_pxs(&particles, 1.0, None);
+
+        assert_eq!(
+            graphics.surface().get_pixel(3, 4),
+            Some(Color::opaque(0, 0, 0)),
+            "enabled sheet graphics must skip the old-style first pass"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(6, 4),
+            Some(Color::opaque(255, 0, 0)),
+            "re-enabling the option must immediately restore the sprite pass"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(2, 6),
+            Some(Color::opaque(20, 40, 60)),
+            "a material without a sheet must be identical in either state"
+        );
+    }
+
+    #[test]
     fn graphical_pxs_uses_gl_linear_filtering_across_its_source_facet() {
         // C4Facet::DrawX supplies a 2x4 source facet and a non-exact 4x4
         // target, which enables GL_LINEAR (C4Facet.cpp:296-303;

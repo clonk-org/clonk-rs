@@ -2620,6 +2620,7 @@ pub(crate) fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
         .map(|value| value != 0)
         .unwrap_or(flags.splitscreen_dividers);
     flags.fire_particles = graphics_bool("FireParticles", flags.fire_particles);
+    flags.pxs_gfx = graphics_bool("PXSGfx", flags.pxs_gfx);
     flags.clock = graphics_bool("ShowClock", flags.clock);
     flags.show_stats = graphics_bool("ShowStats", flags.show_stats);
     flags.fps = general_bool("FPS", flags.fps);

@@ -1993,6 +1993,62 @@ fn runtime_point_filtering_reloads_after_advanced_config_save() {
 }
 
 #[test]
+fn runtime_pxs_graphics_reload_is_live_and_presentation_only() {
+    // C4PXSSystem::Draw rereads Config.Graphics.PXSGfx for both passes
+    // (src/C4PXS.cpp:259-260,279-281); reloading it is presentation-only.
+    let _lock = env_lock().lock();
+    let fixture = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+    persist_config_value(&paths, "Graphics", "PXSGfx", "1").test_value();
+
+    let mut app = new_state_only_running_sandbox_app();
+    app.app_paths = Some(paths.clone());
+    app.synchronize_advanced_options_runtime();
+    assert!(app.display_flags.pxs_gfx);
+    assert!(app.graphics.pxs_graphics_enabled());
+
+    assert!(app.engine.pxs_system.create(
+        clonk_engine::MaterialId::new(0).test_value(),
+        clonk_engine::math::C4Fixed::from_raw(0x12345),
+        clonk_engine::math::C4Fixed::from_raw(0x23456),
+        clonk_engine::math::C4Fixed::from_raw(-0x3456),
+        clonk_engine::math::C4Fixed::from_raw(0x4567),
+    ));
+    let simulation = app.engine.snapshot();
+    let sync = app.engine.sync_check(0);
+    let pxs_slots = app
+        .engine
+        .pxs_system
+        .iter_slots()
+        .map(|(chunk, slot, pxs)| (chunk, slot, *pxs))
+        .collect::<Vec<_>>();
+    let assert_simulation_unchanged = |app: &GameApp| {
+        assert_eq!(app.engine.snapshot(), simulation);
+        assert_eq!(app.engine.sync_check(0), sync);
+        assert_eq!(
+            app.engine
+                .pxs_system
+                .iter_slots()
+                .map(|(chunk, slot, pxs)| (chunk, slot, *pxs))
+                .collect::<Vec<_>>(),
+            pxs_slots
+        );
+    };
+
+    persist_config_value(&paths, "Graphics", "PXSGfx", "0").test_value();
+    app.synchronize_advanced_options_runtime();
+    assert!(!app.display_flags.pxs_gfx);
+    assert!(!app.graphics.pxs_graphics_enabled());
+    assert_simulation_unchanged(&app);
+
+    persist_config_value(&paths, "Graphics", "PXSGfx", "1").test_value();
+    app.synchronize_advanced_options_runtime();
+    assert!(app.display_flags.pxs_gfx);
+    assert!(app.graphics.pxs_graphics_enabled());
+    assert_simulation_unchanged(&app);
+}
+
+#[test]
 fn runtime_advanced_voice_opt_in_retries_a_missing_audio_context() {
     let _lock = env_lock().lock();
     let fixture = tempdir();

@@ -1372,6 +1372,7 @@ impl GameApp {
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
             .set_fire_particles(self.display_flags.fire_particles);
+        self.graphics.set_pxs_graphics(self.display_flags.pxs_gfx);
         self.mission_access = paths
             .and_then(|paths| match load_configured_mission_access(paths) {
                 Ok(access) => Some(MissionAccessStore::new(access)),

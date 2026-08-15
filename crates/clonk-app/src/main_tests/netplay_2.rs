@@ -14624,20 +14624,22 @@ fn renderer_config_loads_native_defaults_and_graphics_values() {
     assert!(defaults.show_player_hud_always);
     assert!(defaults.splitscreen_dividers);
     assert!(defaults.fire_particles);
+    assert!(defaults.pxs_gfx);
 
     fs::write(
         paths.config_file(),
-        "[Graphics]\nShowPlayerHUDAlways=0\nSplitscreenDividers=0\nFireParticles=0\n",
+        "[Graphics]\nShowPlayerHUDAlways=0\nSplitscreenDividers=0\nFireParticles=0\nPXSGfx=0\n",
     )
     .test_value();
     let disabled = load_display_flags(Some(&paths));
     assert!(!disabled.show_player_hud_always);
     assert!(!disabled.splitscreen_dividers);
     assert!(!disabled.fire_particles);
+    assert!(!disabled.pxs_gfx);
 
     fs::write(
         paths.config_file(),
-        "[Graphics]\nShowPlayerHUDAlways=1\nSplitscreenDividers=-1\nFireParticles=1\n",
+        "[Graphics]\nShowPlayerHUDAlways=1\nSplitscreenDividers=-1\nFireParticles=1\nPXSGfx=1\n",
     )
     .test_value();
     let enabled = load_display_flags(Some(&paths));
@@ -14647,6 +14649,7 @@ fn renderer_config_loads_native_defaults_and_graphics_values() {
         "any nonzero divider integer follows C++ truthiness"
     );
     assert!(enabled.fire_particles);
+    assert!(enabled.pxs_gfx);
 
     fs::write(
         paths.config_file(),
