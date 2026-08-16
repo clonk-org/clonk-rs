@@ -1857,30 +1857,73 @@ impl Engine {
     /// wrap, command/procedure/economy forcing, `ChangeDef`) and a hook per
     /// site would leak a stuck loop the moment one was missed. Sound is
     /// client-local presentation, never synchronized or save-persisted, so
-    /// deriving it from observed state costs no determinism. The one residual
-    /// is an A->B->A round trip completed inside a single frame, which C++
-    /// would stop and restart within that same 1/36s.
+    /// deriving it from observed state costs no determinism. The existing
+    /// action-transition observation also retains the ordered slot sequence,
+    /// so an A->B->A round trip completed inside one frame emits the same
+    /// stop/start pairs C++ produces before returning to A.
     fn reconcile_action_sounds(&mut self) {
         for index in 0..self.objects.len() {
-            let object = &self.objects[index];
+            let (id, destroyed, active) = {
+                let object = &self.objects[index];
+                (object.id, object.destroyed, object.state.status.is_active())
+            };
             // A removed object's looping instances are halted by
             // DetachObjectSounds (C4SoundSystem::ClearPointers), which C++
             // reaches from removal rather than from SetAction. Drop the
             // tracking without emitting a redundant stop of our own.
-            if object.destroyed || !object.state.status.is_active() {
+            if destroyed || !active {
                 self.objects[index].active_action_sound = None;
+                self.objects[index].pending_action_sound_events.clear();
                 continue;
             }
+
+            let transitions = std::mem::take(&mut self.objects[index].pending_action_sound_events);
+            for transition in transitions {
+                if transition.previous_action.name == transition.current_action.name
+                    && transition.previous_action.act_map_index
+                        == transition.current_action.act_map_index
+                {
+                    continue;
+                }
+
+                if let Some(previous) = self.objects[index].active_action_sound.take() {
+                    self.pending_audio.push(AudioCommand::StopSound {
+                        name: previous,
+                        target: Some(id),
+                    });
+                }
+                let desired = self
+                    .definitions
+                    .get(&self.objects[index].definition_id)
+                    .map(Definition::action_library)
+                    .and_then(|library| library.spec_for_state(&transition.current_action))
+                    .and_then(|spec| spec.sound.clone());
+                if let Some(sound) = desired {
+                    self.pending_audio.push(AudioCommand::PlaySound {
+                        name: sound.clone(),
+                        target: Some(id),
+                        volume: 100,
+                        looped: true,
+                        // `StartSoundEffect` goes straight to `NewInstance`
+                        // (C4SoundSystem.cpp:54-58). The IsSoundPlaying gate is
+                        // FnSound's alone (C4Script.cpp:2317-2319), so the action
+                        // sound must not inherit it.
+                        multiple: true,
+                        custom_falloff: None,
+                    });
+                    self.objects[index].active_action_sound = Some(sound);
+                }
+            }
+
             let desired = self
                 .definitions
-                .get(&object.definition_id)
+                .get(&self.objects[index].definition_id)
                 .map(Definition::action_library)
-                .and_then(|library| library.spec_for_state(&object.state.action))
+                .and_then(|library| library.spec_for_state(&self.objects[index].state.action))
                 .and_then(|spec| spec.sound.clone());
-            if desired == object.active_action_sound {
+            if desired == self.objects[index].active_action_sound {
                 continue;
             }
-            let id = object.id;
             if let Some(previous) = self.objects[index].active_action_sound.take() {
                 self.pending_audio.push(AudioCommand::StopSound {
                     name: previous,

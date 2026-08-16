@@ -7001,3 +7001,97 @@ fn actmap_sound_loops_while_its_action_slot_stays_selected() {
         uzi_sound(&stopped, burst)
     );
 }
+
+/// `C4Object::SetAction` emits the outgoing ActMap sound stop before the new
+/// action's start (C4Object.cpp:4149-4152, 4186-4190). A caller can select B
+/// and then A again before the frame closes, so end-of-frame reconciliation
+/// must retain that sequence rather than observing only the final A slot.
+#[test]
+fn actmap_sound_reconciles_an_intra_frame_action_round_trip() {
+    let action_sound = |snapshot: &SimulationSnapshot, id| {
+        snapshot
+            .audio
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    AudioCommand::PlaySound { name, target, .. }
+                        | AudioCommand::StopSound { name, target }
+                        if *target == Some(id) && matches!(name.as_str(), "A_Sound" | "B_Sound")
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let mut definition = test_definition("RoundTrip", "Round trip", "func Initialize() { }");
+    definition.configure_actions(
+        Some("Idle".to_string()),
+        HashMap::from([
+            ("Idle".to_string(), ActionSpec::default()),
+            (
+                "A".to_string(),
+                ActionSpec::default().with_length(100).with_sound("A_Sound"),
+            ),
+            (
+                "B".to_string(),
+                ActionSpec::default().with_length(100).with_sound("B_Sound"),
+            ),
+        ]),
+    );
+
+    let mut engine = Engine::with_seed(5);
+    engine.register_test_definition(definition);
+    let object = engine.spawn_test_object(
+        SpawnConfig::new("RoundTrip")
+            .with_category(CATEGORY_OBJECT)
+            .with_action(ActionState::new("A")),
+    );
+
+    let started = engine.test_tick();
+    assert!(
+        matches!(
+            action_sound(&started, object).as_slice(),
+            [AudioCommand::PlaySound { name, looped: true, .. }] if name == "A_Sound"
+        ),
+        "the initial A slot starts its loop"
+    );
+
+    engine
+        .apply_object_update(object, ObjectUpdate::new().with_action("B"))
+        .test_value();
+    engine
+        .apply_object_update(object, ObjectUpdate::new().with_action("A"))
+        .test_value();
+    let round_trip = engine.test_tick();
+    assert_eq!(
+        action_sound(&round_trip, object),
+        [
+            AudioCommand::StopSound {
+                name: "A_Sound".to_string(),
+                target: Some(object),
+            },
+            AudioCommand::PlaySound {
+                name: "B_Sound".to_string(),
+                target: Some(object),
+                volume: 100,
+                looped: true,
+                multiple: true,
+                custom_falloff: None,
+            },
+            AudioCommand::StopSound {
+                name: "B_Sound".to_string(),
+                target: Some(object),
+            },
+            AudioCommand::PlaySound {
+                name: "A_Sound".to_string(),
+                target: Some(object),
+                volume: 100,
+                looped: true,
+                multiple: true,
+                custom_falloff: None,
+            },
+        ],
+        "the reconciler preserves every A-to-B-to-A transition in order"
+    );
+}
