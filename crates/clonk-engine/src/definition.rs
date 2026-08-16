@@ -142,6 +142,12 @@ pub struct Definition {
     /// `C4Def::Load` hands `Game.AddDirectoryForMonitoring` (`:558-560`).
     /// `None` for definitions built from script rather than a group.
     pub(crate) source_path: Option<std::path::PathBuf>,
+    /// True for definitions parsed from a C4 resource group. Resource-backed
+    /// definitions use C++'s native procedure semantics even when Float and
+    /// the whole `[Physical]` section are omitted and therefore default to
+    /// zero; script-built fixtures retain the additive movement-profile
+    /// fallback.
+    pub(crate) resource_backed: bool,
     /// Shared compiled script: `host_world_context()` hands clones of this
     /// `Arc` to host functions so nested script calls (Find_Func, GameCall)
     /// can execute another definition's functions mid-VM-call.
@@ -493,6 +499,7 @@ impl Definition {
         #[allow(clippy::arc_with_non_send_sync)]
         Ok(Self {
             source_path: None,
+            resource_backed: false,
             id,
             name,
             version: DEFAULT_DEFINITION_VERSION,
@@ -902,6 +909,7 @@ impl Definition {
             .unwrap_or_else(|| "Undefined".to_string());
         let mut definition =
             Definition::from_script(resource.core.id.clone(), name, resource.script.combined())?;
+        definition.resource_backed = true;
         definition.description = resource.description().map(str::to_owned);
         definition.set_clonk_names(resource.clonk_names.clone());
         // Real content gets the C++ callback arguments (no parameters;

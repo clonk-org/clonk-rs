@@ -1437,19 +1437,21 @@ impl Engine {
     /// C++ has no zero special case and no second path: `SetPhysical("Float",
     /// 0, ...)` simply makes `lLimit` zero, which clamps both dirs to a dead
     /// stop, and no DFA_FLOAT object ever takes gravity or a terminal-speed
-    /// bound. The port keeps an additive `MovementProfile` convenience for
-    /// fixture definitions that carry no Float physical at all, so the live
-    /// value alone cannot select the path: a definition that ships
-    /// `[Physical] Float` has to stay on the native path through every
-    /// runtime value a script gives it, zero included. Eke's airbike parks
-    /// itself exactly that way when its pilot dismounts
+    /// bound. The port keeps an additive `MovementProfile` convenience only
+    /// for definitions built from script rather than a C4 resource group.
+    /// Every resource-backed definition uses the native path even when
+    /// `[Physical] Float` and the whole section are omitted, because C++
+    /// defaults that field to zero. Eke's airbike parks itself exactly that
+    /// way when its pilot dismounts
     /// (EkeReloaded.c4d/Weapons.c4d/Airbike.c4d/Script.c:78-83,452-461).
     pub(crate) fn uses_native_float_bounds(&self, idx: usize, live_float: i32) -> bool {
         live_float != 0
             || self
                 .definitions
                 .get(&self.objects[idx].definition_id)
-                .is_some_and(|definition| definition.physical().float != 0)
+                .is_some_and(|definition| {
+                    definition.resource_backed || definition.physical().float != 0
+                })
     }
 
     /// The definition retained by `C4ObjectInfo::pDef`. Unlike the object's
@@ -3413,6 +3415,7 @@ impl Engine {
         definition: &mut Definition,
         core: &clonk_resources::definition::DefCore,
     ) {
+        definition.resource_backed = true;
         definition.set_name(core.name.clone().unwrap_or_else(|| "Undefined".to_string()));
         definition.set_version(core.version);
         definition.require_defs = core.require_defs.clone();

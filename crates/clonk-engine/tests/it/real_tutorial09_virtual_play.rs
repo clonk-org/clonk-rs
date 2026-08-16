@@ -707,10 +707,12 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     })?;
 
     // Correct SetPosition now refreshes InLiquid before the shore climb
-    // (C4Script.cpp:479), so the route's real fish values are [20, 20, 12,
-    // 20] after the first two sales above. Pin the resulting native wealth
-    // sequence instead of weakening this route to a bounded search.
-    for expected_wealth in [60, 80, 92, 112] {
+    // (C4Script.cpp:479). With the native zero-Float bound, FXP1 precipitation
+    // remains stationary (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310), so
+    // this route's real fish values are all 20 after the first two sales above.
+    // Pin the resulting native wealth sequence instead of weakening this route
+    // to a bounded search.
+    for expected_wealth in [60, 80, 100] {
         let fish = catch_and_deposit_another_fish(&mut player, owner, clonk, igloo)?;
         player.menu_navigate_to_caption("Sell")?;
         player.menu_enter()?;
@@ -731,7 +733,7 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         })?;
         assert_eq!(player_wealth(player.engine(), owner), expected_wealth);
     }
-    assert_eq!(player_wealth(player.engine(), owner), 112);
+    assert_eq!(player_wealth(player.engine(), owner), 100);
 
     player.wait_until(
         "Tutorial09 fulfills SCRG and reaches GameOver",

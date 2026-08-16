@@ -1,8 +1,13 @@
 use crate::{
-    Definition, Engine, EngineError, EnvironmentSettings, FloatVector2, Landscape, ObjectStatus,
-    ObjectUpdate, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, QueuedCommand,
-    Recorder, Recording, RgbColor, SpawnConfig, Vector2, CATEGORY_OBJECT,
+    ActionState, C4Fixed, Definition, Engine, EngineError, EnvironmentSettings, FixedVec2,
+    FloatVector2, Landscape, ObjectStatus, ObjectUpdate, ParticleCommand, ParticleConfig,
+    ParticleLayer, ParticleScope, QueuedCommand, Recorder, Recording, RgbColor, SpawnConfig,
+    Vector2, CATEGORY_OBJECT,
 };
+use std::fs;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static RESOURCE_FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 pub struct SnapshotScenario {
@@ -193,6 +198,69 @@ pub fn environment_cycle_recording(frames: usize) -> Result<Recording, EngineErr
     Ok(recorder.into_recording())
 }
 
+fn resource_fixture_error(stage: &str, error: impl std::fmt::Display) -> EngineError {
+    EngineError::InvalidScriptOutput {
+        definition: "FXP1".to_string(),
+        function: "resource_float_snapshot".to_string(),
+        detail: format!("{stage}: {error}"),
+    }
+}
+
+fn resource_float_definition() -> Result<Definition, EngineError> {
+    let sequence = RESOURCE_FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "clonk-engine-resource-float-{}-{sequence}",
+        std::process::id()
+    ));
+    let result = (|| {
+        fs::create_dir(&root).map_err(|error| resource_fixture_error("create fixture", error))?;
+        fs::write(
+            root.join("DefCore.txt"),
+            b"[DefCore]\nid=FXP1\nName=Wolke\n",
+        )
+        .map_err(|error| resource_fixture_error("write DefCore", error))?;
+        fs::write(
+            root.join("ActMap.txt"),
+            b"[Action]\nName=Process\nProcedure=FLOAT\nLength=15\nDelay=2\nNextAction=Process\n",
+        )
+        .map_err(|error| resource_fixture_error("write ActMap", error))?;
+        fs::write(root.join("Script.c"), b"#strict\n")
+            .map_err(|error| resource_fixture_error("write Script", error))?;
+
+        let group = clonk_resources::Group::open(&root)
+            .map_err(|error| resource_fixture_error("open resource group", error))?;
+        let resource = clonk_resources::ResourceDefinition::load(&group)
+            .map_err(|error| resource_fixture_error("load resource definition", error))?;
+        Definition::from_resource(&resource)
+    })();
+    let _ = fs::remove_dir_all(&root);
+    result
+}
+
+/// Generate a recording of a real-resource definition with no `[Physical]`
+/// section. C++'s zero-default `Physical.Float` must clamp DFA_FLOAT's raw
+/// velocity to zero (C4InfoCore.cpp:239-242; C4Object.cpp:5291-5310).
+pub fn resource_float_zero_recording(frames: usize) -> Result<Recording, EngineError> {
+    let mut engine = Engine::with_seed(24680);
+    engine.register_definition(resource_float_definition()?)?;
+    engine.spawn_object(
+        SpawnConfig::new("FXP1")
+            .with_category(CATEGORY_OBJECT)
+            .with_mobile(true)
+            .with_action(ActionState::new("Process"))
+            .with_fixed_velocity(FixedVec2::new(
+                C4Fixed::from_raw(123_456),
+                C4Fixed::from_raw(-654_321),
+            )),
+    )?;
+
+    let mut recorder = Recorder::new();
+    for _ in 0..frames {
+        recorder.record(&engine.tick()?);
+    }
+    Ok(recorder.into_recording())
+}
+
 pub const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
     SnapshotScenario {
         name: "basic_movement",
@@ -208,6 +276,11 @@ pub const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
         name: "environment_cycle",
         default_frames: 8,
         generator: environment_cycle_recording,
+    },
+    SnapshotScenario {
+        name: "resource_float_zero",
+        default_frames: 3,
+        generator: resource_float_zero_recording,
     },
 ];
 
@@ -231,5 +304,11 @@ mod tests {
     fn environment_cycle_recording_produces_expected_length() {
         let recording = environment_cycle_recording(8).expect("recording succeeds");
         assert_eq!(recording.frames().len(), 8);
+    }
+
+    #[test]
+    fn resource_float_zero_recording_produces_expected_length() {
+        let recording = resource_float_zero_recording(3).expect("recording succeeds");
+        assert_eq!(recording.frames().len(), 3);
     }
 }

@@ -3409,6 +3409,29 @@ int main()
         printf("]}");
     }
     arr_end();
+
+    // 23. DFA_FLOAT's raw C4Fixed bounds. C4DefCore's Physical member is
+    // zero-initialized when [Physical] is absent (C4InfoCore.cpp:239-242),
+    // and C4Object::ExecAction always clamps both directions to
+    // FIXED100(Physical.Float), including that zero (C4Object.cpp:5291-5310).
+    arr_begin("native_float");
+    struct FloatCase { const char *name; int32_t xdir, ydir, physical_float; };
+    const FloatCase float_cases[] = {
+        {"zero_physical", 123456, -654321, 0},
+        {"physical_100", 123456, -654321, 100},
+    };
+    for (auto s : float_cases)
+    {
+        C4Fixed xdir; xdir.val = s.xdir;
+        C4Fixed ydir; ydir.val = s.ydir;
+        const C4Fixed limit = FIXED100(s.physical_float);
+        if (ydir < -limit) ydir = -limit; if (ydir > +limit) ydir = +limit;
+        if (xdir > +limit) xdir = +limit; if (xdir < -limit) xdir = -limit;
+        sep();
+        printf("{\"name\":\"%s\",\"physical_float\":%d,\"xdir_before\":%d,\"ydir_before\":%d,\"xdir_after\":%d,\"ydir_after\":%d}",
+               s.name, s.physical_float, s.xdir, s.ydir, xdir.val, ydir.val);
+    }
+    arr_end();
     printf("\n}\n");
     return 0;
 }
