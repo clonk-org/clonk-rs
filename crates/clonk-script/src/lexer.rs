@@ -6,6 +6,8 @@ use crate::value::{
 
 // C4AUL_MAX_String (C4Aul.h): decoded string buffer bytes.
 const C4AUL_MAX_STRING: usize = 1024;
+// C4AUL_MAX_Identifier (C4Aul.h): the token buffer also bounds integer text.
+const C4AUL_MAX_IDENTIFIER: usize = 100;
 
 /// Rewindable token-source state for parser lookahead that must re-lex its
 /// tokens afterward. The string-operand length covers the one lexer side
@@ -798,7 +800,6 @@ impl<'a> Lexer<'a> {
                     end_idx = idx + consumed.len_utf8();
 
                     // Collect hex digits [0-9a-fA-F]
-                    let hex_start = end_idx;
                     while let Some(ch) = self.peek_char() {
                         if ch.is_ascii_hexdigit() {
                             let (idx, consumed, _, _) = self.bump_char().unwrap();
@@ -814,24 +815,26 @@ impl<'a> Lexer<'a> {
                     }
 
                     // `%SCNxPTR` accepts the bare `0x` spelling as zero on
-                    // the supported C++ runtime. Scan at pointer width, then
-                    // intentionally truncate to C4ValueInt's signed 32 bits.
-                    let hex_slice = &self.input[hex_start..end_idx];
+                    // the supported C++ runtime. C4Aul copies at most
+                    // C4AUL_MAX_Identifier bytes before scanning at pointer
+                    // width, then intentionally truncates to C4ValueInt's
+                    // signed 32 bits.
+                    let lexeme = &self.input[start_idx..end_idx];
+                    let lexeme = &lexeme[..lexeme.len().min(C4AUL_MAX_IDENTIFIER)];
+                    let hex_slice = &lexeme[2..];
                     if hex_slice.is_empty() {
                         return Ok(Token::new_number(0, 0, true, line, column));
                     }
-                    match u64::from_str_radix(hex_slice, 16) {
-                        Ok(value) => {
-                            return Ok(Token::new_number(value as i32, value, true, line, column));
-                        }
-                        Err(_) => {
-                            return Err(ParseError::new(
-                                format!("hexadecimal literal out of range: 0x{hex_slice}"),
-                                line,
-                                column,
-                            ))
-                        }
-                    }
+                    let value = u128::from_str_radix(hex_slice, 16)
+                        .unwrap_or(u128::MAX)
+                        .min(usize::MAX as u128) as usize;
+                    return Ok(Token::new_number(
+                        value as i32,
+                        value as u64,
+                        true,
+                        line,
+                        column,
+                    ));
                 }
             }
         }
@@ -889,24 +892,26 @@ impl<'a> Lexer<'a> {
             ));
         }
 
+        // C4Aul scans the bounded token buffer with `%SCNdPTR`. Decimal
+        // overflow therefore saturates at pointer-width INT_MAX instead of
+        // becoming a lexer error (C4AulParse.cpp:704-743).
         let slice = &self.input[start_idx..end_idx];
+        let slice = &slice[..slice.len().min(C4AUL_MAX_IDENTIFIER)];
         if matches!(self.peek_char(), Some('(' | ':')) {
             return self.lex_stupid_func_label(slice.to_owned(), line, column);
         }
-        match slice.parse::<i64>() {
-            Ok(value) => Ok(Token::new_number(
-                value as i32,
-                value as u64,
-                false,
-                line,
-                column,
-            )),
-            Err(_) => Err(ParseError::new(
-                format!("integer literal out of range: {slice}"),
-                line,
-                column,
-            )),
-        }
+        let magnitude = slice
+            .parse::<u128>()
+            .unwrap_or(u128::MAX)
+            .min(usize::MAX as u128) as usize;
+        let value = magnitude.min(isize::MAX as usize) as isize;
+        Ok(Token::new_number(
+            value as i32,
+            magnitude as u64,
+            false,
+            line,
+            column,
+        ))
     }
 
     fn lex_string(
@@ -1518,14 +1523,20 @@ mod tests {
 
     #[test]
     fn c4_integer_literal_edges_wrap_hex_and_decimal_to_i32() {
-        let kinds = lex_all("0xffffffff 4294967295 0xa0c0ff")
-            .expect("pointer-width integer scans truncate to C4ValueInt")
-            .into_iter()
-            .map(|token| token.kind)
-            .collect::<Vec<_>>();
+        // C4AulParse.cpp:704-743 scans through pointer width, including
+        // overflow, and C4AulParse.cpp:3409 narrows ATT_INT to int32.
+        let kinds = lex_all(
+            "0xffffffff 4294967295 0xffffffffffffffffffff 99999999999999999999999 0xa0c0ff",
+        )
+        .expect("pointer-width integer scans truncate to C4ValueInt")
+        .into_iter()
+        .map(|token| token.kind)
+        .collect::<Vec<_>>();
         assert_eq!(
             kinds,
             vec![
+                TokenKind::Number(-1),
+                TokenKind::Number(-1),
                 TokenKind::Number(-1),
                 TokenKind::Number(-1),
                 TokenKind::Number(0xa0c0ff),
