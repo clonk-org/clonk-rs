@@ -2070,6 +2070,10 @@ pub struct Object {
     #[doc(hidden)]
     pub commands: CommandStack,
     pub(crate) pending_action_events: VecDeque<ActionTransitionEvent>,
+    /// Ordered action-slot changes awaiting client-local ActMap-sound
+    /// reconciliation. This is runtime presentation state, not synchronized
+    /// or save-persisted object state.
+    pub(crate) pending_action_sound_events: VecDeque<ActionSoundTransition>,
     /// ActMap `Sound=` of the numeric action slot this object currently holds
     /// a looping `StartSoundEffect` instance for (C4Object.cpp:4186-4190).
     /// Client-local presentation state like the rest of C4SoundSystem: it is
@@ -2137,6 +2141,12 @@ pub(crate) enum ActionTransitionKind {
 pub(crate) struct ActionTransitionEvent {
     pub(crate) previous_action: ActionState,
     pub(crate) kind: ActionTransitionKind,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActionSoundTransition {
+    pub(crate) previous_action: ActionState,
+    pub(crate) current_action: ActionState,
 }
 
 #[derive(Debug)]
@@ -2274,6 +2284,7 @@ impl Object {
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
+            pending_action_sound_events: VecDeque::new(),
             active_action_sound: None,
             swim_exit_this_frame: false,
             material_contents: Vec::new(),
@@ -3749,6 +3760,14 @@ impl Object {
         previous: ActionState,
         kind: ActionTransitionKind,
     ) {
+        let current = self.state.action.clone();
+        if previous.name != current.name || previous.act_map_index != current.act_map_index {
+            self.pending_action_sound_events
+                .push_back(ActionSoundTransition {
+                    previous_action: previous.clone(),
+                    current_action: current,
+                });
+        }
         self.pending_action_events.push_back(ActionTransitionEvent {
             previous_action: previous,
             kind,
