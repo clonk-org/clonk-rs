@@ -2031,7 +2031,9 @@ impl GameApp {
         let mut app = Self::new(width, height, audio_options, paths, runtime)?;
         // Capture and compatibility entry points suppress the developer HUD
         // before their first update or render, so it cannot enter evidence.
-        app.debug_hud = debug_hud;
+        // Keep the build gate here as well as in `run`: a release binary must
+        // stay invisible even if a future caller passes an invalid request.
+        app.debug_hud = debug_hud && cfg!(debug_assertions);
         Ok(app)
     }
 
