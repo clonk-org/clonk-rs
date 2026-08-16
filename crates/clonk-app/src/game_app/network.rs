@@ -7893,6 +7893,12 @@ impl GameApp {
             // scenario, so it reaches `Quit()` and the process ends. Leaving
             // the round paused behind an undrawable dialog instead would wedge
             // it with no input able to dismiss it.
+            if let Some(network) = self.network.as_ref() {
+                let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+                if let Err(error) = network.drain_league_record_stream(now) {
+                    tracing::error!(%error, "failed to drain the league record stream before quit");
+                }
+            }
             let title = self
                 .active_scenario
                 .as_ref()

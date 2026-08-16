@@ -924,6 +924,10 @@ enum LeagueRecordRuntimeCommand {
         now: i64,
         completion: Sender<std::result::Result<(), String>>,
     },
+    Drain {
+        now: i64,
+        completion: Sender<std::result::Result<(), String>>,
+    },
     Shutdown {
         completion: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
     },
@@ -1014,6 +1018,7 @@ async fn run_league_record_runtime(
     let mut shutdown_completion: Option<
         tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
     > = None;
+    let mut drain_completion: Option<Sender<std::result::Result<(), String>>> = None;
     let mut last_now = 0;
 
     loop {
@@ -1033,7 +1038,7 @@ async fn run_league_record_runtime(
                 if let Err(error) = stream.acknowledge_upload(success) {
                     tracing::error!(%error, "league record upload acknowledgement failed");
                 }
-                let shutdown_result = if shutdown_completion.is_some() {
+                let drain_result = if shutdown_completion.is_some() || drain_completion.is_some() {
                     if !success {
                         Some(Err(upload_error.unwrap_or_else(|| {
                             "league record upload failed during shutdown".to_string()
@@ -1055,9 +1060,12 @@ async fn run_league_record_runtime(
                     None
                 };
                 publish_league_record_stream_status(&status, Some(&*stream));
-                if let Some(result) = shutdown_result {
+                if let Some(result) = drain_result {
                     if let Some(completion) = shutdown_completion.take() {
                         complete_league_record_runtime_shutdown(&status, completion, result);
+                    } else if let Some(completion) = drain_completion.take() {
+                        publish_league_record_stream_status(&status, None);
+                        let _ = completion.send(result);
                     }
                     break;
                 }
@@ -1125,6 +1133,39 @@ async fn run_league_record_runtime(
                         }
                         publish_league_record_stream_status(&status, stream.as_ref());
                         let _ = completion.send(result);
+                    }
+                    LeagueRecordRuntimeCommand::Drain { now, completion } => {
+                        last_now = now;
+                        let result = match stream.as_mut() {
+                            Some(stream) => stream
+                                .finish()
+                                .map_err(|error| error.to_string())
+                                .and_then(|()| {
+                                    dispatch_league_record_upload(
+                                        stream,
+                                        now,
+                                        &transport,
+                                        &config,
+                                        &upload_result_tx,
+                                    )
+                                    .map_err(|error| error.to_string())
+                                }),
+                            None => Ok(()),
+                        };
+                        if result.is_ok() {
+                            finish_requested = true;
+                        }
+                        if let Err(error) = result {
+                            let _ = completion.send(Err(error));
+                        } else if stream
+                            .as_ref()
+                            .is_some_and(clonk_network::LeagueRecordStream::is_streaming)
+                        {
+                            drain_completion = Some(completion);
+                        } else {
+                            let _ = completion.send(Ok(()));
+                        }
+                        publish_league_record_stream_status(&status, stream.as_ref());
                     }
                     LeagueRecordRuntimeCommand::Shutdown { completion } => {
                         let needs_drain = finish_requested
@@ -4600,6 +4641,28 @@ impl NetworkManager {
         completed
             .recv()
             .map_err(|_| anyhow!("league record runtime ended before finishing"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    /// Finish and synchronously drain a host's league record stream before a
+    /// console round quits. The graphical game-over dialog remains
+    /// asynchronous; the console arm has no dialog loop to keep the network
+    /// worker alive while its terminal upload is acknowledged.
+    pub fn drain_league_record_stream(&self, now: i64) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Ok(());
+        }
+        let Some(runtime) = self.league_record_runtime.as_ref() else {
+            return Ok(());
+        };
+        let (completion, completed) = mpsc::channel();
+        runtime
+            .command_tx
+            .send(LeagueRecordRuntimeCommand::Drain { now, completion })
+            .map_err(|_| anyhow!("league record runtime is not accepting a drain"))?;
+        completed
+            .recv_timeout(clonk_network::LEAGUE_HTTP_TIMEOUT + Duration::from_secs(1))
+            .map_err(|error| anyhow!("league record stream drain did not complete: {error}"))?
             .map_err(|message| anyhow!(message))
     }
 
