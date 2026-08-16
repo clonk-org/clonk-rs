@@ -170,6 +170,11 @@ fn debug_hud_launch_classification_is_fail_closed() {
         &["clonk-app", "--dump-frame", "frame.png"],
         &["clonk-app", "--dump-menu-frame", "frame.png"],
         &["clonk-app", "--headless"],
+        &[
+            "clonk-app",
+            "--headed-surface-smoke",
+            "headed-surface-report.json",
+        ],
     ];
     for arguments in parity_launches {
         let cli = Cli::try_parse_from(*arguments).test_value();
