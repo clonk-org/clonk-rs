@@ -587,6 +587,7 @@ impl Engine {
             object_numbers: object_numbers.clone(),
         };
         let mut restored = Vec::with_capacity(sources.len());
+        let mut used_source_filenames = HashSet::with_capacity(sources.len());
         for source in sources {
             let filename = legacy_basename(source.info.filename.as_bytes());
             if !source.info.is_script_player()
@@ -595,11 +596,22 @@ impl Engine {
             {
                 continue;
             }
+            let source_filename = external_player_paths
+                .get(&source.info.id)
+                .map(|path| clonk_resources::path_to_legacy_bytes(path))
+                .unwrap_or_else(|| source.info.filename.as_bytes().to_vec());
             let player_count = i32::try_from(self.players.len()).unwrap_or(i32::MAX);
             if self
                 .max_players()
                 .is_some_and(|maximum| player_count.saturating_add(1) > maximum)
             {
+                continue;
+            }
+            // C4PlayerList::Join checks FileInUse before allocating its
+            // provisional C4Player (C4PlayerList.cpp:288-303). Keep the
+            // source ledger separate from the runtime number ledger so a
+            // duplicate filename cannot reach validation/removal.
+            if !source_filename.is_empty() && !used_source_filenames.insert(source_filename) {
                 continue;
             }
             // C4PlayerList::Join appends a default player before Init opens
@@ -1144,6 +1156,62 @@ mod tests {
         );
         assert!(engine.player(2).is_some());
         assert!(engine.player(3).is_none());
+        assert!(engine.snapshot().round_results.players.is_empty());
+    }
+
+    #[test]
+    fn duplicate_source_filename_is_skipped_before_provisional_join() {
+        // C4PlayerList::Join rejects FileInUse before allocating C4Player, so
+        // the duplicate row cannot reach runtime-number validation/removal
+        // (C4PlayerList.cpp:288-303).
+        let fixture = tempdir().expect("save tempdir");
+        let scenario = fixture.path().join("Scenario.c4s");
+        std::fs::create_dir(&scenario).expect("create scenario group");
+        std::fs::write(
+            scenario.join("Game.txt"),
+            "[Player7]\nStatus=1\nIndex=2\nID=7\n\n[Player8]\nStatus=1\nIndex=2\nID=8\n",
+        )
+        .expect("write duplicate runtime rows");
+        let profile = scenario.join("Shared.c4p");
+        std::fs::create_dir(&profile).expect("create player profile");
+        std::fs::write(profile.join("Player.txt"), "[Player]\nName=Shared\n")
+            .expect("write player profile");
+        let source = |id| RuntimeJoinPlayerSource {
+            client_id: 0,
+            at_client_name: "Local".to_string(),
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id,
+                filename: crate::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let mut engine = Engine::new();
+        let original_gravity = engine.physics().gravity;
+        engine
+            .load_scenario_script_with_convention(
+                "RemovePlayer.c",
+                "#strict 3\nfunc RemovePlayer(int player, int team) { SetGravity(77); }",
+                true,
+            )
+            .expect("load removal probe");
+
+        let restored = engine
+            .restore_runtime_join_players_from_path(&scenario, &[source(7), source(8)])
+            .expect("duplicate source filename is a pre-join skip");
+
+        assert_eq!(
+            restored,
+            vec![RestoredRuntimeJoinPlayer {
+                client_id: 0,
+                player_info_id: 7,
+                number: 2,
+            }]
+        );
+        assert!(engine.player(2).is_some());
+        assert!(engine.player(0).is_none());
+        assert_eq!(engine.physics().gravity, original_gravity);
         assert!(engine.snapshot().round_results.players.is_empty());
     }
 

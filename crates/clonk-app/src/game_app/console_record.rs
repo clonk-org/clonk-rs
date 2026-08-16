@@ -1928,9 +1928,8 @@ impl GameApp {
         else {
             return;
         };
-        let prepared = open_group_path_for_folder_map(path)
-            .map_err(|error| error.to_string())
-            .and_then(|group| {
+        let prepared = match open_group_path_for_folder_map(path) {
+            Ok(group) => (|| {
                 let local_file = packed_group_bytes(path, self.process_group_maker.as_bytes())?;
                 let stream_chunk = if league_streaming {
                     let packed = if has_player_group_extension(&target) {
@@ -1950,7 +1949,16 @@ impl GameApp {
                     None
                 };
                 Ok((local_file, stream_chunk))
-            });
+            })(),
+            Err(_error) if !league_streaming && path.is_file() => {
+                // C4Record::AddFile copies a local non-streaming source as-is;
+                // Players.Join then reports a malformed/non-group player file.
+                // Keep those opaque bytes in the replay (C4PlayerInfo.cpp:1594-1603).
+                packed_group_bytes(path, self.process_group_maker.as_bytes())
+                    .map(|local_file| (local_file, None))
+            }
+            Err(error) => Err(error.to_string()),
+        };
         let (local_file, stream_chunk) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
