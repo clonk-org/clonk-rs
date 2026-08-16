@@ -2403,6 +2403,16 @@ impl Object {
         }
     }
 
+    pub(crate) fn refresh_shape_from_template(
+        &mut self,
+        template: ObjectShapeTemplate,
+        previous_construction: i32,
+        previous_rect: Option<DefinitionRect>,
+    ) {
+        self.shape_template = template;
+        self.refresh_shape_after_state_change(previous_construction, previous_rect, false);
+    }
+
     pub(crate) fn refresh_shape_geometry(&mut self) {
         if self.shape_template.line != 0 {
             // Line shape independent (C4Object.cpp:322-324).

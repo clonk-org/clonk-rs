@@ -2491,7 +2491,6 @@ impl Engine {
                 object.state.color = color;
             }
         }
-        object.shape_template = template;
         if definition.line() == 0 {
             object.state.shape_override = None;
         }
@@ -2505,7 +2504,7 @@ impl Engine {
         }
         // UpdateFace(true) rebuilds against the new template but preserves
         // fOwnVertices. Line definitions keep their independent live shape.
-        object.refresh_shape_after_state_change(previous_construction, previous_rect, false);
+        object.refresh_shape_from_template(template, previous_construction, previous_rect);
         object.ensure_material_capacity(material_capacity);
         // ChangeDef finishes with SetOCF before returning to script. Keep the
         // raw helper callback-visible even in folds that do not own an
