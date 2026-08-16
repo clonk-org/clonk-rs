@@ -822,6 +822,13 @@ pub enum HostCommand {
         client_ids: Vec<ClientId>,
         reset_performance: bool,
     },
+    /// Runs the game-thread `C4Network2::Execute` seam before control
+    /// preparation. The host uses it to retire a dynamic whose control tick
+    /// has become stale; the completion orders that retirement before the
+    /// caller proceeds into `Control.Prepare`.
+    Execute {
+        completion: oneshot::Sender<bool>,
+    },
     StatusReachedCurrent,
     StatusReached {
         status: NetworkStatus,
@@ -1118,6 +1125,19 @@ impl HostHandle {
             })
             .await
             .map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Mirrors the per-game `C4Network2::Execute` call before
+    /// `C4GameControl::Prepare`; an outdated runtime dynamic is removed on
+    /// the first execution after `ControlTick` passes its `iDynamicTick`
+    /// (src/C4Network2.cpp:679-696; src/C4Game.cpp:776-782).
+    pub async fn execute(&self) -> Result<bool, HostError> {
+        let (completion, executed) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::Execute { completion })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        executed.await.map_err(|_| HostError::HostLoopGone)
     }
 
     pub fn control_send_time_ms(&self, activated_client_ids: &[ClientId]) -> i32 {

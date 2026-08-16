@@ -13067,6 +13067,45 @@ fn runtime_network_role_requires_consistent_manager_identity_and_mode() {
 }
 
 #[test]
+fn game_execution_retires_runtime_dynamic_after_its_control_tick() {
+    // C4Network2::Execute removes a dynamic once ControlTick exceeds
+    // iDynamicTick (src/C4Network2.cpp:679-696), and C4Game::Execute calls
+    // it before Control.Prepare (src/C4Game.cpp:776-782).
+    let mut app = new_state_only_lightweight_running_sandbox_app();
+    configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
+    app.host_join_snapshot = Some(
+        clonk_network::HostConfig::default()
+            .initial_join_snapshot
+            .test_value(),
+    );
+    app.network_control_clock = Some(NetworkControlClock::new(0, 1));
+
+    app.execute_network_before_control_prepare();
+    assert_eq!(
+        app.host_join_snapshot
+            .as_ref()
+            .test_value()
+            .dynamic
+            .resource_type,
+        clonk_network::HostResourceType::Dynamic as u8,
+        "the dynamic remains available at its exact control tick"
+    );
+
+    app.network_control_clock
+        .as_mut()
+        .test_value()
+        .complete_control_frame();
+    app.execute_network_before_control_prepare();
+    let snapshot = app.host_join_snapshot.as_ref().test_value();
+    assert_eq!(
+        snapshot.dynamic.resource_type,
+        clonk_engine::NETWORK_RESOURCE_TYPE_NULL,
+        "the first game execution after the tick crosses iDynamicTick removes it"
+    );
+    assert_eq!(snapshot.dynamic_tick, -1);
+}
+
+#[test]
 fn saved_game_reapplies_current_player_info_identity_and_preferences() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;

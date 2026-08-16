@@ -3127,6 +3127,9 @@ enum NetworkCommand {
         join_allowed: bool,
         completion: Sender<std::result::Result<(), String>>,
     },
+    Execute {
+        completion: Sender<std::result::Result<bool, String>>,
+    },
     StatusReachedCurrent,
     StatusReached {
         status: NetworkStatus,
@@ -4179,6 +4182,30 @@ impl NetworkManager {
         removed
             .recv()
             .map_err(|_| anyhow!("network worker ended before removing the runtime dynamic"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    /// Runs the host's per-game `C4Network2::Execute` seam before control
+    /// preparation. The worker owns the authoritative control tick and
+    /// removes a runtime dynamic only after that tick passes its dynamic tick
+    /// (src/C4Network2.cpp:679-696; src/C4Game.cpp:776-782).
+    pub fn execute(&self) -> Result<bool> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may execute the game network seam"
+            ));
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        if self.worker.is_none() {
+            return Ok(false);
+        }
+        let (completion, executed) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::Execute { completion })
+            .map_err(|_| anyhow!("network worker is not accepting game execution"))?;
+        executed
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before game execution"))?
             .map_err(|message| anyhow!(message))
     }
 
@@ -6574,6 +6601,20 @@ async fn run_host_worker_with_voice_enabled(
                         .map_err(|error| error.to_string());
                         let _ = completion.send(result);
                     }
+                    NetworkCommand::Execute { completion } => {
+                        let result = await_host_operation_while_forwarding_events(
+                            host.execute(),
+                            &mut host_events,
+                            local_owner,
+                            &event_tx,
+                            &telemetry_tx,
+                            &mut player_info_echo_provenance,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
                     NetworkCommand::FailPendingJoinData { reason, completion } => {
                         let result = await_host_operation_while_forwarding_events(
                             host.fail_pending_join_data(reason),
@@ -7882,6 +7923,9 @@ async fn run_client_worker_with_voice_enabled(
                         NetworkCommand::RemoveRuntimeDynamic { completion } => {
                             let _ = completion.send(Err(unavailable));
                         }
+                        NetworkCommand::Execute { completion } => {
+                            let _ = completion.send(Err(unavailable));
+                        }
                         NetworkCommand::FailPendingJoinData { completion, .. } => {
                             let _ = completion.send(Err(unavailable));
                         }
@@ -8021,6 +8065,9 @@ async fn run_client_worker_with_voice_enabled(
                         let _ = completion.send(Err(
                             "client attempted to remove a host runtime dynamic".to_string(),
                         ));
+                    }
+                    NetworkCommand::Execute { completion } => {
+                        let _ = completion.send(Ok(false));
                     }
                     NetworkCommand::FailPendingJoinData { completion, .. } => {
                         let _ = completion.send(Err(
