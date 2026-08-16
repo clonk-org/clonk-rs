@@ -1221,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_resolves_raw_draw_dir_and_flip_dir_rows() {
+    fn renderer_resolves_raw_draw_direction_rows() {
         // C4Object::UpdateFlipDir keeps raw Action.Dir and computes
         // DrawDir=2*FlipDir-1-Dir for the mirrored half
         // (C4Object.cpp:404-430).
@@ -1230,15 +1230,11 @@ mod tests {
             flip_dir: Some(7),
             ..DefinitionActionGraphics::default()
         };
-        for (raw, expected_row, expected_mirror) in [(13, 0, true), (7, 6, true)] {
+        for (raw, expected_row) in [(13, 0), (7, 6)] {
             let direction = Direction::from_script_value(raw);
             assert_eq!(
                 GraphicsSystem::resolve_draw_direction(&banner, direction),
                 expected_row
-            );
-            assert_eq!(
-                GraphicsSystem::resolve_overlay_action_flip(&banner, direction),
-                expected_mirror
             );
         }
 
@@ -1248,9 +1244,6 @@ mod tests {
         };
         let direction = Direction::from_script_value(4);
         assert_eq!(GraphicsSystem::resolve_draw_direction(&flag, direction), 4);
-        assert!(!GraphicsSystem::resolve_overlay_action_flip(
-            &flag, direction
-        ));
 
         let malformed = DefinitionActionGraphics {
             flip_dir: Some(-2),
@@ -1261,10 +1254,6 @@ mod tests {
             -5,
             "negative FlipDir remains truthy and uses the signed C++ formula"
         );
-        assert!(GraphicsSystem::resolve_overlay_action_flip(
-            &malformed,
-            Direction::from_script_value(0),
-        ));
     }
 
     #[test]
@@ -8093,6 +8082,118 @@ mod tests {
             Some(background),
             "the source scale must not enlarge the destination facet"
         );
+    }
+
+    #[test]
+    fn action_and_base_overlays_use_row_zero_and_only_their_own_transform() {
+        // C4GraphicsOverlay::Draw updates MODE_Action from the overlay source
+        // action, then blits with iPhaseY=0 and the overlay's own
+        // C4DrawTransform; it never uses the host's DrawDir or transform
+        // (src/C4DefGraphics.cpp:808-826). MODE_ExtraGraphics is a separate
+        // host-redraw path (src/C4DefGraphics.cpp:794-806).
+        let background = Color::opaque(10, 10, 10);
+        let red = Color::opaque(220, 40, 40);
+        let blue = Color::opaque(40, 80, 220);
+        let green = Color::opaque(40, 220, 80);
+        let mut pixels = vec![background.r, background.g, background.b, background.a];
+        pixels = pixels.repeat(4 * 28);
+        for y in 0..4 {
+            for x in 0..4 {
+                let color = if x < 2 { red } else { blue };
+                let offset = (y * 4 + x) * 4;
+                pixels[offset..offset + 4].copy_from_slice(&[color.r, color.g, color.b, color.a]);
+            }
+        }
+        for y in 24..28 {
+            for x in 0..4 {
+                let offset = (y * 4 + x) * 4;
+                pixels[offset..offset + 4].copy_from_slice(&[green.r, green.g, green.b, green.a]);
+            }
+        }
+        let sprite = DefinitionSprite {
+            actions: HashMap::from([(
+                "Pose".to_string(),
+                DefinitionActionGraphics {
+                    facet: Some(clonk_engine::DefinitionActionFacet {
+                        x: 0,
+                        y: 0,
+                        width: 4,
+                        height: 4,
+                        target_x: 0,
+                        target_y: 0,
+                    }),
+                    directions: 14,
+                    flip_dir: Some(7),
+                    length: Some(1),
+                    ..DefinitionActionGraphics::default()
+                },
+            )]),
+            shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+            ..test_sprite(ImageData::new(4, 28, pixels))
+        };
+        let own_transform = DrawTransform::from_components(-1.0, 1.0, 0.0, 0.0);
+
+        let render = |mode, direction| {
+            let mut object = make_snapshot().objects.remove(0);
+            object.crew_member = false;
+            object.position = Vector2::new(8, 8);
+            object.direction = Direction::from_script_value(direction);
+            object.draw_transform = Some(DrawTransform::from_components(1.0, 1.0, 3.0, 0.0));
+            object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, mode)
+                .with_definition(Some("Overlay".to_string()))
+                .with_action(Some("Pose".to_string()))
+                .with_transform(Some(own_transform))];
+            let mut graphics = test_graphics_with(
+                16,
+                16,
+                16,
+                "overlay row zero",
+                Arc::new(HashMap::from([(
+                    sprite_map_key("Overlay", None),
+                    sprite.clone(),
+                )])),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_point_filtering(true);
+            graphics.surface_mut().fill(background);
+            graphics.draw_object_overlays(
+                &object,
+                &[],
+                &[],
+                OWNER_NONE,
+                None,
+                8.0,
+                8.0,
+                1.0,
+                0.0,
+                None,
+                None,
+            );
+            graphics.surface().clone()
+        };
+
+        for mode in [GraphicsOverlayMode::Action, GraphicsOverlayMode::Base] {
+            let right_facing = render(mode, 0);
+            let left_facing = render(mode, 7);
+            for (label, surface) in [("right-facing", right_facing), ("left-facing", left_facing)] {
+                assert_eq!(
+                    colour_bbox(&surface, blue),
+                    Some((6, 6, 7, 9)),
+                    "{mode:?} {label}"
+                );
+                assert_eq!(
+                    colour_bbox(&surface, red),
+                    Some((8, 6, 9, 9)),
+                    "{mode:?} {label}"
+                );
+                assert_eq!(
+                    colour_bbox(&surface, green),
+                    None,
+                    "{mode:?} {label} must use row 0"
+                );
+            }
+        }
     }
 
     #[test]
