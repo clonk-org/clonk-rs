@@ -1834,6 +1834,107 @@ mod tests {
     }
 
     #[test]
+    fn non_rotateable_face_keeps_raw_rotation_untransformed() {
+        // C4Object.cpp:477 selects the straight blit when Def->Rotateable is
+        // false, even if a scripted object retains a nonzero raw r.
+        let red = Color::opaque(220, 40, 20);
+        let sprite = DefinitionSprite {
+            shape: Some(DefinitionRect::new(-2, 0, 4, 1)),
+            ..test_sprite(ImageData::new(4, 1, [red.r, red.g, red.b, red.a].repeat(4)))
+        };
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(8, 8);
+        object.rotation = 90;
+        object.crew_member = false;
+
+        let mut graphics = test_graphics_with(
+            20,
+            20,
+            20,
+            "non-rotateable raw rotation",
+            Arc::new(HashMap::from([(
+                sprite_map_key("TestObject", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let background = Color::opaque(0, 0, 0);
+        graphics.surface_mut().fill(background);
+        graphics.draw_objects(
+            &[object],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(graphics.surface().get_pixel(6, 8), Some(red));
+        assert_eq!(graphics.surface().get_pixel(9, 8), Some(red));
+        assert_eq!(graphics.surface().get_pixel(7, 6), Some(background));
+    }
+
+    #[test]
+    fn rotateable_face_at_raw_three_sixty_uses_transformed_blit() {
+        // C4Object.cpp:477 compares the raw r, so r == 360 still selects
+        // DrawXT for a Rotateable definition instead of the straight blit.
+        let red = Color::opaque(220, 40, 20);
+        let blue = Color::opaque(20, 40, 220);
+        let image = ImageData::new(
+            2,
+            1,
+            [red.r, red.g, red.b, red.a, blue.r, blue.g, blue.b, blue.a].to_vec(),
+        );
+        let sprite = DefinitionSprite {
+            shape: Some(DefinitionRect::new(-1, 0, 2, 1)),
+            rotateable: 1,
+            ..test_sprite(image)
+        };
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(8, 8);
+        object.rotation = 360;
+        object.crew_member = false;
+
+        let mut graphics = test_graphics_with(
+            20,
+            20,
+            20,
+            "raw three-sixty rotation",
+            Arc::new(HashMap::from([(
+                sprite_map_key("TestObject", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        // A fractional viewport makes the transformed path's linear sample
+        // observably different from the exact straight-path samples.
+        graphics.viewport_x = 0.25;
+        let background = Color::opaque(0, 0, 0);
+        graphics.surface_mut().fill(background);
+        graphics.draw_objects(
+            &[object],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        let first = graphics.surface().get_pixel(7, 8);
+        assert_ne!(first, Some(red));
+        assert_ne!(first, Some(blue));
+        assert_ne!(first, Some(background));
+    }
+
+    #[test]
     fn overlay_draw_transform_uses_its_full_local_matrix() {
         let sprite = DefinitionSprite {
             shape: Some(DefinitionRect::new(-4, -1, 9, 3)),

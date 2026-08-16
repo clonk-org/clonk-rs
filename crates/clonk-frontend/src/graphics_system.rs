@@ -7831,6 +7831,10 @@ impl GraphicsSystem {
         }
         if let Some(bitmap_sprite) = sprite {
             let definition_sprite = geometry_sprite.unwrap_or(bitmap_sprite);
+            let rotateable = self.object_is_rotateable(object, definition_sprite);
+            // C4Object.cpp:477 tests Def->Rotateable and the raw stored r,
+            // not the normalized angle used by the rotation matrix.
+            let face_transformed = base_transform.is_some() || (rotateable && object.rotation != 0);
             // The face blit consumes the resolved origin (cox/coy are measured
             // from cotx/coty), so point the draw origin at it for exactly that
             // call. It is restored before the overlay walk, which resolves its
@@ -7847,6 +7851,7 @@ impl GraphicsSystem {
                 owner_color,
                 zoom,
                 rotation_degrees,
+                face_transformed,
                 base_transform,
                 SpriteBlitState::for_object(object)
                     .with_renderer_config(self.advanced_renderer_config),
@@ -8083,6 +8088,16 @@ impl GraphicsSystem {
         scaled
     }
 
+    fn object_is_rotateable(
+        &self,
+        object: &ObjectSnapshot,
+        definition_sprite: &DefinitionSprite,
+    ) -> bool {
+        definition_sprite.rotateable != 0
+            || self.rotateable_definitions.contains(&object.definition_id)
+            || object.ocf & clonk_engine::ocf::ROTATE != 0
+    }
+
     /// Reconstruct the live C4Shape rect used for presentation. Shape::Rotate
     /// replaces the Con-scaled rect with its legacy radius square whenever
     /// the definition is Rotateable and the raw saved angle is nonzero
@@ -8102,9 +8117,7 @@ impl GraphicsSystem {
         }
         // UpdateShape tests raw r, so a loaded r=360 still enlarges the
         // rectangle even though its vertices retain their orientation.
-        let rotateable = sprite.rotateable != 0
-            || self.rotateable_definitions.contains(&object.definition_id)
-            || object.ocf & clonk_engine::ocf::ROTATE != 0;
+        let rotateable = self.object_is_rotateable(object, sprite);
         if sprite.line == 0 && rotateable && object.rotation != 0 {
             let radius = (((i64::from(shape.x) * i64::from(shape.x)
                 + i64::from(shape.y) * i64::from(shape.y)) as f64)
@@ -8270,6 +8283,7 @@ impl GraphicsSystem {
         owner_color: Option<u32>,
         zoom: f32,
         rotation_degrees: f32,
+        transformed: bool,
         transform: Option<DrawTransform>,
         blit: SpriteBlitState,
         gamma: Option<&clonk_graphics::GammaRamp>,
@@ -8292,6 +8306,7 @@ impl GraphicsSystem {
                 owner_color,
                 zoom,
                 rotation_degrees,
+                transformed,
                 transform,
                 blit,
                 gamma,
@@ -8314,6 +8329,7 @@ impl GraphicsSystem {
                 owner_color,
                 zoom,
                 rotation_degrees,
+                transformed,
                 transform,
                 blit,
                 gamma,
@@ -8394,7 +8410,7 @@ impl GraphicsSystem {
         } else {
             (cox, coy, inst_shape.width as f32, inst_shape.height as f32)
         };
-        self.blit_face(
+        self.blit_face_with_transformed(
             bitmap_sprite,
             source,
             dest,
@@ -8405,6 +8421,7 @@ impl GraphicsSystem {
             owner_color,
             zoom,
             rotation_degrees,
+            transformed,
             transform,
             blit,
             gamma,
@@ -8430,6 +8447,7 @@ impl GraphicsSystem {
         owner_color: Option<u32>,
         zoom: f32,
         rotation_degrees: f32,
+        transformed: bool,
         transform: Option<DrawTransform>,
         blit: SpriteBlitState,
         gamma: Option<&clonk_graphics::GammaRamp>,
@@ -8458,7 +8476,7 @@ impl GraphicsSystem {
             fhgt = (shgt * con / FULL_CON).min(shgt);
         }
 
-        self.blit_face(
+        self.blit_face_with_transformed(
             bitmap_sprite,
             SourceRect::new(fx, fy, fwdt, fhgt),
             (tx, ty, twdt, thgt),
@@ -8469,6 +8487,7 @@ impl GraphicsSystem {
             owner_color,
             zoom,
             rotation_degrees,
+            transformed,
             transform,
             blit,
             gamma,
@@ -8498,6 +8517,37 @@ impl GraphicsSystem {
         blit: SpriteBlitState,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
+        let transformed = transform.is_some() || rotation_degrees.abs() > f32::EPSILON;
+        self.blit_face_with_transformed(
+            sprite,
+            source,
+            dest,
+            shape_center,
+            owner_color,
+            zoom,
+            rotation_degrees,
+            transformed,
+            transform,
+            blit,
+            gamma,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn blit_face_with_transformed(
+        &mut self,
+        sprite: &DefinitionSprite,
+        source: SourceRect,
+        dest: (f32, f32, f32, f32),
+        shape_center: (f32, f32),
+        owner_color: Option<u32>,
+        zoom: f32,
+        rotation_degrees: f32,
+        transformed: bool,
+        transform: Option<DrawTransform>,
+        blit: SpriteBlitState,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
         let (dest_x, dest_y, mut dest_w, mut dest_h) = dest;
         if dest_w <= 0.0 || dest_h <= 0.0 || source.width <= 0 || source.height <= 0 {
             return;
@@ -8510,7 +8560,6 @@ impl GraphicsSystem {
         if !source.is_valid() {
             return;
         }
-        let transformed = transform.is_some() || rotation_degrees.abs() > f32::EPSILON;
         let (mut source, sampling) =
             self.runtime_sprite_blit(source, (dest_w * zoom, dest_h * zoom), transformed);
         let image_w = sprite.image.width() as f32;
@@ -9049,6 +9098,9 @@ impl GraphicsSystem {
                     owner_color,
                     zoom,
                     rotation_degrees,
+                    target.draw_transform.is_some()
+                        || (self.object_is_rotateable(target, geometry_sprite)
+                            && target.rotation != 0),
                     target.draw_transform,
                     blit,
                     gamma,
@@ -9218,6 +9270,8 @@ impl GraphicsSystem {
             owner_color,
             zoom,
             rotation_degrees,
+            transform.is_some()
+                || (self.object_is_rotateable(object, definition_sprite) && object.rotation != 0),
             transform,
             blit,
             gamma,
