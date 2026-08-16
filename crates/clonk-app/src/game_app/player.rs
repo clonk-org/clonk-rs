@@ -504,8 +504,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         let mut event = event;
         let cursor_menu_text_progressing = (self.object_menu.is_none()
-            && !self.ingame_menu_belongs_to(owner)
-            && self.save_browser.is_none())
+            && !self.ingame_menu_belongs_to(owner))
         .then(|| {
             self.engine
                 .cursor_object_menu(owner)
@@ -518,7 +517,6 @@ impl GameApp {
             }
         }
         let local_main_menu_control = self.ingame_menu_belongs_to(owner)
-            || (owner == self.local_owner && self.save_browser.is_some())
             || matches!(
                 event,
                 ControlEvent::Command {
@@ -544,8 +542,7 @@ impl GameApp {
                 return Ok(());
             }
             if self.ingame_menu_belongs_to(owner)
-                || (owner == self.local_owner
-                    && (self.object_menu.is_some() || self.save_browser.is_some()))
+                || (owner == self.local_owner && self.object_menu.is_some())
             {
                 return Ok(());
             }

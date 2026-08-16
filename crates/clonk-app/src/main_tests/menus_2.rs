@@ -3131,21 +3131,6 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
     assert!(!scoreboard.runtime_help_visible);
     assert!(scoreboard.scoreboard_dialog.is_some());
 
-    let mut save_browser = new_classic_running_sandbox_app();
-    save_browser.open_save_browser().test_value();
-    save_browser.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(save_browser.runtime_help_visible);
-    assert!(save_browser.save_browser.is_some());
-
-    let mut rebound_save_browser = new_running_sandbox_app();
-    rebound_save_browser.open_save_browser().test_value();
-    rebound_save_browser
-        .bindings
-        .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
-    rebound_save_browser.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(!rebound_save_browser.runtime_help_visible);
-    assert!(rebound_save_browser.save_browser.is_some());
-
     let mut game_over = new_game_over_keyboard_app();
     game_over
         .bindings

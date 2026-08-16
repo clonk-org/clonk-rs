@@ -7478,8 +7478,6 @@ fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
         Message,
         Context,
         Scoreboard,
-        Save,
-        Load,
         Object,
         Observer,
         GameOver,
@@ -7520,17 +7518,6 @@ fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
                 )
                 .test_value();
             }
-            Layer::Save => {
-                app.save_browser = Some(SaveBrowserState::new(
-                    SaveBrowserMode::Save {
-                        suggested_label: "Slot".to_string(),
-                    },
-                    Vec::new(),
-                ));
-            }
-            Layer::Load => {
-                app.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
-            }
             Layer::Object => {
                 assert!(app.open_object_menu().expect("open object state"));
             }
@@ -7561,8 +7548,6 @@ fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
         Layer::Message,
         Layer::Context,
         Layer::Scoreboard,
-        Layer::Save,
-        Layer::Load,
         Layer::Object,
         Layer::Observer,
         Layer::GameOver,

@@ -4359,7 +4359,6 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
             &IngameMenuLabels::default(),
         ),
     );
-    app.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
     let viewport = app.graphics.viewport_rect(owner).test_value();
     let pointer = GuiPoint::new(
         viewport.x as f32 + viewport.width as f32 / 2.0,
@@ -4400,7 +4399,6 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
     );
 
     app.ingame_menu.clear();
-    app.save_browser = None;
     app.engine
         .apply_object_update(
             cursor,

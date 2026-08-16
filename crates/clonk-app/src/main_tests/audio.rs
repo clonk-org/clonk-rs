@@ -4926,28 +4926,6 @@ fn runtime_music_flash_reaches_every_nonexclusive_running_layer() {
     assert!(scoreboard.scoreboard_dialog.is_some());
 
     for mode in [
-        SaveBrowserMode::Save {
-            suggested_label: "Slot".to_string(),
-        },
-        SaveBrowserMode::Load,
-    ] {
-        let mut save_browser = new_running_sandbox_app();
-        save_browser.save_browser = Some(SaveBrowserState::new(mode.clone(), Vec::new()));
-        save_browser.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-        let flash_before = save_browser.runtime_flash_message.clone();
-        let mut frame = vec![0x6d; 320 * 200 * 4];
-        let error = save_browser
-            .render(&mut frame)
-            .expect_err("save/load must fail before generic pixels");
-        assert_eq!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(&ClassicParityBoundary::SaveBrowser(mode.clone()))
-        );
-        assert!(frame.iter().all(|byte| *byte == 0x6d));
-        assert_eq!(save_browser.runtime_flash_message, flash_before);
-    }
-
-    for mode in [
         AppObjectMenuMode::Inventory,
         AppObjectMenuMode::Container,
         AppObjectMenuMode::Context,

@@ -925,12 +925,7 @@ impl GameApp {
         );
 
         let owns_object_menu = owner == self.local_owner && self.object_menu.is_some();
-        let owns_save_browser = owner == self.local_owner && self.save_browser.is_some();
-        if menu_command
-            && !owns_object_menu
-            && !self.ingame_menu_belongs_to(owner)
-            && !owns_save_browser
-        {
+        if menu_command && !owns_object_menu && !self.ingame_menu_belongs_to(owner) {
             return Ok(false);
         }
 
@@ -939,13 +934,7 @@ impl GameApp {
                 kind,
                 CommandKind::Press | CommandKind::Single | CommandKind::Double
             ) {
-                if owns_save_browser && self.save_browser.take().is_some() {
-                    let reopen = self.save_browser_return_to_menu;
-                    self.save_browser_return_to_menu = false;
-                    if reopen {
-                        self.open_ingame_menu_for_player(owner)?;
-                    }
-                } else if self.ingame_menu_belongs_to(owner) {
+                if self.ingame_menu_belongs_to(owner) {
                     self.close_ingame_menu_by_user_for_player(owner)?;
                 } else {
                     self.open_ingame_menu_for_player(owner)?;
@@ -960,16 +949,6 @@ impl GameApp {
             };
             if let Some(action) = menu.handle_command(command, kind) {
                 self.execute_object_menu_action(action)?;
-            }
-            return Ok(true);
-        }
-
-        if owns_save_browser {
-            let Some(browser) = self.save_browser.as_mut() else {
-                return Ok(false);
-            };
-            if let Some(action) = browser.handle_command(command, kind) {
-                self.execute_save_browser_action(action)?;
             }
             return Ok(true);
         }
@@ -4884,8 +4863,6 @@ impl GameApp {
         self.close_ingame_menu();
         self.object_menu = None;
         self.script_menu_presentations.clear();
-        self.save_browser = None;
-        self.save_browser_return_to_menu = false;
         self.game_over_dialog = None;
         self.pending_league_end = None;
         self.pending_league_player_auth = None;

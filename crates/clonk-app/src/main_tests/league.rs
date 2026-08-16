@@ -1994,14 +1994,6 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     );
 
     app.ingame_menu.clear();
-    app.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
-    let mut with_hidden_save_menu = vec![0_u8; app.graphics.surface().pixels().len()];
-    app.test_render(&mut with_hidden_save_menu);
-    assert_eq!(
-        with_hidden_save_menu, notice_only,
-        "the legacy save-menu fallback contributes no eliminated-viewport pixels"
-    );
-    app.save_browser = None;
 
     let mut retargeted = new_classic_running_sandbox_app();
     let local_owner = retargeted.local_owner;
@@ -2033,7 +2025,6 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
         retargeted_cursor,
         retargeted_hidden_script_menu,
     );
-    retargeted.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
     let mut with_retargeted_menus = vec![0_u8; retargeted.graphics.surface().pixels().len()];
     retargeted.test_render(&mut with_retargeted_menus);
     assert_eq!(

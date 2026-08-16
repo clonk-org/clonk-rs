@@ -1006,14 +1006,6 @@ fn control_script_errors_are_non_fatal_like_cpp() {
         detail: "broken".into(),
     };
     control_script_error_to_status(fatal).expect_err("engine-model errors stay fatal");
-
-    let boundary = classic_parity_engine_error(ClassicParityBoundary::RunningShortcut {
-        key: "unported-test-key",
-    });
-    assert!(matches!(
-        control_script_error_to_status(boundary),
-        Err(EngineError::ClassicMenuParityBoundary { .. })
-    ));
 }
 
 #[test]

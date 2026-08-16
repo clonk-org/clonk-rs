@@ -841,6 +841,15 @@ impl GameApp {
         }
     }
 
+    fn generate_default_save_label(&self) -> String {
+        let base = self
+            .active_scenario
+            .as_ref()
+            .map(|scenario| scenario.title.clone())
+            .unwrap_or_else(|| self.scenario_label.clone());
+        format!("{} {}", base, current_unix_timestamp())
+    }
+
     pub(crate) fn finish_pending_native_save_thumbnails(&mut self, title_png: Option<&[u8]>) {
         while let Some(request) = self.pending_native_save_thumbnails.pop_front() {
             let Some(title_png) = title_png else {
@@ -919,119 +928,6 @@ impl GameApp {
             self.status_text = format!("Save failed: {err:#}");
         }
         result.ok()
-    }
-
-    pub(crate) fn open_save_browser(&mut self) -> Result<()> {
-        let entries = self.collect_save_entries()?;
-        let suggested_label = self.generate_default_save_label();
-        let state = SaveBrowserState::new(SaveBrowserMode::Save { suggested_label }, entries);
-        self.save_browser = Some(state);
-        self.save_browser_return_to_menu = true;
-        self.ingame_menu.clear();
-        self.object_menu = None;
-        Ok(())
-    }
-
-    fn dismiss_save_browser(&mut self, reopen_ingame_menu: bool) -> Result<(), EngineError> {
-        self.save_browser = None;
-        let reopen = reopen_ingame_menu && self.save_browser_return_to_menu;
-        self.save_browser_return_to_menu = false;
-        if reopen {
-            self.open_ingame_menu()?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn execute_save_browser_action(
-        &mut self,
-        action: SaveBrowserAction,
-    ) -> Result<(), EngineError> {
-        match action {
-            SaveBrowserAction::Close => {
-                self.dismiss_save_browser(true)?;
-            }
-            SaveBrowserAction::SaveNew { label } => match self.perform_named_save(&label, None) {
-                Ok(_) => {
-                    self.dismiss_save_browser(true)?;
-                }
-                Err(err) => {
-                    tracing::error!(error = ?err, "failed to save game");
-                    self.status_text = format!("Save failed: {err:#}");
-                }
-            },
-            SaveBrowserAction::SaveExisting { entry } => {
-                match self.perform_named_save(&entry.display_name, Some(entry.path.clone())) {
-                    Ok(_) => {
-                        self.dismiss_save_browser(true)?;
-                    }
-                    Err(err) => {
-                        tracing::error!(error = ?err, "failed to overwrite save");
-                        self.status_text = format!("Save failed: {err:#}");
-                    }
-                }
-            }
-            SaveBrowserAction::Load { entry } => {
-                match self.load_saved_game_from_path(&entry.path) {
-                    Ok(_) => {
-                        self.save_browser = None;
-                        self.save_browser_return_to_menu = false;
-                        self.close_ingame_menu();
-                    }
-                    Err(err) => {
-                        if let Some(boundary) = err.downcast_ref::<ClassicParityBoundary>() {
-                            return Err(classic_parity_engine_error(
-                                report_classic_parity_boundary(boundary.clone()),
-                            ));
-                        }
-                        tracing::error!(
-                            error = ?err,
-                            path = %entry.path.display(),
-                            "failed to load saved game"
-                        );
-                        self.status_text = format!("Load failed: {err:#}");
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn collect_save_entries(&self) -> Result<Vec<SaveEntry>> {
-        let dir = resolve_save_directory();
-        let mut entries = Vec::new();
-        let read_dir = match fs::read_dir(&dir) {
-            Ok(iter) => iter,
-            Err(_) => return Ok(entries),
-        };
-        for entry in read_dir {
-            let entry = match entry {
-                Ok(value) => value,
-                Err(err) => {
-                    tracing::warn!(error = %err, "failed to iterate save directory entry");
-                    continue;
-                }
-            };
-            let path = entry.path();
-            if !is_save_file(&path) {
-                continue;
-            }
-            match load_save_entry(&path) {
-                Ok(save_entry) => entries.push(save_entry),
-                Err(err) => {
-                    tracing::warn!(path = %path.display(), error = %err, "failed to read save metadata");
-                }
-            }
-        }
-        Ok(entries)
-    }
-
-    fn generate_default_save_label(&self) -> String {
-        let base = self
-            .active_scenario
-            .as_ref()
-            .map(|scenario| scenario.title.clone())
-            .unwrap_or_else(|| self.scenario_label.clone());
-        format!("{} {}", base, current_unix_timestamp())
     }
 
     fn perform_named_save(&mut self, label: &str, target: Option<PathBuf>) -> Result<PathBuf> {

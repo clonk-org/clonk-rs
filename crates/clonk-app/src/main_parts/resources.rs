@@ -1158,16 +1158,6 @@ pub(crate) struct SavedGameFile {
     pub(crate) engine_state: EngineState,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct SavedGameHeader {
-    #[allow(dead_code)]
-    version: SaveFileVersion,
-    saved_at_seconds: u64,
-    scenario: SavedScenarioInfo,
-    #[serde(default)]
-    user_label: Option<String>,
-}
-
 struct SaveMigration {
     from: SaveFileVersion,
     to: SaveFileVersion,
@@ -1426,13 +1416,6 @@ pub(crate) fn existing_quick_save_path() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-pub(crate) fn is_save_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("lcsave"))
-        .unwrap_or(false)
 }
 
 pub(crate) fn load_install_material_library(paths: Option<&AppPaths>) -> Option<Arc<MaterialSet>> {
@@ -2410,35 +2393,6 @@ pub(crate) fn scaled_screenshot_extent(extent: u32, scale: f32) -> Result<u32> {
         "scaled screenshot extent is out of range"
     );
     Ok(scaled as u32)
-}
-
-pub(crate) fn load_save_entry(path: &Path) -> Result<SaveEntry> {
-    let file =
-        File::open(path).with_context(|| format!("failed to open save file {}", path.display()))?;
-    let header: SavedGameHeader = serde_json::from_reader(file)
-        .with_context(|| format!("failed to parse save metadata from {}", path.display()))?;
-    let is_quick_save = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.eq_ignore_ascii_case(QUICK_SAVE_FILE))
-        .unwrap_or(false);
-    let display_name = header
-        .user_label
-        .clone()
-        .filter(|label| !label.trim().is_empty())
-        .or_else(|| {
-            if is_quick_save {
-                Some("Quick Save".to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| header.scenario.title.clone());
-    Ok(SaveEntry {
-        display_name,
-        saved_at_seconds: header.saved_at_seconds,
-        path: path.to_path_buf(),
-    })
 }
 
 /// `StdCompilerINIRead::Boolean` (StdCompiler.cpp:692-715): a leading `1`/`0`
