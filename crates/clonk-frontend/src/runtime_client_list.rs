@@ -182,7 +182,7 @@ impl RuntimeClientRow {
 /// independently of that snapshot. Keep the resolved active-language strings
 /// with the dialog so both the runtime F4 panel and the lobby's standalone
 /// client-info panel use the same native templates on every refresh.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeClientInfoResources {
     pub active: String,
     pub inactive: String,
@@ -231,6 +231,26 @@ impl RuntimeClientInfoResources {
             noconnections: noconnections.into(),
             unknown_id: unknown_id.into(),
         }
+    }
+}
+
+impl Default for RuntimeClientInfoResources {
+    fn default() -> Self {
+        Self::new(
+            "Active",
+            "Inactive",
+            "local",
+            "remote",
+            "host",
+            "client",
+            "%s %s %s %s (ID #%d):%s",
+            "Addresses:",
+            "  Data: %s (%s, %d ms)",
+            "Connections: %s: %s (%s, %d ms)",
+            "Addresses: none",
+            "Connections: Not connected",
+            "Unknown client ID #%d.",
+        )
     }
 }
 
@@ -2904,18 +2924,13 @@ fn client_info_lines(
     // The native format string ends in the acknowledgement marker
     // (`IDS_NET_CLIENT_INFO_FORMAT` = `%s %s %s %s (ID #%d):%s`).
     let acknowledgement = if row.unacknowledged { " (!ack)" } else { "" };
-    let label = row.label();
+    // C4Network2ClientDlg::UpdateText passes C4Client::getName(), not the
+    // runtime list's name:nick presentation label.
+    let name = &row.name;
     let client_id = row.client_id.to_string();
     let mut lines = vec![format_resource_string(
         &resources.format,
-        &[
-            activity,
-            location,
-            role,
-            &label,
-            &client_id,
-            acknowledgement,
-        ],
+        &[activity, location, role, name, &client_id, acknowledgement],
     )];
     if row.addresses.is_empty() {
         lines.push(resources.noaddresses.clone());
@@ -2931,7 +2946,21 @@ fn client_info_lines(
     if row.connections.is_empty() {
         lines.push(resources.noconnections.clone());
     } else {
-        lines.extend(row.connections.iter().map(|connection| {
+        let mut connections = row.connections.iter().collect::<Vec<_>>();
+        // C4Network2ClientDlg::UpdateText emits the message route first and
+        // the separate data route second, regardless of container order
+        // (src/C4Network2Dialogs.cpp:91-102).
+        connections.sort_by_key(|connection| {
+            (
+                match connection.usage.as_str() {
+                    "Data/Msg" | "Msg" => 0,
+                    "Data" => 1,
+                    _ => 2,
+                },
+                connection.connection_id,
+            )
+        });
+        lines.extend(connections.into_iter().map(|connection| {
             // The info text shows getPingTime(), unlike the list rows
             // (src/C4Network2Dialogs.cpp:92-102).
             let ping_ms = connection.ping_ms.to_string();
@@ -2967,12 +2996,13 @@ fn client_info_lines(
 }
 
 fn format_resource_string(template: &str, arguments: &[&str]) -> String {
-    let mut template = template.to_string();
+    let mut output = String::with_capacity(template.len());
+    let mut remainder = template;
     for argument in arguments {
         let placeholder = [
-            template.find("%s"),
-            template.find("%d"),
-            template.find("%i"),
+            remainder.find("%s"),
+            remainder.find("%d"),
+            remainder.find("%i"),
         ]
         .into_iter()
         .flatten()
@@ -2980,9 +3010,12 @@ fn format_resource_string(template: &str, arguments: &[&str]) -> String {
         let Some(placeholder) = placeholder else {
             break;
         };
-        template.replace_range(placeholder..placeholder + 2, argument);
+        output.push_str(&remainder[..placeholder]);
+        output.push_str(argument);
+        remainder = &remainder[placeholder + 2..];
     }
-    template
+    output.push_str(remainder);
+    output
 }
 
 fn info_scrolling_geometry(
@@ -3786,14 +3819,14 @@ mod tests {
         let known = row();
         assert_eq!(
             client_info_lines_for(std::slice::from_ref(&known), 7, &resources)[0],
-            "active remote client Remote:Nick (ID #7):"
+            "active remote client Remote (ID #7):"
         );
 
         let mut unacknowledged = known.clone();
         unacknowledged.unacknowledged = true;
         assert_eq!(
             client_info_lines_for(&[unacknowledged.clone()], 7, &resources)[0],
-            "active remote client Remote:Nick (ID #7): (!ack)"
+            "active remote client Remote (ID #7): (!ack)"
         );
 
         // The dialog is bound to an id, so a client that leaves keeps the
@@ -3808,11 +3841,25 @@ mod tests {
         );
         assert_eq!(
             dialog.info_lines()[0],
-            "active remote client Remote:Nick (ID #7): (!ack)"
+            "active remote client Remote (ID #7): (!ack)"
         );
         dialog.replace_snapshot_on_sec1(Vec::new(), Vec::new(), RuntimeClientListStatus::default());
         assert_eq!(dialog.info_client_id(), Some(7), "the dialog stays open");
         assert_eq!(dialog.info_lines(), ["Unknown client ID #7.".to_string()]);
+    }
+
+    #[test]
+    fn client_info_default_resources_keep_standalone_fallback_readable() {
+        let dialog =
+            RuntimeClientListDialog::new_info("Client information", row().client_id, Some(row()));
+        assert_eq!(
+            dialog.info_lines(),
+            [
+                "Active remote client Remote (ID #7):".to_string(),
+                "Addresses: none".to_string(),
+                "Connections: Not connected".to_string(),
+            ]
+        );
     }
 
     // `C4Network2ClientDlg::UpdateText` resolves every body template through
@@ -3855,7 +3902,7 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "INAKTIV/LOKAL/HOST/Remote:Nick/7/ (!ack)",
+                "INAKTIV/LOKAL/HOST/Remote/7/ (!ack)",
                 "ADRESSEN",
                 "  0: addr.example:1234",
                 "VERBINDUNGEN:Msg/Data:UDP:peer.example:5678:17",
@@ -3864,6 +3911,57 @@ mod tests {
         assert_eq!(
             client_info_lines_for(&[], 42, &resources),
             ["UNBEKANNT:42".to_string()]
+        );
+    }
+
+    #[test]
+    fn client_info_keeps_percent_literals_in_network_names() {
+        let resources = info_resources();
+        let mut row = row();
+        row.name = "%s".to_string();
+        row.nick = "%d".to_string();
+
+        assert_eq!(
+            client_info_lines_for(&[row], 7, &resources)[0],
+            "active remote client %s (ID #7):"
+        );
+    }
+
+    #[test]
+    fn client_info_orders_message_before_separate_data_connection() {
+        let resources = info_resources();
+        let mut row = row();
+        row.connections = vec![
+            RuntimeConnectionRow {
+                connection_id: 2,
+                usage: "Data".to_string(),
+                protocol: "TCP".to_string(),
+                peer_address: "data.example:2222".to_string(),
+                packet_loss: 0,
+                ping_ms: 20,
+                lag_ms: 20,
+                can_disconnect: false,
+            },
+            RuntimeConnectionRow {
+                connection_id: 1,
+                usage: "Msg".to_string(),
+                protocol: "UDP".to_string(),
+                peer_address: "msg.example:1111".to_string(),
+                packet_loss: 0,
+                ping_ms: 10,
+                lag_ms: 10,
+                can_disconnect: false,
+            },
+        ];
+
+        assert_eq!(
+            client_info_lines_for(&[row], 7, &resources),
+            [
+                "active remote client Remote (ID #7):",
+                "Addresses: none",
+                "Connections: Msg: UDP (msg.example:1111, 10 ms)",
+                "  Data: TCP (data.example:2222, 20 ms)",
+            ]
         );
     }
 
