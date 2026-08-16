@@ -11,6 +11,7 @@
 //! Each level is a floor, not a selector: level 3 emits all three.
 
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// `Config.Graphics.VerboseObjectLoading`, default 0 (`C4Config.cpp:453`).
 /// Process-global for the same reason C++'s `Config` is: the definition loader
@@ -29,10 +30,39 @@ pub fn verbose_object_loading() -> i32 {
 }
 
 /// The shipped US `IDS_PRC_DEFOVERLOAD` text
-/// (`planet/System.c4g/LanguageUS.txt:1197`). The app overwrites this from the
+/// (`planet/System.c4g/LanguageUS.txt:1211`). The app overwrites this from the
 /// installed language table, matching the other process-global `LoadResStr`
 /// entries in this crate.
 pub const DEFAULT_DEFINITION_OVERLOAD_TEMPLATE: &str = "%s (%s) overloaded.";
+
+/// The process-local `LoadResStr` entry used by definition and particle
+/// overload diagnostics. The app replaces it when its active language table
+/// changes; headless engines retain the shipped US fallback.
+static DEFINITION_OVERLOAD_TEMPLATE: OnceLock<RwLock<Arc<str>>> = OnceLock::new();
+
+fn definition_overload_template_lock() -> &'static RwLock<Arc<str>> {
+    DEFINITION_OVERLOAD_TEMPLATE
+        .get_or_init(|| RwLock::new(Arc::from(DEFAULT_DEFINITION_OVERLOAD_TEMPLATE)))
+}
+
+/// Publishes the active `IDS_PRC_DEFOVERLOAD` resource string.
+pub fn set_definition_overload_template(template: impl Into<String>) {
+    let template = Arc::<str>::from(template.into());
+    *definition_overload_template_lock()
+        .write()
+        .expect("definition overload resource lock") = template;
+}
+
+/// Returns the active `IDS_PRC_DEFOVERLOAD` resource string without copying
+/// its contents. Callers should obtain it only for level-1-or-higher logging;
+/// the level-0 scenario-load path does not touch this lock or allocate.
+pub fn definition_overload_template() -> Arc<str> {
+    Arc::clone(
+        &definition_overload_template_lock()
+            .read()
+            .expect("definition overload resource lock"),
+    )
+}
 
 /// `Log(IDS_PRC_DEFOVERLOAD, name, id)` — the two positional `%s` slots.
 fn format_overload(template: &str, name: &str, id: &str) -> String {
@@ -158,5 +188,27 @@ mod tests {
             format_overload("%s (%s) ueberladen.", "Stein", "ROCK"),
             "Stein (ROCK) ueberladen."
         );
+    }
+
+    #[test]
+    fn localized_overload_template_is_used_for_definition_diagnostics() {
+        set_definition_overload_template("%s (%s) überladen.");
+        let template = definition_overload_template();
+        assert_eq!(
+            definition_overload_lines(
+                1,
+                template.as_ref(),
+                "Stein",
+                "ROCK",
+                "Objects.c4d/Rock.c4d",
+                "Mods.c4d/Rock.c4d",
+            ),
+            vec!["Stein (ROCK) überladen.".to_owned()]
+        );
+        assert_eq!(
+            particle_overload_line(1, template.as_ref(), "Feuer").as_deref(),
+            Some("Feuer (<particle>) überladen.")
+        );
+        set_definition_overload_template(DEFAULT_DEFINITION_OVERLOAD_TEMPLATE);
     }
 }
