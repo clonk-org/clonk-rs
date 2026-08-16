@@ -2550,6 +2550,7 @@ impl<'a> Parser<'a> {
                 let number_line = number.line;
                 let number_column = number.column;
                 let number_is_hex = number.number_is_hex();
+                let raw_number = number.raw_number();
                 let TokenKind::Number(value) = number.kind else {
                     return Err(ParseError::new(
                         "expected integer after static constant sign",
@@ -2557,6 +2558,17 @@ impl<'a> Parser<'a> {
                         number_column,
                     ));
                 };
+                // With Shift(..., false), native C4Aul scans a negative
+                // decimal sign and magnitude together. Once the magnitude
+                // reaches pointer-width INT_MAX + 1, signed scanf saturates
+                // at INTPTR_MIN before C4ValueInt narrowing; do not negate
+                // the already-narrowed positive token instead.
+                if sign == Symbol::Minus
+                    && !number_is_hex
+                    && raw_number.unwrap_or(value as u64) > isize::MAX as u64
+                {
+                    return Ok(Expr::Literal(Literal::Int(isize::MIN as i32)));
+                }
                 // With Shift(..., false), native C4Aul starts the integer at
                 // the sign byte. Consequently `+0x1`/`-0x1` never take the
                 // unsigned token's lowercase-hex transition: it returns the
@@ -2671,6 +2683,29 @@ mod tests {
             .map(|decl| decl.name.as_str())
             .collect();
         assert_eq!(names, vec!["_TLK_ID", "_TLK_TimerInterval"]);
+    }
+
+    #[test]
+    fn signed_static_const_overflow_saturates_before_i32_narrowing() {
+        // C4AulParse.cpp:704-743 scans the sign and decimal magnitude in one
+        // `%SCNdPTR` token. Negative overflow therefore saturates at
+        // INTPTR_MIN before C4AulParse.cpp:3409 narrows to C4ValueInt.
+        let pointer_min = isize::MIN as i32;
+        let pointer_max = isize::MAX as i32;
+        for (spelling, expected) in [
+            ("-9223372036854775808", pointer_min),
+            ("-9223372036854775809", pointer_min),
+            ("-99999999999999999999999", pointer_min),
+            ("9223372036854775808", pointer_max),
+        ] {
+            let source = format!("static const VALUE = {spelling};");
+            let script = parse_script(&source).expect("C4Aul accepts pointer-width overflow");
+            assert_eq!(
+                script.var_decls[0].init,
+                Some(Expr::Literal(Literal::Int(expected))),
+                "spelling: {spelling}"
+            );
+        }
     }
 
     use super::*;

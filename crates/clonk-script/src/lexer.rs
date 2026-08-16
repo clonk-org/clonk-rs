@@ -900,13 +900,14 @@ impl<'a> Lexer<'a> {
         if matches!(self.peek_char(), Some('(' | ':')) {
             return self.lex_stupid_func_label(slice.to_owned(), line, column);
         }
-        let value = slice
+        let magnitude = slice
             .parse::<u128>()
             .unwrap_or(u128::MAX)
-            .min(isize::MAX as u128) as isize;
+            .min(usize::MAX as u128) as usize;
+        let value = magnitude.min(isize::MAX as usize) as isize;
         Ok(Token::new_number(
             value as i32,
-            value as u64,
+            magnitude as u64,
             false,
             line,
             column,
