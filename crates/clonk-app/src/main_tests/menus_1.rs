@@ -4167,22 +4167,42 @@ fn unported_object_menu_requests_fail_before_generic_object_menu_state_exists() 
 }
 
 #[test]
-fn rust_only_running_function_keys_fail_without_opening_panes() {
+fn running_function_keys_without_bindings_are_ignored() {
     let mut app = new_menu_app(320, 200);
     app.start_sandbox_scenario(FrontendScenario::fallback())
         .test_value();
+    // C4Game registers bare F9/Ctrl+F9 for screenshots and Ctrl+F5..F8 for
+    // diagnostics, but no bare F5/F6/F7 save/load route (C4Game.cpp:3373-3374,
+    // 3386-3389).
     for (key, label) in [
         (VirtualKeyCode::F5, "F5"),
         (VirtualKeyCode::F6, "F6"),
         (VirtualKeyCode::F7, "F7"),
     ] {
-        let error = app
-            .handle_key(key, ElementState::Pressed)
-            .expect_err("unported running shortcut must fail");
-        assert!(error.to_string().contains(label));
+        app.handle_key(key, ElementState::Pressed)
+            .unwrap_or_else(|error| panic!("unsupported {label} must be ignored: {error}"));
         assert!(app.ingame_menu.is_none());
         assert!(app.object_menu.is_none());
+        assert!(app.pending_screenshots.is_empty());
     }
+}
+
+#[test]
+fn activate_savegame_opens_classic_ten_slot_menu() {
+    let mut app = new_classic_running_sandbox_app();
+    app.apply_ingame_menu_action(MenuAction::ActivateSavegame)
+        .test_value();
+
+    // C4MainMenu::ActivateSavegame constructs slots 1..10 before returning
+    // to the main menu (C4MainMenu.cpp:422-500).
+    let menu = app.ingame_menu.get(app.local_owner).test_value();
+    assert_eq!(menu.page(), ingame_menu::MenuPage::Savegame);
+    assert_eq!(menu.items().len(), 10);
+    assert!(menu
+        .items()
+        .iter()
+        .enumerate()
+        .all(|(index, item)| item.action == MenuAction::SaveSlot((index + 1) as u8)));
 }
 
 #[test]

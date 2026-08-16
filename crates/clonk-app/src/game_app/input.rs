@@ -3504,13 +3504,12 @@ impl GameApp {
         if self.handle_network_chart_key(key, state) {
             return Ok(());
         }
-        let (runtime_engine_dispatch_suppressed, denied_debug_callback) =
-            match self.handle_runtime_global_key(key, state)? {
-                RuntimeGlobalKeyOutcome::Handled => return Ok(()),
-                RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch => (true, false),
-                RuntimeGlobalKeyOutcome::Unhandled => (false, false),
-                RuntimeGlobalKeyOutcome::UnhandledAfterDeniedDebug => (false, true),
-            };
+        let runtime_engine_dispatch_suppressed = match self.handle_runtime_global_key(key, state)? {
+            RuntimeGlobalKeyOutcome::Handled => return Ok(()),
+            RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch => true,
+            RuntimeGlobalKeyOutcome::Unhandled
+            | RuntimeGlobalKeyOutcome::UnhandledAfterDeniedDebug => false,
+        };
         if self.handle_scoreboard_key(key, state)? {
             return Ok(());
         }
@@ -4574,17 +4573,6 @@ impl GameApp {
                 }
                 let viewport_scope_excludes_player_control =
                     self.viewport_scope_excludes_player_control();
-                let unsupported_running_shortcut =
-                    if state == ElementState::Pressed && c4_modifiers.is_empty() {
-                        match key {
-                            VirtualKeyCode::F5 => Some("F5"),
-                            VirtualKeyCode::F6 => Some("F6"),
-                            VirtualKeyCode::F7 => Some("F7"),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
                 if self.handle_viewport_player_cycle_key(key, state) {
                     return Ok(());
                 }
@@ -4593,11 +4581,6 @@ impl GameApp {
                 }
                 if self.handle_runtime_stats_toggle_key(key, state) {
                     return Ok(());
-                }
-                if let Some(key) = unsupported_running_shortcut.filter(|_| !denied_debug_callback) {
-                    return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                        ClassicParityBoundary::RunningShortcut { key },
-                    )));
                 }
                 if !runtime_engine_dispatch_suppressed && !viewport_scope_excludes_player_control {
                     self.handle_engine_key(key, state)?;
