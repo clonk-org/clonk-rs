@@ -19,6 +19,9 @@ use crate::{
     PLAYER_INFO_FLAG_WON,
 };
 
+/// C4Player's missing runtime `Index` value (C4Player.h:31).
+const C4P_NUMBER_NONE: i32 = -5;
+
 /// One joined SavePlayerInfos row, retaining its enclosing client packet.
 /// Callers must preserve packet order and player order within each packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,7 +348,7 @@ fn parse_player_state(
     let color_index = section.i32("Color", -1);
     let position_index = section.i32("Position", 0);
     Ok(PlayerState {
-        id: section.i32("Index", -1),
+        id: section.i32("Index", C4P_NUMBER_NONE),
         player_info_id: section.i32("ID", 0),
         at_client: PlayerAtClient::new(section.i32("AtClient", -1)),
         at_client_name: section.value("AtClientName").map(ToOwned::to_owned),
@@ -706,7 +709,7 @@ impl Engine {
                         .unwrap_or(error));
                 }
             };
-            if state.id == -1 {
+            if state.id == C4P_NUMBER_NONE {
                 state.id = provisional_number;
             }
             apply_player_file_to_state(&mut state, source, &player_file);
@@ -1142,6 +1145,62 @@ mod tests {
         assert!(engine.player(2).is_some());
         assert!(engine.player(3).is_none());
         assert!(engine.snapshot().round_results.players.is_empty());
+    }
+
+    #[test]
+    fn missing_runtime_index_uses_none_sentinel_before_recreate_fallback() {
+        // C4P_Number_None is -5 (C4Player.h:31); CompileFunc defaults a
+        // missing Index to that sentinel (C4Player.cpp:1556-1564), and Init
+        // replaces only that value with the provisional number after loading
+        // runtime data (C4Player.cpp:354-381). C4PlayerList::Join allocates
+        // that provisional number before Init (C4PlayerList.cpp:271-317).
+        let fixture = tempdir().expect("save tempdir");
+        let save = fixture.path().join("Save.c4s");
+        std::fs::create_dir(&save).expect("create save group");
+        std::fs::write(
+            save.join("Game.txt"),
+            "[Player7]\nStatus=1\nID=7\n\n[Player8]\nStatus=1\nIndex=-1\nID=8\n",
+        )
+        .expect("write player runtime");
+        for (filename, name) in [("Alice.c4p", "Alice"), ("Bob.c4p", "Bob")] {
+            let profile = save.join(filename);
+            std::fs::create_dir(&profile).expect("create player profile");
+            std::fs::write(
+                profile.join("Player.txt"),
+                format!("[Player]\nName={name}\n"),
+            )
+            .expect("write player profile");
+        }
+        let source = |id: i32, filename: &str, name: &str| RuntimeJoinPlayerSource {
+            client_id: 0,
+            at_client_name: "Local".to_string(),
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id,
+                filename: crate::LegacyCString::from_bytes(filename.as_bytes().to_vec()).unwrap(),
+                name: crate::LegacyCString::from_bytes(name.as_bytes().to_vec()).unwrap(),
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let mut engine = Engine::new();
+
+        let restored = engine
+            .restore_runtime_join_players_from_path(
+                &save,
+                &[source(7, "Alice.c4p", "Alice"), source(8, "Bob.c4p", "Bob")],
+            )
+            .expect("restore players with and without Index");
+
+        assert_eq!(
+            restored
+                .iter()
+                .map(|player| player.number)
+                .collect::<Vec<_>>(),
+            [0, -1]
+        );
+        assert!(engine.player(0).is_some());
+        assert!(engine.player(-1).is_some());
     }
 
     #[test]
