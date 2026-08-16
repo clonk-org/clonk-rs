@@ -4456,7 +4456,7 @@ fn network_restore_projects_resumed_ids_into_league_teams_and_host_snapshot() {
         offline_random_seed: None,
     });
 
-    app.prepare_network_savegame_recreation().test_value();
+    app.prepare_network_savegame_recreation(false).test_value();
 
     assert_eq!(app.deferred_network_savegame_recreation, vec![(3, 7)]);
     assert_eq!(
