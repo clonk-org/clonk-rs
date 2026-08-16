@@ -1938,6 +1938,7 @@ impl GameApp {
                 rows,
                 status,
             )
+            .with_info_resources(self.runtime_client_info_resources())
             .with_option_caption_reference(option_caption_reference)
             .with_info_caption(self.runtime_resource_string("IDS_NET_CLIENT_INFO")),
         );

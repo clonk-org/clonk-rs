@@ -176,6 +176,84 @@ impl RuntimeClientRow {
     }
 }
 
+/// Localized templates used by `C4Network2ClientDlg::UpdateText`.
+///
+/// The network snapshot is owned by `clonk-app`, but the dialog can refresh
+/// independently of that snapshot. Keep the resolved active-language strings
+/// with the dialog so both the runtime F4 panel and the lobby's standalone
+/// client-info panel use the same native templates on every refresh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeClientInfoResources {
+    pub active: String,
+    pub inactive: String,
+    pub local: String,
+    pub remote: String,
+    pub host: String,
+    pub client: String,
+    pub format: String,
+    pub addresses: String,
+    pub conndata: String,
+    pub connections: String,
+    pub noaddresses: String,
+    pub noconnections: String,
+    pub unknown_id: String,
+}
+
+impl RuntimeClientInfoResources {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        active: impl Into<String>,
+        inactive: impl Into<String>,
+        local: impl Into<String>,
+        remote: impl Into<String>,
+        host: impl Into<String>,
+        client: impl Into<String>,
+        format: impl Into<String>,
+        addresses: impl Into<String>,
+        conndata: impl Into<String>,
+        connections: impl Into<String>,
+        noaddresses: impl Into<String>,
+        noconnections: impl Into<String>,
+        unknown_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            active: active.into(),
+            inactive: inactive.into(),
+            local: local.into(),
+            remote: remote.into(),
+            host: host.into(),
+            client: client.into(),
+            format: format.into(),
+            addresses: addresses.into(),
+            conndata: conndata.into(),
+            connections: connections.into(),
+            noaddresses: noaddresses.into(),
+            noconnections: noconnections.into(),
+            unknown_id: unknown_id.into(),
+        }
+    }
+}
+
+impl Default for RuntimeClientInfoResources {
+    fn default() -> Self {
+        Self::new(
+            "Active",
+            "Inactive",
+            "local",
+            "remote",
+            "host",
+            "client",
+            "%s %s %s %s (ID #%d):%s",
+            "Addresses:",
+            "  Data: %s (%s, %d ms)",
+            "Connections: %s: %s (%s, %d ms)",
+            "Addresses: none",
+            "Connections: Not connected",
+            "Unknown client ID #%d.",
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeClientListStatus {
     pub tick: i32,
@@ -325,6 +403,7 @@ pub struct RuntimeClientListTooltip {
 pub struct RuntimeClientListDialog {
     caption: String,
     info_dialog: ScrollingInfoDialog,
+    info_resources: RuntimeClientInfoResources,
     caption_scroll: Cell<CaptionScrollState>,
     info_caption_scroll: Cell<CaptionScrollState>,
     options: Vec<LobbyOptionRow>,
@@ -366,6 +445,7 @@ impl RuntimeClientListDialog {
         Self {
             caption: caption.into(),
             info_dialog: ScrollingInfoDialog::new("Client information", 10, true),
+            info_resources: RuntimeClientInfoResources::default(),
             caption_scroll: Cell::new(CaptionScrollState::default()),
             info_caption_scroll: Cell::new(CaptionScrollState::default()),
             options,
@@ -405,10 +485,12 @@ impl RuntimeClientListDialog {
         row: Option<RuntimeClientRow>,
     ) -> Self {
         let rows = row.into_iter().collect::<Vec<_>>();
-        let lines = client_info_lines_for(&rows, client_id);
+        let info_resources = RuntimeClientInfoResources::default();
+        let lines = client_info_lines_for(&rows, client_id, &info_resources);
         Self {
             caption: String::new(),
             info_dialog: ScrollingInfoDialog::new(caption, 10, true),
+            info_resources,
             caption_scroll: Cell::new(CaptionScrollState::default()),
             info_caption_scroll: Cell::new(CaptionScrollState::default()),
             options: Vec::new(),
@@ -448,6 +530,7 @@ impl RuntimeClientListDialog {
         Self {
             caption: String::new(),
             info_dialog: ScrollingInfoDialog::new(caption, requested_line_count, false),
+            info_resources: RuntimeClientInfoResources::default(),
             caption_scroll: Cell::new(CaptionScrollState::default()),
             info_caption_scroll: Cell::new(CaptionScrollState::default()),
             options: Vec::new(),
@@ -488,6 +571,18 @@ impl RuntimeClientListDialog {
 
     pub fn with_info_caption(mut self, caption: impl Into<String>) -> Self {
         self.info_dialog.set_caption(caption);
+        self
+    }
+
+    pub fn with_info_resources(mut self, resources: RuntimeClientInfoResources) -> Self {
+        self.info_resources = resources;
+        if let Some(client_id) = self.info_client_id {
+            self.info_dialog.reset_lines(client_info_lines_for(
+                &self.rows,
+                client_id,
+                &self.info_resources,
+            ));
+        }
         self
     }
 
@@ -627,7 +722,7 @@ impl RuntimeClientListDialog {
         // line (src/C4Network2Dialogs.cpp:54-59).
         if let Some(lines) = self
             .info_client_id
-            .map(|id| client_info_lines_for(&self.rows, id))
+            .map(|id| client_info_lines_for(&self.rows, id, &self.info_resources))
         {
             if sec1_timer {
                 let _ = self.info_dialog.on_sec1_timer(|| lines);
@@ -1100,8 +1195,11 @@ impl RuntimeClientListDialog {
             }
             HitTarget::ClientInfo(client_id) => {
                 self.reset_info_presentation();
-                self.info_dialog
-                    .reset_lines(client_info_lines_for(&self.rows, client_id));
+                self.info_dialog.reset_lines(client_info_lines_for(
+                    &self.rows,
+                    client_id,
+                    &self.info_resources,
+                ));
                 self.info_open = true;
                 self.info_client_id = Some(client_id);
                 RuntimeClientListAction::OpenInfo(client_id)
@@ -2788,48 +2886,136 @@ impl RuntimeClientListDialog {
 /// because the context entry went stale, or because the client left while the
 /// dialog is open — renders the native fallback line rather than closing
 /// (src/C4Network2Dialogs.cpp:54-59).
-fn client_info_lines_for(rows: &[RuntimeClientRow], client_id: i32) -> Vec<String> {
+fn client_info_lines_for(
+    rows: &[RuntimeClientRow],
+    client_id: i32,
+    resources: &RuntimeClientInfoResources,
+) -> Vec<String> {
     rows.iter()
         .find(|row| row.client_id == client_id)
         .map_or_else(
-            || vec![format!("Unknown client ID #{client_id}.")],
-            client_info_lines,
+            || {
+                let client_id = client_id.to_string();
+                vec![format_resource_string(&resources.unknown_id, &[&client_id])]
+            },
+            |row| client_info_lines(row, resources),
         )
 }
 
-fn client_info_lines(row: &RuntimeClientRow) -> Vec<String> {
-    let role = if row.host { "host" } else { "client" };
-    let location = if row.local { "local" } else { "remote" };
-    let activity = if row.activated { "active" } else { "inactive" };
+fn client_info_lines(
+    row: &RuntimeClientRow,
+    resources: &RuntimeClientInfoResources,
+) -> Vec<String> {
+    let role = if row.host {
+        &resources.host
+    } else {
+        &resources.client
+    };
+    let location = if row.local {
+        &resources.local
+    } else {
+        &resources.remote
+    };
+    let activity = if row.activated {
+        &resources.active
+    } else {
+        &resources.inactive
+    };
     // The native format string ends in the acknowledgement marker
     // (`IDS_NET_CLIENT_INFO_FORMAT` = `%s %s %s %s (ID #%d):%s`).
     let acknowledgement = if row.unacknowledged { " (!ack)" } else { "" };
-    let mut lines = vec![
-        format!("{activity}, {location}, {role}"),
-        format!("{} ({}){acknowledgement}", row.label(), row.client_id),
-    ];
-    if !row.player_names.is_empty() {
-        lines.push(format!("Players: {}", row.player_names.join(", ")));
-    }
+    // C4Network2ClientDlg::UpdateText passes C4Client::getName(), not the
+    // runtime list's name:nick presentation label.
+    let name = &row.name;
+    let client_id = row.client_id.to_string();
+    let mut lines = vec![format_resource_string(
+        &resources.format,
+        &[activity, location, role, name, &client_id, acknowledgement],
+    )];
     if row.addresses.is_empty() {
-        lines.push("No addresses available".to_string());
+        lines.push(resources.noaddresses.clone());
     } else {
-        lines.push("Addresses:".to_string());
-        lines.extend(row.addresses.iter().map(|address| format!("  {address}")));
+        lines.push(resources.addresses.clone());
+        lines.extend(
+            row.addresses
+                .iter()
+                .enumerate()
+                .map(|(index, address)| format!("  {index}: {address}")),
+        );
     }
     if row.connections.is_empty() {
-        lines.push("No connection details available".to_string());
+        lines.push(resources.noconnections.clone());
     } else {
-        lines.extend(row.connections.iter().map(|connection| {
+        let mut connections = row.connections.iter().collect::<Vec<_>>();
+        // C4Network2ClientDlg::UpdateText emits the message route first and
+        // the separate data route second, regardless of container order
+        // (src/C4Network2Dialogs.cpp:91-102).
+        connections.sort_by_key(|connection| {
+            (
+                match connection.usage.as_str() {
+                    "Data/Msg" | "Msg" => 0,
+                    "Data" => 1,
+                    _ => 2,
+                },
+                connection.connection_id,
+            )
+        });
+        lines.extend(connections.into_iter().map(|connection| {
             // The info text shows getPingTime(), unlike the list rows
             // (src/C4Network2Dialogs.cpp:92-102).
-            format!(
-                "{} {} {} ({} ms)",
-                connection.usage, connection.protocol, connection.peer_address, connection.ping_ms
-            )
+            let ping_ms = connection.ping_ms.to_string();
+            let usage = if connection.usage == "Data/Msg" {
+                "Msg/Data"
+            } else {
+                connection.usage.as_str()
+            };
+            let template = if connection.usage == "Data" {
+                &resources.conndata
+            } else {
+                &resources.connections
+            };
+            if connection.usage == "Data" {
+                format_resource_string(
+                    template,
+                    &[&connection.protocol, &connection.peer_address, &ping_ms],
+                )
+            } else {
+                format_resource_string(
+                    template,
+                    &[
+                        usage,
+                        &connection.protocol,
+                        &connection.peer_address,
+                        &ping_ms,
+                    ],
+                )
+            }
         }));
     }
     lines
+}
+
+fn format_resource_string(template: &str, arguments: &[&str]) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut remainder = template;
+    for argument in arguments {
+        let placeholder = [
+            remainder.find("%s"),
+            remainder.find("%d"),
+            remainder.find("%i"),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let Some(placeholder) = placeholder else {
+            break;
+        };
+        output.push_str(&remainder[..placeholder]);
+        output.push_str(argument);
+        remainder = &remainder[placeholder + 2..];
+    }
+    output.push_str(remainder);
+    output
 }
 
 fn info_scrolling_geometry(
@@ -3094,6 +3280,24 @@ mod tests {
         }
     }
 
+    fn info_resources() -> RuntimeClientInfoResources {
+        RuntimeClientInfoResources::new(
+            "active",
+            "inactive",
+            "local",
+            "remote",
+            "host",
+            "client",
+            "%s %s %s %s (ID #%d):%s",
+            "Addresses:",
+            "  Data: %s (%s, %d ms)",
+            "Connections: %s: %s (%s, %d ms)",
+            "Addresses: none",
+            "Connections: Not connected",
+            "Unknown client ID #%d.",
+        )
+    }
+
     #[test]
     fn status_uses_the_native_field_order() {
         assert_eq!(
@@ -3178,7 +3382,7 @@ mod tests {
         let preferred = IntRect {
             x: 0,
             y: 0,
-            w: 320,
+            w: 640,
             h: 200,
         };
         let mut dialog = RuntimeClientListDialog::new(
@@ -3586,7 +3790,8 @@ mod tests {
     #[test]
     fn standalone_client_info_starts_on_the_requested_row_and_closes_as_info() {
         let mut dialog =
-            RuntimeClientListDialog::new_info("Client information", row().client_id, Some(row()));
+            RuntimeClientListDialog::new_info("Client information", row().client_id, Some(row()))
+                .with_info_resources(info_resources());
         assert!(dialog.is_info_only());
         assert_eq!(dialog.info_client_id(), Some(7));
         assert_eq!(dialog.rows().len(), 1);
@@ -3604,38 +3809,160 @@ mod tests {
     // (src/C4Network2Dialogs.cpp:54-71).
     #[test]
     fn client_info_text_shows_unknown_ids_and_the_host_ack_marker() {
+        let resources = info_resources();
         assert_eq!(
-            client_info_lines_for(&[], 12),
+            client_info_lines_for(&[], 12, &resources),
             vec!["Unknown client ID #12.".to_string()],
             "an id with no client renders the native fallback line"
         );
 
         let known = row();
         assert_eq!(
-            client_info_lines_for(std::slice::from_ref(&known), 7)[1],
-            "Remote:Nick (7)"
+            client_info_lines_for(std::slice::from_ref(&known), 7, &resources)[0],
+            "active remote client Remote (ID #7):"
         );
 
         let mut unacknowledged = known.clone();
         unacknowledged.unacknowledged = true;
         assert_eq!(
-            client_info_lines_for(&[unacknowledged.clone()], 7)[1],
-            "Remote:Nick (7) (!ack)"
+            client_info_lines_for(&[unacknowledged.clone()], 7, &resources)[0],
+            "active remote client Remote (ID #7): (!ack)"
         );
 
         // The dialog is bound to an id, so a client that leaves keeps the
         // dialog open on the fallback text instead of closing it.
-        let mut dialog = RuntimeClientListDialog::new_info("Client information", 7, Some(known));
+        let mut dialog = RuntimeClientListDialog::new_info("Client information", 7, Some(known))
+            .with_info_resources(resources);
         assert_eq!(dialog.info_client_id(), Some(7));
         dialog.replace_snapshot(
             Vec::new(),
             vec![unacknowledged],
             RuntimeClientListStatus::default(),
         );
-        assert_eq!(dialog.info_lines()[1], "Remote:Nick (7) (!ack)");
+        assert_eq!(
+            dialog.info_lines()[0],
+            "active remote client Remote (ID #7): (!ack)"
+        );
         dialog.replace_snapshot_on_sec1(Vec::new(), Vec::new(), RuntimeClientListStatus::default());
         assert_eq!(dialog.info_client_id(), Some(7), "the dialog stays open");
         assert_eq!(dialog.info_lines(), ["Unknown client ID #7.".to_string()]);
+    }
+
+    #[test]
+    fn client_info_default_resources_keep_standalone_fallback_readable() {
+        let dialog =
+            RuntimeClientListDialog::new_info("Client information", row().client_id, Some(row()));
+        assert_eq!(
+            dialog.info_lines(),
+            [
+                "Active remote client Remote (ID #7):".to_string(),
+                "Addresses: none".to_string(),
+                "Connections: Not connected".to_string(),
+            ]
+        );
+    }
+
+    // `C4Network2ClientDlg::UpdateText` resolves every body template through
+    // the active language table (`src/C4Network2Dialogs.cpp:65-105`).
+    #[test]
+    fn client_info_uses_active_resources_for_native_arguments() {
+        let resources = RuntimeClientInfoResources::new(
+            "AKTIV",
+            "INAKTIV",
+            "LOKAL",
+            "FERN",
+            "HOST",
+            "CLIENT",
+            "%s/%s/%s/%s/%d/%s",
+            "ADRESSEN",
+            "DATEN:%s:%s:%d",
+            "VERBINDUNGEN:%s:%s:%s:%d",
+            "KEINE-ADRESSEN:%d",
+            "KEINE-VERBINDUNGEN",
+            "UNBEKANNT:%d",
+        );
+        let mut row = row();
+        row.host = true;
+        row.local = true;
+        row.activated = false;
+        row.unacknowledged = true;
+        row.addresses = vec!["addr.example:1234".to_string()];
+        row.connections = vec![RuntimeConnectionRow {
+            connection_id: 3,
+            usage: "Data/Msg".to_string(),
+            protocol: "UDP".to_string(),
+            peer_address: "peer.example:5678".to_string(),
+            packet_loss: 2,
+            ping_ms: 17,
+            lag_ms: 19,
+            can_disconnect: false,
+        }];
+
+        let lines = client_info_lines_for(&[row], 7, &resources);
+        assert_eq!(
+            lines,
+            [
+                "INAKTIV/LOKAL/HOST/Remote/7/ (!ack)",
+                "ADRESSEN",
+                "  0: addr.example:1234",
+                "VERBINDUNGEN:Msg/Data:UDP:peer.example:5678:17",
+            ]
+        );
+        assert_eq!(
+            client_info_lines_for(&[], 42, &resources),
+            ["UNBEKANNT:42".to_string()]
+        );
+    }
+
+    #[test]
+    fn client_info_keeps_percent_literals_in_network_names() {
+        let resources = info_resources();
+        let mut row = row();
+        row.name = "%s".to_string();
+        row.nick = "%d".to_string();
+
+        assert_eq!(
+            client_info_lines_for(&[row], 7, &resources)[0],
+            "active remote client %s (ID #7):"
+        );
+    }
+
+    #[test]
+    fn client_info_orders_message_before_separate_data_connection() {
+        let resources = info_resources();
+        let mut row = row();
+        row.connections = vec![
+            RuntimeConnectionRow {
+                connection_id: 2,
+                usage: "Data".to_string(),
+                protocol: "TCP".to_string(),
+                peer_address: "data.example:2222".to_string(),
+                packet_loss: 0,
+                ping_ms: 20,
+                lag_ms: 20,
+                can_disconnect: false,
+            },
+            RuntimeConnectionRow {
+                connection_id: 1,
+                usage: "Msg".to_string(),
+                protocol: "UDP".to_string(),
+                peer_address: "msg.example:1111".to_string(),
+                packet_loss: 0,
+                ping_ms: 10,
+                lag_ms: 10,
+                can_disconnect: false,
+            },
+        ];
+
+        assert_eq!(
+            client_info_lines_for(&[row], 7, &resources),
+            [
+                "active remote client Remote (ID #7):",
+                "Addresses: none",
+                "Connections: Msg: UDP (msg.example:1111, 10 ms)",
+                "  Data: TCP (data.example:2222, 20 ms)",
+            ]
+        );
     }
 
     #[test]
@@ -3643,7 +3970,7 @@ mod tests {
         let preferred = IntRect {
             x: 0,
             y: 0,
-            w: 320,
+            w: 640,
             h: 200,
         };
         let font = tooltip_font();
@@ -3663,13 +3990,15 @@ mod tests {
                 can_disconnect: false,
             })
             .collect();
-        let all_lines = client_info_lines(&overflow);
+        let resources = info_resources();
+        let all_lines = client_info_lines(&overflow, &resources);
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
             options(true),
             vec![overflow.clone()],
             RuntimeClientListStatus::default(),
-        );
+        )
+        .with_info_resources(resources);
         let list = dialog.layout(preferred, font.line_height);
         let row_point = GuiPoint::new(
             (list.list.x + 25) as f32,
