@@ -9539,9 +9539,11 @@ impl GameApp {
                     },
                 ))
             })?;
-        let item_icons = (menu.style == 3)
-            .then(|| self.script_menu_item_icons(menu))
-            .unwrap_or_default();
+        let item_icons = if menu.style == 3 {
+            self.script_menu_item_icons(menu)
+        } else {
+            Default::default()
+        };
         let presentation = self
             .script_menu_presentations
             .get(&owner)
