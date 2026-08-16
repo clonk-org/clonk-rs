@@ -163,9 +163,9 @@ use clonk_app_core::{
     ClassicStartupBootstrapIssue,
 };
 use clonk_app_menus::game_over::{
-    EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction, GameOverActivationKey,
-    GameOverClassicResources, GameOverEntry, GameOverFocus, GameOverOutcome, GameOverSound,
-    GameOverState, NextMissionButton,
+    resolve_league_evaluation_icon, EvaluationGoal, EvaluationPlayer, EvaluationViewModel,
+    GameOverAction, GameOverActivationKey, GameOverClassicResources, GameOverEntry, GameOverFocus,
+    GameOverOutcome, GameOverSound, GameOverState, NextMissionButton,
 };
 use clonk_app_menus::ingame_menu::{
     DisplayFlags, DisplayToggle, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry,

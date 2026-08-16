@@ -6604,23 +6604,26 @@ impl FrontendAssets {
         let button_down = self.startup_dialog_images.get("GUIButtonDown.png")?;
         let button_highlight = self.game_over_button_highlight.as_ref()?;
         let fonts = self.clonk_fonts.as_deref()?;
-        Some(GameOverClassicResources::new(
-            clonk_frontend::classic_gui::ClassicGuiSkin::new(
-                caption,
-                button,
-                button_down,
+        Some(
+            GameOverClassicResources::new(
+                clonk_frontend::classic_gui::ClassicGuiSkin::new(
+                    caption,
+                    button,
+                    button_down,
+                    Some(button_highlight),
+                ),
+                fonts,
                 Some(button_highlight),
-            ),
-            fonts,
-            Some(button_highlight),
-            self.startup_dialog_images.get("GUIIcons.png"),
-            hud.player
-                .as_ref()
-                .or_else(|| self.startup_dialog_images.get("Player.png")),
-            hud.score.as_ref(),
-            self.startup_dialog_images.get("GUIScroll.png"),
-            hud.crew.as_ref(),
-        ))
+                self.startup_dialog_images.get("GUIIcons.png"),
+                hud.player
+                    .as_ref()
+                    .or_else(|| self.startup_dialog_images.get("Player.png")),
+                hud.score.as_ref(),
+                self.startup_dialog_images.get("GUIScroll.png"),
+                hud.crew.as_ref(),
+            )
+            .with_gui_icons_extended(self.startup_dialog_images.get("GUIIcons2.png")),
+        )
     }
 
     pub(crate) fn scoreboard_resources<'a>(
@@ -7356,6 +7359,13 @@ impl FrontendAssets {
             if !self.startup_dialog_images.contains_key(name) {
                 missing.push(name.to_string());
             }
+        }
+        if self
+            .startup_dialog_images
+            .get("GUIIcons2.png")
+            .is_some_and(|image| resolve_league_evaluation_icon(image).is_none())
+        {
+            missing.push("GUIIcons2.png (Ico:League)".to_string());
         }
         if hud.player.is_none() && !self.startup_dialog_images.contains_key("Player.png") {
             missing.push("Player.png".to_string());
