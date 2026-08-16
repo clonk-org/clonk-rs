@@ -8641,7 +8641,6 @@ impl GraphicsSystem {
         sprite: &DefinitionSprite,
         action_name: &str,
         phase: i32,
-        direction: Direction,
         owner_color: Option<u32>,
         screen_x: f32,
         screen_y: f32,
@@ -8686,12 +8685,12 @@ impl GraphicsSystem {
             phase.rem_euclid(frame_count_i32)
         };
 
-        let draw_dir = Self::resolve_draw_direction(graphics, direction);
-        let flipped = Self::resolve_overlay_action_flip(graphics, direction);
-
+        // MODE_Action overlays use the source action's first facet row and
+        // their own transform; host facing is not part of this C++ draw
+        // (src/C4DefGraphics.cpp:808-826).
         let source_rect = SourceRect::new(
             facet.x + facet.width.saturating_mul(frame_index),
-            facet.y + facet.height.saturating_mul(draw_dir),
+            facet.y,
             facet.width,
             facet.height,
         );
@@ -8736,7 +8735,7 @@ impl GraphicsSystem {
                 sprite.color_mask.as_ref(),
                 &source,
                 sampling,
-                flipped,
+                false,
                 owner_color,
                 blit,
                 gamma,
@@ -8773,7 +8772,7 @@ impl GraphicsSystem {
                 sprite.color_mask.as_ref(),
                 &source,
                 sampling,
-                flipped,
+                false,
                 owner_color,
                 blit,
                 gamma,
@@ -9182,7 +9181,6 @@ impl GraphicsSystem {
             sprite,
             action_name,
             phase,
-            object.direction,
             owner_color,
             screen_x,
             screen_y,
@@ -9507,25 +9505,6 @@ impl GraphicsSystem {
                 .saturating_sub(direction),
             _ => direction,
         }
-    }
-
-    /// Whether a MODE_Action/MODE_Base graphics overlay mirrors with the host
-    /// object's facing. C++ does not: C4GraphicsOverlay::Draw blits with
-    /// `iPhaseY = 0` and the overlay's own `C4DrawTransform`, never the host's
-    /// `pDrawTransform` (C4DefGraphics.cpp:820-826). This preserves the port's
-    /// pre-existing overlay behaviour unchanged, quarantined behind this one
-    /// helper rather than converged: no test covers the behaviour, so closing
-    /// the gap needs its own oracle first (clonk-org/clonk-rs#354).
-    /// MODE_ExtraGraphics is unaffected — it *does* inherit the host
-    /// transform in C++ (C4DefGraphics.cpp:794-806), which the port already
-    /// reproduces.
-    pub(crate) fn resolve_overlay_action_flip(
-        graphics: &DefinitionActionGraphics,
-        direction: Direction,
-    ) -> bool {
-        graphics
-            .flip_dir
-            .is_some_and(|flip_dir| flip_dir != 0 && direction.to_script_value() >= flip_dir)
     }
 
     fn source_within_image(image: &ImageData, rect: &SourceRect) -> bool {
