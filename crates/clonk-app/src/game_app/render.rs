@@ -4843,15 +4843,6 @@ impl GameApp {
                     .engine
                     .definition_picture_image(title_id)
                     .map(definition_menu_picture);
-                let item_definition_color = if !menu.user_menu
-                    && matches!(
-                        menu.title_symbol,
-                        clonk_engine::ObjectMenuSymbol::Buy { .. }
-                    ) {
-                    object_menu_buying_player_color(&self.snapshot, menu.command_object)
-                } else {
-                    0
-                };
                 let text_spec_resources = self.script_text_spec_resources();
                 let font_images = resolve_script_menu_font_images(
                     &self.engine,
@@ -4862,34 +4853,7 @@ impl GameApp {
                     tracing::error!(%error, "classic menu text-image resource preflight failed");
                     error
                 })?;
-                let hud_graphics = self.current_hud_graphics();
-                let allowed_blit_modes =
-                    self.graphics.advanced_renderer_config().allowed_blit_modes;
-                // A Context ObjectRank facet is sized by the menu's resolved
-                // ItemHeight, which only the layout knows (C4Script.cpp:1721).
-                let context_item_height = (menu.style == 1).then(|| {
-                    // Without the classic set the row falls back to the
-                    // C4MN_SymbolSize floor, which is what the layout uses too.
-                    let line_height = fonts.as_deref().map_or(0, |fonts| fonts.text.line_height);
-                    clonk_app_menus::object_menu::classic_context_item_height(line_height)
-                });
-                let item_icons = menu
-                    .items
-                    .iter()
-                    .map(|item| {
-                        clonk_app_core::pictures::object_menu_item_picture_with_context_height(
-                            &self.engine,
-                            &self.snapshot,
-                            item,
-                            item_definition_color,
-                            &hud_graphics,
-                            menu.style,
-                            text_spec_resources,
-                            allowed_blit_modes,
-                            context_item_height,
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                let item_icons = self.script_menu_item_icons(menu);
                 // C4MenuItem::DrawElement blits a row symbol only while its
                 // facet holds a surface (C4Menu.cpp:166), so a picture that
                 // never resolved draws an empty cell. C++ renders each symbol
@@ -5002,6 +4966,7 @@ impl GameApp {
                         area,
                         &layout_font,
                         menu,
+                        &item_icons,
                         self.display_flags.show_commands,
                         &font_images,
                         menu_location.expect("free anchor has a location"),
