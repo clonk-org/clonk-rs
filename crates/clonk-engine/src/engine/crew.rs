@@ -734,10 +734,10 @@ impl Engine {
     /// native Contents/Get/Put, Activate and base-sell rows still resolve
     /// their symbol against the frame's snapshot instead of capturing it at
     /// refill as `C4ObjectMenu::RefillInternal` does, so such a row can draw
-    /// blank for one frame (clonk-org/clonk-rs#364), and a Dialog row
-    /// hit-tests off the item recipe rather than the resolved facet
-    /// (`C4Menu.cpp:138`, clonk-org/clonk-rs#375). No parity gate has a menu
-    /// section, so neither of those is machine-checked.
+    /// blank for one frame (clonk-org/clonk-rs#364). Dialog input now receives
+    /// the same resolved item icons as drawing, so `GetSymbolWidth` follows
+    /// the facet's surface (`C4Menu.cpp:138`). No parity gate has a menu
+    /// section, so the native-row lifetime gap is not machine-checked.
     pub fn menu_user_enter(
         &mut self,
         object_id: ObjectId,
