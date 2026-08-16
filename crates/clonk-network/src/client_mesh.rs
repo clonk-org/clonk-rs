@@ -1,4 +1,6 @@
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+#[cfg(unix)]
+use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::Duration;
 
 use crate::{AddressInsertion, NetworkAddress, NetworkProtocol};
