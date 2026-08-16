@@ -1037,6 +1037,16 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
 
     let mut app = new_classic_menu_app(800, 600);
     app.app_paths = Some(paths.clone());
+    app.display_flags.player_names = false;
+    app.display_flags.clonk_names = false;
+    app.display_flags.clock = true;
+    app.display_flags.fps = true;
+    app.display_flags.upper_board = UpperBoardMode::Small;
+    app.defer_display_toggle(DisplayToggle::PlayerNames);
+    app.defer_display_toggle(DisplayToggle::ClonkNames);
+    app.defer_display_toggle(DisplayToggle::Clock);
+    app.defer_display_toggle(DisplayToggle::Fps);
+    app.defer_display_toggle(DisplayToggle::UpperBoard);
     attach_l040_network_dialog(&mut app);
     let redirect = clonk_network::MasterserverReplyInfo {
         league_server_redirect: "https://new.example".to_string(),
@@ -1091,6 +1101,25 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
             .get_in(Some("Network"), "ServerAddress"),
         Some("https://new.example")
     );
+    let redirected = Config::load(paths.config_file()).test_value();
+    assert_eq!(
+        redirected.get_in(Some("Graphics"), "ShowCrewNames"),
+        Some("false")
+    );
+    assert_eq!(
+        redirected.get_in(Some("Graphics"), "ShowCrewCNames"),
+        Some("false")
+    );
+    assert_eq!(
+        redirected.get_in(Some("Graphics"), "ShowClock"),
+        Some("true")
+    );
+    assert_eq!(redirected.get_in(Some("General"), "FPS"), Some("true"));
+    assert_eq!(
+        redirected.get_in(Some("Graphics"), "UpperBoard"),
+        Some("Small")
+    );
+    assert_eq!(app.deferred_config.len(), 0);
     assert_eq!(app.message_dialogs.len(), 1);
     let applied = &app.message_dialogs[0].state;
     assert_eq!(applied.caption(), "Server Redirection");

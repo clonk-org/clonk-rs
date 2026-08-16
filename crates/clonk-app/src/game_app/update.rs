@@ -102,11 +102,16 @@ impl GameApp {
     /// Stores the time of this check, successful or not, exactly as
     /// `C4UpdateDlg.cpp:266-267` does before it queries anything.
     fn store_last_update_time(&mut self, now: i64) {
-        let Some(paths) = self.app_paths.as_ref() else {
+        let Some(paths) = self.app_paths.clone() else {
             return;
         };
         let path = paths.config_file();
         let stored = Config::load(&path).map(|mut config| {
+            // This port persists the attempt immediately, while C++ keeps
+            // LastUpdateTime in its process-local Config until a later save.
+            // Since this is nevertheless a complete config rewrite, preserve
+            // the five in-game Display values already held in memory too.
+            self.apply_display_flags_to_config(&mut config);
             config.set_in(Some("Network"), "LastUpdateTime", now.to_string());
             (config, path.clone())
         });
@@ -116,6 +121,11 @@ impl GameApp {
                     save_config_preserving_native_general_booleans(&config, &path, None, None)
                 {
                     tracing::warn!(%error, "failed to store the update check time");
+                } else {
+                    // The complete save now contains the current Display
+                    // fields, so the shutdown flush must not rewrite stale
+                    // deferred entries after it.
+                    self.clear_deferred_display_toggles();
                 }
             }
             Err(error) => {

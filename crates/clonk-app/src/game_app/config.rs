@@ -2138,6 +2138,41 @@ impl GameApp {
         }
     }
 
+    /// Saves a complete config while carrying the five in-game Display values
+    /// that are still held in the process-local state. C++ mutates its global
+    /// `Config` before every complete save, so `Config.Save()` at the
+    /// masterserver redirect site (`C4StartupNetDlg.cpp:312-315`) includes
+    /// those values even though the Display menu itself waits for shutdown.
+    /// Keep the pending entries until the complete write succeeds; a failed
+    /// save must remain recoverable by the ordinary shutdown flush.
+    pub(crate) fn persist_config_value_with_display(
+        &mut self,
+        section: &str,
+        key: &str,
+        value: impl Into<String>,
+    ) -> io::Result<()> {
+        let Some(paths) = self.app_paths.clone() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "application paths are unavailable",
+            ));
+        };
+        let path = paths.config_file();
+        let mut config = match Config::load(&path) {
+            Ok(config) => config,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+            Err(error) => return Err(error),
+        };
+        self.apply_display_flags_to_config(&mut config);
+        config.set_in(Some(section), key, value);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        save_config_preserving_native_general_booleans(&config, &path, None, None)?;
+        self.clear_deferred_display_toggles();
+        Ok(())
+    }
+
     /// Keep the in-game Display values in the process-local config until the
     /// next C++ save site. `C4MainMenu::MenuCommand` mutates these fields in
     /// memory (`C4MainMenu.cpp:855-882`), while `C4Application::Quit` writes
@@ -2210,7 +2245,7 @@ impl GameApp {
         );
     }
 
-    fn clear_deferred_display_toggles(&mut self) {
+    pub(crate) fn clear_deferred_display_toggles(&mut self) {
         for (section, key) in [
             ("Graphics", "ShowCrewNames"),
             ("Graphics", "ShowCrewCNames"),
