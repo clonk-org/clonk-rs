@@ -1805,38 +1805,10 @@ impl<'a> Parser<'a> {
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         if self.consume_if_symbol(Symbol::Bang)?.is_some() {
-            // The speculative preflight predates the `(!x) = y` precedence
-            // fix and now contributes only a fallback error. A lexer error
-            // never becomes a token, so `reset_speculative` has nothing to
-            // replay for the text the preflight scanned past and the lexer
-            // cursor stays beyond it: `!Foo(99999999999999999999999)` then
-            // compiles as though the argument were absent, where without the
-            // preflight it fails with `integer literal out of range` at
-            // column 24. Known open gap (clonk-org/clonk-rs#363).
-            // Deleting the preflight restored the right error and column in
-            // every probed shape with the whole `clonk-script` suite green,
-            // but that is not the close: C++ never raises this error at all
-            // — `C4AulParse.cpp:704-744` scans literals through
-            // `%SCNdPTR`/`%SCNxPTR` and truncates at the `AB_INT` push — so
-            // what the oracle does with a literal wider than 64 bits has to
-            // be established before choosing between deleting the preflight
-            // and widening the truncation. Latent for shipped content: the
-            // widest literals across the 2,132 `.c` files under `content/`
-            // are 10 decimal and 8 hex digits, none overflowing the lexer's
-            // `i64`/`u64` scan, and `parity verify` compiles no such script.
-            // Whatever changes here, this AST must never choose precedence:
-            // replay and parse only the unary operand, so `!x = y` stays
-            // `(!x) = y`.
-            if self.speculative_tokens.is_none() {
-                self.begin_speculative();
-                let speculative_result = self.parse_assignment();
-                self.reset_speculative();
-                return match self.parse_unary() {
-                    Ok(expr) => Ok(Expr::Unary(UnaryOp::Not, Box::new(expr))),
-                    Err(error) => Err(speculative_result.err().unwrap_or(error)),
-                };
-            }
-
+            // C4Aul's `!` operator has unary precedence (C4AulParse.cpp:432),
+            // so parse only its unary operand. The old speculative full-
+            // assignment pass could advance past a lexer error and then lose
+            // the offending source position when it replayed its tokens.
             let expr = self.parse_unary()?;
             return Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)));
         }
@@ -2993,6 +2965,74 @@ func Ok() { return 1; }
     }
 
     #[test]
+    fn bang_call_keeps_a_wide_integer_argument() {
+        // C4AulParse.cpp:704-743 scans through pointer width and
+        // C4AulParse.cpp:3409 narrows the resulting ATT_INT to C4ValueInt.
+        let expression = parse_expression_at_strict("!Foo(99999999999999999999999)", 0)
+            .expect("the oracle truncates an oversized decimal literal");
+        let Expr::Unary(UnaryOp::Not, operand) = expression else {
+            panic!("expected unary ! expression");
+        };
+        let Expr::Call { args, .. } = *operand else {
+            panic!("expected ! to bind the complete call operand");
+        };
+        assert_eq!(args, [Expr::Literal(Literal::Int(-1))]);
+    }
+
+    #[test]
+    fn bang_assignment_keeps_a_wide_integer_rhs() {
+        // C4AulParse.cpp:432 and 704-743 keep ! at unary precedence while
+        // C4AulParse.cpp:3409 narrows the oversized ATT_INT value.
+        let script = parse_script("func Test() { var x; return !x = 99999999999999999999999; }")
+            .expect("the oversized assignment RHS is a valid C++ integer token");
+        let Stmt::Return(Some(Expr::Assignment(target, value))) = &script.functions[0].body[1]
+        else {
+            panic!("expected assignment expression in return statement");
+        };
+        assert!(matches!(
+            target,
+            AssignmentTarget::InvalidValue { expression, operator: "=" }
+                if matches!(&**expression, Expr::Unary(UnaryOp::Not, operand)
+                    if matches!(&**operand, Expr::Variable(name) if name == "x"))
+        ));
+        assert_eq!(**value, Expr::Literal(Literal::Int(-1)));
+    }
+
+    #[test]
+    fn bang_and_keeps_a_wide_integer_rhs() {
+        // C4AulParse.cpp:432 gives ! unary precedence and 704-743 plus
+        // 3409 preserve the pointer-width scan before int32 narrowing.
+        let script = parse_script("func Test() { var x; return !x && 99999999999999999999999; }")
+            .expect("the oversized logical RHS is a valid C++ integer token");
+        let Stmt::Return(Some(Expr::Binary(left, BinaryOp::And, right))) =
+            &script.functions[0].body[1]
+        else {
+            panic!("expected top-level && expression");
+        };
+        assert!(matches!(
+            &**left,
+            Expr::Unary(UnaryOp::Not, operand)
+                if matches!(&**operand, Expr::Variable(name) if name == "x")
+        ));
+        assert_eq!(**right, Expr::Literal(Literal::Int(-1)));
+    }
+
+    #[test]
+    fn bang_preserves_a_later_lexer_error_location() {
+        // C4AulParse.cpp:616-634 reports an invalid strict-2 character at
+        // its source position; the preceding wide integer remains an ATT_INT
+        // from C4AulParse.cpp:704-743 rather than masking that diagnostic.
+        let source = "#strict 2\nfunc Test() { return !Foo(99999999999999999999999 @); }";
+        let error = parse_script(source).expect_err("the invalid @ must be reported");
+        assert_eq!(error.message(), "unexpected character '@'");
+        assert_eq!(error.line(), 2);
+        assert_eq!(
+            error.column(),
+            source.lines().nth(1).unwrap().find('@').unwrap() + 1
+        );
+    }
+
+    #[test]
     fn parse_return_with_simple_expression() {
         let result = parse_script("func Test() { return 42; }");
         assert!(result.is_ok());
@@ -3443,14 +3483,14 @@ func Ok() { return 1; }
     }
 
     #[test]
-    fn speculative_unary_records_synthesized_string_operands_once() {
+    fn unary_container_operands_register_synthesized_string_values_once() {
         let script = parse_script(
             r#"#strict 3
                func Test(target) {
                    return [!{if = 1}, !{"quoted" = 2}, !target.dot, !target->arrow];
                }"#,
         )
-        .expect("unary operands parse after their speculative preflight");
+        .expect("unary operands preserve their string registration values");
 
         assert_eq!(
             script.string_literals,
