@@ -6511,6 +6511,39 @@ mod tests {
             Some((150, 150))
         );
         assert!(item_icons[1].is_none());
+
+        // C4ObjectMenu::RefillInternal owns the facet before a later tick can
+        // remove its source object (C4ObjectMenu.cpp:311-313, C4Menu.cpp:388-398).
+        // The empty frame snapshot models that deletion; the retained
+        // definition/picture inputs must still produce the row symbol.
+        let mut native_item = menu.items[0].clone();
+        native_item.image = clonk_engine::ObjectMenuImage::Definition;
+        native_item.item_id = "_LEI".to_string();
+        native_item.picture_object = Some(clonk_engine::ObjectId::new(999_999));
+        native_item.picture_snapshot = Some(clonk_engine::ObjectMenuPictureSnapshot {
+            definition_id: "_LEI".into(),
+            symbol_size: 35,
+            base_graphics: None,
+            graphics_overlays: Vec::new(),
+            blit_mode: 0,
+            color: 0,
+            color_modulation: 0,
+            picture_rect: clonk_engine::DefinitionRect::default(),
+            rank: None,
+        });
+        let frame_after_source_removal = engine.snapshot();
+        assert!(
+            clonk_app_core::pictures::object_menu_item_picture(
+                &engine,
+                &frame_after_source_removal,
+                &native_item,
+                0,
+                &clonk_frontend::HudGraphics::default(),
+                menu.style,
+            )
+            .is_some(),
+            "the refill snapshot keeps the native row drawable after deletion",
+        );
         let decoration_image = engine
             .definition_sprite_image("MD69", None)
             .expect("MD69 sprite sheet");

@@ -1819,6 +1819,17 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
         })
     }
 
+    fn object_menu_picture_snapshot(
+        &self,
+        object: ObjectId,
+    ) -> Option<crate::ObjectMenuPictureSnapshot> {
+        HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_menu_picture_snapshot(object, false, 35))
+        })
+    }
+
     fn can_concat_picture_with(&self, object: ObjectId, other: ObjectId) -> bool {
         HOST_CONTEXT.with(|cell| {
             cell.borrow()
