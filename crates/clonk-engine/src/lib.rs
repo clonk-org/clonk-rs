@@ -10645,12 +10645,11 @@ impl Engine {
         let object = &mut self.objects[index];
         let previous_rect = object.current_shape_rect();
         let previous_construction = object.state.construction;
-        object.shape_template = template;
         // The mask falls back to the reloaded definition's default, the way
         // ChangeDef drops the override (`C4Object.cpp:1213`).
         object.state.solid_mask_override = None;
         object.compiled_mass = None;
-        object.refresh_shape_after_state_change(previous_construction, previous_rect, false);
+        object.refresh_shape_from_template(template, previous_construction, previous_rect);
     }
 
     /// Every live object of one definition, in master order — the set both
