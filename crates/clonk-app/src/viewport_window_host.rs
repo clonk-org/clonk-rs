@@ -174,6 +174,10 @@ impl DeveloperWindowHost for ViewportWindowHost {
         self.window.request_redraw();
     }
 
+    fn focus_window(&mut self) {
+        self.window.focus_window();
+    }
+
     fn set_visible(&mut self, visible: bool) {
         self.window.set_visible(visible);
         self.visible = visible;

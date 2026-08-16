@@ -32,6 +32,7 @@ pub(crate) fn build_object_list_window(
             target,
             OBJECT_LIST_TITLE,
             true,
+            false,
             None,
             OBJECT_LIST_WIDTH,
             OBJECT_LIST_HEIGHT,
@@ -53,6 +54,10 @@ impl DeveloperWindowHost for ObjectListWindowHost {
 
     fn request_redraw(&mut self) {
         self.surface.request_redraw();
+    }
+
+    fn focus_window(&mut self) {
+        self.surface.focus_window();
     }
 
     fn set_visible(&mut self, visible: bool) {

@@ -27,6 +27,7 @@ pub(crate) fn build_component_editor_window(
             target,
             title,
             true,
+            false,
             None,
             EDITOR_WIDTH,
             EDITOR_HEIGHT,
@@ -42,6 +43,10 @@ impl DeveloperWindowHost for ComponentEditorWindowHost {
 
     fn request_redraw(&mut self) {
         self.surface.request_redraw();
+    }
+
+    fn focus_window(&mut self) {
+        self.surface.focus_window();
     }
 
     fn set_visible(&mut self, visible: bool) {

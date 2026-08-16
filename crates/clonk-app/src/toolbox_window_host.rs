@@ -28,11 +28,17 @@ pub struct ToolboxWindowHost {
 /// `C4DevmodeDlg::AddPage` makes it resizable, a utility type hint, role
 /// `"toolbox"`, transient for the console and centred on it
 /// (`C4DevmodeDlg.cpp:63-68`, recorded in
-/// [`crate::developer_toolbox::ToolboxChrome`]). winit carries only the first
-/// of those five: it has no utility hint, no window role, and no
-/// transient-for or centre-on-parent for a second top level. The window is
-/// therefore an ordinary resizable one, positioned from the remembered
-/// coordinates when there are any.
+/// [`crate::developer_toolbox::ToolboxChrome`]). The X11-specific winit
+/// extension applies the utility type when that backend is active. There is no
+/// cross-platform equivalent for the arbitrary window role, transient-for
+/// relation or centre-on-parent operation for a second top-level window. Those
+/// three pieces are an accepted platform limitation here; the port deliberately
+/// keeps an ordinary resizable window rather than substituting always-on-top or
+/// a child window, which would change the window's lifetime and placement
+/// semantics. It is positioned from the remembered coordinates when there are
+/// any. `Window::focus_window` is still requested on every show and reopen;
+/// winit documents that request as unsupported on Wayland, where the compositor
+/// retains focus authority.
 pub(crate) fn build_toolbox_window(
     target: &ActiveEventLoop,
     title: &str,
@@ -46,6 +52,7 @@ pub(crate) fn build_toolbox_window(
             target,
             title,
             chrome.resizable,
+            chrome.utility,
             position,
             width,
             height,
@@ -74,6 +81,10 @@ impl DeveloperWindowHost for ToolboxWindowHost {
 
     fn request_redraw(&mut self) {
         self.surface.request_redraw();
+    }
+
+    fn focus_window(&mut self) {
+        self.surface.focus_window();
     }
 
     fn set_visible(&mut self, visible: bool) {
