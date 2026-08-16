@@ -29,7 +29,7 @@ pub(crate) fn reconcile_developer_toolbox_window(
     next_key: &mut u64,
     target: &winit::event_loop::ActiveEventLoop,
 ) {
-    use crate::developer_windows::{DeveloperWindowHost, HostPurpose};
+    use crate::developer_windows::HostPurpose;
     use crate::toolbox_window_host::build_toolbox_window;
 
     if app.developer_toolbox_effects.is_empty() {
@@ -49,10 +49,7 @@ pub(crate) fn reconcile_developer_toolbox_window(
             } => match key {
                 Some(key) => {
                     windows.switch_page(key, page);
-                    if let Some(host) = windows.host_mut(key) {
-                        host.set_visible(true);
-                        host.request_redraw();
-                    }
+                    windows.show_and_focus(key);
                     if let Some(DeveloperHost::Toolbox(toolbox)) = windows.host_mut(key) {
                         toolbox.surface.window.set_title(&title);
                         // `SwitchPage` restores the remembered coordinates on
@@ -87,6 +84,7 @@ pub(crate) fn reconcile_developer_toolbox_window(
                                 HostPurpose::Toolbox { page },
                                 DeveloperHost::Toolbox(host),
                             );
+                            windows.show_and_focus(key);
                         }
                         Err(error) => {
                             tracing::error!(%error, "failed to open the developer toolbox");

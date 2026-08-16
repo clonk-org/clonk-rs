@@ -45,11 +45,13 @@ pub(crate) enum SoftwarePresent {
 ///
 /// `position` places it where a previous session left it; without one the
 /// platform chooses, which is the closest thing winit has to GTK's
-/// centre-on-parent.
+/// centre-on-parent. `utility` requests the X11 utility window type when that
+/// backend is active; other backends keep their ordinary top-level type.
 pub(crate) fn build_software_window(
     target: &ActiveEventLoop,
     title: &str,
     resizable: bool,
+    utility: bool,
     position: Option<(i32, i32)>,
     width: u32,
     height: u32,
@@ -64,6 +66,16 @@ pub(crate) fn build_software_window(
     if let Some((x, y)) = position {
         attributes = attributes.with_position(winit::dpi::PhysicalPosition::new(x, y));
     }
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::x11::{ActiveEventLoopExtX11, WindowAttributesExtX11, WindowType};
+
+        if utility && target.is_x11() {
+            attributes = attributes.with_x11_window_type(vec![WindowType::Utility]);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = utility;
     let window = Arc::new(
         target
             .create_window(attributes)
@@ -156,6 +168,10 @@ impl DeveloperWindowHost for SoftwareWindow {
 
     fn request_redraw(&mut self) {
         self.window.request_redraw();
+    }
+
+    fn focus_window(&mut self) {
+        self.window.focus_window();
     }
 
     fn set_visible(&mut self, visible: bool) {

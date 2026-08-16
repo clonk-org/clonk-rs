@@ -108,6 +108,10 @@ impl DeveloperWindowHost for DeveloperHost {
         }
     }
 
+    fn focus_window(&mut self) {
+        self.window().focus_window();
+    }
+
     fn set_visible(&mut self, visible: bool) {
         match self {
             Self::Shell(shell) => shell.set_visible(visible),

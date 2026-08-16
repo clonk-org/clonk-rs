@@ -52,6 +52,8 @@ pub trait DeveloperWindowHost {
     fn resize(&mut self, width: u32, height: u32);
     /// Marks the host as needing a redraw before the next present.
     fn request_redraw(&mut self);
+    /// Brings a visible host to the front and gives it input focus.
+    fn focus_window(&mut self);
     fn set_visible(&mut self, visible: bool);
     fn visible(&self) -> bool;
 }
@@ -196,6 +198,20 @@ impl<H: DeveloperWindowHost> DeveloperWindows<H> {
             .is_some()
     }
 
+    /// Shows a record, raises it and gives it input focus before asking for a
+    /// frame. The toolbox uses this when it is opened or reopened; keeping the
+    /// sequence here makes the ordering testable without a live event loop.
+    pub fn show_and_focus(&mut self, id: WindowId) -> bool {
+        self.records
+            .get_mut(&id)
+            .map(|record| {
+                record.host.set_visible(true);
+                record.host.focus_window();
+                record.host.request_redraw();
+            })
+            .is_some()
+    }
+
     /// Switches the toolbox's page identity. Returns false for a record that is
     /// not a toolbox.
     pub fn switch_page(&mut self, id: WindowId, page: ToolboxPage) -> bool {
@@ -293,7 +309,9 @@ mod tests {
     struct MockHost {
         size: (u32, u32),
         redraws: usize,
+        focuses: usize,
         presents: usize,
+        events: Vec<&'static str>,
         visible: bool,
         fail_present: Option<String>,
     }
@@ -314,10 +332,17 @@ mod tests {
 
         fn request_redraw(&mut self) {
             self.redraws += 1;
+            self.events.push("redraw");
+        }
+
+        fn focus_window(&mut self) {
+            self.focuses += 1;
+            self.events.push("focus");
         }
 
         fn set_visible(&mut self, visible: bool) {
             self.visible = visible;
+            self.events.push("visible");
         }
 
         fn visible(&self) -> bool {
@@ -395,6 +420,7 @@ mod tests {
         impl DeveloperWindowHost for DropProbe {
             fn resize(&mut self, _width: u32, _height: u32) {}
             fn request_redraw(&mut self) {}
+            fn focus_window(&mut self) {}
             fn set_visible(&mut self, _visible: bool) {}
             fn visible(&self) -> bool {
                 true
@@ -504,5 +530,21 @@ mod tests {
         );
         assert_eq!(windows.close(WindowId(99)), CloseOutcome::Unknown);
         assert_eq!(windows.len(), 2);
+    }
+
+    // C4DevmodeDlg.cpp:90-121 — SwitchPage shows the notebook window again;
+    // the port's equivalent must raise/focus it before the next frame.
+    #[test]
+    fn showing_the_toolbox_raises_and_focuses_its_window() {
+        let mut windows = registry();
+        assert!(windows.hide(TOOLBOX));
+        windows.host_mut(TOOLBOX).expect("toolbox").events.clear();
+
+        assert!(windows.show_and_focus(TOOLBOX));
+        let toolbox = windows.host(TOOLBOX).expect("toolbox");
+        assert!(toolbox.visible);
+        assert_eq!(toolbox.redraws, 1);
+        assert_eq!(toolbox.focuses, 1);
+        assert_eq!(toolbox.events, ["visible", "focus", "redraw"]);
     }
 }
