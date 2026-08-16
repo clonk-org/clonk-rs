@@ -1231,6 +1231,19 @@ fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
 
     let mut app = new_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
+    // C4UpdateDlg.cpp:264-268 records the attempt before the check; this
+    // port's immediate config rewrite must also carry the in-memory Display
+    // values that C++ would retain in its global Config.
+    app.display_flags.player_names = false;
+    app.display_flags.clonk_names = false;
+    app.display_flags.clock = true;
+    app.display_flags.fps = true;
+    app.display_flags.upper_board = UpperBoardMode::Small;
+    app.defer_display_toggle(DisplayToggle::PlayerNames);
+    app.defer_display_toggle(DisplayToggle::ClonkNames);
+    app.defer_display_toggle(DisplayToggle::Clock);
+    app.defer_display_toggle(DisplayToggle::Fps);
+    app.defer_display_toggle(DisplayToggle::UpperBoard);
 
     app.check_for_updates_at(true, 1000 + 60 * 60 * 24 - 1)
         .test_value();
@@ -1248,6 +1261,19 @@ fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
         Some((1000 + 60 * 60 * 24 - 1).to_string()),
         "the attempt is stored before the result is known"
     );
+    let saved = Config::load(paths.config_file()).test_value();
+    assert_eq!(
+        saved.get_in(Some("Graphics"), "ShowCrewNames"),
+        Some("false")
+    );
+    assert_eq!(
+        saved.get_in(Some("Graphics"), "ShowCrewCNames"),
+        Some("false")
+    );
+    assert_eq!(saved.get_in(Some("Graphics"), "ShowClock"), Some("true"));
+    assert_eq!(saved.get_in(Some("General"), "FPS"), Some("true"));
+    assert_eq!(saved.get_in(Some("Graphics"), "UpperBoard"), Some("Small"));
+    assert_eq!(app.deferred_config.len(), 0);
 
     // A second request while one is in flight says so rather than starting
     // another; C++ cannot reach this because its check blocks.

@@ -1588,6 +1588,7 @@ impl GameApp {
                 // (C4MainMenu.cpp:855-884).
                 let selection = self.ingame_menu_selection(player);
                 self.display_flags.toggle(toggle);
+                self.defer_display_toggle(toggle);
                 if toggle == DisplayToggle::UpperBoard {
                     let game_time_seconds = self.game_time_seconds();
                     self.graphics.set_upper_board_mode(
@@ -4245,15 +4246,12 @@ impl GameApp {
             MessageDialogContinuation::NetworkServerRedirect { address }
                 if result == clonk_frontend::message_dialog::MessageDialogResult::Yes =>
             {
-                let persisted = self.app_paths.as_ref().map_or_else(
-                    || {
-                        Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            "application paths are unavailable",
-                        ))
-                    },
-                    |paths| persist_config_value(paths, "Network", "ServerAddress", address),
-                );
+                // C4StartupNetDlg writes Config.Network.ServerAddress and
+                // immediately calls Config.Save (`C4StartupNetDlg.cpp:312-315`).
+                // Carry the in-memory Display fields into that complete save
+                // before the deferred shutdown flush gets a chance to run.
+                let persisted =
+                    self.persist_config_value_with_display("Network", "ServerAddress", address);
                 match persisted {
                     Ok(()) => {
                         let message = self.runtime_resource_text(

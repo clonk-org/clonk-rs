@@ -1193,6 +1193,12 @@ impl GameApp {
                 "the Options dialog is unavailable",
             ));
         }
+        // C4StartupOptionsDlg::SaveConfig calls Config.Save after applying
+        // the open dialog (`C4StartupOptionsDlg.cpp:1182-1183`). Keep the
+        // in-memory Display values in that explicit save just as the C++
+        // Config object does; the Display menu's regular path remains
+        // deferred until C4Application::Quit (`C4Application.cpp:351-367`).
+        self.apply_display_flags_to_config(&mut config);
         advanced_config::canonicalize_existing(&mut config);
         advanced_config::apply_changes(&mut config, changes);
         let fair_crew = changes
