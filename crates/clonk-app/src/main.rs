@@ -2429,6 +2429,8 @@ impl GameApp {
             gamepads,
             #[cfg(test)]
             gamepad_poll_count: 0,
+            #[cfg(test)]
+            sec1_timer_call_count: 0,
             gamepad_gui_control: load_gamepad_gui_control(paths),
             snapshot,
             focus_id: None,
@@ -7146,6 +7148,10 @@ impl GameApp {
     /// stay deterministic because only the window loop drives this method;
     /// tests and other hosts may pulse it explicitly.
     fn sec1_timer(&mut self) -> Result<bool, EngineError> {
+        #[cfg(test)]
+        {
+            self.sec1_timer_call_count += 1;
+        }
         self.guard_classic_global_gui_bootstrap()?;
         let status_reached = self.check_runtime_network_status_reached();
         // C4Network2 is also a one-second timer proc and calls Execute from

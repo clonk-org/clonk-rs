@@ -128,6 +128,26 @@ fn sec1_timer_coalesces_stalls_over_two_seconds_like_cpp() {
 }
 
 #[test]
+fn sec1_timer_backlog_invokes_callback_once_and_preserves_phase() {
+    // CStdApp::Execute compares seconds with LastExecute.tv_sec and fires
+    // Sec1Timer at most once (LegacyClonk src/StdAppUnix.cpp:288-291), while
+    // Win32 never queues WM_TIMER twice (LegacyClonk src/StdAppWin32.cpp:132).
+    let mut app = new_menu_app(320, 200);
+    let mut seconds = Duration::ZERO;
+    app.engine.test_tick();
+
+    advance_game_clock_from_elapsed(
+        &mut app,
+        &mut seconds,
+        Duration::from_secs(60) + Duration::from_millis(250),
+    )
+    .test_value();
+
+    assert_eq!(app.sec1_timer_call_count, 1);
+    assert_eq!(seconds, Duration::from_millis(250));
+}
+
+#[test]
 fn event_loop_second_accumulator_pulses_the_engine_clock() {
     // StdApp's one-second callback is independent from frame scheduling
     // (StdAppUnix.cpp:286-291); C4Game::Sec1Timer consumes TimeGo
