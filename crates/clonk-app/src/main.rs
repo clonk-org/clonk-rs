@@ -589,6 +589,13 @@ fn run() -> Result<()> {
     }
     let update_notice_detail = update_download::take_update_notice_detail();
     let classic = parse_classic_command_line(&cli.classic_arguments);
+    let debug_hud = debug_hud_enabled(
+        std::env::var(LC_APP_HUD_DEBUG_ENV).ok().as_deref(),
+        cfg!(debug_assertions),
+        debug_hud_launch(&cli),
+        std::env::var_os("LC_APP_DUMP_FRAME").is_some()
+            || std::env::var_os("LC_APP_DUMP_OBJECTS").is_some(),
+    );
     install_classic_language_override(&classic);
     let console_log_capture = classic
         .console
@@ -880,12 +887,13 @@ fn run() -> Result<()> {
         );
         let (logical_width, logical_height) = presenter.logical_size();
 
-        let mut app = GameApp::new(
+        let mut app = GameApp::new_with_debug_hud(
             logical_width,
             logical_height,
             audio_options,
             app_paths.as_deref(),
             runtime,
+            debug_hud,
         )
         .context("failed to initialise app state")?;
         let update_failure_prefix =
@@ -2012,6 +2020,21 @@ impl GameApp {
         Self::new_with_frontend_scenarios(width, height, audio_options, paths, runtime, None)
     }
 
+    fn new_with_debug_hud(
+        width: u32,
+        height: u32,
+        audio_options: AudioOptions,
+        paths: Option<&AppPaths>,
+        runtime: RuntimeConfig,
+        debug_hud: bool,
+    ) -> Result<Self> {
+        let mut app = Self::new(width, height, audio_options, paths, runtime)?;
+        // Capture and compatibility entry points suppress the developer HUD
+        // before their first update or render, so it cannot enter evidence.
+        app.debug_hud = debug_hud;
+        Ok(app)
+    }
+
     fn new_with_frontend_scenarios(
         width: u32,
         height: u32,
@@ -2778,9 +2801,12 @@ impl GameApp {
             lobby_chat_drag_anchor: None,
             message_input_history: VecDeque::new(),
             show_startup_hint: false,
-            debug_hud: std::env::var("LC_APP_HUD_DEBUG")
-                .map(|v| v == "1")
-                .unwrap_or(false),
+            debug_hud: debug_hud_enabled(
+                std::env::var(LC_APP_HUD_DEBUG_ENV).ok().as_deref(),
+                cfg!(debug_assertions),
+                DebugHudLaunch::Interactive,
+                false,
+            ),
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);

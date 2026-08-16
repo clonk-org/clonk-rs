@@ -121,6 +121,71 @@ fn classic_command_line_keeps_rust_option_values_out_of_legacy_scanning() {
     assert!(Cli::try_parse_from(["clonk-app", "--future"]).is_err());
 }
 
+#[test]
+fn debug_hud_requires_developer_interactive_launch() {
+    assert!(debug_hud_enabled(
+        Some("1"),
+        true,
+        DebugHudLaunch::Interactive,
+        false,
+    ));
+    assert!(!debug_hud_enabled(
+        None,
+        true,
+        DebugHudLaunch::Interactive,
+        false,
+    ));
+    assert!(!debug_hud_enabled(
+        Some("true"),
+        true,
+        DebugHudLaunch::Interactive,
+        false,
+    ));
+    assert!(!debug_hud_enabled(
+        Some("1"),
+        false,
+        DebugHudLaunch::Interactive,
+        false,
+    ));
+}
+
+#[test]
+fn debug_hud_is_suppressed_for_parity_and_compatibility_launches() {
+    for launch in [DebugHudLaunch::ParityCapture, DebugHudLaunch::Compatibility] {
+        assert!(!debug_hud_enabled(Some("1"), true, launch, false));
+    }
+    assert!(!debug_hud_enabled(
+        Some("1"),
+        true,
+        DebugHudLaunch::Interactive,
+        true,
+    ));
+}
+
+#[test]
+fn debug_hud_launch_classification_is_fail_closed() {
+    let parity_launches: &[&[&str]] = &[
+        &["clonk-app", "--test-load", "Fixture.c4s"],
+        &["clonk-app", "--integration-test", "Fixture.c4s"],
+        &["clonk-app", "--dump-frame", "frame.png"],
+        &["clonk-app", "--dump-menu-frame", "frame.png"],
+        &["clonk-app", "--headless"],
+    ];
+    for arguments in parity_launches {
+        let cli = Cli::try_parse_from(*arguments).test_value();
+        assert_eq!(debug_hud_launch(&cli), DebugHudLaunch::ParityCapture);
+    }
+
+    let compatibility = Cli::try_parse_from(["clonk-app", "Scenario.c4s"]).test_value();
+    assert_eq!(
+        debug_hud_launch(&compatibility),
+        DebugHudLaunch::Compatibility
+    );
+
+    let interactive = Cli::try_parse_from(["clonk-app"]).test_value();
+    assert_eq!(debug_hud_launch(&interactive), DebugHudLaunch::Interactive);
+}
+
 /// C++ selects a dedicated server at build time
 /// (`option(USE_CONSOLE ...)`, CMakeLists.txt:178), so it is fixed for the
 /// life of the process and cannot be re-chosen mid-run. A single shipped

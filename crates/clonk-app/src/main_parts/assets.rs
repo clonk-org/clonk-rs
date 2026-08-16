@@ -271,6 +271,54 @@ pub(crate) struct Cli {
     pub(crate) classic_arguments: Vec<OsString>,
 }
 
+/// Explicit developer-only opt-in for the Rust FRAME/POS/VEL HUD.
+pub(crate) const LC_APP_HUD_DEBUG_ENV: &str = "LC_APP_HUD_DEBUG";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DebugHudLaunch {
+    Interactive,
+    ParityCapture,
+    Compatibility,
+}
+
+/// Classify launch surfaces before constructing app state.
+///
+/// Compatibility arguments and every non-interactive test/capture route are
+/// fail-closed for the developer HUD. They must retain the classic overlays
+/// and produce parity evidence without Rust-only presentation text.
+pub(crate) fn debug_hud_launch(cli: &Cli) -> DebugHudLaunch {
+    if !cli.classic_arguments.is_empty() {
+        DebugHudLaunch::Compatibility
+    } else if cli.test_load.is_some()
+        || cli.integration_test.is_some()
+        || cli.dump_frame.is_some()
+        || cli.dump_menu_frame.is_some()
+        || cli.headless
+        || cli.headed_surface_smoke.is_some()
+    {
+        DebugHudLaunch::ParityCapture
+    } else {
+        DebugHudLaunch::Interactive
+    }
+}
+
+/// Return whether the explicit HUD opt-in is valid for this launch.
+///
+/// `LC_APP_HUD_DEBUG=1` is intentionally the whole contract: it is accepted
+/// only in a debug build, for an interactive launch, and when no forensic
+/// capture environment is active. All other values and contexts are off.
+pub(crate) fn debug_hud_enabled(
+    requested: Option<&str>,
+    developer_build: bool,
+    launch: DebugHudLaunch,
+    capture_environment: bool,
+) -> bool {
+    developer_build
+        && requested == Some("1")
+        && launch == DebugHudLaunch::Interactive
+        && !capture_environment
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClassicCommandLine {
     pub(crate) scenario: Option<PathBuf>,
@@ -649,12 +697,13 @@ pub(crate) fn run_headless_server(
     // other renderer, so the logical surface keeps its ordinary size. Nothing
     // presents it.
     let (logical_width, logical_height) = DisplayOptions::default().actual_size();
-    let mut app = GameApp::new(
+    let mut app = GameApp::new_with_debug_hud(
         logical_width,
         logical_height,
         AudioOptions::silenced(),
         app_paths.map(|paths| &**paths),
         runtime,
+        false,
     )
     .context("failed to initialise headless server state")?;
     app.headless = true;
@@ -7909,12 +7958,13 @@ pub(crate) fn run_sandbox_dump(
     use std::thread;
     use std::time::Duration;
 
-    let mut app = GameApp::new(
+    let mut app = GameApp::new_with_debug_hud(
         1280,
         720,
         AudioOptions::default(),
         app_paths.map(|v| &**v),
         runtime,
+        false,
     )
     .context("failed to initialise app for frame dump")?;
     app.auto_start_sandbox = true;
@@ -7990,12 +8040,13 @@ pub(crate) fn run_menu_dump(
     use std::thread;
     use std::time::Duration;
 
-    let mut app = GameApp::new(
+    let mut app = GameApp::new_with_debug_hud(
         1280,
         720,
         AudioOptions::default(),
         app_paths.map(|v| &**v),
         runtime,
+        false,
     )
     .context("failed to initialise app for menu dump")?;
 
@@ -8127,12 +8178,13 @@ pub(crate) fn run_integration_test(
     let start = Instant::now();
 
     // Create app (reuses test infrastructure)
-    let mut app = GameApp::new(
+    let mut app = GameApp::new_with_debug_hud(
         640, // width
         480, // height
         AudioOptions::default(),
         app_paths.map(|v| &**v),
         runtime,
+        false,
     )
     .context("failed to initialize app for integration test")?;
 

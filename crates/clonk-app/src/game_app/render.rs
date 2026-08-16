@@ -4629,6 +4629,10 @@ impl GameApp {
             &self.snapshot,
             &self.voice_chat.active_speakers(Instant::now()),
         );
+        // The developer HUD is an additive payload for the frontend chrome.
+        // `render_frame_hud_chrome` draws it before this app-owned sequence,
+        // where classic network status, help, flash, dialogs and errors retain
+        // their independent presentation layers and ordering.
         let overlay = GraphicsOverlay {
             frame_text: &self.frame_text,
             status_text: &self.status_text,

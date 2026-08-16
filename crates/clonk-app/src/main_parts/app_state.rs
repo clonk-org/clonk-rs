@@ -1010,8 +1010,9 @@ pub(crate) struct GameApp {
     /// `C4Player::ShowStartup` for the local player: device hint + name
     /// until the first control com (src/C4Player.cpp:1376,1735).
     pub(crate) show_startup_hint: bool,
-    /// `LC_APP_HUD_DEBUG=1`: draw the FRAME/POS/VEL debug lines on top of
-    /// the C++-faithful HUD.
+    /// Developer-only `LC_APP_HUD_DEBUG=1` on an interactive debug build:
+    /// draw FRAME/POS/VEL lines additively on top of the C++-faithful HUD.
+    /// Launch classification keeps this false for parity and compatibility.
     pub(crate) debug_hud: bool,
 }
 
