@@ -4,6 +4,25 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-08-16
+
+### Bug fixes
+
+- Honor native zero float defaults for resources (#506)
+- Distinguish missing and explicit runtime player indexes (#501)
+- Process c4group update commands in sequence (#500)
+- Deactivate remote clients after player elimination (#507)
+- Gate port capabilities for stock cpp peers (#502)
+
+### Performance
+
+- Reduce volcano landscape upload churn (#504)
+- Skip unchanged sector rank refreshes (#503)
+
+### Testing
+
+- Cover runtime network join through running state (#505)
+
 ## [0.13.0] - 2026-08-15
 
 ### Bug fixes
