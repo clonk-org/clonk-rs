@@ -2801,12 +2801,11 @@ impl GameApp {
             lobby_chat_drag_anchor: None,
             message_input_history: VecDeque::new(),
             show_startup_hint: false,
-            debug_hud: debug_hud_enabled(
-                std::env::var(LC_APP_HUD_DEBUG_ENV).ok().as_deref(),
-                cfg!(debug_assertions),
-                DebugHudLaunch::Interactive,
-                false,
-            ),
+            // Launch policy is resolved in `run` before this constructor and
+            // passed through `new_with_debug_hud`. Direct constructors are
+            // test/capture infrastructure, so they must fail closed rather
+            // than treating an inherited environment as interactive.
+            debug_hud: false,
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
