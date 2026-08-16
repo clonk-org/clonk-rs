@@ -2071,14 +2071,17 @@ mod tests {
         driver.socket_writability_established = true;
         let congested = address(1, 11_101);
         let healthy = address(2, 11_102);
-        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sent_hook = std::sync::Arc::clone(&sent);
+        let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let attempts_hook = std::sync::Arc::clone(&attempts);
         driver.set_send_hook(move |destination, payload| {
             let destination = canonical_reliable_udp_peer_address(destination);
+            attempts_hook
+                .lock()
+                .unwrap()
+                .push((destination, payload.to_vec()));
             if destination == congested {
                 Err(io::ErrorKind::WouldBlock.into())
             } else {
-                sent_hook.lock().unwrap().push(destination);
                 Ok(payload.len())
             }
         });
@@ -2096,7 +2099,10 @@ mod tests {
             events: Vec::new(),
         };
         assert!(driver.flush_step(step).await.unwrap().is_empty());
-        assert_eq!(sent.lock().unwrap().as_slice(), &[healthy]);
+        assert_eq!(
+            attempts.lock().unwrap().as_slice(),
+            &[(congested, vec![0x41]), (healthy, vec![0x42])]
+        );
     }
 
     #[tokio::test]
