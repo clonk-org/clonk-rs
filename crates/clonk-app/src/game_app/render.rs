@@ -4804,6 +4804,7 @@ impl GameApp {
                                     // (C4Menu.cpp:713-721,796-797).
                                     explicit_lines: None,
                                     applied_menu_lines: menu.lines,
+                                    applied_menu_item_count: menu.items.len(),
                                 },
                             );
                             time_on_selection
@@ -4827,6 +4828,9 @@ impl GameApp {
                     0
                 });
             if let Some((target, menu)) = script_menu.as_ref() {
+                if let Some(state) = self.script_menu_presentations.get_mut(&script_menu_owner) {
+                    sync_script_menu_presentation_item_count(state, menu);
+                }
                 let fonts = self.assets.clonk_fonts.clone();
                 let fallback = self.assets.font_arc();
                 let legacy_title_id = menu.identification.to_string();

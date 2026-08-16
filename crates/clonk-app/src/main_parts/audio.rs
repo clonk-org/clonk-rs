@@ -4953,6 +4953,10 @@ pub(crate) struct ScriptMenuPresentationState {
     /// later `SetMenuSize` is recognised by the change rather than by the
     /// value alone.
     pub(crate) applied_menu_lines: i32,
+    /// The item count observed when this presentation last mirrored the
+    /// engine menu. A refill which grows the set clears C4Menu's
+    /// `LocationSet`, so the next draw must derive its row count again.
+    pub(crate) applied_menu_item_count: usize,
 }
 
 pub(crate) fn reset_script_menu_presentation_location(state: &mut ScriptMenuPresentationState) {
@@ -4963,6 +4967,30 @@ pub(crate) fn reset_script_menu_presentation_location(state: &mut ScriptMenuPres
         state.location_needs_initialization = false;
     }
     state.selection_needs_adjustment = true;
+    // C4Menu::ResetLocation only clears LocationSet; the following Draw's
+    // InitLocation then overwrites Lines from the item count, just as it does
+    // after a viewport reset (C4Menu.h:203; C4Menu.cpp:713-721).
+    state.explicit_lines = None;
+}
+
+/// Mirror `C4Menu::RefillInternal`'s location lifetime for retained app
+/// presentation state. A growth invalidates `LocationSet`, causing the next
+/// draw to recompute `Lines` and `VisibleCount` from the new item set. A
+/// shrink has the same effect only for Context menus, matching the native
+/// `IsContextMenu` branch (C4Menu.cpp:961-969; InitLocation/InitSize at
+/// 713-721,755-780).
+pub(crate) fn sync_script_menu_presentation_item_count(
+    state: &mut ScriptMenuPresentationState,
+    menu: &clonk_engine::ObjectMenuState,
+) {
+    let item_count = menu.items.len();
+    let is_context_menu = menu.style == 1; // C4Menu.h:180, C4MN_Style_Context
+    let invalidates_location = item_count > state.applied_menu_item_count
+        || (item_count < state.applied_menu_item_count && is_context_menu);
+    if invalidates_location {
+        reset_script_menu_presentation_location(state);
+    }
+    state.applied_menu_item_count = item_count;
 }
 
 /// C4GUI's single retained `pDragElement` for a menu's wooden title label.

@@ -2281,8 +2281,10 @@ impl GameApp {
                 // draw's InitLocation (C4Menu.cpp:713-721,796-797).
                 explicit_lines: None,
                 applied_menu_lines: menu.lines,
+                applied_menu_item_count: menu.items.len(),
             },
         };
+        sync_script_menu_presentation_item_count(&mut next, &menu);
         // C4Menu::SetSize assigns Lines without clearing LocationSet, so a
         // SetMenuSize on an already-displayed menu keeps its explicit row
         // count (C4Menu.cpp:635-640).

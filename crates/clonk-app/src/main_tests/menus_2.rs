@@ -2298,6 +2298,316 @@ fn engine_script_menu_pointer_selects_enters_and_closes_like_cpp() {
 }
 
 #[test]
+fn script_menu_pre_first_draw_discards_explicit_rows() {
+    // C4Menu::SetSize writes Lines without clearing LocationSet, but a newly
+    // created menu still draws through InitLocation first, which derives the
+    // row count from the item set (C4Menu.cpp:635-640,713-721,796-797).
+    let mut app = new_classic_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    let owner = app.local_owner;
+    let cursor = app.engine.test_crew_cursor(owner);
+    let mut menu = long_script_menu(cursor, 4);
+    menu.lines = 1;
+    install_test_cursor_menu(&mut app, cursor, menu.clone());
+    let mut frame = vec![0_u8; 640 * 480 * 4];
+    app.test_render(&mut frame);
+    let (_, layout) = app
+        .script_menu_layout_for_owner(owner, false)
+        .expect("layout resources")
+        .test_value();
+    let area = app.graphics.viewport_rect(owner).test_value();
+    let fallback = app.assets.font_arc();
+    let font = clonk_frontend::hud::HudFont::from_set(
+        app.assets.clonk_fonts.as_deref(),
+        fallback.as_ref(),
+    );
+    let derived_layout =
+        object_menu::engine_script_menu_layout(area, &font, &menu, app.display_flags.show_commands);
+    assert_eq!(layout.lines, derived_layout.lines);
+    assert_eq!(layout.visible, derived_layout.visible);
+    assert_eq!(layout.client.height, derived_layout.client.height);
+    assert_eq!(layout.scrollbar, derived_layout.scrollbar);
+    assert!(layout.item_rect(3).is_some());
+    assert_eq!(app.script_menu_presentations[&owner].explicit_lines, None);
+}
+
+#[test]
+fn script_menu_explicit_rows_survive_stable_live_draws() {
+    // C4Menu::SetSize reruns only InitSize and leaves LocationSet set, so a
+    // row count issued after the first draw controls the live client, visible
+    // count, scrollbar and hit grid (C4Menu.cpp:635-640,755-780).
+    let mut app = new_classic_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    let owner = app.local_owner;
+    let cursor = app.engine.test_crew_cursor(owner);
+    install_test_cursor_menu(&mut app, cursor, long_script_menu(cursor, 4));
+    let mut frame = vec![0_u8; 640 * 480 * 4];
+    app.test_render(&mut frame);
+
+    let mut explicit_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    explicit_menu.lines = 2;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu.clone());
+    app.test_render(&mut frame);
+    let (_, first_live_layout) = app
+        .script_menu_layout_for_owner(owner, false)
+        .expect("first live layout resources")
+        .test_value();
+    assert_eq!(first_live_layout.lines, 2);
+    assert_eq!(first_live_layout.visible, 2);
+    assert!(first_live_layout.scrollbar.is_some());
+    assert!(first_live_layout.item_rect(0).is_some());
+    assert!(first_live_layout.item_rect(1).is_some());
+
+    explicit_menu.selection = 2;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu.clone());
+    app.test_render(&mut frame);
+    let (_, stable_layout) = app
+        .script_menu_layout_for_owner(owner, false)
+        .expect("stable live layout resources")
+        .test_value();
+    assert_eq!(stable_layout.lines, 2);
+    assert_eq!(stable_layout.visible, 2);
+    assert_eq!(stable_layout.client.height, first_live_layout.client.height);
+    assert!(stable_layout.scrollbar.is_some());
+    assert!(stable_layout.item_rect(0).is_none());
+    assert!(stable_layout.item_rect(2).is_some());
+    assert_eq!(
+        app.script_menu_presentations[&owner].explicit_lines,
+        Some(2)
+    );
+
+    // Normal-menu shrink does not clear LocationSet, so the live explicit
+    // row count remains even when the derived one-row item set would fit in a
+    // smaller grid (C4Menu.cpp:961-969).
+    explicit_menu.items.truncate(1);
+    explicit_menu.selection = 0;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu);
+    app.test_render(&mut frame);
+    let (_, stable_shrink_layout) = app
+        .script_menu_layout_for_owner(owner, false)
+        .expect("stable shrink layout resources")
+        .test_value();
+    assert_eq!(stable_shrink_layout.lines, 2);
+    assert_eq!(stable_shrink_layout.visible, 2);
+    assert!(stable_shrink_layout.scrollbar.is_none());
+    assert!(stable_shrink_layout.item_rect(0).is_some());
+    assert_eq!(
+        app.script_menu_presentations[&owner].explicit_lines,
+        Some(2)
+    );
+}
+
+#[test]
+fn script_menu_growth_refill_recomputes_explicit_rows_and_visible_grid() {
+    // C4Menu::RefillInternal clears LocationSet whenever a refill grows the
+    // item set (C4Menu.cpp:947-970). The next Draw therefore reruns
+    // InitLocation, which recomputes Lines and VisibleCount from the new item
+    // count instead of retaining a live SetMenuSize row count
+    // (C4Menu.cpp:713-721,755-780,796-797).
+    let mut app = new_classic_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    let owner = app.local_owner;
+    let cursor = app.engine.test_crew_cursor(owner);
+    install_test_cursor_menu(&mut app, cursor, long_script_menu(cursor, 2));
+    let mut frame = vec![0_u8; 640 * 480 * 4];
+    app.test_render(&mut frame);
+
+    let mut explicit_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    explicit_menu.lines = 1;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu);
+    app.test_render(&mut frame);
+    let (_, explicit_layout) = app
+        .script_menu_layout_for_owner(owner, false)
+        .expect("explicit layout resources")
+        .test_value();
+    assert_eq!(explicit_layout.lines, 1);
+    assert_eq!(explicit_layout.visible, 1);
+    assert!(explicit_layout.scrollbar.is_some());
+
+    let mut grown_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    let grown_items = long_script_menu(cursor, 4).items;
+    grown_menu.items = grown_items;
+    grown_menu.lines = 1;
+    grown_menu.selection = 3;
+    install_test_cursor_menu(&mut app, cursor, grown_menu.clone());
+    app.test_render(&mut frame);
+    let (_, grown_layout) = app
+        .script_menu_layout_for_owner(owner, false)
+        .expect("grown layout resources")
+        .test_value();
+    let area = app.graphics.viewport_rect(owner).test_value();
+    let fallback = app.assets.font_arc();
+    let font = clonk_frontend::hud::HudFont::from_set(
+        app.assets.clonk_fonts.as_deref(),
+        fallback.as_ref(),
+    );
+    let derived_layout = object_menu::engine_script_menu_layout(
+        area,
+        &font,
+        &grown_menu,
+        app.display_flags.show_commands,
+    );
+    assert_eq!(grown_layout.lines, derived_layout.lines);
+    assert_eq!(grown_layout.visible, derived_layout.visible);
+    assert_eq!(grown_layout.client.height, derived_layout.client.height);
+    assert_eq!(
+        grown_layout.scrollbar.is_some(),
+        derived_layout.scrollbar.is_some()
+    );
+    assert!(
+        grown_layout.item_rect(3).is_some(),
+        "selection remains visible"
+    );
+    assert_eq!(
+        app.script_menu_presentations[&owner].explicit_lines, None,
+        "growth must invalidate the live explicit row count"
+    );
+}
+
+#[test]
+fn context_menu_shrink_refill_recomputes_explicit_rows_and_scrollbar() {
+    // C4Menu::RefillInternal resizes a context menu when its item count
+    // decreases, while ordinary menus keep their retained location
+    // (C4Menu.cpp:961-969). The invalidation reruns InitLocation's derived
+    // row count and InitSize's VisibleCount/scrollbar geometry
+    // (C4Menu.cpp:713-721,755-780).
+    let mut app = new_classic_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    let owner = app.local_owner;
+    let cursor = app.engine.test_crew_cursor(owner);
+    let mut initial_menu = long_script_menu(cursor, 4);
+    initial_menu.style = 1;
+    install_test_cursor_menu(&mut app, cursor, initial_menu);
+    let mut frame = vec![0_u8; 640 * 480 * 4];
+    app.test_render(&mut frame);
+
+    let mut explicit_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    explicit_menu.lines = 1;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu);
+    app.test_render(&mut frame);
+    let (_, explicit_layout) = app
+        .script_menu_layout_for_owner(owner, false)
+        .expect("explicit layout resources")
+        .test_value();
+    assert_eq!(explicit_layout.lines, 1);
+    assert!(explicit_layout.scrollbar.is_some());
+
+    let mut shrunk_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    shrunk_menu.items.truncate(2);
+    shrunk_menu.lines = 1;
+    install_test_cursor_menu(&mut app, cursor, shrunk_menu.clone());
+    app.test_render(&mut frame);
+    let (_, shrunk_layout) = app
+        .script_menu_layout_for_owner(owner, false)
+        .expect("shrunk layout resources")
+        .test_value();
+    let area = app.graphics.viewport_rect(owner).test_value();
+    let fallback = app.assets.font_arc();
+    let font = clonk_frontend::hud::HudFont::from_set(
+        app.assets.clonk_fonts.as_deref(),
+        fallback.as_ref(),
+    );
+    let derived_layout = object_menu::engine_script_menu_layout(
+        area,
+        &font,
+        &shrunk_menu,
+        app.display_flags.show_commands,
+    );
+    assert_eq!(shrunk_layout.lines, derived_layout.lines);
+    assert_eq!(shrunk_layout.visible, derived_layout.visible);
+    assert_eq!(shrunk_layout.client.height, derived_layout.client.height);
+    assert_eq!(shrunk_layout.scrollbar, derived_layout.scrollbar);
+    assert!(shrunk_layout.item_rect(1).is_some());
+    assert_eq!(
+        app.script_menu_presentations[&owner].explicit_lines, None,
+        "a Context shrink must invalidate the live explicit row count"
+    );
+}
+
+#[test]
+fn script_menu_viewport_resize_recomputes_explicit_rows_and_hit_regions() {
+    // C4Viewport marks menu positions for reset whenever its output size
+    // changes (C4Viewport.cpp:780-803,1482-1494), then ResetLocation makes
+    // the next Draw rerun InitLocation (C4Menu.cpp:713-721,796-797).
+    let mut app = new_classic_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    let owner = app.local_owner;
+    let cursor = app.engine.test_crew_cursor(owner);
+    install_test_cursor_menu(&mut app, cursor, long_script_menu(cursor, 4));
+    let mut frame = vec![0_u8; 640 * 480 * 4];
+    app.test_render(&mut frame);
+
+    let mut explicit_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    explicit_menu.lines = 1;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu);
+    app.test_render(&mut frame);
+    let (_, explicit_layout) = app
+        .script_menu_layout_for_owner(owner, false)
+        .expect("explicit layout resources")
+        .test_value();
+    assert_eq!(explicit_layout.lines, 1);
+    assert!(explicit_layout.scrollbar.is_some());
+
+    app.resize(320, 200).test_value();
+    let mut resized_frame = vec![0_u8; 320 * 200 * 4];
+    app.test_render(&mut resized_frame);
+    let (_, resized_layout) = app
+        .script_menu_layout_for_owner(owner, false)
+        .expect("resized layout resources")
+        .test_value();
+    let area = app.graphics.viewport_rect(owner).test_value();
+    let fallback = app.assets.font_arc();
+    let font = clonk_frontend::hud::HudFont::from_set(
+        app.assets.clonk_fonts.as_deref(),
+        fallback.as_ref(),
+    );
+    let resized_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    let derived_layout = object_menu::engine_script_menu_layout(
+        area,
+        &font,
+        &resized_menu,
+        app.display_flags.show_commands,
+    );
+    assert_eq!(resized_layout.lines, derived_layout.lines);
+    assert_eq!(resized_layout.visible, derived_layout.visible);
+    assert_eq!(resized_layout.client.height, derived_layout.client.height);
+    assert_eq!(resized_layout.scrollbar, derived_layout.scrollbar);
+    assert!(resized_layout.item_rect(0).is_some());
+    assert_eq!(
+        app.script_menu_presentations[&owner].explicit_lines, None,
+        "viewport reset must discard the old live row count"
+    );
+}
+
+#[test]
 fn running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
