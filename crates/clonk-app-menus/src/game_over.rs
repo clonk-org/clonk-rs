@@ -1,6 +1,6 @@
 use clonk_engine::RoundResultsNetworkResult;
 use clonk_frontend::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
-use clonk_frontend::{expand_hotkey_markup, ClonkFontSet, ImageData};
+use clonk_frontend::{expand_hotkey_markup, hud::GuiArtScale, ClonkFontSet, ImageData};
 use clonk_graphics::clonk_font::TextAlign;
 use clonk_graphics::{Color, GammaRamp, Rect, Surface, TextFont};
 
@@ -41,6 +41,10 @@ pub const CLASSIC_CLOSE_ICON_SOURCE: IntRect = IntRect {
     w: 40,
     h: 40,
 };
+const CLASSIC_LEAGUE_ICON_PHASE: u32 = 8;
+const CLASSIC_EXTENDED_ICON_COLUMNS: u32 = 4;
+const CLASSIC_EXTENDED_ICON_NATIVE_SIZE: (u32, u32) = (256, 320);
+const CLASSIC_EXTENDED_ICON_CELL: u32 = 64;
 
 const BACKDROP_COLOR: Color = Color::new(8, 12, 24, 210);
 const PANEL_COLOR: Color = Color::new(22, 32, 52, 240);
@@ -424,6 +428,7 @@ pub struct GameOverClassicResources<'a> {
     fonts: &'a ClonkFontSet,
     icon_button_highlight: Option<&'a ImageData>,
     gui_icons: Option<&'a ImageData>,
+    gui_icons_extended: Option<&'a ImageData>,
     player: Option<&'a ImageData>,
     score: Option<&'a ImageData>,
     scroll: Option<&'a ImageData>,
@@ -447,11 +452,21 @@ impl<'a> GameOverClassicResources<'a> {
             fonts,
             icon_button_highlight,
             gui_icons,
+            gui_icons_extended: None,
             player,
             score,
             scroll,
             crew,
         }
+    }
+
+    /// Attach the process-global `GUIIcons2.png` sheet used by evaluation's
+    /// native `{{Ico:League}}` score facet (C4PlayerInfoListBox.cpp:380-418).
+    /// The sheet remains borrowed so its source identity and active-sheet
+    /// rebinding follow the other classic resources.
+    pub const fn with_gui_icons_extended(mut self, image: Option<&'a ImageData>) -> Self {
+        self.gui_icons_extended = image;
+        self
     }
 }
 
@@ -2011,6 +2026,9 @@ impl GameOverState {
     ) {
         let layout =
             self.classic_evaluation_layout(surface.width(), surface.height(), resources.fonts);
+        let league_icon = resources
+            .gui_icons_extended
+            .and_then(resolve_league_evaluation_icon);
         for (goal, goal_layout) in self.evaluation.goals().iter().zip(&layout.goals) {
             if let Some(picture) = goal.picture.as_ref() {
                 let grayscale = (!goal.fulfilled).then(|| grayscale_image(picture, 30));
@@ -2235,15 +2253,15 @@ impl GameOverState {
                     draw_classic_image(surface, &icon, rect, gamma);
                 }
             }
-            if let Some((_icon, text)) = evaluation_score_label(player, "Score") {
+            if let Some((icon, text)) = evaluation_score_label(player, "Score") {
+                let score_icon = match icon {
+                    EvaluationScoreIcon::League => league_icon.as_ref(),
+                    EvaluationScoreIcon::Settlement => resources.score,
+                };
                 render_evaluation_score(
                     surface,
                     resources.fonts,
-                    // `{{Ico:League}}` and `{{Ico:Settlement}}` are separate
-                    // GUI icons in C++; only the settlement facet is in the
-                    // validated evaluation resource set today, so both
-                    // variants draw it.
-                    resources.score,
+                    score_icon,
                     player_layout.score_anchor,
                     text.as_str(),
                     gamma,
@@ -2397,6 +2415,36 @@ fn crop_image(image: &ImageData, source: IntRect) -> Option<ImageData> {
         }
         ImageData::new(width, height, pixels)
     })
+}
+
+/// `C4GUI::Ico_League` is phase 8 of the native 4x5 `GUIIcons2.png` atlas
+/// (`C4Gui.cpp:1090-1092`; `C4PlayerInfoListBox.cpp:380-418`). Preserve the
+/// atlas's own integer art scale so a validated higher-resolution sheet keeps
+/// the same phase and aspect.
+pub fn resolve_league_evaluation_icon(image: &ImageData) -> Option<ImageData> {
+    let scale = GuiArtScale::of(image, CLASSIC_EXTENDED_ICON_NATIVE_SIZE);
+    if image.width() != scale.scale_up(CLASSIC_EXTENDED_ICON_NATIVE_SIZE.0)
+        || image.height() != scale.scale_up(CLASSIC_EXTENDED_ICON_NATIVE_SIZE.1)
+    {
+        return None;
+    }
+    let expected_len = u64::from(image.width())
+        .checked_mul(u64::from(image.height()))
+        .and_then(|pixels| pixels.checked_mul(4));
+    if expected_len != Some(image.pixels().len() as u64) {
+        return None;
+    }
+    let cell = scale.scale_up(CLASSIC_EXTENDED_ICON_CELL);
+    let phase = CLASSIC_LEAGUE_ICON_PHASE;
+    crop_image(
+        image,
+        IntRect {
+            x: (phase % CLASSIC_EXTENDED_ICON_COLUMNS * cell) as i32,
+            y: (phase / CLASSIC_EXTENDED_ICON_COLUMNS * cell) as i32,
+            w: cell as i32,
+            h: cell as i32,
+        },
+    )
 }
 
 fn grayscale_image(image: &ImageData, offset: i32) -> ImageData {
@@ -3438,13 +3486,15 @@ mod tests {
     #[test]
     fn classic_resources_carry_cpp_evaluation_icon_sheets() {
         // C4GoalDisplay uses GUIIcons for Ico_Star, while evaluation player
-        // rows use GraphicsResource Player and Score facets
+        // rows use GraphicsResource Player and Score facets plus the GUIIcons2
+        // Ico_League facet
         // (C4GameOverDlg.cpp:68-71; C4PlayerInfoListBox.cpp:261-322,
         // 344-425; C4GraphicsResource.cpp:265-268).
         let caption = solid_image(96, 23, [1, 2, 3, 255]);
         let button = solid_image(128, 32, [4, 5, 6, 255]);
         let button_down = solid_image(128, 32, [7, 8, 9, 255]);
         let gui_icons = solid_image(240, 360, [10, 11, 12, 255]);
+        let gui_icons_extended = solid_image(256, 320, [20, 21, 22, 255]);
         let player = solid_image(48, 48, [13, 14, 15, 255]);
         let score = solid_image(60, 30, [16, 17, 18, 255]);
         let fonts = endeavour_fonts();
@@ -3457,7 +3507,8 @@ mod tests {
             Some(&score),
             None,
             None,
-        );
+        )
+        .with_gui_icons_extended(Some(&gui_icons_extended));
 
         assert_eq!(
             resources
@@ -3483,6 +3534,108 @@ mod tests {
         assert_eq!(
             resources.score.map(|image| (image.width(), image.height())),
             Some((60, 30))
+        );
+        assert_eq!(
+            resources
+                .gui_icons_extended
+                .map(|image| (image.width(), image.height())),
+            Some((256, 320))
+        );
+    }
+
+    #[test]
+    fn league_evaluation_resolves_the_native_extended_icon_facet() {
+        // `C4PlayerInfoListBox::UpdateScoreLabel` prefixes league rows with
+        // `{{Ico:League}}`, whose extended phase is 8 in GUIIcons2
+        // (C4Gui.h:732-743;
+        // C4PlayerInfoListBox.cpp:380-418).
+        let mut pixels = vec![0_u8; 256 * 320 * 4];
+        let phase = 8_u32;
+        let x0 = (phase % 4) * 64;
+        let y0 = (phase / 4) * 64;
+        for y in y0..y0 + 64 {
+            for x in x0..x0 + 64 {
+                let offset = ((y * 256 + x) * 4) as usize;
+                pixels[offset..offset + 4].copy_from_slice(&[17, 18, 19, 255]);
+            }
+        }
+        let icons_extended = ImageData::new(256, 320, pixels);
+        let league = resolve_league_evaluation_icon(&icons_extended)
+            .expect("GUIIcons2 phase 8 is the native league facet");
+        assert_eq!((league.width(), league.height()), (64, 64));
+        assert_eq!(league.pixels(), [17, 18, 19, 255].repeat(64 * 64));
+        assert!(resolve_league_evaluation_icon(&ImageData::new(256, 320, Vec::new())).is_none());
+    }
+
+    // `UpdateScoreLabel` emits distinct inline specs for league and settlement
+    // evaluation rows (src/C4PlayerInfoListBox.cpp:376-418); the renderer must
+    // keep those facets independent without moving the score anchor.
+    #[test]
+    fn league_evaluation_score_draws_the_extended_facet_not_settlement() {
+        let mut pixels = vec![0_u8; 256 * 320 * 4];
+        for y in 128..192 {
+            for x in 0..64 {
+                let offset = ((y * 256 + x) * 4) as usize;
+                pixels[offset..offset + 4].copy_from_slice(&[17, 18, 19, 255]);
+            }
+        }
+        let icons_extended = ImageData::new(256, 320, pixels);
+        let score = solid_image(60, 30, [91, 92, 93, 255]);
+        let fonts = endeavour_fonts();
+        let caption = solid_image(96, 23, [1, 2, 3, 255]);
+        let button = solid_image(128, 32, [4, 5, 6, 255]);
+        let button_down = solid_image(128, 32, [7, 8, 9, 255]);
+        let mut state = GameOverState::new("Round over".into(), Vec::new(), true);
+        state.set_evaluation(EvaluationViewModel::new(
+            Vec::new(),
+            vec![EvaluationPlayer {
+                player_info_id: 1,
+                team_id: None,
+                name: "Player".into(),
+                won: false,
+                color_dw: 0,
+                total_playing_time: 0,
+                score_old: 10,
+                score_new: Some(35),
+                custom_evaluation_strings: String::new(),
+                big_icon: None,
+                league_score_old: Some(1200),
+                league_score_gain: Some(30),
+                league_score_new: Some(1230),
+                joined_color_dw: None,
+                league_rank_symbol: None,
+            }],
+        ));
+        let resources = GameOverClassicResources::new(
+            ClassicGuiSkin::new(&caption, &button, &button_down, None),
+            &fonts,
+            None,
+            None,
+            None,
+            Some(&score),
+            None,
+            None,
+        )
+        .with_gui_icons_extended(Some(&icons_extended));
+        let mut surface = Surface::new(1024, 600, clonk_graphics::PixelFormat::Rgba8888);
+        state.render(
+            &mut surface,
+            &clonk_graphics::BitmapFont::new(),
+            Some(resources),
+        );
+        assert!(
+            surface
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel == [17, 18, 19, 255]),
+            "league rows draw GUIIcons2 phase 8 rather than Score.png"
+        );
+        assert!(
+            !surface
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel == [91, 92, 93, 255]),
+            "league rows must not draw the settlement facet"
         );
     }
 

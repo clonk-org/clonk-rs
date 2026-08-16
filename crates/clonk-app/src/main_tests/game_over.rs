@@ -2512,6 +2512,27 @@ fn game_over_uses_elimination_time_big_icon_after_player_resource_departure() {
 }
 
 #[test]
+fn game_over_rejects_an_extended_sheet_without_the_native_league_facet() {
+    let mut app = new_game_over_keyboard_app();
+    let invalid = ImageData::new(64, 64, vec![0xff; 64 * 64 * 4]);
+    Arc::get_mut(&mut app.assets)
+        .test_value()
+        .startup_dialog_images
+        .insert("GUIIcons2.png".to_string(), invalid);
+
+    let error = app
+        .assets
+        .require_classic_game_over_resources()
+        .expect_err("evaluation resources must contain the native league facet");
+    assert_eq!(
+        error,
+        ClassicParityBoundary::GameOverResources {
+            missing: vec!["GUIIcons2.png (Ico:League)".to_string()],
+        }
+    );
+}
+
+#[test]
 fn every_game_over_icon_source_obeys_global_then_overlay_preflight() {
     let mut app = new_game_over_keyboard_app();
     app.assets
