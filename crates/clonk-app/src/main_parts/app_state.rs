@@ -2543,9 +2543,6 @@ pub(crate) enum ClassicParityBoundary {
     HudGameMessage {
         count: usize,
     },
-    RunningShortcut {
-        key: &'static str,
-    },
     LoaderScreen {
         context: &'static str,
         detail: String,
@@ -2704,10 +2701,6 @@ impl fmt::Display for ClassicParityBoundary {
             Self::HudGameMessage { count } => write!(
                 f,
                 "classic C4GameMessage renderer is unavailable for {count} visible message(s)"
-            ),
-            Self::RunningShortcut { key } => write!(
-                f,
-                "running shortcut {key} has no classic renderer/action in the Rust port"
             ),
             Self::LoaderScreen { context, detail } => write!(
                 f,
