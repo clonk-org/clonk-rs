@@ -430,10 +430,11 @@ impl ParticleSystem {
                 .map(|def| def.core.name.clone())
                 .collect(),
         );
-        // `C4ParticleDef::Reload` opens `Filename` before loading the
-        // definition (`C4Particles.cpp:194-205`). Seed that synchronous
-        // open result alongside the names so `FnReloadParticle` can report
-        // an I/O failure before its deferred request is applied.
+        // `C4ParticleDef::Reload` opens `Filename` and loads the complete
+        // definition before returning (`C4Particles.cpp:194-205`). Seed that
+        // complete preflight result alongside the names so
+        // `FnReloadParticle` can report an I/O/load failure before its
+        // deferred request is applied.
         *self.reloadable_def_io_success.borrow_mut() = Rc::new(
             self.defs
                 .iter()
@@ -441,7 +442,12 @@ impl ParticleSystem {
                     let path = def.source_path.as_ref()?;
                     Some((
                         def.core.name.clone(),
-                        clonk_resources::Group::open(path).is_ok(),
+                        clonk_resources::Group::open(path)
+                            .ok()
+                            .and_then(|group| {
+                                clonk_resources::ParticleDefinition::load(&group).ok()
+                            })
+                            .is_some(),
                     ))
                 })
                 .collect(),
