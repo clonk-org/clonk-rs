@@ -216,6 +216,7 @@ pub(in crate::scenario) fn scenario_definition_from_resource(
         crew_member: core.crew_member != 0,
         can_be_base: core.can_be_base,
         movement: MovementProfile::default(),
+        movement_manifest: false,
         category: core.category,
         value: core.value,
         mass: core.mass,
@@ -435,6 +436,8 @@ pub(in crate::scenario) struct DefinitionManifest {
     pub(in crate::scenario) actions: HashMap<String, ActionSpec>,
     #[serde(default)]
     pub(in crate::scenario) crew_member: bool,
+    /// Synthetic fixture movement is opt-in; omission keeps C++'s native
+    /// DFA_FLOAT physical bounds, including the zero default.
     #[serde(default)]
     pub(in crate::scenario) movement: Option<MovementManifest>,
     #[serde(default)]

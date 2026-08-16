@@ -142,6 +142,7 @@ pub(in crate::scenario) struct ScenarioDefinition {
     pub(in crate::scenario) crew_member: bool,
     pub(in crate::scenario) can_be_base: bool,
     pub(in crate::scenario) movement: MovementProfile,
+    pub(in crate::scenario) movement_manifest: bool,
     pub(in crate::scenario) category: i32,
     pub(in crate::scenario) value: i32,
     pub(in crate::scenario) mass: i32,
@@ -4351,7 +4352,9 @@ impl Scenario {
             // while loading the definition (C4Def.cpp:641-657). Keep that
             // frozen selection instead of rereading resources at apply time.
             compiled.set_clonk_names(definition.clonk_names.clone());
-            compiled.set_movement_profile(definition.movement);
+            if definition.movement_manifest {
+                compiled.set_movement_profile(definition.movement);
+            }
             compiled.set_category(definition.category);
             compiled.set_value(
                 self.value_overloads
@@ -4861,6 +4864,7 @@ impl Scenario {
                     crew_member,
                     can_be_base: false,
                     movement: MovementProfile::default(),
+                    movement_manifest: false,
                     category: category_override.unwrap_or(crate::DEFAULT_CATEGORY),
                     value: 0,
                     mass: 0,
@@ -4897,6 +4901,7 @@ impl Scenario {
 
             if let Some(profile) = movement_override {
                 scenario_definition.movement = profile;
+                scenario_definition.movement_manifest = true;
             }
 
             if let Some(category_value) = category_override {

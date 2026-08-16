@@ -1438,19 +1438,21 @@ impl Engine {
     /// 0, ...)` simply makes `lLimit` zero, which clamps both dirs to a dead
     /// stop, and no DFA_FLOAT object ever takes gravity or a terminal-speed
     /// bound. The port keeps an additive `MovementProfile` convenience only
-    /// for definitions built from script rather than a C4 resource group.
-    /// Every resource-backed definition uses the native path even when
-    /// `[Physical] Float` and the whole section are omitted, because C++
-    /// defaults that field to zero. Eke's airbike parks itself exactly that
-    /// way when its pilot dismounts
+    /// for synthetic definitions that explicitly opt in and do not carry a
+    /// nonzero physical Float; every other definition uses the native path
+    /// even when `[Physical] Float` and the whole section are omitted, because
+    /// C++ defaults that field to zero.
+    /// Eke's airbike parks itself exactly that way when its pilot dismounts
     /// (EkeReloaded.c4d/Weapons.c4d/Airbike.c4d/Script.c:78-83,452-461).
     pub(crate) fn uses_native_float_bounds(&self, idx: usize, live_float: i32) -> bool {
         live_float != 0
             || self
                 .definitions
                 .get(&self.objects[idx].definition_id)
-                .is_some_and(|definition| {
-                    definition.resource_backed || definition.physical().float != 0
+                .is_none_or(|definition| {
+                    definition.resource_backed
+                        || definition.physical().float != 0
+                        || !definition.movement_profile_override
                 })
     }
 

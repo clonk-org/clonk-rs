@@ -1545,7 +1545,7 @@ impl Engine {
             let object = &mut self.objects[idx];
             // DFA_SWIM and DFA_FLOAT never apply gravity (no DoGravity call,
             // C4Object.cpp:4920-4970/:5268-5287); the legacy halved-gravity
-            // paths keep it for physical-less fixtures.
+            // path remains only for explicitly opted-in FLOAT fixtures.
             let physical_skips_gravity = match procedure {
                 ActionProcedure::Swim => physical.swim != 0,
                 ActionProcedure::Float => native_float_bounds,
@@ -1829,7 +1829,7 @@ impl Engine {
             // applies its own `FIXED100(pPhysical->Float)` bounds
             // (C4Object.cpp:4893-4904,5291-5310). Neither is subject to the
             // synthetic PhysicsSettings terminal-speed bounds. Keep those
-            // bounds for physical-less FLOAT fixtures that use the additive
+            // bounds for FLOAT fixtures that explicitly use the additive
             // MovementProfile convenience path.
             let native_float = matches!(procedure, ActionProcedure::Float) && native_float_bounds;
             if !matches!(procedure, ActionProcedure::Flight | ActionProcedure::Lift)
