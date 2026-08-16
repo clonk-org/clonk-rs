@@ -866,6 +866,8 @@ pub struct ReliableUdpSocketDriver {
     socket_writability_establishments: usize,
     #[cfg(test)]
     force_next_planned_send_would_block: bool,
+    #[cfg(test)]
+    send_hook: Option<ReliableUdpSendHook>,
 }
 
 #[derive(Debug)]
@@ -1022,6 +1024,9 @@ enum ReliableUdpLastSend {
     BestEffort,
 }
 
+#[cfg(test)]
+type ReliableUdpSendHook = Box<dyn FnMut(SocketAddr, &[u8]) -> io::Result<usize> + Send + 'static>;
+
 pub(crate) enum ReliableUdpPollReady {
     Datagram(usize, SocketAddr),
     Timer,
@@ -1071,6 +1076,8 @@ impl ReliableUdpSocketDriver {
             socket_writability_establishments: 0,
             #[cfg(test)]
             force_next_planned_send_would_block: false,
+            #[cfg(test)]
+            send_hook: None,
         })
     }
 
@@ -1641,7 +1648,9 @@ impl ReliableUdpSocketDriver {
         destination: SocketAddr,
     ) -> io::Result<usize> {
         #[cfg(test)]
-        let result = if std::mem::take(&mut self.force_next_planned_send_would_block) {
+        let result = if let Some(hook) = self.send_hook.as_mut() {
+            hook(destination, payload)
+        } else if std::mem::take(&mut self.force_next_planned_send_would_block) {
             Err(io::ErrorKind::WouldBlock.into())
         } else {
             self.socket.try_send_to(payload, destination)
@@ -1684,6 +1693,14 @@ impl ReliableUdpSocketDriver {
     #[cfg(test)]
     fn force_next_planned_send_would_block(&mut self) {
         self.force_next_planned_send_would_block = true;
+    }
+
+    #[cfg(test)]
+    fn set_send_hook<F>(&mut self, hook: F)
+    where
+        F: FnMut(SocketAddr, &[u8]) -> io::Result<usize> + Send + 'static,
+    {
+        self.send_hook = Some(Box::new(hook));
     }
 
     async fn flush_step(&mut self, mut step: ReliableUdpStep) -> io::Result<Vec<ReliableUdpEvent>> {
@@ -2041,6 +2058,51 @@ mod tests {
                 .is_err()
         );
         assert_eq!(driver.socket_writability_establishments(), 1);
+    }
+
+    #[tokio::test]
+    async fn congested_peer_does_not_delay_other_peer_send() {
+        // A WouldBlock result models the per-peer send budget being exhausted
+        // without a real blocked socket. C++ drops that datagram on
+        // EWOULDBLOCK and continues with the next peer
+        // (oracle-src-pinned src/C4NetIO.cpp:1772-1790).
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+        driver.socket_writability_established = true;
+        let congested = address(1, 11_101);
+        let healthy = address(2, 11_102);
+        let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let attempts_hook = std::sync::Arc::clone(&attempts);
+        driver.set_send_hook(move |destination, payload| {
+            let destination = canonical_reliable_udp_peer_address(destination);
+            attempts_hook
+                .lock()
+                .unwrap()
+                .push((destination, payload.to_vec()));
+            if destination == congested {
+                Err(io::ErrorKind::WouldBlock.into())
+            } else {
+                Ok(payload.len())
+            }
+        });
+        let step = ReliableUdpStep {
+            datagrams: vec![
+                ReliableUdpDatagram {
+                    destination: congested,
+                    payload: vec![0x41],
+                },
+                ReliableUdpDatagram {
+                    destination: healthy,
+                    payload: vec![0x42],
+                },
+            ],
+            events: Vec::new(),
+        };
+        assert!(driver.flush_step(step).await.unwrap().is_empty());
+        assert_eq!(
+            attempts.lock().unwrap().as_slice(),
+            &[(congested, vec![0x41]), (healthy, vec![0x42])]
+        );
     }
 
     #[tokio::test]
