@@ -3292,6 +3292,11 @@ impl Scenario {
         let verbose_level = verbose_loading::verbose_object_loading();
         let mut overload_winners: HashMap<String, (String, String)> = HashMap::new();
         let mut seen_particles: HashSet<String> = HashSet::new();
+        // `LoadResStr(IDS_PRC_DEFOVERLOAD)` is process-local like C++'s
+        // Application.ResStrTable. Avoid even reading it when level 0 keeps
+        // the overload bookkeeping disabled.
+        let overload_template =
+            (verbose_level >= 1).then(verbose_loading::definition_overload_template);
         for (index, item) in load_items.iter().enumerate() {
             match item {
                 CollectedDefinition::Definition(definition) => {
@@ -3328,12 +3333,14 @@ impl Scenario {
                     if verbose_level >= 1
                         && !seen_particles.insert(definition.core.name.clone()) =>
                 {
-                    if let Some(line) = verbose_loading::particle_overload_line(
-                        verbose_level,
-                        verbose_loading::DEFAULT_DEFINITION_OVERLOAD_TEMPLATE,
-                        &definition.core.name,
-                    ) {
-                        tracing::info!("{line}");
+                    if let Some(template) = overload_template.as_deref() {
+                        if let Some(line) = verbose_loading::particle_overload_line(
+                            verbose_level,
+                            template,
+                            &definition.core.name,
+                        ) {
+                            tracing::info!("{line}");
+                        }
                     }
                 }
                 CollectedDefinition::Particle(_) => {}
@@ -3362,16 +3369,18 @@ impl Scenario {
                             .as_deref()
                             .map(verbose_loading::group_full_name)
                             .unwrap_or(definition.id.as_str());
-                        verbose_loading::definition_overload_lines(
-                            verbose_level,
-                            verbose_loading::DEFAULT_DEFINITION_OVERLOAD_TEMPLATE,
-                            winning_name,
-                            &definition.id,
-                            old_group,
-                            winning_group,
-                        )
-                        .iter()
-                        .for_each(|line| tracing::info!("{line}"));
+                        if let Some(template) = overload_template.as_deref() {
+                            verbose_loading::definition_overload_lines(
+                                verbose_level,
+                                template,
+                                winning_name,
+                                &definition.id,
+                                old_group,
+                                winning_group,
+                            )
+                            .iter()
+                            .for_each(|line| tracing::info!("{line}"));
+                        }
                     }
                     definition_load_steps.push(DefinitionLoadStep::Declarations {
                         name: definition.id,

@@ -2322,6 +2322,13 @@ impl GameApp {
             .as_ref()
             .map(object_no_dig_resource_string)
             .unwrap_or_else(|_| "%s cannot dig.".to_owned());
+        let definition_overload_template = runtime_language_table
+            .as_ref()
+            .map(definition_overload_resource_string)
+            .unwrap_or_else(|_| {
+                clonk_engine::scenario::verbose_loading::DEFAULT_DEFINITION_OVERLOAD_TEMPLATE
+                    .to_owned()
+            });
         let construction_check_feedback = runtime_language_table
             .as_ref()
             .map(construction_check_resource_strings)
@@ -2342,6 +2349,9 @@ impl GameApp {
         engine.set_needed_material_resource_strings(
             needed_material_need.clone(),
             needed_material_none.clone(),
+        );
+        clonk_engine::scenario::verbose_loading::set_definition_overload_template(
+            definition_overload_template,
         );
         engine.set_object_no_dig_resource_string(object_no_dig.clone());
         {
@@ -6069,6 +6079,7 @@ impl GameApp {
             .unwrap_or_else(|| "[Undefined: IDS_LANG_CHARSET]".to_string());
         let (needed_material_need, needed_material_none) = needed_material_resource_strings(&table);
         let object_no_dig = object_no_dig_resource_string(&table);
+        let definition_overload_template = definition_overload_resource_string(&table);
         self.needed_material_need = needed_material_need.clone();
         self.needed_material_none = needed_material_none.clone();
         self.object_no_dig = object_no_dig.clone();
@@ -6077,6 +6088,9 @@ impl GameApp {
         self.runtime_language_charset = table.charset;
         self.engine
             .set_needed_material_resource_strings(needed_material_need, needed_material_none);
+        clonk_engine::scenario::verbose_loading::set_definition_overload_template(
+            definition_overload_template,
+        );
         self.engine.set_object_no_dig_resource_string(object_no_dig);
         let construction_check_feedback = construction_check_resource_strings(&table);
         self.construction_check_feedback = construction_check_feedback.clone();

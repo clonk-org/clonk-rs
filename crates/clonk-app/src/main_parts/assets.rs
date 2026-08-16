@@ -4923,6 +4923,14 @@ pub(crate) fn object_no_dig_resource_string(table: &RuntimeLanguageTable) -> Str
         .unwrap_or_else(|| "[Undefined: IDS_OBJ_NODIG]".to_string())
 }
 
+pub(crate) fn definition_overload_resource_string(table: &RuntimeLanguageTable) -> String {
+    table
+        .entries
+        .get("IDS_PRC_DEFOVERLOAD")
+        .cloned()
+        .unwrap_or_else(|| "[Undefined: IDS_PRC_DEFOVERLOAD]".to_string())
+}
+
 /// `LoadResStr` bundle behind ConstructionCheck's red failure feedback:
 /// IDS_OBJ_UNDEF, IDS_OBJ_NOCON, IDS_OBJ_NOROOM, IDS_OBJ_NOLEVEL,
 /// IDS_OBJ_NOOTHER (C4Landscape.cpp:2131-2163).

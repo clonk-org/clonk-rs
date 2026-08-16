@@ -7854,6 +7854,44 @@ fn runtime_f1_language_lookup_is_case_insensitive_and_skips_empty_candidates() {
     assert!(columns.left.contains("F1</c> - Hilfe"));
 }
 
+#[test]
+fn runtime_definition_overload_uses_the_active_language_resource() {
+    // `planet/System.c4g/LanguageDE.txt:1210` carries the localized
+    // `IDS_PRC_DEFOVERLOAD` template, including its native alignment prefix.
+    let fixture = runtime_install_fixture(Some("[General]\nLanguageEx=DE\n"));
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../planet/System.c4g/LanguageDE.txt"),
+        fixture.system.join("LanguageDE.txt"),
+    )
+    .test_value();
+
+    let table = load_runtime_language_table(Some(&fixture.paths)).test_value();
+    assert_eq!(
+        definition_overload_resource_string(&table),
+        "   %s (%s) überladen."
+    );
+
+    let mut app = new_real_menu_app(320, 240);
+    app.app_paths = Some(fixture.paths.clone());
+    app.reload_application_language_resources().test_value();
+    let template = clonk_engine::scenario::verbose_loading::definition_overload_template();
+    assert_eq!(template.as_ref(), "   %s (%s) überladen.");
+    assert_eq!(
+        clonk_engine::scenario::verbose_loading::definition_overload_lines(
+            1,
+            template.as_ref(),
+            "Stein",
+            "ROCK",
+            "Objects.c4d/Rock.c4d",
+            "Mods.c4d/Rock.c4d",
+        ),
+        vec!["   Stein (ROCK) überladen.".to_owned()]
+    );
+    clonk_engine::scenario::verbose_loading::set_definition_overload_template(
+        clonk_engine::scenario::verbose_loading::DEFAULT_DEFINITION_OVERLOAD_TEMPLATE,
+    );
+}
+
 /// `C4GraphicsSystem::DrawHelp` asks `GetKeyboardInputName` for each
 /// registered key's *current* code, so a `KeyConfig` override changes the
 /// displayed chord as well as the dispatch
