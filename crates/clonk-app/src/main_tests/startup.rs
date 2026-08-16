@@ -1184,6 +1184,9 @@ fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
 
     let mut app = new_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
+    // C4UpdateDlg.cpp:264-268 records the attempt before the check; this
+    // port's immediate config rewrite must also carry the in-memory Display
+    // values that C++ would retain in its global Config.
     app.display_flags.player_names = false;
     app.display_flags.clonk_names = false;
     app.display_flags.clock = true;

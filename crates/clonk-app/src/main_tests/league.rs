@@ -1037,6 +1037,8 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
 
     let mut app = new_classic_menu_app(800, 600);
     app.app_paths = Some(paths.clone());
+    // C4StartupNetDlg.cpp:312-315 updates the in-memory Config and then
+    // writes the complete config, including Display values changed earlier.
     app.display_flags.player_names = false;
     app.display_flags.clonk_names = false;
     app.display_flags.clock = true;
