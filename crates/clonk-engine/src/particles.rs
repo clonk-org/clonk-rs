@@ -14,7 +14,7 @@ use crate::{ObjectId, ParticleLayer};
 use clonk_resources::GraphicsImage;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -347,6 +347,7 @@ pub struct ParticleSystem {
     defs: Vec<ParticleDef>,
     def_names: RefCell<Rc<HashSet<String>>>,
     reloadable_def_names: RefCell<Rc<HashSet<String>>>,
+    reloadable_def_io_success: RefCell<Rc<HashMap<String, bool>>>,
     def_name_caches_dirty: Cell<bool>,
     particles: Vec<Particle>,
     pub safe_rng: SafeRng,
@@ -367,6 +368,7 @@ impl Default for ParticleSystem {
             defs: Vec::new(),
             def_names: RefCell::new(Rc::new(HashSet::new())),
             reloadable_def_names: RefCell::new(Rc::new(HashSet::new())),
+            reloadable_def_io_success: RefCell::new(Rc::new(HashMap::new())),
             def_name_caches_dirty: Cell::new(false),
             particles: Vec::new(),
             safe_rng: SafeRng::default(),
@@ -426,6 +428,28 @@ impl ParticleSystem {
                 .iter()
                 .filter(|def| def.source_path.is_some())
                 .map(|def| def.core.name.clone())
+                .collect(),
+        );
+        // `C4ParticleDef::Reload` opens `Filename` and loads the complete
+        // definition before returning (`C4Particles.cpp:194-205`). Seed that
+        // complete preflight result alongside the names so
+        // `FnReloadParticle` can report an I/O/load failure before its
+        // deferred request is applied.
+        *self.reloadable_def_io_success.borrow_mut() = Rc::new(
+            self.defs
+                .iter()
+                .filter_map(|def| {
+                    let path = def.source_path.as_ref()?;
+                    Some((
+                        def.core.name.clone(),
+                        clonk_resources::Group::open(path)
+                            .ok()
+                            .and_then(|group| {
+                                clonk_resources::ParticleDefinition::load(&group).ok()
+                            })
+                            .is_some(),
+                    ))
+                })
                 .collect(),
         );
         self.def_name_caches_dirty.set(false);
@@ -677,6 +701,11 @@ impl ParticleSystem {
     pub(crate) fn shared_reloadable_def_names(&self) -> Rc<HashSet<String>> {
         self.refresh_def_name_caches_if_dirty();
         Rc::clone(&self.reloadable_def_names.borrow())
+    }
+
+    pub(crate) fn shared_reloadable_def_io_success(&self) -> Rc<HashMap<String, bool>> {
+        self.refresh_def_name_caches_if_dirty();
+        Rc::clone(&self.reloadable_def_io_success.borrow())
     }
 
     /// `C4ParticleList::Remove` via FnClearParticles (C4Script.cpp:4925-4944):

@@ -60,6 +60,14 @@
         let dir = tempfile::tempdir().test_value();
         let group = dir.path().join("Smoke.c4d");
         std::fs::create_dir_all(&group).test_value();
+        std::fs::write(
+            group.join("Particle.txt"),
+            b"[Particle]\nName=Smoke\nInitFn=StdInit\nExecFn=StdExec\nDrawFn=Std\nFace=0,0,1,1\n",
+        )
+        .test_value();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(group.join("Graphics.png"))
+            .test_value();
 
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
@@ -113,16 +121,103 @@
         result.test_value();
 
         // Only the accepted name is staged, and the engine does the work once.
-        assert_eq!(engine.apply_particle_reload_requests(), 0);
+        assert_eq!(engine.apply_particle_reload_requests(), 1);
         assert!(
-            engine.particle_system.get_def("Smoke").is_none(),
-            "the group has no Particle.txt, so the reload failed and removed it"
+            engine.particle_system.get_def("Smoke").is_some(),
+            "the complete source group reloads successfully"
         );
         assert_eq!(
             engine.apply_particle_reload_requests(),
             0,
             "the request is drained once, not replayed"
         );
+    }
+
+    // C4Script.cpp:5161-5165 -> C4Game.cpp:2369-2394; the Filename open is
+    // C4Particles.cpp:194-205. Once the network,
+    // nil-name, unknown-name, and missing-Filename checks have passed, the
+    // synchronous result is still the actual reload result: an I/O failure
+    // while loading the source group must be visible to the calling script
+    // while the destructive failure arm clears every particle and removes the
+    // definition.
+    #[test]
+    fn reload_particle_reports_io_failure_synchronously_and_clears_everything() {
+        let dir = tempfile::tempdir().test_value();
+        // The group itself opens, but its Particle.txt/Graphics.png payload
+        // cannot be loaded. C++ therefore returns false from Reload, not true
+        // merely because C4Group::Open succeeded.
+        let unreadable_group = dir.path().join("Smoke.c4d");
+        std::fs::create_dir_all(&unreadable_group).test_value();
+
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Known() { return ReloadParticle(\"Smoke\"); }",
+            )
+            .test_value();
+
+        let mut engine = crate::Engine::new();
+        let core = |name: &str| crate::particles::ParticleDefCore {
+            name: name.to_string(),
+            init_fn: "StdInit".to_string(),
+            exec_fn: "StdExec".to_string(),
+            draw_fn: "Std".to_string(),
+            ..Default::default()
+        };
+        engine
+            .particle_system
+            .register_def(core("Smoke"), 4, 1.0)
+            .test_value();
+        assert!(engine
+            .particle_system
+            .set_def_source_path("Smoke", Some(unreadable_group.clone())));
+        engine
+            .particle_system
+            .register_def(core("Sparks"), 4, 1.0)
+            .test_value();
+        assert!(engine.particle_system.create(
+            "Smoke",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            ParticleLayer::Global,
+            None,
+        ));
+        assert!(engine.particle_system.create(
+            "Sparks",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            ParticleLayer::Global,
+            None,
+        ));
+        assert_eq!(engine.particle_system.particles().len(), 2);
+
+        let world = engine.host_world_context();
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            // `Smoke` is known and has a Filename, but loading its source
+            // group fails. C++ therefore returns false synchronously from
+            // `FnReloadParticle`, before the engine's deferred work runs.
+            Ok::<_, RuntimeError>(script.call("Known", &[]).expect("probe executes"))
+        });
+        assert_eq!(result.test_value(), Value::Int(0));
+
+        // The accepted request is drained once. The I/O failure runs C++'s
+        // destructive arm: all particles are cleared and only the failed
+        // definition is removed.
+        assert_eq!(engine.apply_particle_reload_requests(), 0);
+        assert!(engine.particle_system.particles().is_empty());
+        assert!(engine.particle_system.get_def("Smoke").is_none());
+        assert!(engine.particle_system.get_def("Sparks").is_some());
+        assert_eq!(engine.apply_particle_reload_requests(), 0);
     }
 
     // C4Script.cpp:5143-5159 -> C4Game::ReloadDef (C4Game.cpp:2322-2367).
