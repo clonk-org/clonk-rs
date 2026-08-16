@@ -10280,7 +10280,8 @@ impl GraphicsSystem {
             );
         }
 
-        // Opt-in debug lines (replaces the old debug bar; off by default).
+        // Opt-in developer diagnostics only. Classic message/help/status
+        // layers remain independent and are rendered by their owning passes.
         if let Some((frame_text, status_text)) = self.debug_hud_text.clone() {
             let line_height = font.line_height();
             let base_y = if self.hud_chrome_active() {

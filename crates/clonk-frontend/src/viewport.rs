@@ -789,11 +789,14 @@ impl MessageBoardOverlay {
 }
 
 pub struct GraphicsOverlay<'a> {
-    /// Debug FRAME/POS/VEL line — drawn only when `debug_hud` is set.
+    /// Developer-only FRAME/POS/VEL text. It is additive and must never carry
+    /// classic help, flash, network, or error presentation.
     pub frame_text: &'a str,
-    /// Debug ENERGY/DAMAGE/OWNER line — drawn only when `debug_hud` is set.
+    /// Developer-only ENERGY/DAMAGE/OWNER text. It is additive and must never
+    /// replace classic status presentation.
     pub status_text: &'a str,
-    /// Opt-in debug HUD lines (not part of the C++-faithful overlay).
+    /// Opt-in developer HUD lines (not part of the C++-faithful overlay).
+    /// Callers keep this false for parity/compatibility launches.
     pub debug_hud: bool,
     /// `false` for `Head.Film && Head.Replay`: suppresses the per-viewport
     /// player HUD and world cursor/select marks while leaving global chrome
