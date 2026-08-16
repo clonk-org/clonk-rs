@@ -145,9 +145,13 @@ pub struct Definition {
     /// True for definitions parsed from a C4 resource group. Resource-backed
     /// definitions use C++'s native procedure semantics even when Float and
     /// the whole `[Physical]` section are omitted and therefore default to
-    /// zero; script-built fixtures retain the additive movement-profile
-    /// fallback.
+    /// zero; only synthetic definitions with an explicit movement manifest
+    /// retain the additive movement-profile fallback.
     pub(crate) resource_backed: bool,
+    /// True when a synthetic definition explicitly opts into the additive
+    /// movement-profile convenience. Real definitions stay on C++'s native
+    /// procedure path unless a fixture supplies this override.
+    pub(crate) movement_profile_override: bool,
     /// Shared compiled script: `host_world_context()` hands clones of this
     /// `Arc` to host functions so nested script calls (Find_Func, GameCall)
     /// can execute another definition's functions mid-VM-call.
@@ -500,6 +504,7 @@ impl Definition {
         Ok(Self {
             source_path: None,
             resource_backed: false,
+            movement_profile_override: false,
             id,
             name,
             version: DEFAULT_DEFINITION_VERSION,
@@ -1342,6 +1347,7 @@ impl Definition {
 
     pub fn set_movement_profile(&mut self, movement: MovementProfile) {
         self.movement = movement;
+        self.movement_profile_override = true;
     }
 
     pub fn category(&self) -> i32 {

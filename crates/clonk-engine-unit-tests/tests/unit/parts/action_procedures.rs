@@ -108,6 +108,8 @@ fn float_command_direction_updates_velocity() {
     let mut actions = HashMap::new();
     actions.insert("Float".to_string(), ActionSpec::for_procedure("float"));
     definition.configure_actions(Some("Float".to_string()), actions);
+    // A direct setter is the unit-fixture equivalent of an explicit
+    // MovementManifest; without it, DFA_FLOAT follows the native zero bound.
     definition.set_movement_profile(
         MovementProfile::default()
             .with_float_speed(6)
@@ -137,6 +139,46 @@ fn float_command_direction_updates_velocity() {
             .unwrap_or(object.velocity.y << 16),
         -131072
     );
+}
+
+#[test]
+fn float_without_physical_or_movement_manifest_freezes_raw_velocity() {
+    let mut definition = test_definition("Balloon", "Balloon", PROCEDURE_MOVEMENT_SCRIPT);
+    definition.configure_actions(
+        Some("Float".to_string()),
+        HashMap::from([(
+            "Float".to_string(),
+            ActionSpec::default().with_procedure("FLOAT"),
+        )]),
+    );
+
+    let mut engine = Engine::with_seed(5);
+    engine.register_test_definition(definition);
+    engine.set_environment(EnvironmentSettings::new(0));
+
+    let id = engine.spawn_test_object(
+        SpawnConfig::new("Balloon")
+            .with_category(CATEGORY_OBJECT)
+            .with_command_direction(CommandDirection::Stop),
+    );
+    let index = engine.test_object_index(id);
+    for _ in 0..2 {
+        engine.objects[index].set_fixed_velocity(FixedVec2::new(
+            C4Fixed::from_raw(123_456),
+            C4Fixed::from_raw(-654_321),
+        ));
+
+        engine.apply_physics_at_index(index).test_value();
+
+        // C4Object::ExecAction clamps both raw axes to FIXED100(Float), including
+        // zero when [Physical] Float is absent (src/C4Object.cpp:5291-5309).
+        assert_eq!(
+            engine.objects[index].fixed_velocity,
+            FixedVec2::ZERO,
+            "DFA_FLOAT with no Float physical must clamp both raw axes to zero \
+             (oracle-src-pinned src/C4Object.cpp:5291-5309)",
+        );
+    }
 }
 
 #[test]

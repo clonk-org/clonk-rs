@@ -9213,8 +9213,8 @@ fn target_bounds(
 /// (C4Object.cpp:5268-5286): `xdir/ydir ± FloatAccel` per ComDir (Stop
 /// drifts — no deceleration case), both axes clamped to
 /// `lLimit = FIXED100(Float)` (not ValByPhysical). DFA_FLOAT never applies
-/// gravity. Physical-less fixture definitions keep the legacy
-/// `MovementProfile` path instead.
+/// gravity. Synthetic definitions with an explicit movement manifest keep the
+/// legacy `MovementProfile` path instead.
 fn apply_float_physical_movement(
     velocity: &mut FixedVec2,
     command_direction: CommandDirection,
