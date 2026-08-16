@@ -560,6 +560,7 @@ pub fn engine_script_menu_pointer_target(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
+    item_icons: &[Option<ImageData>],
     show_commands: bool,
     show_close_button: bool,
     point: GuiPoint,
@@ -568,6 +569,7 @@ pub fn engine_script_menu_pointer_target(
         area,
         font,
         menu,
+        item_icons,
         show_commands,
         show_close_button,
         point,
@@ -581,6 +583,7 @@ pub fn engine_script_menu_pointer_target_with_info(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
+    item_icons: &[Option<ImageData>],
     show_commands: bool,
     show_close_button: bool,
     point: GuiPoint,
@@ -591,11 +594,7 @@ pub fn engine_script_menu_pointer_target_with_info(
         return None;
     }
     if menu.style == 3 {
-        let item_has_symbols = menu
-            .items
-            .iter()
-            .map(|item| item.image != clonk_engine::ObjectMenuImage::None)
-            .collect::<Vec<_>>();
+        let item_has_symbols = item_icons.iter().map(Option::is_some).collect::<Vec<_>>();
         let mut layout = dialog_script_menu_layout_with_symbols(
             area,
             font,
@@ -695,6 +694,7 @@ pub fn engine_script_menu_pointer_target_with_presentation(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
+    item_icons: &[Option<ImageData>],
     show_commands: bool,
     show_close_button: bool,
     point: GuiPoint,
@@ -710,11 +710,7 @@ pub fn engine_script_menu_pointer_target_with_presentation(
         return None;
     }
     if menu.style == 3 {
-        let item_has_symbols = menu
-            .items
-            .iter()
-            .map(|item| item.image != clonk_engine::ObjectMenuImage::None)
-            .collect::<Vec<_>>();
+        let item_has_symbols = item_icons.iter().map(Option::is_some).collect::<Vec<_>>();
         let layout = relocate_dialog_menu_layout(
             dialog_script_menu_layout_with_symbols(
                 area,
@@ -751,6 +747,7 @@ pub fn engine_script_menu_pointer_target_with_free_anchor(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
+    item_icons: &[Option<ImageData>],
     show_commands: bool,
     show_close_button: bool,
     point: GuiPoint,
@@ -766,11 +763,7 @@ pub fn engine_script_menu_pointer_target_with_free_anchor(
         return None;
     }
     if menu.style == 3 {
-        let item_has_symbols = menu
-            .items
-            .iter()
-            .map(|item| item.image != clonk_engine::ObjectMenuImage::None)
-            .collect::<Vec<_>>();
+        let item_has_symbols = item_icons.iter().map(Option::is_some).collect::<Vec<_>>();
         let layout = clamp_dialog_menu_layout_to_free_anchor(
             area,
             dialog_script_menu_layout_with_symbols(
@@ -809,6 +802,7 @@ pub fn engine_script_menu_presentation_geometry_with_free_anchor(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
+    item_icons: &[Option<ImageData>],
     show_commands: bool,
     font_images: &HashMap<String, ImageData>,
     free_location: (i32, i32),
@@ -820,11 +814,7 @@ pub fn engine_script_menu_presentation_geometry_with_free_anchor(
     explicit_lines: Option<i32>,
 ) -> Option<EngineScriptMenuPresentationGeometry> {
     if menu.style == 3 {
-        let item_has_symbols = menu
-            .items
-            .iter()
-            .map(|item| item.image != clonk_engine::ObjectMenuImage::None)
-            .collect::<Vec<_>>();
+        let item_has_symbols = item_icons.iter().map(Option::is_some).collect::<Vec<_>>();
         let layout = clamp_dialog_menu_layout_to_free_anchor(
             area,
             dialog_script_menu_layout_with_symbols(
@@ -875,6 +865,7 @@ pub fn engine_script_menu_presentation_geometry(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
+    item_icons: &[Option<ImageData>],
     show_commands: bool,
     font_images: &HashMap<String, ImageData>,
     location: Option<(i32, i32)>,
@@ -885,11 +876,7 @@ pub fn engine_script_menu_presentation_geometry(
     explicit_lines: Option<i32>,
 ) -> Option<EngineScriptMenuPresentationGeometry> {
     if menu.style == 3 {
-        let item_has_symbols = menu
-            .items
-            .iter()
-            .map(|item| item.image != clonk_engine::ObjectMenuImage::None)
-            .collect::<Vec<_>>();
+        let item_has_symbols = item_icons.iter().map(Option::is_some).collect::<Vec<_>>();
         let layout = relocate_dialog_menu_layout(
             dialog_script_menu_layout_with_symbols(
                 area,
@@ -4921,7 +4908,17 @@ mod tests {
 
         let hit = |point| {
             engine_script_menu_pointer_target_with_presentation(
-                area, &font, &menu, false, true, point, &images, location, 5, None,
+                area,
+                &font,
+                &menu,
+                &[],
+                false,
+                true,
+                point,
+                &images,
+                location,
+                5,
+                None,
             )
         };
         assert_eq!(
@@ -4997,7 +4994,15 @@ mod tests {
         let area = Rect::new(0, 0, 640, 480);
         let menu = engine_script_menu_fixture(3, 2);
         let natural = engine_script_menu_presentation_geometry(
-            area, &font, &menu, false, &images, None, 0, None,
+            area,
+            &font,
+            &menu,
+            &[],
+            false,
+            &images,
+            None,
+            0,
+            None,
         )
         .expect("dialog geometry");
         let location = Some((-17, -23));
@@ -5005,6 +5010,7 @@ mod tests {
             area,
             &font,
             &menu,
+            &[],
             false,
             &images,
             location,
@@ -5031,6 +5037,7 @@ mod tests {
                 area,
                 &font,
                 &menu,
+                &[],
                 false,
                 true,
                 GuiPoint::new(title.x as f32 + 1.0, title.y as f32 + 1.0),
@@ -5053,6 +5060,7 @@ mod tests {
                 area,
                 &font,
                 &menu,
+                &[],
                 false,
                 true,
                 GuiPoint::new(close.x as f32 + 1.0, close.y as f32 + 1.0),
@@ -5070,6 +5078,7 @@ mod tests {
             area,
             &font,
             &menu,
+            &[],
             false,
             &images,
             visible_location,
@@ -5083,6 +5092,7 @@ mod tests {
                 area,
                 &font,
                 &menu,
+                &[],
                 false,
                 true,
                 GuiPoint::new(visible_title.x as f32 + 1.0, visible_title.y as f32 + 1.0,),
@@ -5104,6 +5114,7 @@ mod tests {
                 area,
                 &font,
                 &menu,
+                &[],
                 false,
                 true,
                 GuiPoint::new(visible_close.x as f32 + 1.0, visible_close.y as f32 + 1.0,),
@@ -5113,6 +5124,50 @@ mod tests {
                 None,
             ),
             Some(EngineScriptMenuPointerTarget::Close)
+        );
+    }
+
+    #[test]
+    fn dialog_hit_geometry_ignores_unresolved_item_picture() {
+        // C4MenuItem::GetSymbolWidth reserves a Dialog symbol column only
+        // when the resolved facet has a surface (C4Menu.cpp:138).
+        let fallback = clonk_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let area = Rect::new(0, 0, 640, 480);
+        let font_images = HashMap::new();
+        let mut menu = engine_script_menu_fixture(3, 1);
+        menu.items[0].image = clonk_engine::ObjectMenuImage::Definition;
+
+        let mut differing_caption = None;
+        for length in 1..=256 {
+            menu.items[0].caption = "W".repeat(length);
+            let drawn =
+                dialog_script_menu_layout_with_images(area, &font, &menu, &[None], &font_images);
+            let recipe =
+                dialog_script_menu_layout_with_symbols(area, &font, &menu, &[true], &font_images);
+            if drawn.bounds != recipe.bounds {
+                differing_caption = Some((drawn, recipe));
+                break;
+            }
+        }
+        let (drawn, recipe) = differing_caption.expect("fixture crosses a symbol-wrap boundary");
+        assert_ne!(drawn.bounds, recipe.bounds);
+
+        let hit_geometry = engine_script_menu_presentation_geometry(
+            area,
+            &font,
+            &menu,
+            &[None],
+            false,
+            &font_images,
+            None,
+            0,
+            None,
+        )
+        .expect("Dialog geometry");
+        assert_eq!(
+            hit_geometry.bounds, drawn.bounds,
+            "input geometry must match drawing when the picture does not resolve"
         );
     }
 
@@ -5248,6 +5303,7 @@ mod tests {
             dialog_area,
             &hud_font,
             &replacement_dialog,
+            &[],
             false,
             &HashMap::new(),
             dialog_click,
@@ -5266,6 +5322,7 @@ mod tests {
                 dialog_area,
                 &hud_font,
                 &replacement_dialog,
+                &[],
                 false,
                 true,
                 GuiPoint::new(dialog_click.0 as f32 + 1.0, dialog_click.1 as f32 + 1.0),
@@ -5279,7 +5336,7 @@ mod tests {
 
         let point = GuiPoint::new(item.x as f32 + 1.0, item.y as f32 + 1.0);
         assert_eq!(
-            engine_script_menu_pointer_target(area, &hud_font, &menu, false, true, point,),
+            engine_script_menu_pointer_target(area, &hud_font, &menu, &[], false, true, point,),
             Some(EngineScriptMenuPointerTarget::Item(0))
         );
 
@@ -5400,7 +5457,15 @@ mod tests {
         let probe = GuiPoint::new(mapped_row.x as f32 + 1.0, mapped_row.y as f32 + 1.0);
         assert_eq!(
             engine_script_menu_pointer_target_with_info(
-                area, &font, &menu, false, false, probe, &images, None,
+                area,
+                &font,
+                &menu,
+                &[],
+                false,
+                false,
+                probe,
+                &images,
+                None,
             ),
             Some(EngineScriptMenuPointerTarget::Item(0)),
         );
@@ -5409,6 +5474,7 @@ mod tests {
                 area,
                 &font,
                 &menu,
+                &[],
                 false,
                 false,
                 probe,
@@ -5557,6 +5623,7 @@ mod tests {
                 area,
                 &font,
                 &menu,
+                &[],
                 true,
                 false,
                 GuiPoint::new(row.x as f32 + 1.0, row.y as f32 + 1.0),
@@ -5659,6 +5726,7 @@ mod tests {
                 area,
                 &font,
                 &menu,
+                &[],
                 false,
                 false,
                 probe,
@@ -5672,6 +5740,7 @@ mod tests {
                 area,
                 &font,
                 &menu,
+                &[],
                 false,
                 false,
                 probe,
@@ -5852,6 +5921,7 @@ mod tests {
                 Rect::new(0, 0, 640, 480),
                 &font,
                 &menu,
+                &icons,
                 true,
                 true,
                 GuiPoint::new(480.0, 39.0),
@@ -5864,6 +5934,7 @@ mod tests {
                 Rect::new(0, 0, 640, 480),
                 &font,
                 &menu,
+                &icons,
                 true,
                 true,
                 GuiPoint::new(300.0, 62.0),
@@ -5922,7 +5993,15 @@ mod tests {
         );
         assert_eq!(
             engine_script_menu_pointer_target_with_info(
-                area, &font, &menu, false, false, probe, &images, None,
+                area,
+                &font,
+                &menu,
+                &[],
+                false,
+                false,
+                probe,
+                &images,
+                None,
             ),
             Some(EngineScriptMenuPointerTarget::Item(0))
         );
@@ -5931,6 +6010,7 @@ mod tests {
                 area,
                 &font,
                 &menu,
+                &[],
                 false,
                 false,
                 probe,
@@ -6369,6 +6449,7 @@ mod tests {
                 Rect::new(0, 0, 640, 480),
                 &font,
                 &menu,
+                &[],
                 false,
                 true,
                 GuiPoint::new((layout.client_x + 1) as f32, (layout.client_y + 1) as f32,),
@@ -7298,6 +7379,7 @@ mod tests {
                 Rect::new(0, 0, 640, 480),
                 &hud_font,
                 &menu,
+                &[],
                 true,
                 true,
                 GuiPoint::new(411.0, 393.0),
@@ -7404,6 +7486,7 @@ mod tests {
                 Rect::new(0, 0, 640, 480),
                 &hud_font,
                 &menu,
+                &[],
                 true,
                 true,
                 GuiPoint::new(558.0, 381.0),
@@ -7415,6 +7498,7 @@ mod tests {
                 Rect::new(0, 0, 640, 480),
                 &hud_font,
                 &menu,
+                &[],
                 true,
                 true,
                 GuiPoint::new(411.0, 400.0),

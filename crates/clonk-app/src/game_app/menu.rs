@@ -2403,6 +2403,11 @@ impl GameApp {
                         },
                     ))
                 })?;
+        let item_icons = if menu.style == 3 {
+            self.script_menu_item_icons(menu)
+        } else {
+            Default::default()
+        };
         let presentation = self
             .script_menu_presentations
             .get(&owner)
@@ -2419,6 +2424,7 @@ impl GameApp {
                 area,
                 &font,
                 menu,
+                &item_icons,
                 self.display_flags.show_commands,
                 &font_images,
                 location.expect("free anchor has a location"),
@@ -2432,6 +2438,7 @@ impl GameApp {
             area,
             &font,
             menu,
+            &item_icons,
             self.display_flags.show_commands,
             &font_images,
             location,
