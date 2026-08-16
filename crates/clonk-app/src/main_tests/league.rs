@@ -1166,6 +1166,120 @@ fn serve_one_record_stream_upload() -> (String, thread::JoinHandle<Vec<u8>>) {
     (format!("http://{address}/record?game=7&"), request)
 }
 
+fn serve_delayed_record_stream_upload(
+    response_delay: Duration,
+) -> (
+    String,
+    thread::JoinHandle<Vec<u8>>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").test_value();
+    let address = listener.local_addr().test_value();
+    let response_sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let response_sent_in_thread = std::sync::Arc::clone(&response_sent);
+    let request = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().test_value();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .test_value();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let count = stream.read(&mut buffer).test_value();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+            let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let header = std::str::from_utf8(&request[..header_end]).test_value();
+            let content_length = header
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                })
+                .test_value();
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        thread::sleep(response_delay);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .test_value();
+        response_sent_in_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+        request
+    });
+    (
+        format!("http://{address}/record?game=7&"),
+        request,
+        response_sent,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headless_round_end_drains_pending_league_record_stream() {
+    // `C4Game::ShowGameOverDlg`'s console arm waits while the network stream
+    // is still active, after `C4Control::StopRecord` has requested its final
+    // upload (oracle-src-pinned src/C4Game.cpp:3680-3687;
+    // src/C4GameControl.cpp:165-177).
+    let directory = tempdir();
+    let output_path = directory.path().join("001-Headless.c4s");
+    let (endpoint, request, response_sent) =
+        serve_delayed_record_stream_upload(Duration::from_millis(500));
+    let mut app = new_classic_running_sandbox_app();
+    install_test_recording_template(&mut app, output_path);
+    app.recording_template
+        .as_mut()
+        .test_value()
+        .initial_stream_chunk = b"initial record".to_vec();
+    let (network, _events) = NetworkManager::test_stub_with_league_record_stream(endpoint);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Headless host".to_string(),
+        prepared: None,
+    }));
+    app.headless = true;
+    app.start_recording(true).test_value();
+    app.network
+        .as_ref()
+        .test_value()
+        .append_league_record_bytes(b"terminal tail")
+        .test_value();
+
+    app.handle_game_over().test_value();
+    assert!(
+        response_sent.load(std::sync::atomic::Ordering::SeqCst),
+        "headless game-over must wait for the terminal upload response"
+    );
+    let request = request.test_join();
+    let header_end = request
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .test_value();
+    let header = std::str::from_utf8(&request[..header_end]).test_value();
+    assert!(
+        header.contains("end=true"),
+        "round end must send the terminal upload"
+    );
+    let body = &request[header_end + 4..];
+    let mut decoded = Vec::new();
+    ZlibDecoder::new(body)
+        .read_to_end(&mut decoded)
+        .test_value();
+    assert!(
+        decoded
+            .windows(b"terminal tail".len())
+            .any(|window| window == b"terminal tail"),
+        "the terminal stream upload must contain bytes appended before game over"
+    );
+}
+
 #[test]
 fn forced_recording_writes_replay_group_and_league_sha() {
     let directory = tempdir();
