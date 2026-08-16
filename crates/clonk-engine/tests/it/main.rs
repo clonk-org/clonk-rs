@@ -123,6 +123,7 @@ shard_modules!(
     mars_oxygen,
     message_board_queries,
     optional_int_strictness,
+    queron_relaunch_cycle,
     real_tutorial01_virtual_play,
     real_tutorial03_production,
     real_tutorial04_virtual_play,
