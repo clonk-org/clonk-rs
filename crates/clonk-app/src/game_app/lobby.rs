@@ -2174,7 +2174,8 @@ impl GameApp {
                 self.runtime_resource_string("IDS_NET_CLIENT_INFO"),
                 client_id,
                 row,
-            ),
+            )
+            .with_info_resources(self.runtime_client_info_resources()),
         );
         self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
         Ok(true)

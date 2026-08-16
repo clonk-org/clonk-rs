@@ -7850,6 +7850,34 @@ impl GameApp {
         runtime_resource_text_from_table(&self.startup_tooltip_resources, key, fallback)
     }
 
+    pub(crate) fn runtime_client_info_resources(
+        &self,
+    ) -> clonk_frontend::runtime_client_list::RuntimeClientInfoResources {
+        use clonk_frontend::runtime_client_list::RuntimeClientInfoResources;
+
+        RuntimeClientInfoResources::new(
+            self.runtime_resource_text("IDS_MSG_ACTIVE", "Active"),
+            self.runtime_resource_text("IDS_MSG_INACTIVE", "Inactive"),
+            self.runtime_resource_text("IDS_MSG_LOCAL", "local"),
+            self.runtime_resource_text("IDS_MSG_REMOTE", "remote"),
+            self.runtime_resource_text("IDS_MSG_HOST", "host"),
+            self.runtime_resource_text("IDS_MSG_CLIENT", "client"),
+            self.runtime_resource_text("IDS_NET_CLIENT_INFO_FORMAT", "%s %s %s %s (ID #%d):%s"),
+            self.runtime_resource_text("IDS_NET_CLIENT_INFO_ADDRESSES", "Addresses:"),
+            self.runtime_resource_text("IDS_NET_CLIENT_INFO_CONNDATA", "  Data: %s (%s, %d ms)"),
+            self.runtime_resource_text(
+                "IDS_NET_CLIENT_INFO_CONNECTIONS",
+                "Connections: %s: %s (%s, %d ms)",
+            ),
+            self.runtime_resource_text("IDS_NET_CLIENT_INFO_NOADDRESSES", "Addresses: none"),
+            self.runtime_resource_text(
+                "IDS_NET_CLIENT_INFO_NOCONNECTIONS",
+                "Connections: Not connected",
+            ),
+            self.runtime_resource_text("IDS_NET_CLIENT_INFO_UNKNOWNID", "Unknown client ID #%d."),
+        )
+    }
+
     fn quick_load(&mut self) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
         let candidate = self
