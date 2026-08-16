@@ -9576,7 +9576,7 @@ impl GameApp {
         } else {
             if self.network_savegame_recreation_progress.is_none() {
                 self.engine.game_start_synchronize()?;
-                self.prepare_network_savegame_recreation()?;
+                self.prepare_network_savegame_recreation(network_savegame)?;
                 self.stage_ordinary_network_recreated_script_files();
                 self.local_controls = LocalControlRegistry::default();
                 self.engine.set_local_players([]);

@@ -5865,3 +5865,109 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
     none.report_offline_wild_takeovers(&[]).test_value();
     assert!(none.message_dialogs.is_empty());
 }
+
+/// `RestoreSavegameInfos` logs an unassociated current participant only for a
+/// savegame, logs the remaining restore-row count before
+/// `RemoveUnassociatedPlayers`, and logs each joined row removed by
+/// `RemoveUnjoined` (C4PlayerInfo.cpp:1420-1435,1620-1629).
+#[test]
+fn savegame_resume_logs_localized_unassociated_player_removals() {
+    let native = |text: &str| LegacyCString::from_bytes(text.as_bytes().to_vec()).test_value();
+    let mut current = ControlPlayerInfoRegistry::default();
+    current.apply(clonk_engine::PlayerInfoControlData {
+        client_id: 0,
+        players: vec![
+            clonk_engine::ControlPlayerInfoEntry {
+                name: native("Resumed participant"),
+                savegame_player: 7,
+                ..Default::default()
+            },
+            clonk_engine::ControlPlayerInfoEntry {
+                name: native("New participant"),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    let restore = vec![
+        clonk_engine::ControlPlayerInfoEntry {
+            id: 7,
+            name: native("Resumed player"),
+            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+            game_number: 7,
+            ..Default::default()
+        },
+        clonk_engine::ControlPlayerInfoEntry {
+            id: 8,
+            name: native("Unclaimed player"),
+            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+            game_number: 8,
+            ..Default::default()
+        },
+    ];
+    let resources = HashMap::from([
+        (
+            "IDS_PRC_RESUMENOPLRASSOCIATION".to_string(),
+            "localized participant %s".to_string(),
+        ),
+        (
+            "IDS_PRC_RESUMEREMOVEPLRS".to_string(),
+            "localized remaining %d".to_string(),
+        ),
+        (
+            "IDS_PRC_REMOVEPLR".to_string(),
+            "localized removed %s".to_string(),
+        ),
+    ]);
+
+    let (before, after) = savegame_player_removal_log_lines(&current, &restore, true, &resources);
+
+    assert_eq!(
+        before,
+        vec![
+            "localized participant New participant".to_string(),
+            "localized remaining 1".to_string(),
+        ]
+    );
+    assert_eq!(
+        after,
+        vec!["localized removed Unclaimed player".to_string()]
+    );
+
+    let capture = clonk_logging::ConsoleLogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_target(false)
+        .with_level(false)
+        .with_writer(capture.clone())
+        .finish();
+    let mut engine = Engine::default();
+    tracing::subscriber::with_default(subscriber, || {
+        remove_unassociated_savegame_player_objects_with_logs(
+            &mut engine,
+            &current,
+            &restore,
+            true,
+            &resources,
+        )
+        .test_value();
+    });
+    let logged = capture.take();
+    assert_eq!(
+        logged.lines().map(str::to_owned).collect::<Vec<_>>(),
+        vec![
+            "localized participant New participant".to_string(),
+            "localized remaining 1".to_string(),
+            "localized removed Unclaimed player".to_string(),
+        ]
+    );
+
+    let (regular_before, regular_after) =
+        savegame_player_removal_log_lines(&current, &restore, false, &resources);
+    assert_eq!(regular_before, vec!["localized remaining 1".to_string()]);
+    assert_eq!(
+        regular_after,
+        vec!["localized removed Unclaimed player".to_string()]
+    );
+}

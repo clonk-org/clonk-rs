@@ -1,6 +1,9 @@
 #![cfg_attr(feature = "app-test-shard-mode", allow(unused_imports))]
 
 use super::*;
+use crate::game_app_scenario::{
+    remove_unassociated_savegame_player_objects_with_logs, savegame_player_removal_log_lines,
+};
 use clonk_app_core::pictures::{
     centered_picture_transform, compose_inventory_picture,
     compose_inventory_picture_with_allowed_modes, compose_owned_menu_picture,

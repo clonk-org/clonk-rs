@@ -6,6 +6,8 @@
 
 use super::*;
 
+use clonk_core::log_target::SCRIPT_LOG_TARGET;
+
 struct ReplayPlayerStartup {
     player_infos: ControlPlayerInfoRegistry,
     restart_player_infos: ControlPlayerInfoRegistry,
@@ -35,6 +37,113 @@ fn control_player_info_registry_from_snapshot(
             }),
     );
     player_infos
+}
+
+/// Format the `RestoreSavegameInfos` messages around its removal pass. The
+/// association and removal itself remain in the engine; keeping the localized
+/// presentation here mirrors C++'s `LoadResStr` at the application boundary.
+pub(crate) fn savegame_player_removal_log_lines(
+    current_player_infos: &ControlPlayerInfoRegistry,
+    restore_player_infos: &[clonk_engine::ControlPlayerInfoEntry],
+    save_game: bool,
+    resources: &HashMap<String, String>,
+) -> (Vec<String>, Vec<String>) {
+    let (_, current_packets) = current_player_infos.retained_rows_snapshot();
+    let associated_restore_ids = current_packets
+        .iter()
+        .flat_map(|(_, _, players)| players)
+        .map(|player| player.savegame_player)
+        .filter(|id| *id != 0)
+        .collect::<HashSet<_>>();
+    let restore_ids = restore_player_infos
+        .iter()
+        .map(|player| player.id)
+        .collect::<HashSet<_>>();
+
+    let mut before = Vec::new();
+    if save_game {
+        let template = runtime_resource_text_from_table(
+            resources,
+            "IDS_PRC_RESUMENOPLRASSOCIATION",
+            "Participant %s was not assigned to any savegame player. Joining as new player.",
+        );
+        before.extend(
+            current_packets
+                .iter()
+                .flat_map(|(_, _, players)| players)
+                .filter(|player| player.savegame_player == 0)
+                .map(|player| {
+                    let name = legacy_presentation_text(control_player_effective_name(player));
+                    format_resource_string(template.clone(), &[&name])
+                }),
+        );
+    }
+
+    let grabbed_count = current_packets
+        .iter()
+        .flat_map(|(_, _, players)| players)
+        .filter(|player| {
+            player.savegame_player != 0 && restore_ids.contains(&player.savegame_player)
+        })
+        .count();
+    // C++ subtracts every successful current-to-restore association, even if
+    // malformed input associates two current rows with the same saved row
+    // (C4PlayerInfo.cpp:1400-1408).
+    let remaining_count = restore_player_infos.len() as i32 - grabbed_count as i32;
+    if remaining_count != 0 {
+        let template = runtime_resource_text_from_table(
+            resources,
+            "IDS_PRC_RESUMEREMOVEPLRS",
+            "%d savegame players were not assigned and are being removed.",
+        );
+        before.push(format_resource_string(
+            template,
+            &[&remaining_count.to_string()],
+        ));
+    }
+
+    let template =
+        runtime_resource_text_from_table(resources, "IDS_PRC_REMOVEPLR", "Player %s removed.");
+    let after = restore_player_infos
+        .iter()
+        .filter(|restore| {
+            restore.is_joined()
+                && restore.game_number != OWNER_NONE
+                && !associated_restore_ids.contains(&restore.id)
+        })
+        .map(|restore| {
+            let name = legacy_presentation_text(control_player_effective_name(restore));
+            format_resource_string(template.clone(), &[&name])
+        })
+        .collect();
+
+    (before, after)
+}
+
+/// Apply the already-portioned savegame player-object removal pass and emit
+/// its three C++ `RestoreSavegameInfos` log sites in order.
+pub(crate) fn remove_unassociated_savegame_player_objects_with_logs(
+    engine: &mut Engine,
+    current_player_infos: &ControlPlayerInfoRegistry,
+    restore_player_infos: &[clonk_engine::ControlPlayerInfoEntry],
+    save_game: bool,
+    resources: &HashMap<String, String>,
+) -> Result<(), EngineError> {
+    let (before, after) = savegame_player_removal_log_lines(
+        current_player_infos,
+        restore_player_infos,
+        save_game,
+        resources,
+    );
+    for line in before {
+        tracing::info!(target: SCRIPT_LOG_TARGET, "{line}");
+    }
+    engine
+        .remove_unassociated_savegame_player_objects(current_player_infos, restore_player_infos)?;
+    for line in after {
+        tracing::info!(target: SCRIPT_LOG_TARGET, "{line}");
+    }
+    Ok(())
 }
 
 fn prepare_replay_player_startup(
@@ -1887,12 +1996,14 @@ impl GameApp {
             self.mouse_control_allowed = !scenario_data.disables_mouse();
         }
         if let Some(savegame) = offline_savegame.as_ref() {
-            engine
-                .remove_unassociated_savegame_player_objects(
-                    &self.control_player_infos,
-                    &savegame.unassociated_restore_players,
-                )
-                .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
+            remove_unassociated_savegame_player_objects_with_logs(
+                &mut engine,
+                &self.control_player_infos,
+                &savegame.unassociated_restore_players,
+                savegame.save_game,
+                &self.startup_tooltip_resources,
+            )
+            .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
             if !savegame.unassociated_restore_players.is_empty() {
                 engine.recheck_team_player_info_memberships(
                     &ordered_control_player_team_memberships(&self.control_player_infos),
@@ -1918,12 +2029,14 @@ impl GameApp {
                     &self.network_league_name,
                     &startup.player_infos,
                 );
-                engine
-                    .remove_unassociated_savegame_player_objects(
-                        &startup.player_infos,
-                        &startup.unassociated_restore_players,
-                    )
-                    .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
+                remove_unassociated_savegame_player_objects_with_logs(
+                    &mut engine,
+                    &startup.player_infos,
+                    &startup.unassociated_restore_players,
+                    replay_save_game,
+                    &self.startup_tooltip_resources,
+                )
+                .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
                 engine.recheck_team_player_info_memberships(
                     &ordered_control_player_team_memberships(&startup.player_infos),
                 );

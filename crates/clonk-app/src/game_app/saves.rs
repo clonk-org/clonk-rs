@@ -5,6 +5,7 @@
 //! Structural only: same crate, same type, same method bodies.
 
 use super::*;
+use crate::game_app_scenario::remove_unassociated_savegame_player_objects_with_logs;
 
 impl GameApp {
     pub(crate) fn developer_console_player_save_options(&self) -> (bool, bool, String) {
@@ -1196,7 +1197,10 @@ impl GameApp {
         Some(ScreenshotSaveOutcome { kind, path, result })
     }
 
-    pub(crate) fn prepare_network_savegame_recreation(&mut self) -> Result<(), EngineError> {
+    pub(crate) fn prepare_network_savegame_recreation(
+        &mut self,
+        save_game: bool,
+    ) -> Result<(), EngineError> {
         let restore_player_infos = self
             .loading_state
             .as_ref()
@@ -1219,9 +1223,12 @@ impl GameApp {
             &self.network_league_name,
             &self.control_player_infos,
         );
-        self.engine.remove_unassociated_savegame_player_objects(
+        remove_unassociated_savegame_player_objects_with_logs(
+            &mut self.engine,
             &self.control_player_infos,
             &restore_player_infos,
+            save_game,
+            &self.startup_tooltip_resources,
         )?;
 
         let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
