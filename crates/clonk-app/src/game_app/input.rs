@@ -3012,6 +3012,114 @@ impl GameApp {
         true
     }
 
+    /// Runs the default-unbound PRIO_Base control-rate callbacks after
+    /// ChartToggle, in their native registration order
+    /// (src/C4Game.cpp:3456-3462). C++'s `KeyAdjustControlRate` is a
+    /// key-down-only callback; `AdjustControlRate` only emits a relative
+    /// CID_Set from the control host (`src/C4GameControl.h:122-126`;
+    /// `src/C4GameControl.cpp:548-552`).
+    pub(crate) fn handle_runtime_control_rate_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running) || self.local_player_key_binding_in_scope(key) {
+            return Ok(false);
+        }
+        let delta = if self.runtime_keyboard_binding_matches("CtrlRateDown", key, false) {
+            -1
+        } else if self.runtime_keyboard_binding_matches("CtrlRateUp", key, false) {
+            1
+        } else {
+            return Ok(false);
+        };
+        if state != ElementState::Pressed {
+            return Ok(false);
+        }
+        if self.engine.is_control_host() {
+            self.submit_or_execute_running_control_set(0, delta)?;
+        }
+        Ok(true)
+    }
+
+    /// Runs the default-unbound PRIO_Base NetAllowJoinToggle after both
+    /// control-rate callbacks, matching the native registration order
+    /// (src/C4Game.cpp:3456-3462). `C4Network2::ToggleAllowJoin` changes the
+    /// live host admission gate and consumes its key even when this process is
+    /// not the network host (`src/C4Network2.cpp:799-804`; host-side flash and
+    /// config mutation: `src/C4Network2.cpp:841-849`).
+    pub(crate) fn handle_runtime_net_allow_join_toggle_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running)
+            || !self.runtime_keyboard_binding_matches("NetAllowJoinToggle", key, false)
+            || self.local_player_key_binding_in_scope(key)
+        {
+            return Ok(false);
+        }
+        if state != ElementState::Pressed {
+            return Ok(false);
+        }
+        if !matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
+            return Ok(true);
+        }
+        let currently_allowed = self
+            .runtime_network_join_allowed
+            .or_else(|| match self.network_mode.as_ref() {
+                Some(NetworkMode::Host(HostSettings {
+                    prepared: Some(prepared),
+                    ..
+                })) => Some(prepared.admission().runtime_join_allowed()),
+                Some(NetworkMode::Host(_) | NetworkMode::Client(_)) | None => None,
+            })
+            .unwrap_or_else(|| {
+                !native_config_text(
+                    &load_native_config_bytes(self.app_paths.as_ref()),
+                    "Network",
+                    "NoRuntimeJoin",
+                )
+                .as_deref()
+                .map(parse_config_bool)
+                .unwrap_or(true)
+            });
+        let allowed = !currently_allowed;
+        let Some(network) = self.network.as_ref() else {
+            return Ok(true);
+        };
+        if let Err(error) = network.set_join_allowed(allowed) {
+            tracing::error!(%error, allowed, "failed to change runtime join admission");
+            return Ok(true);
+        }
+        self.runtime_network_join_allowed = Some(allowed);
+        if let Some(NetworkMode::Host(HostSettings {
+            prepared: Some(prepared),
+            ..
+        })) = self.network_mode.as_mut()
+        {
+            prepared.set_runtime_join_allowed(allowed);
+        }
+        self.persist_game_option_value(
+            "Network",
+            "NoRuntimeJoin",
+            if allowed { "0" } else { "1" }.to_string(),
+        );
+        self.publish_running_host_reference();
+        let labels = self.classic_lobby_option_labels();
+        let message = if allowed {
+            labels.runtime_join_free
+        } else {
+            labels.runtime_join_barred
+        };
+        match self.prepare_runtime_flash_message(&message, self.runtime_language_charset) {
+            Ok(message) => self.runtime_flash_message = message,
+            Err(error) => tracing::warn!(%error, "failed to prepare runtime-join flash message"),
+        }
+        self.refresh_runtime_client_list();
+        Ok(true)
+    }
+
     /// Runs the default-unbound PRIO_Base NetStatsToggle, the last entry of
     /// the native "no default keys assigned" block (src/C4Game.cpp:3462).
     /// Every other PRIO_Base action registered before it — including
@@ -3407,6 +3515,12 @@ impl GameApp {
             return Ok(());
         }
         if self.handle_runtime_chart_toggle_key(key, state) {
+            return Ok(());
+        }
+        if self.handle_runtime_control_rate_key(key, state)? {
+            return Ok(());
+        }
+        if self.handle_runtime_net_allow_join_toggle_key(key, state)? {
             return Ok(());
         }
         if self.startup_network_transition_blocks_input() {

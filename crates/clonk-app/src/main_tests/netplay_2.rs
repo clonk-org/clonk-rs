@@ -15192,6 +15192,98 @@ fn net_stats_toggle_is_default_unbound_and_a_custom_chord_shows_the_overlay() {
     assert!(app.graphics.network_status_text().is_none());
 }
 
+// CtrlRateDown and CtrlRateUp are registered in this order in the native
+// KEY_Default block (src/C4Game.cpp:3456-3462). They call
+// C4GameControl::KeyAdjustControlRate, which submits a relative
+// C4CVT_ControlRate set only from the control host
+// (src/C4GameControl.h:122-126; src/C4GameControl.cpp:548-552).
+#[test]
+fn control_rate_keys_submit_native_relative_adjustments() {
+    let mut app = new_classic_running_sandbox_app();
+    let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(parse_runtime_key_config(
+            b"[Keys]\nCtrlRateDown=F8\nCtrlRateUp=F10\n",
+        )
+        .test_value()))
+        .test_value();
+
+    app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F8, ElementState::Released);
+    app.test_key(VirtualKeyCode::F10, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F10, ElementState::Released);
+
+    let decided = commands.take_submitted_decided_controls();
+    assert_eq!(
+        decided
+            .iter()
+            .map(|(_, control, _)| {
+                clonk_network::LegacyControlSet::from_control_packet(control).test_value()
+            })
+            .collect::<Vec<_>>(),
+        [
+            clonk_network::LegacyControlSet {
+                value_type: 0,
+                data: -1,
+                by_client: 0,
+            },
+            clonk_network::LegacyControlSet {
+                value_type: 0,
+                data: 1,
+                by_client: 0,
+            },
+        ]
+    );
+}
+
+// NetAllowJoinToggle follows CtrlRateDown and CtrlRateUp in the same native
+// KEY_Default block (src/C4Game.cpp:3456-3462). It calls
+// C4Network2::ToggleAllowJoin, which toggles the live host gate and consumes
+// the key without an Up callback (src/C4Network2.cpp:799-804).
+#[test]
+fn net_allow_join_toggle_key_toggles_the_live_host_gate() {
+    let mut app = new_classic_running_sandbox_app();
+    let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
+    app.runtime_network_join_allowed = Some(false);
+    let labels = app.classic_lobby_option_labels();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(parse_runtime_key_config(
+            b"[Keys]\nNetAllowJoinToggle=F10\n",
+        )
+        .test_value()))
+        .test_value();
+
+    let acknowledgement = thread::spawn(move || {
+        let (allowed, completion) = commands.receive_join_allowed();
+        assert!(allowed);
+        completion.send(Ok(())).test_value();
+        let (allowed, completion) = commands.receive_join_allowed();
+        assert!(!allowed);
+        completion.send(Ok(())).test_value();
+    });
+    app.test_key(VirtualKeyCode::F10, ElementState::Pressed);
+    assert_eq!(app.runtime_network_join_allowed, Some(true));
+    assert_eq!(
+        app.runtime_flash_message
+            .as_ref()
+            .map(|message| message.text.as_str()),
+        Some(labels.runtime_join_free.as_str())
+    );
+    app.test_key(VirtualKeyCode::F10, ElementState::Released);
+    app.test_key(VirtualKeyCode::F10, ElementState::Pressed);
+    acknowledgement.test_join();
+
+    assert_eq!(app.runtime_network_join_allowed, Some(false));
+    assert!(
+        app.runtime_flash_message
+            .as_ref()
+            .is_some_and(|message| message.text == labels.runtime_join_barred),
+        "the native toggle reports the new admission state"
+    );
+}
+
 #[test]
 fn runtime_client_list_maps_native_lifecycle_readiness_and_wait() {
     use clonk_frontend::runtime_client_list::RuntimeClientStatusIcon;
