@@ -452,6 +452,11 @@ fn startup_options_visible_labels_follow_runtime_resources() {
             "IDS_CTL_FAIRCREWSTRENGTH",
             "Staerke der \"Fairen Mannschaft\"",
         ),
+        ("IDS_CTL_FAIRCREWWEAK", "Schwach"),
+        ("IDS_CTL_FAIRCREWSTRONG", "Stark"),
+        ("IDS_CTL_DIG", "Graben"),
+        ("IDS_NET_PORT_TCP", "TCP-Anschluss"),
+        ("IDS_NET_PORT_UDP", "UDP-Anschluss"),
         ("IDS_CTL_NOLANGINFO", "Sprachpaket nicht verfuegbar."),
     ] {
         app.startup_tooltip_resources
@@ -475,6 +480,13 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     assert_eq!(labels.port_reference, "Referenzport");
     assert_eq!(labels.active, "Aktiv");
     assert_eq!(labels.chat_name, "Chatname:");
+    // The fair-crew child captions and network port group titles are resolved
+    // at construction (`C4StartupOptionsDlg.cpp:768-773,996-999`), not only
+    // when a control is activated.
+    assert_eq!(labels.fair_crew_weak, "Schwach");
+    assert_eq!(labels.fair_crew_strong, "Stark");
+    assert_eq!(labels.port_tcp, "TCP-Anschluss");
+    assert_eq!(labels.port_udp, "UDP-Anschluss");
     assert_eq!(
         labels.fair_crew_strength,
         "Staerke der \"Fairen Mannschaft\""
@@ -493,14 +505,38 @@ fn startup_options_visible_labels_follow_runtime_resources() {
         "Language"
     );
 
-    // The nested key-capture and resolution-confirm dialogs are resources too,
-    // including their positional `%s`/`%d`/`%u` arguments.
+    // KeySelDialog uses the same localized action name as the control button
+    // (`C4StartupOptionsDlg.cpp:160-177`).
     for (key, value) in [
         (
             "IDS_MSG_PRESSKEY",
             "Taste fuer \"%s\" auf Tastaturblock %d druecken.",
         ),
         ("IDS_MSG_DEFINEKEY", "Taste zuweisen"),
+    ] {
+        app.startup_tooltip_resources
+            .insert(key.to_string(), value.to_string());
+    }
+    app.process_options_dialog_actions(vec![
+        clonk_frontend::startup_options_dlg::OptionsDlgAction::BeginControlCapture(
+            clonk_frontend::startup_options_controls::ControlCaptureTarget {
+                device: clonk_frontend::startup_options_controls::ControlDevice::Keyboard,
+                set: 2,
+                control: 5,
+            },
+        ),
+    ])
+    .test_value();
+    let capture = app.message_dialogs.last().test_value();
+    assert_eq!(
+        capture.state.message(),
+        "Taste fuer \"Graben\" auf Tastaturblock 3 druecken."
+    );
+    assert_eq!(capture.state.caption(), "Taste zuweisen");
+
+    // The nested key-capture and resolution-confirm dialogs are resources too,
+    // including their positional `%s`/`%d`/`%u` arguments.
+    for (key, value) in [
         ("IDS_MNU_SWITCHRESOLUTION", "Aufloesung wechseln"),
         (
             "IDS_MNU_SWITCHRESOLUTION_TEXT",
@@ -532,6 +568,8 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     let book = app.assets.options_book_fonts.as_deref().test_value();
     let wide = clonk_frontend::startup_options_dlg::OptionsLabels {
         language: "Sprachauswahl fuer das gesamte Programm".to_string(),
+        fair_crew_weak: "Sehr schwache Mannschaft".to_string(),
+        fair_crew_strong: "Aussergewoehnlich starke Mannschaft".to_string(),
         ..Default::default()
     };
     let narrow = clonk_frontend::startup_options_dlg::options_dlg_layout_with_labels(
@@ -549,6 +587,15 @@ fn startup_options_visible_labels_follow_runtime_resources() {
         "a longer resolved label must push its combo right: {} vs {}",
         widened.language_combo.x,
         narrow.language_combo.x
+    );
+    assert!(
+        widened.weak_label.w > narrow.weak_label.w
+            && widened.strong_label.w > narrow.strong_label.w,
+        "fair-crew labels must measure resolved child captions: weak {} vs {}, strong {} vs {}",
+        widened.weak_label.w,
+        narrow.weak_label.w,
+        widened.strong_label.w,
+        narrow.strong_label.w
     );
 }
 

@@ -131,6 +131,9 @@ pub struct OptionsLabels {
     pub advanced_settings: String,
     /// `IDS_CTL_FAIRCREWSTRENGTH`.
     pub fair_crew_strength: String,
+    /// `IDS_CTL_FAIRCREWWEAK` / `IDS_CTL_FAIRCREWSTRONG`.
+    pub fair_crew_weak: String,
+    pub fair_crew_strong: String,
     /// `IDS_CTL_NOLANGINFO`.
     pub no_language_info: String,
     /// `IDS_CTL_MUSIC`.
@@ -159,7 +162,10 @@ pub struct OptionsLabels {
     pub reset_keyboard: String,
     /// `IDS_CTL_GAMEPADFORMENU`.
     pub gamepad_gui_control: String,
-    /// `IDS_NET_PORT_REFERENCE` / `IDS_NET_PORT_DISCOVERY`.
+    /// `IDS_NET_PORT_TCP` / `IDS_NET_PORT_UDP` / `IDS_NET_PORT_REFERENCE` /
+    /// `IDS_NET_PORT_DISCOVERY`.
+    pub port_tcp: String,
+    pub port_udp: String,
     pub port_reference: String,
     pub port_discovery: String,
     /// `IDS_CTL_ACTIVE`.
@@ -199,6 +205,8 @@ impl Default for OptionsLabels {
             reset_config: "Reset configuration".into(),
             advanced_settings: "Advanced settings".into(),
             fair_crew_strength: "Strength of \"Fair Crew\"".into(),
+            fair_crew_weak: "weak".into(),
+            fair_crew_strong: "strong".into(),
             no_language_info: "Language pack not available.".into(),
             music: "Music".into(),
             sound_effects: "Sound effects".into(),
@@ -214,6 +222,8 @@ impl Default for OptionsLabels {
             apply_scale: "Apply".into(),
             reset_keyboard: "Reset all".into(),
             gamepad_gui_control: "Use gamepad for menu control.".into(),
+            port_tcp: "TCP port".into(),
+            port_udp: "UDP port".into(),
             port_reference: "Reference port".into(),
             port_discovery: "Discovery port".into(),
             active: "Active".into(),
@@ -977,8 +987,9 @@ pub fn options_dlg_layout_for(
         y: r.y + group_client.y,
         ..r
     };
-    let weak_label = group_abs(ca_group.get_from_left(book_w("weak"), check_h));
-    let strong_label = group_abs(ca_group.get_from_right(book_w("strong"), check_h));
+    let weak_label = group_abs(ca_group.get_from_left(book_w(&labels.fair_crew_weak), check_h));
+    let strong_label =
+        group_abs(ca_group.get_from_right(book_w(&labels.fair_crew_strong), check_h));
     let slider = group_abs(ca_group.get_centered(ca_group.inner_width(), 16));
 
     // Bottom small buttons (781-792): W = min(w@CaptionFont + lh*4, inner*2/5);
@@ -4913,12 +4924,13 @@ impl OptionsDlgScreen {
         let full = GuiRect::new(0.0, 0.0, w as f32, h as f32);
         draw_image_bilinear(surface, &full, &assets.background, gamma);
 
-        // 2. Title label, GUI TitleFont, yellow, centered.
+        // 2. Title label, GUI TitleFont, yellow, centered. The constructor
+        // resolves `IDS_DLG_OPTIONS` here (`C4StartupOptionsDlg.cpp:609`).
         gui.title.draw_with_gamma(
             surface,
             layout.title_center.0,
             layout.title_center.1,
-            "Options",
+            &state.labels.title,
             YELLOW_FONT_RGBA,
             TextAlign::Center,
             true,
@@ -5855,8 +5867,8 @@ impl OptionsDlgScreen {
         let network = state.network();
         for id in NetworkPortId::ALL {
             let title = match id {
-                NetworkPortId::Tcp => "TCP port",
-                NetworkPortId::Udp => "UDP port",
+                NetworkPortId::Tcp => state.labels.port_tcp.as_str(),
+                NetworkPortId::Udp => state.labels.port_udp.as_str(),
                 NetworkPortId::Reference => state.labels.port_reference.as_str(),
                 NetworkPortId::Discovery => state.labels.port_discovery.as_str(),
             };
@@ -6203,8 +6215,12 @@ impl OptionsDlgScreen {
                 gamma,
             );
         };
-        center_label(surface, &layout.weak_label, "weak");
-        center_label(surface, &layout.strong_label, "strong");
+        center_label(surface, &layout.weak_label, &state.labels.fair_crew_weak);
+        center_label(
+            surface,
+            &layout.strong_label,
+            &state.labels.fair_crew_strong,
+        );
 
         Self::draw_book_scrollbar(
             surface,
