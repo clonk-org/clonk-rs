@@ -1351,6 +1351,7 @@ impl GameApp {
         // The advanced editor writes `Network.MasterServerSignUp` straight to
         // the file, so an older netdlg toggle must stop shadowing it.
         self.deferred_config.clear("Network", "MasterServerSignUp");
+        self.clear_deferred_display_toggles();
         let paths = self.app_paths.as_ref();
         let is_fullscreen = self.display_flags.is_fullscreen;
         self.display_flags = load_display_flags(paths);
@@ -2134,6 +2135,90 @@ impl GameApp {
         if let Err(error) = persist_config_value(paths, section, key, value) {
             tracing::error!(%error, section, key, "failed to persist game option");
             self.status_text = format!("Unable to save game option: {error}");
+        }
+    }
+
+    /// Keep the in-game Display values in the process-local config until the
+    /// next C++ save site. `C4MainMenu::MenuCommand` mutates these fields in
+    /// memory (`C4MainMenu.cpp:855-882`), while `C4Application::Quit` writes
+    /// the complete config only on a clean shutdown (`C4Application.cpp:351-367`).
+    /// The other Display rows are intentionally left to their own save-site
+    /// audits; changing one row must not eagerly persist or rewrite them.
+    pub(crate) fn defer_display_toggle(&mut self, toggle: DisplayToggle) {
+        let (section, key, value) = match toggle {
+            DisplayToggle::PlayerNames => (
+                "Graphics",
+                "ShowCrewNames",
+                self.display_flags.player_names.to_string(),
+            ),
+            DisplayToggle::ClonkNames => (
+                "Graphics",
+                "ShowCrewCNames",
+                self.display_flags.clonk_names.to_string(),
+            ),
+            DisplayToggle::Clock => (
+                "Graphics",
+                "ShowClock",
+                self.display_flags.clock.to_string(),
+            ),
+            DisplayToggle::Fps => ("General", "FPS", self.display_flags.fps.to_string()),
+            DisplayToggle::UpperBoard => (
+                "Graphics",
+                "UpperBoard",
+                match self.display_flags.upper_board {
+                    UpperBoardMode::Hide => "Hide",
+                    UpperBoardMode::Full => "Full",
+                    UpperBoardMode::Small => "Small",
+                    UpperBoardMode::Mini => "Mini",
+                }
+                .to_owned(),
+            ),
+            DisplayToggle::Portraits
+            | DisplayToggle::ShowCommands
+            | DisplayToggle::ShowCommandKeys
+            | DisplayToggle::WhiteChat => return,
+        };
+        self.deferred_config.set(section, key, value);
+    }
+
+    pub(crate) fn apply_display_flags_to_config(&self, config: &mut Config) {
+        config.set_in(
+            Some("Graphics"),
+            "ShowCrewNames",
+            self.display_flags.player_names.to_string(),
+        );
+        config.set_in(
+            Some("Graphics"),
+            "ShowCrewCNames",
+            self.display_flags.clonk_names.to_string(),
+        );
+        config.set_in(
+            Some("Graphics"),
+            "ShowClock",
+            self.display_flags.clock.to_string(),
+        );
+        config.set_in(Some("General"), "FPS", self.display_flags.fps.to_string());
+        config.set_in(
+            Some("Graphics"),
+            "UpperBoard",
+            match self.display_flags.upper_board {
+                UpperBoardMode::Hide => "Hide",
+                UpperBoardMode::Full => "Full",
+                UpperBoardMode::Small => "Small",
+                UpperBoardMode::Mini => "Mini",
+            },
+        );
+    }
+
+    fn clear_deferred_display_toggles(&mut self) {
+        for (section, key) in [
+            ("Graphics", "ShowCrewNames"),
+            ("Graphics", "ShowCrewCNames"),
+            ("Graphics", "ShowClock"),
+            ("General", "FPS"),
+            ("Graphics", "UpperBoard"),
+        ] {
+            self.deferred_config.clear(section, key);
         }
     }
 

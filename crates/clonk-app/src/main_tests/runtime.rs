@@ -9013,6 +9013,114 @@ fn runtime_config_booleans_follow_stdcompiler_grammar_and_preserve_defaults() {
     }
 }
 
+#[test]
+fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
+    // C4MainMenu.cpp:855-882 mutates Config in memory and reopens the page;
+    // C4Config.cpp:381,455-466 declares the five persisted keys, and
+    // C4Application.cpp:351-367 is the save site. The Display page owns only
+    // these five persisted keys here; the remaining toggles belong to other
+    // save-site audits and must not be written as a side effect.
+    let mut app = new_state_only_lightweight_running_sandbox_app();
+    let user_data = tempdir();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .test_value();
+    let _guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(repository)),
+        ("LC_USER_DATA_DIR", Some(user_data.path())),
+    ]);
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+    fs::write(
+        paths.config_file(),
+        "[General]\nFPS=false\nUnrelatedGeneral=keep\n\n[Graphics]\nShowCrewNames=true\nShowCrewCNames=true\nShowClock=false\nUpperBoard=Full\nUnrelatedGraphics=keep\n",
+    )
+    .test_value();
+    app.app_paths = Some(paths.clone());
+    let initial_config = fs::read(paths.config_file()).test_value();
+
+    app.apply_ingame_menu_action(MenuAction::ActivateDisplay)
+        .test_value();
+    app.ingame_menu
+        .get_mut(app.local_owner)
+        .test_mut()
+        .set_selection(1);
+    for toggle in [
+        DisplayToggle::PlayerNames,
+        DisplayToggle::ClonkNames,
+        DisplayToggle::Clock,
+        DisplayToggle::Fps,
+        DisplayToggle::UpperBoard,
+    ] {
+        app.apply_ingame_menu_action(MenuAction::Display(toggle))
+            .test_value();
+    }
+    for toggle in [
+        DisplayToggle::Portraits,
+        DisplayToggle::ShowCommands,
+        DisplayToggle::ShowCommandKeys,
+        DisplayToggle::WhiteChat,
+    ] {
+        app.apply_ingame_menu_action(MenuAction::Display(toggle))
+            .test_value();
+    }
+
+    assert_eq!(
+        app.ingame_menu
+            .get(app.local_owner)
+            .test_value()
+            .selection(),
+        1
+    );
+    assert!(!app.display_flags.player_names);
+    assert!(!app.display_flags.clonk_names);
+    assert!(app.display_flags.clock);
+    assert!(app.display_flags.fps);
+    assert_eq!(app.display_flags.upper_board, UpperBoardMode::Small);
+    assert_eq!(app.deferred_config.len(), 5);
+
+    assert_eq!(
+        fs::read(paths.config_file()).test_value(),
+        initial_config,
+        "Display toggles mutate the process-local config only until shutdown"
+    );
+    app.flush_deferred_config();
+    let after_flush = Config::load(paths.config_file()).test_value();
+    assert_eq!(
+        after_flush.get_in(Some("Graphics"), "ShowCrewNames"),
+        Some("false")
+    );
+    assert_eq!(
+        after_flush.get_in(Some("Graphics"), "ShowCrewCNames"),
+        Some("false")
+    );
+    assert_eq!(
+        after_flush.get_in(Some("Graphics"), "ShowClock"),
+        Some("true")
+    );
+    assert_eq!(
+        after_flush.get_in(Some("Graphics"), "UpperBoard"),
+        Some("Small")
+    );
+    assert_eq!(after_flush.get_in(Some("General"), "FPS"), Some("true"));
+    assert_eq!(
+        after_flush.get_in(Some("General"), "UnrelatedGeneral"),
+        Some("keep")
+    );
+    assert_eq!(
+        after_flush.get_in(Some("Graphics"), "UnrelatedGraphics"),
+        Some("keep")
+    );
+
+    let reopened = load_display_flags(Some(&paths));
+    assert!(!reopened.player_names);
+    assert!(!reopened.clonk_names);
+    assert!(reopened.clock);
+    assert!(reopened.fps);
+    assert_eq!(reopened.upper_board, UpperBoardMode::Small);
+}
+
 /// `Graphics.ShowStats` has no oracle counterpart — it opts in to the
 /// port's diagnostics overlay, which reports the presentation half of the
 /// frame budget `General.FPS` (C4Game::FPS) structurally cannot see. It is

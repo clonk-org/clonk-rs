@@ -1609,6 +1609,7 @@ impl GameApp {
                 // (C4MainMenu.cpp:855-884).
                 let selection = self.ingame_menu_selection(player);
                 self.display_flags.toggle(toggle);
+                self.defer_display_toggle(toggle);
                 if toggle == DisplayToggle::UpperBoard {
                     let game_time_seconds = self.game_time_seconds();
                     self.graphics.set_upper_board_mode(
