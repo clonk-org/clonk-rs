@@ -4314,14 +4314,6 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
     assert!(app.scoreboard_dialog.is_some());
     app.test_render(&mut frame);
 
-    let mut save_browser = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
-    save_browser.open_save_browser().test_value();
-    assert!(save_browser.save_browser.is_some());
-    call_scoreboard_function_and_update(&mut save_browser, "ShowAndEnd");
-    assert!(save_browser.game_over_dialog.is_some());
-    assert!(save_browser.save_browser.is_none());
-    assert!(!save_browser.save_browser_return_to_menu);
-
     let mut object_menu = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
     assert!(object_menu.open_object_menu().expect("open object menu"));
     call_scoreboard_function_and_update(&mut object_menu, "ShowAndEnd");

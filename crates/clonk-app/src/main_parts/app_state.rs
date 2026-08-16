@@ -285,8 +285,6 @@ pub(crate) struct GameApp {
     /// control nor offers its Options entry (C4Player.cpp:1907-1912;
     /// C4MainMenu.cpp:563-571).
     pub(crate) mouse_control_allowed: bool,
-    pub(crate) save_browser: Option<SaveBrowserState>,
-    pub(crate) save_browser_return_to_menu: bool,
     pub(crate) mode: AppMode,
     pub(crate) scenario_catalog: HashMap<String, FrontendScenario>,
     /// Interactive scenario refreshes run outside the UI thread. The old
@@ -2518,7 +2516,6 @@ pub(crate) enum ClassicParityBoundary {
     },
     IngameMenuChild(ClassicIngameMenuChild),
     ObjectMenu(ClassicObjectMenuBoundary),
-    SaveBrowser(SaveBrowserMode),
     AppObjectMenu(AppObjectMenuMode),
     RuntimeHelpResources {
         detail: String,
@@ -2660,10 +2657,6 @@ impl fmt::Display for ClassicParityBoundary {
             Self::ObjectMenu(kind) => write!(
                 f,
                 "classic object menu {kind:?} is not implemented; refusing generic Rust object menu"
-            ),
-            Self::SaveBrowser(mode) => write!(
-                f,
-                "classic {mode:?} save/load screen is unavailable; refusing generic Rust browser"
             ),
             Self::AppObjectMenu(mode) => write!(
                 f,

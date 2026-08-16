@@ -62,7 +62,6 @@ mod ready_check_notification;
 use clonk_app_netplay::prepared_host_bootstrap;
 use clonk_app_netplay::resource_path_identity;
 mod runtime_join_save;
-mod save_browser;
 mod settings;
 mod shell_window_host;
 mod software_window;
@@ -318,7 +317,6 @@ use offline_startup::{
     offline_player_paths_identical, offline_player_real_path, OfflineStartupPlayers,
 };
 use png::{BitDepth, ColorType, Encoder};
-use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
 use serde::{
     de::{self, Unexpected, Visitor},
     ser::Serializer,
@@ -2501,8 +2499,6 @@ impl GameApp {
             graphics_smoke_level,
             mouse_control: true,
             mouse_control_allowed: true,
-            save_browser: None,
-            save_browser_return_to_menu: false,
             mode: AppMode::Loading,
             scenario_catalog,
             scenario_selector_discovery: None,
@@ -4110,8 +4106,7 @@ impl GameApp {
                 }
             }
             if self.ingame_menu_belongs_to(owner)
-                || (owner == self.local_owner
-                    && (self.object_menu.is_some() || self.save_browser.is_some()))
+                || (owner == self.local_owner && self.object_menu.is_some())
             {
                 return Ok(());
             }
@@ -4502,19 +4497,6 @@ impl GameApp {
     /// `Application.SetNextMission` + `Game.Abort`, C4GameDialogs.cpp:116-120).
     fn retain_restart_restore_mask_for_restart(&mut self) {
         self.restart_restore_infos.what = self.engine.restart_restore_info_mask();
-    }
-
-    fn open_load_browser(&mut self) -> Result<()> {
-        let entries = self.collect_save_entries()?;
-        if entries.is_empty() {
-            self.status_text = "No saved games found".to_string();
-        }
-        let state = SaveBrowserState::new(SaveBrowserMode::Load, entries);
-        self.save_browser = Some(state);
-        self.save_browser_return_to_menu = true;
-        self.ingame_menu.clear();
-        self.object_menu = None;
-        Ok(())
     }
 
     fn load_saved_game_from_path(&mut self, path: &Path) -> Result<()> {
@@ -5181,7 +5163,6 @@ impl GameApp {
                 .network_start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
-            || self.save_browser.is_some()
             || self.object_menu.is_some()
     }
 

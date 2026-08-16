@@ -4420,16 +4420,6 @@ impl GameApp {
         }
         if viewport_overlays_visible && self.menu_owner_has_unsuppressed_viewport(self.local_owner)
         {
-            if let Some(browser) = self.save_browser.as_ref() {
-                let boundary = report_classic_parity_boundary(ClassicParityBoundary::SaveBrowser(
-                    browser.mode().clone(),
-                ));
-                tracing::error!(%boundary, "refusing to render Rust-only save/load browser");
-                return Err(anyhow::Error::new(boundary));
-            }
-        }
-        if viewport_overlays_visible && self.menu_owner_has_unsuppressed_viewport(self.local_owner)
-        {
             if let Some(menu) = self.object_menu.as_ref() {
                 let boundary = report_classic_parity_boundary(
                     ClassicParityBoundary::AppObjectMenu(menu.mode()),

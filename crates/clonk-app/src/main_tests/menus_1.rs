@@ -4009,23 +4009,6 @@ fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
         .expect("open app-owned object menu"));
     check(object, "app-owned object menu");
 
-    for mode in [
-        SaveBrowserMode::Save {
-            suggested_label: "Slot".to_string(),
-        },
-        SaveBrowserMode::Load,
-    ] {
-        let mut app = new_running_sandbox_app();
-        app.save_browser = Some(SaveBrowserState::new(mode.clone(), Vec::new()));
-        check(
-            app,
-            match mode {
-                SaveBrowserMode::Save { .. } => "save browser",
-                SaveBrowserMode::Load => "load browser",
-            },
-        );
-    }
-
     let mut scoreboard = new_running_sandbox_app();
     scoreboard.scoreboard_dialog = Some(scoreboard.scoreboard_request());
     check(scoreboard, "visible scoreboard");
@@ -4197,7 +4180,8 @@ fn rust_only_running_function_keys_fail_without_opening_panes() {
             .handle_key(key, ElementState::Pressed)
             .expect_err("unported running shortcut must fail");
         assert!(error.to_string().contains(label));
-        assert!(app.save_browser.is_none());
+        assert!(app.ingame_menu.is_none());
+        assert!(app.object_menu.is_none());
     }
 }
 

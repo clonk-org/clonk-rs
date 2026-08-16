@@ -7944,13 +7944,10 @@ impl GameApp {
         // C4GameOverDlg::OnShown hides the scoreboard and closes each
         // player's fullscreen C4MainMenu before evaluation becomes
         // interactive. The synchronized object/cursor menu survives
-        // C4Player::CloseMenu; save-browser UI is a descendant of the app's
-        // fullscreen menu. The scoreboard refcount is untouched.
+        // C4Player::CloseMenu. The scoreboard refcount is untouched.
         self.close_scoreboard_dialog();
-        let fullscreen_menu_open = self.ingame_menu.is_some() || self.save_browser.is_some();
+        let fullscreen_menu_open = self.ingame_menu.is_some();
         self.close_ingame_menu();
-        self.save_browser = None;
-        self.save_browser_return_to_menu = false;
         if fullscreen_menu_open {
             // C4MainMenu::OnClosed synchronizes exactly one
             // ClearPressedComs when game-over closes the player menu.
