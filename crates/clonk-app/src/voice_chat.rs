@@ -47,10 +47,11 @@
 //! no lane rather than a cleartext one. That exchange is bound to no identity,
 //! so it does not defend against an attacker who can rewrite the cleartext
 //! control stream — the limitation the rest of the protocol already carries.
-//! The seal keeps no replay window, deliberately, since that would put per-
-//! connection state on a lane whose droppability is the point; a repeated frame
-//! is instead refused here by [`VoiceActivityTracker`]'s shared epoch and
-//! sequence window.
+//! The network seal intentionally only authenticates and decrypts each
+//! datagram; it keeps no replay window, since that would put per-connection
+//! state on a lane whose droppability is the point. After that network step,
+//! this app layer's [`VoiceActivityTracker`] owns duplicate/late suppression
+//! through its shared epoch and sequence window.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1422,6 +1423,37 @@ mod tests {
         assert_eq!(
             activity.active_speakers(start + SPEAKING_HANGOVER),
             Vec::<(i32, i32)>::new(),
+        );
+    }
+
+    #[test]
+    fn voice_activity_tracker_rejects_newest_late_and_old_epoch_replays() {
+        let snapshot = snapshot_with_player(17, 7);
+        let now = Instant::now();
+        let mut activity = VoiceActivityTracker::default();
+
+        assert_eq!(
+            activity.note_frame(&snapshot, 7, 17, 5, 100, now),
+            VoiceFrameDisposition::Accepted,
+        );
+        assert_eq!(
+            activity.note_frame(&snapshot, 7, 17, 5, 100, now),
+            VoiceFrameDisposition::DuplicateOrLate,
+            "the network seal authenticates a duplicate; the activity tracker refuses it",
+        );
+        assert_eq!(
+            activity.note_frame(&snapshot, 7, 17, 5, 36, now),
+            VoiceFrameDisposition::DuplicateOrLate,
+            "a frame outside the activity tracker's late window must not reopen speech",
+        );
+        assert_eq!(
+            activity.note_frame(&snapshot, 7, 17, 6, 0, now),
+            VoiceFrameDisposition::AcceptedNewEpoch,
+        );
+        assert_eq!(
+            activity.note_frame(&snapshot, 7, 17, 5, 101, now),
+            VoiceFrameDisposition::DuplicateOrLate,
+            "a delayed frame from the previous epoch must remain rejected",
         );
     }
 

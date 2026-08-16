@@ -116,6 +116,10 @@ impl VoiceRouteCookie {
 
 /// One direction of one route's media protection: the cookie that names the
 /// direction on the wire, and the key that seals everything behind it.
+/// The codec is intentionally stateless: each call authenticates one datagram
+/// and does not retain `(stream_epoch, sequence)` replay state. Once a frame is
+/// decoded, duplicate/late suppression belongs to the application layer's
+/// `VoiceActivityTracker`.
 #[derive(Clone, Copy)]
 pub(crate) struct VoiceMediaCipher {
     cookie: VoiceRouteCookie,
@@ -823,6 +827,28 @@ mod tests {
             "an on-path observer must not read the encoded audio off the wire"
         );
         assert_eq!(decode_authenticated_voice_packet(&wire, cipher), Ok(packet));
+    }
+
+    #[test]
+    fn sealed_media_leaves_replay_suppression_to_the_application_tracker() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
+            [0x42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let packet = VoicePacket::Direct(
+            VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
+        );
+        let wire = encode_authenticated_voice_packet(cipher, &packet).unwrap();
+
+        assert_eq!(
+            decode_authenticated_voice_packet(&wire, cipher),
+            Ok(packet.clone())
+        );
+        assert_eq!(
+            decode_authenticated_voice_packet(&wire, cipher),
+            Ok(packet),
+            "the network seal authenticates both deliveries; the app tracker owns replay suppression",
+        );
     }
 
     /// Drives both halves of one route's announcement exchange the way the
