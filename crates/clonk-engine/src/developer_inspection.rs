@@ -167,73 +167,9 @@ pub fn effect_lines(effects: &[crate::effect::EffectState]) -> Vec<String> {
         .collect()
 }
 
-/// How a function reached `Game.ScriptEngine`'s function list, which decides
-/// its `GetPublic()` answer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GlobalFunctionKind {
-    /// A `global func` from content. These are `C4AulScriptFunc`, whose
-    /// `GetPublic()` is unconditionally `true` (`C4Aul.h:357`) — so even a
-    /// `private global func` is offered for completion.
-    Script,
-    /// An engine native. `C4AulEngineFuncHelper` returns the flag it was
-    /// registered with (`C4Script.cpp:6311`), so the hidden internals stay out.
-    Engine { public: bool },
-}
-
-/// `C4AulFunc::GetPublic()` for the engine-wide list
-/// (`C4PropertyDlg.cpp:337-347`).
-pub fn global_completion_visible(kind: GlobalFunctionKind) -> bool {
-    match kind {
-        GlobalFunctionKind::Script => true,
-        GlobalFunctionKind::Engine { public } => public,
-    }
-}
-
-/// The definition-script rule (`C4PropertyDlg.cpp:355-358`), which is *not*
-/// `GetPublic()`: it compares `pRef->Access == AA_PUBLIC` directly, so
-/// `private`, `protected` and `global` definition functions are all excluded.
-pub fn object_completion_visible(access: clonk_script::AccessLevel) -> bool {
-    matches!(access, clonk_script::AccessLevel::Public)
-}
-
-/// The console input control's completion sources (`C4PropertyDlg::UpdateInputCtrl`).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CompletionFunctions {
-    /// Public engine and global script functions, in `Game.ScriptEngine` order.
-    pub globals: Vec<String>,
-    /// The first selected object's definition functions, in `GetSFunc` scan
-    /// order. Empty when nothing is selected or the object has no script.
-    pub object: Vec<String>,
-}
-
-/// Splits the two completion lists by C++'s two different publicity rules.
-///
-/// Both lists stay in native scan order. The hosts compose them differently —
-/// GTK appends everything, while Win32 inserts the object functions and a
-/// `"----------"` divider at the top, which reverses them above the divider —
-/// so composition belongs to the window layer, not here.
-pub fn completion_functions(
-    engine_functions: impl IntoIterator<Item = (String, GlobalFunctionKind)>,
-    definition_functions: impl IntoIterator<Item = (String, clonk_script::AccessLevel)>,
-) -> CompletionFunctions {
-    CompletionFunctions {
-        globals: engine_functions
-            .into_iter()
-            .filter(|(_, kind)| global_completion_visible(*kind))
-            .map(|(name, _)| name)
-            .collect(),
-        object: definition_functions
-            .into_iter()
-            .filter(|(_, access)| object_completion_visible(*access))
-            .map(|(name, _)| name)
-            .collect(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clonk_script::AccessLevel;
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -363,7 +299,7 @@ mod tests {
     // C4ObjectList.cpp:59-83,536-574 — first-seen definition order with counts,
     // deleted objects excluded, unknown definitions skipped.
     #[test]
-    fn developer_object_inspection_exposes_data_strings_and_public_def_functions() {
+    fn developer_object_inspection_exposes_data_strings() {
         let contents = Fixture::default()
             .definition(1, "ROCK")
             .definition(2, "WOOD")
@@ -423,59 +359,5 @@ mod tests {
         let mut map = ValueMap::new();
         map.insert("k".to_owned(), Value::Int(2));
         assert_eq!(data_string(&Value::Proplist(map)), "{ \"k\" = 2 }");
-
-        // C4PropertyDlg.cpp:337-358 — two different publicity rules. Every
-        // global script function is offered even when declared private, while a
-        // definition function must be exactly AA_PUBLIC.
-        assert!(global_completion_visible(GlobalFunctionKind::Script));
-        assert!(global_completion_visible(GlobalFunctionKind::Engine {
-            public: true
-        }));
-        assert!(!global_completion_visible(GlobalFunctionKind::Engine {
-            public: false
-        }));
-        assert!(object_completion_visible(AccessLevel::Public));
-        assert!(!object_completion_visible(AccessLevel::Protected));
-        assert!(!object_completion_visible(AccessLevel::Private));
-        assert!(
-            !object_completion_visible(AccessLevel::Global),
-            "a global definition function belongs to the engine list instead"
-        );
-
-        let completion = completion_functions(
-            [
-                (
-                    "CreateObject".to_owned(),
-                    GlobalFunctionKind::Engine { public: true },
-                ),
-                (
-                    "SetRestoreInfos".to_owned(),
-                    GlobalFunctionKind::Engine { public: false },
-                ),
-                ("HelperFn".to_owned(), GlobalFunctionKind::Script),
-            ],
-            [
-                ("ControlDig".to_owned(), AccessLevel::Public),
-                ("Secret".to_owned(), AccessLevel::Private),
-                ("Initialize".to_owned(), AccessLevel::Public),
-            ],
-        );
-        assert_eq!(
-            completion,
-            CompletionFunctions {
-                globals: vec!["CreateObject".to_owned(), "HelperFn".to_owned()],
-                object: vec!["ControlDig".to_owned(), "Initialize".to_owned()],
-            },
-            "both lists keep native scan order"
-        );
-
-        // Nothing selected: the globals still complete, the object list is bare.
-        assert_eq!(
-            completion_functions([("Log".to_owned(), GlobalFunctionKind::Script)], []),
-            CompletionFunctions {
-                globals: vec!["Log".to_owned()],
-                object: Vec::new(),
-            }
-        );
     }
 }
