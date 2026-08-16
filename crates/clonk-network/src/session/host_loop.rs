@@ -774,6 +774,10 @@ pub(crate) async fn run_host(
                             .client_performance
                             .mark_consumed(tick, consumed_at, client_ids);
                     }
+                    HostCommand::Execute { completion } => {
+                        let removed = remove_stale_host_runtime_dynamic(&mut state);
+                        let _ = completion.send(removed);
+                    }
                     HostCommand::StatusReachedCurrent => {
                         let effects = state.status_barrier.local_reached();
                         apply_barrier_effects(effects, &mut state).await;

@@ -7623,6 +7623,40 @@ impl GameApp {
         }
     }
 
+    /// Runs the host's `C4Network2::Execute` seam immediately before
+    /// `Control.Prepare`. The worker owns the authoritative control tick, so
+    /// it removes the runtime JoinData dynamic on the first execution after
+    /// that tick passes `iDynamicTick` (src/C4Network2.cpp:679-696;
+    /// src/C4Game.cpp:776-782).
+    pub(crate) fn execute_network_before_control_prepare(&mut self) {
+        if self.mode != AppMode::Running || self.runtime_network_role() != RuntimeNetworkRole::Host
+        {
+            return;
+        }
+        let current_tick = self.next_network_control_tick();
+        let stale = self.host_join_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.dynamic.resource_type == clonk_network::HostResourceType::Dynamic as u8
+                && current_tick > snapshot.dynamic_tick
+        });
+        if !stale {
+            return;
+        }
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        match network.execute() {
+            Ok(_) => {
+                if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                    snapshot.dynamic = clonk_engine::NetworkResourceCore::default();
+                    snapshot.dynamic_tick = -1;
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to execute host network dynamic cleanup");
+            }
+        }
+    }
+
     pub(crate) fn tick_league_update_at(&self, now: i64) {
         if self.pending_league_end.is_some()
             || !matches!(self.network_mode, Some(NetworkMode::Host(_)))

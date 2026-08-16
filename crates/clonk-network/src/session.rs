@@ -13160,7 +13160,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn runtime_dynamic_is_not_removed_synchronously_when_its_tick_is_crossed() {
+    async fn runtime_dynamic_is_removed_on_the_next_game_execution_after_its_tick() {
         // C4Network2 removes an outdated dynamic while executing, rather than
         // in its control-tick notification path (src/C4Network2.cpp:679-696).
         // A normal game execution reaches that check only after ControlTick
@@ -13215,9 +13215,10 @@ mod tests {
         )
         .await
         .test_value();
+        host.execute().await.unwrap();
         assert!(
-            host.remove_runtime_dynamic().await.unwrap(),
-            "the control-tick handler must not synchronously remove a stale runtime dynamic"
+            !host.remove_runtime_dynamic().await.unwrap(),
+            "the next game execution must remove a stale runtime dynamic"
         );
 
         host.shutdown().await.test_value();

@@ -637,6 +637,10 @@ impl GameApp {
         // Native runs Network.Execute before Control.Prepare, so this scan
         // must still happen when the ready-control gate returns early.
         self.deactivate_inactive_network_clients();
+        // The regular game execution is the second C4Network2::Execute path
+        // besides OnSec1Timer; retire an outdated runtime dynamic before any
+        // control preparation can observe it (src/C4Game.cpp:776-782).
+        self.execute_network_before_control_prepare();
         if !matches!(self.mode, AppMode::Menu) {
             // Dropping the backdrop while loading or in-game (game over,
             // return to menu) frees its full-screen buffer during play.
