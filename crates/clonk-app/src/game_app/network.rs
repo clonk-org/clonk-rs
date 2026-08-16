@@ -1279,7 +1279,7 @@ impl GameApp {
     ///
     /// Deliberately not a modal: the game is still running, it is simply not
     /// advancing, and a dialog would be a worse lie than silence. The per-client
-    /// detail — who is behind and by how much — is already in the F7 client list
+    /// detail — who is behind and by how much — is already in the F4 client list
     /// as "(wait N ms, behind M)".
     pub(crate) fn announce_network_stall(&mut self, now: Instant) -> Result<(), EngineError> {
         let (since, announced) = *self.network_stall_since.get_or_insert((now, false));
