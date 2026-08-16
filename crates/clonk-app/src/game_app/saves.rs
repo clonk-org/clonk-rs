@@ -5,6 +5,7 @@
 //! Structural only: same crate, same type, same method bodies.
 
 use super::*;
+use crate::game_app_scenario::remove_unassociated_savegame_player_objects_with_logs;
 
 impl GameApp {
     pub(crate) fn developer_console_player_save_options(&self) -> (bool, bool, String) {
