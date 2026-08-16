@@ -858,6 +858,9 @@ impl Engine {
             self.particle_system.shared_reloadable_def_names(),
             Rc::clone(&self.host_requests.particle_reload_requests),
         )
+        .with_shared_particle_reload_io_success(
+            self.particle_system.shared_reloadable_def_io_success(),
+        )
         .with_definition_reloads(
             reloadable_definitions,
             Rc::clone(&self.host_requests.definition_reload_requests),

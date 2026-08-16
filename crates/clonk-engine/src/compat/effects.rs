@@ -10,13 +10,15 @@ use crate::particles::ObjectFireEmission;
 /// the definitions holding a `Filename` plus the network flag — which is the
 /// same shape the port uses to let `CreateObject` return a reference to an
 /// object the engine has not made yet (`next_object_id`). The accepted name is
-/// staged on the `host_requests` channel and the engine reloads it afterwards.
+/// staged on the `host_requests` channel and the engine reloads it afterwards;
+/// the context also records whether opening its `Filename` succeeded so that
+/// an I/O-open failure is visible in the synchronous result.
 ///
 /// Every `false` C++ produces is reproduced: network game, nil name, unknown
-/// name, and a definition with no `Filename` (`C4Particles.cpp:197`). One case
-/// diverges — a reload that passes all four checks and then fails on I/O
-/// answers `true` where C++ answers `false`. The engine still runs the full
-/// failure arm; only the value the script already received is optimistic.
+/// name, a definition with no `Filename` (`C4Particles.cpp:197`), and a
+/// `Filename` whose group cannot be opened. The accepted name is still staged
+/// even when that preflight fails, so the engine runs the full destructive
+/// failure arm after the callback.
 pub(crate) fn reload_particle(args: &[Value]) -> Result<Value, RuntimeError> {
     let name = parse_native_c4_string_argument(args.first(), "ReloadParticle", "name")?;
     // `if (!szName) return false;` — the nil safety check comes before the
@@ -33,7 +35,7 @@ pub(crate) fn reload_particle(args: &[Value]) -> Result<Value, RuntimeError> {
             .particle_reload_requests
             .borrow_mut()
             .push(name.clone());
-        true
+        context.world.particle_reload_io_succeeded(&name)
     });
     Ok(Value::Int(i32::from(accepted)))
 }

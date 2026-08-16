@@ -125,6 +125,88 @@
         );
     }
 
+    // C4Script.cpp:5161-5165 -> C4Game.cpp:2369-2394; the Filename open is
+    // C4Particles.cpp:194-205. Once the network,
+    // nil-name, unknown-name, and missing-Filename checks have passed, the
+    // synchronous result is still the actual reload result: an I/O failure
+    // must be visible to the calling script while the destructive failure arm
+    // clears every particle and removes the definition.
+    #[test]
+    fn reload_particle_reports_io_failure_synchronously_and_clears_everything() {
+        let dir = tempfile::tempdir().test_value();
+        let missing_group = dir.path().join("Smoke.c4d");
+
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Known() { return ReloadParticle(\"Smoke\"); }",
+            )
+            .test_value();
+
+        let mut engine = crate::Engine::new();
+        let core = |name: &str| crate::particles::ParticleDefCore {
+            name: name.to_string(),
+            init_fn: "StdInit".to_string(),
+            exec_fn: "StdExec".to_string(),
+            draw_fn: "Std".to_string(),
+            ..Default::default()
+        };
+        engine
+            .particle_system
+            .register_def(core("Smoke"), 4, 1.0)
+            .test_value();
+        assert!(engine
+            .particle_system
+            .set_def_source_path("Smoke", Some(missing_group.clone())));
+        engine
+            .particle_system
+            .register_def(core("Sparks"), 4, 1.0)
+            .test_value();
+        assert!(engine.particle_system.create(
+            "Smoke",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            ParticleLayer::Global,
+            None,
+        ));
+        assert!(engine.particle_system.create(
+            "Sparks",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            ParticleLayer::Global,
+            None,
+        ));
+        assert_eq!(engine.particle_system.particles().len(), 2);
+
+        let world = engine.host_world_context();
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            // `Smoke` is known and has a Filename, but its group cannot be
+            // opened. C++ therefore returns false synchronously from
+            // `FnReloadParticle`, before the engine's deferred work runs.
+            Ok::<_, RuntimeError>(script.call("Known", &[]).expect("probe executes"))
+        });
+        assert_eq!(result.test_value(), Value::Int(0));
+
+        // The accepted request is drained once. The I/O failure runs C++'s
+        // destructive arm: all particles are cleared and only the failed
+        // definition is removed.
+        assert_eq!(engine.apply_particle_reload_requests(), 0);
+        assert!(engine.particle_system.particles().is_empty());
+        assert!(engine.particle_system.get_def("Smoke").is_none());
+        assert!(engine.particle_system.get_def("Sparks").is_some());
+        assert_eq!(engine.apply_particle_reload_requests(), 0);
+    }
+
     // C4Script.cpp:5143-5159 -> C4Game::ReloadDef (C4Game.cpp:2322-2367).
     #[test]
     fn reload_def_answers_synchronously_and_defaults_to_the_callers_definition() {

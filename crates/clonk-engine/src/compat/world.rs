@@ -2362,6 +2362,13 @@ pub struct HostWorldContext {
     /// Names `FnReloadParticle` accepted, drained by the engine after the
     /// call (`Engine::take_particle_reload_requests`).
     pub(crate) particle_reload_requests: Rc<RefCell<Vec<String>>>,
+    /// Whether opening each accepted particle definition's `Filename`
+    /// succeeded when this host context was seeded. `FnReloadParticle` runs
+    /// synchronously in C++ (`C4Script.cpp:5161-5165`), while the port applies
+    /// the accepted request after the callback; carrying this preflight result
+    /// preserves the observable I/O failure without moving engine mutation
+    /// into the host callback.
+    reloadable_particle_io_success: Option<Rc<HashMap<String, bool>>>,
     /// The definitions a reload could actually re-open — those holding a
     /// `Filename` (`C4Def.cpp:550`), for `FnReloadDef`'s synchronous answer.
     reloadable_definitions: Option<Rc<std::collections::HashSet<String>>>,
@@ -2513,6 +2520,7 @@ impl Default for HostWorldContext {
             particle_defs: None,
             reloadable_particle_defs: None,
             particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
+            reloadable_particle_io_success: None,
             reloadable_definitions: None,
             definition_reload_requests: Rc::new(RefCell::new(Vec::new())),
             definition_scripts: Rc::new(HashMap::new()),
@@ -2936,6 +2944,7 @@ impl HostWorldContext {
             particle_defs: None,
             reloadable_particle_defs: None,
             particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
+            reloadable_particle_io_success: None,
             reloadable_definitions: None,
             definition_reload_requests: Rc::new(RefCell::new(Vec::new())),
             definition_scripts: Rc::new(HashMap::new()),
@@ -3599,12 +3608,21 @@ impl HostWorldContext {
         self
     }
 
+    pub(crate) fn with_shared_particle_reload_io_success(
+        mut self,
+        results: Rc<HashMap<String, bool>>,
+    ) -> Self {
+        self.reloadable_particle_io_success = Some(results);
+        self
+    }
+
     /// Whether `Game.ReloadParticle(name)` would reload this definition.
     ///
     /// `C4Game::ReloadParticle` returns false for a network game, a null name,
     /// a name no definition answers to, and a definition with no `Filename`
-    /// (`C4Game.cpp:2371-2380`, `C4Particles.cpp:197`). All four are decidable
-    /// before the call; only an I/O failure at reload time is not.
+    /// (`C4Game.cpp:2371-2380`, `C4Particles.cpp:197`). The source group's
+    /// open result is also seeded before the call for the synchronous script
+    /// answer; the accepted request remains staged when that open fails.
     /// Seed `FnReloadDef`'s synchronous answer and its request channel.
     pub(crate) fn with_definition_reloads(
         mut self,
@@ -3635,6 +3653,12 @@ impl HostWorldContext {
                 .reloadable_particle_defs
                 .as_ref()
                 .is_some_and(|defs| defs.contains(name))
+    }
+
+    pub(crate) fn particle_reload_io_succeeded(&self, name: &str) -> bool {
+        self.reloadable_particle_io_success
+            .as_ref()
+            .is_none_or(|results| results.get(name).copied().unwrap_or(false))
     }
 
     /// Attach the material table (FnMaterial name lookups).

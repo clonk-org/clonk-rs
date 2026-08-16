@@ -1153,8 +1153,8 @@ impl Engine {
     /// The builtin answered synchronously from pre-seeded state, so this is
     /// only the work; the script already has its result. A reload that fails
     /// here still clears every particle and drops the definition, exactly as
-    /// the direct call does — the script simply saw the optimistic answer,
-    /// which is the one narrow divergence this design accepts.
+    /// the direct call does. The host context preflights opening `Filename`
+    /// so an I/O-open failure is already reflected in that result.
     /// Apply the reloads `FnReloadDef` accepted during the last script call
     /// (`C4Game::ReloadDef`, `C4Game.cpp:2322-2367`).
     pub fn apply_definition_reload_requests(&mut self) -> usize {
