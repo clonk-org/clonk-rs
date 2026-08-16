@@ -139,6 +139,8 @@ pub(crate) struct GameApp {
     pub(crate) gamepads: GamepadManager,
     #[cfg(test)]
     pub(crate) gamepad_poll_count: usize,
+    #[cfg(test)]
+    pub(crate) sec1_timer_call_count: usize,
     pub(crate) gamepad_gui_control: bool,
     pub(crate) snapshot: SimulationSnapshot,
     pub(crate) focus_id: Option<ObjectId>,
