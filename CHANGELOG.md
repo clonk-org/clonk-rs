@@ -4,6 +4,27 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.3] - 2026-08-16
+
+### Bug fixes
+
+- Align dialog hit testing with resolved icons (#594)
+- Resolve the native League evaluation icon (#603)
+- Route native network key callbacks (#604)
+- Replay intra-frame ActMap sound transitions (#605)
+- Cfg-gate Unix-only client mesh import (#592)
+- Render action overlays from row zero (#595)
+- Mirror raw rotation predicate in face blits (#598)
+- Log savegame player removal messages (#593)
+- Drain pending stream before headless round exit (#600)
+- Localize definition overload diagnostics (#597)
+- Snapshot native object menu pictures (#599)
+- Default unmanifested float actions to native bounds (#601)
+
+### Testing
+
+- Restore About list scrolling coverage (#596)
+
 ## [0.13.2] - 2026-08-16
 
 ### Testing
