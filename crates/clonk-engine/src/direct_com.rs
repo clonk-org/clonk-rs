@@ -101,6 +101,10 @@ pub(crate) trait InternalObjectMenuSource {
     fn current_menu(&self, object: ObjectId) -> Option<crate::ObjectMenuState>;
     fn object(&self, object: ObjectId) -> Option<InternalObjectMenuObject>;
     fn definition(&self, definition: &str) -> Option<InternalObjectMenuDefinition>;
+    fn object_menu_picture_snapshot(
+        &self,
+        object: ObjectId,
+    ) -> Option<crate::ObjectMenuPictureSnapshot>;
     fn can_concat_picture_with(&self, object: ObjectId, other: ObjectId) -> bool;
     fn activate_value(
         &mut self,
@@ -817,6 +821,9 @@ pub(crate) fn build_activate_menu_state<S: InternalObjectMenuSource>(
         // C4ObjectMenu is already installed and frozen before GetValue.
         // Rows added by prior iterations and callback-side menu mutations
         // are therefore live at this exact call site.
+        // C4ObjectMenu.cpp:194-199 captures Picture2Facet before GetValue
+        // can mutate or remove the representative object.
+        let picture_snapshot = source.object_menu_picture_snapshot(item_id);
         let value = source.activate_value(crew_id, item_id, container_id, &menu)?;
         menu = match source.current_menu(crew_id) {
             Some(live) if live.internal_refill_token == menu_identity => live,
@@ -836,7 +843,7 @@ pub(crate) fn build_activate_menu_state<S: InternalObjectMenuSource>(
             symbol: crate::ObjectMenuSymbol::default(),
             image: crate::ObjectMenuImage::default(),
             presentation_definition_id: None,
-            picture_snapshot: None,
+            picture_snapshot,
             picture_object: Some(item_id),
             components: Vec::new(),
             selectable: true,
@@ -1020,6 +1027,9 @@ pub(crate) fn build_container_contents_menu_state<S: InternalObjectMenuSource>(
         {
             get = true;
         }
+        // C4ObjectMenu.cpp:311-313 renders Picture2Facet before the row is
+        // added; keep that surface independent of later object deletion.
+        let picture_snapshot = source.object_menu_picture_snapshot(item_id);
         let all_count = source
             .object(container_id)
             .map(|container| {
@@ -1060,7 +1070,7 @@ pub(crate) fn build_container_contents_menu_state<S: InternalObjectMenuSource>(
             symbol: crate::ObjectMenuSymbol::default(),
             image: crate::ObjectMenuImage::default(),
             presentation_definition_id: None,
-            picture_snapshot: None,
+            picture_snapshot,
             picture_object: Some(item_id),
             components: Vec::new(),
             selectable: true,
@@ -1121,6 +1131,13 @@ impl InternalObjectMenuSource for EngineInternalObjectMenuSource<'_> {
             contents: object.state.contents.clone(),
             active: !object.destroyed && object.state.status != crate::ObjectStatus::Deleted,
         })
+    }
+
+    fn object_menu_picture_snapshot(
+        &self,
+        object: ObjectId,
+    ) -> Option<crate::ObjectMenuPictureSnapshot> {
+        self.0.native_object_menu_picture_snapshot(object)
     }
 
     fn definition(&self, definition: &str) -> Option<InternalObjectMenuDefinition> {
@@ -2492,6 +2509,7 @@ impl Engine {
                     .is_some_and(|index| self.objects[index].has_nonzero_status())
             })
             .collect::<Vec<_>>();
+        let first_carried_object = present_crew_contents.first().copied();
         let first_carried_definition = present_crew_contents
             .first()
             .and_then(|object_id| self.find_object_index(*object_id))
@@ -2621,7 +2639,8 @@ impl Engine {
                     symbol: crate::ObjectMenuSymbol::Put,
                     image: crate::ObjectMenuImage::default(),
                     presentation_definition_id: None,
-                    picture_snapshot: None,
+                    picture_snapshot: first_carried_object
+                        .and_then(|object| self.native_object_menu_picture_snapshot(object)),
                     picture_object: None,
                     components: Vec::new(),
                     selectable: true,
@@ -2636,7 +2655,7 @@ impl Engine {
                 || (self.players.contains_key(&base_owner)
                     && !self.players_hostile(base_owner, crew_owner)))
         {
-            items.push(item(
+            let mut contents_item = item(
                 "Contents",
                 format!(
                     "SetCommand(this,\"Get\",Object({}),0,0,,2)&&ExecuteCommand()",
@@ -2644,7 +2663,9 @@ impl Engine {
                 ),
                 base_definition.clone(),
                 crate::ObjectMenuSymbol::Definition,
-            ));
+            );
+            contents_item.picture_snapshot = self.native_object_menu_picture_snapshot(base_id);
+            items.push(contents_item);
         }
         if self.players.contains_key(&base_player) && !self.players_hostile(base_player, crew_owner)
         {
@@ -5211,6 +5232,29 @@ impl Engine {
         .collect()
     }
 
+    /// The native C4ObjectMenu refill owns each internal row's picture at
+    /// construction time. Keep the effective object graphics as immutable
+    /// presentation inputs so a later tick cannot blank the symbol
+    /// (`C4ObjectMenu.cpp:194-199,311-313,350-372`).
+    fn native_object_menu_picture_snapshot(
+        &self,
+        object_id: ObjectId,
+    ) -> Option<crate::ObjectMenuPictureSnapshot> {
+        let index = self.find_object_index(object_id)?;
+        let object = &self.objects[index];
+        Some(crate::ObjectMenuPictureSnapshot {
+            definition_id: object.definition_id.clone(),
+            symbol_size: 35,
+            base_graphics: object.state.base_graphics.clone(),
+            graphics_overlays: object.state.graphics_overlays.clone(),
+            blit_mode: object.state.blit_mode,
+            color: object.state.color,
+            color_modulation: object.state.color_modulation,
+            picture_rect: object.state.picture_rect,
+            rank: None,
+        })
+    }
+
     /// `C4ObjectList::ObjectCount(id)` counts every live same-ID content,
     /// independently of the category/picture group used for the visible row
     /// (C4ObjectList.cpp:320-329; C4ObjectMenu.cpp:266-267,317-319).
@@ -5414,6 +5458,9 @@ impl Engine {
                 .find_object_index(crew_id)
                 .map(|index| self.objects[index].state.owner)
                 .unwrap_or(-1);
+            // C4ObjectMenu.cpp:258-263 renders Picture2Facet before
+            // GetValue; capture it before the callback below.
+            let picture_snapshot = self.native_object_menu_picture_snapshot(item_id);
             let value =
                 self.object_value_in_container_for_menu(crew_id, item_id, base_id, for_player)?;
             items.push(crate::ObjectMenuItem {
@@ -5426,7 +5473,7 @@ impl Engine {
                 symbol: crate::ObjectMenuSymbol::default(),
                 image: crate::ObjectMenuImage::default(),
                 presentation_definition_id: None,
-                picture_snapshot: None,
+                picture_snapshot,
                 picture_object: Some(item_id),
                 components: Vec::new(),
                 selectable: true,
@@ -11048,6 +11095,13 @@ protected func ContainedThrow(object clonk)
         assert_eq!(item.caption, "Activate Cargo");
         assert_eq!(item.info_caption, "Kayak cargo.");
         assert_eq!(item.count, 2);
+        assert_eq!(
+            item.picture_snapshot
+                .as_ref()
+                .map(|picture| picture.definition_id.as_str()),
+            Some("CRGO"),
+            "C4ObjectMenu::RefillInternal captures the symbol before later ticks",
+        );
         let selected_cargo = item.picture_object.test_value();
         assert!(cargo.contains(&selected_cargo));
         let remaining_cargo = cargo
@@ -11116,6 +11170,14 @@ protected func ContainedThrow(object clonk)
         assert_eq!(menu.items.len(), 1);
         assert_eq!(menu.items[0].count, 1);
         assert_eq!(menu.items[0].picture_object, Some(remaining_cargo));
+        assert_eq!(
+            menu.items[0]
+                .picture_snapshot
+                .as_ref()
+                .map(|picture| picture.definition_id.as_str()),
+            Some("CRGO"),
+            "the surviving row keeps its refill-time picture inputs",
+        );
     }
 
     #[test]
@@ -11123,7 +11185,7 @@ protected func ContainedThrow(object clonk)
         // C4ObjectMenu's "easy way" calls Contents.Find once and tests only
         // that first FULL_CON object's picture. It must not search through a
         // non-concatenating full object for a later concatenating one
-        // (C4ObjectMenu.cpp:183-189,252-259,292-299).
+        // (C4ObjectMenu.cpp:183-189,252-259,292-313).
         let mut engine = Engine::new();
         register_clonk(&mut engine, "CLNK", "#strict 2\n");
         let mut container = test_definition("CONT", "Container", "#strict 2\n");
@@ -11210,6 +11272,13 @@ protected func ContainedThrow(object clonk)
                 Some(later_full_red),
             ]
         );
+        assert!(
+            contents_menu
+                .items
+                .iter()
+                .all(|item| item.picture_snapshot.is_some()),
+            "C4ObjectMenu.cpp:311-313 owns every Contents row picture at refill",
+        );
 
         engine
             .open_activate_menu(crew_index, container_index)
@@ -11229,6 +11298,13 @@ protected func ContainedThrow(object clonk)
                 Some(first_full_blue),
                 Some(later_full_red),
             ]
+        );
+        assert!(
+            activate_menu
+                .items
+                .iter()
+                .all(|item| item.picture_snapshot.is_some()),
+            "C4ObjectMenu.cpp:194-199 owns every Activate row picture at refill",
         );
 
         engine.objects[container_index].state.base = 1;
@@ -11250,6 +11326,34 @@ protected func ContainedThrow(object clonk)
                 Some(first_full_blue),
                 Some(later_full_red),
             ]
+        );
+        assert!(
+            sell_menu
+                .items
+                .iter()
+                .all(|item| item.picture_snapshot.is_some()),
+            "C4ObjectMenu.cpp:258-263 owns every Sell row picture at refill",
+        );
+
+        // C4Object::AssignRemoval clears menu object references before the
+        // later tick snapshot, but the facet copied by Add remains owned by
+        // the row (C4Object.cpp:302-304; C4Menu.cpp:388-398).
+        let removed_source = sell_menu.items[2].picture_object.test_value();
+        engine
+            .clear_object_references_for_removal(removed_source)
+            .test_value();
+        let menu_after_removal = engine
+            .debug_object_menu(crew.as_u64())
+            .test_value()
+            .test_value();
+        assert_eq!(menu_after_removal.items[2].picture_object, None);
+        assert_eq!(
+            menu_after_removal.items[2]
+                .picture_snapshot
+                .as_ref()
+                .map(|picture| picture.definition_id.as_str()),
+            Some("ITEM"),
+            "the refill-time picture survives removal cleanup",
         );
     }
 
@@ -14772,10 +14876,21 @@ global func FxWorldContextLateLast(target, number, menu, image) { [Global late l
                 target.as_u64()
             )
         );
+        assert_eq!(
+            menu.items[0]
+                .picture_snapshot
+                .as_ref()
+                .map(|picture| picture.definition_id.as_str()),
+            Some("ITEM"),
+            "Put composes the first carried object's refill-time picture",
+        );
     }
 
     #[test]
     fn context_container_rows_include_contents_for_pushed_grab_get_target() {
+        // C4ObjectMenu::RefillInternal draws the target into the Contents
+        // row before Add takes ownership of the facet
+        // (C4ObjectMenu.cpp:361-373).
         let mut engine = Engine::new();
         register_clonk(&mut engine, "CLNK", "#strict\n");
         let mut container = test_definition("CONT", "Container", "#strict\n");
@@ -14803,6 +14918,14 @@ global func FxWorldContextLateLast(target, number, menu, image) { [Global late l
                 "SetCommand(this,\"Get\",Object({}),0,0,,2)&&ExecuteCommand()",
                 target.as_u64()
             )
+        );
+        assert_eq!(
+            menu.items[0]
+                .picture_snapshot
+                .as_ref()
+                .map(|picture| picture.definition_id.as_str()),
+            Some("CONT"),
+            "Contents keeps the target picture captured during refill",
         );
     }
 

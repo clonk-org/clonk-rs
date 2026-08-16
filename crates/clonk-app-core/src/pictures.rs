@@ -850,6 +850,21 @@ pub fn object_menu_item_picture_with_context_height(
     allowed_blit_modes: u32,
     context_item_height: Option<i32>,
 ) -> Option<ImageData> {
+    if let (true, Some(picture)) = (
+        matches!(&item.image, clonk_engine::ObjectMenuImage::Definition),
+        item.picture_snapshot.as_ref(),
+    ) {
+        // Native C4ObjectMenu rows own the Picture2Facet surface
+        // created during refill; do not re-resolve their source object
+        // from the frame snapshot (C4ObjectMenu.cpp:194-199,
+        // 311-313,350-372).
+        return cached_menu_object_picture_with_allowed_modes(
+            engine,
+            picture,
+            false,
+            allowed_blit_modes,
+        );
+    }
     match &item.image {
         clonk_engine::ObjectMenuImage::None => None,
         clonk_engine::ObjectMenuImage::Object { object } => item

@@ -3754,10 +3754,11 @@ pub enum ObjectMenuImage {
     },
 }
 
-/// The object-picture inputs captured while `AddMenuItem` constructs an
-/// Object/ObjectRank symbol. C++ renders that symbol into the menu item at
-/// add time, so later graphics, color, overlay, or deletion changes must not
-/// affect the row (`C4Script.cpp:1617-1678`; `C4Menu.cpp:388-398`).
+/// The object-picture inputs captured while a menu row constructs its symbol.
+/// Script `AddMenuItem` and native `C4ObjectMenu::RefillInternal` both render
+/// into the row at add time, so later graphics, color, overlay, or deletion
+/// changes must not affect it (`C4Script.cpp:1617-1678`; `C4ObjectMenu.cpp`;
+/// `C4Menu.cpp:388-398`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectMenuPictureSnapshot {
     pub definition_id: DefinitionId,
@@ -3815,7 +3816,8 @@ pub struct ObjectMenuItem {
     /// commands and `item_id` (`C4Script.cpp:1481-1483`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation_definition_id: Option<DefinitionId>,
-    /// Cached inputs for Object/ObjectRank script image recipes.
+    /// Cached inputs for Object/ObjectRank script image recipes and native
+    /// internal rows whose Picture2Facet is captured during refill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picture_snapshot: Option<ObjectMenuPictureSnapshot>,
     /// Object whose `Picture2Facet` supplied this row's symbol during an
