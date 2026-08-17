@@ -134,6 +134,7 @@ shard_modules!(
     real_tutorial10_virtual_play,
     real_tutorial_campaign,
     reference_parameters,
+    sailboat_hull_solid_mask,
     script_counter,
     script_goto,
     set_builtin,
