@@ -5839,6 +5839,14 @@ impl GameApp {
         // scenario, direct join or record stream. Their failed OpenGame quits;
         // console `/open` returns directly to C4AS_Startup. Only an ordinary
         // fullscreen startup lineage reaches QuitGame -> PreInit -> DoStartup.
+        //
+        // Reachable from `run_headless_server`: its console event loop drives
+        // `GameApp::update`, whose `poll_loading` reports an asynchronous
+        // scenario-load failure through `finish_scenario_loading_failure`.
+        // `!console_mode` is nonetheless the whole condition — `UseStartupDialog`
+        // is `isFullScreen && ...` (C4Game.cpp:3299) and only `/console` clears
+        // `isFullScreen` (C4Game.cpp:3295-3296), so a dedicated server keeps the
+        // fullscreen lineage and the gate takes no `headless` term.
         !self.console_mode
             && self
                 .classic_command_line

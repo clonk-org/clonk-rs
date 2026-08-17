@@ -5308,3 +5308,59 @@ fn startup_f6_launches_editor_when_available() {
     assert!(app.pending_editor_launch.is_none());
     assert_eq!(app.startup_view, StartupView::About);
 }
+
+#[test]
+fn a_dedicated_server_keeps_the_fullscreen_startup_lineage_rule() {
+    // `Application.UseStartupDialog` is `isFullScreen && !DirectJoinAddress &&
+    // !ScenarioFilename && !RecordStream` (C4Game.cpp:3299), and only
+    // `/console` clears `isFullScreen` (C4Game.cpp:3295-3296). A dedicated
+    // server is a `USE_CONSOLE` build, not a `/console` run, so it keeps the
+    // fullscreen lineage: `!console_mode` is already the right term, and the
+    // gate takes no `headless` condition.
+    for headless in [false, true] {
+        let mut app = new_state_only_menu_app(320, 200);
+        app.headless = headless;
+        assert!(
+            app.failed_open_game_returns_to_startup(),
+            "an empty command line keeps a startup generation to return to"
+        );
+
+        app.classic_command_line.scenario = Some(PathBuf::from("Broken.c4s"));
+        assert!(
+            !app.failed_open_game_returns_to_startup(),
+            "an explicit command-line scenario suppresses the startup dialog"
+        );
+
+        app.classic_command_line.scenario = None;
+        app.classic_command_line.record_stream = Some(PathBuf::from("Broken.c4r"));
+        assert!(
+            !app.failed_open_game_returns_to_startup(),
+            "a command-line record stream suppresses the startup dialog"
+        );
+    }
+}
+
+#[test]
+fn a_dedicated_server_quits_when_its_command_line_record_stream_fails() {
+    // A nonempty `RecordStream` clears `UseStartupDialog` (C4Game.cpp:3299),
+    // so the failed `OpenGame` unwinds `QuitGame` into `Quit` instead of
+    // reconstructing a startup dialog (C4Application.cpp:376-404,438-450).
+    // `run_headless_server` reaches this through `poll_loading`, which the
+    // console event loop drives from `GameApp::update`, so the exit request
+    // has to survive the headless path as well.
+    let mut app = new_state_only_menu_app(320, 200);
+    app.headless = true;
+    app.classic_command_line.record_stream = Some(PathBuf::from("Broken.c4r"));
+    app.classic_record_stream_activation_pending = true;
+    app.mode = AppMode::Loading;
+
+    assert!(app.failed_record_stream_exits());
+    app.finish_scenario_loading_failure("controlled headless load failure".to_string(), false)
+        .test_value();
+
+    assert_eq!(app.mode, AppMode::Menu);
+    assert!(
+        app.take_exit_request(),
+        "a dedicated server with no startup generation to return to quits"
+    );
+}
