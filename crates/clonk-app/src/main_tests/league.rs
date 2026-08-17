@@ -1239,10 +1239,15 @@ fn serve_delayed_record_stream_upload(
             }
         }
         thread::sleep(response_delay);
+        // Publish the flag before the write, never after: the client can read
+        // the response, complete the drain and reach the assertion while this
+        // thread is still descheduled between the two statements. The delay
+        // above is what the assertion actually pins, and it has already
+        // elapsed here.
+        response_sent_in_thread.store(true, std::sync::atomic::Ordering::SeqCst);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             .test_value();
-        response_sent_in_thread.store(true, std::sync::atomic::Ordering::SeqCst);
         request
     });
     (
