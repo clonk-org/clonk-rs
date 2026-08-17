@@ -804,6 +804,20 @@ impl GameApp {
     /// (C4MainMenu.cpp:797-804). Unlike the Rust-only quick/custom save flow,
     /// this writes the copied scenario as a native C4Group.
     pub(crate) fn save_to_slot(&mut self, slot: u8) {
+        // `C4Game::SaveGameTitle` copies the scenario's own title before the
+        // first frame and otherwise screenshots under `isFullScreen && Active`
+        // (C4Game.cpp:2102-2115) — the pair spelled here as
+        // `!console_mode && window_active`.
+        //
+        // Not reachable from `run_headless_server`: the only caller is
+        // `MenuAction::SaveSlot`, which arrives through
+        // `dispatch_control_event_for_local_player`, and a dedicated server has
+        // no local input device — `process_console_command` accepts `/quit`,
+        // `/close`, `/start`, `/open` and chat, none of which open a savegame
+        // menu. Should a headless path ever reach it, `window_active` has to
+        // start tracking `CStdApp::Active{false}` (StdApp.h:257) first: a
+        // headless `GameApp` still defaults it to `true`, so C++ would decline
+        // the screenshot where the port would take one.
         let capture_title = self.engine.frame() != 0 && !self.console_mode && self.window_active;
         let title_png = if capture_title && !self.retained_gpu_presentation_active {
             let surface = self.graphics.surface();
