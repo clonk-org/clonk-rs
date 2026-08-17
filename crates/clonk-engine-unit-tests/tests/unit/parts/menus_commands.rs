@@ -395,6 +395,42 @@ fn menu_definition_picture_phase_preserves_index_and_clips_out_of_bounds() {
 }
 
 #[test]
+fn object_list_definition_picture_uses_the_raw_picture_rect() {
+    // C4ObjectListDlg.cpp:681-696 reads Graphics.Bitmap directly at
+    // Def->PictureRect. Unlike C4Def::Picture2Facet, the object-list icon
+    // callback does not apply C4Def::Scale before sampling that bitmap.
+    let mut definition = test_definition("ICON", "Icon", "");
+    definition.set_graphics_scale(2.0);
+    definition.set_picture(Some(DefinitionPicture {
+        x: 1,
+        y: 2,
+        width: 2,
+        height: 1,
+    }));
+    definition.set_sprite_image(Some(DefinitionSpriteImage {
+        width: 8,
+        height: 8,
+        pixels: std::sync::Arc::from(
+            (0_u8..64)
+                .flat_map(|value| [value, 0, 0, 255])
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ),
+        color_mask: None,
+    }));
+    let mut engine = Engine::new();
+    engine.register_test_definition(definition);
+
+    let icon = engine.definition_picture_icon_image("ICON").test_value();
+    assert_eq!((icon.width(), icon.height()), (2, 1));
+    assert_eq!(
+        icon.pixels().as_ref(),
+        &[17, 0, 0, 255, 18, 0, 0, 255],
+        "Scale belongs to game rendering, not the raw object-list callback"
+    );
+}
+
+#[test]
 fn real_clonk_category_agrees_across_definition_object_and_reflection() {
     // C4DefCore::Load adds C4D_CrewMember for any nonzero CrewMember
     // before validating the low-five-bit sort category (C4Def.cpp:

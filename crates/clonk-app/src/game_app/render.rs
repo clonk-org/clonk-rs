@@ -3397,7 +3397,7 @@ impl GameApp {
                 let object = self.snapshot.object(id)?;
                 let image = self
                     .engine
-                    .definition_picture_phase_image(&object.definition_id, 0)?;
+                    .definition_picture_icon_image(&object.definition_id)?;
                 if self
                     .engine
                     .definition(&object.definition_id)
