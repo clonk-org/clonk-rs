@@ -1,3 +1,5 @@
+#[cfg(not(windows))]
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Projects a classic native `char *` path into the host operating system's
@@ -112,9 +114,85 @@ pub fn path_to_legacy_bytes(path: &Path) -> Vec<u8> {
     path.to_string_lossy().as_bytes().to_vec()
 }
 
+/// Reproduce LegacyClonk's `StdFile::RealPath` for a path that may not exist.
+///
+/// POSIX `realpath` rejects a missing leaf, while the C++ helper keeps trying
+/// shorter existing prefixes and appends the unresolved suffix. Windows uses
+/// `_fullpath`, which is lexical and does not require the leaf to exist.
+pub fn real_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut normalized = PathBuf::new();
+        for component in absolute.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    if matches!(
+                        normalized.components().next_back(),
+                        Some(std::path::Component::Normal(_))
+                    ) {
+                        normalized.pop();
+                    }
+                }
+                component => normalized.push(component.as_os_str()),
+            }
+        }
+        return normalized;
+    }
+
+    #[cfg(not(windows))]
+    {
+        let original = path.to_path_buf();
+        let mut prefix = path.to_path_buf();
+        let mut suffix = Vec::<OsString>::new();
+        loop {
+            if let Ok(mut resolved) = std::fs::canonicalize(&prefix) {
+                for component in suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return resolved;
+            }
+            let Some(component) = prefix.file_name().map(OsString::from) else {
+                return original;
+            };
+            suffix.push(component);
+            if !prefix.pop() {
+                return original;
+            }
+        }
+    }
+}
+
+/// Return the byte identity used by `StdFile::ItemIdentical`.
+///
+/// Windows compares the `_fullpath` results case-insensitively using the
+/// native ANSI path APIs. The explicit CP_ACP folds mirror the legacy byte
+/// comparison used by the resource path layer; POSIX remains byte-exact.
+pub fn path_identity_bytes(path: &Path) -> Vec<u8> {
+    let bytes = path_to_legacy_bytes(&real_path(path));
+    #[cfg(windows)]
+    {
+        let mut bytes = bytes;
+        for byte in &mut bytes {
+            *byte = match *byte {
+                b'a'..=b'z' => *byte - 32,
+                0xe4 => 0xc4,
+                0xf6 => 0xd6,
+                0xfc => 0xdc,
+                _ => *byte,
+            };
+        }
+        bytes
+    }
+    #[cfg(not(windows))]
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn legacy_path_round_trips_the_platform_native_projection() {
@@ -124,5 +202,35 @@ mod tests {
             b"Group.c4d".to_vec()
         };
         assert_eq!(path_to_legacy_bytes(&path_from_legacy_bytes(&bytes)), bytes);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn real_path_appends_missing_suffix_after_canonical_existing_prefix() {
+        let fixture = tempdir().expect("real-path fixture");
+        let existing = fixture.path().join("existing");
+        std::fs::create_dir(&existing).expect("existing directory");
+        let requested = existing
+            .join(".")
+            .join("missing")
+            .join("..")
+            .join("Player.c4p");
+
+        assert_eq!(
+            real_path(&requested),
+            existing.join("missing").join("..").join("Player.c4p")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_real_path_identity_folds_native_case() {
+        let left = Path::new(r"C:\Players\Shared.c4p");
+        let right = Path::new(r"c:\players\shared.c4p");
+        assert_eq!(path_identity_bytes(left), path_identity_bytes(right));
+        assert_eq!(
+            path_identity_bytes(Path::new(r"C:\Players\..\Players\Shared.c4p")),
+            path_identity_bytes(right)
+        );
     }
 }

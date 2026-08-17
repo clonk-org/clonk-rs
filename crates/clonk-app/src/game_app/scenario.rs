@@ -283,12 +283,14 @@ fn restore_replay_savegame_players(
     gamepads_enabled: bool,
     disable_mouse: bool,
 ) -> Result<(), EngineError> {
+    let mut filename_ledger = clonk_engine::RuntimeJoinPlayerFilenameLedger::default();
     for source in &startup.runtime_players {
-        let binding = match engine.restore_offline_savegame_players_from_path(
+        let binding = match engine.restore_offline_savegame_players_from_path_with_filename_ledger(
             scenario_path,
             std::slice::from_ref(source),
             external_player_paths,
             save_game,
+            &mut filename_ledger,
         ) {
             Ok(mut restored) => restored.pop(),
             Err(error) => {
@@ -2010,7 +2012,7 @@ impl GameApp {
                 );
             }
         }
-        let restored_offline_savegame_players = offline_savegame
+        let mut restored_offline_savegame_players = offline_savegame
             .as_ref()
             .map(|savegame| {
                 self.restore_offline_savegame_engine_players(&mut engine, &path, savegame)
@@ -2183,9 +2185,22 @@ impl GameApp {
                 return Err(error);
             }
             if let Some(savegame) = offline_savegame.as_ref() {
+                let prejoin_recorded_player_files = restored_offline_savegame_players
+                    .as_ref()
+                    .map(|(_, _, files)| files);
                 for source in &savegame.runtime_players {
                     if let Some(path) = savegame.recreation_record_paths.get(&source.info.id) {
-                        self.record_recreated_player_file(source.info.id, path);
+                        let prejoin_bytes = prejoin_recorded_player_files.and_then(|files| {
+                            files
+                                .iter()
+                                .find(|(info_id, _)| *info_id == source.info.id)
+                                .map(|(_, bytes)| bytes.as_slice())
+                        });
+                        self.record_recreated_player_file_with_fallback(
+                            source.info.id,
+                            path,
+                            prejoin_bytes,
+                        );
                     }
                 }
             }
@@ -2231,11 +2246,16 @@ impl GameApp {
                     .engine
                     .startup_player_count()
                     .unwrap_or_else(|| startup.startup_player_count());
-                let (mut local_players, mut joined_player_files) =
-                    match (offline_savegame.as_ref(), restored_offline_savegame_players) {
-                        (Some(_), Some(restored)) => restored,
-                        _ => (Vec::new(), Vec::new()),
-                    };
+                let (mut local_players, mut joined_player_files) = match (
+                    offline_savegame.as_ref(),
+                    restored_offline_savegame_players.as_mut(),
+                ) {
+                    (Some(_), Some((local_players, joined_player_files, _))) => (
+                        std::mem::take(local_players),
+                        std::mem::take(joined_player_files),
+                    ),
+                    _ => (Vec::new(), Vec::new()),
+                };
                 let mut team_selection_players = Vec::new();
                 for join in pending_offline_joins {
                     let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {

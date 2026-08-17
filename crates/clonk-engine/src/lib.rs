@@ -189,7 +189,8 @@ pub use round_results::{
     RoundResultsPlayerStatus, RoundResultsState,
 };
 pub use runtime_join_player_restore::{
-    RestoredRuntimeJoinPlayer, RuntimeJoinPlayerRestoreError, RuntimeJoinPlayerSource,
+    RestoredRuntimeJoinPlayer, RuntimeJoinPlayerFilenameLedger, RuntimeJoinPlayerRestoreError,
+    RuntimeJoinPlayerSource,
 };
 pub use scenario::{
     GameParameterRuleGoalLists, InitialNetworkScenarioMetadata, InitialNetworkTeam,

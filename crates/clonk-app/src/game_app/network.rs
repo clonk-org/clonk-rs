@@ -8935,12 +8935,29 @@ impl GameApp {
         let external_player_paths = external_path
             .map(|path| HashMap::from([(source.info.id, path)]))
             .unwrap_or_default();
-        let result = self.engine.restore_offline_savegame_players_from_path(
-            scenario_path,
-            std::slice::from_ref(source),
-            &external_player_paths,
-            save_game,
-        );
+        let result = {
+            let filename_ledger = self
+                .network_savegame_recreation_progress
+                .as_mut()
+                .map(|progress| &mut progress.filename_ledger);
+            match filename_ledger {
+                Some(filename_ledger) => self
+                    .engine
+                    .restore_offline_savegame_players_from_path_with_filename_ledger(
+                        scenario_path,
+                        std::slice::from_ref(source),
+                        &external_player_paths,
+                        save_game,
+                        filename_ledger,
+                    ),
+                None => self.engine.restore_offline_savegame_players_from_path(
+                    scenario_path,
+                    std::slice::from_ref(source),
+                    &external_player_paths,
+                    save_game,
+                ),
+            }
+        };
         let binding = match result {
             Ok(mut bindings) => bindings.pop(),
             Err(error @ clonk_engine::RuntimeJoinPlayerRestoreError::ProvisionalRemoval(_)) => {
@@ -9419,6 +9436,7 @@ impl GameApp {
 
         let mut restored_sources = Vec::with_capacity(sources.len());
         let mut restored = Vec::with_capacity(sources.len());
+        let mut filename_ledger = clonk_engine::RuntimeJoinPlayerFilenameLedger::default();
         for source in &sources {
             let embedded_filename = (!source.info.filename.is_empty()).then(|| {
                 let filename = path_from_group_name_bytes(&normalize_legacy_path_bytes(
@@ -9449,17 +9467,21 @@ impl GameApp {
                     .clear_recreated_temporary_player_file(source.info.id, true);
             }
             let result = if ordinary_recreation {
-                self.engine.restore_offline_savegame_players_from_path(
-                    &scenario_path,
-                    std::slice::from_ref(source),
-                    &external_player_paths,
-                    save_game,
-                )
+                self.engine
+                    .restore_offline_savegame_players_from_path_with_filename_ledger(
+                        &scenario_path,
+                        std::slice::from_ref(source),
+                        &external_player_paths,
+                        save_game,
+                        &mut filename_ledger,
+                    )
             } else {
-                self.engine.restore_runtime_join_players_from_path(
-                    &scenario_path,
-                    std::slice::from_ref(source),
-                )
+                self.engine
+                    .restore_runtime_join_players_from_path_with_filename_ledger(
+                        &scenario_path,
+                        std::slice::from_ref(source),
+                        &mut filename_ledger,
+                    )
             };
             match result {
                 Ok(mut bindings) => {

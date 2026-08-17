@@ -2231,6 +2231,130 @@ fn recreated_malformed_player_file_is_recorded_as_opaque_bytes() {
 }
 
 #[test]
+fn offline_recreation_shares_filename_ledger_across_one_source_calls() {
+    // The saves entry point calls the engine once per row, while native
+    // RecreatePlayers keeps FileInUse state across the whole walk
+    // (C4PlayerList.cpp:288-303,433-448).
+    let directory = tempdir();
+    let scenario_path = directory.path().join("Scenario.c4s");
+    fs::create_dir(&scenario_path).test_value();
+    fs::write(
+        scenario_path.join("Game.txt"),
+        b"[Player7]\nStatus=1\nIndex=2\nID=7\n\n[Player8]\nStatus=1\nIndex=3\nID=8\n",
+    )
+    .test_value();
+    let profile_path = directory.path().join("Shared.c4p");
+    fs::create_dir(&profile_path).test_value();
+    fs::write(
+        profile_path.join("Player.txt"),
+        b"[Player]\nName=Shared\n[Preferences]\nControl=0\nMouse=0\n",
+    )
+    .test_value();
+    let alias_path = profile_path
+        .parent()
+        .test_ref()
+        .join(".")
+        .join("Shared.c4p");
+    let source = |id| clonk_engine::RuntimeJoinPlayerSource {
+        client_id: 0,
+        at_client_name: "Local".to_string(),
+        info: clonk_engine::ControlPlayerInfoEntry {
+            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+            id,
+            player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+            ..Default::default()
+        },
+        load_unnamed_portraits: true,
+    };
+    let savegame = OfflineSavegameStartup {
+        initial_game_data: None,
+        runtime_players: vec![source(7), source(8)],
+        external_player_paths: HashMap::from([(7, profile_path), (8, alias_path)]),
+        recreation_record_paths: HashMap::new(),
+        embedded_player_info_ids: std::collections::HashSet::new(),
+        recording_player_info: Default::default(),
+        recording_last_player_id: 0,
+        unassociated_restore_players: Vec::new(),
+        save_game: false,
+        wild_takeovers: Vec::new(),
+    };
+    let mut app = new_state_only_running_sandbox_app();
+    let mut engine = clonk_engine::Engine::new();
+    engine.set_max_players(4);
+
+    let (local_players, _, _) = app
+        .restore_offline_savegame_engine_players(&mut engine, &scenario_path, &savegame)
+        .test_value();
+
+    assert_eq!(local_players, [2]);
+    assert!(engine.player(2).is_some());
+    assert!(engine.player(3).is_none());
+}
+
+#[test]
+fn offline_recreation_captures_malformed_source_before_failed_join() {
+    // C4Record::AddFile copies the source before Players.Join opens it, so a
+    // malformed external file remains available after the failed join
+    // (C4PlayerInfo.cpp:1594-1603; C4Record.cpp:273-315).
+    let directory = tempdir();
+    let scenario_path = directory.path().join("Scenario.c4s");
+    fs::create_dir(&scenario_path).test_value();
+    fs::write(
+        scenario_path.join("Game.txt"),
+        b"[Player7]\nStatus=1\nIndex=2\nID=7\n",
+    )
+    .test_value();
+    let profile_path = directory.path().join("Malformed.c4p");
+    let payload = b"opaque malformed source\0\x80\xff";
+    fs::write(&profile_path, payload).test_value();
+    let source = clonk_engine::RuntimeJoinPlayerSource {
+        client_id: 0,
+        at_client_name: "Local".to_string(),
+        info: clonk_engine::ControlPlayerInfoEntry {
+            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+            id: 7,
+            player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+            ..Default::default()
+        },
+        load_unnamed_portraits: true,
+    };
+    let savegame = OfflineSavegameStartup {
+        initial_game_data: None,
+        runtime_players: vec![source],
+        external_player_paths: HashMap::from([(7, profile_path.clone())]),
+        recreation_record_paths: HashMap::from([(7, profile_path.clone())]),
+        embedded_player_info_ids: std::collections::HashSet::new(),
+        recording_player_info: Default::default(),
+        recording_last_player_id: 0,
+        unassociated_restore_players: Vec::new(),
+        save_game: false,
+        wild_takeovers: Vec::new(),
+    };
+    let mut app = new_state_only_running_sandbox_app();
+    app.recording_enabled = true;
+    let mut engine = clonk_engine::Engine::new();
+
+    let (_, _, captured) = app
+        .restore_offline_savegame_engine_players(&mut engine, &scenario_path, &savegame)
+        .test_value();
+
+    assert_eq!(captured, vec![(7, payload.to_vec())]);
+    assert!(engine.player(2).is_none());
+
+    let output_path = directory.path().join("001-OfflineMalformed.c4s");
+    install_test_recording_template(&mut app, output_path.clone());
+    app.start_recording(true).test_value();
+    fs::remove_file(&profile_path).test_value();
+    app.record_recreated_player_file_with_fallback(7, &profile_path, Some(&captured[0].1));
+    assert!(app.finish_recording().is_none());
+    let record = Group::open(&output_path).test_value();
+    assert_eq!(
+        record.read_entry_bytes("Recreate-7.c4p").test_value(),
+        payload
+    );
+}
+
+#[test]
 fn synchronized_player_file_with_empty_filename_never_resolves_the_install_root() {
     // C4Player::Save on a filename-less player fails at its EraseItem/
     // C4Group_MoveItem calls without ever renaming the installation
