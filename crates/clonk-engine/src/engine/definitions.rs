@@ -1100,6 +1100,22 @@ impl Engine {
         DefinitionPictureImage::from_sprite_rect_clipped(definition.sprite_image()?, rect)
     }
 
+    /// `C4ObjectListDlg::icon_cell_data_func` source image
+    /// (`C4ObjectListDlg.cpp:681-696`). The callback samples the raw graphics
+    /// bitmap at `PictureRect`; unlike `Picture2Facet`, it does not apply
+    /// `C4Def::Scale` first.
+    pub fn definition_picture_icon_image(
+        &self,
+        definition_id: &str,
+    ) -> Option<DefinitionPictureImage> {
+        let definition = self.definitions.get(definition_id)?;
+        let picture = definition.picture()?;
+        DefinitionPictureImage::from_sprite_rect_clipped(
+            definition.sprite_image()?,
+            DefinitionRect::new(picture.x, picture.y, picture.width, picture.height),
+        )
+    }
+
     /// `C4Object::CanConcatPictureWith` (src/C4Object.cpp:6173-6213),
     /// including every `AllowPictureStack` exception and the asymmetric
     /// picture-overlay walk.

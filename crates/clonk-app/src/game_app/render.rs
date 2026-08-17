@@ -3372,22 +3372,47 @@ impl GameApp {
         use clonk_engine::developer_inspection::object_tree;
 
         let tree = object_tree(&self.snapshot.render_order, &self.snapshot);
-        crate::developer_object_list_view::object_list_rows(&tree, |id| {
-            // `name_cell_data_func` draws `object->GetName()` (`:659-664`),
-            // which is the custom name when there is one and the definition's
-            // otherwise.
-            self.snapshot
-                .object(id)
-                .map(|object| {
-                    object.custom_name.clone().unwrap_or_else(|| {
-                        self.engine
-                            .definition(&object.definition_id)
-                            .map(|definition| definition.name().to_owned())
-                            .unwrap_or_else(|| object.definition_id.clone())
+        crate::developer_object_list_view::object_list_rows(
+            &tree,
+            |id| {
+                // `name_cell_data_func` draws `object->GetName()` (`:659-664`),
+                // which is the custom name when there is one and the definition's
+                // otherwise.
+                self.snapshot
+                    .object(id)
+                    .map(|object| {
+                        object.custom_name.clone().unwrap_or_else(|| {
+                            self.engine
+                                .definition(&object.definition_id)
+                                .map(|definition| definition.name().to_owned())
+                                .unwrap_or_else(|| object.definition_id.clone())
+                        })
                     })
-                })
-                .unwrap_or_default()
-        })
+                    .unwrap_or_default()
+            },
+            |id| {
+                // `icon_cell_data_func` reads the definition's Graphics bitmap at
+                // its PictureRect (`C4ObjectListDlg.cpp:667-722`), not the
+                // object's mutable PictureRect or a separate incremental model.
+                let object = self.snapshot.object(id)?;
+                let image = self
+                    .engine
+                    .definition_picture_icon_image(&object.definition_id)?;
+                if self
+                    .engine
+                    .definition(&object.definition_id)
+                    .is_some_and(|definition| definition.color_by_owner())
+                {
+                    Some(clonk_gui::ImageData::new(
+                        image.width(),
+                        image.height(),
+                        clonk_app_core::pictures::inventory_picture_pixels(&image, object.color),
+                    ))
+                } else {
+                    Some(clonk_app_core::pictures::definition_menu_picture(image))
+                }
+            },
+        )
     }
 
     /// `C4ObjectListDlg::OnSelectionChanged` (`:599-620`).
