@@ -1910,17 +1910,39 @@ impl GameApp {
         else {
             return;
         };
-        self.record_player_group_file(&path, recorded_player_resource_name(core));
+        self.record_player_group_file(&path, recorded_player_resource_name(core), None);
     }
 
     /// `C4PlayerInfoList::RecreatePlayers` records directly recreated player
     /// groups separately because no `JoinPlayer` control exists to run
     /// `C4ControlJoinPlayer::PreRec` (C4PlayerInfo.cpp:1594-1598).
     pub(crate) fn record_recreated_player_file(&mut self, info_id: i32, path: &Path) {
-        self.record_player_group_file(path, format!("Recreate-{info_id}.c4p").into_bytes());
+        self.record_recreated_player_file_with_fallback(info_id, path, None);
     }
 
-    fn record_player_group_file(&mut self, path: &Path, target: Vec<u8>) {
+    /// Capture bytes staged before `RecreatePlayers` joins its source. This is
+    /// the local-record equivalent of `C4Record::AddFile` copying the source
+    /// before `C4PlayerList::Join` can reject a malformed profile
+    /// (C4PlayerInfo.cpp:1594-1603).
+    pub(crate) fn record_recreated_player_file_with_fallback(
+        &mut self,
+        info_id: i32,
+        path: &Path,
+        prejoin_bytes: Option<&[u8]>,
+    ) {
+        self.record_player_group_file(
+            path,
+            format!("Recreate-{info_id}.c4p").into_bytes(),
+            prejoin_bytes,
+        );
+    }
+
+    fn record_player_group_file(
+        &mut self,
+        path: &Path,
+        target: Vec<u8>,
+        prejoin_bytes: Option<&[u8]>,
+    ) {
         let Some(league_streaming) = self
             .recording
             .as_ref()
@@ -1928,11 +1950,25 @@ impl GameApp {
         else {
             return;
         };
-        let prepared = open_group_path_for_folder_map(path)
-            .map_err(|error| error.to_string())
-            .and_then(|group| {
-                let local_file = packed_group_bytes(path, self.process_group_maker.as_bytes())?;
-                let stream_chunk = if league_streaming {
+        let prepared = match (league_streaming, prejoin_bytes) {
+            (false, Some(bytes)) => Ok((bytes.to_vec(), None)),
+            (false, None) => match open_group_path_for_folder_map(path) {
+                Ok(_group) => (|| {
+                    let local_file = packed_group_bytes(path, self.process_group_maker.as_bytes())?;
+                    Ok((local_file, None))
+                })(),
+                Err(_error) if path.is_file() => {
+                    // C4Record::AddFile copies a local non-streaming source
+                    // as-is; Players.Join then reports a malformed/non-group
+                    // player file (C4PlayerInfo.cpp:1594-1603).
+                    packed_group_bytes(path, self.process_group_maker.as_bytes())
+                        .map(|local_file| (local_file, None))
+                }
+                Err(error) => Err(error.to_string()),
+            },
+            (true, _) => match open_group_path_for_folder_map(path) {
+                Ok(group) => (|| {
+                    let local_file = packed_group_bytes(path, self.process_group_maker.as_bytes())?;
                     let packed = if has_player_group_extension(&target) {
                         self.pack_stripped_stream_player(&group, &target)?
                     } else {
@@ -1942,15 +1978,15 @@ impl GameApp {
                         LegacyCString::from_bytes(target.clone()).ok_or_else(|| {
                             "streamed player filename contains an interior NUL".to_string()
                         })?;
-                    Some(
+                    let stream_chunk = Some(
                         clonk_network::encode_league_stream_file_chunk(&stream_name, &packed)
                             .map_err(|error| error.to_string())?,
-                    )
-                } else {
-                    None
-                };
-                Ok((local_file, stream_chunk))
-            });
+                    );
+                    Ok((local_file, stream_chunk))
+                })(),
+                Err(error) => Err(error.to_string()),
+            },
+        };
         let (local_file, stream_chunk) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {

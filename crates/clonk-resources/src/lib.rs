@@ -32,7 +32,9 @@ pub use group_writer::{
 };
 pub use image_decode::{load_image_from_memory, load_image_from_memory_with_format, open_image};
 pub use language::{ComponentGroups, LanguageInfo, LanguagePacks, LoadedComponent};
-pub use legacy_paths::{path_from_legacy_bytes, path_to_legacy_bytes};
+pub use legacy_paths::{
+    path_from_legacy_bytes, path_identity_bytes, path_to_legacy_bytes, real_path,
+};
 pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};
 pub use network_scenario::{
     combine_network_scenario, merge_extracted_group_entries, NetworkScenarioError,

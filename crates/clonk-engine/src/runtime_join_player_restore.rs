@@ -44,6 +44,30 @@ pub struct RestoredRuntimeJoinPlayer {
     pub number: i32,
 }
 
+/// Source filenames already admitted by one native `RecreatePlayers` walk.
+///
+/// `C4PlayerList::FileInUse` observes every successfully joined player, even
+/// when the application reaches `Join` through one-source-at-a-time helpers.
+/// Keep this ledger at the recreation-sequence boundary so those calls share
+/// the same `RealPath` identity set (C4PlayerList.cpp:288-303,433-448;
+/// StdFile.cpp:696-707).
+#[derive(Debug, Default)]
+pub struct RuntimeJoinPlayerFilenameLedger {
+    identities: HashSet<Vec<u8>>,
+}
+
+impl RuntimeJoinPlayerFilenameLedger {
+    fn reserve(&mut self, identity: Vec<u8>) -> bool {
+        self.identities.insert(identity)
+    }
+
+    fn release(&mut self, identity: Option<&[u8]>) {
+        if let Some(identity) = identity {
+            self.identities.remove(identity);
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RuntimeJoinPlayerRestoreError {
     #[error("runtime player recreation has no combined scenario path")]
@@ -459,18 +483,71 @@ fn legacy_basename(path: &[u8]) -> &[u8] {
         .map_or(path, |separator| &path[separator + 1..])
 }
 
+fn source_filename_identity(
+    scenario_path: &Path,
+    source_filename: &[u8],
+    external_path: Option<&Path>,
+) -> Option<Vec<u8>> {
+    if source_filename.is_empty() {
+        return None;
+    }
+    let path = external_path.map_or_else(
+        || scenario_path.join(clonk_resources::path_from_legacy_bytes(source_filename)),
+        Path::to_path_buf,
+    );
+    Some(clonk_resources::path_identity_bytes(&path))
+}
+
+fn cleanup_failed_recreated_player(
+    engine: &mut Engine,
+    filename_ledger: &mut RuntimeJoinPlayerFilenameLedger,
+    identity: Option<&[u8]>,
+    provisional_number: i32,
+    error: RuntimeJoinPlayerRestoreError,
+) -> RuntimeJoinPlayerRestoreError {
+    let cleanup = engine.remove_failed_recreated_player(provisional_number);
+    filename_ledger.release(identity);
+    cleanup
+        .err()
+        .map(|cleanup| RuntimeJoinPlayerRestoreError::ProvisionalRemoval(cleanup.to_string()))
+        .unwrap_or(error)
+}
+
 impl Engine {
     pub fn restore_runtime_join_players_from_path(
         &mut self,
         scenario_path: impl AsRef<Path>,
         sources: &[RuntimeJoinPlayerSource],
     ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
+        let mut filename_ledger = RuntimeJoinPlayerFilenameLedger::default();
+        self.restore_runtime_join_players_from_path_with_filename_ledger(
+            scenario_path,
+            sources,
+            &mut filename_ledger,
+        )
+    }
+
+    pub fn restore_runtime_join_players_from_path_with_filename_ledger(
+        &mut self,
+        scenario_path: impl AsRef<Path>,
+        sources: &[RuntimeJoinPlayerSource],
+        filename_ledger: &mut RuntimeJoinPlayerFilenameLedger,
+    ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
         if sources.is_empty() {
             return Ok(Vec::new());
         }
+        let scenario_path = scenario_path.as_ref();
         let group = Group::open(scenario_path)?;
         let game_txt = group.read_file("Game.txt")?;
-        self.restore_runtime_join_players(&group, &game_txt, sources)
+        self.restore_runtime_join_players_with_external_paths(
+            scenario_path,
+            &group,
+            &game_txt,
+            sources,
+            &HashMap::new(),
+            true,
+            filename_ledger,
+        )
     }
 
     /// Ordinary offline savegames keep user-player files outside the save
@@ -485,9 +562,28 @@ impl Engine {
         external_player_paths: &HashMap<i32, PathBuf>,
         save_game: bool,
     ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
+        let mut filename_ledger = RuntimeJoinPlayerFilenameLedger::default();
+        self.restore_offline_savegame_players_from_path_with_filename_ledger(
+            scenario_path,
+            sources,
+            external_player_paths,
+            save_game,
+            &mut filename_ledger,
+        )
+    }
+
+    pub fn restore_offline_savegame_players_from_path_with_filename_ledger(
+        &mut self,
+        scenario_path: impl AsRef<Path>,
+        sources: &[RuntimeJoinPlayerSource],
+        external_player_paths: &HashMap<i32, PathBuf>,
+        save_game: bool,
+        filename_ledger: &mut RuntimeJoinPlayerFilenameLedger,
+    ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
         if sources.is_empty() {
             return Ok(Vec::new());
         }
+        let scenario_path = scenario_path.as_ref();
         let group = Group::open(scenario_path)?;
         // `C4Game::OpenScenario` leaves `GameText` null for a scenario that
         // ships no Game.txt, and `LoadRuntimeData` simply reports failure
@@ -496,11 +592,13 @@ impl Engine {
             .exists("Game.txt")
             .then(|| group.read_file("Game.txt"));
         self.restore_runtime_join_players_with_external_paths(
+            scenario_path,
             &group,
             &game_txt.transpose()?.unwrap_or_default(),
             sources,
             external_player_paths,
             save_game,
+            filename_ledger,
         )
     }
 
@@ -510,12 +608,15 @@ impl Engine {
         game_txt: &[u8],
         sources: &[RuntimeJoinPlayerSource],
     ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
+        let mut filename_ledger = RuntimeJoinPlayerFilenameLedger::default();
         self.restore_runtime_join_players_with_external_paths(
+            scenario_group.root(),
             scenario_group,
             game_txt,
             sources,
             &HashMap::new(),
             true,
+            &mut filename_ledger,
         )
     }
 
@@ -565,11 +666,13 @@ impl Engine {
 
     fn restore_runtime_join_players_with_external_paths(
         &mut self,
+        scenario_path: &Path,
         scenario_group: &Group,
         game_txt: &[u8],
         sources: &[RuntimeJoinPlayerSource],
         external_player_paths: &HashMap<i32, PathBuf>,
         save_game: bool,
+        filename_ledger: &mut RuntimeJoinPlayerFilenameLedger,
     ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
         if sources.is_empty() {
             return Ok(Vec::new());
@@ -595,10 +698,31 @@ impl Engine {
             {
                 continue;
             }
+            let source_filename = external_player_paths
+                .get(&source.info.id)
+                .map(|path| clonk_resources::path_to_legacy_bytes(path))
+                .unwrap_or_else(|| source.info.filename.as_bytes().to_vec());
+            let source_filename_identity = source_filename_identity(
+                scenario_path,
+                &source_filename,
+                external_player_paths
+                    .get(&source.info.id)
+                    .map(PathBuf::as_path),
+            );
             let player_count = i32::try_from(self.players.len()).unwrap_or(i32::MAX);
             if self
                 .max_players()
                 .is_some_and(|maximum| player_count.saturating_add(1) > maximum)
+            {
+                continue;
+            }
+            // C4PlayerList::Join checks FileInUse before allocating its
+            // provisional C4Player (C4PlayerList.cpp:288-303). Keep the
+            // source ledger separate from the runtime number ledger so a
+            // duplicate filename cannot reach validation/removal.
+            if source_filename_identity
+                .as_ref()
+                .is_some_and(|identity| !filename_ledger.reserve(identity.clone()))
             {
                 continue;
             }
@@ -658,13 +782,13 @@ impl Engine {
             let player_file = match player_file_result {
                 Ok(player_file) => player_file,
                 Err(error) => {
-                    return Err(self
-                        .remove_failed_recreated_player(provisional_number)
-                        .err()
-                        .map(|cleanup| {
-                            RuntimeJoinPlayerRestoreError::ProvisionalRemoval(cleanup.to_string())
-                        })
-                        .unwrap_or(error));
+                    return Err(cleanup_failed_recreated_player(
+                        self,
+                        filename_ledger,
+                        source_filename_identity.as_deref(),
+                        provisional_number,
+                        error,
+                    ));
                 }
             };
 
@@ -700,13 +824,13 @@ impl Engine {
             let mut state = match state_result {
                 Ok(state) => state,
                 Err(error) => {
-                    return Err(self
-                        .remove_failed_recreated_player(provisional_number)
-                        .err()
-                        .map(|cleanup| {
-                            RuntimeJoinPlayerRestoreError::ProvisionalRemoval(cleanup.to_string())
-                        })
-                        .unwrap_or(error));
+                    return Err(cleanup_failed_recreated_player(
+                        self,
+                        filename_ledger,
+                        source_filename_identity.as_deref(),
+                        provisional_number,
+                        error,
+                    ));
                 }
             };
             if state.id == C4P_NUMBER_NONE {
@@ -731,26 +855,26 @@ impl Engine {
                         .insert(provisional_number, Player::from_state(state));
                 }
                 let error = RuntimeJoinPlayerRestoreError::ZeroPlayerInfoId(source.info.id);
-                return Err(self
-                    .remove_failed_recreated_player(removal_key)
-                    .err()
-                    .map(|cleanup| {
-                        RuntimeJoinPlayerRestoreError::ProvisionalRemoval(cleanup.to_string())
-                    })
-                    .unwrap_or(error));
+                return Err(cleanup_failed_recreated_player(
+                    self,
+                    filename_ledger,
+                    source_filename_identity.as_deref(),
+                    removal_key,
+                    error,
+                ));
             }
             let validation_error =
                 (state.id != provisional_number && self.players.contains_key(&state.id)).then_some(
                     RuntimeJoinPlayerRestoreError::DuplicatePlayerNumber(state.id),
                 );
             if let Some(error) = validation_error {
-                return Err(self
-                    .remove_failed_recreated_player(provisional_number)
-                    .err()
-                    .map(|cleanup| {
-                        RuntimeJoinPlayerRestoreError::ProvisionalRemoval(cleanup.to_string())
-                    })
-                    .unwrap_or(error));
+                return Err(cleanup_failed_recreated_player(
+                    self,
+                    filename_ledger,
+                    source_filename_identity.as_deref(),
+                    provisional_number,
+                    error,
+                ));
             }
             self.players.remove(&provisional_number);
             self.player_order
@@ -1145,6 +1269,226 @@ mod tests {
         assert!(engine.player(2).is_some());
         assert!(engine.player(3).is_none());
         assert!(engine.snapshot().round_results.players.is_empty());
+    }
+
+    #[test]
+    fn duplicate_source_filename_is_skipped_before_provisional_join() {
+        // C4PlayerList::Join rejects FileInUse before allocating C4Player, so
+        // the duplicate row cannot reach runtime-number validation/removal
+        // (C4PlayerList.cpp:288-303).
+        let fixture = tempdir().expect("save tempdir");
+        let scenario = fixture.path().join("Scenario.c4s");
+        std::fs::create_dir(&scenario).expect("create scenario group");
+        std::fs::write(
+            scenario.join("Game.txt"),
+            "[Player7]\nStatus=1\nIndex=2\nID=7\n\n[Player8]\nStatus=1\nIndex=2\nID=8\n",
+        )
+        .expect("write duplicate runtime rows");
+        let profile = scenario.join("Shared.c4p");
+        std::fs::create_dir(&profile).expect("create player profile");
+        std::fs::write(profile.join("Player.txt"), "[Player]\nName=Shared\n")
+            .expect("write player profile");
+        let source = |id| RuntimeJoinPlayerSource {
+            client_id: 0,
+            at_client_name: "Local".to_string(),
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id,
+                filename: crate::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let mut engine = Engine::new();
+        let original_gravity = engine.physics().gravity;
+        engine
+            .load_scenario_script_with_convention(
+                "RemovePlayer.c",
+                "#strict 3\nfunc RemovePlayer(int player, int team) { SetGravity(77); }",
+                true,
+            )
+            .expect("load removal probe");
+
+        let restored = engine
+            .restore_runtime_join_players_from_path(&scenario, &[source(7), source(8)])
+            .expect("duplicate source filename is a pre-join skip");
+
+        assert_eq!(
+            restored,
+            vec![RestoredRuntimeJoinPlayer {
+                client_id: 0,
+                player_info_id: 7,
+                number: 2,
+            }]
+        );
+        assert!(engine.player(2).is_some());
+        assert!(engine.player(0).is_none());
+        assert_eq!(engine.physics().gravity, original_gravity);
+        assert!(engine.snapshot().round_results.players.is_empty());
+    }
+
+    #[test]
+    fn duplicate_source_filename_is_skipped_across_one_source_production_calls() {
+        // The application recreates replay/offline rows one at a time, but
+        // C4PlayerList::FileInUse still sees the earlier joined filename
+        // (C4PlayerList.cpp:288-303,433-448).
+        let fixture = tempdir().expect("save tempdir");
+        let scenario = fixture.path().join("Scenario.c4s");
+        std::fs::create_dir(&scenario).expect("create scenario group");
+        std::fs::write(
+            scenario.join("Game.txt"),
+            "[Player7]\nStatus=1\nIndex=2\nID=7\n\n[Player8]\nStatus=1\nIndex=3\nID=8\n",
+        )
+        .expect("write duplicate runtime rows");
+        let profile = scenario.join("Shared.c4p");
+        std::fs::create_dir(&profile).expect("create player profile");
+        std::fs::write(profile.join("Player.txt"), "[Player]\nName=Shared\n")
+            .expect("write player profile");
+        let source = |id: i32, filename: &[u8]| RuntimeJoinPlayerSource {
+            client_id: 0,
+            at_client_name: "Local".to_string(),
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id,
+                filename: crate::LegacyCString::from_bytes(filename.to_vec()).unwrap(),
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let mut engine = Engine::new();
+        let mut filename_ledger = RuntimeJoinPlayerFilenameLedger::default();
+
+        let first = engine
+            .restore_runtime_join_players_from_path_with_filename_ledger(
+                &scenario,
+                &[source(7, b"Shared.c4p")],
+                &mut filename_ledger,
+            )
+            .expect("first source joins");
+        let second = engine
+            .restore_runtime_join_players_from_path_with_filename_ledger(
+                &scenario,
+                &[source(8, b"./Shared.c4p")],
+                &mut filename_ledger,
+            )
+            .expect("duplicate source is skipped before join");
+
+        assert_eq!(first[0].number, 2);
+        assert!(second.is_empty());
+        assert!(engine.player(2).is_some());
+        assert!(engine.player(3).is_none());
+        assert_eq!(
+            engine
+                .players()
+                .map(|player| player.id())
+                .collect::<Vec<_>>(),
+            [2]
+        );
+    }
+
+    #[test]
+    fn real_path_aliases_share_file_in_use_identity_before_join() {
+        // `ItemIdentical` resolves `RealPath` before comparing POSIX names, so
+        // lexical aliases of one external profile are duplicates
+        // (StdFile.cpp:114-145,696-707; C4PlayerList.cpp:433-448).
+        let fixture = tempdir().expect("save tempdir");
+        let scenario = fixture.path().join("Scenario.c4s");
+        std::fs::create_dir(&scenario).expect("create scenario group");
+        std::fs::write(
+            scenario.join("Game.txt"),
+            "[Player7]\nStatus=1\nIndex=2\nID=7\n\n[Player8]\nStatus=1\nIndex=3\nID=8\n",
+        )
+        .expect("write duplicate runtime rows");
+        let profile = fixture.path().join("Shared.c4p");
+        std::fs::create_dir(&profile).expect("create player profile");
+        std::fs::write(profile.join("Player.txt"), "[Player]\nName=Shared\n")
+            .expect("write player profile");
+        let alias = profile
+            .parent()
+            .expect("profile parent")
+            .join(".")
+            .join("Shared.c4p");
+        let source = |id| RuntimeJoinPlayerSource {
+            client_id: 0,
+            at_client_name: "Local".to_string(),
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id,
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let external = HashMap::from([(7, profile.clone()), (8, alias)]);
+        let mut engine = Engine::new();
+        let mut filename_ledger = RuntimeJoinPlayerFilenameLedger::default();
+
+        let restored = engine
+            .restore_offline_savegame_players_from_path_with_filename_ledger(
+                &scenario,
+                &[source(7), source(8)],
+                &external,
+                false,
+                &mut filename_ledger,
+            )
+            .expect("real-path duplicate is skipped before join");
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].player_info_id, 7);
+        assert!(engine.player(2).is_some());
+        assert!(engine.player(3).is_none());
+    }
+
+    #[test]
+    fn failed_join_releases_filename_for_later_recreation_call() {
+        // FileInUse only retains a source after Join succeeds; a failed Init
+        // removes the provisional player and must not poison a later row
+        // (C4PlayerList.cpp:302-314).
+        let fixture = tempdir().expect("save tempdir");
+        let scenario = fixture.path().join("Scenario.c4s");
+        std::fs::create_dir(&scenario).expect("create scenario group");
+        std::fs::write(
+            scenario.join("Game.txt"),
+            "[Player7]\nStatus=1\nIndex=2\nID=7\n\n[Player8]\nStatus=1\nIndex=2\nID=8\n",
+        )
+        .expect("write runtime rows");
+        let profile = fixture.path().join("Shared.c4p");
+        std::fs::create_dir(&profile).expect("create malformed profile");
+        let source = |id| RuntimeJoinPlayerSource {
+            client_id: 0,
+            at_client_name: "Local".to_string(),
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id,
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let external = HashMap::from([(7, profile.clone()), (8, profile.clone())]);
+        let mut engine = Engine::new();
+        let mut filename_ledger = RuntimeJoinPlayerFilenameLedger::default();
+        let first = engine.restore_offline_savegame_players_from_path_with_filename_ledger(
+            &scenario,
+            &[source(7)],
+            &external,
+            false,
+            &mut filename_ledger,
+        );
+        assert!(first.is_err());
+        assert!(engine.player(2).is_none());
+
+        std::fs::write(profile.join("Player.txt"), "[Player]\nName=Shared\n")
+            .expect("repair player profile");
+        let second = engine
+            .restore_offline_savegame_players_from_path_with_filename_ledger(
+                &scenario,
+                &[source(8)],
+                &external,
+                false,
+                &mut filename_ledger,
+            )
+            .expect("later source can reuse failed filename");
+        assert_eq!(second[0].player_info_id, 8);
+        assert!(engine.player(2).is_some());
     }
 
     #[test]

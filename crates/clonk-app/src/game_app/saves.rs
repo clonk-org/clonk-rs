@@ -7,6 +7,8 @@
 use super::*;
 use crate::game_app_scenario::remove_unassociated_savegame_player_objects_with_logs;
 
+type OfflineSavegameRestore = (Vec<i32>, Vec<PathBuf>, Vec<(i32, Vec<u8>)>);
+
 impl GameApp {
     pub(crate) fn developer_console_player_save_options(&self) -> (bool, bool, String) {
         let graphics = load_options_graphics_state(self.app_paths.as_ref());
@@ -1248,18 +1250,34 @@ impl GameApp {
         engine: &mut Engine,
         scenario_path: &Path,
         savegame: &OfflineSavegameStartup,
-    ) -> Result<(Vec<i32>, Vec<PathBuf>), EngineError> {
+    ) -> Result<OfflineSavegameRestore, EngineError> {
         if savegame.runtime_players.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
         let mut local_players = Vec::new();
         let mut joined_player_files = Vec::new();
+        let mut prejoin_recorded_player_files = Vec::new();
+        let mut filename_ledger = clonk_engine::RuntimeJoinPlayerFilenameLedger::default();
         for source in &savegame.runtime_players {
-            let result = engine.restore_offline_savegame_players_from_path(
+            if self.recording_enabled || self.network_is_league {
+                if let Some(path) = savegame.recreation_record_paths.get(&source.info.id) {
+                    match packed_group_bytes(path, self.process_group_maker.as_bytes()) {
+                        Ok(bytes) => prejoin_recorded_player_files.push((source.info.id, bytes)),
+                        Err(error) => tracing::warn!(
+                            info_id = source.info.id,
+                            path = %path.display(),
+                            %error,
+                            "failed to capture offline player file before recreation"
+                        ),
+                    }
+                }
+            }
+            let result = engine.restore_offline_savegame_players_from_path_with_filename_ledger(
                 scenario_path,
                 std::slice::from_ref(source),
                 &savegame.external_player_paths,
                 savegame.save_game,
+                &mut filename_ledger,
             );
             if savegame.embedded_player_info_ids.contains(&source.info.id) {
                 self.control_player_infos
@@ -1379,7 +1397,11 @@ impl GameApp {
         );
         engine.set_local_players(local_players.iter().copied());
         self.mouse_control = self.local_controls.mouse_owner().is_some();
-        Ok((local_players, joined_player_files))
+        Ok((
+            local_players,
+            joined_player_files,
+            prejoin_recorded_player_files,
+        ))
     }
 
     pub(crate) fn quick_save(&mut self) -> Result<()> {

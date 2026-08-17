@@ -1,5 +1,3 @@
-#[cfg(not(windows))]
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -75,27 +73,13 @@ impl OfflineStartupPlayers {
     }
 }
 
-#[cfg(not(windows))]
 pub(super) fn offline_player_real_path(path: &Path) -> io::Result<PathBuf> {
-    // C++ RealPath delegates to POSIX realpath for an existing player file
+    // C++ RealPath canonicalizes the longest existing POSIX prefix and
+    // appends missing components; Windows uses _fullpath
     // (pristine 9ffa0a5d src/StdFile.cpp:114-145,696-707).
-    fs::canonicalize(path)
+    Ok(clonk_resources::real_path(path))
 }
 
-#[cfg(windows)]
-pub(super) fn offline_player_real_path(path: &Path) -> io::Result<PathBuf> {
-    // C++ uses _fullpath on Windows, then compares without case
-    // (pristine 9ffa0a5d src/StdFile.cpp:114-118,696-707).
-    std::path::absolute(path)
-}
-
-#[cfg(not(windows))]
 pub(super) fn offline_player_paths_identical(left: &Path, right: &Path) -> bool {
-    left == right
-}
-
-#[cfg(windows)]
-pub(super) fn offline_player_paths_identical(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy()
-        .eq_ignore_ascii_case(&right.to_string_lossy())
+    clonk_resources::path_identity_bytes(left) == clonk_resources::path_identity_bytes(right)
 }

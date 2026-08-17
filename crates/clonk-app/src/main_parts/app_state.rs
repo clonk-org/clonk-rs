@@ -16,6 +16,9 @@ pub(crate) struct NetworkSavegameRecreationProgress {
     /// The native outer RecreatePlayers packet loop freezes the client and
     /// name while its inner player loop may block on a resource.
     pub(crate) active_client: Option<(i32, String)>,
+    /// `C4PlayerList::FileInUse` spans the whole resumable recreation walk,
+    /// not just the one source processed before a resource wait.
+    pub(crate) filename_ledger: clonk_engine::RuntimeJoinPlayerFilenameLedger,
 }
 
 /// One open component editor: which component, the text being edited, and the
