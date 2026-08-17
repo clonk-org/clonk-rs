@@ -15,12 +15,12 @@
 
 use clonk_engine::developer_inspection::InspectionNode;
 use clonk_engine::ObjectId;
-use clonk_frontend::classic_gui::IntRect;
+use clonk_frontend::classic_gui::{draw_facet_stretch, IntRect};
 use clonk_frontend::developer_chrome::{
     contains, draw_fitted_text, draw_sunken, fill, CONTROL_BACKGROUND, CONTROL_TEXT,
     SELECTED_BACKGROUND, SELECTED_TEXT, SMALL_FONT_SIZE, WINDOW_BACKGROUND,
 };
-use clonk_frontend::GuiPoint;
+use clonk_frontend::{GuiPoint, ImageData};
 use clonk_graphics::{Surface, TextFont};
 
 /// `gtk_window_set_default_size(GTK_WINDOW(window), 180, 300)`
@@ -33,17 +33,21 @@ pub(crate) const OBJECT_LIST_HEIGHT: u32 = 300;
 pub(crate) const OBJECT_LIST_TITLE: &str = "Objects";
 
 const PADDING: i32 = 4;
-const ROW_HEIGHT: i32 = 16;
+/// `ICON_SIZE` in C4ObjectListDlg.cpp:665 and the fixed-height tree rows at
+/// `:773`: the pixbuf renderer makes every row tall enough for its icon.
+const ICON_SIZE: i32 = 24;
+const ROW_HEIGHT: i32 = ICON_SIZE;
 /// A contained object is drawn under its container, indented by one step —
 /// `GtkTreeView`'s expander column does the same.
 const INDENT: i32 = 12;
 
-/// One drawable row: an object, its depth, and the name to show.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// One drawable row: an object, its depth, name, and definition picture.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ObjectListRow {
     pub(crate) id: ObjectId,
     pub(crate) depth: usize,
     pub(crate) name: String,
+    pub(crate) icon: Option<ImageData>,
 }
 
 /// Flatten the ported tree into rows, parents before their contents.
@@ -54,11 +58,13 @@ pub(crate) struct ObjectListRow {
 pub(crate) fn object_list_rows(
     tree: &[InspectionNode],
     name_of: impl Fn(ObjectId) -> String,
+    icon_of: impl Fn(ObjectId) -> Option<ImageData>,
 ) -> Vec<ObjectListRow> {
     fn walk(
         nodes: &[InspectionNode],
         depth: usize,
         name_of: &impl Fn(ObjectId) -> String,
+        icon_of: &impl Fn(ObjectId) -> Option<ImageData>,
         rows: &mut Vec<ObjectListRow>,
     ) {
         for node in nodes {
@@ -66,13 +72,14 @@ pub(crate) fn object_list_rows(
                 id: node.id,
                 depth,
                 name: name_of(node.id),
+                icon: icon_of(node.id),
             });
-            walk(&node.contents, depth + 1, name_of, rows);
+            walk(&node.contents, depth + 1, name_of, icon_of, rows);
         }
     }
 
     let mut rows = Vec::new();
-    walk(tree, 0, &name_of, &mut rows);
+    walk(tree, 0, &name_of, &icon_of, &mut rows);
     rows
 }
 
@@ -94,6 +101,39 @@ fn row_rect(index: usize, first: usize, width: u32) -> IntRect {
         w: (width as i32 - PADDING * 2 - 2).max(1),
         h: ROW_HEIGHT,
     }
+}
+
+/// The C++ cell-data callback scales each `PictureRect` facet to 24 pixels on
+/// its longer side while retaining aspect ratio (`C4ObjectListDlg.cpp:701-714`).
+fn icon_extent(icon: &ImageData) -> Option<(i32, i32)> {
+    let width = u64::from(icon.width());
+    let height = u64::from(icon.height());
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let (target_width, target_height) = if width >= height {
+        (
+            ICON_SIZE,
+            ((ICON_SIZE as u64) * height / width).max(1) as i32,
+        )
+    } else {
+        (
+            ((ICON_SIZE as u64) * width / height).max(1) as i32,
+            ICON_SIZE,
+        )
+    };
+    Some((target_width, target_height))
+}
+
+fn icon_rect(row: IntRect, depth: usize, icon: &ImageData) -> Option<IntRect> {
+    let (width, height) = icon_extent(icon)?;
+    let x = row.x + depth as i32 * INDENT;
+    Some(IntRect {
+        x,
+        y: row.y + (ROW_HEIGHT - height) / 2,
+        w: width,
+        h: height,
+    })
 }
 
 /// Which object a click landed on, or `None` past the last row.
@@ -149,12 +189,24 @@ pub(crate) fn render_object_list(
         if chosen {
             fill(surface, rect, SELECTED_BACKGROUND);
         }
+        if let Some(image) = row.icon.as_ref() {
+            if let Some(icon) = icon_rect(rect, row.depth, image) {
+                draw_facet_stretch(
+                    surface,
+                    image,
+                    (0.0, 0.0, image.width() as f32, image.height() as f32),
+                    (icon.x as f32, icon.y as f32, icon.w as f32, icon.h as f32),
+                    None,
+                );
+            }
+        }
+        let text_x = rect.x + row.depth as i32 * INDENT + ICON_SIZE;
         draw_fitted_text(
             surface,
             font,
             IntRect {
-                x: rect.x + row.depth as i32 * INDENT,
-                w: (rect.w - row.depth as i32 * INDENT).max(1),
+                x: text_x,
+                w: (rect.w - text_x + rect.x).max(1),
                 ..rect
             },
             &row.name,
@@ -187,6 +239,7 @@ mod tests {
                 node(5, vec![]),
             ],
             |id| format!("Object {}", id.as_u64()),
+            |id| Some(ImageData::new(1, 1, vec![id.as_u64() as u8, 0, 0, 255])),
         )
     }
 
@@ -203,7 +256,48 @@ mod tests {
             "parents come before their contents, at one step less depth"
         );
         assert_eq!(rows[0].name, "Object 1");
-        assert!(object_list_rows(&[], |_| String::new()).is_empty());
+        assert!(object_list_rows(&[], |_| String::new(), |_| None).is_empty());
+    }
+
+    // C4ObjectListDlg.cpp:669-724 — each row's icon is sourced from that
+    // object's definition PictureRect and then installed on its renderer.
+    #[test]
+    fn object_list_rows_capture_each_definition_picture_icon() {
+        let first = ImageData::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]);
+        let second = ImageData::new(1, 2, vec![0, 255, 0, 255, 255, 255, 0, 255]);
+        let rows = object_list_rows(
+            &[node(1, vec![]), node(2, vec![])],
+            |id| format!("Object {}", id.as_u64()),
+            |id| match id.as_u64() {
+                1 => Some(first.clone()),
+                2 => Some(second.clone()),
+                _ => None,
+            },
+        );
+
+        assert_eq!(rows[0].icon.as_ref(), Some(&first));
+        assert_eq!(rows[1].icon.as_ref(), Some(&second));
+    }
+
+    // C4ObjectListDlg.cpp:701-714 — the icon column preserves the
+    // PictureRect aspect ratio while fitting its longer side to ICON_SIZE.
+    #[test]
+    fn object_list_icons_fit_their_picture_aspect_ratio() {
+        let wide = ImageData::new(4, 2, vec![255; 4 * 2 * 4]);
+        let tall = ImageData::new(2, 4, vec![255; 2 * 4 * 4]);
+        let row = row_rect(0, 0, OBJECT_LIST_WIDTH);
+
+        assert_eq!(icon_extent(&wide), Some((ICON_SIZE, ICON_SIZE / 2)));
+        assert_eq!(icon_extent(&tall), Some((ICON_SIZE / 2, ICON_SIZE)));
+        assert_eq!(
+            icon_rect(row, 1, &wide),
+            Some(IntRect {
+                x: row.x + INDENT,
+                y: row.y + (ROW_HEIGHT - ICON_SIZE / 2) / 2,
+                w: ICON_SIZE,
+                h: ICON_SIZE / 2,
+            })
+        );
     }
 
     #[test]
@@ -256,10 +350,11 @@ mod tests {
         let rows = object_list_rows(
             &(0..100).map(|id| node(id, vec![])).collect::<Vec<_>>(),
             |id| format!("Object {}", id.as_u64()),
+            |_| None,
         );
         let (width, height) = (OBJECT_LIST_WIDTH, 100);
         let (first, capacity) = visible_window(rows.len(), Some(80), height);
-        assert!(capacity > 0 && capacity < rows.len());
+        assert_eq!(capacity, 3, "24px icons determine the fixed row metric");
         assert_eq!(
             first + capacity - 1,
             80,
