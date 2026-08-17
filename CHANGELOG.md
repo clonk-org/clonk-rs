@@ -4,6 +4,35 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-08-17
+
+### Bug fixes
+
+- Preserve pre-join player source handling (#622)
+- Invalidate explicit script-menu rows on refill (#621)
+- Preserve oversized script literals in unary expressions (#619)
+- Persist in-game display settings (#613)
+- Report particle reload I/O failures synchronously (#610)
+- Remove unsupported save shortcuts (#615)
+- Isolate the Rust debug HUD from parity runs (#620)
+- Localize runtime client information dialogs (#618)
+- Localize remaining startup options strings (#616)
+
+### Features
+
+- Render definition icons in object list (#623)
+
+### Refactoring
+
+- Unify definition shape refresh (#612)
+- Remove unused console completion helper (#609)
+
+### Testing
+
+- Isolate congested UDP peer sends (#617)
+- Pin voice replay ownership (#614)
+- Pin one-shot second timer backlog behavior (#611)
+
 ## [0.13.3] - 2026-08-16
 
 ### Bug fixes
