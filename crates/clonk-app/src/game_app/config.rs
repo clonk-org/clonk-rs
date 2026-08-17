@@ -2003,12 +2003,7 @@ impl GameApp {
         for (section, entries) in self.deferred_config.take_by_section() {
             let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> = entries
                 .iter()
-                .map(|(key, value)| {
-                    (
-                        key.as_str(),
-                        clonk_app_netplay::NativeConfigValue::RawAscii(value.as_str()),
-                    )
-                })
+                .map(|(key, value)| (key.as_str(), value.as_native()))
                 .collect();
             if let Err(error) = persist_native_config_values(&paths, &section, &updates) {
                 tracing::warn!(%error, section, "could not save deferred config values");

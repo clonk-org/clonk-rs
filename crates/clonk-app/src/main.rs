@@ -1920,14 +1920,7 @@ fn run() -> Result<()> {
                         let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> =
                             entries
                                 .iter()
-                                .map(|(key, value)| {
-                                    (
-                                        key.as_str(),
-                                        clonk_app_netplay::NativeConfigValue::RawAscii(
-                                            value.as_str(),
-                                        ),
-                                    )
-                                })
+                                .map(|(key, value)| (key.as_str(), value.as_native()))
                                 .collect();
                         if let Err(error) =
                             persist_native_config_values(paths.as_ref(), &section, &updates)
