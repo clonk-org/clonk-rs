@@ -79,6 +79,7 @@ fn tutorial04_enter_all_keeps_only_one_tflint_in_the_real_clonk() {
         scenario_callbacks: false,
         refill_object: Some(hut),
         refill_object_contents_count: 3,
+        location_reset_generation: 0,
         items: vec![ObjectMenuItem {
             caption: "Get T-Flint".to_owned(),
             info_caption: String::new(),

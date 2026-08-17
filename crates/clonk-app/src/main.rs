@@ -5299,9 +5299,10 @@ impl GameApp {
             && (self.scoreboard_close_pointer_capture
                 || self.scoreboard_pointer_target(gui_point)?.is_some()
                 || self.ingame_menu_pointer_target(gui_point).is_some()
-                || self
-                    .script_menu_pointer_target_for_owner(viewport.owner, gui_point)?
-                    .is_some());
+                || (self.ensure_script_menu_presentation_for_owner(viewport.owner)
+                    && self
+                        .script_menu_pointer_target_for_owner(viewport.owner, gui_point)?
+                        .is_some()));
         let target_region = gui_target
             || self
                 .ingame_viewport_region(viewport.owner, screen)

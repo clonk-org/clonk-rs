@@ -4953,10 +4953,14 @@ pub(crate) struct ScriptMenuPresentationState {
     /// later `SetMenuSize` is recognised by the change rather than by the
     /// value alone.
     pub(crate) applied_menu_lines: i32,
-    /// The item count observed when this presentation last mirrored the
-    /// engine menu. A refill which grows the set clears C4Menu's
-    /// `LocationSet`, so the next draw must derive its row count again.
-    pub(crate) applied_menu_item_count: usize,
+    /// The engine-owned generation observed when this presentation last
+    /// mirrored the menu. A native refill or `ClearItems(true)` advances the
+    /// generation, so the next draw must derive its row count again.
+    pub(crate) applied_location_reset_generation: u64,
+    /// A reset remains pending until the next draw consumes C4Menu's cleared
+    /// `LocationSet`; a same-frame SetMenuSize must not recreate explicit
+    /// rows before that draw (C4Menu.h:203; C4Menu.cpp:635-640,796-797).
+    pub(crate) location_reset_pending: bool,
 }
 
 pub(crate) fn reset_script_menu_presentation_location(state: &mut ScriptMenuPresentationState) {
@@ -4971,26 +4975,26 @@ pub(crate) fn reset_script_menu_presentation_location(state: &mut ScriptMenuPres
     // InitLocation then overwrites Lines from the item count, just as it does
     // after a viewport reset (C4Menu.h:203; C4Menu.cpp:713-721).
     state.explicit_lines = None;
+    state.location_reset_pending = true;
 }
 
-/// Mirror `C4Menu::RefillInternal`'s location lifetime for retained app
-/// presentation state. A growth invalidates `LocationSet`, causing the next
-/// draw to recompute `Lines` and `VisibleCount` from the new item set. A
-/// shrink has the same effect only for Context menus, matching the native
-/// `IsContextMenu` branch (C4Menu.cpp:961-969; InitLocation/InitSize at
-/// 713-721,755-780).
-pub(crate) fn sync_script_menu_presentation_item_count(
+/// Mirror the engine-owned C4Menu::LocationSet lifetime for retained app
+/// presentation state. Only native `RefillInternal` and `ClearItems(true)`
+/// advance the generation; ordinary script AddMenuItem writes do not.
+pub(crate) fn sync_script_menu_presentation_location_reset(
     state: &mut ScriptMenuPresentationState,
     menu: &clonk_engine::ObjectMenuState,
 ) {
-    let item_count = menu.items.len();
-    let is_context_menu = menu.style == 1; // C4Menu.h:180, C4MN_Style_Context
-    let invalidates_location = item_count > state.applied_menu_item_count
-        || (item_count < state.applied_menu_item_count && is_context_menu);
-    if invalidates_location {
+    if menu.location_reset_generation != state.applied_location_reset_generation {
         reset_script_menu_presentation_location(state);
     }
-    state.applied_menu_item_count = item_count;
+    if state.location_reset_pending {
+        // The draw that consumes ResetLocation also consumes any stale Lines
+        // value written before it. Do not let that old value look like a new
+        // SetMenuSize event on the following frame.
+        state.applied_menu_lines = menu.lines;
+    }
+    state.applied_location_reset_generation = menu.location_reset_generation;
 }
 
 /// C4GUI's single retained `pDragElement` for a menu's wooden title label.

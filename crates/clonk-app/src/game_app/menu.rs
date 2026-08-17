@@ -2281,17 +2281,18 @@ impl GameApp {
                 // draw's InitLocation (C4Menu.cpp:713-721,796-797).
                 explicit_lines: None,
                 applied_menu_lines: menu.lines,
-                applied_menu_item_count: menu.items.len(),
+                applied_location_reset_generation: menu.location_reset_generation,
+                location_reset_pending: false,
             },
         };
-        sync_script_menu_presentation_item_count(&mut next, &menu);
         // C4Menu::SetSize assigns Lines without clearing LocationSet, so a
         // SetMenuSize on an already-displayed menu keeps its explicit row
         // count (C4Menu.cpp:635-640).
-        if next.applied_menu_lines != menu.lines {
+        if !next.location_reset_pending && next.applied_menu_lines != menu.lines {
             next.explicit_lines = (menu.lines > 0).then_some(menu.lines);
             next.applied_menu_lines = menu.lines;
         }
+        sync_script_menu_presentation_location_reset(&mut next, &menu);
         self.script_menu_presentations.insert(owner, next);
         true
     }

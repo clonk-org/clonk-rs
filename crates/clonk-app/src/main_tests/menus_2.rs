@@ -2439,7 +2439,11 @@ fn script_menu_growth_refill_recomputes_explicit_rows_and_visible_grid() {
         .expect("menu remains open");
     let grown_items = long_script_menu(cursor, 4).items;
     grown_menu.items = grown_items;
-    grown_menu.lines = 1;
+    grown_menu.location_reset_generation = grown_menu.location_reset_generation.wrapping_add(1);
+    // A refill callback may issue SetMenuSize while it adds rows. C++ clears
+    // LocationSet after the refill, so this changed value is discarded by
+    // the same draw that observes the growth (C4Menu.cpp:635-640,947-970).
+    grown_menu.lines = 2;
     grown_menu.selection = 3;
     install_test_cursor_menu(&mut app, cursor, grown_menu.clone());
     app.test_render(&mut frame);
@@ -2473,6 +2477,146 @@ fn script_menu_growth_refill_recomputes_explicit_rows_and_visible_grid() {
     assert_eq!(
         app.script_menu_presentations[&owner].explicit_lines, None,
         "growth must invalidate the live explicit row count"
+    );
+}
+
+#[test]
+fn script_menu_pointer_hit_test_invalidates_growth_before_redraw() {
+    // Input can arrive after the simulation has rebuilt a menu but before the
+    // next presentation. Native C4Menu has already cleared LocationSet at
+    // that point, so the hit grid must use the grown natural row count rather
+    // than the prior explicit SetMenuSize count (C4Menu.cpp:947-970).
+    let mut app = new_classic_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    let owner = app.local_owner;
+    let cursor = app.engine.test_crew_cursor(owner);
+    install_test_cursor_menu(&mut app, cursor, long_script_menu(cursor, 2));
+    let mut frame = vec![0_u8; 640 * 480 * 4];
+    app.test_render(&mut frame);
+
+    let mut explicit_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    explicit_menu.lines = 1;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu);
+    app.test_render(&mut frame);
+
+    let mut grown_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    grown_menu.items = long_script_menu(cursor, 4).items;
+    grown_menu.location_reset_generation = grown_menu.location_reset_generation.wrapping_add(1);
+    grown_menu.lines = 1;
+    grown_menu.selection = 0;
+    let area = app.graphics.viewport_rect(owner).test_value();
+    let fallback = app.assets.font_arc();
+    let font = clonk_frontend::hud::HudFont::from_set(
+        app.assets.clonk_fonts.as_deref(),
+        fallback.as_ref(),
+    );
+    let natural_layout = object_menu::engine_script_menu_layout(
+        area,
+        &font,
+        &grown_menu,
+        app.display_flags.show_commands,
+    );
+    let fourth_item = natural_layout.item_rect(3).test_value();
+    install_test_cursor_menu(&mut app, cursor, grown_menu);
+
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(fourth_item.x) + 8.0,
+        f64::from(fourth_item.y) + 8.0,
+    ));
+    assert_eq!(
+        app.engine
+            .debug_object_menu(cursor.as_u64())
+            .expect("cursor")
+            .expect("grown menu")
+            .selection,
+        3,
+        "pointer hit-testing must observe refill invalidation before redraw"
+    );
+    assert_eq!(
+        app.script_menu_presentations[&owner].explicit_lines, None,
+        "pointer input must not retain the stale explicit row count"
+    );
+}
+
+#[test]
+fn script_menu_live_add_item_preserves_explicit_rows() {
+    // C4Menu::AddItem updates the live grid but does not clear LocationSet;
+    // only C4ObjectMenu::RefillInternal owns the count-based invalidation
+    // (C4Menu.cpp:401-430; C4ObjectMenu.cpp:947-970).
+    let mut app = new_classic_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    let owner = app.local_owner;
+    let cursor = app.engine.test_crew_cursor(owner);
+    install_test_cursor_menu(&mut app, cursor, long_script_menu(cursor, 2));
+    let mut frame = vec![0_u8; 640 * 480 * 4];
+    app.test_render(&mut frame);
+
+    let mut explicit_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    explicit_menu.lines = 1;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu.clone());
+    app.test_render(&mut frame);
+    assert_eq!(
+        app.script_menu_presentations[&owner].explicit_lines,
+        Some(1)
+    );
+
+    explicit_menu.items.push(explicit_menu.items[0].clone());
+    explicit_menu.selection = 0;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu);
+    app.test_render(&mut frame);
+    assert_eq!(
+        app.script_menu_presentations[&owner].explicit_lines,
+        Some(1),
+        "ordinary AddMenuItem growth must not mimic native refill invalidation"
+    );
+}
+
+#[test]
+fn script_menu_viewport_reset_does_not_restore_same_frame_set_size() {
+    // C4Viewport resets LocationSet before the next Draw; a SetMenuSize made
+    // in that interval is overwritten by InitLocation, not retained as a
+    // live explicit row count (C4Menu.h:203; C4Menu.cpp:635-640,713-721).
+    let mut app = new_classic_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    let owner = app.local_owner;
+    let cursor = app.engine.test_crew_cursor(owner);
+    install_test_cursor_menu(&mut app, cursor, long_script_menu(cursor, 4));
+    let mut frame = vec![0_u8; 640 * 480 * 4];
+    app.test_render(&mut frame);
+
+    let mut explicit_menu = app
+        .engine
+        .debug_object_menu(cursor.as_u64())
+        .expect("cursor menu")
+        .expect("menu remains open");
+    explicit_menu.lines = 1;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu.clone());
+    app.test_render(&mut frame);
+    assert_eq!(
+        app.script_menu_presentations[&owner].explicit_lines,
+        Some(1)
+    );
+
+    app.resize(320, 200).test_value();
+    explicit_menu.lines = 2;
+    install_test_cursor_menu(&mut app, cursor, explicit_menu);
+    let mut resized_frame = vec![0_u8; 320 * 200 * 4];
+    app.test_render(&mut resized_frame);
+    assert_eq!(
+        app.script_menu_presentations[&owner].explicit_lines, None,
+        "viewport reset must dominate a same-frame SetMenuSize"
     );
 }
 
@@ -2514,6 +2658,7 @@ fn context_menu_shrink_refill_recomputes_explicit_rows_and_scrollbar() {
         .expect("cursor menu")
         .expect("menu remains open");
     shrunk_menu.items.truncate(2);
+    shrunk_menu.location_reset_generation = shrunk_menu.location_reset_generation.wrapping_add(1);
     shrunk_menu.lines = 1;
     install_test_cursor_menu(&mut app, cursor, shrunk_menu.clone());
     app.test_render(&mut frame);
