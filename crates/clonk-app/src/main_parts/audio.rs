@@ -4953,6 +4953,14 @@ pub(crate) struct ScriptMenuPresentationState {
     /// later `SetMenuSize` is recognised by the change rather than by the
     /// value alone.
     pub(crate) applied_menu_lines: i32,
+    /// The engine-owned generation observed when this presentation last
+    /// mirrored the menu. A native refill or `ClearItems(true)` advances the
+    /// generation, so the next draw must derive its row count again.
+    pub(crate) applied_location_reset_generation: u64,
+    /// A reset remains pending until the next draw consumes C4Menu's cleared
+    /// `LocationSet`; a same-frame SetMenuSize must not recreate explicit
+    /// rows before that draw (C4Menu.h:203; C4Menu.cpp:635-640,796-797).
+    pub(crate) location_reset_pending: bool,
 }
 
 pub(crate) fn reset_script_menu_presentation_location(state: &mut ScriptMenuPresentationState) {
@@ -4963,6 +4971,30 @@ pub(crate) fn reset_script_menu_presentation_location(state: &mut ScriptMenuPres
         state.location_needs_initialization = false;
     }
     state.selection_needs_adjustment = true;
+    // C4Menu::ResetLocation only clears LocationSet; the following Draw's
+    // InitLocation then overwrites Lines from the item count, just as it does
+    // after a viewport reset (C4Menu.h:203; C4Menu.cpp:713-721).
+    state.explicit_lines = None;
+    state.location_reset_pending = true;
+}
+
+/// Mirror the engine-owned C4Menu::LocationSet lifetime for retained app
+/// presentation state. Only native `RefillInternal` and `ClearItems(true)`
+/// advance the generation; ordinary script AddMenuItem writes do not.
+pub(crate) fn sync_script_menu_presentation_location_reset(
+    state: &mut ScriptMenuPresentationState,
+    menu: &clonk_engine::ObjectMenuState,
+) {
+    if menu.location_reset_generation != state.applied_location_reset_generation {
+        reset_script_menu_presentation_location(state);
+    }
+    if state.location_reset_pending {
+        // The draw that consumes ResetLocation also consumes any stale Lines
+        // value written before it. Do not let that old value look like a new
+        // SetMenuSize event on the following frame.
+        state.applied_menu_lines = menu.lines;
+    }
+    state.applied_location_reset_generation = menu.location_reset_generation;
 }
 
 /// C4GUI's single retained `pDragElement` for a menu's wooden title label.

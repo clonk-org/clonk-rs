@@ -376,6 +376,7 @@ pub(crate) fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         scenario_callbacks,
         refill_object: None,
         refill_object_contents_count: 0,
+        location_reset_generation: 0,
         items: Vec::new(),
         // InitMenu immediately chooses five columns for Normal and one
         // for every other style (C4Menu.cpp:359-365); Lines stays at its
@@ -975,6 +976,10 @@ pub(crate) fn clear_menu_items(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     menu.items.clear();
     menu.selection = -1;
+    // ClearMenuItems calls C4Menu::ClearItems(true), which clears
+    // LocationSet for every style even when a later AddMenuItem restores the
+    // old final count (C4Script.cpp:5149-5159; C4Menu.cpp:975-987).
+    menu.mark_location_reset();
     let stored = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
             .as_mut()

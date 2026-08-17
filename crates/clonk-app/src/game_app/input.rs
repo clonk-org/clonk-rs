@@ -7307,20 +7307,24 @@ impl GameApp {
                 let script_menu_owner = self.local_controls.mouse_owner();
                 let script_menu_target = match script_menu_owner {
                     Some(owner) => {
-                        match self.script_menu_pointer_target_for_owner(owner, point) {
-                            Ok(target) => target,
-                            Err(error) => {
-                                // The pre-hit-test ordering keeps an active
-                                // drag from crossing its threshold behind the
-                                // menu. With no button gesture, retain native's
-                                // projected viewport pointer even when menu
-                                // resources fail before ownership resolves.
-                                if self.mouse_state.is_none()
-                                    && self.ingame_right_mouse_state.is_none()
-                                {
-                                    let _ = self.update_ingame_pointer(point);
+                        if !self.ensure_script_menu_presentation_for_owner(owner) {
+                            None
+                        } else {
+                            match self.script_menu_pointer_target_for_owner(owner, point) {
+                                Ok(target) => target,
+                                Err(error) => {
+                                    // The pre-hit-test ordering keeps an active
+                                    // drag from crossing its threshold behind the
+                                    // menu. With no button gesture, retain native's
+                                    // projected viewport pointer even when menu
+                                    // resources fail before ownership resolves.
+                                    if self.mouse_state.is_none()
+                                        && self.ingame_right_mouse_state.is_none()
+                                    {
+                                        let _ = self.update_ingame_pointer(point);
+                                    }
+                                    return Err(error);
                                 }
-                                return Err(error);
                             }
                         }
                     }
@@ -7368,10 +7372,13 @@ impl GameApp {
         self.ingame_mouse_caption = IngameMouseCaptionState::default();
     }
 
-    pub(crate) fn ingame_edge_cursor_active(&self) -> bool {
+    pub(crate) fn ingame_edge_cursor_active(&mut self) -> bool {
         let Some(scroll) = self.ingame_edge_scroll else {
             return false;
         };
+        if !self.ensure_script_menu_presentation_for_owner(scroll.owner) {
+            return false;
+        }
         let Some(gui_point) = self.ingame_gui_pointer else {
             return false;
         };
@@ -7401,7 +7408,7 @@ impl GameApp {
         )
     }
 
-    pub(crate) fn ingame_help_cursor_active(&self) -> bool {
+    pub(crate) fn ingame_help_cursor_active(&mut self) -> bool {
         let Some(pointer) = self.ingame_pointer else {
             return false;
         };
@@ -7419,7 +7426,7 @@ impl GameApp {
             && !self.ingame_edge_cursor_active()
     }
 
-    pub(crate) fn ingame_custom_cursor_active(&self) -> bool {
+    pub(crate) fn ingame_custom_cursor_active(&mut self) -> bool {
         self.ingame_construction_drag_active()
             || self.ingame_edge_cursor_active()
             || self.ingame_help_cursor_active()
@@ -7733,10 +7740,13 @@ impl GameApp {
             // A fallible script-menu region lookup must never leave a prior
             // border direction armed after this new pointer position.
             self.ingame_edge_scroll = None;
+            let script_menu_is_present =
+                self.ensure_script_menu_presentation_for_owner(pointer.owner);
             let target_region = self
                 .ingame_viewport_region(pointer.owner, pointer.screen)
                 .is_some()
-                || (!self.ingame_construction_drag_active()
+                || (script_menu_is_present
+                    && !self.ingame_construction_drag_active()
                     && self
                         .script_menu_pointer_target_for_owner(pointer.owner, point)?
                         .is_some());
@@ -8458,7 +8468,11 @@ impl GameApp {
         } else {
             match (script_menu_owner, self.ingame_gui_pointer) {
                 (Some(owner), Some(gui_point)) => {
-                    self.script_menu_pointer_target_for_owner(owner, gui_point)?
+                    if !self.ensure_script_menu_presentation_for_owner(owner) {
+                        None
+                    } else {
+                        self.script_menu_pointer_target_for_owner(owner, gui_point)?
+                    }
                 }
                 _ => None,
             }
@@ -9379,7 +9393,11 @@ impl GameApp {
         } else {
             match (script_menu_owner, self.ingame_gui_pointer) {
                 (Some(owner), Some(gui_point)) => {
-                    self.script_menu_pointer_target_for_owner(owner, gui_point)?
+                    if !self.ensure_script_menu_presentation_for_owner(owner) {
+                        None
+                    } else {
+                        self.script_menu_pointer_target_for_owner(owner, gui_point)?
+                    }
                 }
                 _ => None,
             }

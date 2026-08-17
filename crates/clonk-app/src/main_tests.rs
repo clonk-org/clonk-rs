@@ -4071,6 +4071,7 @@ fn two_item_script_menu(cursor: ObjectId) -> clonk_engine::ObjectMenuState {
         scenario_callbacks: false,
         refill_object: None,
         refill_object_contents_count: 0,
+        location_reset_generation: 0,
         items: vec![
             clonk_engine::ObjectMenuItem {
                 caption: "First".to_string(),

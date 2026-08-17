@@ -4119,6 +4119,7 @@ fn exec_base_clears_base_when_the_flag_is_lost() -> Result<(), EngineError> {
                 scenario_callbacks: false,
                 refill_object: None,
                 refill_object_contents_count: 0,
+                location_reset_generation: 0,
                 items: Vec::new(),
                 columns: 1,
                 lines: 0,

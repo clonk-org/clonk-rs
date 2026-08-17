@@ -4021,6 +4021,15 @@ pub struct ObjectMenuState {
     /// supplies the periodic refill (C4ObjectMenu.cpp:448-459).
     #[serde(default, skip_serializing_if = "i32_is_zero")]
     pub refill_object_contents_count: i32,
+    /// Monotonic presentation generation for C4Menu::LocationSet resets.
+    ///
+    /// Native refills and `ClearItems(true)` invalidate the retained menu
+    /// location without changing script-visible state. The app consumes this
+    /// generation to keep that lifetime distinct from ordinary AddMenuItem
+    /// writes (C4Menu.cpp:975-987; C4ObjectMenu.cpp:947-970).
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub location_reset_generation: u64,
     pub items: Vec<ObjectMenuItem>,
     /// C4Menu::Columns — 0 = auto layout (C4Menu::Default, C4Menu.cpp:299);
     /// script-set via SetMenuSize (C4Menu::SetSize, C4Menu.cpp:635-640).
@@ -4085,6 +4094,10 @@ pub struct ObjectMenuFrameDecoration {
 }
 
 impl ObjectMenuState {
+    pub(crate) fn mark_location_reset(&mut self) {
+        self.location_reset_generation = self.location_reset_generation.wrapping_add(1);
+    }
+
     pub(crate) fn set_text_progress(&mut self, mut amount: i32, add: bool) -> bool {
         if add {
             if !self.text_progressing {

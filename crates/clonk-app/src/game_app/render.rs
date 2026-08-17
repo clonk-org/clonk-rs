@@ -4798,6 +4798,9 @@ impl GameApp {
                                     // (C4Menu.cpp:713-721,796-797).
                                     explicit_lines: None,
                                     applied_menu_lines: menu.lines,
+                                    applied_location_reset_generation: menu
+                                        .location_reset_generation,
+                                    location_reset_pending: false,
                                 },
                             );
                             time_on_selection
@@ -4889,10 +4892,16 @@ impl GameApp {
                 if let Some(state) = self
                     .script_menu_presentations
                     .get_mut(&script_menu_owner)
-                    .filter(|state| state.applied_menu_lines != menu.lines)
+                    .filter(|state| {
+                        !state.location_reset_pending && state.applied_menu_lines != menu.lines
+                    })
                 {
                     state.explicit_lines = (menu.lines > 0).then_some(menu.lines);
                     state.applied_menu_lines = menu.lines;
+                }
+                if let Some(state) = self.script_menu_presentations.get_mut(&script_menu_owner) {
+                    sync_script_menu_presentation_location_reset(state, menu);
+                    state.location_reset_pending = false;
                 }
                 let (
                     menu_location,

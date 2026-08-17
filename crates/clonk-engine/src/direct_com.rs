@@ -298,6 +298,7 @@ fn activate_menu_state(
         scenario_callbacks: false,
         refill_object: Some(container_id),
         refill_object_contents_count,
+        location_reset_generation: 0,
         items,
         columns: 5,
         lines: 0,
@@ -928,6 +929,7 @@ pub(crate) fn build_container_contents_menu_state<S: InternalObjectMenuSource>(
             scenario_callbacks: false,
             refill_object: Some(container_id),
             refill_object_contents_count,
+            location_reset_generation: 0,
             items: Vec::new(),
             columns: 5,
             lines: 0,
@@ -1785,6 +1787,10 @@ impl Engine {
         };
         let refill_object = menu.refill_object;
         let previous_count = menu.refill_object_contents_count;
+        let previous_item_count = menu.items.len();
+        let previous_style = menu.style;
+        let previous_runtime_id = menu.runtime_id;
+        let previous_location_reset_generation = menu.location_reset_generation;
         let context_has_command_object = menu.command_object.is_some();
         let Some(container_id) = refill_object else {
             if periodic_refill {
@@ -1830,6 +1836,24 @@ impl Engine {
             }
             14 => self.refill_context_menu(crew_index, container_index, current_count)?,
             _ => unreachable!("filtered refill-driven object-menu id"),
+        }
+        // C4Menu::RefillInternal clears LocationSet only after a successful
+        // DoRefillInternal, and only when the final count grows (or a Context
+        // menu shrinks). Ordinary AddMenuItem writes do not reach this path;
+        // ClearMenuItems(true) already carries its own generation marker.
+        if let Some(menu) = self.objects[crew_index]
+            .state
+            .menu
+            .as_mut()
+            .filter(|menu| menu.runtime_id == previous_runtime_id)
+        {
+            let invalidates_location = menu.items.len() > previous_item_count
+                || (menu.items.len() < previous_item_count && previous_style == 1);
+            if invalidates_location
+                && menu.location_reset_generation == previous_location_reset_generation
+            {
+                menu.mark_location_reset();
+            }
         }
         // C4ObjectMenu::Execute stores the observed count before invoking
         // the inherited refill. Store it on the still-matching menu after
@@ -2597,6 +2621,7 @@ impl Engine {
                 scenario_callbacks: false,
                 refill_object: Some(base_id),
                 refill_object_contents_count: 0,
+                location_reset_generation: 0,
                 items: Vec::new(),
                 columns: 1,
                 lines: 0,
@@ -2851,6 +2876,7 @@ impl Engine {
             scenario_callbacks: false,
             refill_object: None,
             refill_object_contents_count: 0,
+            location_reset_generation: 0,
             items: Vec::new(),
             columns: 1,
             lines: 0,
@@ -4999,6 +5025,7 @@ impl Engine {
             scenario_callbacks: false,
             refill_object: None,
             refill_object_contents_count: 0,
+            location_reset_generation: 0,
             items: Vec::new(),
             columns: 5,
             lines: 0,
@@ -5204,6 +5231,7 @@ impl Engine {
             scenario_callbacks: false,
             refill_object: Some(base_id),
             refill_object_contents_count: 0,
+            location_reset_generation: 0,
             items,
             columns: 5,
             lines: 0,
@@ -5532,6 +5560,7 @@ impl Engine {
             scenario_callbacks: false,
             refill_object: Some(base_id),
             refill_object_contents_count: 0,
+            location_reset_generation: 0,
             items,
             columns: 5,
             lines: 0,
@@ -8499,6 +8528,66 @@ public func MarkFinishedOnly()
                 .name,
             "Jump",
             "once the mandatory menu closes, Up reaches ObjectComUp"
+        );
+    }
+
+    #[test]
+    fn clear_menu_items_keeps_location_reset_when_same_count_is_readded() {
+        // FnClearMenuItems passes fResetSelection=true, so C4Menu clears
+        // LocationSet even if a callback re-adds the old number of rows
+        // (C4Script.cpp:5149-5159; C4Menu.cpp:975-987).
+        let script = r#"
+        #strict 2
+        func OpenMenu() {
+            CreateMenu(WIPF, this(), this(), 0, "Choose");
+            AddMenuItem("First", "Nop()", WIPF, this());
+            AddMenuItem("Second", "Nop()", WIPF, this());
+            return 1;
+        }
+        func AppendOnly() {
+            AddMenuItem("Appended", "Nop()", WIPF, this());
+            return 1;
+        }
+        func ClearAndReadd() {
+            ClearMenuItems(this());
+            AddMenuItem("Replacement", "Nop()", WIPF, this());
+            AddMenuItem("Replacement 2", "Nop()", WIPF, this());
+            return 1;
+        }
+        func Nop() { return 1; }
+        "#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", script);
+        engine.register_test_player(PlayerConfig::new(1, "Test"));
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let index = engine.test_object_index(crew);
+        engine.call_test_object_function(index, "OpenMenu", Vec::new());
+        let initial_generation = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("menu open")
+            .location_reset_generation;
+
+        engine.call_test_object_function(index, "AppendOnly", Vec::new());
+        let appended = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("menu remains open");
+        assert_eq!(appended.items.len(), 3);
+        assert_eq!(
+            appended.location_reset_generation, initial_generation,
+            "ordinary AddMenuItem does not clear LocationSet (C4Menu.cpp:401-430)"
+        );
+
+        engine.call_test_object_function(index, "ClearAndReadd", Vec::new());
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("menu remains open");
+        assert_eq!(menu.items.len(), 2);
+        assert_eq!(
+            menu.location_reset_generation,
+            initial_generation.wrapping_add(1),
         );
     }
 
@@ -17110,12 +17199,20 @@ protected func CalcValue(object base, int player)
         let mut item = test_definition("ITEM", "Item", "#strict\n");
         item.set_category(crate::CATEGORY_OBJECT);
         engine.register_test_definition(item);
+        let mut item_two = test_definition("ITM2", "Second Item", "#strict\n");
+        item_two.set_category(crate::CATEGORY_OBJECT);
+        engine.register_test_definition(item_two);
         engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(hut));
         let crew_index = engine.test_object_index(crew);
         let hut_index = engine.test_object_index(hut);
         engine
             .open_base_sell_menu(crew_index, hut_index)
             .test_value();
+        let initial_location_generation = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("sell menu opens")
+            .location_reset_generation;
         assert_eq!(
             engine
                 .debug_object_menu(crew.as_u64())
@@ -17129,7 +17226,7 @@ protected func CalcValue(object base, int player)
         // cache. Add the second object only after that count is established.
         engine.tick_without_snapshot().test_value();
         assert_eq!(engine.frame(), 1);
-        engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(hut));
+        engine.spawn_test_object(SpawnConfig::new("ITM2").with_container(hut));
 
         engine.execute_player_controls().test_value();
         assert_eq!(engine.frame(), 1, "the immediate refill advances no frame");
@@ -17143,7 +17240,21 @@ protected func CalcValue(object base, int player)
             .iter()
             .find(|item| item.item_id == "ITEM")
             .test_value();
-        assert_eq!(item.count, 2);
+        assert_eq!(item.count, 1);
+        assert_eq!(
+            menu.items
+                .iter()
+                .find(|item| item.item_id == "ITM2")
+                .test_value()
+                .count,
+            1
+        );
+        assert_eq!(menu.items.len(), 3);
+        assert_eq!(
+            menu.location_reset_generation,
+            initial_location_generation.wrapping_add(1),
+            "C4ObjectMenu::RefillInternal marks a growing refill (C4Menu.cpp:947-970)",
+        );
         assert_eq!(
             menu.refill_object_contents_count, 3,
             "the cache includes the contained crew and both sale objects"
