@@ -2220,19 +2220,4 @@ impl GameApp {
             sha1: Sha1::digest(&on_disk).into(),
         })
     }
-
-    /// Whether a failed command-line record stream ends the process.
-    ///
-    /// A nonempty `RecordStream` clears `UseStartupDialog` (C4Game.cpp:3299),
-    /// so its failed `OpenGame` unwinds `QuitGame` into `Quit` rather than
-    /// reconstructing a startup dialog (C4Application.cpp:376-404,438-450).
-    ///
-    /// Reachable from `run_headless_server`, which starts a command-line record
-    /// stream itself and drives the asynchronous failure through `poll_loading`.
-    /// `!console_mode` still carries the whole condition: it is C++'s
-    /// `isFullScreen`, which only `/console` clears (C4Game.cpp:3295-3296), so a
-    /// dedicated server quits here exactly like a fullscreen run.
-    pub(crate) fn failed_record_stream_exits(&self) -> bool {
-        !self.console_mode && self.classic_record_stream_activation_pending
-    }
 }
