@@ -4470,7 +4470,10 @@ fn options_gamepad_device_claim_switches_and_releases() {
         .restore_sheet(OptionsSheet::Network);
     app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(OptionsSheet::Network)])
         .test_value();
-    assert_eq!(app.gamepads.options_open_slot(), None);
+    // Leaving the sheet does not drop the claim: only `~ControlConfigArea`
+    // deletes `C4GamePadOpener`, and that area lives as long as the dialog
+    // (`C4StartupOptionsDlg.cpp:344-352,988-991`).
+    assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
 
     app.startup_options_dialog
         .as_mut()
@@ -4589,6 +4592,56 @@ fn factory_default_control_sheets_show_empty_captions_for_unbound_slots() {
 // IDS_MSG_PRESSKEY/IDS_MSG_PRESSBTN — the very same `IDS_CTL_*` string the key
 // button draws beside its cap (:242). The prompt must therefore quote the sheet's
 // own label, not a second hand-written name.
+/// `KeySelDialog::KeyDown` rejects only a gamepad/keyboard mismatch and the
+/// wrong pad, then stores the raw code and closes
+/// (`C4StartupOptionsDlg.cpp:189-200`) — there is no "supported key" filter, so
+/// every key ends the capture. The port used to consume codes its config codec
+/// cannot encode without rebinding or closing, leaving the modal up.
+#[test]
+fn control_capture_accepts_every_key_including_ones_the_codec_cannot_encode() {
+    use clonk_frontend::startup_options_controls::{ControlCaptureTarget, ControlDevice};
+    use clonk_frontend::startup_options_dlg::OptionsDlgAction;
+
+    let mut app = new_classic_menu_app(640, 480);
+    app.open_options_menu();
+    let target = ControlCaptureTarget {
+        device: ControlDevice::Keyboard,
+        set: 1,
+        control: ControlBindingId::Dig as usize,
+    };
+
+    // Codec coverage is per-platform, so the list is filtered at runtime rather
+    // than asserting which of these any one target rejects.
+    for key in [
+        VirtualKeyCode::AudioVolumeUp,
+        VirtualKeyCode::MediaPlayPause,
+        VirtualKeyCode::BrowserHome,
+        VirtualKeyCode::Power,
+        VirtualKeyCode::KeyQ,
+    ] {
+        app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
+            .test_value();
+        assert!(
+            app.message_dialogs.last().is_some(),
+            "capture modal is up for {key:?}"
+        );
+        app.test_key(key, ElementState::Pressed);
+        assert!(
+            !app.message_dialogs.last().is_some_and(|dialog| matches!(
+                dialog.continuation,
+                MessageDialogContinuation::OptionsControlCapture(open) if open == target
+            )),
+            "{key:?} must close the capture modal whether or not it persists"
+        );
+        assert_eq!(
+            app.bindings.key_for_set(1, ControlBindingId::Dig),
+            Some(key),
+            "{key:?} binds for the session"
+        );
+        app.test_key(key, ElementState::Released);
+    }
+}
+
 #[test]
 fn control_capture_prompt_quotes_the_sheet_label_for_every_control() {
     use clonk_frontend::startup_options_controls::{
