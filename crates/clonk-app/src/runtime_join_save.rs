@@ -3,6 +3,7 @@
 //! This is the Rust counterpart of
 //! `C4PlayerInfoList::SetAsRestoreInfos(PlayerInfos, true, true, true, true)`.
 
+use clonk_engine::savegame_association::legacy_basename;
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -334,12 +335,6 @@ fn runtime_user_player_filename(
 fn runtime_script_player_filename(player_info_id: i32) -> LegacyCString {
     LegacyCString::from_bytes(format!("ScriptPlr-{player_info_id}.c4p").into_bytes())
         .expect("script restore filename is static ASCII")
-}
-
-fn legacy_basename(path: &[u8]) -> &[u8] {
-    path.iter()
-        .rposition(|byte| matches!(*byte, b'/' | b'\\'))
-        .map_or(path, |separator| &path[separator + 1..])
 }
 
 fn encode_local_group_filename(filename: &[u8]) -> Vec<u8> {

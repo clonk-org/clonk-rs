@@ -79,9 +79,11 @@ fn legacy_bytes_equal_no_case(left: &[u8], right: &[u8]) -> bool {
             .all(|(left, right)| capital(*left) == capital(*right))
 }
 
-/// `GetFilename`: the component after the last separator, either slash, because
-/// a config written on Windows is read on unix and the reverse.
-fn legacy_basename(path: &[u8]) -> &[u8] {
+/// `GetFilename` (`StdFile.cpp:43-49`): the component after the last separator.
+///
+/// Shared with the runtime-join filename derivation, which composes this same
+/// helper's result (`C4PlayerInfo.cpp:1665`).
+pub fn legacy_basename(path: &[u8]) -> &[u8] {
     path.iter()
         .rposition(|byte| matches!(*byte, b'/' | b'\\'))
         .map_or(path, |separator| &path[separator + 1..])
