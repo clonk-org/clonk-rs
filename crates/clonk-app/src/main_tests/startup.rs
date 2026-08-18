@@ -3441,6 +3441,47 @@ fn failed_local_scenario_load_reinitializes_the_startup_loader_screen() {
 }
 
 #[test]
+fn a_command_line_scenario_that_fails_to_load_ends_the_process() {
+    // `ParseCommandLine` clears `UseStartupDialog` for an explicit scenario
+    // (C4Game.cpp:3299), so the failed `OpenGame` unwinds `QuitGame` into
+    // `Quit()` rather than reconstructing a startup dialog
+    // (C4Application.cpp:373-405,438-450). Settling into `AppMode::Menu`
+    // instead leaves a headless server running with nothing to run and no
+    // menu it could ever draw.
+    let mut app = new_state_only_menu_app(320, 200);
+    app.headless = true;
+    app.classic_command_line.scenario = Some(PathBuf::from("Broken.c4s"));
+    app.mode = AppMode::Loading;
+
+    app.finish_scenario_loading_failure("controlled command-line load failure".to_string(), false)
+        .test_value();
+
+    assert!(
+        app.take_exit_request(),
+        "there is no startup generation to return to"
+    );
+
+    // A console `/open` failure is the other branch: `/open` sets
+    // `UseStartupDialog` back (C4Application.cpp:598-612), so the engine
+    // returns to `C4AS_Startup` and waits for the operator's next command.
+    let mut opened = new_state_only_menu_app(320, 200);
+    opened.headless = true;
+    opened.classic_command_line.scenario = Some(PathBuf::from("Broken.c4s"));
+    opened.console_restored_startup_dialog = true;
+    opened.mode = AppMode::Loading;
+
+    opened
+        .finish_scenario_loading_failure("controlled /open load failure".to_string(), false)
+        .test_value();
+
+    assert_eq!(opened.mode, AppMode::Menu);
+    assert!(
+        !opened.take_exit_request(),
+        "a console-opened failure waits for the next command instead"
+    );
+}
+
+#[test]
 fn pathless_startup_skips_boot_worker_without_bypassing_loader_failure() {
     let mut app = test_game_app(320, 200, AudioOptions::default(), None).test_value();
     install_classic_test_assets(&mut app);
@@ -5354,7 +5395,7 @@ fn a_dedicated_server_quits_when_its_command_line_record_stream_fails() {
     app.classic_record_stream_activation_pending = true;
     app.mode = AppMode::Loading;
 
-    assert!(app.failed_record_stream_exits());
+    assert!(!app.startup_dialog_in_use());
     app.finish_scenario_loading_failure("controlled headless load failure".to_string(), false)
         .test_value();
 

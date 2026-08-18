@@ -5201,10 +5201,12 @@ impl GameApp {
                     self.status_text = format!("Unable to start command-line scenario: {error}");
                     failed = true;
                 }
-                if failed && self.failed_record_stream_exits() {
-                    // ParseCommandLine disables the startup dialog for a
-                    // nonempty RecordStream. A failed StreamToRecord therefore
-                    // ends the application instead of exposing the main menu.
+                if failed && !self.startup_dialog_in_use() {
+                    // ParseCommandLine disables the startup dialog for an
+                    // explicit scenario, direct join or record stream
+                    // (C4Game.cpp:3299), so their failed start unwinds
+                    // `QuitGame` into `Quit()` rather than exposing a main menu
+                    // this run never came from (C4Application.cpp:373-405).
                     self.request_exit("a command-line scenario failed to start");
                     return;
                 }

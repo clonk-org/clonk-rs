@@ -865,7 +865,12 @@ impl GameApp {
         self.network_start_wait = None;
         self.mode = AppMode::Menu;
         self.restore_startup_fonts();
-        if prepared_go || self.failed_record_stream_exits() {
+        // `QuitGame` reconstructs a startup dialog only when one is in use and
+        // otherwise reaches `Quit()` (C4Application.cpp:373-405), so a start
+        // with no startup generation behind it ends the process rather than
+        // settling into a menu it never came from — which on a headless server
+        // is a silent hang with nothing left to run.
+        if prepared_go || !self.startup_dialog_in_use() {
             self.request_exit("a scenario failed to load with no menu to return to");
         } else if returns_to_startup {
             if let Some(audio) = self.audio.as_mut() {
