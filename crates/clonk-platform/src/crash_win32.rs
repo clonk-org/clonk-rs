@@ -395,13 +395,45 @@ pub struct ExceptionSummary {
     pub registers: X64Registers,
     /// `ContextRecord->EFlags`.
     pub eflags: u32,
+    /// What the handler collected after the register block, or `None` for a
+    /// summary that describes no attempt at all — which is what keeps the
+    /// report composable, and assertable, off Windows.
+    pub walk: Option<CollectedWalk>,
+}
+
+/// What the handler read out of DbgHelp and Toolhelp32
+/// (`C4CrashHandlerWin32.cpp:252-352`).
+///
+/// Each half is separately `None` because each fails separately: C++ reports a
+/// refusal line for a DbgHelp that will not initialize, and passes a module
+/// snapshot it never obtained over in silence.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CollectedWalk {
+    /// `StackWalk64`'s frames, or `None` when `SymInitialize` failed.
+    pub frames: Option<Vec<StackFrame>>,
+    /// The `TH32CS_SNAPMODULE` snapshot, or `None` when one was never taken.
+    pub modules: Option<Vec<LoadedModule>>,
 }
 
 /// Assembles the human-readable report `SafeTextDump` writes to the log
-/// descriptor (`C4CrashHandlerWin32.cpp:86-202`) for one exception.
+/// descriptor (`C4CrashHandlerWin32.cpp:86-352`) for one exception.
+///
+/// The walk and the module list are collected by the handler, so a summary
+/// carrying neither composes exactly the report it did before they existed.
 pub fn compose_report(exception: &ExceptionSummary, dump_filename: Option<&str>) -> String {
+    let walk = exception
+        .walk
+        .as_ref()
+        .map(|walk| {
+            format!(
+                "{}{}",
+                stack_trace_section(walk.frames.as_deref()),
+                loaded_modules_section(walk.modules.as_deref()),
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{walk}",
         report_header(exception.code, dump_filename),
         exception_description(exception.code),
         continuable_line(exception.exception_flags),
@@ -419,22 +451,35 @@ pub use windows_impl::{
 #[cfg(windows)]
 mod windows_impl {
     use super::{
-        compose_report, crash_dialog_text, crash_dump_filename, ExceptionSummary, X64Registers,
+        compose_report, crash_dialog_text, crash_dump_filename, CollectedWalk, ExceptionSummary,
+        LoadedModule, SourceLocation, StackFrame, SymbolMatch, X64Registers,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, SYSTEMTIME};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_BAD_LENGTH, HANDLE, INVALID_HANDLE_VALUE, SYSTEMTIME,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileA, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
         FILE_SHARE_READ,
     };
     use windows_sys::Win32::System::Diagnostics::Debug::{
+        AddrModeFlat, StackWalk64, SymCleanup, SymFromAddr, SymFunctionTableAccess64,
+        SymGetLineFromAddr64, SymGetModuleBase64, SymGetModuleInfo64, SymInitialize, SymSetOptions,
+        CONTEXT, IMAGEHLP_LINE64, IMAGEHLP_MODULE64, STACKFRAME64, SYMBOL_INFO,
+        SYMOPT_DEFERRED_LOADS, SYMOPT_LOAD_LINES, SYMOPT_UNDNAME,
+    };
+    use windows_sys::Win32::System::Diagnostics::Debug::{
         MiniDumpNormal, MiniDumpWriteDump, SetUnhandledExceptionFilter, EXCEPTION_POINTERS,
         MINIDUMP_EXCEPTION_INFORMATION,
     };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
+    };
     use windows_sys::Win32::System::SystemInformation::GetSystemTime;
+    use windows_sys::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_AMD64;
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
+        GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, GetCurrentThreadId,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxA, MB_ICONERROR};
 
@@ -466,6 +511,180 @@ mod windows_impl {
     extern "C" {
         #[link_name = "_write"]
         fn crt_write(fd: i32, buf: *const std::ffi::c_void, count: u32) -> i32;
+    }
+
+    /// `constexpr size_t DumpBufferSize = 2048` (:49-51), which is what bounds
+    /// the symbol name DbgHelp is allowed to write back.
+    const DUMP_BUFFER_SIZE: usize = 2048;
+
+    /// `SYMBOL_INFO` plus the name bytes that follow it.
+    ///
+    /// DbgHelp writes the undecorated name straight past the end of the struct,
+    /// so the storage has to be one allocation with the header at its front —
+    /// which is exactly what C++'s single `SymbolBuffer` is.
+    #[repr(C)]
+    struct SymbolBuffer {
+        info: SYMBOL_INFO,
+        name: [u8; DUMP_BUFFER_SIZE - std::mem::size_of::<SYMBOL_INFO>()],
+    }
+
+    /// Reads a `MODULEENTRY32W` fixed wide-character array up to its first NUL.
+    /// An unterminated field yields the whole array, which is what the C `%ls`
+    /// would print.
+    fn wide_string(field: &[u16]) -> String {
+        let end = field
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(field.len());
+        String::from_utf16_lossy(&field[..end])
+    }
+
+    /// Reads one of the NUL-terminated ANSI strings DbgHelp writes back.
+    ///
+    /// # Safety
+    ///
+    /// `start` must be null or point at a NUL-terminated string DbgHelp filled
+    /// in, and it must stay valid for the read.
+    unsafe fn narrow_string(start: *const i8) -> String {
+        if start.is_null() {
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(start.cast())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The symbolised walk and the loaded-module list
+    /// (`C4CrashHandlerWin32.cpp:252-352`).
+    ///
+    /// `StackWalk64` writes through the `CONTEXT` it is given, so it gets a copy
+    /// — C++ takes one for the same reason (:257).
+    pub(super) fn collect_walk(context: &CONTEXT) -> CollectedWalk {
+        CollectedWalk {
+            frames: walk_stack(context),
+            modules: snapshot_modules(),
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn walk_stack(context: &CONTEXT) -> Option<Vec<StackFrame>> {
+        // SAFETY: every call below is a documented DbgHelp entry point taking
+        // stack storage this function owns for the whole walk.
+        unsafe {
+            SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+            let process = GetCurrentProcess();
+            if SymInitialize(process, std::ptr::null(), 1) == 0 {
+                return None;
+            }
+            let mut walked: CONTEXT = *context;
+            let mut frame: STACKFRAME64 = std::mem::zeroed();
+            frame.AddrPC.Mode = AddrModeFlat;
+            frame.AddrStack.Mode = AddrModeFlat;
+            frame.AddrFrame.Mode = AddrModeFlat;
+            frame.AddrPC.Offset = walked.Rip;
+            frame.AddrStack.Offset = walked.Rsp;
+            // "Some compilers use rdi for their frame pointer instead. Let's
+            // hope they're in the minority." (:272-273).
+            frame.AddrFrame.Offset = walked.Rbp;
+
+            let mut frames = Vec::new();
+            while StackWalk64(
+                IMAGE_FILE_MACHINE_AMD64 as u32,
+                process,
+                GetCurrentThread(),
+                &mut frame,
+                (&mut walked as *mut CONTEXT).cast(),
+                None,
+                Some(SymFunctionTableAccess64),
+                Some(SymGetModuleBase64),
+                None,
+            ) != 0
+            {
+                frames.push(resolve_frame(process, frame.AddrPC.Offset));
+            }
+            SymCleanup(process);
+            Some(frames)
+        }
+    }
+
+    /// A build for an architecture whose `STACKFRAME64` seeding this port has
+    /// not written declines rather than walking from a zeroed frame.
+    #[cfg(not(target_arch = "x86_64"))]
+    fn walk_stack(_context: &CONTEXT) -> Option<Vec<StackFrame>> {
+        None
+    }
+
+    /// The module, symbol and line lookups one frame's address feeds
+    /// (`C4CrashHandlerWin32.cpp:293-322`).
+    ///
+    /// # Safety
+    ///
+    /// `process` must be the handle `SymInitialize` succeeded for, and the walk
+    /// it belongs to must not have been cleaned up yet.
+    unsafe fn resolve_frame(process: HANDLE, address: u64) -> StackFrame {
+        let mut module: IMAGEHLP_MODULE64 = std::mem::zeroed();
+        module.SizeOfStruct = std::mem::size_of::<IMAGEHLP_MODULE64>() as u32;
+        let resolved_module = SymGetModuleInfo64(process, address, &mut module) != 0;
+
+        let mut symbol: SymbolBuffer = std::mem::zeroed();
+        symbol.info.SizeOfStruct = std::mem::size_of::<SYMBOL_INFO>() as u32;
+        symbol.info.MaxNameLen = (DUMP_BUFFER_SIZE - std::mem::size_of::<SYMBOL_INFO>()) as u32;
+        let mut displacement = 0u64;
+        let resolved_symbol =
+            SymFromAddr(process, address, &mut displacement, &mut symbol.info) != 0;
+
+        let mut line: IMAGEHLP_LINE64 = std::mem::zeroed();
+        line.SizeOfStruct = std::mem::size_of::<IMAGEHLP_LINE64>() as u32;
+        let mut column = 0u32;
+        let resolved_line = SymGetLineFromAddr64(process, address, &mut column, &mut line) != 0;
+
+        StackFrame {
+            address,
+            module: resolved_module.then(|| narrow_string(module.ModuleName.as_ptr())),
+            image_base: resolved_module.then_some(module.BaseOfImage),
+            symbol: resolved_symbol.then(|| SymbolMatch {
+                name: narrow_string(symbol.info.Name.as_ptr()),
+                displacement,
+            }),
+            source: resolved_line.then(|| SourceLocation {
+                file: narrow_string(line.FileName.cast_const().cast()),
+                line: line.LineNumber,
+            }),
+        }
+    }
+
+    /// The `TH32CS_SNAPMODULE` walk (`C4CrashHandlerWin32.cpp:332-352`).
+    ///
+    /// The retry loop is C++'s: `CreateToolhelp32Snapshot` reports
+    /// `ERROR_BAD_LENGTH` when the module list changed under it, and that alone
+    /// is worth asking again for.
+    fn snapshot_modules() -> Option<Vec<LoadedModule>> {
+        // SAFETY: the snapshot handle is closed on every path out, and both
+        // enumerators fill storage this function owns.
+        unsafe {
+            let mut snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
+            while snapshot == INVALID_HANDLE_VALUE {
+                if GetLastError() != ERROR_BAD_LENGTH {
+                    return None;
+                }
+                snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
+            }
+            let mut entry: MODULEENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+            let mut modules = Vec::new();
+            let mut present = Module32FirstW(snapshot, &mut entry) != 0;
+            while present {
+                modules.push(LoadedModule {
+                    name: wide_string(&entry.szModule),
+                    base: entry.modBaseAddr as u64,
+                    size: entry.modBaseSize as u64,
+                    path: wide_string(&entry.szExePath),
+                });
+                present = Module32NextW(snapshot, &mut entry) != 0;
+            }
+            CloseHandle(snapshot);
+            Some(modules)
+        }
     }
 
     /// Installs the one-shot unhandled-exception filter
@@ -603,6 +822,7 @@ mod windows_impl {
         {
             exception.registers = registers_from_context(context);
             exception.eflags = context.EFlags;
+            exception.walk = Some(collect_walk(context));
         }
         let user_path = USER_PATH
             .lock()
@@ -764,6 +984,56 @@ mod tests {
             stack_frame_line(2, &beyond_four_gigabytes),
             "#  2 huge+0x5678\n",
             "C's `long` is 32 bits here, so the high half never reaches the report"
+        );
+    }
+
+    /// C4CrashHandlerWin32.cpp:202-352 — the walk and the module list follow
+    /// the register block, in that order, and only when the handler collected
+    /// them. A report composed without either is byte-for-byte what it was.
+    #[test]
+    fn the_report_appends_the_trace_and_modules_after_the_registers() {
+        let exception = ExceptionSummary {
+            code: EXCEPTION_ILLEGAL_INSTRUCTION,
+            eflags: 0x40,
+            ..ExceptionSummary::default()
+        };
+        let bare = compose_report(&exception, None);
+
+        let walk = CollectedWalk {
+            frames: Some(vec![StackFrame {
+                address: 0x7ff6_1234_5678,
+                module: Some("clonk-game".to_owned()),
+                image_base: Some(0x7ff6_1234_0000),
+                symbol: Some(SymbolMatch {
+                    name: "main".to_owned(),
+                    displacement: 0x2a,
+                }),
+                source: None,
+            }]),
+            modules: Some(vec![LoadedModule {
+                name: "clonk-game.exe".to_owned(),
+                base: 0x7ff6_1234_0000,
+                size: 0x4_5000,
+                path: "C:\\Games\\Clonk\\clonk-game.exe".to_owned(),
+            }]),
+        };
+        let walked = ExceptionSummary {
+            walk: Some(walk.clone()),
+            ..exception.clone()
+        };
+
+        assert_eq!(
+            compose_report(&walked, None),
+            format!(
+                "{bare}{}{}",
+                stack_trace_section(walk.frames.as_deref()),
+                loaded_modules_section(walk.modules.as_deref()),
+            )
+        );
+        assert!(
+            compose_report(&walked, None)
+                .contains("EFLAGS: 0x00000040 (...Z...)\n\nStack trace:\n"),
+            "the trace follows the register block directly"
         );
     }
 
@@ -1037,6 +1307,49 @@ mod tests {
         );
     }
 
+    /// C4CrashHandlerWin32.cpp:252-352 — the walk and the snapshot themselves,
+    /// driven from a context captured in this thread.
+    ///
+    /// The filter's own `CONTEXT` cannot be obtained without crashing the
+    /// harness, but `RtlCaptureContext` produces one of exactly the shape
+    /// `StackWalk64` is handed, so this exercises the same DbgHelp and
+    /// Toolhelp32 wiring the handler uses.
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[test]
+    fn a_captured_context_walks_this_thread_and_lists_this_process_s_modules() {
+        use windows_sys::Win32::System::Diagnostics::Debug::{RtlCaptureContext, CONTEXT};
+
+        // SAFETY: RtlCaptureContext fills the whole aligned structure.
+        let context = unsafe {
+            let mut context: CONTEXT = std::mem::zeroed();
+            RtlCaptureContext(&mut context);
+            context
+        };
+        let walk = super::windows_impl::collect_walk(&context);
+
+        let frames = walk
+            .frames
+            .as_deref()
+            .expect("DbgHelp initializes inside our own process");
+        assert!(
+            !frames.is_empty(),
+            "a captured context walks at least its own frame: {}",
+            stack_trace_section(Some(frames))
+        );
+
+        let modules = walk
+            .modules
+            .as_deref()
+            .expect("a module snapshot of our own process");
+        assert!(
+            modules
+                .iter()
+                .any(|module| module.name.to_ascii_lowercase().ends_with(".exe")),
+            "the snapshot names the running executable: {}",
+            loaded_modules_section(Some(modules))
+        );
+    }
+
     // C4CrashHandlerWin32.cpp:360-470 — one exception produces the log report,
     // a timestamped minidump under the user path, and the dialog body naming
     // both. The OS-invoked filter itself cannot run in-process without killing
@@ -1057,6 +1370,9 @@ mod tests {
             parameters: vec![1, 0xDEAD_BEEF],
             registers,
             eflags: 0x40,
+            // The artifact path is what this pins; the walk is driven from a
+            // real captured context by its own test.
+            walk: None,
         };
         let artifacts =
             super::crash_artifacts_for(user_path, Some("C:\\Clonk.log"), &exception, None);
