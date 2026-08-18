@@ -12,9 +12,34 @@
 //! because the tiers this is meant to police — GLES 3 and software adapters —
 //! are exactly the ones CI runners do not have.
 
+/// Optional wgpu features interactive play requires: none.
+///
+/// Timestamp queries are opt-in (`WindowSurfaceBuildOptions`) and the renderer
+/// runs without them, so nothing here may become non-empty without a matching
+/// change to the support matrix in `docs/GRAPHICS_SUPPORT.md`.
+pub const REQUIRED_FEATURES: wgpu::Features = wgpu::Features::empty();
+
+/// What the frame-buffer texture is created with: it is uploaded to and
+/// sampled, and nothing else.
+pub const REQUIRED_BUFFER_USAGES: wgpu::TextureUsages =
+    wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST);
+
+/// The 2D texture dimension the floor promises, which is what GLES 3.0 and
+/// WebGL2 both guarantee.
+///
+/// An adapter offering more is used to the full — the device asks for
+/// `adapter.limits()` — so this bounds what the port may *require*, not what it
+/// may use.
+pub const MINIMUM_TEXTURE_DIMENSION_2D: u32 = 2048;
+
 /// One unmet requirement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MissingCapability {
+    /// The adapter cannot both upload to and sample the frame-buffer format.
+    BufferUsages {
+        needed: wgpu::TextureUsages,
+        available: wgpu::TextureUsages,
+    },
     /// Presentation composites in byte space and relies on the surface encode
     /// to restore those bytes, so an sRGB surface format is required.
     SrgbSurfaceFormat,
@@ -35,6 +60,10 @@ impl std::fmt::Display for MissingCapability {
                 formatter,
                 "the requested {needed}px buffer exceeds the adapter's \
                  max_texture_dimension_2d of {available}px"
+            ),
+            Self::BufferUsages { needed, available } => write!(
+                formatter,
+                "the frame buffer format supports {available:?}, and presentation needs {needed:?}"
             ),
             Self::ZeroExtent => formatter.write_str("the requested buffer extent is zero"),
         }
@@ -78,12 +107,20 @@ impl std::fmt::Display for CapabilityReport {
 pub fn probe_capabilities(
     surface_formats: &[wgpu::TextureFormat],
     max_texture_dimension_2d: u32,
+    buffer_format_usages: wgpu::TextureUsages,
     buffer_extent: (u32, u32),
 ) -> CapabilityReport {
     let mut missing = Vec::new();
 
     if !surface_formats.iter().any(|format| format.is_srgb()) {
         missing.push(MissingCapability::SrgbSurfaceFormat);
+    }
+
+    if !buffer_format_usages.contains(REQUIRED_BUFFER_USAGES) {
+        missing.push(MissingCapability::BufferUsages {
+            needed: REQUIRED_BUFFER_USAGES,
+            available: buffer_format_usages,
+        });
     }
 
     let (width, height) = buffer_extent;
@@ -113,7 +150,8 @@ mod tests {
 
     #[test]
     fn an_adapter_meeting_the_floor_reports_nothing_missing() {
-        let report = probe_capabilities(&[LINEAR, SRGB], 8192, (1920, 1080));
+        let report =
+            probe_capabilities(&[LINEAR, SRGB], 8192, REQUIRED_BUFFER_USAGES, (1920, 1080));
         assert!(report.is_supported());
         assert_eq!(report.to_string(), "the adapter meets the graphics floor");
     }
@@ -123,13 +161,13 @@ mod tests {
     /// does not have.
     #[test]
     fn a_surface_without_an_srgb_format_is_below_the_floor() {
-        let report = probe_capabilities(&[LINEAR], 8192, (640, 480));
+        let report = probe_capabilities(&[LINEAR], 8192, REQUIRED_BUFFER_USAGES, (640, 480));
         assert_eq!(report.missing, vec![MissingCapability::SrgbSurfaceFormat]);
     }
 
     #[test]
     fn a_buffer_larger_than_the_texture_limit_names_both_numbers() {
-        let report = probe_capabilities(&[SRGB], 2048, (4096, 1080));
+        let report = probe_capabilities(&[SRGB], 2048, REQUIRED_BUFFER_USAGES, (4096, 1080));
         assert_eq!(
             report.missing,
             vec![MissingCapability::TextureDimension {
@@ -145,7 +183,7 @@ mod tests {
     /// from one diagnostic instead of fixing one and being told about the next.
     #[test]
     fn every_missing_requirement_is_reported_together() {
-        let report = probe_capabilities(&[LINEAR], 1024, (4096, 4096));
+        let report = probe_capabilities(&[LINEAR], 1024, REQUIRED_BUFFER_USAGES, (4096, 4096));
         assert_eq!(
             report.missing,
             vec![
@@ -161,9 +199,56 @@ mod tests {
         assert!(rendered.contains("max_texture_dimension_2d"), "{rendered}");
     }
 
+    /// The floor is *declared*, not inferred from whatever the renderer
+    /// happens to ask for today. This is the gate the issue asks for: a
+    /// dependency or renderer change that needs an optional feature, a wider
+    /// usage set or a larger texture than GLES 3.0 guarantees fails here
+    /// instead of silently raising the bar for every user.
+    #[test]
+    fn the_declared_floor_is_what_the_renderer_actually_requires() {
+        assert_eq!(
+            REQUIRED_FEATURES,
+            wgpu::Features::empty(),
+            "interactive play requires no optional wgpu feature; timestamp \
+             queries are opt-in and degrade when absent"
+        );
+        assert_eq!(
+            REQUIRED_BUFFER_USAGES,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            "the frame buffer is uploaded to and sampled, and nothing else"
+        );
+        assert_eq!(
+            MINIMUM_TEXTURE_DIMENSION_2D, 2048,
+            "GLES 3.0 and WebGL2 both guarantee 2048, which is what the floor \
+             promises and no more"
+        );
+    }
+
+    /// An adapter whose format features do not cover what the frame buffer is
+    /// created with cannot present at all, and says so in the same diagnostic
+    /// as everything else it is missing.
+    #[test]
+    fn a_format_without_the_buffer_usages_is_below_the_floor() {
+        let report = probe_capabilities(
+            &[SRGB],
+            8192,
+            wgpu::TextureUsages::TEXTURE_BINDING,
+            (640, 480),
+        );
+
+        assert_eq!(
+            report.missing,
+            vec![MissingCapability::BufferUsages {
+                needed: REQUIRED_BUFFER_USAGES,
+                available: wgpu::TextureUsages::TEXTURE_BINDING,
+            }]
+        );
+        assert!(report.to_string().contains("COPY_DST"), "{report}");
+    }
+
     #[test]
     fn a_zero_extent_is_reported_without_a_dimension_comparison() {
-        let report = probe_capabilities(&[SRGB], 8192, (0, 480));
+        let report = probe_capabilities(&[SRGB], 8192, REQUIRED_BUFFER_USAGES, (0, 480));
         assert_eq!(report.missing, vec![MissingCapability::ZeroExtent]);
     }
 }

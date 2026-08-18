@@ -273,6 +273,9 @@ impl WindowSurface {
         let report = crate::capability::probe_capabilities(
             &capabilities.formats,
             max_texture_dimension_2d,
+            adapter
+                .get_texture_format_features(BUFFER_FORMAT)
+                .allowed_usages,
             buffer_extent,
         );
         if !report.is_supported() {
@@ -608,7 +611,9 @@ fn create_buffer_texture(device: &wgpu::Device, extent: (u32, u32)) -> wgpu::Tex
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: BUFFER_FORMAT,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        // The floor declares these, and the probe refuses an adapter whose
+        // format features do not cover them, so the two cannot drift apart.
+        usage: crate::capability::REQUIRED_BUFFER_USAGES,
         view_formats: &[],
     })
 }
@@ -616,6 +621,22 @@ fn create_buffer_texture(device: &wgpu::Device, extent: (u32, u32)) -> wgpu::Tex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The device request must never ask for more than the published floor.
+    ///
+    /// Timestamp queries are the one optional feature this build touches, and
+    /// they are opt-in: with them off the request is exactly the floor, so a
+    /// new required feature has to change `docs/GRAPHICS_SUPPORT.md` and this
+    /// assertion together rather than raising the bar silently.
+    #[test]
+    fn the_device_request_asks_for_nothing_beyond_the_published_floor() {
+        let without_queries = timestamp_query_status(false, wgpu::Features::TIMESTAMP_QUERY);
+
+        assert_eq!(
+            without_queries.required_features(),
+            crate::capability::REQUIRED_FEATURES
+        );
+    }
 
     #[test]
     fn timestamp_feature_is_not_requested_when_disabled() {
