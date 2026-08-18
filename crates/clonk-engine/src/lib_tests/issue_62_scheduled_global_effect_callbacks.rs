@@ -156,6 +156,57 @@ global func FxEngineGlobalTimer(target, object declared_but_unused, int time)
     }
 }
 
+/// Effect dispatch is measured before it is optimised: an effect-heavy tick
+/// spends most of `advance_tick` here, and the cost being chased is how often
+/// a `HostWorldContext` is *built*, not the shallow clone of one.
+///
+/// `tick_global_effects` builds one context per timer event, so the count
+/// tracks the number of firing effects rather than the tick. That is the
+/// number a narrower context or a reused scratch world has to move; pinning it
+/// keeps an "optimisation" that changes nothing honest.
+#[test]
+fn a_global_effect_tick_reports_one_world_context_build_per_timer_event() {
+    let mut engine = Engine::new();
+    assert_eq!(
+        engine.install_additional_global_scripts(&[(
+            "CountedScheduledGlobal.c".to_string(),
+            r#"#strict 2
+global func FxCountedScheduledTimer(target, object declared_but_unused, int time)
+{
+  return(0);
+}
+"#
+            .to_string(),
+        )]),
+        1
+    );
+    for number in 1..=3 {
+        let mut effect = scheduled_global_effect("CountedScheduled", None, None);
+        effect.number = number;
+        engine.global_effects.push(effect);
+    }
+
+    engine.reset_effect_dispatch_stats();
+    crate::TestValueExt::test_value(engine.tick_without_snapshot());
+
+    let stats = engine.effect_dispatch_stats();
+    assert_eq!(
+        stats.global_timer_events, 3,
+        "every scheduled global effect fires its timer once per tick"
+    );
+    assert_eq!(
+        stats.world_context_builds, stats.global_timer_events,
+        "each timer event builds its own context — the cost this measures"
+    );
+
+    // The counters observe; they must not carry into the next window.
+    engine.reset_effect_dispatch_stats();
+    assert_eq!(
+        engine.effect_dispatch_stats(),
+        EffectDispatchStats::default()
+    );
+}
+
 #[test]
 fn scheduled_global_tick_keeps_strict3_conversion_fail_safe() {
     // At strict 3, C4AulScriptFunc::Exec does not downgrade the mismatch;

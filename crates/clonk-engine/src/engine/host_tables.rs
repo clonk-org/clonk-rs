@@ -932,6 +932,7 @@ impl Engine {
     }
 
     pub(crate) fn host_world_context(&self) -> HostWorldContext {
+        self.record_effect_dispatch(|stats| stats.world_context_builds += 1);
         // Freeze the generation-stamped id lookup before a callback may hold
         // one object through `&mut`. Script-side spawns/removals are staged and
         // cannot change this vector until the context has been dropped.

@@ -2272,6 +2272,7 @@ impl Engine {
                 continue;
             };
 
+            self.record_effect_dispatch(|stats| stats.global_timer_events += 1);
             let world = self.host_world_context();
             let rng_state = self.rng.clone();
             let mut global_effects = std::mem::take(&mut self.global_effects);
