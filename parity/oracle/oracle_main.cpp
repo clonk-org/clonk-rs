@@ -1311,6 +1311,14 @@ public:
         Entry(C4ID id, int32_t count) : id{id}, count{count} {}
     };
 
+    // The parsed DefCore appends every entry it reads (C4IDList::CompileFunc,
+    // through Entry::CompileFunc), which is the only way the same ID can appear
+    // twice — SetIDCount can never produce one. Compiling CompileFunc itself
+    // would drag in StdCompiler and the whole group layer, so the oracle
+    // constructs the parsed result directly. Nothing under test comes from
+    // here: every accessor below is the extracted production code.
+    C4IDList(std::initializer_list<Entry> parsed) : content{parsed} {}
+
     void Clear();
     C4ID GetID(std::size_t index, int32_t *count = nullptr) const;
     int32_t GetIDCount(C4ID id, int32_t zeroDefaultValue = 0) const;
@@ -1476,6 +1484,93 @@ static void printC4IDList(const C4IDList &list)
     }
     printf("]");
 }
+
+namespace component_order_oracle
+{
+struct Case
+{
+    const char *name;
+    std::initializer_list<C4IDList::Entry> initial;
+    // An empty id means the row applies no SetIDCount.
+    const char *setId;
+    int32_t setCount;
+};
+
+// `C4IDList::Entry` takes a packed C4ID, so the rows name their IDs as text and
+// pack them here.
+static C4IDList::Entry entry(std::string_view id, int32_t count)
+{
+    return C4IDList::Entry{C4Id(id), count};
+}
+
+void printCases()
+{
+    const Case cases[] = {
+        // The shipped Bazooka DefCore: Components=METL=2;KLAS=1;ENAP=1;ENAP=1.
+        // A map keyed by ID reports three entries where GetNumberOfIDs says
+        // four, and ComponentConGain/Cutoff index this list by position.
+        {"bazooka_defcore",
+         {entry("METL", 2), entry("KLAS", 1), entry("ENAP", 1), entry("ENAP", 1)},
+         "", 0},
+        // The case a map cannot hold at all: it keeps one of the two counts.
+        {"repeat_unequal_counts", {entry("ROCK", 3), entry("ROCK", 7)}, "", 0},
+        // findId returns the first match, so a write by ID leaves the later
+        // repeat alone.
+        {"set_updates_the_first_repeat", {entry("ROCK", 3), entry("ROCK", 7)}, "ROCK", 9},
+        // An absent ID appends, which is what puts new entries at the end
+        // rather than in sorted position.
+        {"set_appends_when_absent", {entry("METL", 2)}, "WOOD", 5},
+        // A zero-count entry stays in the list and keeps its slot; with the
+        // default zeroDefVal, GetIDCount answers 0 for it exactly as it does
+        // for an ID that is not there at all.
+        {"zero_count_entry_is_retained", {entry("ZERO", 0), entry("IROC", 3)}, "", 0},
+        // Nothing sorts the list.
+        {"insertion_order_is_kept", {entry("ZZZZ", 1), entry("AAAA", 2)}, "", 0},
+    };
+
+    printf("\"component_order\":[");
+    for (std::size_t index = 0; index < std::size(cases); ++index)
+    {
+        const Case &test = cases[index];
+        C4IDList list{test.initial};
+
+        if (index) printf(",");
+        printf("{\"name\":\"%s\",\"initial\":", test.name);
+        printC4IDList(list);
+        printf(",\"set\":");
+        if (*test.setId)
+        {
+            printf("{\"id\":");
+            printC4ID(C4Id(test.setId));
+            printf(",\"count\":%d}", test.setCount);
+            list.SetIDCount(C4Id(test.setId), test.setCount, true);
+        }
+        else
+        {
+            printf("null");
+        }
+
+        printf(",\"entries\":");
+        printC4IDList(list);
+        printf(",\"number_of_ids\":%d,\"lookups\":[", list.GetNumberOfIDs());
+        // One lookup per distinct ID, in first-appearance order: that is the
+        // order findId resolves in, and a repeat must not produce two rows.
+        std::vector<C4ID> seen;
+        for (int32_t position = 0; position < list.GetNumberOfIDs(); ++position)
+        {
+            const C4ID id = list.GetID(static_cast<std::size_t>(position));
+            if (std::find(seen.begin(), seen.end(), id) != seen.end()) continue;
+            if (!seen.empty()) printf(",");
+            seen.push_back(id);
+            printf("{\"id\":");
+            printC4ID(id);
+            printf(",\"count\":%d}", list.GetIDCount(id));
+        }
+        printf("]}");
+    }
+    printf("]");
+}
+} // namespace component_order_oracle
 
 static void printCreatedIDs(
     const std::vector<C4ID> &created,
@@ -3481,6 +3576,12 @@ int main()
     // 16c. The four MatchingLevel passes RestoreSavegameInfos runs when it
     //      associates joining players with a savegame's stored players.
     savegame_matching_oracle::printCases();
+    printf(",\n");
+
+    // 16d. Component (C4IDList) order, which is inside the replay hash but had
+    //      no comparable field: the ordered entries, GetNumberOfIDs counting a
+    //      repeat twice, and GetIDCount resolving to the first match.
+    component_order_oracle::printCases();
     printf(",\n");
 
     // 17. Exact DigOutMaterialCast spawn arguments and the twenty following
