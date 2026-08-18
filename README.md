@@ -171,8 +171,8 @@ graphics, audio, scripts, text, and other assets under [`planet/`](planet/) and
 the [`content/`](content/) submodule remain under their own `COPYING` files,
 including the Clonk content license carried by the content submodule.
 
-The Eke Reloaded and Clonk Mars packs are redistributed under the specific
-permission and attribution terms recorded in
-[`content/THIRD_PARTY_GAME_CONTENT.md`](content/THIRD_PARTY_GAME_CONTENT.md),
-not under the source or general content licenses. Third-party Rust dependencies
-retain their own licenses.
+The Eke Reloaded and Clonk Mars packs are redistributed under separate,
+specifically granted permission, and the Metal & Magic and Queron 3 packs come
+from CCAN — none of them under the source or general content licenses. Establish
+the position for yourself before redistributing any of them. Third-party Rust
+dependencies retain their own licenses.
