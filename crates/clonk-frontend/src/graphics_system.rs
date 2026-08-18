@@ -788,6 +788,10 @@ pub struct GraphicsSystem {
     material_textures: Arc<HashMap<String, MaterialTextureSurface>>,
     /// C4MaterialCore presentation fields by lowercase material name.
     material_render_info: Arc<HashMap<String, MaterialRenderInfo>>,
+    /// Bumped whenever the material catalogue is replaced, so the packed
+    /// pattern atlas and slot table survive every landscape update in between.
+    material_catalogue_revision: u64,
+    shader_landscape_catalogue: crate::materials::MaterialAtlasCache,
     /// Persistent C++-style Surface32 counterpart. The retained PixelGrid
     /// clone anchors COW ancestry, allowing changed rectangles to patch the
     /// RGBA bytes without rebuilding the complete landscape.
@@ -908,6 +912,8 @@ impl GraphicsSystem {
             retained_lit_sky: None,
             material_textures: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
+            material_catalogue_revision: 0,
+            shader_landscape_catalogue: crate::materials::MaterialAtlasCache::default(),
             landscape_cache: None,
             column_ground_cache: None,
             column_liquid_cache: None,
@@ -1166,6 +1172,7 @@ impl GraphicsSystem {
                 })
                 .collect(),
         );
+        self.material_catalogue_revision = self.material_catalogue_revision.wrapping_add(1);
         self.landscape_cache = None;
     }
 
@@ -1174,6 +1181,7 @@ impl GraphicsSystem {
         textures: Arc<HashMap<String, MaterialTextureSurface>>,
     ) {
         self.material_textures = textures;
+        self.material_catalogue_revision = self.material_catalogue_revision.wrapping_add(1);
         self.landscape_cache = None;
     }
 
@@ -1182,6 +1190,7 @@ impl GraphicsSystem {
         render_info: Arc<HashMap<String, MaterialRenderInfo>>,
     ) {
         self.material_render_info = render_info;
+        self.material_catalogue_revision = self.material_catalogue_revision.wrapping_add(1);
         self.landscape_cache = None;
     }
 
@@ -5761,6 +5770,10 @@ impl GraphicsSystem {
                     bytes.to_vec(),
                     shading_plane,
                     &slots,
+                    &mut self.shader_landscape_catalogue,
+                    self.material_catalogue_revision,
+                    materials,
+                    textures,
                 );
                 self.pending_shader_landscape = self
                     .landscape_cache
