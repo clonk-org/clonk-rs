@@ -68,6 +68,7 @@ use crate::journal::{
     safe_child_name, InstallIdentity, Journal, JournalError, JournalStep, PreviousInstalledState,
     StepState, TransactionPhase,
 };
+use crate::recovery_registry;
 use crate::state::{InstalledState, InstalledStateSnapshot, StateError};
 use clonk_platform::AppPaths;
 use serde::{Deserialize, Serialize};
@@ -139,6 +140,12 @@ const DISPLAY_VERSION_VALUE: &[u8] = b"DisplayVersion\0";
 pub struct InstallLayout {
     root: PathBuf,
     bundle: bool,
+    /// Where the path-independent transaction pointers live.
+    ///
+    /// `None` — every production layout — resolves the per-user directory from
+    /// the environment when it is needed, so constructing a layout stays a pure
+    /// function of the path it is given. Tests name their own.
+    recovery_registry: Option<PathBuf>,
 }
 
 impl InstallLayout {
@@ -146,6 +153,7 @@ impl InstallLayout {
         Self {
             root: root.into(),
             bundle: false,
+            recovery_registry: None,
         }
     }
 
@@ -154,7 +162,23 @@ impl InstallLayout {
         Self {
             root: app_dir.into(),
             bundle: true,
+            recovery_registry: None,
         }
+    }
+
+    /// Points this layout at an explicit registry directory instead of the
+    /// per-user one.
+    pub fn with_recovery_registry(mut self, registry: impl Into<PathBuf>) -> Self {
+        self.recovery_registry = Some(registry.into());
+        self
+    }
+
+    /// The registry this install records its transaction in, or `None` when the
+    /// platform names no per-user directory to keep it in.
+    fn recovery_registry(&self) -> Option<PathBuf> {
+        self.recovery_registry
+            .clone()
+            .or_else(recovery_registry::default_dir)
     }
 
     /// The layout of a discovered installation.
@@ -1775,12 +1799,15 @@ where
         .then(|| present(&layout.root().join(BUNDLE_ICON)));
 
     journal.save(&work)?;
+    // Durable before the first tree is touched, and before the bundle can be
+    // moved out from under the sidecar this names.
+    remember_bundle_transaction(layout);
     if let Err(cause) = stager(layout, &steps, &nonce) {
         // The pending journal was durable before staging began. Remove it only
         // after every partial tree is gone; otherwise startup recovery retains
         // the exact nonce it needs to finish that cleanup.
         let cleaned = discard_transients(layout, &journal)
-            .and_then(|()| Journal::remove(&work).map_err(ApplyError::from));
+            .and_then(|()| finish_transaction(layout, &work).map_err(ApplyError::from));
         return Err(match cleaned {
             Ok(()) => cause,
             Err(failure) => ApplyError::RollbackFailed {
@@ -1830,7 +1857,7 @@ where
                     if signing_attempted {
                         resign_bundle(layout, ops)?;
                     }
-                    Journal::remove(&work)?;
+                    finish_transaction(layout, &work)?;
                     Ok(())
                 })();
                 match restored {
@@ -1848,7 +1875,7 @@ where
         });
     }
 
-    Journal::remove(&work)?;
+    finish_transaction(layout, &work)?;
     // Best effort by design: a software-inventory entry that lags by one
     // release is not worth undoing an update the user asked for.
     if let Err(error) = ops.set_installed_version(&plan.version) {
@@ -1911,16 +1938,37 @@ fn transaction_dir_for(layout: &InstallLayout) -> Result<PathBuf, ApplyError> {
     let Some(identity) = InstallIdentity::of(&root) else {
         return Ok(own);
     };
-    let Some(namespace) = own.parent() else {
+    let found = sibling_namespace_transaction(&own, identity)
+        .or_else(|| registered_transaction(layout, identity));
+    let Some(found) = found else {
         return Ok(own);
     };
-    let Ok(entries) = std::fs::read_dir(namespace) else {
-        return Ok(own);
-    };
+    // Move it into this bundle's own namespace rather than working out of the
+    // old one: every staged, backup and quarantine path is derived from
+    // `work_dir()`, so a transaction read from somewhere else would look for
+    // its backups under the new name and find nothing.
+    if own.exists() {
+        std::fs::remove_dir(&own).map_err(io("clearing the transaction directory", &own))?;
+    } else if let Some(namespace) = own.parent() {
+        // A bundle moved to a directory that has never hosted an update has no
+        // namespace of its own yet, and a rename cannot create one.
+        ensure_dir(namespace)?;
+    }
+    rename(&found, &own)?;
+    // The transaction now lives where this install derives it, and the entry
+    // that led here names a directory that no longer exists.
+    remember_bundle_transaction(layout);
+    Ok(own)
+}
+
+/// The transaction beside where this bundle sits, which is where a *renamed*
+/// bundle's own sidecar was left.
+fn sibling_namespace_transaction(own: &Path, identity: InstallIdentity) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(own.parent()?).ok()?;
     let mut adopted: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|candidate| *candidate != own)
+        .filter(|candidate| candidate != own)
         .filter(|candidate| {
             matches!(
                 Journal::load(candidate),
@@ -1931,18 +1979,80 @@ fn transaction_dir_for(layout: &InstallLayout) -> Result<PathBuf, ApplyError> {
     // Deterministic when more than one names this install, which only a
     // hand-edited namespace can produce.
     adopted.sort();
-    let Some(found) = adopted.into_iter().next() else {
-        return Ok(own);
-    };
-    // Move it into this bundle's own namespace rather than working out of the
-    // old one: every staged, backup and quarantine path is derived from
-    // `work_dir()`, so a transaction read from somewhere else would look for
-    // its backups under the new name and find nothing.
-    if own.exists() {
-        std::fs::remove_dir(&own).map_err(io("clearing the transaction directory", &own))?;
+    adopted.into_iter().next()
+}
+
+/// The transaction this install recorded before it moved, which is the only way
+/// back to a sidecar left in a directory the bundle no longer sits in.
+///
+/// The pointer alone never grants adoption: the journal it names is read and
+/// checked against this install's identity exactly as a sibling candidate is,
+/// so a stale entry — or one aimed by hand — reaches nothing.
+fn registered_transaction(layout: &InstallLayout, identity: InstallIdentity) -> Option<PathBuf> {
+    let registry = layout.recovery_registry()?;
+    let recorded = recovery_registry::locate(&registry, identity)?;
+    match Journal::load(&recorded) {
+        Ok(Some(journal)) if journal.install_identity == Some(identity) => Some(recorded),
+        // The transaction it named is finished or gone; an entry that leads
+        // nowhere is only a slower way of finding nothing next time.
+        _ => {
+            recovery_registry::forget(&registry, identity);
+            None
+        }
     }
-    rename(&found, &own)?;
-    Ok(own)
+}
+
+/// Records where this bundle's transaction is waiting, so recovery can find it
+/// again after a move that leaves the sidecar behind.
+///
+/// Best effort by design: the registry only widens what recovery reaches, so a
+/// registry that cannot be written costs the moved-bundle case and nothing
+/// else, and must never fail an update that is otherwise fine.
+fn remember_bundle_transaction(layout: &InstallLayout) {
+    if !layout.is_bundle() {
+        return;
+    }
+    let Ok(root) = canonical_install_root(layout) else {
+        return;
+    };
+    let (Some(identity), Some(registry)) = (InstallIdentity::of(&root), layout.recovery_registry())
+    else {
+        return;
+    };
+    if let Err(source) = recovery_registry::record(&registry, identity, &layout.work_dir(), &root) {
+        tracing::warn!(
+            ?source,
+            registry = %registry.display(),
+            "could not record where this install's update transaction is waiting"
+        );
+    }
+}
+
+/// Declares the transaction over: removes the journal, then the entry pointing
+/// at it.
+///
+/// In that order, because the journal is the authority. An entry outliving its
+/// journal is read as absent and dropped on the next lookup; a journal outliving
+/// its entry is still found wherever this install derives it.
+fn finish_transaction(layout: &InstallLayout, work: &Path) -> Result<(), JournalError> {
+    Journal::remove(work)?;
+    forget_bundle_transaction(layout);
+    Ok(())
+}
+
+/// Drops this bundle's registry entry, which finishing a transaction means.
+fn forget_bundle_transaction(layout: &InstallLayout) {
+    if !layout.is_bundle() {
+        return;
+    }
+    let Ok(root) = canonical_install_root(layout) else {
+        return;
+    };
+    let (Some(identity), Some(registry)) = (InstallIdentity::of(&root), layout.recovery_registry())
+    else {
+        return;
+    };
+    recovery_registry::forget(&registry, identity);
 }
 
 pub fn resume_interrupted_update_with(
@@ -2009,7 +2119,7 @@ pub fn resume_interrupted_update_with(
         if layout.is_bundle() {
             resign_bundle(layout, ops)?;
         }
-        Journal::remove(&work)?;
+        finish_transaction(layout, &work)?;
         return Ok(ResumeOutcome::RolledBack { version });
     }
 
@@ -2022,7 +2132,7 @@ pub fn resume_interrupted_update_with(
     prepare_commit(layout, &journal)?;
     installed_state.save_preserving_unknown(&layout.data_dir(), previous_state.raw())?;
     finish_commit(layout, &journal, ops)?;
-    Journal::remove(&work)?;
+    finish_transaction(layout, &work)?;
     Ok(ResumeOutcome::RolledForward { version })
 }
 
@@ -4015,6 +4125,170 @@ mod tests {
             std::fs::read_to_string(first_backup.join("System.c4g/Rank.txt"))
                 .expect("read retained first bundle backup"),
             "first bundle"
+        );
+    }
+
+    #[test]
+    fn a_bundle_moved_to_another_directory_still_recovers_its_own_transaction() {
+        // The sibling-namespace search only reaches a rename: it looks beside
+        // where the bundle is *now*. Moving one to a different parent leaves
+        // the sidecar in the old namespace entirely, so the transaction is
+        // found through the registry the apply recorded, which is keyed by the
+        // install's filesystem identity and derived from no install path.
+        let directory = TempDir::new().expect("volume");
+        let registry = directory.path().join("registry");
+        let old_parent = directory.path().join("Downloads");
+        let new_parent = directory.path().join("Applications");
+        std::fs::create_dir_all(&old_parent).expect("old parent");
+        std::fs::create_dir_all(&new_parent).expect("new parent");
+
+        let original = InstallLayout::macos_bundle(old_parent.join("Clonk.app"))
+            .with_recovery_registry(&registry);
+        write_file(&original.root().join("Contents/Info.plist"), "metadata");
+        write_file(&original.data_dir().join("Graphics.c4g/Keep.txt"), "kept");
+        let nonce = "moved-mid-update";
+        write_file(
+            &original
+                .quarantine_dir(nonce)
+                .join("planet/System.c4g/Rank.txt"),
+            "the interrupted install",
+        );
+
+        let mut step = JournalStep::new("planet", &"aa".repeat(32), "Contents/Resources/planet");
+        step.state = StepState::BackupMoved;
+        step.destination_existed = Some(true);
+        let mut journal = Journal::new(
+            "0.7.0",
+            nonce,
+            canonical_install_root(&original).expect("canonical bundle"),
+            vec![step],
+        );
+        journal.previous_bundle_icon_present = Some(false);
+        journal
+            .save(&original.work_dir())
+            .expect("save the journal beside the original parent");
+        remember_bundle_transaction(&original);
+
+        let moved_path = new_parent.join("Clonk.app");
+        std::fs::rename(original.root(), &moved_path).expect("move the bundle");
+        let moved = InstallLayout::macos_bundle(moved_path).with_recovery_registry(&registry);
+
+        let recovery = resume_interrupted_update_with(&moved, &FakePlatform::new())
+            .expect("the moved bundle owns this transaction");
+
+        assert_ne!(
+            recovery,
+            ResumeOutcome::NothingToDo,
+            "the sidecar has to be found through the registry"
+        );
+        assert_eq!(
+            std::fs::read_to_string(moved.data_dir().join("planet/System.c4g/Rank.txt"))
+                .expect("the backup was restored into the moved bundle"),
+            "the interrupted install"
+        );
+        assert_eq!(
+            std::fs::read_dir(&registry)
+                .expect("read the registry")
+                .count(),
+            0,
+            "a finished transaction leaves nothing for a later install to chase"
+        );
+    }
+
+    #[test]
+    fn one_bundle_never_reaches_another_install_s_registry_entry() {
+        // Keying the registry by identity is what keeps it from becoming the
+        // pathname test it replaces: a second install reads its own identity,
+        // which names no entry, so the first one's sidecar stays untouched even
+        // though both consult the same registry.
+        let directory = TempDir::new().expect("volume");
+        let registry = directory.path().join("registry");
+        let interrupted_parent = directory.path().join("Downloads");
+        let other_parent = directory.path().join("Applications");
+        std::fs::create_dir_all(&interrupted_parent).expect("interrupted parent");
+        std::fs::create_dir_all(&other_parent).expect("other parent");
+
+        let interrupted = InstallLayout::macos_bundle(interrupted_parent.join("Clonk.app"))
+            .with_recovery_registry(&registry);
+        write_file(&interrupted.root().join("Contents/Info.plist"), "metadata");
+        let nonce = "interrupted-elsewhere";
+        let backup = interrupted.quarantine_dir(nonce).join("planet");
+        write_file(
+            &backup.join("System.c4g/Rank.txt"),
+            "the interrupted install",
+        );
+        let mut step = JournalStep::new("planet", &"aa".repeat(32), "Contents/Resources/planet");
+        step.state = StepState::BackupMoved;
+        let mut journal = Journal::new(
+            "0.7.0",
+            nonce,
+            canonical_install_root(&interrupted).expect("canonical interrupted bundle"),
+            vec![step],
+        );
+        journal.previous_bundle_icon_present = Some(false);
+        journal
+            .save(&interrupted.work_dir())
+            .expect("save the interrupted journal");
+        remember_bundle_transaction(&interrupted);
+
+        let other = InstallLayout::macos_bundle(other_parent.join("Clonk.app"))
+            .with_recovery_registry(&registry);
+        write_file(&other.root().join("Contents/Info.plist"), "other metadata");
+        let other_planet = other.data_dir().join("planet/System.c4g/Rank.txt");
+        write_file(&other_planet, "the other install");
+
+        let recovery = resume_interrupted_update_with(&other, &FakePlatform::new())
+            .expect("a second install has nothing of its own to recover");
+
+        assert_eq!(recovery, ResumeOutcome::NothingToDo);
+        assert_eq!(
+            std::fs::read_to_string(&other_planet).expect("read the untouched second install"),
+            "the other install"
+        );
+        assert!(
+            Journal::load(&interrupted.work_dir())
+                .expect("load the interrupted journal")
+                .is_some(),
+            "the interrupted install keeps its transaction"
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("System.c4g/Rank.txt"))
+                .expect("read the retained backup"),
+            "the interrupted install"
+        );
+    }
+
+    #[test]
+    fn an_entry_naming_a_finished_transaction_is_dropped_rather_than_followed() {
+        // A registry entry is a hint, not an authority. One left behind by a
+        // transaction that has since finished names a directory holding no
+        // journal, and following it would be inventing an interrupted update.
+        let directory = TempDir::new().expect("volume");
+        let registry = directory.path().join("registry");
+        let parent = directory.path().join("Applications");
+        std::fs::create_dir_all(&parent).expect("bundle parent");
+        let bundle =
+            InstallLayout::macos_bundle(parent.join("Clonk.app")).with_recovery_registry(&registry);
+        write_file(&bundle.root().join("Contents/Info.plist"), "metadata");
+        let planet = bundle.data_dir().join("planet/System.c4g/Rank.txt");
+        write_file(&planet, "the installed release");
+        ensure_dir(&bundle.work_dir()).expect("an empty transaction directory");
+        remember_bundle_transaction(&bundle);
+
+        let recovery = resume_interrupted_update_with(&bundle, &FakePlatform::new())
+            .expect("an entry without a journal is not an interrupted update");
+
+        assert_eq!(recovery, ResumeOutcome::NothingToDo);
+        assert_eq!(
+            std::fs::read_to_string(&planet).expect("read the untouched install"),
+            "the installed release"
+        );
+        assert_eq!(
+            std::fs::read_dir(&registry)
+                .expect("read the registry")
+                .count(),
+            0,
+            "an entry that leads nowhere is dropped rather than re-read next launch"
         );
     }
 

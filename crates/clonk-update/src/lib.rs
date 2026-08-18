@@ -35,6 +35,7 @@ pub mod digest;
 pub mod extract;
 pub mod journal;
 pub mod manifest;
+mod recovery_registry;
 pub mod state;
 
 pub use apply::{
