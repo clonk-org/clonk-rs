@@ -1470,6 +1470,52 @@ fn a_game_option_reaches_the_file_only_at_a_save_surface() {
 }
 
 #[test]
+fn a_pending_game_option_survives_rebuilding_the_option_buttons() {
+    // C++ rebuilds `C4GameOptionButtons` from the one process-wide `Config`
+    // that its own toggles just wrote — record at C4Network2Dialogs.cpp:648
+    // over :715, league at :629 over :686, comment at :768 over :776 and the
+    // remembered password at :733 over :748 — so re-entering the scenario
+    // browser shows what this session set, not what is still on disk.
+    let _lock = env_lock().lock();
+    let fixture = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+    fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+    fs::write(
+        paths.config_file(),
+        b"[General]\r\nRecord=0\r\n\r\n[Network]\r\nComment=\"old comment\"\r\nLeagueServerSignUp=0\r\nLastPassword=\"old pass\"\r\n",
+    )
+    .test_value();
+    let mut app = new_state_only_menu_app(320, 200);
+    app.app_paths = Some(paths.clone());
+
+    app.process_game_option_actions(vec![
+        GameOptionAction::RecordPreferenceChanged(true),
+        GameOptionAction::LeagueSignupChanged(true),
+        GameOptionAction::CommentChanged("live comment".to_string()),
+        GameOptionAction::PasswordChanged {
+            remember_for_next_round: Some("live pass".to_string()),
+            password: String::new(),
+        },
+    ])
+    .test_value();
+
+    let rebuilt = app.scenario_game_option_values();
+    assert!(rebuilt.record, "the Record toggle survives the rebuild");
+    assert!(rebuilt.league_server_signup);
+    assert_eq!(rebuilt.comment, "live comment");
+    assert_eq!(rebuilt.last_password, "live pass");
+    // Nothing has been written yet — the file is still what the session
+    // started from.
+    let on_disk = Config::load(paths.config_file()).test_value();
+    assert_eq!(on_disk.get_in(Some("General"), "Record"), Some("0"));
+    assert_eq!(
+        on_disk.get_in(Some("Network"), "Comment"),
+        Some("old comment")
+    );
+    reset_cached_app_paths();
+}
+
+#[test]
 fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
     let _lock = env_lock().lock();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))

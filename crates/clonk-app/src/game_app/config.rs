@@ -1312,6 +1312,13 @@ impl GameApp {
             self.show_options_advanced_error("the Options dialog is unavailable")?;
             return Ok(());
         }
+        // The editor is a view of the live `Config`, so it has to show what this
+        // session already changed rather than the values still on disk.
+        for (section, entries) in self.deferred_config.pending_by_section() {
+            for (key, text) in entries {
+                config.set_in(Some(&section), key, text);
+            }
+        }
         let return_sheet = self
             .startup_options_dialog
             .as_ref()
@@ -1348,9 +1355,26 @@ impl GameApp {
     }
 
     pub(crate) fn synchronize_advanced_options_runtime(&mut self) {
-        // The advanced editor writes `Network.MasterServerSignUp` straight to
-        // the file, so an older netdlg toggle must stop shadowing it.
-        self.deferred_config.clear("Network", "MasterServerSignUp");
+        // The advanced editor writes straight to the file, so an older pending
+        // change to a key it edits must stop shadowing the newer file value.
+        // C++ has one `Config` object, and its options save writes exactly what
+        // the runtime toggles left in it (C4StartupOptionsDlg.cpp:1183), so
+        // nothing can go stale behind a save there.
+        for (section, key) in [
+            ("Network", "MasterServerSignUp"),
+            ("Network", "LeagueServerSignUp"),
+            ("Network", "ControlRate"),
+            ("Network", "ControlMode"),
+            ("Network", "NoRuntimeJoin"),
+            ("Network", "Comment"),
+            ("Network", "LastPassword"),
+            ("General", "Record"),
+            ("Graphics", "MsgBoard"),
+            ("Startup", "HideMsgStartDedicated"),
+            ("Startup", "HideMsgPlrNoTakeOver"),
+        ] {
+            self.deferred_config.clear(section, key);
+        }
         self.clear_deferred_display_toggles();
         let paths = self.app_paths.as_ref();
         let is_fullscreen = self.display_flags.is_fullscreen;
@@ -2124,6 +2148,40 @@ impl GameApp {
         }
     }
 
+    /// The game options a freshly built `C4GameOptionButtons` would show.
+    ///
+    /// C++ rebuilds the control from the one process-wide `Config`
+    /// (`C4Network2Dialogs.cpp:629,648,733,768`), which the toggles beside it
+    /// have already mutated (`:676-686,715,748,776`), so re-entering the
+    /// scenario browser shows what this session last set. The port loads from
+    /// the file, so every deferred key has to be laid back over it.
+    pub(crate) fn scenario_game_option_values(
+        &self,
+    ) -> clonk_frontend::game_option_buttons::GameOptionValues {
+        let mut values = load_scenario_game_option_values(self.app_paths.as_ref());
+        let pending_bool = |section: &str, key: &str| {
+            self.deferred_config
+                .get(section, key)
+                .and_then(parse_native_config_bool)
+        };
+        if let Some(signup) = pending_bool("Network", "MasterServerSignUp") {
+            values.master_server_signup = signup;
+        }
+        if let Some(league) = pending_bool("Network", "LeagueServerSignUp") {
+            values.league_server_signup = league;
+        }
+        if let Some(record) = pending_bool("General", "Record") {
+            values.record = record;
+        }
+        if let Some(password) = self.deferred_config.get("Network", "LastPassword") {
+            values.last_password = password.to_owned();
+        }
+        if let Some(comment) = self.deferred_config.get("Network", "Comment") {
+            values.comment = comment.to_owned();
+        }
+        values
+    }
+
     /// A scenario-selector or lobby game option, which C++ keeps in its
     /// process-wide `Config` until the shutdown save.
     ///
@@ -2154,7 +2212,8 @@ impl GameApp {
             );
             return;
         };
-        self.deferred_config.set_escaped(section, key, native);
+        self.deferred_config
+            .set_escaped(section, key, value, native);
     }
 
     /// Saves a complete config while carrying the five in-game Display values
@@ -2183,12 +2242,23 @@ impl GameApp {
             Err(error) => return Err(error),
         };
         self.apply_display_flags_to_config(&mut config);
+        // C++'s `Config.Save()` writes the one live object, so it carries every
+        // runtime toggle this session made, not just the redirect. `set_in`
+        // picks each field's own value format, including the escaped-string
+        // ones.
+        for (pending_section, entries) in self.deferred_config.pending_by_section() {
+            for (pending_key, text) in entries {
+                config.set_in(Some(&pending_section), pending_key, text);
+            }
+        }
         config.set_in(Some(section), key, value);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         save_config_preserving_native_general_booleans(&config, &path, None, None)?;
-        self.clear_deferred_display_toggles();
+        // Only now that the write succeeded: a failed save must stay
+        // recoverable by the ordinary shutdown flush.
+        self.deferred_config.take_by_section();
         Ok(())
     }
 

@@ -21,8 +21,11 @@ use std::collections::BTreeMap;
 pub(crate) enum DeferredValue {
     /// An unquoted single-line scalar such as `"0"` or `"1"`.
     RawAscii(String),
-    /// Native C4 bytes for an escaped-string field (`C4Config.cpp:379`).
-    CppEscaped(Vec<u8>),
+    /// An escaped-string field (`C4Config.cpp:379`): `native` is what the
+    /// writer needs, `text` what the session reads back. A live C4Config holds
+    /// one field that both the writer and every reader see, so the store has to
+    /// keep the readable form beside the bytes.
+    CppEscaped { text: String, native: Vec<u8> },
 }
 
 impl DeferredValue {
@@ -30,9 +33,17 @@ impl DeferredValue {
     pub(crate) fn as_native(&self) -> clonk_app_netplay::NativeConfigValue<'_> {
         match self {
             Self::RawAscii(value) => clonk_app_netplay::NativeConfigValue::RawAscii(value),
-            Self::CppEscaped(value) => {
-                clonk_app_netplay::NativeConfigValue::CppEscapedString(value)
+            Self::CppEscaped { native, .. } => {
+                clonk_app_netplay::NativeConfigValue::CppEscapedString(native)
             }
+        }
+    }
+
+    /// What a reader of the live field would see this session.
+    pub(crate) fn as_text(&self) -> &str {
+        match self {
+            Self::RawAscii(value) => value,
+            Self::CppEscaped { text, .. } => text,
         }
     }
 }
@@ -67,11 +78,15 @@ impl DeferredConfig {
         &mut self,
         section: impl Into<String>,
         key: impl Into<String>,
-        value: Vec<u8>,
+        text: impl Into<String>,
+        native: Vec<u8>,
     ) {
         self.pending.insert(
             (section.into(), key.into()),
-            DeferredValue::CppEscaped(value),
+            DeferredValue::CppEscaped {
+                text: text.into(),
+                native,
+            },
         );
     }
 
@@ -91,14 +106,27 @@ impl DeferredConfig {
         self.pending.len()
     }
 
-    /// The pending scalar for a key, which is what the running session should
-    /// read back rather than the stale file. An escaped-string field holds
-    /// native bytes with no presentation form here and reports `None`.
+    /// The pending value for a key, which is what the running session should
+    /// read back rather than the stale file — C++ has one live `Config` field
+    /// that its writer and every reader share.
     pub(crate) fn get(&self, section: &str, key: &str) -> Option<&str> {
-        match self.pending.get(&(section.to_owned(), key.to_owned()))? {
-            DeferredValue::RawAscii(value) => Some(value.as_str()),
-            DeferredValue::CppEscaped(_) => None,
+        self.pending
+            .get(&(section.to_owned(), key.to_owned()))
+            .map(DeferredValue::as_text)
+    }
+
+    /// The pending writes as readable text, grouped by section, for a save
+    /// surface that rewrites a whole `Config` rather than patching keys. Leaves
+    /// the store intact: the caller drops it only once its write succeeded.
+    pub(crate) fn pending_by_section(&self) -> Vec<(String, Vec<(&str, &str)>)> {
+        let mut grouped: BTreeMap<String, Vec<(&str, &str)>> = BTreeMap::new();
+        for ((section, key), value) in &self.pending {
+            grouped
+                .entry(section.clone())
+                .or_default()
+                .push((key.as_str(), value.as_text()));
         }
+        grouped.into_iter().collect()
     }
 
     /// Takes the pending writes grouped by section, ready for one
@@ -179,16 +207,21 @@ mod tests {
     fn a_deferred_escaped_string_keeps_its_native_writer() {
         let mut config = DeferredConfig::default();
         config.set("Network", "MasterServerSignUp", "1");
-        config.set_escaped("Network", "Comment", b"a \"quoted\" comment".to_vec());
+        config.set_escaped(
+            "Network",
+            "Comment",
+            "a quoted comment",
+            b"a \"quoted\" comment".to_vec(),
+        );
 
-        // Only a raw scalar reads back as text; an escaped field holds native
-        // bytes that the session has no presentation form for here.
+        // Both kinds read back as text: C++ has one live field that its writer
+        // and every reader share.
         assert_eq!(config.get("Network", "MasterServerSignUp"), Some("1"));
-        assert_eq!(config.get("Network", "Comment"), None);
+        assert_eq!(config.get("Network", "Comment"), Some("a quoted comment"));
 
         // Either kind replaces the other for the same key, so a flush writes
         // each key exactly once.
-        config.set_escaped("Network", "Comment", b"replaced".to_vec());
+        config.set_escaped("Network", "Comment", "replaced", b"replaced".to_vec());
         assert_eq!(config.len(), 2);
 
         assert_eq!(
@@ -198,7 +231,10 @@ mod tests {
                 vec![
                     (
                         "Comment".to_owned(),
-                        DeferredValue::CppEscaped(b"replaced".to_vec())
+                        DeferredValue::CppEscaped {
+                            text: "replaced".to_owned(),
+                            native: b"replaced".to_vec()
+                        }
                     ),
                     (
                         "MasterServerSignUp".to_owned(),

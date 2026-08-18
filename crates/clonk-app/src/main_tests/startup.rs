@@ -5364,3 +5364,75 @@ fn a_dedicated_server_quits_when_its_command_line_record_stream_fails() {
         "a dedicated server with no startup generation to return to quits"
     );
 }
+
+#[test]
+fn a_ticked_dont_show_again_box_suppresses_its_warning_before_any_save() {
+    // `ShowMessageModal` returns early on the flag it was handed by pointer —
+    // `if (pbConfigDontShowAgainSetting && *pbConfigDontShowAgainSetting)
+    // return true;` (C4GuiDialogs.cpp:1060-1065) — so the tick takes effect
+    // from memory, in the session that made it. The pointers are
+    // `&Config.Startup.HideMsgPlrNoTakeOver` (C4GameLobby.cpp:462) and
+    // `&Config.Startup.HideMsgStartDedicated` (C4StartupScenSelDlg.cpp:1697),
+    // and neither file contains a `Config.Save()`.
+    let _lock = env_lock().lock();
+    let fixture = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+    fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+    fs::write(
+        paths.config_file(),
+        b"[Startup]\r\nHideMsgStartDedicated=0\r\n",
+    )
+    .test_value();
+    let mut app = new_state_only_menu_app(320, 200);
+    app.app_paths = Some(paths.clone());
+    assert!(!app.startup_message_hidden("HideMsgStartDedicated"));
+
+    app.deferred_config
+        .set("Startup", "HideMsgStartDedicated", "1");
+
+    assert!(
+        app.startup_message_hidden("HideMsgStartDedicated"),
+        "the tick suppresses the warning without waiting for a save"
+    );
+    assert_eq!(
+        Config::load(paths.config_file())
+            .test_value()
+            .get_in(Some("Startup"), "HideMsgStartDedicated"),
+        Some("0"),
+        "and the file still holds what the session started from"
+    );
+    reset_cached_app_paths();
+}
+
+#[test]
+fn a_dedicated_server_writes_its_runtime_config_on_a_clean_quit() {
+    // `C4Application::Quit` ends in `if (Config.fConfigLoaded) Config.Save();`
+    // (C4Application.cpp:367) with no `USE_CONSOLE` guard, so a dedicated
+    // server persists its accumulated Config exactly like a fullscreen run.
+    // `run_headless_server` returns before the winit loop exists, so its own
+    // shutdown has to do that write.
+    let _lock = env_lock().lock();
+    let fixture = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+    fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+    fs::write(
+        paths.config_file(),
+        b"[Network]\r\nControlRate=2\r\nComment=\"old comment\"\r\n",
+    )
+    .test_value();
+    let mut app = new_state_only_menu_app(320, 200);
+    app.app_paths = Some(paths.clone());
+    app.headless = true;
+    app.persist_game_option_value("Network", "ControlRate", "7".to_string());
+    app.persist_game_option_text("Network", "Comment", "Weekend server");
+
+    app.finish_console_shutdown();
+
+    let saved = Config::load(paths.config_file()).test_value();
+    assert_eq!(saved.get_in(Some("Network"), "ControlRate"), Some("7"));
+    assert_eq!(
+        saved.get_in(Some("Network"), "Comment"),
+        Some("Weekend server")
+    );
+    reset_cached_app_paths();
+}

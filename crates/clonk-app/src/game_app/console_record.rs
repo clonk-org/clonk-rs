@@ -422,6 +422,12 @@ impl GameApp {
     pub(crate) fn finish_console_shutdown(&mut self) {
         self.finish_recording();
         self.finalize_pending_league_end_for_teardown();
+        // `C4Application::Quit` ends in `if (Config.fConfigLoaded) Config.Save();`
+        // with no `USE_CONSOLE` guard (C4Application.cpp:367), so a dedicated
+        // server writes its accumulated Config on a clean quit exactly like a
+        // fullscreen run. `run_headless_server` returns before the winit loop
+        // exists, so it never reaches that loop's own exiting flush.
+        self.flush_deferred_config();
     }
 
     pub(crate) fn process_console_command(&mut self, line: &str) -> Result<()> {
