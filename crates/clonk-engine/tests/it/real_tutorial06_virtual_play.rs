@@ -336,8 +336,8 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         |engine| {
             engine.object_snapshot(elevator).is_some_and(|object| {
                 object.construction < 100_000
-                    && object.components.get("WOOD").copied() == Some(4)
-                    && object.components.get("METL").copied() == Some(2)
+                    && object.components.get("WOOD") == Some(4)
+                    && object.components.get("METL") == Some(2)
             })
         },
     )?;

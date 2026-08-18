@@ -67,6 +67,7 @@ mod player;
 pub mod player_file;
 use player_file::PlayerInfoCoreState;
 pub mod component_list;
+pub use component_list::ComponentList;
 pub mod pxs;
 mod record;
 mod runtime_join_player_restore;
@@ -602,32 +603,33 @@ pub(crate) fn docon_refreshes_construction(before: i32, after: i32) -> bool {
 /// C++ iterates the object's existing component entries; it never inserts a
 /// definition component that the object no longer carries.
 pub(crate) fn docon_component_counts(
-    current: &HashMap<DefinitionId, i32>,
-    order: &[DefinitionId],
+    current: &ComponentList,
     definition: &[(DefinitionId, i32)],
     construction: i32,
     change: i32,
-) -> HashMap<DefinitionId, i32> {
+) -> ComponentList {
+    // C4Object::ComponentConGain/Cutoff index Def->Component by the object's
+    // C4IDList *position*, not by ID (C4Object.cpp:510-526), and read and write
+    // the object's own entry at that same position. Walking positions is what
+    // makes a repeated ID behave: looking the entry up by ID would resolve both
+    // of the Bazooka DefCore's two ENAP positions to the first entry.
     let mut updated = current.clone();
-    for (index, id) in order.iter().enumerate() {
-        if let Some(count) = current.get(id) {
-            // C4Object::ComponentConGain/Cutoff index Def->Component by the
-            // object's C4IDList position, not by ID (C4Object.cpp:510-526).
-            let definition_count = definition.get(index).map_or(0, |(_, count)| *count);
-            let scaled = scaled_definition_component_count(definition_count, construction);
-            let count = if change < 0 {
-                (*count).min(scaled)
-            } else {
-                (*count).max(scaled)
-            };
-            updated.insert(id.clone(), count);
-        }
+    for index in 0..updated.len() {
+        let definition_count = definition.get(index).map_or(0, |(_, count)| *count);
+        let scaled = scaled_definition_component_count(definition_count, construction);
+        let existing = updated.count_at(index).unwrap_or(0);
+        let count = if change < 0 {
+            existing.min(scaled)
+        } else {
+            existing.max(scaled)
+        };
+        updated.set_count_at(index, count);
     }
     updated
 }
 
 fn normalized_component_order(
-    components: &HashMap<DefinitionId, i32>,
+    components: &ComponentList,
     order: Vec<DefinitionId>,
     definition_order: &[DefinitionId],
 ) -> Vec<DefinitionId> {
@@ -641,10 +643,10 @@ fn normalized_component_order(
     };
     let mut normalized = source
         .into_iter()
-        .filter(|id| components.contains_key(id))
+        .filter(|id| components.contains(id))
         .collect::<Vec<_>>();
     let mut extras = components
-        .keys()
+        .ids()
         .filter(|id| !normalized.contains(id))
         .cloned()
         .collect::<Vec<_>>();
@@ -656,12 +658,15 @@ fn normalized_component_order(
 fn definition_component_counts(
     definition: &[(DefinitionId, i32)],
     construction: i32,
-) -> HashMap<DefinitionId, i32> {
-    let mut counts = HashMap::new();
+) -> ComponentList {
+    // Appended rather than merged: a definition list may name the same ID twice
+    // with independent counts, and C4IDList keeps both (`C4IDList.cpp:33-36`).
+    let mut counts = ComponentList::new();
     for (id, count) in definition {
-        counts
-            .entry(id.clone())
-            .or_insert_with(|| fresh_definition_component_count(*count, construction));
+        counts.push(
+            id.clone(),
+            fresh_definition_component_count(*count, construction),
+        );
     }
     counts
 }

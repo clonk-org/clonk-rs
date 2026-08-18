@@ -632,7 +632,6 @@ impl Engine {
         }
         let components = docon_component_counts(
             &self.objects[idx].state.components,
-            &self.objects[idx].state.component_order,
             &definition_components,
             after,
             change,

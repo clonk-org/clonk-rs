@@ -719,7 +719,6 @@ impl Engine {
                 .unwrap_or_default();
             docon_component_counts(
                 &self.objects[target_idx].state.components,
-                &self.objects[target_idx].state.component_order,
                 &definition_components,
                 desired_construction,
                 delta,
@@ -973,7 +972,6 @@ impl Engine {
                 .state
                 .components
                 .get(&component.id)
-                .copied()
                 .unwrap_or(0);
 
             if inserted < component.count {
@@ -991,7 +989,6 @@ impl Engine {
                 .state
                 .components
                 .get(&component.id)
-                .copied()
                 .unwrap_or(0);
 
             if inserted < component.count {
@@ -1011,7 +1008,6 @@ impl Engine {
                         .state
                         .components
                         .get(&component.id)
-                        .copied()
                         .unwrap_or(0);
                     let inserted_percent =
                         i64::from(inserted).saturating_mul(100) / i64::from(component.count);
@@ -1077,12 +1073,12 @@ impl Engine {
         previous_count: i32,
     ) {
         let target_state = &mut self.objects[target_idx].state;
-        if !target_state.components.contains_key(component_id) {
+        if !target_state.components.contains(component_id) {
             target_state.component_order.push(component_id.clone());
         }
         target_state
             .components
-            .insert(component_id.clone(), previous_count.wrapping_add(1));
+            .set(component_id.clone(), previous_count.wrapping_add(1));
     }
 
     /// Build credits the component, unlinks it from the parent list, then

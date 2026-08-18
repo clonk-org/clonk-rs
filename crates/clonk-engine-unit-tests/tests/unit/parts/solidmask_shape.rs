@@ -5127,9 +5127,9 @@ func Decaying() {
         let object = engine.test_object_snapshot(id);
         assert_eq!(object.construction, 96_000);
         assert_eq!(object.position.y, 101, "DoCon keeps the old shape bottom");
-        assert_eq!(object.components.get("SKIN"), Some(&1));
-        assert_eq!(object.components.get("BBON"), Some(&1));
-        assert_eq!(object.components.get("RMET"), Some(&2));
+        assert_eq!(object.components.get("SKIN"), Some(1));
+        assert_eq!(object.components.get("BBON"), Some(1));
+        assert_eq!(object.components.get("RMET"), Some(2));
         let idx = engine.test_object_index(id);
         assert_eq!(
             engine.objects[idx].fixed_position.y,

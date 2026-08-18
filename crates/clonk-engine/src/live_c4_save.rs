@@ -2234,7 +2234,7 @@ fn serialize_object(
                 state
                     .component_order
                     .iter()
-                    .map(|id| (id.clone(), state.components.get(id).copied().unwrap_or(0))),
+                    .map(|id| (id.clone(), state.components.get(id).unwrap_or(0))),
             ),
         );
     }

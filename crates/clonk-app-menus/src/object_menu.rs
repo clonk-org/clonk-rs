@@ -3973,6 +3973,7 @@ mod tests {
     use super::*;
     use clonk_app_core::pictures::apply_default_menu_owner_color;
     use clonk_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
+    use clonk_engine::ComponentList;
     use clonk_engine::{
         CommandStackSnapshot, Definition, Engine, JoinPlayerConfig, MovementProfile,
         ObjectSnapshot, ObjectStatus, ObjectUpdate, PlayerConfig, Scenario, ScenarioError,
@@ -4235,7 +4236,7 @@ mod tests {
             color_modulation: 0,
             picture_rect: Default::default(),
             contents: Vec::new(),
-            components: HashMap::new(),
+            components: ComponentList::new(),
             component_order: Vec::new(),
             status: ObjectStatus::Normal,
             owner: 1,

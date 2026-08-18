@@ -1,9 +1,10 @@
 use crate::support::EngineTestExt;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::support::real_scenario::PreparedInstalledScenario;
 use clonk_engine::{math, Definition, DefinitionId, SpawnConfig, Vector2};
 use clonk_script::Value;
+use clonk_engine::ComponentList;
 
 #[test]
 fn component_all_uses_the_instance_custom_recipe_and_calling_builder() {
@@ -43,14 +44,14 @@ global func GetCustomComponents(object builder)
     }
 
     let custom = engine.spawn_test_object(
-        SpawnConfig::new("CUST").with_components(HashMap::from([(DefinitionId::from("METL"), 1)])),
+        SpawnConfig::new("CUST").with_components(ComponentList::from_iter([(DefinitionId::from("METL"), 1)])),
     );
     let mixed =
-        engine.spawn_test_object(SpawnConfig::new("PLAI").with_components(HashMap::from([
+        engine.spawn_test_object(SpawnConfig::new("PLAI").with_components(ComponentList::from_iter([
             (DefinitionId::from("WOOD"), 1),
             (DefinitionId::from("METL"), 1),
         ])));
-    let pure = engine.spawn_test_object(SpawnConfig::new("PLAI").with_components(HashMap::from([
+    let pure = engine.spawn_test_object(SpawnConfig::new("PLAI").with_components(ComponentList::from_iter([
         (DefinitionId::from("WOOD"), 2),
         (DefinitionId::from("METL"), 0),
     ])));

@@ -429,8 +429,9 @@ mod tests {
     use super::*;
     use crate::rng::LcgRng;
     use crate::{
-        ActionState, CommandDirection, CommandStackSnapshot, Direction, EnvironmentFrame,
-        HudSnapshot, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, OWNER_NONE,
+        ActionState, CommandDirection, CommandStackSnapshot, ComponentList, Direction,
+        EnvironmentFrame, HudSnapshot, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2,
+        OWNER_NONE,
     };
     use std::collections::HashMap;
 
@@ -477,7 +478,7 @@ mod tests {
                 color_modulation: 0,
                 picture_rect: Default::default(),
                 contents: Vec::new(),
-                components: HashMap::new(),
+                components: ComponentList::new(),
                 component_order: Vec::new(),
                 status: ObjectStatus::Normal,
                 owner: OWNER_NONE,

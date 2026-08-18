@@ -11,6 +11,11 @@
 //! `findId` does for `GetIDCount`/`SetIDCount` (`C4IDList.cpp:60-66,76-83`).
 
 use std::collections::HashMap;
+use std::fmt;
+
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::DefinitionId;
 
@@ -101,6 +106,58 @@ impl ComponentList {
     }
 }
 
+impl Serialize for ComponentList {
+    /// Emitted as a sequence, because a map cannot hold a repeated ID.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.entries.len()))?;
+        for (id, count) in &self.entries {
+            sequence.serialize_element(&(id, count))?;
+        }
+        sequence.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ComponentList {
+    /// Accepts **either** shape. States written before this type existed hold a
+    /// map (`{"WOOD": 4}`); states written since hold a sequence
+    /// (`[["WOOD", 4]]`). A savegame or engine snapshot recorded earlier has to
+    /// keep loading, so the map arm is a compatibility path rather than dead
+    /// code — it is what every already-written save on disk uses.
+    ///
+    /// The map arm sorts by ID: map iteration order is not deterministic, and a
+    /// state recorded in the old shape carries no order to recover.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct EitherShape;
+
+        impl<'de> Visitor<'de> for EitherShape {
+            type Value = ComponentList;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a component sequence or a legacy id->count map")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::with_capacity(access.size_hint().unwrap_or_default());
+                while let Some(entry) = access.next_element::<(DefinitionId, i32)>()? {
+                    entries.push(entry);
+                }
+                Ok(ComponentList { entries })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::with_capacity(access.size_hint().unwrap_or_default());
+                while let Some(entry) = access.next_entry::<DefinitionId, i32>()? {
+                    entries.push(entry);
+                }
+                entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+                Ok(ComponentList { entries })
+            }
+        }
+
+        deserializer.deserialize_any(EitherShape)
+    }
+}
+
 impl FromIterator<(DefinitionId, i32)> for ComponentList {
     fn from_iter<T: IntoIterator<Item = (DefinitionId, i32)>>(iter: T) -> Self {
         Self {
@@ -166,6 +223,34 @@ mod tests {
         assert!(list.set_count_at(1, 11));
         assert_eq!(list.count_at(1), Some(11));
         assert!(!list.set_count_at(2, 1), "out of range is a no-op");
+    }
+
+    /// Round-trips as a sequence, which is the only shape that can hold the
+    /// repeat the Bazooka DefCore ships.
+    #[test]
+    fn serialises_as_a_sequence_and_round_trips_repeats() {
+        let list = ComponentList::from_iter([(id("ENAP"), 1), (id("ENAP"), 2)]);
+        let json = serde_json::to_string(&list).expect("serialises");
+        assert_eq!(json, r#"[["ENAP",1],["ENAP",2]]"#);
+        assert_eq!(
+            serde_json::from_str::<ComponentList>(&json).expect("round trips"),
+            list
+        );
+    }
+
+    /// A state written before this type existed holds a map; it still loads.
+    #[test]
+    fn deserialises_the_legacy_map_shape() {
+        let list = serde_json::from_str::<ComponentList>(r#"{"WOOD":4,"METL":2}"#)
+            .expect("legacy map loads");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.get("WOOD"), Some(4));
+        assert_eq!(list.get("METL"), Some(2));
+        assert_eq!(
+            list.ids().cloned().collect::<Vec<_>>(),
+            vec![id("METL"), id("WOOD")],
+            "map order is not deterministic, so the recovery sorts by ID"
+        );
     }
 
     #[test]

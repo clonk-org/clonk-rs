@@ -157,7 +157,7 @@ pub(crate) fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
                 components
                     .iter()
                     .find(|(id, _)| id.as_str().eq_ignore_ascii_case(&component))
-                    .map(|(_, count)| *count)
+                    .map(|(_, count)| count)
                     .unwrap_or(0)
             } else {
                 def_order
@@ -176,7 +176,6 @@ pub(crate) fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
                         let count = state_components
                             .as_ref()
                             .and_then(|components| components.get(&id))
-                            .copied()
                             .unwrap_or(0);
                         (id.as_str().to_string(), count)
                     })
@@ -273,7 +272,7 @@ pub(crate) fn get_needed_mat_str(args: &[Value]) -> Result<Value, RuntimeError> 
             let current = current_components
                 .iter()
                 .find(|(id, _)| id.as_str().eq_ignore_ascii_case(&component))
-                .map(|(_, count)| *count)
+                .map(|(_, count)| count)
                 .unwrap_or(0);
             let deficit = required.wrapping_sub(current);
             if deficit > 0 {
@@ -2485,7 +2484,7 @@ pub(crate) fn set_component(args: &[Value]) -> Result<Value, RuntimeError> {
         if !order.contains(&component) {
             order.push(component.clone());
         }
-        map.insert(component, count);
+        map.set(component, count);
         object.pending_update.components = Some(map);
         object.pending_update.component_order = Some(order);
         Ok(Value::Bool(true))
@@ -7669,7 +7668,7 @@ fn resolve_component_list(
         order
             .into_iter()
             .map(|id| {
-                let count = components.get(&id).copied().unwrap_or(0);
+                let count = components.get(&id).unwrap_or(0);
                 (id.as_str().to_owned(), count)
             })
             .collect()
@@ -8675,7 +8674,7 @@ fn reflect_object_values(
             );
             reflection.push(
                 &object_path("Component"),
-                Value::Int(components.get(id).copied().unwrap_or(0)),
+                Value::Int(components.get(id).unwrap_or(0)),
             );
         }
     }

@@ -607,8 +607,8 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         |app| app.engine.object_snapshot(wood).is_none(),
     );
     let first_delivery = app.engine.test_object_snapshot(elevator);
-    assert_eq!(first_delivery.components.get("WOOD"), Some(&4));
-    assert_eq!(first_delivery.components.get("METL"), Some(&1));
+    assert_eq!(first_delivery.components.get("WOOD"), Some(4));
+    assert_eq!(first_delivery.components.get("METL"), Some(1));
     assert_eq!(
         first_delivery.construction, 80_000,
         "ELEV needs its second METL before construction can pass 80%"
@@ -1005,8 +1005,8 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         |app| app_object_with_definition(app, "ELEC").is_some(),
     );
     let completed = app.engine.test_object_snapshot(elevator);
-    assert_eq!(completed.components.get("WOOD"), Some(&4));
-    assert_eq!(completed.components.get("METL"), Some(&2));
+    assert_eq!(completed.components.get("WOOD"), Some(4));
+    assert_eq!(completed.components.get("METL"), Some(2));
     assert_eq!(completed.construction, 100_000);
     let carriage = app_object_with_definition(&app, "ELEC").test_value();
     assert_eq!(completed.action.target, Some(carriage));
