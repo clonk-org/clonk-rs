@@ -139,13 +139,20 @@ fn tutorial07_seed_zero_landscape_matches_cpp_surface8() {
         engine.landscape().and_then(Landscape::pixel_grid),
     );
     assert_eq!((grid.width(), grid.height()), (680, 480));
-    let hash = grid
-        .bytes()
+    assert_eq!(surface8_hash(grid), 0x2310_7266_3100_b0cd);
+}
+
+/// FNV-1a over the whole Surface8 plane, in the order C++ walks it.
+///
+/// Each byte is a texmap index in the low 7 bits with the IFT bit 0x80, and the
+/// plane is row-major with `Pitch == Wdt`, so this is the same function of the
+/// same bytes as the C++ side's walk over `_GetPix(x, y)`.
+fn surface8_hash(grid: &clonk_engine::landscape::PixelGrid) -> u64 {
+    grid.bytes()
         .iter()
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
-    assert_eq!(hash, 0x2310_7266_3100_b0cd);
+        })
 }
 
 #[test]
