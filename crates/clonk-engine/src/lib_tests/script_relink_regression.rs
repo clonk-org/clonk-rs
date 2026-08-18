@@ -62,6 +62,42 @@ fn link_surfaces_an_unresolvable_hard_inherited_per_definition() {
     );
 }
 
+/// An `#appendto` host's `inherited` reaches the chain it is appended *into*,
+/// so its overload target exists only once appends and includes have run. C4Aul
+/// never sees the intermediate state — it binds `inherited` with every func
+/// table already built (`C4AulParse.cpp:1406`) and the appended function's
+/// `Fn->Owner` is the target — so judging the source host earlier reports a
+/// function that resolves perfectly well, and truncating it there
+/// (`C4AulParse.cpp:3553-3577`) would then be copied onto the target.
+#[test]
+fn an_appendto_hosts_hard_inherited_resolves_through_its_target() {
+    let mut engine = Engine::new();
+    register(&mut engine, "BASE", "#strict\nfunc Layer() { return 1; }");
+    register(
+        &mut engine,
+        "APND",
+        "#strict\n#appendto BASE\nfunc Layer() { return 10 + inherited(); }",
+    );
+    link_initial_scripts(&mut engine);
+
+    let base = engine.spawn_test_object(SpawnConfig::new("BASE"));
+    assert_eq!(
+        call(&mut engine, base, "Layer"),
+        Value::Int(11),
+        "the appended body still reaches the base implementation"
+    );
+    // The append source's *own* copy has no overload of its own and raises,
+    // exactly as it did before the truncation existed — only the wording moved
+    // to C4Aul's. What must not happen is that copy being truncated first and
+    // then linked onto the target, which is what judging the host before
+    // `resolve_appends` produced.
+    let own = engine.spawn_test_object(SpawnConfig::new("APND"));
+    let index = crate::TestValueExt::test_value(engine.find_object_index(own));
+    assert!(engine
+        .call_object_function(index, "Layer", Vec::new())
+        .is_err());
+}
+
 #[test]
 fn initial_link_preparses_every_host_constant_before_function_literal_holds() {
     let mut engine = Engine::new();

@@ -559,7 +559,6 @@ impl Engine {
         self.distribute_global_script_functions(table, function_order);
         self.definition_metadata_cache.borrow_mut().take();
         self.solid_mask_metadata_cache.borrow_mut().take();
-        self.report_unresolved_inherited();
     }
 
     /// `C4AulScript::Parse` reports a hard `inherited` with no overload target
@@ -567,39 +566,47 @@ impl Engine {
     /// (`C4AulParse.cpp:2799`, `:3563-3586`). The call still raises when it
     /// runs — C++ leaves the function with an `AB_ERR` chunk — so this adds
     /// the load-time report the port was missing, not a new failure mode.
-    fn report_unresolved_inherited(&self) {
-        // ":3566 — do not show errors for System.c4g scripts that appear to be
-        // pure #appendto scripts" (`if (Fn->Owner->Def || Fn->Owner->Appends.empty())`).
-        let definition_reports = self.definitions.iter().flat_map(|(id, definition)| {
-            definition
-                .script
-                .unresolved_inherited_diagnostics()
-                .into_iter()
-                .map(move |diagnostic| (id.to_string(), diagnostic))
-        });
-        let script_reports = self
-            .script_link_sources
-            .iter()
-            .filter_map(|source| match source {
-                ScriptLinkSource::Script {
-                    name,
-                    base_script,
-                    script,
-                } => base_script
-                    .appends()
-                    .is_empty()
-                    .then(|| (name.clone(), script.unresolved_inherited_diagnostics())),
-                // Definitions are covered above; the scenario script carries
-                // no separate host here.
-                ScriptLinkSource::Definition(_) | ScriptLinkSource::Scenario => None,
-            })
-            .flat_map(|(name, diagnostics)| {
-                diagnostics
+    fn report_unresolved_inherited(&mut self) {
+        // The truncation itself is unconditional. In `C4AulScript::Parse` the
+        // jump redirection and `AddBCC(AB_ERR)` sit *outside* ":3566 — do not
+        // show errors for System.c4g scripts that appear to be pure #appendto
+        // scripts" (`if (Fn->Owner->Def || Fn->Owner->Appends.empty())`), which
+        // guards only `err.show()` and `++errCnt`. So a suppressed host still
+        // gets its function truncated; it just does not log.
+        let mut reports = Vec::new();
+        for (id, definition) in self.definitions.iter_mut() {
+            let host = id.to_string();
+            reports.extend(
+                definition
+                    .truncate_unresolved_inherited()
                     .into_iter()
-                    .map(move |diagnostic| (name.clone(), diagnostic))
-            });
+                    .map(|diagnostic| (host.clone(), diagnostic)),
+            );
+        }
+        for source in self.script_link_sources.iter_mut() {
+            // Definitions are covered above; the scenario script carries no
+            // separate host here.
+            let ScriptLinkSource::Script {
+                name,
+                base_script,
+                script,
+            } = source
+            else {
+                continue;
+            };
+            let suppressed = !base_script.appends().is_empty();
+            let name = name.clone();
+            let diagnostics = Arc::make_mut(script).truncate_unresolved_inherited();
+            if !suppressed {
+                reports.extend(
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| (name.clone(), diagnostic)),
+                );
+            }
+        }
 
-        for (host, diagnostic) in definition_reports.chain(script_reports) {
+        for (host, diagnostic) in reports {
             tracing::error!(%host, %diagnostic, "script link error");
         }
     }
@@ -866,6 +873,13 @@ impl Engine {
             }
         }
         self.definition_metadata_cache.borrow_mut().take();
+
+        // Last, once appends and includes have placed every function on the
+        // host that owns it. C4Aul binds `inherited` with all func tables
+        // built (`C4AulParse.cpp:1406`); judging it before this point reports
+        // an `#appendto` source host whose overload target only exists on the
+        // target, and truncating there would then be copied onto the target.
+        self.report_unresolved_inherited();
 
         Ok(())
     }

@@ -1241,6 +1241,14 @@ impl Definition {
         Arc::make_mut(&mut self.script).set_global_functions(functions);
     }
 
+    /// Applies C4Aul's link-time truncation to this definition's script and
+    /// returns what it refused. See `ScriptEngine::truncate_unresolved_inherited`.
+    pub(crate) fn truncate_unresolved_inherited(
+        &mut self,
+    ) -> Vec<clonk_script::UnresolvedInherited> {
+        Arc::make_mut(&mut self.script).truncate_unresolved_inherited()
+    }
+
     pub fn configure_actions(
         &mut self,
         default_action: Option<String>,
