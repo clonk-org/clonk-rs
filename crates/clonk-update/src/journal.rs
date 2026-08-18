@@ -303,12 +303,12 @@ fn temporary_path_in(directory: &Path) -> PathBuf {
 /// directory cannot be opened as a file without backup semantics — and its
 /// rename already carries the metadata write, so the sync is unix-only.
 #[cfg(unix)]
-fn sync_directory(directory: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_directory(directory: &Path) -> std::io::Result<()> {
     std::fs::File::open(directory)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_directory: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_directory(_directory: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
