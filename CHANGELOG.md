@@ -4,6 +4,33 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-08-18
+
+### Bug fixes
+
+- Refuse a global func that names a declaring script's local (#646)
+- Flush the deferred participant list in its quoted native form (#645)
+- Do not draw the refused league registration notice on a headless server (#642)
+- Quit when a command-line start has no startup generation behind it (#635)
+- Defer the runtime config writes C++ leaves to its shutdown save (#633)
+
+### Features
+
+- Record component archive ownership so a retired pack can be removed (#643)
+- Silence a muted participant's voice from the runtime client list (#640)
+- Define the observer and multiple-local-player voice source policy (#639)
+- Tell a client when the async deadline discarded its control (#638)
+- Park a headless server for the next console command after a round (#634)
+
+### Performance
+
+- Move the definition and sector lookup tables onto the engine hasher (#637)
+
+### Testing
+
+- Record the headless determination for the console-mode gates (#632)
+- Pin the sailboat hull solid mask across ChangeDef (#630)
+
 ## [0.14.0] - 2026-08-17
 
 ### Bug fixes
