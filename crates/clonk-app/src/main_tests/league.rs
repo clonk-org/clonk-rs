@@ -6246,6 +6246,48 @@ fn requesting_the_application_exit_ends_the_league_registration() {
     assert_eq!(app.exit_reason, Some("the main menu Quit item"));
 }
 
+/// AppKit's terminate — Cmd+Q, the Dock's Quit item, log-out — has to reach the
+/// same de-registration the menu Quit item does.
+///
+/// `C4Application::Quit` unwinds to `LeagueEnd(); DeinitLeague();` for every
+/// way the loop ends (`C4Game.cpp:581`; `C4Network2.cpp:746-763`), and SDL keeps
+/// that true on macOS by cancelling the terminate and re-posting it
+/// (`StdAppUnix.cpp:809-815`). winit implements only
+/// `applicationWillTerminate:`, so the port answers
+/// `applicationShouldTerminate:` with `NSTerminateCancel` and leaves a request
+/// for the next loop turn; this pins the half of that which is not AppKit's.
+#[test]
+fn a_macos_terminate_request_ends_the_league_registration() {
+    let mut app = new_menu_app(320, 200);
+    let (manager, _events) = NetworkManager::test_stub();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+
+    // Nothing pending: the loop turn must not invent a quit.
+    assert!(!crate::macos_terminate::take_terminate_request());
+    assert!(app.network.is_some(), "the host is still registered");
+
+    // What the delegate does, without an AppKit terminate to raise.
+    crate::macos_terminate::note_terminate_request();
+    assert!(
+        crate::macos_terminate::take_terminate_request(),
+        "the loop turn observes the request"
+    );
+    app.request_exit("macOS terminate");
+
+    assert!(
+        app.network.is_none(),
+        "a terminate must end the registration on the loop turn, not inside AppKit's terminate"
+    );
+    assert!(app.network_mode.is_none());
+    assert!(app.exit_requested);
+    assert_eq!(app.exit_reason, Some("macOS terminate"));
+}
+
 /// `MasterServerSignUp` is the configuration a dedicated internet server is
 /// built around, and its refusal arm had no headless coverage. A refused
 /// registration is a dismissible notice rather than a failed host, so a

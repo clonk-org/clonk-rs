@@ -40,6 +40,7 @@ mod developer_windows;
 mod display_backend;
 mod display_sleep_inhibitor;
 mod dock_icon;
+mod macos_terminate;
 use clonk_app_render::draw_commands;
 mod game_message;
 mod gamepad;
@@ -1062,7 +1063,19 @@ fn run() -> Result<()> {
             // application rather than to any one window.
             if dock_icon::should_attach_dock_tile(&event, dock_tile_attached) {
                 dock_icon::set_dock_icon();
+                // Same moment for the same reason: winit has installed its
+                // NSApplication delegate by the first Resumed, and the
+                // `applicationShouldTerminate:` answer is added to that class.
+                macos_terminate::install_terminate_handler();
                 dock_tile_attached = true;
+            }
+            // AppKit asked to terminate (Cmd+Q, the Dock's Quit item, log-out).
+            // The delegate answered NSTerminateCancel and left the request
+            // here, so the ordinary quit path — the one that drops the network
+            // session and sends the league `End` — runs on this loop turn
+            // instead of inside AppKit's terminate.
+            if macos_terminate::take_terminate_request() {
+                app.request_exit("macOS terminate");
             }
             // `C4GraphicsSystem` opens and closes a viewport's window inside
             // Create/CloseViewport (`C4GraphicsSystem.cpp:229-240,205-224`). winit
