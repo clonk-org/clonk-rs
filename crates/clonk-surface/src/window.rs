@@ -308,6 +308,7 @@ impl WindowSurface {
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: self.surface_format,
+                color_space: wgpu::SurfaceColorSpace::Auto,
                 width: self.surface_extent.0,
                 height: self.surface_extent.1,
                 present_mode: self.present_mode,
@@ -477,7 +478,7 @@ impl WindowSurface {
         self.queue.submit(Some(command_buffer));
         let presentation_started = Instant::now();
         let queue_submission = presentation_started.duration_since(submission_started);
-        frame.present();
+        self.queue.present(frame);
         let presented_at = Instant::now();
         let presentation = presented_at.duration_since(presentation_started);
         Ok(ProfiledPresentation {
@@ -566,6 +567,7 @@ async fn adapter_for(
             compatible_surface: Some(surface),
             force_fallback_adapter: false,
             power_preference: wgpu::PowerPreference::from_env().unwrap_or_default(),
+            apply_limit_buckets: false,
         })
         .await
         .map_err(|_| SurfaceError::AdapterNotFound)

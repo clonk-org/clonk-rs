@@ -196,8 +196,9 @@ def _validate_adapter(
     _require_integer(value["subgroup_min_size"], f"{label}.subgroup_min_size")
     _require_integer(value["subgroup_max_size"], f"{label}.subgroup_max_size")
     _require(
-        type(value["transient_saves_memory"]) is bool,
-        f"{label}.transient_saves_memory must be a boolean",
+        type(value["transient_saves_memory"]) is bool
+        or value["transient_saves_memory"] is None,
+        f"{label}.transient_saves_memory must be a boolean or null",
     )
     _require(
         value["backend"] == expected_backend,

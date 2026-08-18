@@ -1415,7 +1415,8 @@ fn retained_gpu_artifact_fingerprints_the_device_adapter_fields() {
         backend: wgpu::Backend::Vulkan,
         subgroup_min_size: 16,
         subgroup_max_size: 64,
-        transient_saves_memory: true,
+        transient_saves_memory: Some(true),
+        limit_bucket: None,
     });
 
     assert_eq!(record.name, "Adapter");
@@ -1428,7 +1429,7 @@ fn retained_gpu_artifact_fingerprints_the_device_adapter_fields() {
     assert_eq!(record.backend, "vulkan");
     assert_eq!(record.subgroup_min_size, 16);
     assert_eq!(record.subgroup_max_size, 64);
-    assert!(record.transient_saves_memory);
+    assert_eq!(record.transient_saves_memory, Some(true));
 }
 
 #[test]

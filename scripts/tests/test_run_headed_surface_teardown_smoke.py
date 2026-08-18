@@ -182,6 +182,16 @@ class HeadedSurfaceReportTests(unittest.TestCase):
                         expected_backend="vulkan",
                     )
 
+    def test_accepts_an_adapter_that_does_not_report_transient_attachment_savings(self):
+        report = authoritative_report()
+        mutate_both_adapters(report, transient_saves_memory=None)
+
+        MODULE.validate_report(
+            report,
+            authoritative=True,
+            expected_backend="vulkan",
+        )
+
     def test_wiring_only_accepts_real_non_nvidia_surface_evidence_without_claiming_crash_coverage(
         self,
     ):
