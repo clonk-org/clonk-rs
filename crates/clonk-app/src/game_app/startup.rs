@@ -7,6 +7,24 @@
 use super::*;
 
 impl GameApp {
+    /// Hold a rebuilt `General.Participants` for the shutdown save.
+    ///
+    /// It is a `CFG_MaxString` escaped-string field, so the flush has to hand
+    /// the native bytes to C++'s quoted writer; the raw writer would emit the
+    /// list bare, and a LegacyClonk install sharing this file would not read it
+    /// back as the same value.
+    pub(crate) fn defer_participant_list(&mut self, participants: &str) {
+        let Some(native) = clonk_resources::encode_legacy_script_text(participants) else {
+            tracing::warn!(
+                participants,
+                "participant list is not representable in the classic Windows-1252 config"
+            );
+            return;
+        };
+        self.deferred_config
+            .set_escaped("General", "Participants", participants, native);
+    }
+
     pub(crate) fn console_startup_active(&self) -> bool {
         matches!(self.mode, AppMode::Menu | AppMode::Loading) && !self.console_game_active()
     }
@@ -3861,8 +3879,7 @@ impl GameApp {
         let forced_first_participant =
             matches!(&origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer);
         if forced_first_participant {
-            self.deferred_config
-                .set("General", "Participants", saved.file_name.clone());
+            self.defer_participant_list(&saved.file_name);
         }
         let Some(paths) = self.app_paths.as_ref() else {
             self.startup_tooltip.pointer_left();
