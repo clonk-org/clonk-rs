@@ -1200,11 +1200,13 @@ fn control_wait_attribution_for(
     tick: Tick,
     recipient: ClientId,
     waiting: &BTreeSet<ClientId>,
+    discarded: &BTreeSet<ClientId>,
 ) -> Option<crate::ControlWaitAttribution> {
     (!waiting.is_empty()).then(|| crate::ControlWaitAttribution {
         tick,
         waited_for_recipient: waiting.contains(&recipient),
         waited_for_other: waiting.iter().any(|client_id| *client_id != recipient),
+        discarded_recipient_control: discarded.contains(&recipient),
     })
 }
 
@@ -1232,6 +1234,10 @@ pub(crate) async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState
             .control_waiting_clients
             .remove(&batch.tick())
             .unwrap_or_default();
+        let discarded = state
+            .control_discarded_clients
+            .remove(&batch.tick())
+            .unwrap_or_default();
         for client_id in state
             .coordinator
             .client_ids()
@@ -1244,7 +1250,7 @@ pub(crate) async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState
                 continue;
             }
             if let Some(attribution) =
-                control_wait_attribution_for(batch.tick(), client_id, &waiting)
+                control_wait_attribution_for(batch.tick(), client_id, &waiting, &discarded)
             {
                 let _ = try_send_host_message(
                     state,
@@ -1947,23 +1953,57 @@ mod tests {
     #[test]
     fn host_wait_attribution_distinguishes_the_late_recipient_from_healthy_peers() {
         let waiting = BTreeSet::from([7]);
+        let none = BTreeSet::new();
 
         assert_eq!(
-            control_wait_attribution_for(73, 7, &waiting),
+            control_wait_attribution_for(73, 7, &waiting, &none),
             Some(crate::ControlWaitAttribution {
                 tick: 73,
                 waited_for_recipient: true,
                 waited_for_other: false,
+                discarded_recipient_control: false,
             })
         );
         assert_eq!(
-            control_wait_attribution_for(73, 8, &waiting),
+            control_wait_attribution_for(73, 8, &waiting, &none),
             Some(crate::ControlWaitAttribution {
                 tick: 73,
                 waited_for_recipient: false,
                 waited_for_other: true,
+                discarded_recipient_control: false,
             })
         );
-        assert_eq!(control_wait_attribution_for(73, 8, &BTreeSet::new()), None);
+        assert_eq!(
+            control_wait_attribution_for(73, 8, &BTreeSet::new(), &none),
+            None
+        );
+    }
+
+    /// Only the client the deadline actually gave up on is told its input was
+    /// dropped. A peer that was merely waited for — and delivered before the
+    /// budget ran out — is not, or every healthy client in a session with one
+    /// bad peer would report losing input it never lost.
+    #[test]
+    fn only_the_client_the_deadline_gave_up_on_is_told_its_control_was_dropped() {
+        let waiting = BTreeSet::from([7, 8]);
+        let discarded = BTreeSet::from([7]);
+
+        let dropped = control_wait_attribution_for(73, 7, &waiting, &discarded)
+            .expect("the tick had a wait to attribute");
+        assert!(dropped.waited_for_recipient);
+        assert!(dropped.discarded_recipient_control);
+
+        let waited_only = control_wait_attribution_for(73, 8, &waiting, &discarded)
+            .expect("the tick had a wait to attribute");
+        assert!(waited_only.waited_for_recipient);
+        assert!(
+            !waited_only.discarded_recipient_control,
+            "8 was waited for but delivered, so it lost nothing"
+        );
+
+        let bystander = control_wait_attribution_for(73, 9, &waiting, &discarded)
+            .expect("the tick had a wait to attribute");
+        assert!(!bystander.waited_for_recipient);
+        assert!(!bystander.discarded_recipient_control);
     }
 }

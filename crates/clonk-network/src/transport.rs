@@ -1442,6 +1442,7 @@ mod tests {
             tick: 73,
             waited_for_recipient: false,
             waited_for_other: true,
+            discarded_recipient_control: false,
         };
         let frame = ControlTransport::<tokio::io::DuplexStream>::encode_message_frame(
             ControlMessage::ControlWaitAttribution(attribution),

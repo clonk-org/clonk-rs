@@ -2556,6 +2556,8 @@ impl GameApp {
             )),
             console_mode: false,
             headless: false,
+            discarded_control_ticks: 0,
+            last_reported_discarded_control_tick: None,
             console_restored_startup_dialog: false,
             developer_console: DeveloperConsole::new(),
             developer_console_edit_mode: ConsoleEditMode::Play,

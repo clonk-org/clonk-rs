@@ -849,6 +849,16 @@ impl GameApp {
                             .runtime_network_committed_control_mode
                             .or(self.runtime_network_control_mode)
                             .unwrap_or(0);
+                        // Independent of the lateness branch below: the host can
+                        // give up on this client's control without this tick
+                        // also being measurably late here.
+                        let discarded_tick = control_tick_cost
+                            .and_then(|cost| cost.wait_attribution)
+                            .filter(|attribution| attribution.discarded_recipient_control)
+                            .map(|attribution| attribution.tick);
+                        if let Some(discarded_tick) = discarded_tick {
+                            self.note_discarded_control_tick(discarded_tick);
+                        }
                         if let Some(clock) = self.network_control_clock.as_mut() {
                             if let Some(cost) = control_tick_cost {
                                 clock.observe_control_send_time_ms(cost.send_time_ms);

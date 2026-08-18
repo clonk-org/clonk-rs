@@ -870,6 +870,7 @@ mod tests {
             game_started: false,
             control_mode: config.initial_status.control_mode,
             control_waiting_clients: BTreeMap::new(),
+            control_discarded_clients: BTreeMap::new(),
             straggler_late: Default::default(),
             peer_capabilities: Default::default(),
             async_control_wait: None,
@@ -967,6 +968,7 @@ mod tests {
                     tick: 0,
                     waited_for_recipient: true,
                     waited_for_other: false,
+                    discarded_recipient_control: false,
                 }
             ))
         ));

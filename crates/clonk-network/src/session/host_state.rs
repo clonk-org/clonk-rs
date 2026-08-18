@@ -111,6 +111,11 @@ pub(crate) struct HostState {
     /// Clients whose contribution was still missing when the host first
     /// reached each host-routed control tick.
     pub(crate) control_waiting_clients: BTreeMap<Tick, BTreeSet<ClientId>>,
+    /// Clients whose contribution the async deadline gave up on, so the tick
+    /// was packed without it and the input is gone rather than deferred
+    /// (`force_expired_async_control`, mirroring `PackCompleteCtrl`,
+    /// C4GameControlNetwork.cpp:741-784). Read once when the aggregate ships.
+    pub(crate) control_discarded_clients: BTreeMap<Tick, BTreeSet<ClientId>>,
     /// Consecutive ticks each client has failed to deliver before the host
     /// packed without it.
     pub(crate) straggler_late: std::collections::BTreeMap<ClientId, u32>,

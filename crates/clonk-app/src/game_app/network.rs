@@ -7912,6 +7912,30 @@ impl GameApp {
         }
     }
 
+    /// Record that the host packed a tick without this client's control.
+    ///
+    /// The host bounds its async wait at
+    /// `ControlRate * AsyncMaxWait * 1000 / TargetFPS` and then packs whoever
+    /// arrived; the absent client's control is dropped, not deferred, and a
+    /// packet arriving afterwards is rejected as stale. Reporting it is
+    /// deliberately a log and a counter — never a control — because the host
+    /// alone decides the timeout and broadcasts one authoritative aggregate
+    /// that every client executes identically. Putting the notice in the
+    /// control stream would make the loss itself a synchronized event.
+    pub(crate) fn note_discarded_control_tick(&mut self, tick: clonk_network::Tick) {
+        self.discarded_control_ticks = self.discarded_control_ticks.saturating_add(1);
+        let tick = i32::try_from(tick).unwrap_or(i32::MAX);
+        if self.last_reported_discarded_control_tick == Some(tick) {
+            return;
+        }
+        self.last_reported_discarded_control_tick = Some(tick);
+        tracing::warn!(
+            tick,
+            discarded_ticks = self.discarded_control_ticks,
+            "the host packed this control tick without our input; it was dropped, not delayed"
+        );
+    }
+
     pub(crate) fn finish_game_over_after_league(&mut self) -> Result<(), EngineError> {
         if self.headless {
             // `C4Game::ShowGameOverDlg` builds no dialog in a console engine:
