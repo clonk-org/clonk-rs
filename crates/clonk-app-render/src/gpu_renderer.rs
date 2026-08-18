@@ -1742,6 +1742,10 @@ pub struct GpuRendererStats {
     pub landscape_instance_upload_bytes: usize,
     pub solid_rect_upload_bytes: usize,
     pub composition_recreated: bool,
+    /// Composed shader-landscape outputs created this frame. Zero once the
+    /// output is retained, which is also what keeps the quad, object and
+    /// landscape bind groups that name it valid.
+    pub created_shader_landscape_outputs: usize,
 }
 
 /// One painter-ordered retained scene and its coordinate transform.
@@ -3458,24 +3462,41 @@ impl RetainedGpuRenderer {
             device.limits().max_texture_dimension_2d,
         )?;
         let extent = inputs.composed_extent();
+        // The composition pass clears and rewrites every texel of its target,
+        // so an output of the right extent can be composed into again. Keeping
+        // it also keeps the bind groups that name it valid.
+        let retained_output = self
+            .textures
+            .remove(&id)
+            .filter(|cached| {
+                cached.contents == CachedTextureContents::ShaderLandscape
+                    && cached.extent == extent
+                    && cached.format == GpuTextureFormat::Rgba8
+            })
+            .map(|cached| (cached._texture, cached.view));
+        let recreated = retained_output.is_none();
         let composer = self
             .landscape_composer
             .get_or_insert_with(|| ShaderLandscapeComposer::new(device));
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lc_gpu_shader_landscape_composed"),
-            size: wgpu::Extent3d {
-                width: extent[0],
-                height: extent[1],
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+        let (texture, view) = retained_output.unwrap_or_else(|| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("lc_gpu_shader_landscape_composed"),
+                size: wgpu::Extent3d {
+                    width: extent[0],
+                    height: extent[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (texture, view)
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         composer.compose_into_profiled(device, queue, encoder, &view, inputs, timestamp_writes)?;
 
         let byte_len = u64::from(extent[0]) * u64::from(extent[1]) * 4;
@@ -3494,9 +3515,12 @@ impl RetainedGpuRenderer {
                 view,
             },
         );
-        self.quad_bind_groups.clear();
-        self.object_bind_groups.clear();
-        self.landscape_bind_groups.clear();
+        self.last_stats.created_shader_landscape_outputs += usize::from(recreated);
+        if recreated {
+            self.quad_bind_groups.clear();
+            self.object_bind_groups.clear();
+            self.landscape_bind_groups.clear();
+        }
         Ok(())
     }
 
@@ -7178,6 +7202,64 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// The rows a retained plane must re-upload, as a half-open row range.
+///
+/// `None` is an unchanged plane, which uploads nothing. A plane whose length
+/// no longer matches its predecessor is uploaded whole: it belongs to a
+/// different extent, and the caller has already recreated the texture.
+fn changed_rows(previous: &[u8], next: &[u8], row_bytes: usize) -> Option<std::ops::Range<usize>> {
+    if row_bytes == 0 {
+        return None;
+    }
+    let rows = next.len() / row_bytes;
+    if previous.len() != next.len() {
+        return (rows > 0).then_some(0..rows);
+    }
+    let row = |index: usize| index * row_bytes..(index + 1) * row_bytes;
+    let differs = |index: &usize| previous[row(*index)] != next[row(*index)];
+    let first = (0..rows).find(differs)?;
+    let last = (first..rows).rev().find(differs).unwrap_or(first);
+    Some(first..last + 1)
+}
+
+/// What a retained composition's resources are shaped by. The planes are one
+/// texel per map pixel, so they follow the map extent and — because an absent
+/// shading plane composes from a 1x1 neutral texel — whether shading is on.
+/// The atlas and its slot table come from the material catalogue instead, and
+/// change only when it is reloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShaderLandscapeResourceKey {
+    extent: [u32; 2],
+    shading: bool,
+    atlas_extent: [u32; 2],
+}
+
+/// Which retained resources the next composition can keep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ShaderLandscapeReuse {
+    planes: bool,
+    atlas: bool,
+    /// The bind group names every view, so it survives only when they all do.
+    bind_group: bool,
+}
+
+impl ShaderLandscapeReuse {
+    fn between(
+        previous: Option<ShaderLandscapeResourceKey>,
+        next: ShaderLandscapeResourceKey,
+    ) -> Self {
+        previous.map_or_else(Self::default, |previous| {
+            let planes = previous.extent == next.extent && previous.shading == next.shading;
+            let atlas = previous.atlas_extent == next.atlas_extent;
+            Self {
+                planes,
+                atlas,
+                bind_group: planes && atlas,
+            }
+        })
+    }
+}
+
 /// Renders the landscape material composition per fragment.
 ///
 /// Deliberate divergence from C++, opt in through `Graphics.ShaderLandscape`.
@@ -7188,6 +7270,127 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 pub struct ShaderLandscapeComposer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    retained: Option<RetainedShaderLandscape>,
+}
+
+/// One composition's GPU resources, kept across compositions.
+///
+/// The plane bytes are kept beside their textures so the next composition can
+/// upload the rows that changed rather than the whole map, and so an unchanged
+/// landscape uploads nothing at all.
+#[derive(Debug)]
+struct RetainedShaderLandscape {
+    key: ShaderLandscapeResourceKey,
+    index: wgpu::TextureView,
+    index_plane: Vec<u8>,
+    shading: wgpu::TextureView,
+    shading_plane: Vec<u8>,
+    atlas: wgpu::TextureView,
+    atlas_bytes: Vec<u8>,
+    params: wgpu::Buffer,
+    config: [u32; 4],
+    slots: wgpu::Buffer,
+    slot_table: [ShaderLandscapeSlot; SHADER_LANDSCAPE_SLOTS],
+    bind_group: wgpu::BindGroup,
+    /// Held so the views above stay valid: a wgpu view does not keep its
+    /// texture alive.
+    _textures: [wgpu::Texture; 3],
+}
+
+impl RetainedShaderLandscape {
+    /// Re-uploads the map planes by the rows that changed. An unchanged
+    /// landscape uploads nothing.
+    fn upload_planes(
+        &mut self,
+        queue: &wgpu::Queue,
+        index_plane: &[u8],
+        shading_plane: &[u8],
+        shading_extent: [u32; 2],
+    ) {
+        upload_changed_rows(
+            queue,
+            &self.index,
+            &mut self.index_plane,
+            index_plane,
+            self.key.extent,
+            1,
+        );
+        upload_changed_rows(
+            queue,
+            &self.shading,
+            &mut self.shading_plane,
+            shading_plane,
+            shading_extent,
+            2,
+        );
+    }
+
+    /// The atlas comes from the material catalogue, so it survives every
+    /// composition until a reload changes it.
+    fn upload_atlas(&mut self, queue: &wgpu::Queue, atlas: &[u8], extent: [u32; 2]) {
+        upload_changed_rows(queue, &self.atlas, &mut self.atlas_bytes, atlas, extent, 4);
+    }
+
+    /// The uniforms are small enough to rewrite whole, but only when the
+    /// detail factor, extent or texmap actually moved.
+    fn upload_uniforms(
+        &mut self,
+        queue: &wgpu::Queue,
+        config: [u32; 4],
+        table: &[ShaderLandscapeSlot; SHADER_LANDSCAPE_SLOTS],
+    ) {
+        if self.config != config {
+            self.config = config;
+            queue.write_buffer(&self.params, 0, u32_bytes(&config));
+        }
+        if self.slot_table != *table {
+            self.slot_table = *table;
+            queue.write_buffer(&self.slots, 0, shader_landscape_slot_bytes(table));
+        }
+    }
+}
+
+/// Writes the rows of `next` that differ from `previous` into `view`'s
+/// texture, and adopts them.
+fn upload_changed_rows(
+    queue: &wgpu::Queue,
+    view: &wgpu::TextureView,
+    previous: &mut Vec<u8>,
+    next: &[u8],
+    extent: [u32; 2],
+    bytes_per_texel: u32,
+) {
+    let row_bytes = extent[0] as usize * bytes_per_texel as usize;
+    let Some(rows) = changed_rows(previous, next, row_bytes) else {
+        return;
+    };
+    let offset = rows.start * row_bytes;
+    let height = (rows.end - rows.start) as u32;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: view.texture(),
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: rows.start as u32,
+                z: 0,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        &next[offset..offset + (height as usize * row_bytes)],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(extent[0] * bytes_per_texel),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width: extent[0],
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    previous.clear();
+    previous.extend_from_slice(next);
 }
 
 impl ShaderLandscapeComposer {
@@ -7261,13 +7464,14 @@ impl ShaderLandscapeComposer {
         Self {
             pipeline,
             bind_group_layout,
+            retained: None,
         }
     }
 
     /// Composes into `target`, which must be an `Rgba8Unorm` view of exactly
     /// `inputs.composed_extent()`.
     pub fn compose_into(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -7278,7 +7482,7 @@ impl ShaderLandscapeComposer {
     }
 
     fn compose_into_profiled(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -7288,88 +7492,129 @@ impl ShaderLandscapeComposer {
     ) -> Result<(), GpuRendererError> {
         inputs.validate()?;
         let pixels = inputs.extent[0] as usize * inputs.extent[1] as usize;
-        let (_index, index_view) = uint_plane(
-            device,
-            queue,
-            "lc_gpu_shader_landscape_index",
-            wgpu::TextureFormat::R8Uint,
-            inputs.extent,
-            &inputs.index_plane[..pixels],
-            1,
-        );
+        let index_plane = &inputs.index_plane[..pixels];
         let neutral = [0_u8, 0];
-        let (shading_extent, shading_bytes) = inputs
+        let (shading_extent, shading_plane) = inputs
             .shading_plane
             .map_or(([1, 1], &neutral[..]), |plane| {
                 (inputs.extent, &plane[..pixels * 2])
             });
-        let (_shading, shading_view) = uint_plane(
-            device,
-            queue,
-            "lc_gpu_shader_landscape_shading",
-            wgpu::TextureFormat::Rg8Uint,
-            shading_extent,
-            shading_bytes,
-            2,
-        );
         let atlas_pixels = inputs.atlas_extent[0] as usize * inputs.atlas_extent[1] as usize;
-        let (_atlas, atlas_view) = uint_plane(
-            device,
-            queue,
-            "lc_gpu_shader_landscape_atlas",
-            wgpu::TextureFormat::Rgba8Uint,
-            inputs.atlas_extent,
-            &inputs.atlas[..atlas_pixels * 4],
-            4,
-        );
-
+        let atlas_bytes = &inputs.atlas[..atlas_pixels * 4];
+        let key = ShaderLandscapeResourceKey {
+            extent: inputs.extent,
+            shading: inputs.shading_plane.is_some(),
+            atlas_extent: inputs.atlas_extent,
+        };
         let config: [u32; 4] = [
             inputs.extent[0],
             inputs.extent[1],
             inputs.detail,
             u32::from(inputs.shading_plane.is_some()),
         ];
-        let params = uniform_buffer(
-            device,
-            queue,
-            "lc_gpu_shader_landscape_params",
-            u32_bytes(&config),
-        );
         let mut table = [ShaderLandscapeSlot::default(); SHADER_LANDSCAPE_SLOTS];
         table[..inputs.slots.len()].copy_from_slice(inputs.slots);
-        let slots = uniform_buffer(
-            device,
-            queue,
-            "lc_gpu_shader_landscape_slots",
-            shader_landscape_slot_bytes(&table),
-        );
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lc_gpu_shader_landscape_bind_group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&index_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&shading_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: params.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: slots.as_entire_binding(),
-                },
-            ],
-        });
+        let reuse =
+            ShaderLandscapeReuse::between(self.retained.as_ref().map(|retained| retained.key), key);
+        let mut retained = self.retained.take();
+        // A resource the next composition cannot keep is dropped before its
+        // replacement is created, so a resize does not hold both.
+        if !reuse.planes || !reuse.atlas {
+            retained = None;
+        }
+
+        let retained = match retained {
+            Some(mut retained) => {
+                retained.upload_planes(queue, index_plane, shading_plane, shading_extent);
+                retained.upload_atlas(queue, atlas_bytes, inputs.atlas_extent);
+                retained.upload_uniforms(queue, config, &table);
+                retained
+            }
+            None => {
+                let (index_texture, index) = uint_plane(
+                    device,
+                    queue,
+                    "lc_gpu_shader_landscape_index",
+                    wgpu::TextureFormat::R8Uint,
+                    inputs.extent,
+                    index_plane,
+                    1,
+                );
+                let (shading_texture, shading) = uint_plane(
+                    device,
+                    queue,
+                    "lc_gpu_shader_landscape_shading",
+                    wgpu::TextureFormat::Rg8Uint,
+                    shading_extent,
+                    shading_plane,
+                    2,
+                );
+                let (atlas_texture, atlas) = uint_plane(
+                    device,
+                    queue,
+                    "lc_gpu_shader_landscape_atlas",
+                    wgpu::TextureFormat::Rgba8Uint,
+                    inputs.atlas_extent,
+                    atlas_bytes,
+                    4,
+                );
+                let params = uniform_buffer(
+                    device,
+                    queue,
+                    "lc_gpu_shader_landscape_params",
+                    u32_bytes(&config),
+                );
+                let slots = uniform_buffer(
+                    device,
+                    queue,
+                    "lc_gpu_shader_landscape_slots",
+                    shader_landscape_slot_bytes(&table),
+                );
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("lc_gpu_shader_landscape_bind_group"),
+                    layout: &self.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&index),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&shading),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&atlas),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: params.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: slots.as_entire_binding(),
+                        },
+                    ],
+                });
+                RetainedShaderLandscape {
+                    key,
+                    index,
+                    index_plane: index_plane.to_vec(),
+                    shading,
+                    shading_plane: shading_plane.to_vec(),
+                    atlas,
+                    atlas_bytes: atlas_bytes.to_vec(),
+                    params,
+                    config,
+                    slots,
+                    slot_table: table,
+                    bind_group,
+                    _textures: [index_texture, shading_texture, atlas_texture],
+                }
+            }
+        };
+        let retained = self.retained.insert(retained);
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lc_gpu_shader_landscape_pass"),
@@ -7388,7 +7633,7 @@ impl ShaderLandscapeComposer {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, &retained.bind_group, &[]);
         pass.draw(0..3, 0..1);
         Ok(())
     }
@@ -11981,8 +12226,19 @@ mod tests {
         queue: &wgpu::Queue,
         inputs: ShaderLandscapeInputs<'_>,
     ) -> Vec<u8> {
+        let mut composer = ShaderLandscapeComposer::new(device);
+        compose_shader_landscape_with(&mut composer, device, queue, inputs)
+    }
+
+    /// Composes through `composer`, so successive calls exercise the resources
+    /// it retains rather than a fresh set each time.
+    fn compose_shader_landscape_with(
+        composer: &mut ShaderLandscapeComposer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        inputs: ShaderLandscapeInputs<'_>,
+    ) -> Vec<u8> {
         let extent = inputs.composed_extent();
-        let composer = ShaderLandscapeComposer::new(device);
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lc_gpu_shader_landscape_test_target"),
             size: wgpu::Extent3d {
@@ -12569,6 +12825,237 @@ mod tests {
         assert!(
             varied > 0,
             "detail 2 must sample the pattern inside a landscape pixel"
+        );
+    }
+
+    /// A retained plane is re-uploaded by the rows that actually changed, so
+    /// an unchanged landscape uploads nothing and a local edit uploads its own
+    /// band rather than the whole map.
+    #[test]
+    fn a_retained_plane_uploads_only_the_rows_that_changed() {
+        let previous = vec![0_u8; 4 * 3];
+
+        assert_eq!(
+            changed_rows(&previous, &previous, 4),
+            None,
+            "an unchanged plane uploads nothing"
+        );
+
+        let mut edited = previous.clone();
+        edited[5] = 1;
+        assert_eq!(
+            changed_rows(&previous, &edited, 4),
+            Some(1..2),
+            "one edited row uploads that row alone"
+        );
+
+        let mut spanning = previous.clone();
+        spanning[1] = 1;
+        spanning[9] = 1;
+        assert_eq!(
+            changed_rows(&previous, &spanning, 4),
+            Some(0..3),
+            "separate edits upload the band that covers them"
+        );
+
+        assert_eq!(
+            changed_rows(&previous, &[0_u8; 4 * 5], 4),
+            Some(0..5),
+            "a plane of a different length is uploaded whole"
+        );
+    }
+
+    /// A landscape update composes into the output it already has. Creating a
+    /// new one each update also invalidated every quad, object and landscape
+    /// bind group that named it, so the whole scene's bindings were rebuilt
+    /// for one landscape edit.
+    #[test]
+    fn a_landscape_update_composes_into_the_retained_output() {
+        let Some((_runtime, _instance, _adapter, device, queue)) =
+            test_wgpu_device("lc_gpu_shader_landscape_output_retention_device", true)
+        else {
+            return;
+        };
+        let extent = [12_u32, 12_u32];
+        let base = GpuTextureId::fresh();
+        let scene = shader_landscape_scene_fixture(base, extent, extent, 1);
+        let mut renderer = test_renderer(&device, &queue);
+        renderer.set_shader_landscape(true);
+        renderer.set_landscape_detail(1);
+
+        renderer.set_pending_shader_landscape(Some((base, shader_landscape_plan_fixture(extent))));
+        let first = render_identity_readback(&mut renderer, &device, &queue, &scene);
+        assert_eq!(
+            renderer.last_stats().created_shader_landscape_outputs,
+            1,
+            "the first composition has no output to keep"
+        );
+
+        let mut edited = shader_landscape_plan_fixture(extent);
+        let row = extent[0] as usize;
+        for byte in &mut edited.index_plane[4 * row..6 * row] {
+            *byte = u8::from(*byte == 0);
+        }
+        renderer.set_pending_shader_landscape(Some((base, edited.clone())));
+        let updated = render_identity_readback(&mut renderer, &device, &queue, &scene);
+        assert_eq!(
+            renderer.last_stats().created_shader_landscape_outputs,
+            0,
+            "an update of the same extent composes into the output it already has"
+        );
+        assert_ne!(updated, first, "the edited plan must reach the output");
+        assert!(
+            !renderer.quad_bind_groups.is_empty(),
+            "a retained output keeps the bind groups that name it"
+        );
+
+        // A different extent owns a different output, so that one is recreated.
+        let larger = [16_u32, 16_u32];
+        let larger_scene = shader_landscape_scene_fixture(base, larger, larger, 1);
+        renderer.set_pending_shader_landscape(Some((base, shader_landscape_plan_fixture(larger))));
+        let _ = render_identity_readback(&mut renderer, &device, &queue, &larger_scene);
+        assert_eq!(
+            renderer.last_stats().created_shader_landscape_outputs,
+            1,
+            "a resized landscape cannot reuse the smaller output"
+        );
+    }
+
+    /// Composing twice through one composer must give the same pixels as
+    /// composing each landscape on its own. The retained planes upload only
+    /// the rows that changed, so a row left stale — or a partial write placed
+    /// at the wrong origin — shows up here as a pixel difference and nowhere
+    /// else.
+    #[test]
+    fn a_retained_composition_matches_composing_each_landscape_fresh() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            return;
+        };
+        let extent = [8_u32, 8_u32];
+        let (atlas_extent, atlas, _) = shader_landscape_atlas();
+        let slots = shader_landscape_slots();
+        let first = shader_landscape_index_plane(extent);
+        // A band in the middle changes material; the rows around it do not.
+        let mut second = first.clone();
+        let row = extent[0] as usize;
+        for byte in &mut second[3 * row..5 * row] {
+            *byte = u8::from(*byte == 0);
+        }
+        assert_ne!(first, second, "the fixture must actually differ");
+
+        fn inputs<'a>(
+            plane: &'a [u8],
+            extent: [u32; 2],
+            atlas: &'a [u8],
+            atlas_extent: [u32; 2],
+            slots: &'a [ShaderLandscapeSlot],
+        ) -> ShaderLandscapeInputs<'a> {
+            ShaderLandscapeInputs {
+                extent,
+                index_plane: plane,
+                shading_plane: None,
+                atlas,
+                atlas_extent,
+                slots,
+                detail: 1,
+            }
+        }
+        let first_inputs = || inputs(&first, extent, &atlas, atlas_extent, &slots);
+        let second_inputs = || inputs(&second, extent, &atlas, atlas_extent, &slots);
+
+        let mut composer = ShaderLandscapeComposer::new(&device);
+        let retained_first =
+            compose_shader_landscape_with(&mut composer, &device, &queue, first_inputs());
+        let retained_second =
+            compose_shader_landscape_with(&mut composer, &device, &queue, second_inputs());
+        let retained_again =
+            compose_shader_landscape_with(&mut composer, &device, &queue, second_inputs());
+
+        assert_eq!(
+            retained_first,
+            compose_shader_landscape(&device, &queue, first_inputs()),
+            "the first composition through a retained composer is unchanged"
+        );
+        assert_eq!(
+            retained_second,
+            compose_shader_landscape(&device, &queue, second_inputs()),
+            "an edited band recomposes exactly as a fresh composition does"
+        );
+        assert_eq!(
+            retained_again, retained_second,
+            "recomposing an unchanged landscape repeats it"
+        );
+    }
+
+    /// The composition resources are retained, so each set survives exactly
+    /// the inputs that do not invalidate it: the planes follow the map extent
+    /// and whether shading is present, the atlas follows the material
+    /// catalogue, and the bind group — which names every view — survives only
+    /// when both do.
+    #[test]
+    fn retained_composition_resources_survive_the_inputs_that_do_not_invalidate_them() {
+        let key = ShaderLandscapeResourceKey {
+            extent: [64, 32],
+            shading: true,
+            atlas_extent: [16, 16],
+        };
+
+        assert_eq!(
+            ShaderLandscapeReuse::between(Some(key), key),
+            ShaderLandscapeReuse {
+                planes: true,
+                atlas: true,
+                bind_group: true,
+            },
+            "an unchanged composition recreates nothing"
+        );
+
+        assert_eq!(
+            ShaderLandscapeReuse::between(None, key),
+            ShaderLandscapeReuse::default(),
+            "the first composition has nothing to keep"
+        );
+
+        let resized = ShaderLandscapeResourceKey {
+            extent: [64, 64],
+            ..key
+        };
+        assert_eq!(
+            ShaderLandscapeReuse::between(Some(key), resized),
+            ShaderLandscapeReuse {
+                planes: false,
+                atlas: true,
+                bind_group: false,
+            },
+            "a resized map keeps the catalogue it did not touch"
+        );
+
+        let unshaded = ShaderLandscapeResourceKey {
+            shading: false,
+            ..key
+        };
+        assert_eq!(
+            ShaderLandscapeReuse::between(Some(key), unshaded),
+            ShaderLandscapeReuse {
+                planes: false,
+                atlas: true,
+                bind_group: false,
+            },
+            "the shading plane changes extent with its presence"
+        );
+
+        let reloaded = ShaderLandscapeResourceKey {
+            atlas_extent: [32, 16],
+            ..key
+        };
+        assert_eq!(
+            ShaderLandscapeReuse::between(Some(key), reloaded),
+            ShaderLandscapeReuse {
+                planes: true,
+                atlas: false,
+                bind_group: false,
+            },
+            "a material reload keeps the planes it did not touch"
         );
     }
 
