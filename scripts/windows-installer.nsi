@@ -116,7 +116,6 @@ Section "Uninstall"
   Delete "$INSTDIR\COPYING"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\credits.txt"
-  Delete "$INSTDIR\THIRD_PARTY_GAME_CONTENT.md"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
 
