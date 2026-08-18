@@ -13,6 +13,7 @@ pub use wgpu;
 
 mod acquire;
 mod blit;
+pub mod capability;
 mod window;
 
 pub use acquire::AcquireError;

@@ -38,6 +38,10 @@ pub enum SurfaceError {
     /// An extent was zero or beyond what the device supports.
     #[error("{0}")]
     Extent(#[from] ExtentError),
+    /// The adapter does not meet the interactive graphics floor. Carries every
+    /// unmet requirement, not just the first one found.
+    #[error("{0}")]
+    BelowGraphicsFloor(crate::capability::CapabilityReport),
     /// The surface is gone and must be rebuilt by its owner, not reconfigured.
     /// This is the one presentation failure callers can recover from.
     #[error("the window surface was lost")]
@@ -261,18 +265,29 @@ impl WindowSurface {
             requested if capabilities.present_modes.contains(&requested) => requested,
             _ => wgpu::PresentMode::AutoVsync,
         };
+
+        // Check the whole graphics floor before deriving anything from it, so a
+        // machine below it gets one diagnostic naming every missing
+        // requirement rather than discovering them one failure at a time.
+        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
+        let report = crate::capability::probe_capabilities(
+            &capabilities.formats,
+            max_texture_dimension_2d,
+            buffer_extent,
+        );
+        if !report.is_supported() {
+            return Err(SurfaceError::BelowGraphicsFloor(report));
+        }
+
         // Presentation composites in byte space and relies on the surface
-        // encode to restore those bytes, so an sRGB surface is required; the
-        // fallback matches what every desktop backend actually offers.
+        // encode to restore those bytes, so an sRGB surface is required. The
+        // probe above has already established there is one.
         let surface_format = capabilities
             .formats
             .iter()
             .find(|format| format.is_srgb())
             .copied()
             .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb);
-
-        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
-        check_extent(buffer_extent.0, buffer_extent.1, max_texture_dimension_2d)?;
 
         let texture = create_buffer_texture(&device, buffer_extent);
         let blitter = Blitter::new(
