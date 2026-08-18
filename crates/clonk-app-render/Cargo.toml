@@ -19,7 +19,7 @@ clonk-frontend = { path = "../clonk-frontend" }
 clonk-graphics = { path = "../clonk-graphics" }
 thiserror = "2"
 tracing = "0.1"
-wgpu = "29"
+wgpu = "30"
 # Benchmark-only: keep Criterion out of the application and workspace test
 # graph while retaining an executable end-to-end GPU submission benchmark.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"], optional = true }

@@ -60,7 +60,7 @@ strsim = "0.11"
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.32", features = ["rt-multi-thread", "sync", "time", "net"] }
 raw-window-handle = "0.6"
-wgpu = "29"
+wgpu = "30"
 winit = "0.30"
 tracing = "0.1"
 parking_lot = "0.12"
