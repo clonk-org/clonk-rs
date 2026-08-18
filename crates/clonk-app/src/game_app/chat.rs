@@ -1418,16 +1418,11 @@ impl GameApp {
     pub(crate) fn set_message_board_line_count(&mut self, line_count: i32) {
         let line_height = self.graphics.message_board_line_height();
         let enabled = self.message_board.set_line_count(line_count, line_height);
-        if let Some(paths) = self.app_paths.as_ref() {
-            if let Err(error) = persist_config_value(
-                paths,
-                "Graphics",
-                "MsgBoard",
-                i32::from(enabled).to_string(),
-            ) {
-                tracing::warn!(%error, "failed to persist Graphics.MsgBoard");
-            }
-        }
+        // `C4MessageBoard::ChangeMode` assigns `Config.Graphics.MsgBoard` for
+        // each of its three modes and saves nothing (C4MessageBoard.cpp:65-118),
+        // so the mode a session ends on reaches the file at shutdown.
+        self.deferred_config
+            .set("Graphics", "MsgBoard", i32::from(enabled).to_string());
     }
 
     pub(crate) fn message_board_overlay(&mut self) -> MessageBoardOverlay {

@@ -4004,7 +4004,18 @@ pub(crate) fn build_network_host_preparation(
         .ok_or_else(|| anyhow!("scenario `{}` has no filesystem path", scenario.title))?;
     let config_bytes = load_native_config_bytes(app.app_paths.as_ref());
     let network_ports = sanitized_network_ports(&config_bytes);
-    let raw_value = |section: &str, key: &str| native_config_text(&config_bytes, section, key);
+    // C++ prepares the round from the one process-wide `Config`, so it reads
+    // back whatever the previous round's controls wrote — `ControlRate`
+    // (C4GameParameters.cpp:430-431 over C4Control.cpp:141), `ControlMode`
+    // (C4Network2.cpp:231 over :853) and `NoRuntimeJoin` (C4Network2.cpp:513
+    // over C4GameOptions.cpp:169) are all memory-only writes. This session's
+    // pending values therefore outrank the file here.
+    let raw_value = |section: &str, key: &str| {
+        app.deferred_config
+            .get(section, key)
+            .map(str::to_owned)
+            .or_else(|| native_config_text(&config_bytes, section, key))
+    };
     let value =
         |section: &str, key: &str| raw_value(section, key).map(|value| value.trim().to_owned());
     let integer = |section: &str, key: &str, default: i32| {

@@ -3671,7 +3671,7 @@ impl GameApp {
             return;
         };
         let projected = clonk_script::c4_string_from_bytes(value);
-        self.persist_game_option_value("Network", "Comment", projected);
+        self.persist_game_option_text("Network", "Comment", &projected);
         let password_needed = self
             .advertised_game_reference
             .as_ref()

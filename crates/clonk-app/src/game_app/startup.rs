@@ -5069,8 +5069,7 @@ impl GameApp {
             self.runtime_network_status_barrier = None;
             self.control_clients = initial_control_clients(None, None);
             self.network_client_activity.clear();
-            let mut values = load_scenario_game_option_values(self.app_paths.as_ref());
-            values.master_server_signup = self.masterserver_signup_setting();
+            let values = self.scenario_game_option_values();
             self.scenario_game_options =
                 GameOptionButtons::new(GameOptionContext::LocalSelector, values);
             self.sync_scenario_game_option_bounds();
@@ -5923,7 +5922,17 @@ impl GameApp {
         Ok(Some(head))
     }
 
+    /// Whether this session has already been told to stop showing a warning.
+    ///
+    /// `ShowMessageModal` tests the flag it was handed by pointer — `if
+    /// (pbConfigDontShowAgainSetting && *pbConfigDontShowAgainSetting) return
+    /// true;` (C4GuiDialogs.cpp:1060-1065) — so a tick suppresses the dialog
+    /// immediately, from memory. The pending change therefore outranks the
+    /// file, which only catches up at a save surface.
     pub(crate) fn startup_message_hidden(&self, key: &str) -> bool {
+        if let Some(pending) = self.deferred_config.get("Startup", key) {
+            return parse_config_bool(pending);
+        }
         self.app_paths
             .as_ref()
             .and_then(|paths| Config::load(paths.config_file()).ok())

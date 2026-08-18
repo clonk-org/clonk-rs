@@ -1920,14 +1920,7 @@ fn run() -> Result<()> {
                         let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> =
                             entries
                                 .iter()
-                                .map(|(key, value)| {
-                                    (
-                                        key.as_str(),
-                                        clonk_app_netplay::NativeConfigValue::RawAscii(
-                                            value.as_str(),
-                                        ),
-                                    )
-                                })
+                                .map(|(key, value)| (key.as_str(), value.as_native()))
                                 .collect();
                         if let Err(error) =
                             persist_native_config_values(paths.as_ref(), &section, &updates)
@@ -8655,10 +8648,17 @@ impl GameApp {
         self.league_signup_pointer_capture = false;
         self.league_signup_pointer_position = None;
         let line_height = self.graphics.message_board_line_height();
-        self.message_board.initialize(
-            load_message_board_enabled(self.app_paths.as_ref()),
-            line_height,
-        );
+        // `C4MessageBoard::Init` reads the live `Config.Graphics.MsgBoard`
+        // (C4MessageBoard.cpp:236) that `ChangeMode` wrote without saving
+        // (:65-118), so a `/msgboard` from the previous round carries into this
+        // one; only the file lags until a save surface.
+        let message_board_enabled = self
+            .deferred_config
+            .get("Graphics", "MsgBoard")
+            .and_then(parse_native_config_bool)
+            .unwrap_or_else(|| load_message_board_enabled(self.app_paths.as_ref()));
+        self.message_board
+            .initialize(message_board_enabled, line_height);
         // C4PlayerList::JoinNew logs IDS_PRC_JOINPLR "Player join: %s"
         // (C4PlayerList.cpp:281, LanguageUS.txt:1222).
         let join_line = self

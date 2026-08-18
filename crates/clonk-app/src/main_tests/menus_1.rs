@@ -1349,6 +1349,10 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
         GameOptionAction::CommentChanged("new comment".to_string()),
     ])
     .test_value();
+    // No C++ game-option surface saves the file, so the four toggles above sit
+    // in the deferred store until a save surface runs; the subject here is the
+    // written content, so flush the way a clean shutdown would.
+    app.flush_deferred_config();
     let config = Config::load(paths.config_file()).test_value();
     assert_eq!(config.get_in(Some("General"), "NoCrew"), Some("false"));
     assert_eq!(config.get_in(Some("General"), "FairCrew"), None);
@@ -1401,11 +1405,112 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
     )])
     .test_value();
     assert_eq!(app.scenario_game_options.values().password, "new password");
+    // `SCopy(szPass, Config.Network.LastPassword, ...)` writes memory only
+    // (C4Network2Dialogs.cpp:748). `LastPassword` is a `CFG_MaxString` field,
+    // so the flush has to hand the native bytes to the escaped writer.
+    app.flush_deferred_config();
     assert_eq!(
         Config::load(paths.config_file())
             .expect("reload password")
             .get_in(Some("Network"), "LastPassword"),
         Some("new password")
+    );
+    reset_cached_app_paths();
+}
+
+#[test]
+fn a_game_option_reaches_the_file_only_at_a_save_surface() {
+    // The whole C++ tree holds seven `Config.Save()` calls — the Options
+    // dialog (C4StartupOptionsDlg.cpp:1183), the updater (C4UpdateDlg.cpp:338,347),
+    // the masterserver redirect (C4StartupNetDlg.cpp:314) and three in
+    // `C4Application` — and not one of them is a game-option surface. A toggle
+    // therefore lives in the process-wide `Config` until the shutdown write
+    // (C4Application.cpp:367), so a crash discards it.
+    let _lock = env_lock().lock();
+    let fixture = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+    fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+    fs::write(
+        paths.config_file(),
+        b"[General]\r\nRecord=0\r\n\r\n[Network]\r\nComment=\"old comment\"\r\n",
+    )
+    .test_value();
+    let mut app = new_state_only_menu_app(320, 200);
+    app.app_paths = Some(paths.clone());
+
+    app.process_game_option_actions(vec![
+        GameOptionAction::RecordPreferenceChanged(true),
+        GameOptionAction::CommentChanged("deferred comment".to_string()),
+    ])
+    .test_value();
+
+    assert_eq!(app.deferred_config.get("General", "Record"), Some("1"));
+    let unflushed = Config::load(paths.config_file()).test_value();
+    assert_eq!(unflushed.get_in(Some("General"), "Record"), Some("0"));
+    assert_eq!(
+        unflushed.get_in(Some("Network"), "Comment"),
+        Some("old comment"),
+        "the file keeps what this session started from"
+    );
+
+    app.flush_deferred_config();
+    let saved = Config::load(paths.config_file()).test_value();
+    assert_eq!(saved.get_in(Some("General"), "Record"), Some("1"));
+    assert_eq!(
+        saved.get_in(Some("Network"), "Comment"),
+        Some("deferred comment")
+    );
+    // `Network.Comment` is a `CFG_MaxString` field, so the flush has to keep
+    // C++'s quoted form rather than writing the scalar through unchanged.
+    let native = fs::read(paths.config_file()).test_value();
+    assert!(native
+        .windows(b"Comment=\"deferred comment\"".len())
+        .any(|window| window == b"Comment=\"deferred comment\""));
+    reset_cached_app_paths();
+}
+
+#[test]
+fn a_pending_game_option_survives_rebuilding_the_option_buttons() {
+    // C++ rebuilds `C4GameOptionButtons` from the one process-wide `Config`
+    // that its own toggles just wrote — record at C4Network2Dialogs.cpp:648
+    // over :715, league at :629 over :686, comment at :768 over :776 and the
+    // remembered password at :733 over :748 — so re-entering the scenario
+    // browser shows what this session set, not what is still on disk.
+    let _lock = env_lock().lock();
+    let fixture = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+    fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+    fs::write(
+        paths.config_file(),
+        b"[General]\r\nRecord=0\r\n\r\n[Network]\r\nComment=\"old comment\"\r\nLeagueServerSignUp=0\r\nLastPassword=\"old pass\"\r\n",
+    )
+    .test_value();
+    let mut app = new_state_only_menu_app(320, 200);
+    app.app_paths = Some(paths.clone());
+
+    app.process_game_option_actions(vec![
+        GameOptionAction::RecordPreferenceChanged(true),
+        GameOptionAction::LeagueSignupChanged(true),
+        GameOptionAction::CommentChanged("live comment".to_string()),
+        GameOptionAction::PasswordChanged {
+            remember_for_next_round: Some("live pass".to_string()),
+            password: String::new(),
+        },
+    ])
+    .test_value();
+
+    let rebuilt = app.scenario_game_option_values();
+    assert!(rebuilt.record, "the Record toggle survives the rebuild");
+    assert!(rebuilt.league_server_signup);
+    assert_eq!(rebuilt.comment, "live comment");
+    assert_eq!(rebuilt.last_password, "live pass");
+    // Nothing has been written yet — the file is still what the session
+    // started from.
+    let on_disk = Config::load(paths.config_file()).test_value();
+    assert_eq!(on_disk.get_in(Some("General"), "Record"), Some("0"));
+    assert_eq!(
+        on_disk.get_in(Some("Network"), "Comment"),
+        Some("old comment")
     );
     reset_cached_app_paths();
 }
