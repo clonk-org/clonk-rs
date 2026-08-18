@@ -69,6 +69,7 @@ use player_file::PlayerInfoCoreState;
 pub mod pxs;
 mod record;
 mod runtime_join_player_restore;
+pub mod savegame_association;
 #[doc(hidden)]
 pub use clonk_engine_core::rng;
 mod round_results;

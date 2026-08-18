@@ -1,3 +1,6 @@
+pub(super) use clonk_engine::savegame_association::{
+    effective_player_name, savegame_players_match,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -365,63 +368,6 @@ fn associate_offline_savegame_player_info(
         wild_takeovers,
         recording_player_info,
     )
-}
-
-pub(super) fn savegame_players_match(
-    current: &ControlPlayerInfoEntry,
-    saved: &ControlPlayerInfoEntry,
-    matching_level: u8,
-) -> bool {
-    match matching_level {
-        0 => {
-            !current.filename.is_empty()
-                && !saved.filename.is_empty()
-                && legacy_bytes_equal_no_case(
-                    legacy_basename(current.filename.as_bytes()),
-                    legacy_basename(saved.filename.as_bytes()),
-                )
-                && legacy_bytes_equal_no_case(
-                    effective_player_name(current),
-                    effective_player_name(saved),
-                )
-        }
-        1 => {
-            legacy_bytes_equal_no_case(effective_player_name(current), effective_player_name(saved))
-        }
-        2 => current.original_color == saved.original_color,
-        _ => true,
-    }
-}
-
-fn legacy_bytes_equal_no_case(left: &[u8], right: &[u8]) -> bool {
-    fn capital(byte: u8) -> u8 {
-        match byte {
-            b'a'..=b'z' => byte - 32,
-            0xe4 => 0xc4,
-            0xf6 => 0xd6,
-            0xfc => 0xdc,
-            _ => byte,
-        }
-    }
-
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| capital(*left) == capital(*right))
-}
-
-fn effective_player_name(player: &ControlPlayerInfoEntry) -> &[u8] {
-    [&player.league_account, &player.forced_name, &player.name]
-        .into_iter()
-        .find(|name| !name.is_empty())
-        .map_or(&[], |name| name.as_bytes())
-}
-
-fn legacy_basename(path: &[u8]) -> &[u8] {
-    path.iter()
-        .rposition(|byte| matches!(*byte, b'/' | b'\\'))
-        .map_or(path, |separator| &path[separator + 1..])
 }
 
 #[cfg(all(
