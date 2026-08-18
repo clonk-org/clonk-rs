@@ -7537,6 +7537,44 @@ pub struct EffectDispatchStats {
     pub object_state_snapshots: usize,
 }
 
+/// Where scenario activation spends its time, by stage.
+///
+/// Activation is a user-visible cost with no stage-level tracker: the sampled
+/// profile attributed most of `Scenario::apply` to object-placement callbacks,
+/// but a sample of one subtree does not apportion the whole interval. These
+/// are wall-clock spans recorded as each stage runs, so a stage that is cheap
+/// on one scenario and dominant on another shows up as itself rather than as
+/// "apply".
+///
+/// Observation only: nothing here is serialised or read by the simulation, and
+/// the stages are recorded, never used to decide anything.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActivationTimings {
+    /// `configure_materials_from_library`: material/texmap resolution.
+    pub materials: std::time::Duration,
+    /// Landscape installation and the scenario's landscape systems.
+    pub landscape: std::time::Duration,
+    /// Objects.txt placement, including the callbacks each spawn runs.
+    pub object_placement: std::time::Duration,
+    /// `initialize_definition_scripts`: every definition's Initialize.
+    pub definition_scripts: std::time::Duration,
+    /// Map-creator callbacks that run after placement.
+    pub post_init_map_callbacks: std::time::Duration,
+    /// The scenario script's own Initialize.
+    pub scenario_script: std::time::Duration,
+}
+
+/// The activation stage a span belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivationStage {
+    Materials,
+    Landscape,
+    ObjectPlacement,
+    DefinitionScripts,
+    PostInitMapCallbacks,
+    ScenarioScript,
+}
+
 pub struct Engine {
     /// Active-language `IDS_BTN_NEXTSCENARIO`/`IDS_DESC_NEXTSCENARIO`, which
     /// `FnSetNextMission` substitutes for omitted arguments. Presentation text
@@ -7545,6 +7583,8 @@ pub struct Engine {
     /// Observation only; see `EffectDispatchStats`. Behind a `Cell` because a
     /// context is built from `&self`.
     pub(crate) effect_dispatch_stats: std::cell::Cell<EffectDispatchStats>,
+    /// Observation only; see `ActivationTimings`.
+    pub(crate) activation_timings: ActivationTimings,
     /// Keyed by `DefinitionId`, so the per-tick probes from
     /// `active_solid_mask_indices` pay a fixed-seed hash rather than
     /// `RandomState`'s. Every iteration over this map is order-independent:
@@ -9989,6 +10029,7 @@ impl Engine {
         script_constants::register_script_constants_in_global_table(&script_global_consts);
         let mut engine = Self {
             effect_dispatch_stats: std::cell::Cell::default(),
+            activation_timings: ActivationTimings::default(),
             next_mission_defaults: (
                 compat::DEFAULT_NEXT_MISSION_TEXT.to_string(),
                 compat::DEFAULT_NEXT_MISSION_DESCRIPTION.to_string(),
@@ -10504,6 +10545,35 @@ impl Engine {
         let mut stats = self.effect_dispatch_stats.get();
         record(&mut stats);
         self.effect_dispatch_stats.set(stats);
+    }
+
+    /// Where the last scenario activation spent its time, by stage.
+    pub fn activation_timings(&self) -> ActivationTimings {
+        self.activation_timings
+    }
+
+    /// Clears the stage timings, so one activation does not report another's.
+    pub fn reset_activation_timings(&mut self) {
+        self.activation_timings = ActivationTimings::default();
+    }
+
+    /// Adds a stage's span. Stages accumulate because placement runs from more
+    /// than one site.
+    pub(crate) fn record_activation_stage(
+        &mut self,
+        stage: ActivationStage,
+        elapsed: std::time::Duration,
+    ) {
+        let timings = &mut self.activation_timings;
+        let slot = match stage {
+            ActivationStage::Materials => &mut timings.materials,
+            ActivationStage::Landscape => &mut timings.landscape,
+            ActivationStage::ObjectPlacement => &mut timings.object_placement,
+            ActivationStage::DefinitionScripts => &mut timings.definition_scripts,
+            ActivationStage::PostInitMapCallbacks => &mut timings.post_init_map_callbacks,
+            ActivationStage::ScenarioScript => &mut timings.scenario_script,
+        };
+        *slot = slot.saturating_add(elapsed);
     }
 
     /// `C4DefList::Reload` plus the `C4Game::ReloadDef` policy around it

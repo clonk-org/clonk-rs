@@ -987,6 +987,80 @@ mod game_start_sync {
         );
     }
 
+    /// Activation is a user-visible cost with no stage-level tracker, so the
+    /// stages report themselves rather than being inferred from one sampled
+    /// subtree of `Scenario::apply`.
+    ///
+    /// The stages must be attributed to the activation that ran them: a reused
+    /// `Engine` that carried the previous scenario's spans forward would
+    /// report the first load's cost against the second for ever.
+    #[test]
+    fn scenario_activation_reports_the_stages_that_ran_it() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let rock = defs.join("Rock.c4d");
+        std::fs::create_dir_all(&rock).expect("rock dir");
+        std::fs::write(
+            rock.join("DefCore.txt"),
+            "[DefCore]\nid=ROCK\nName=Rock\nCategory=2\nWidth=8\nHeight=8\nOffset=-4,-4\n",
+        )
+        .expect("rock core");
+        std::fs::write(
+            rock.join("Script.c"),
+            "#strict\nfunc Initialize() { return(1); }\n",
+        )
+        .expect("rock script");
+        write_test_definition_graphics(&rock);
+
+        let scenario_dir = dir.path().join("Sync.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Sync\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("core");
+        std::fs::write(
+            scenario_dir.join("Script.c"),
+            "#strict\nfunc Initialize() { CreateObject(ROCK, 10, 10, -1); return(1); }\n",
+        )
+        .expect("scenario script");
+
+        let resolver = ProbeResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(5);
+        assert_eq!(
+            engine.activation_timings(),
+            crate::ActivationTimings::default(),
+            "a fresh engine has activated nothing"
+        );
+
+        scenario.apply(&mut engine).expect("scenario applies");
+        let timings = engine.activation_timings();
+        assert_ne!(
+            timings,
+            crate::ActivationTimings::default(),
+            "an activation that ran definitions and a scenario script reports stages"
+        );
+
+        // Definition Initialize and the scenario's own Initialize are separate
+        // stages: the sampled profile could not tell them apart.
+        let staged = timings.definition_scripts + timings.scenario_script;
+        assert!(
+            staged <= std::time::Duration::from_secs(60),
+            "the stage spans are wall-clock spans of this activation, not a running total"
+        );
+
+        engine.reset_activation_timings();
+        assert_eq!(
+            engine.activation_timings(),
+            crate::ActivationTimings::default(),
+            "one activation must not report another's stages"
+        );
+    }
+
     // GoldRush DoInitialize (Script.c:33-35) pins unowned crew NPCs from
     // the SCENARIO-SCRIPT context: `while(pObj = FindObjectOwner(0,-1,
     // 0,0,0,0,OCF_CrewMember,0,0,pObj)) AddEffect("StayThere",...)`.

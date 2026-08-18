@@ -4156,8 +4156,11 @@ impl Scenario {
             engine.set_standard_names(self.standard_names.clone());
         }
         if let Some(material_library) = &self.material_library {
+            let started = std::time::Instant::now();
             engine.configure_materials_from_library(material_library);
+            engine.record_activation_stage(crate::ActivationStage::Materials, started.elapsed());
         }
+        let landscape_started = std::time::Instant::now();
         if let Some(landscape) = &self.landscape {
             engine.set_landscape(landscape.clone());
         } else {
@@ -4173,6 +4176,10 @@ impl Scenario {
         engine.load_scenario_landscape_systems(
             &root_landscape_systems,
             self.landscape.is_some() || self.scenario_sections.is_empty(),
+        );
+        engine.record_activation_stage(
+            crate::ActivationStage::Landscape,
+            landscape_started.elapsed(),
         );
 
         // C4Landscape::ScenarioInit evaluates Gravity through the synced
@@ -4537,6 +4544,7 @@ impl Scenario {
             }
         }
 
+        let object_placement_started = std::time::Instant::now();
         if self.legacy_core.is_some() {
             // C4GameObjects::Load constructs every object first and only
             // then denumerates Contained/Contents pointers. Spawn the rows
@@ -4693,7 +4701,16 @@ impl Scenario {
         // Every surviving C4Def receives ~InitializeDef after loaded-object
         // denumeration and before the legacy environment placers run
         // (C4Game.cpp:2505-2520).
+        engine.record_activation_stage(
+            crate::ActivationStage::ObjectPlacement,
+            object_placement_started.elapsed(),
+        );
+        let definition_scripts_started = std::time::Instant::now();
         let mut initialized = engine.initialize_definition_scripts()?;
+        engine.record_activation_stage(
+            crate::ActivationStage::DefinitionScripts,
+            definition_scripts_started.elapsed(),
+        );
         created.append(&mut initialized);
 
         // C4Game::InitGame environment placements (C4Game.cpp:2493-2503):
@@ -4733,7 +4750,12 @@ impl Scenario {
             // pixel order, on the live post-FixRandom synced ledger
             // (C4Game.cpp:2493-2521; C4MapCreatorS2.cpp:49-114).
             if execute_post_init_map_callbacks {
+                let post_init_started = std::time::Instant::now();
                 engine.run_post_init_map_callbacks(&live_post_init_map_callbacks)?;
+                engine.record_activation_stage(
+                    crate::ActivationStage::PostInitMapCallbacks,
+                    post_init_started.elapsed(),
+                );
             }
             if !self.keep_map_creator {
                 engine.clear_runtime_map_creator();
@@ -4777,7 +4799,9 @@ impl Scenario {
     /// executed later by the control queue.
     pub fn apply(&self, engine: &mut Engine) -> Result<Vec<ObjectId>, ScenarioError> {
         let mut created = self.apply_before_players(engine)?;
+        let started = std::time::Instant::now();
         let mut additional = engine.initialize_scenario_script()?;
+        engine.record_activation_stage(crate::ActivationStage::ScenarioScript, started.elapsed());
         created.append(&mut additional);
         Ok(created)
     }
