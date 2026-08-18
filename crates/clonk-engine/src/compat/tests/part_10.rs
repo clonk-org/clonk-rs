@@ -1370,8 +1370,8 @@ public func Seed() { return(CreateObject(HUT1, 100, 100, -1)); }
         assert_eq!(hut.local_vars.get("iOrder"), Some(&Value::Int(123)));
         assert_eq!(hut.local_vars.get("iCompletionWood"), Some(&Value::Int(4)));
         assert_eq!(hut.local_vars.get("iCompletionMetal"), Some(&Value::Int(2)));
-        assert_eq!(hut.components.get("WOOD"), Some(&4));
-        assert_eq!(hut.components.get("METL"), Some(&2));
+        assert_eq!(hut.components.get("WOOD"), Some(4));
+        assert_eq!(hut.components.get("METL"), Some(2));
 
         let basement = engine
             .objects
@@ -1431,7 +1431,7 @@ public func Seed() { return(CreateObject(HUT1, 100, 100, -1)); }
         // up the new definition component counts by LIST INDEX, so OLD1's
         // first METL entry gains NEW1's first (WOOD) count.
         assert_eq!(created.components.get("WOOD"), None);
-        assert_eq!(created.components.get("METL"), Some(&2));
+        assert_eq!(created.components.get("METL"), Some(2));
         assert_eq!(
             created.local_vars.get("completion_wood"),
             Some(&Value::Int(0))

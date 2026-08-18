@@ -154,7 +154,7 @@ pub struct ObjectState {
     #[serde(skip)]
     pub(crate) contents_link_generation: u64,
     #[serde(default)]
-    pub components: HashMap<DefinitionId, i32>,
+    pub components: ComponentList,
     /// C4Object::Component is a C4IDList: indexed access follows insertion
     /// order independently of the count map, and zero-count entries remain
     /// present (C4IDList.cpp:38-45,85-103).
@@ -391,7 +391,7 @@ pub(crate) fn preview_spawn_state(
         blit_mode: 0,
         contents: Vec::new(),
         contents_link_generation: 0,
-        components: HashMap::new(),
+        components: ComponentList::new(),
         component_order: Vec::new(),
         status: ObjectStatus::Normal,
         owner,
@@ -891,7 +891,7 @@ pub(crate) struct ObjectDelta {
     graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
     draw_transform: Option<Option<DrawTransform>>,
     base_graphics: Option<Option<ObjectBaseGraphics>>,
-    components: Option<HashMap<DefinitionId, i32>>,
+    components: Option<ComponentList>,
     component_order: Option<Vec<DefinitionId>>,
     material_contents: Option<Vec<i32>>,
     pub(crate) local_vars: Option<HashMap<String, Value>>,
@@ -1496,7 +1496,7 @@ pub struct ObjectUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_graphics: Option<Option<ObjectBaseGraphics>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub components: Option<HashMap<DefinitionId, i32>>,
+    pub components: Option<ComponentList>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_order: Option<Vec<DefinitionId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4425,7 +4425,7 @@ pub struct SpawnConfig {
     /// entries compile this verbatim (C4Object.cpp:2811); fresh objects use
     /// their definition components scaled to initial Con when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub components: Option<HashMap<DefinitionId, i32>>,
+    pub components: Option<ComponentList>,
     /// Explicit C4IDList order for loaded/runtime component lists. None uses
     /// definition order for fresh objects and a deterministic key fallback
     /// for legacy Rust states.
@@ -4833,20 +4833,24 @@ impl SpawnConfig {
         self
     }
 
-    pub fn with_components(mut self, components: HashMap<DefinitionId, i32>) -> Self {
+    pub fn with_components(mut self, components: ComponentList) -> Self {
         self.components = Some(components);
-        // A map has no C4IDList ordering. Spawn resolves known entries in
-        // definition order and appends only unknown extras deterministically.
+        // The list carries its own order, so no separate order vector is set
+        // here; spawn resolves known entries in definition order and appends
+        // unknown extras deterministically.
         self.component_order = None;
         self
     }
 
     pub fn with_ordered_components(mut self, components: Vec<(DefinitionId, i32)>) -> Self {
-        let mut counts = HashMap::new();
+        let mut counts = ComponentList::new();
         let mut order = Vec::new();
         for (id, count) in components {
             order.push(id.clone());
-            counts.entry(id).or_insert(count);
+            // Append rather than merge: C4IDList keeps a repeated ID as its own
+            // entry (`C4IDList.cpp:33-36`), and the shipped Bazooka DefCore has
+            // one. A map-shaped build kept only the first of each.
+            counts.push(id, count);
         }
         self.components = Some(counts);
         self.component_order = Some(order);
@@ -5030,7 +5034,7 @@ pub struct ObjectSnapshot {
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
-    pub components: HashMap<DefinitionId, i32>,
+    pub components: ComponentList,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub component_order: Vec<DefinitionId>,
     #[serde(default)]

@@ -6341,7 +6341,6 @@ impl EffectHostContext {
         if crate::docon_refreshes_construction(before, after) {
             let components = crate::docon_component_counts(
                 &current_components,
-                &current_component_order,
                 &definition_components,
                 after,
                 delta,

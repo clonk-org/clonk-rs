@@ -680,6 +680,7 @@ pub fn build_cursor_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clonk_engine::ComponentList;
     use clonk_engine::{
         ActionState, CommandStackSnapshot, ObjectId, PlayerState, SimulationSnapshot, Vector2,
     };
@@ -782,7 +783,7 @@ mod tests {
             color_modulation: 0,
             picture_rect: Default::default(),
             contents: Vec::new(),
-            components: HashMap::new(),
+            components: ComponentList::new(),
             component_order: Vec::new(),
             status: Default::default(),
             owner: 0,

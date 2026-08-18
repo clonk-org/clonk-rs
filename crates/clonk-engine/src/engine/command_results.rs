@@ -1327,18 +1327,15 @@ impl Engine {
             }
             "Build" => {
                 if let Some(target) = command.target {
-                    let (component, count) = self
-                        .find_object_index(target)
-                        .and_then(|target_index| {
-                            let state = &self.objects[target_index].state;
-                            state.component_order.first().map(|id| {
-                                (
-                                    Some(id.clone()),
-                                    state.components.get(id).copied().unwrap_or(0),
-                                )
+                    let (component, count) =
+                        self.find_object_index(target)
+                            .and_then(|target_index| {
+                                let state = &self.objects[target_index].state;
+                                state.component_order.first().map(|id| {
+                                    (Some(id.clone()), state.components.get(id).unwrap_or(0))
+                                })
                             })
-                        })
-                        .unwrap_or_default();
+                            .unwrap_or_default();
                     if let Some(builder_index) = self.find_object_index(actor_id) {
                         // A truthy result suppresses only the generated
                         // material message in C++; sound/Stop still follow.

@@ -1279,13 +1279,11 @@ fn preview_command_failure_feedback(
                     let count = scope
                         .and_then(|scope| scope.pending_update.components.as_ref())
                         .and_then(|components| components.get(&id))
-                        .copied()
                         .or_else(|| {
                             context.get_world_object(target).and_then(|object| {
                                 object
                                     .full_state()
                                     .and_then(|state| state.components.get(&id))
-                                    .copied()
                             })
                         })
                         .unwrap_or(0);

@@ -74,11 +74,11 @@ fn tutorial03_real_sawmill_processes_a_pure_wood_tree() {
         .iter()
         .find(|object| {
             object.definition_id == "TRE2"
-                && object.components.get("WOOD").copied() == Some(5)
+                && object.components.get("WOOD") == Some(5)
                 && object
                     .components
                     .iter()
-                    .all(|(id, count)| id == "WOOD" || *count == 0)
+                    .all(|(id, count)| id == "WOOD" || count == 0)
         })
         .unwrap_or_else(|| {
             let trees = snapshot

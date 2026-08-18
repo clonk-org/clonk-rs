@@ -3770,7 +3770,7 @@ protected func BuildAbort()
     );
     let structure = snapshot.object(structure_id).test_value();
     assert_eq!(structure.construction, 75_000);
-    assert_eq!(structure.components.get("Wood"), Some(&3));
+    assert_eq!(structure.components.get("Wood"), Some(3));
     Ok(())
 }
 
@@ -3830,7 +3830,7 @@ fn build_procedure_consumes_components_from_builder() -> Result<(), EngineError>
         "construction should advance when components are available"
     );
     let components = structure.components.get("Wood");
-    assert_eq!(components, Some(&1));
+    assert_eq!(components, Some(1));
     assert!(
         snapshot.object(wood_id).is_none(),
         "component should be consumed during build"
@@ -3987,7 +3987,7 @@ protected func Destruction()
         snapshot
             .object(valid_site)
             .and_then(|site| site.components.get("WOOD")),
-        Some(&1)
+        Some(1)
     );
 
     for (label, material) in [
@@ -4001,7 +4001,7 @@ protected func Destruction()
     for site in [burning_site, partial_site] {
         let site = snapshot.object(site).test_value();
         assert_eq!(site.construction, 1_000);
-        assert_eq!(site.components.get("WOOD"), Some(&0));
+        assert_eq!(site.components.get("WOOD"), Some(0));
     }
     Ok(())
 }
@@ -4076,8 +4076,8 @@ protected func GetCustomComponents(builder)
     assert!(snapshot.object(metal_id).is_none());
     let site = snapshot.object(site_id).test_value();
     assert_eq!(site.construction, 2_500);
-    assert_eq!(site.components.get("METL"), Some(&1));
-    assert_eq!(site.components.get("WOOD"), Some(&0));
+    assert_eq!(site.components.get("METL"), Some(1));
+    assert_eq!(site.components.get("WOOD"), Some(0));
     assert_eq!(
         snapshot
             .object(builder_id)
@@ -4191,7 +4191,7 @@ fn build_uses_can_construct_turn_to_docon_components_and_repair() -> Result<(), 
     let snapshot = engine.tick()?;
     let fast = snapshot.object(fast_site).test_value();
     assert_eq!(fast.construction, 4_000);
-    assert_eq!(fast.components.get("STON"), Some(&4));
+    assert_eq!(fast.components.get("STON"), Some(4));
     assert_eq!(fast.definition_id, "DONE");
     assert_eq!(fast.damage, 0);
     assert_eq!(
@@ -4203,7 +4203,7 @@ fn build_uses_can_construct_turn_to_docon_components_and_repair() -> Result<(), 
 
     let zero = snapshot.object(zero_site).test_value();
     assert_eq!(zero.construction, 1_000);
-    assert_eq!(zero.components.get("STON"), Some(&0));
+    assert_eq!(zero.components.get("STON"), Some(0));
     assert_eq!(zero.definition_id, "SITE");
     assert_eq!(zero.damage, 77);
     assert_eq!(
@@ -4215,7 +4215,7 @@ fn build_uses_can_construct_turn_to_docon_components_and_repair() -> Result<(), 
 
     let full = snapshot.object(full_site).test_value();
     assert_eq!(full.construction, FULL_CON);
-    assert_eq!(full.components.get("STON"), Some(&100));
+    assert_eq!(full.components.get("STON"), Some(100));
 
     let internal = snapshot.object(internal_site).test_value();
     assert_eq!(internal.definition_id, "DONE");

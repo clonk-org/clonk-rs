@@ -55,7 +55,7 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
     assert_eq!(
         engine
             .object_snapshot(object)
-            .and_then(|snapshot| snapshot.components.get("NEGA").copied()),
+            .and_then(|snapshot| snapshot.components.get("NEGA")),
         Some(-3),
         "initial ComponentConCutoff keeps min(-3, 0)"
     );
@@ -65,13 +65,13 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
     assert_eq!(
         engine
             .object_snapshot(object)
-            .and_then(|snapshot| snapshot.components.get("ROCK").copied()),
+            .and_then(|snapshot| snapshot.components.get("ROCK")),
         Some(2)
     );
     assert_eq!(
         engine
             .object_snapshot(object)
-            .and_then(|snapshot| snapshot.components.get("NEGA").copied()),
+            .and_then(|snapshot| snapshot.components.get("NEGA")),
         Some(-1),
         "growth uses max(-3, trunc(-3 * 50%))"
     );
@@ -80,10 +80,10 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
         engine.spawn_object(SpawnConfig::new("PART").with_construction(FULL_CON / 2)),
     );
     let partial = crate::TestValueExt::test_value(engine.object_snapshot(partial));
-    assert_eq!(partial.components.get("ROCK"), Some(&2));
+    assert_eq!(partial.components.get("ROCK"), Some(2));
     assert_eq!(
         partial.components.get("NEGA"),
-        Some(&-1),
+        Some(-1),
         "fresh partial Con includes the initial ComponentConGain"
     );
 
@@ -92,10 +92,10 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
     );
     let below_first_step =
         crate::TestValueExt::test_value(engine.object_snapshot(below_first_step));
-    assert_eq!(below_first_step.components.get("ROCK"), Some(&0));
+    assert_eq!(below_first_step.components.get("ROCK"), Some(0));
     assert_eq!(
         below_first_step.components.get("NEGA"),
-        Some(&-3),
+        Some(-3),
         "initial DoCon does not refresh components below its first one-percent step"
     );
 }
@@ -134,7 +134,7 @@ fn zero_requirement_still_consumes_toward_a_negative_live_count() {
     assert_eq!(
         engine
             .object_snapshot(site)
-            .and_then(|snapshot| snapshot.components.get("ZERO").copied()),
+            .and_then(|snapshot| snapshot.components.get("ZERO")),
         Some(0)
     );
     assert!(engine

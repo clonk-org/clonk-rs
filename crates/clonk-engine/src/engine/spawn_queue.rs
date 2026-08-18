@@ -390,17 +390,21 @@ impl Engine {
                 );
                 (components, order)
             }
-            None if loaded => (HashMap::new(), Vec::new()),
+            None if loaded => (ComponentList::new(), Vec::new()),
             None => {
                 let order = definition_components
                     .iter()
                     .map(|component| component.id.clone())
                     .collect();
-                let mut components = HashMap::new();
+                // Appended, not merged: a definition may name an ID twice with
+                // independent counts and C4IDList keeps both entries
+                // (`C4IDList.cpp:33-36`).
+                let mut components = ComponentList::new();
                 for component in &definition_components {
-                    components.entry(component.id.clone()).or_insert_with(|| {
-                        fresh_definition_component_count(component.count, construction)
-                    });
+                    components.push(
+                        component.id.clone(),
+                        fresh_definition_component_count(component.count, construction),
+                    );
                 }
                 (components, order)
             }

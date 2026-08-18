@@ -79,8 +79,8 @@ fn deep_sea_conkit_site_starts_building_underwater() {
                 .is_some_and(|object| object.definition_id == "CNKT")
         }));
     let kit_components = engine.test_object_snapshot(conkit).components;
-    assert_eq!(kit_components.get("GCOR"), Some(&2));
-    assert_eq!(kit_components.get("METL"), Some(&1));
+    assert_eq!(kit_components.get("GCOR"), Some(2));
+    assert_eq!(kit_components.get("METL"), Some(1));
 
     // Take one CNKT from the shell (the interactive contents-menu route is
     // pinned above ground by the Tutorial04 suites).
@@ -323,12 +323,12 @@ fn deep_sea_conkit_site_starts_building_underwater() {
         let expected_gcor = frame.min(6);
         let expected_glas = frame.min(2);
         assert_eq!(
-            site_state.components.get("GCOR").copied().unwrap_or(0),
+            site_state.components.get("GCOR").unwrap_or(0),
             expected_gcor,
             "frame {frame}: the site grabs one carried GCOR per frame"
         );
         assert_eq!(
-            site_state.components.get("GLAS").copied().unwrap_or(0),
+            site_state.components.get("GLAS").unwrap_or(0),
             expected_glas,
             "frame {frame}: the site grabs carried GLAS until its demand is met"
         );
@@ -408,12 +408,12 @@ fn deep_sea_conkit_site_starts_building_underwater() {
             "accelerated frame {frame}: the underwater Build action persists"
         );
         assert_eq!(
-            site_state.components.get("GCOR").copied().unwrap_or(0),
+            site_state.components.get("GCOR").unwrap_or(0),
             6,
             "accelerated frame {frame}: transferred GCOR remain on the site"
         );
         assert_eq!(
-            site_state.components.get("GLAS").copied().unwrap_or(0),
+            site_state.components.get("GLAS").unwrap_or(0),
             2,
             "accelerated frame {frame}: transferred GLAS remain on the site"
         );
@@ -448,8 +448,8 @@ fn deep_sea_conkit_site_starts_building_underwater() {
         0,
         "a finished building gains OCF_FullCon"
     );
-    assert_eq!(complete.components.get("GCOR"), Some(&6));
-    assert_eq!(complete.components.get("GLAS"), Some(&2));
+    assert_eq!(complete.components.get("GCOR"), Some(6));
+    assert_eq!(complete.components.get("GLAS"), Some(2));
 
     // The builder stops: DFA_BUILD sees the complete target, ObjectComStop
     // ends the action, and C4Command::Build finishes without queueing

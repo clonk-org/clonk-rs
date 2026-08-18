@@ -850,7 +850,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
             .objects
             .iter()
             .find(|object| {
-                object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
+                object.definition_id == "ALC_" && object.components.get("IROC") == Some(3)
             })
             .map(|object| object.id),
     );
@@ -875,14 +875,14 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IROC").copied()),
+            .and_then(|bag| bag.components.get("IROC")),
         Some(3),
         "the shipped loose bag supplies the rock ingredient used by MGUP"
     );
     assert_eq!(
         engine
             .object_snapshot(seeded_bag)
-            .and_then(|bag| bag.components.get("IROC").copied()),
+            .and_then(|bag| bag.components.get("IROC")),
         Some(0),
         "TransferAlchem moves rather than duplicates the shipped ingredients"
     );
@@ -946,7 +946,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IROC").copied()),
+            .and_then(|bag| bag.components.get("IROC")),
         Some(2),
         "a successful MGUP cast consumes its one IROC ingredient"
     );
@@ -994,7 +994,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IROC").copied()),
+            .and_then(|bag| bag.components.get("IROC")),
         Some(1),
         "the absorbed MGDW cast still consumes its one IROC ingredient"
     );
@@ -1201,8 +1201,8 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
             .iter()
             .find(|object| {
                 object.definition_id == "ALC_"
-                    && object.components.get("IMUS").copied() == Some(4)
-                    && object.components.get("IGOL").copied() == Some(3)
+                    && object.components.get("IMUS") == Some(4)
+                    && object.components.get("IGOL") == Some(3)
             })
             .map(|object| object.id),
     );
@@ -1230,8 +1230,8 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         );
     }
     let bag = engine.test_object_snapshot(attached_bag);
-    assert_eq!(bag.components.get("IMUS"), Some(&4));
-    assert_eq!(bag.components.get("IGOL"), Some(&4));
+    assert_eq!(bag.components.get("IMUS"), Some(4));
+    assert_eq!(bag.components.get("IGOL"), Some(4));
     let mage_index = engine.test_object_index(mage);
     assert!(
         engine
@@ -1267,8 +1267,8 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     let bag_after_cast = engine.test_object_snapshot(attached_bag);
     assert_eq!(
         (
-            bag_after_cast.components.get("IMUS").copied(),
-            bag_after_cast.components.get("IGOL").copied(),
+            bag_after_cast.components.get("IMUS"),
+            bag_after_cast.components.get("IGOL"),
         ),
         (Some(1), Some(0)),
         "MWP2 must complete through ExecMagic before portal validation; mage={:?}",
@@ -1455,8 +1455,8 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
             .iter()
             .find(|object| {
                 object.definition_id == "ALC_"
-                    && object.components.get("INEC").copied() == Some(1)
-                    && object.components.get("IASH").copied() == Some(3)
+                    && object.components.get("INEC") == Some(1)
+                    && object.components.get("IASH") == Some(3)
             })
             .map(|object| object.id),
     );
@@ -1513,14 +1513,14 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("INEC").copied()),
+            .and_then(|bag| bag.components.get("INEC")),
         Some(0),
         "a successful XCRS cast consumes its two-nectar recipe"
     );
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IASH").copied()),
+            .and_then(|bag| bag.components.get("IASH")),
         Some(0),
         "a successful XCRS cast consumes its four-ash recipe"
     );
@@ -1595,8 +1595,8 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
             .iter()
             .find(|object| {
                 object.definition_id == "ALC_"
-                    && object.components.get("IMUS").copied() == Some(4)
-                    && object.components.get("IGOL").copied() == Some(3)
+                    && object.components.get("IMUS") == Some(4)
+                    && object.components.get("IGOL") == Some(3)
             })
             .map(|object| object.id),
     );
@@ -1653,14 +1653,14 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IMUS").copied()),
+            .and_then(|bag| bag.components.get("IMUS")),
         Some(1),
         "a successful GGHG cast consumes three mushrooms"
     );
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IGOL").copied()),
+            .and_then(|bag| bag.components.get("IGOL")),
         Some(2),
         "a successful GGHG cast consumes one gold"
     );
@@ -1682,7 +1682,7 @@ fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu(
             .objects
             .iter()
             .find(|object| {
-                object.definition_id == "ALC_" && object.components.get("IGOL").copied() == Some(3)
+                object.definition_id == "ALC_" && object.components.get("IGOL") == Some(3)
             })
             .map(|object| object.id),
     );
@@ -1755,7 +1755,7 @@ fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu(
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IGOL").copied()),
+            .and_then(|bag| bag.components.get("IGOL")),
         Some(2),
         "the successful MART cast consumes one shipped gold ingredient"
     );
@@ -1785,7 +1785,7 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
             .objects
             .iter()
             .find(|object| {
-                object.definition_id == "ALC_" && object.components.get("IGOL").copied() == Some(3)
+                object.definition_id == "ALC_" && object.components.get("IGOL") == Some(3)
             })
             .map(|object| object.id),
     );
@@ -1895,14 +1895,14 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IMUS").copied()),
+            .and_then(|bag| bag.components.get("IMUS")),
         Some(3),
         "SetMagic consumes one of the shipped bag's four mushrooms"
     );
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IASH").copied()),
+            .and_then(|bag| bag.components.get("IASH")),
         Some(2),
         "SetMagic consumes one of the shipped bag's three ashes"
     );
@@ -1945,7 +1945,7 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
             .objects
             .iter()
             .find(|object| {
-                object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
+                object.definition_id == "ALC_" && object.components.get("IROC") == Some(3)
             })
             .map(|object| object.id),
     );
@@ -2018,14 +2018,14 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IROC").copied()),
+            .and_then(|bag| bag.components.get("IROC")),
         Some(3),
         "ALC_::Activate transfers the scenario ingredients into MCLK's hidden bag"
     );
     assert_eq!(
         engine
             .object_snapshot(seeded_bag)
-            .and_then(|bag| bag.components.get("IROC").copied()),
+            .and_then(|bag| bag.components.get("IROC")),
         Some(0),
         "the player route moves rather than duplicates the seeded ingredients"
     );
@@ -2114,7 +2114,7 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
             .objects
             .iter()
             .find(|object| {
-                object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
+                object.definition_id == "ALC_" && object.components.get("IROC") == Some(3)
             })
             .map(|object| object.id),
     );
@@ -2227,7 +2227,7 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IROC").copied()),
+            .and_then(|bag| bag.components.get("IROC")),
         Some(2),
         "the combo cast consumes MGUP's one IROC ingredient"
     );
@@ -2250,7 +2250,7 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
             .objects
             .iter()
             .find(|object| {
-                object.definition_id == "ALC_" && object.components.get("IBON").copied() == Some(2)
+                object.definition_id == "ALC_" && object.components.get("IBON") == Some(2)
             })
             .map(|object| object.id),
     );
@@ -2338,7 +2338,7 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IBON").copied()),
+            .and_then(|bag| bag.components.get("IBON")),
         Some(0),
         "the successful MLGT cast consumes its shipped two-bone recipe"
     );
@@ -2373,8 +2373,8 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
             .iter()
             .find(|object| {
                 object.definition_id == "ALC_"
-                    && object.components.get("ISPH").copied() == Some(1)
-                    && object.components.get("IGOL").copied() == Some(3)
+                    && object.components.get("ISPH") == Some(1)
+                    && object.components.get("IGOL") == Some(3)
             })
             .map(|object| object.id),
     );
@@ -2554,7 +2554,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
             .objects
             .iter()
             .find(|object| {
-                object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
+                object.definition_id == "ALC_" && object.components.get("IROC") == Some(3)
             })
             .map(|object| object.id),
     );
@@ -2659,7 +2659,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
-            .and_then(|bag| bag.components.get("IROC").copied()),
+            .and_then(|bag| bag.components.get("IROC")),
         Some(0),
         "a successful MQKE cast consumes its three-rock recipe"
     );

@@ -15,6 +15,7 @@ use clonk_app_core::pictures::{
 use clonk_app_core::ClassicGuiBootstrapDefect;
 use clonk_audio::decode_audio;
 use clonk_engine::command::CommandData;
+use clonk_engine::ComponentList;
 use clonk_engine::{
     ActionState, CommandDirection, CommandStackSnapshot, Direction, EnvironmentFrame, FloatVector2,
     HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot, ObjectStatus, PlayerState,
@@ -1204,7 +1205,7 @@ fn make_object(id: u64, definition: &str, position: Vector2) -> ObjectSnapshot {
         color_modulation: 0,
         picture_rect: Default::default(),
         contents: Vec::new(),
-        components: HashMap::new(),
+        components: ComponentList::new(),
         component_order: Vec::new(),
         status: ObjectStatus::Normal,
         owner: 1,

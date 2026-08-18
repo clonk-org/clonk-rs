@@ -3,7 +3,7 @@ use clonk_engine::{
     Definition, DefinitionComponent, Engine, EngineState, ObjectId, PlayerConfig, SpawnConfig,
 };
 use clonk_script::Value;
-use std::collections::HashMap;
+use clonk_engine::ComponentList;
 
 const SCRIPT: &str = r#"
 #strict
@@ -54,8 +54,8 @@ fn dynamic_object_components_keep_cpp_insertion_order_and_zero_entries() {
 
     let snapshot = engine.test_object_snapshot(bag);
     assert_eq!(snapshot.component_order, ["ZERO", "IROC"]);
-    assert_eq!(snapshot.components.get("ZERO"), Some(&2));
-    assert_eq!(snapshot.components.get("IROC"), Some(&3));
+    assert_eq!(snapshot.components.get("ZERO"), Some(2));
+    assert_eq!(snapshot.components.get("IROC"), Some(3));
 
     let state: EngineState = crate::support::TestValueExt::test_value(serde_json::from_str(
         &crate::support::TestValueExt::test_value(serde_json::to_string(&engine.capture_state())),
@@ -112,7 +112,7 @@ func ReadOrder()
     ]);
     engine.register_test_definition(definition.clone());
     let object =
-        engine.spawn_test_object(SpawnConfig::new("ORDR").with_components(HashMap::from([
+        engine.spawn_test_object(SpawnConfig::new("ORDR").with_components(ComponentList::from_iter([
             ("AAAA".to_owned(), 1),
             ("ZZZZ".to_owned(), 2),
         ])));
@@ -135,6 +135,55 @@ func ReadOrder()
     assert_eq!(
         restored.test_object_snapshot(object).component_order,
         ["ZZZZ", "AAAA", "AAAA"]
+    );
+}
+
+/// The case a map cannot represent at all: the same ID twice with *different*
+/// counts. `C4IDList` is a vector (`C4IDList.cpp:33-36`) and `GetIDCount` reads
+/// the first match (`:76-83`), so both slots have to survive independently —
+/// through a state round-trip as well, since the list is serialised.
+#[test]
+fn duplicate_component_slots_keep_unequal_counts_through_restore() {
+    let mut engine = Engine::new();
+    let definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "DUPC",
+        "Duplicate components",
+        "#strict\nfunc Probe() { return 0; }\n",
+    ));
+    engine.register_test_definition(definition.clone());
+
+    let object = engine.spawn_test_object(SpawnConfig::new("DUPC").with_ordered_components(vec![
+        ("AAAA".to_owned(), 3),
+        ("AAAA".to_owned(), 7),
+    ]));
+
+    let components = engine.test_object_snapshot(object).components;
+    assert_eq!(components.len(), 2, "both slots are kept");
+    assert_eq!(components.count_at(0), Some(3));
+    assert_eq!(components.count_at(1), Some(7));
+    assert_eq!(
+        components.get("AAAA"),
+        Some(3),
+        "ID lookup resolves to the first slot, as findId does"
+    );
+
+    let state: EngineState = crate::support::TestValueExt::test_value(serde_json::from_str(
+        &crate::support::TestValueExt::test_value(serde_json::to_string(&engine.capture_state())),
+    ));
+    let mut restored = Engine::new();
+    restored.register_test_definition(definition);
+    crate::support::TestValueExt::test_value(restored.restore_state(&state));
+
+    let restored_components = restored.test_object_snapshot(object).components;
+    assert_eq!(
+        restored_components.count_at(0),
+        Some(3),
+        "the serialised list keeps the first slot's own count"
+    );
+    assert_eq!(
+        restored_components.count_at(1),
+        Some(7),
+        "and the second's, which a map keyed by ID would have collapsed"
     );
 }
 
@@ -427,9 +476,9 @@ func Read()
         ])
     );
     let snapshot = engine.test_object_snapshot(object);
-    assert_eq!(snapshot.components.get("POSI"), Some(&-2));
-    assert_eq!(snapshot.components.get("NEGA"), Some(&-5));
-    assert_eq!(snapshot.components.get("ZERO"), Some(&-7));
+    assert_eq!(snapshot.components.get("POSI"), Some(-2));
+    assert_eq!(snapshot.components.get("NEGA"), Some(-5));
+    assert_eq!(snapshot.components.get("ZERO"), Some(-7));
 
     let state: EngineState = crate::support::TestValueExt::test_value(serde_json::from_str(
         &crate::support::TestValueExt::test_value(serde_json::to_string(&engine.capture_state())),

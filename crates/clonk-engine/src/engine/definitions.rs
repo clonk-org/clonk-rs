@@ -1813,7 +1813,6 @@ impl Engine {
             .unwrap_or_default();
         let components = docon_component_counts(
             &self.objects[index].state.components,
-            &self.objects[index].state.component_order,
             &definition_components,
             after,
             change,

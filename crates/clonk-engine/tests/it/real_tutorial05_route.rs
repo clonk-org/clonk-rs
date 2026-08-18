@@ -672,8 +672,8 @@ fn tutorial05_partial_elevator_starts_with_its_built_component_fraction(
         .find(|object| object.definition_id == "ELEV")
         .expect("Tutorial05 creates its elevator construction");
     assert_eq!(elevator.construction, 80_000);
-    assert_eq!(elevator.components.get("WOOD"), Some(&3));
-    assert_eq!(elevator.components.get("METL"), Some(&1));
+    assert_eq!(elevator.components.get("WOOD"), Some(3));
+    assert_eq!(elevator.components.get("METL"), Some(1));
 }
 
 // InitRules creates the scenario's CNMT object and UpdateRules maps its

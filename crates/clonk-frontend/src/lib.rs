@@ -196,9 +196,9 @@ mod tests {
     use super::*;
     use clonk_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
     use clonk_engine::{
-        CommandStackSnapshot, Engine, EnvironmentFrame, FogOfWarPlayerFrame, JoinPlayerConfig,
-        Landscape, LiquidSegment, MaterialId, ObjectId, ObjectUpdate, ObjectVertex, PlayerState,
-        RgbColor, Scenario, ScenarioError, SpawnConfig, Vector2,
+        CommandStackSnapshot, ComponentList, Engine, EnvironmentFrame, FogOfWarPlayerFrame,
+        JoinPlayerConfig, Landscape, LiquidSegment, MaterialId, ObjectId, ObjectUpdate,
+        ObjectVertex, PlayerState, RgbColor, Scenario, ScenarioError, SpawnConfig, Vector2,
     };
     use clonk_graphics::{BitmapFont, PixelFormat};
     use clonk_resources::{Group, MaterialLibrary};
@@ -4559,7 +4559,7 @@ mod tests {
                 color_modulation: 0,
                 picture_rect: Default::default(),
                 contents: Vec::new(),
-                components: HashMap::new(),
+                components: ComponentList::new(),
                 component_order: Vec::new(),
                 status: Default::default(),
                 owner: 0,

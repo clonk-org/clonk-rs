@@ -4168,7 +4168,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         assert_eq!(object.construction, FULL_CON - 100);
         assert_eq!(object.position.y, 5, "DoCon preserves shape bottom");
         assert_eq!(object.vertices[0].y, 3, "UpdateFace jolts vertices");
-        assert_eq!(object.components.get("WOOD"), Some(&1));
+        assert_eq!(object.components.get("WOOD"), Some(1));
         let idx = engine.test_object_index(id);
         assert_eq!(
             engine.objects[idx].fixed_position.y,

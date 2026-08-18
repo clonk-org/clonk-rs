@@ -169,7 +169,7 @@ public func SeedFull()
         );
         assert_eq!(child.local_vars.get("iCompletion"), Some(&Value::Nil));
         assert_eq!(child.local_vars.get("iInitialized"), Some(&Value::Nil));
-        assert_eq!(child.components.get("ROCK"), Some(&1));
+        assert_eq!(child.components.get("ROCK"), Some(1));
         let caller_index = engine.find_object_index(caller).test_value();
         assert_eq!(
             engine.objects[caller_index]
@@ -197,7 +197,7 @@ public func SeedFull()
             Some(&Value::Int(100))
         );
         assert_eq!(full.local_vars.get("iInitialized"), Some(&Value::Int(1)));
-        assert_eq!(full.components.get("ROCK"), Some(&100));
+        assert_eq!(full.components.get("ROCK"), Some(100));
     }
 
     #[test]
@@ -474,7 +474,7 @@ public func SeedFull()
                 .components
                 .as_ref()
                 .and_then(|components| components.get("WOOD")),
-            Some(&2)
+            Some(2)
         );
         assert_eq!(
             component_update.component_order.as_deref(),
