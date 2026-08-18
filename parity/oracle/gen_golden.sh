@@ -467,6 +467,52 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Def.cpp" > "$gen/def_picture2facet_rect.inc"
 
+# C4PlayerInfoList::FindSavegameResumePlayerInfo's per-level predicate: the four
+# MatchingLevel passes RestoreSavegameInfos runs over the unassociated players
+# (C4PlayerInfo.cpp:1102-1118, driven from :1373-1391). Bound to the switch and
+# to all four case labels, so a change to the surrounding client traversal, or a
+# dropped level, fails the extraction instead of silently narrowing the oracle.
+# PML_PlrFileName's deliberate fallthrough into PML_PlrName is part of the
+# extracted text.
+awk '
+  /^C4PlayerInfo \*C4PlayerInfoList::FindSavegameResumePlayerInfo\(/ { in_fn = 1 }
+  in_fn && /switch \(iMatchLvl\)/ { p = 1 }
+  p { print }
+  p && /case PML_PlrFileName:/ { file_name++ }
+  p && /case PML_PlrName:/ { plr_name++ }
+  p && /case PML_PrefColor:/ { pref_color++ }
+  p && /case PML_Any:/ { any++; closing = 1; next }
+  p && closing && /^[[:space:]]*}$/ { found = 1; exit }
+  END {
+    if (!found || file_name != 1 || plr_name != 1 || pref_color != 1 || any != 1) exit 1
+  }
+' "$src/C4PlayerInfo.cpp" > "$gen/savegame_matching_switch.inc"
+
+# The predicate compares through the production string and path helpers, so lift
+# those rather than restating their semantics: CharCapital carries the three
+# Latin-1 umlaut foldings, and GetFilename's separator set is what decides where
+# a player file's basename starts.
+awk '
+  /^char CharCapital\(char cChar\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Strings.cpp" > "$gen/char_capital.inc"
+
+awk '
+  /^bool SEqualNoCase\(const char \*szStr1, const char \*szStr2, size_t iLen\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Strings.cpp" > "$gen/sequal_no_case.inc"
+
+awk '
+  /^char \*GetFilename\(char \*szPath\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/StdFile.cpp" > "$gen/get_filename.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

@@ -1052,6 +1052,59 @@ fn player_names(engine: &Engine) -> Value {
     )
 }
 
+fn savegame_matching_entry(case: &Value, side: &str) -> crate::control::ControlPlayerInfoEntry {
+    let name = case[format!("{side}_name")]
+        .as_array()
+        .expect("savegame_player_matching name is a C++ oracle byte array")
+        .iter()
+        .map(|byte| byte.as_u64().expect("name byte is a number") as u8)
+        .collect::<Vec<_>>();
+    // The oracle emits Latin-1 bytes, which is what the engine stores.
+    let filename = case[format!("{side}_filename")]
+        .as_str()
+        .expect("savegame_player_matching filename is a string")
+        .as_bytes()
+        .to_vec();
+    crate::control::ControlPlayerInfoEntry {
+        name: crate::control::LegacyCString::from_bytes(name)
+            .expect("oracle names carry no interior NUL"),
+        filename: crate::control::LegacyCString::from_bytes(filename)
+            .expect("oracle filenames carry no interior NUL"),
+        original_color: i(case, &format!("{side}_color")) as u32,
+        ..Default::default()
+    }
+}
+
+fn rust_savegame_player_matching(case: &Value, case_index: usize) {
+    const SECTION: &str = "savegame_player_matching";
+    let current = savegame_matching_entry(case, "current");
+    let saved = savegame_matching_entry(case, "saved");
+    let cpp = case["matches"]
+        .as_array()
+        .expect("savegame_player_matching matches is a C++ oracle array");
+    assert_eq!(
+        cpp.len(),
+        4,
+        "{SECTION} case {case_index} records one result per MatchingLevel"
+    );
+    for (level, expected) in cpp.iter().enumerate() {
+        let expected = expected
+            .as_bool()
+            .expect("savegame_player_matching result is a bool");
+        expect_json_eq(
+            SECTION,
+            case_index,
+            &format!("matches[{level}]"),
+            Value::Bool(expected),
+            Value::Bool(crate::savegame_association::savegame_players_match(
+                &current,
+                &saved,
+                level as u8,
+            )),
+        );
+    }
+}
+
 fn rust_player_join_capacity(case: &Value, case_index: usize) {
     const SECTION: &str = "player_join_capacity";
     let initial_names = case["names_before"]
@@ -1163,6 +1216,23 @@ fn parity_differential_matches_cpp_golden() {
     );
     for (case_index, case) in player_join_capacity_cases.iter().enumerate() {
         rust_player_join_capacity(case, case_index);
+    }
+
+    // C4PlayerInfo.cpp:1102-1118. The four MatchingLevel passes
+    // RestoreSavegameInfos runs (:1373-1391) when it associates joining players
+    // with a savegame's stored players. The C++ oracle compiles the extracted
+    // switch, including PML_PlrFileName's fallthrough into PML_PlrName, so a
+    // file-name match alone never associates.
+    let savegame_matching_cases = golden["savegame_player_matching"]
+        .as_array()
+        .expect("savegame_player_matching is a C++ oracle array");
+    assert_eq!(
+        savegame_matching_cases.len(),
+        9,
+        "savegame_player_matching must retain its exact nine-row matrix"
+    );
+    for (case_index, case) in savegame_matching_cases.iter().enumerate() {
+        rust_savegame_player_matching(case, case_index);
     }
 
     // 1. itofix (whole-integer + precision-denominated).
