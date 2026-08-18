@@ -323,6 +323,10 @@ fn local_join_capabilities() -> (bool, Vec<u32>) {
     (false, Vec::new())
 }
 
+// Only the unix `local_join_capabilities` above classifies addresses; the
+// `not(unix)` arm reports no global IPv6 because it enumerates nothing, so this
+// is gated with its caller rather than left dead on those platforms.
+#[cfg(unix)]
 fn cpp_is_global_ipv6(ip: Ipv6Addr) -> bool {
     let first = ip.octets()[0];
     !ip.is_unspecified()
