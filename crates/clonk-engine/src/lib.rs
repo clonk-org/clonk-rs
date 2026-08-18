@@ -66,6 +66,7 @@ mod pathfinder;
 mod player;
 pub mod player_file;
 use player_file::PlayerInfoCoreState;
+pub mod component_list;
 pub mod pxs;
 mod record;
 mod runtime_join_player_restore;
