@@ -3,6 +3,7 @@
 //! This is the Rust counterpart of
 //! `C4PlayerInfoList::SetAsRestoreInfos(PlayerInfos, true, true, true, true)`.
 
+use clonk_engine::savegame_association::legacy_basename;
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -334,12 +335,6 @@ fn runtime_user_player_filename(
 fn runtime_script_player_filename(player_info_id: i32) -> LegacyCString {
     LegacyCString::from_bytes(format!("ScriptPlr-{player_info_id}.c4p").into_bytes())
         .expect("script restore filename is static ASCII")
-}
-
-fn legacy_basename(path: &[u8]) -> &[u8] {
-    path.iter()
-        .rposition(|byte| matches!(*byte, b'/' | b'\\'))
-        .map_or(path, |separator| &path[separator + 1..])
 }
 
 fn encode_local_group_filename(filename: &[u8]) -> Vec<u8> {
@@ -749,9 +744,19 @@ mod tests {
     }
 
     #[test]
-    fn user_restore_basename_accepts_both_c4_path_separators() {
-        assert_eq!(legacy_basename(b"C:\\Players\\Alice.c4p"), b"Alice.c4p");
+    fn user_restore_basename_follows_the_cpp_host_separator() {
+        // The composed join filename is `{name}-{GetFilename(joinFile)}`
+        // (C4PlayerInfo.cpp:1665), and GetFilename treats a backslash as a
+        // separator only on Windows (StdFile.cpp:43-49, StdFile.h:41-49), so
+        // this expectation is host-conditional in the same way.
         assert_eq!(legacy_basename(b"Players/Bob.c4p"), b"Bob.c4p");
+        let windows_path: &[u8] = b"C:\\Players\\Alice.c4p";
+        let expected: &[u8] = if cfg!(windows) {
+            b"Alice.c4p"
+        } else {
+            windows_path
+        };
+        assert_eq!(legacy_basename(windows_path), expected);
     }
 
     #[test]

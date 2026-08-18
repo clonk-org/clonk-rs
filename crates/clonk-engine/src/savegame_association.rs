@@ -79,10 +79,51 @@ fn legacy_bytes_equal_no_case(left: &[u8], right: &[u8]) -> bool {
             .all(|(left, right)| capital(*left) == capital(*right))
 }
 
-/// `GetFilename`: the component after the last separator, either slash, because
-/// a config written on Windows is read on unix and the reverse.
-fn legacy_basename(path: &[u8]) -> &[u8] {
+/// `GetFilename` (`StdFile.cpp:43-49`): the component after the last separator.
+///
+/// Shared with the runtime-join filename derivation, which composes this same
+/// helper's result (`C4PlayerInfo.cpp:1665`).
+///
+/// C++ splits on `DirectorySeparator || '/'`, and `DirectorySeparator` is
+/// `'\\'` only on Windows (`StdFile.h:41-49`) — so a backslash begins a new
+/// component there and is an ordinary filename byte everywhere else. The split
+/// is host-conditional here for the same reason: a peer has to derive the same
+/// basename as the C++ build it is playing against, and that build is running
+/// this platform.
+///
+/// Deliberately *not* the cross-platform "split on either slash" rule. That is
+/// stable across hosts but disagrees with C++ on unix, and both call sites feed
+/// synchronised player state.
+pub fn legacy_basename(path: &[u8]) -> &[u8] {
     path.iter()
-        .rposition(|byte| matches!(*byte, b'/' | b'\\'))
+        .rposition(|byte| *byte == b'/' || (cfg!(windows) && *byte == b'\\'))
         .map_or(path, |separator| &path[separator + 1..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `StdFile.cpp:43-49` splits on `DirectorySeparator || '/'`, and
+    /// `StdFile.h:41-49` makes `DirectorySeparator` `'\\'` on Windows and `'/'`
+    /// elsewhere — so the backslash case is host-conditional by construction and
+    /// the expectation has to be too, rather than pinning this host's answer.
+    #[test]
+    fn basename_splits_on_backslash_only_where_cpp_does() {
+        assert_eq!(legacy_basename(b"Players/Alice.c4p"), b"Alice.c4p");
+        assert_eq!(legacy_basename(b"Alice.c4p"), b"Alice.c4p");
+        assert_eq!(legacy_basename(b""), b"");
+
+        let windows_path: &[u8] = br"C:\Players\Alice.c4p";
+        let expected: &[u8] = if cfg!(windows) {
+            b"Alice.c4p"
+        } else {
+            windows_path
+        };
+        assert_eq!(legacy_basename(windows_path), expected);
+
+        // A mixed path still ends at the last separator C++ recognises here.
+        let mixed: &[u8] = br"Players\Sub/Alice.c4p";
+        assert_eq!(legacy_basename(mixed), b"Alice.c4p");
+    }
 }
