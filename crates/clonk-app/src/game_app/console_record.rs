@@ -32,6 +32,33 @@ impl GameApp {
                     || self.classic_host_lobby.is_some()))
     }
 
+    /// `Application.UseStartupDialog`: whether this session has a startup
+    /// generation for `QuitGame` to return to (C4Application.cpp:373-405)
+    /// rather than falling through to `Quit()`.
+    ///
+    /// `ParseCommandLine` computes it from the launch parameters
+    /// (C4Game.cpp:3299) — which is what
+    /// [`Self::failed_open_game_returns_to_startup`] already reports — and a
+    /// console `/open` or `/close` puts it back afterwards
+    /// (C4Application.cpp:598-612,617-624).
+    pub(crate) fn startup_dialog_in_use(&self) -> bool {
+        self.console_restored_startup_dialog || self.failed_open_game_returns_to_startup()
+    }
+
+    /// Return a finished console round to the state its next command is
+    /// accepted from, the way `QuitGame` reaches `C4AS_PreInit` and `PreInit`
+    /// then settles on `C4AS_Startup` (C4Application.cpp:373-405,239-293).
+    pub(crate) fn park_console_session_after_round(&mut self) {
+        // The scenario that just ended must not be re-launched by the boot
+        // worker or leak into the next round's save.
+        self.classic_command_line.scenario = None;
+        self.classic_command_line.record_stream = None;
+        self.classic_command_line.direct_join = None;
+        self.classic_record_stream_activation_pending = false;
+        self.console_restored_startup_dialog = true;
+        self.close_console_game();
+    }
+
     fn close_console_game(&mut self) {
         let boot_still_loading = self.boot_loading.is_some();
         let network_game_active = self.network.is_some()
@@ -438,6 +465,10 @@ impl GameApp {
 
         let lobby_active = self.console_lobby_active();
         if line == "/close" && self.console_game_active() {
+            // `/close` clears the round and sets `UseStartupDialog`
+            // (C4Application.cpp:617-624), so the session has a startup
+            // generation again whatever it was launched with.
+            self.console_restored_startup_dialog = true;
             self.close_console_game();
             return Ok(());
         }
@@ -451,6 +482,12 @@ impl GameApp {
                 let classic =
                     parse_classic_command_line(&parse_classic_console_parameters(parameters));
                 self.apply_classic_command_line(&classic)?;
+                // `/open` re-parses a command line and then sets
+                // `UseStartupDialog` back (C4Application.cpp:598-612), even
+                // though the parse just filled in a scenario filename that
+                // would otherwise clear it (C4Game.cpp:3299). That is what
+                // returns the console to `C4AS_Startup` when this round ends.
+                self.console_restored_startup_dialog = true;
                 self.launch_classic_command_line_join()?;
                 self.launch_classic_command_line_scenario()?;
             }

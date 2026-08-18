@@ -390,6 +390,12 @@ pub(crate) struct GameApp {
     /// inherit. C++ reads the two separately too, and either alone makes the
     /// lobby a console lobby (C4Network2.cpp:463).
     pub(crate) headless: bool,
+    /// A console command has put `Application.UseStartupDialog` back, so this
+    /// session has a startup generation to return to even though it was
+    /// launched without one. `/open` and `/close` both set it
+    /// (C4Application.cpp:598-612,617-624), which is what lets a dedicated
+    /// server park for the next command instead of ending its process.
+    pub(crate) console_restored_startup_dialog: bool,
     pub(crate) developer_console: DeveloperConsole,
     pub(crate) developer_console_edit_mode: ConsoleEditMode,
     /// `C4EditCursor::Selection`. Shared by the viewport edit cursor, the

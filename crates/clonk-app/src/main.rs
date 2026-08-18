@@ -2556,6 +2556,7 @@ impl GameApp {
             )),
             console_mode: false,
             headless: false,
+            console_restored_startup_dialog: false,
             developer_console: DeveloperConsole::new(),
             developer_console_edit_mode: ConsoleEditMode::Play,
             developer_selection: Default::default(),
