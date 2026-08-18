@@ -7,7 +7,11 @@ impl GameApp {
             .is_some_and(|audio| audio.options.voice_enabled)
     }
 
-    fn local_voice_identity(&self) -> Option<(i32, i32)> {
+    /// The one player this client speaks as, or `None` when it is not a voice
+    /// source at all. See `voice_chat::authenticated_selected_voice_crew` for
+    /// the policy: an observer never opens the microphone, and a client with
+    /// several local players speaks as `local_owner`.
+    pub(crate) fn local_voice_identity(&self) -> Option<(i32, i32)> {
         let network = self.network.as_ref()?;
         let client_id = i32::try_from(network.local_client_id()).ok()?;
         if self.mode == AppMode::Running {

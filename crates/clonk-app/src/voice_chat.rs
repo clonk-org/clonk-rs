@@ -1154,6 +1154,32 @@ pub(crate) fn voice_stream_id(client_id: i32, player_id: i32) -> u64 {
     (u64::from(client_id as u32) << 32) | u64::from(player_id as u32)
 }
 
+/// The voice source policy for a running round.
+///
+/// Proximity voice is a Rust-only extension with no C++ oracle, so this is a
+/// decision rather than a port: **a voice source is one active player's selected
+/// crew, and nothing else.** Two cases follow from that rather than from an
+/// accident of the cursor lookup:
+///
+/// - **An observer is not a voice source.** A participant with no active player
+///   at this client, or an active player with no selected crew, has no position
+///   to mix from. It is silent in both directions: `local_voice_identity`
+///   returns `None`, so the microphone is never opened
+///   (see [`crate::game_app`]'s `update_voice_chat`), and an inbound frame
+///   claiming such a player resolves to no source and is dropped. Playing it
+///   unpositioned instead would hand observers a broadcast channel that
+///   positional players do not have.
+/// - **A client with several local players speaks as its selected one.** The
+///   sender stamps `local_owner`, the single local player whose crew the client
+///   is controlling, so a client contributes at most one stream and the choice
+///   never depends on player order. Receivers key streams on
+///   `(client_id, player_id)` and mix each from *that* player's own cursor, so
+///   two local players would be two independently positioned sources rather
+///   than one ambiguous one — the receiving side needs no tie-break at all.
+///
+/// The determinism boundary is untouched either way: this only decides which
+/// presentation-only frames are mixed, and voice never enters controls,
+/// snapshots, savegames, records or sync checks (clonk-org/clonk-rs#301).
 pub(crate) fn authenticated_selected_voice_crew(
     snapshot: &SimulationSnapshot,
     client_id: i32,
