@@ -3409,6 +3409,7 @@ int main()
         printf("]}");
     }
     arr_end();
+    printf(",\n");
 
     // 23. DFA_FLOAT's raw C4Fixed bounds. C4DefCore's Physical member is
     // zero-initialized when [Physical] is absent (C4InfoCore.cpp:239-242),
