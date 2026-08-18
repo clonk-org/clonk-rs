@@ -7509,11 +7509,30 @@ struct HostRequestQueues {
     viewport_presentation_requests: Rc<RefCell<Vec<ViewportPresentationRequest>>>,
 }
 
+/// What effect dispatch materialises, counted rather than asserted.
+///
+/// Effect callbacks dominate an effect-heavy tick, and the costly part is not
+/// the shallow `HostWorldContext` clone but how often a context is *built*:
+/// `tick_global_effects` builds one per timer event rather than one per tick.
+/// These counters are observation only — they take no part in simulation
+/// state, are not serialised, and never influence a callback.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EffectDispatchStats {
+    /// Timer events dispatched from the global effect list.
+    pub global_timer_events: usize,
+    /// `HostWorldContext` constructions, each of which freezes the id lookup
+    /// and builds a lazy provider.
+    pub world_context_builds: usize,
+}
+
 pub struct Engine {
     /// Active-language `IDS_BTN_NEXTSCENARIO`/`IDS_DESC_NEXTSCENARIO`, which
     /// `FnSetNextMission` substitutes for omitted arguments. Presentation text
     /// is host state, so it stays out of the serialized `EngineState`.
     pub(crate) next_mission_defaults: (String, String),
+    /// Observation only; see `EffectDispatchStats`. Behind a `Cell` because a
+    /// context is built from `&self`.
+    pub(crate) effect_dispatch_stats: std::cell::Cell<EffectDispatchStats>,
     /// Keyed by `DefinitionId`, so the per-tick probes from
     /// `active_solid_mask_indices` pay a fixed-seed hash rather than
     /// `RandomState`'s. Every iteration over this map is order-independent:
@@ -9957,6 +9976,7 @@ impl Engine {
         let script_global_consts = clonk_script::new_global_variables();
         script_constants::register_script_constants_in_global_table(&script_global_consts);
         let mut engine = Self {
+            effect_dispatch_stats: std::cell::Cell::default(),
             next_mission_defaults: (
                 compat::DEFAULT_NEXT_MISSION_TEXT.to_string(),
                 compat::DEFAULT_NEXT_MISSION_DESCRIPTION.to_string(),
@@ -10450,6 +10470,24 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
 }
 
 impl Engine {
+    /// What effect dispatch has materialised since the last reset.
+    pub fn effect_dispatch_stats(&self) -> EffectDispatchStats {
+        self.effect_dispatch_stats.get()
+    }
+
+    /// Starts a fresh measurement window. Observation only: nothing in the
+    /// simulation reads these counters.
+    pub fn reset_effect_dispatch_stats(&self) {
+        self.effect_dispatch_stats
+            .set(EffectDispatchStats::default());
+    }
+
+    pub(crate) fn record_effect_dispatch(&self, record: impl FnOnce(&mut EffectDispatchStats)) {
+        let mut stats = self.effect_dispatch_stats.get();
+        record(&mut stats);
+        self.effect_dispatch_stats.set(stats);
+    }
+
     /// `C4DefList::Reload` plus the `C4Game::ReloadDef` policy around it
     /// (`C4Def.cpp:1191-1213`, `C4Game.cpp:2322-2367`).
     ///
