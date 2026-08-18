@@ -178,6 +178,11 @@ pub struct Function {
     /// records the site here and runs the same check once the overload tables
     /// exist. The failsafe `_inherited` spelling never sets it.
     pub(crate) hard_inherited_line: Option<usize>,
+    /// Column of that site, and the index of the top-level body statement that
+    /// contains it, so a link-time refusal can truncate the body the way
+    /// `C4AulScript::Parse` truncates emitted code (`C4AulParse.cpp:3553-3577`).
+    pub(crate) hard_inherited_column: Option<usize>,
+    pub(crate) hard_inherited_stmt_index: Option<usize>,
     /// Identifiers this body reads or writes that could name one of the
     /// declaring script's `local`s, with the one-based line of each first use.
     ///
@@ -222,6 +227,8 @@ impl std::fmt::Debug for Function {
             .field("global_link_host", &self.global_link_host)
             .field("overloaded", &self.overloaded)
             .field("hard_inherited_line", &self.hard_inherited_line)
+            .field("hard_inherited_column", &self.hard_inherited_column)
+            .field("hard_inherited_stmt_index", &self.hard_inherited_stmt_index)
             .field("global_local_reference", &self.global_local_reference)
             .finish()
     }
@@ -243,6 +250,8 @@ impl Clone for Function {
             global_link_host: self.global_link_host,
             overloaded: self.overloaded.clone(),
             hard_inherited_line: self.hard_inherited_line,
+            hard_inherited_column: self.hard_inherited_column,
+            hard_inherited_stmt_index: self.hard_inherited_stmt_index,
             global_local_candidates: self.global_local_candidates.clone(),
             global_local_reference: self.global_local_reference.clone(),
             compiled: std::sync::OnceLock::new(),
@@ -266,6 +275,8 @@ impl PartialEq for Function {
             && self.global_link_host == other.global_link_host
             && self.overloaded == other.overloaded
             && self.hard_inherited_line == other.hard_inherited_line
+            && self.hard_inherited_column == other.hard_inherited_column
+            && self.hard_inherited_stmt_index == other.hard_inherited_stmt_index
             && self.global_local_reference == other.global_local_reference
     }
 }
@@ -402,6 +413,34 @@ impl Function {
 
     /// Stamp the original declaring script on parsed functions. Linked
     /// copies already carrying provenance deliberately retain it.
+    /// Truncates this body the way `C4AulScript::Parse` truncates a function
+    /// whose parse threw: everything emitted before the offending token stays,
+    /// every jump that still has no destination is repointed at the truncation
+    /// point, and an `AB_ERR` chunk is appended (`C4AulParse.cpp:3553-3577`).
+    ///
+    /// Dropping the statements from the offending one onward gives both halves
+    /// of that at once — a branch that would have jumped over the token has
+    /// nothing left to jump to, so it falls into the sentinel exactly like the
+    /// redirected jump does, and no path returns normally except a `return`
+    /// reached earlier in the body.
+    ///
+    /// C++ keeps the bytecode already emitted *inside* the offending statement
+    /// (an `if` condition's side effects run before the error); this drops the
+    /// whole statement, which is the boundary the port's ordinary parse-error
+    /// recovery already uses in `recover_function_body`.
+    pub(crate) fn truncate_at_link_error(&mut self, message: &str, line: usize, column: usize) {
+        let truncate_at = self
+            .hard_inherited_stmt_index
+            .unwrap_or(0)
+            .min(self.body.len());
+        self.body.truncate(truncate_at);
+        self.body.push(Stmt::ParseError {
+            message: message.to_string(),
+            line,
+            column,
+        });
+    }
+
     pub(crate) fn bind_source_host(&mut self, host: crate::vm::ScriptHostIdentity) {
         self.resolved_snapshot = std::sync::OnceLock::new();
         if self.source_host.is_none() {
