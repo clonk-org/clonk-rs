@@ -928,6 +928,10 @@ pub(crate) fn present_retained_gpu_frame_profiled(
     let request_native_save_readback = !app.pending_native_save_thumbnails.is_empty();
     let request_current_readback =
         !app.pending_screenshots.is_empty() || !app.pending_gpu_thumbnail_paths.is_empty();
+    // A screenshot needs every presented pixel; a frame wanted only for save
+    // thumbnails does not. Reducing on the GPU maps the 200x150 result instead
+    // of the complete frame — about 117 KiB rather than 31.6 MiB at 4K.
+    let current_readback_is_thumbnail_only = app.pending_screenshots.is_empty();
     let profile_context = RetainedGpuFrameContext::capture(
         pixels,
         renderer,
@@ -936,6 +940,7 @@ pub(crate) fn present_retained_gpu_frame_profiled(
     );
     let mut previous_native_readback = None;
     let mut readback = None;
+    let mut readback_is_reduced = false;
     let mut retained_profile = None;
     let (submission, frame_preparation_error) = {
         let mut frame_preparation_error = None;
@@ -969,18 +974,42 @@ pub(crate) fn present_retained_gpu_frame_profiled(
                     .map(|layer| gpu_renderer::GpuSceneLayer::new(&layer.scene, layer.presentation))
                     .collect::<Vec<_>>();
                 if request_native_save_readback {
-                    previous_native_readback =
-                        renderer.readback_last_presentation(context.device, encoder)?;
+                    // A native save only ever encodes a thumbnail from the
+                    // previous presentation, so it never needs its full pixels.
+                    previous_native_readback = renderer.readback_last_presentation_reduced(
+                        context.device,
+                        encoder,
+                        SAVE_THUMBNAIL_EXTENT,
+                    )?;
+                    if previous_native_readback.is_none() {
+                        previous_native_readback =
+                            renderer.readback_last_presentation(context.device, encoder)?;
+                    }
                 }
+                let needs_current_readback = request_current_readback
+                    || (request_native_save_readback && previous_native_readback.is_none());
+                let reduce_current = needs_current_readback && current_readback_is_thumbnail_only;
                 readback = renderer.render_layers(
                     context.device,
                     context.queue,
                     encoder,
                     surface_view,
                     &layers,
-                    request_current_readback
-                        || (request_native_save_readback && previous_native_readback.is_none()),
+                    needs_current_readback && !reduce_current,
                 )?;
+                if reduce_current {
+                    // The composition still holds the frame just presented, so
+                    // the reduction reads it before anything overwrites it.
+                    readback = renderer.readback_last_presentation_reduced(
+                        context.device,
+                        encoder,
+                        SAVE_THUMBNAIL_EXTENT,
+                    )?;
+                    readback_is_reduced = readback.is_some();
+                    if readback.is_none() {
+                        readback = renderer.readback_last_presentation(context.device, encoder)?;
+                    }
+                }
                 retained_profile = Some(RetainedGpuFrameProfile {
                     frame_preparation,
                     renderer: renderer.last_stats(),
@@ -1167,12 +1196,19 @@ pub(crate) fn present_retained_gpu_frame_profiled(
             }
         }
         while !app.pending_screenshots.is_empty() {
-            let result = app.save_next_screenshot(
-                Some(frame.rgba.as_mut_slice()),
-                frame.extent[0],
-                frame.extent[1],
-                presenter.scale(),
-            );
+            // A screenshot queued after this frame's readback was chosen can
+            // still find a thumbnail-sized reduction here. Those are not its
+            // pixels, so take the CPU capture of the real extent instead.
+            let result = if readback_is_reduced {
+                app.save_next_screenshot(None, physical_width, physical_height, presenter.scale())
+            } else {
+                app.save_next_screenshot(
+                    Some(frame.rgba.as_mut_slice()),
+                    frame.extent[0],
+                    frame.extent[1],
+                    presenter.scale(),
+                )
+            };
             app.report_screenshot_result(result);
         }
     }

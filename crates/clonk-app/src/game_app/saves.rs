@@ -1480,6 +1480,40 @@ mod save_thumbnail_tests {
     }
 
     #[test]
+    fn a_pre_reduced_frame_encodes_to_the_same_thumbnail_as_the_whole_frame() {
+        // The retained GPU path reduces a thumbnail-only presentation before
+        // reading it back, so this encoder receives a frame that is already
+        // 200x150. Re-running the area reduction at 1:1 has to be the identity
+        // or the two paths would write different bytes into a save archive.
+        let (width, height) = (801, 601);
+        let frame: Vec<u8> = (0..width as usize * height as usize)
+            .flat_map(|index| {
+                let alpha = [0_u8, 255, 17, 128, 254][index % 5];
+                [
+                    (index * 37 % 256) as u8,
+                    (index * 91 % 256) as u8,
+                    (index * 13 % 256) as u8,
+                    alpha,
+                ]
+            })
+            .collect();
+        let reduced = clonk_graphics::surface::downsample_rgba_box(
+            &frame,
+            width,
+            height,
+            SAVE_THUMBNAIL_WIDTH,
+            SAVE_THUMBNAIL_HEIGHT,
+        )
+        .expect("reduce the presented frame");
+        assert_eq!(
+            encode_presented_save_thumbnail(SAVE_THUMBNAIL_WIDTH, SAVE_THUMBNAIL_HEIGHT, &reduced)
+                .expect("encode an already reduced frame"),
+            encode_presented_save_thumbnail(width, height, &frame)
+                .expect("encode the complete frame"),
+        );
+    }
+
+    #[test]
     fn save_thumbnail_rejects_a_frame_whose_length_disagrees_with_its_extent() {
         assert!(encode_presented_save_thumbnail(4, 4, &[0; 60]).is_err());
         assert!(encode_presented_save_thumbnail(0, 0, &[]).is_err());
