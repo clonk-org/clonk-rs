@@ -249,6 +249,137 @@ pub fn continuable_line(exception_flags: u32) -> &'static str {
     }
 }
 
+/// What `SymFromAddr` resolved an address to (`C4CrashHandlerWin32.cpp:303-307`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SymbolMatch {
+    /// `SYMBOL_INFO::Name`, already undecorated by `SYMOPT_UNDNAME`.
+    pub name: String,
+    /// How far into the symbol the address sits.
+    pub displacement: u64,
+}
+
+/// What `SymGetLineFromAddr64` resolved an address to (`:318-322`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceLocation {
+    /// `IMAGEHLP_LINE64::FileName`.
+    pub file: String,
+    /// `IMAGEHLP_LINE64::LineNumber`.
+    pub line: u32,
+}
+
+/// One `StackWalk64` frame, lifted out of the DbgHelp structures so the line it
+/// produces can be composed and asserted on any host.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StackFrame {
+    /// `frame.AddrPC.Offset`.
+    pub address: u64,
+    /// `IMAGEHLP_MODULE64::ModuleName`, absent when `SymGetModuleInfo64` fails.
+    pub module: Option<String>,
+    /// `IMAGEHLP_MODULE64::BaseOfImage`, which only a resolved module carries.
+    pub image_base: Option<u64>,
+    pub symbol: Option<SymbolMatch>,
+    pub source: Option<SourceLocation>,
+}
+
+/// Formats a value the way `%#lx` does.
+///
+/// Two C details the port has to keep. `long` is 32 bits in Windows' LLP64
+/// model, so `static_cast<long>` (`:305,310,314`) truncates a 64-bit
+/// displacement or offset before it is printed; and `#` prefixes `0x` only for
+/// a nonzero value, so a zero displacement prints as a bare `0`.
+fn c_hash_hex(value: u64) -> String {
+    match value as u32 {
+        0 => "0".to_owned(),
+        truncated => format!("{truncated:#x}"),
+    }
+}
+
+/// One line of the stack trace (`C4CrashHandlerWin32.cpp:291-324`).
+///
+/// The three address forms are a fallback chain, not alternatives: a resolved
+/// symbol wins, else an offset into the module that owns the address, else the
+/// raw address.
+pub fn stack_frame_line(number: i32, frame: &StackFrame) -> String {
+    let module = frame.module.as_deref().unwrap_or_default();
+    let address = match (&frame.symbol, frame.image_base) {
+        (Some(symbol), _) => format!("!{}+{}", symbol.name, c_hash_hex(symbol.displacement)),
+        (None, Some(base)) if base > 0 => {
+            format!("+{}", c_hash_hex(frame.address.wrapping_sub(base)))
+        }
+        (None, _) => c_hash_hex(frame.address),
+    };
+    let source = frame
+        .source
+        .as_ref()
+        .map(|source| format!(" [{} @ {}]", source.file, source.line))
+        .unwrap_or_default();
+    format!("#{number:3} {module}{address}{source}\n")
+}
+
+/// One `MODULEENTRY32` of the `TH32CS_SNAPMODULE` snapshot (`:340-350`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LoadedModule {
+    /// `szModule`.
+    pub name: String,
+    /// `modBaseAddr`.
+    pub base: u64,
+    /// `modBaseSize`.
+    pub size: u64,
+    /// `szExePath`.
+    pub path: String,
+}
+
+/// One line of the loaded-module list (`C4CrashHandlerWin32.cpp:345-349`).
+///
+/// `%32ls` is a minimum field width, so an overlong name is padded to nothing
+/// and keeps every character.
+pub fn loaded_module_line(module: &LoadedModule) -> String {
+    format!(
+        "{:>32} loaded at {} - {} ({})\n",
+        module.name,
+        pointer(module.base as usize),
+        pointer(module.base.wrapping_add(module.size) as usize),
+        module.path,
+    )
+}
+
+/// The stack trace, or the one line that stands in for it
+/// (`C4CrashHandlerWin32.cpp:255-256,291-328`).
+///
+/// `None` is a DbgHelp that would not initialize. Its refusal line replaces the
+/// section rather than heading an empty one, because C++ writes the header
+/// inside the branch that succeeded.
+pub fn stack_trace_section(frames: Option<&[StackFrame]>) -> String {
+    let Some(frames) = frames else {
+        return "[Stack trace not available: failed to initialize Debugging Help Library]\n"
+            .to_owned();
+    };
+    frames.iter().enumerate().fold(
+        "\nStack trace:\n".to_owned(),
+        |mut section, (index, frame)| {
+            section.push_str(&stack_frame_line(index as i32, frame));
+            section
+        },
+    )
+}
+
+/// The loaded-module list (`C4CrashHandlerWin32.cpp:332-352`).
+///
+/// `None` is a module snapshot that never succeeded, which C++ passes over in
+/// silence — header included.
+pub fn loaded_modules_section(modules: Option<&[LoadedModule]>) -> String {
+    modules
+        .map(|modules| {
+            modules
+                .iter()
+                .fold("\nLoaded modules:\n".to_owned(), |mut section, module| {
+                    section.push_str(&loaded_module_line(module));
+                    section
+                })
+        })
+        .unwrap_or_default()
+}
+
 /// The `EXCEPTION_RECORD`/`CONTEXT` fields the report draws on
 /// (`C4CrashHandlerWin32.cpp:86-202`), lifted out of the raw Win32 structures so
 /// the report can be composed and asserted on any host.
@@ -534,6 +665,182 @@ mod windows_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C4CrashHandlerWin32.cpp:291-320 — the frame line a fully resolved
+    /// address produces: `#%3d ` then the module, `!` and the symbol with its
+    /// displacement.
+    #[test]
+    fn a_resolved_frame_names_its_module_symbol_and_displacement() {
+        assert_eq!(
+            stack_frame_line(
+                0,
+                &StackFrame {
+                    address: 0x7ff6_1234_5678,
+                    module: Some("clonk-game".to_owned()),
+                    image_base: Some(0x7ff6_1234_0000),
+                    symbol: Some(SymbolMatch {
+                        name: "main".to_owned(),
+                        displacement: 0x2a,
+                    }),
+                    source: None,
+                }
+            ),
+            "#  0 clonk-game!main+0x2a\n"
+        );
+    }
+
+    /// C4CrashHandlerWin32.cpp:309-316 — with no symbol the line falls back to
+    /// the offset into the owning module, and with neither to the raw address.
+    #[test]
+    fn an_unresolved_frame_falls_back_to_the_module_offset_then_the_address() {
+        let known_module = StackFrame {
+            address: 0x7ff6_1234_5678,
+            module: Some("ntdll".to_owned()),
+            image_base: Some(0x7ff6_1234_0000),
+            symbol: None,
+            source: None,
+        };
+        assert_eq!(stack_frame_line(7, &known_module), "#  7 ntdll+0x5678\n");
+
+        let nothing_resolved = StackFrame {
+            address: 0x1234_5678,
+            ..StackFrame::default()
+        };
+        assert_eq!(stack_frame_line(12, &nothing_resolved), "# 12 0x12345678\n");
+    }
+
+    /// C4CrashHandlerWin32.cpp:318-322 — line information is a suffix, not a
+    /// replacement for the address form it follows.
+    #[test]
+    fn source_information_follows_the_address_form() {
+        assert_eq!(
+            stack_frame_line(
+                1,
+                &StackFrame {
+                    address: 0x7ff6_1234_5678,
+                    module: Some("clonk-game".to_owned()),
+                    image_base: Some(0x7ff6_1234_0000),
+                    symbol: Some(SymbolMatch {
+                        name: "C4Game::Execute".to_owned(),
+                        displacement: 0x11,
+                    }),
+                    source: Some(SourceLocation {
+                        file: "C:\\src\\C4Game.cpp".to_owned(),
+                        line: 1234,
+                    }),
+                }
+            ),
+            "#  1 clonk-game!C4Game::Execute+0x11 [C:\\src\\C4Game.cpp @ 1234]\n"
+        );
+    }
+
+    /// `%#lx` prints a bare `0` — the `#` flag adds no prefix to zero — and
+    /// `static_cast<long>` truncates to 32 bits before printing (`:305,310`).
+    #[test]
+    fn the_displacement_keeps_c_s_zero_and_truncation_behaviour() {
+        let exactly_at_symbol = StackFrame {
+            address: 0x7ff6_1234_0000,
+            module: Some("clonk-game".to_owned()),
+            image_base: Some(0x7ff6_1234_0000),
+            symbol: Some(SymbolMatch {
+                name: "start".to_owned(),
+                displacement: 0,
+            }),
+            source: None,
+        };
+        assert_eq!(
+            stack_frame_line(0, &exactly_at_symbol),
+            "#  0 clonk-game!start+0\n"
+        );
+
+        let beyond_four_gigabytes = StackFrame {
+            address: 0x7ff7_1234_5678,
+            module: Some("huge".to_owned()),
+            image_base: Some(0x7ff6_1234_0000),
+            symbol: None,
+            source: None,
+        };
+        assert_eq!(
+            stack_frame_line(2, &beyond_four_gigabytes),
+            "#  2 huge+0x5678\n",
+            "C's `long` is 32 bits here, so the high half never reaches the report"
+        );
+    }
+
+    /// C4CrashHandlerWin32.cpp:345-349 — `%32ls loaded at <base> - <end>
+    /// (<path>)`, where the end is the base plus the image size.
+    #[test]
+    fn a_loaded_module_line_pads_its_name_and_spans_its_image() {
+        assert_eq!(
+            loaded_module_line(&LoadedModule {
+                name: "clonk-game.exe".to_owned(),
+                base: 0x7ff6_1234_0000,
+                size: 0x4_5000,
+                path: "C:\\Games\\Clonk\\clonk-game.exe".to_owned(),
+            }),
+            "                  clonk-game.exe loaded at 0x00007ff612340000 - \
+             0x00007ff612385000 (C:\\Games\\Clonk\\clonk-game.exe)\n"
+        );
+    }
+
+    /// A name at or over the field width is not truncated: `%32ls` is a
+    /// minimum, so a longer module name simply pushes the rest of the line.
+    #[test]
+    fn an_overlong_module_name_is_not_truncated() {
+        let line = loaded_module_line(&LoadedModule {
+            name: "a-module-name-longer-than-thirty-two.dll".to_owned(),
+            base: 0x1000,
+            size: 0x10,
+            path: "C:\\a.dll".to_owned(),
+        });
+
+        assert!(
+            line.starts_with("a-module-name-longer-than-thirty-two.dll loaded at "),
+            "{line}"
+        );
+    }
+
+    /// C4CrashHandlerWin32.cpp:255-256,326-328 — the header belongs to the
+    /// success branch, so a DbgHelp that will not initialize contributes the
+    /// refusal line **instead of** a headed but empty trace.
+    #[test]
+    fn an_uninitialized_dbghelp_reports_its_refusal_without_a_header() {
+        assert_eq!(
+            stack_trace_section(None),
+            "[Stack trace not available: failed to initialize Debugging Help Library]\n"
+        );
+    }
+
+    /// C4CrashHandlerWin32.cpp:255,291 — frames are numbered from zero under
+    /// the one header.
+    #[test]
+    fn the_stack_trace_numbers_its_frames_under_one_header() {
+        let frame = |name: &str| StackFrame {
+            address: 0x7ff6_1234_0000,
+            module: Some("clonk-game".to_owned()),
+            image_base: Some(0x7ff6_1234_0000),
+            symbol: Some(SymbolMatch {
+                name: name.to_owned(),
+                displacement: 0,
+            }),
+            source: None,
+        };
+
+        assert_eq!(
+            stack_trace_section(Some(&[frame("inner"), frame("outer")])),
+            "\nStack trace:\n\
+             #  0 clonk-game!inner+0\n\
+             #  1 clonk-game!outer+0\n"
+        );
+    }
+
+    /// C4CrashHandlerWin32.cpp:332-352 — a snapshot that never succeeds leaves
+    /// the whole section out, header included.
+    #[test]
+    fn an_unavailable_module_snapshot_contributes_nothing() {
+        assert_eq!(loaded_modules_section(None), "");
+        assert_eq!(loaded_modules_section(Some(&[])), "\nLoaded modules:\n");
+    }
 
     // C4CrashHandlerWin32.cpp:390,410 — the C4ENGINENAME-crash-<UTC>.dmp template.
     #[test]
