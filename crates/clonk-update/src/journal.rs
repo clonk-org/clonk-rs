@@ -30,6 +30,55 @@ const UNBOUND_JOURNAL_SCHEMA: u32 = 2;
 
 pub const JOURNAL_FILE_NAME: &str = "clonk-update-journal.json";
 
+/// The install root's filesystem identity, which a rename or a move within a
+/// volume preserves and a freshly created directory at the same path does not.
+///
+/// Recovery binds a journal to the *install* rather than to its pathname. The
+/// stored canonical path alone answers "is this the same location", which is
+/// the wrong question twice: an unrelated install placed at a path that once
+/// held an interrupted one matches it, and an interrupted install that has been
+/// renamed no longer does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallIdentity {
+    /// `st_dev` on unix, the volume serial number on Windows.
+    pub volume: u64,
+    /// `st_ino` on unix, the file index on Windows.
+    pub file: u64,
+}
+
+impl InstallIdentity {
+    /// Reads the identity of an existing directory. `None` when the platform
+    /// does not expose one, which keeps recovery on the pathname check rather
+    /// than failing an install that is otherwise fine.
+    pub fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Self::from_metadata(&metadata)
+    }
+
+    #[cfg(unix)]
+    fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            volume: metadata.dev(),
+            file: metadata.ino(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::windows::fs::MetadataExt;
+        Some(Self {
+            volume: u64::from(metadata.volume_serial_number()?),
+            file: metadata.file_index()?,
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn from_metadata(_metadata: &std::fs::Metadata) -> Option<Self> {
+        None
+    }
+}
+
 /// How far one component's swap got.
 ///
 /// Three states, because there are exactly two renames: `dest -> backup` and
@@ -134,6 +183,14 @@ pub struct Journal {
     /// deriving any live, staged or backup path from it.
     #[serde(default)]
     pub install_root: PathBuf,
+    /// Filesystem identity of that install root, recorded so recovery can bind
+    /// the document to the install itself rather than to where it was sitting.
+    ///
+    /// `None` for journals written before this was recorded, and on any
+    /// platform that exposes no identity; recovery falls back to comparing
+    /// `install_root` there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_identity: Option<InstallIdentity>,
     pub steps: Vec<JournalStep>,
     #[serde(default)]
     pub phase: TransactionPhase,
@@ -252,11 +309,13 @@ impl Journal {
         install_root: impl Into<PathBuf>,
         steps: Vec<JournalStep>,
     ) -> Self {
+        let install_root = install_root.into();
         Self {
             schema: JOURNAL_SCHEMA,
             version: version.to_string(),
             nonce: nonce.to_string(),
-            install_root: install_root.into(),
+            install_identity: InstallIdentity::of(&install_root),
+            install_root,
             steps,
             phase: TransactionPhase::Applying,
             previous_installed_state: Some(PreviousInstalledState::Absent),
