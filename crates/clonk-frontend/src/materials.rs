@@ -667,12 +667,84 @@ pub(crate) fn compose_material_gpu_slot(
 /// `packed_material_slot_matches_the_cpu_composer` proves equals
 /// `compose_material_surface_pixel`. Nothing here re-derives composition
 /// arithmetic; it only marshals what the CPU composer already resolved.
+/// The pattern atlas and packed slot table one material catalogue resolves to.
+///
+/// Both are shared rather than copied into each plan: they are the same bytes
+/// until the catalogue is reloaded, and a landscape update must not pay for
+/// them.
+#[derive(Clone, Debug)]
+pub(crate) struct PackedMaterialCatalogue {
+    pub(crate) atlas: Arc<[u8]>,
+    pub(crate) atlas_extent: [u32; 2],
+    pub(crate) slots: Arc<[[u32; 16]]>,
+}
+
+/// Keeps the packed catalogue across landscape updates.
+///
+/// The atlas and slot table are resolved from two independent things: the
+/// material catalogue the `GraphicsSystem` holds, which its setters revision,
+/// and the texmap the *landscape grid* carries, which they do not see. Both
+/// belong in the key — keying on the revision alone serves a stale atlas to a
+/// landscape whose texmap has been replaced. The names are compared rather
+/// than hashed, and cloned only when the packing is rebuilt.
+#[derive(Debug, Default)]
+pub(crate) struct MaterialAtlasCache {
+    revision: u64,
+    materials: Vec<Option<String>>,
+    textures: Vec<Option<String>>,
+    packed: Option<PackedMaterialCatalogue>,
+}
+
+impl MaterialAtlasCache {
+    /// The packed catalogue for this revision and texmap, building it only
+    /// when the one held belongs to another.
+    pub(crate) fn resolve(
+        &mut self,
+        revision: u64,
+        materials: &[Option<String>],
+        textures: &[Option<String>],
+        build: impl FnOnce() -> PackedMaterialCatalogue,
+    ) -> PackedMaterialCatalogue {
+        let current =
+            self.revision == revision && self.materials == materials && self.textures == textures;
+        let held = self.packed.as_ref().filter(|_| current).cloned();
+        held.unwrap_or_else(|| {
+            let packed = build();
+            self.revision = revision;
+            self.materials = materials.to_vec();
+            self.textures = textures.to_vec();
+            self.packed = Some(packed.clone());
+            packed
+        })
+    }
+}
+
 pub(crate) fn build_shader_landscape_plan(
     extent: [u32; 2],
     index_plane: Vec<u8>,
     shading_plane: Option<Vec<u8>>,
     slots: &[MaterialSlot<'_>],
+    catalogue: &mut MaterialAtlasCache,
+    revision: u64,
+    material_names: &[Option<String>],
+    texture_names: &[Option<String>],
 ) -> clonk_graphics::ShaderLandscapePlan {
+    let packed = catalogue.resolve(revision, material_names, texture_names, || {
+        pack_material_catalogue(slots)
+    });
+    clonk_graphics::ShaderLandscapePlan {
+        extent,
+        index_plane,
+        shading_plane,
+        atlas: packed.atlas.to_vec(),
+        atlas_extent: packed.atlas_extent,
+        slots: packed.slots.to_vec(),
+    }
+}
+
+/// Packs every pattern the texmap references into one atlas and packs each
+/// slot against it. Catalogue work only: nothing here reads the landscape.
+fn pack_material_catalogue(slots: &[MaterialSlot<'_>]) -> PackedMaterialCatalogue {
     // Collect every referenced pattern once, remembering where each slot's
     // primary and overlay landed so the rects can be looked up after packing.
     let mut patterns: Vec<MaterialPatternRef<'_>> = Vec::new();
@@ -695,7 +767,7 @@ pub(crate) fn build_shader_landscape_plan(
     }
     let (atlas_width, atlas_height, atlas, rects) = build_material_atlas(&patterns);
 
-    let packed = slots
+    let packed: Vec<[u32; 16]> = slots
         .iter()
         .zip(&indices)
         .map(|(slot, index)| {
@@ -716,13 +788,10 @@ pub(crate) fn build_shader_landscape_plan(
         })
         .collect();
 
-    clonk_graphics::ShaderLandscapePlan {
-        extent,
-        index_plane,
-        shading_plane,
-        atlas,
+    PackedMaterialCatalogue {
+        atlas: Arc::from(atlas),
         atlas_extent: [atlas_width, atlas_height],
-        slots: packed,
+        slots: Arc::from(packed),
     }
 }
 
@@ -941,7 +1010,17 @@ mod gpu_slot_tests {
         let index_plane: Vec<u8> = (0..extent[0] * extent[1])
             .map(|i| if i % 3 == 0 { 1 } else { 2 })
             .collect();
-        let plan = build_shader_landscape_plan(extent, index_plane.clone(), None, &slots);
+        let mut catalogue = MaterialAtlasCache::default();
+        let plan = build_shader_landscape_plan(
+            extent,
+            index_plane.clone(),
+            None,
+            &slots,
+            &mut catalogue,
+            1,
+            &material_names,
+            &texture_names,
+        );
 
         assert_eq!(plan.slots.len(), 128);
         assert_eq!(plan.extent, extent);
@@ -1066,5 +1145,56 @@ mod gpu_slot_tests {
         };
         let composed = compose_material_gpu_slot(&MaterialGpuSlot::default(), 1, 0, 0, atlas);
         assert_eq!(composed, Color::transparent());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pattern atlas and packed slot table are built from the material
+    /// catalogue, not from the landscape, so a landscape update must reuse
+    /// them. They were rebuilt — atlas allocation, pattern copies and all —
+    /// on every update.
+    #[test]
+    fn the_packed_catalogue_is_rebuilt_only_when_the_catalogue_changes() {
+        let mut cache = MaterialAtlasCache::default();
+        let builds = std::cell::Cell::new(0_usize);
+        let build = || {
+            builds.set(builds.get() + 1);
+            PackedMaterialCatalogue {
+                atlas: Arc::from(vec![7_u8; 4]),
+                atlas_extent: [1, 1],
+                slots: Arc::from(vec![[0_u32; 16]]),
+            }
+        };
+
+        let earth = [Some("Earth".to_string()), None];
+        let smooth = [Some("Smooth".to_string()), None];
+        let rough = [Some("Rough".to_string()), None];
+
+        let first = cache.resolve(1, &earth, &smooth, build);
+        assert_eq!(builds.get(), 1);
+
+        let again = cache.resolve(1, &earth, &smooth, build);
+        assert_eq!(builds.get(), 1, "an unchanged catalogue is not rebuilt");
+        assert!(
+            Arc::ptr_eq(&first.atlas, &again.atlas),
+            "the retained atlas is shared, not copied"
+        );
+        assert!(Arc::ptr_eq(&first.slots, &again.slots));
+
+        let reloaded = cache.resolve(2, &earth, &smooth, build);
+        assert_eq!(builds.get(), 2, "a reloaded catalogue is rebuilt");
+        assert!(!Arc::ptr_eq(&first.atlas, &reloaded.atlas));
+
+        // The texmap belongs to the landscape grid, not to the catalogue, so
+        // it moves without a revision bump.
+        let _ = cache.resolve(2, &earth, &rough, build);
+        assert_eq!(
+            builds.get(),
+            3,
+            "a texmap the catalogue's revision cannot see is still rebuilt"
+        );
     }
 }
