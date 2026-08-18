@@ -9199,6 +9199,19 @@ mod tests {
         }
     }
 
+    // The three control-sheet render tests below check this port against the
+    // C++ *draw model* — rects, caps, blit modes and colours read out of
+    // `C4StartupOptionsDlg`/`C4GUI` — and not against captured C++ pixels. No
+    // 1280x720 oracle capture of either control sheet exists, so they are Rust
+    // self-consistency plus a hand-derived geometry oracle.
+    //
+    // Recorded as accepted rather than left as a silent gap: capturing these
+    // two sheets needs a headed oracle run driven to the Controls and Gamepad
+    // sheets with a pad attached, and the gamepad sheet's content depends on
+    // how many pads the capturing host has — so a captured baseline would pin
+    // the capture host's pad count as much as the draw model. The startup
+    // screens that *are* pixel-pinned against C++ are the ones whose content is
+    // host-independent. Revisit if a capture rig with a fixed pad set exists.
     fn render_gamepad_sheet(state: &OptionsDlgState) -> Surface {
         let assets = control_sheet_assets();
         let gui = endeavour_font_set();

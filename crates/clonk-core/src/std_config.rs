@@ -320,6 +320,16 @@ impl Config {
         self.entries.shift_insert(insertion_index, map_key, entry);
     }
 
+    /// Drops a key entirely, so a value that equals its C++ default leaves no
+    /// line behind. `mkNamingAdapt(value, name, default)` omits the entry when
+    /// it matches the default (`C4Config.cpp:585-602`), and C++ re-serializes
+    /// the whole config from its struct — so a reset removes the line rather
+    /// than writing the default over it. Returns whether a key was present.
+    pub fn remove_in(&mut self, section: Option<&str>, key: &str) -> bool {
+        let map_key = (section.map(String::from), key.to_string());
+        self.entries.shift_remove(&map_key).is_some()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Entry> {
         self.entries.values()
     }

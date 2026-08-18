@@ -476,10 +476,13 @@ impl GameApp {
         if !c4_modifiers.is_empty() {
             return Ok(true);
         }
-        if !KeyboardBindings::is_supported_key(key) {
-            tracing::warn!(?key, "ignoring control capture for an unpersistable key");
-            return Ok(true);
-        }
+        // `KeySelDialog::KeyDown` rejects only a gamepad/keyboard mismatch and
+        // the wrong pad; any other code is stored and closes the modal
+        // (`C4StartupOptionsDlg.cpp:189-200`). Refusing the codes the config
+        // codec cannot encode left the modal open on them instead. Such a key
+        // still binds for the session; `write_to_config` skips persisting it
+        // rather than invent a code a C++ engine sharing the config would
+        // misread.
         let Some(id) = ControlBindingId::ALL.get(target.control).copied() else {
             return Ok(true);
         };
@@ -877,12 +880,17 @@ impl GameApp {
 
     fn sync_options_gamepad_device(&mut self) {
         use clonk_frontend::startup_options_controls::ControlDevice;
-        use clonk_frontend::startup_options_dlg::OptionsSheet;
 
+        // Both `ControlConfigArea`s are built in the dialog constructor, and
+        // the gamepad one's `UpdateCtrlSet` creates `C4GamePadOpener` right
+        // there whenever `Config.General.GamepadEnabled` is set; only
+        // `~ControlConfigArea` deletes it (`C4StartupOptionsDlg.cpp:251,
+        // 344-352,988-991`). So the claim tracks the dialog's lifetime and the
+        // selected set, not which sheet happens to be shown.
         let selected = self.startup_options_dialog.as_ref().and_then(|dialog| {
             (self.mode == AppMode::Menu
                 && self.startup_view == StartupView::Options
-                && dialog.active_sheet() == OptionsSheet::Gamepad)
+                && self.gamepads_enabled)
                 .then(|| dialog.controls().selected_set(ControlDevice::Gamepad))
         });
         self.gamepads

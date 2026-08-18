@@ -1246,7 +1246,10 @@ mod tests {
         bindings.replace_axis_calibrations(calibrations);
         bindings.write_to_config(&mut config);
 
-        assert_eq!(config.get_in(Some("Gamepad2"), "Axis4Min"), Some("0"));
+        // 0 is `AxisMin`'s declared default, so `mkNamingAdapt` writes no line
+        // for it (`C4Config.cpp:585-589`) and the seeded 10000 is dropped; it
+        // reloads as 0 either way.
+        assert_eq!(config.get_in(Some("Gamepad2"), "Axis4Min"), None);
         assert_eq!(config.get_in(Some("Gamepad2"), "Axis4Max"), Some("50000"));
         assert_eq!(
             config.get_in(Some("Gamepad2"), "Axis4Calibrated"),
