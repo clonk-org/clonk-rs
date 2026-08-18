@@ -535,11 +535,17 @@ impl GamepadBindings {
         for (gamepad_index, keys) in self.keys.iter().enumerate() {
             let section = format!("Gamepad{gamepad_index}");
             for (control_index, raw_key) in keys.iter().enumerate() {
-                config.set_in(
-                    Some(&section),
-                    format!("Button{}", control_index + 1),
-                    raw_key.unwrap_or(-1).to_string(),
-                );
+                let name = format!("Button{}", control_index + 1);
+                // -1 is the declared default (`C4Config.cpp:591-602`), and
+                // `mkNamingAdapt` writes nothing for a value that equals it.
+                match raw_key {
+                    Some(code) if *code != -1 => {
+                        config.set_in(Some(&section), name, code.to_string());
+                    }
+                    _ => {
+                        config.remove_in(Some(&section), &name);
+                    }
+                }
             }
         }
         if self.axis_calibration_dirty {
@@ -570,20 +576,29 @@ impl GamepadBindings {
         for (gamepad_index, calibrations) in self.axis_calibrations.iter().enumerate() {
             let section = format!("Gamepad{gamepad_index}");
             for (axis, calibration) in calibrations.iter().enumerate() {
-                config.set_in(
-                    Some(&section),
+                // Declared defaults are 0u/0u/false (`C4Config.cpp:585-589`).
+                let default = GamepadAxisCalibration::default();
+                let mut write = |name: String, value: String, is_default: bool| {
+                    if is_default {
+                        config.remove_in(Some(&section), &name);
+                    } else {
+                        config.set_in(Some(&section), name, value);
+                    }
+                };
+                write(
                     format!("Axis{axis}Min"),
                     calibration.min.to_string(),
+                    calibration.min == default.min,
                 );
-                config.set_in(
-                    Some(&section),
+                write(
                     format!("Axis{axis}Max"),
                     calibration.max.to_string(),
+                    calibration.max == default.max,
                 );
-                config.set_in(
-                    Some(&section),
+                write(
                     format!("Axis{axis}Calibrated"),
                     calibration.calibrated.to_string(),
+                    calibration.calibrated == default.calibrated,
                 );
             }
         }
@@ -2050,14 +2065,23 @@ mod tests {
             config.get_in(Some("Gamepad3"), "Button12"),
             Some(raw_set_four.to_string().as_str())
         );
+        // Only the two bound buttons get a line: the rest are -1, which is the
+        // declared default `mkNamingAdapt` omits (`C4Config.cpp:591-602`).
         for gamepad in 0..GamepadBindings::SET_COUNT {
             for control in 0..CONTROL_BINDING_COUNT {
-                assert!(config
-                    .get_in(
-                        Some(&format!("Gamepad{gamepad}")),
-                        &format!("Button{}", control + 1),
-                    )
-                    .is_some());
+                let bound =
+                    (gamepad == 2 && control + 1 == 6) || (gamepad == 3 && control + 1 == 12);
+                assert_eq!(
+                    config
+                        .get_in(
+                            Some(&format!("Gamepad{gamepad}")),
+                            &format!("Button{}", control + 1),
+                        )
+                        .is_some(),
+                    bound,
+                    "Gamepad{gamepad} Button{}",
+                    control + 1
+                );
             }
         }
 
@@ -2092,26 +2116,31 @@ mod tests {
 
         bindings.reset_all();
         bindings.write_to_config(&mut config);
+        // `C4ConfigGamepad::Reset` compiles an empty config, and every field is
+        // declared through `mkNamingAdapt` with its default (-1 for buttons,
+        // 0u/0u/false for axes), which writes nothing when the value matches
+        // (`C4Config.cpp:585-607`). The seeded `Axis*` lines above therefore
+        // have to disappear rather than be overwritten with the default.
         for gamepad in 0..GamepadBindings::SET_COUNT {
             let section = format!("Gamepad{gamepad}");
             for control in 0..CONTROL_BINDING_COUNT {
                 assert_eq!(
                     config.get_in(Some(&section), &format!("Button{}", control + 1)),
-                    Some("-1")
+                    None
                 );
             }
             for axis in 0..6 {
                 assert_eq!(
                     config.get_in(Some(&section), &format!("Axis{axis}Min")),
-                    Some("0")
+                    None
                 );
                 assert_eq!(
                     config.get_in(Some(&section), &format!("Axis{axis}Max")),
-                    Some("0")
+                    None
                 );
                 assert_eq!(
                     config.get_in(Some(&section), &format!("Axis{axis}Calibrated")),
-                    Some("false")
+                    None
                 );
             }
         }
