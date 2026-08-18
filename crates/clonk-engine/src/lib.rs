@@ -11292,6 +11292,36 @@ fn recover_effect_callback_error(
     }
 }
 
+thread_local! {
+    /// Scratch for the `Fx<name><event>` callback name.
+    ///
+    /// Effect dispatch builds this name for *every* effect on *every* event,
+    /// and usually to discover the script does not implement that callback at
+    /// all. `format!` heap-allocated one `String` per attempt; reusing a
+    /// per-thread buffer keeps the lookup key without the allocation.
+    ///
+    /// Thread-local rather than threaded through the call: the engine executes
+    /// one tick on one thread, and tests run whole engines in parallel, so a
+    /// shared buffer would couple them.
+    static EFFECT_CALLBACK_NAME: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Builds `Fx<name><event>` into the reusable buffer and hands it to `use_name`.
+///
+/// The name never escapes the closure, which is what lets the buffer be reused:
+/// callers only need it to look a function up.
+fn with_effect_callback_name<R>(name: &str, event: &str, use_name: impl FnOnce(&str) -> R) -> R {
+    EFFECT_CALLBACK_NAME.with(|buffer| {
+        let mut buffer = buffer.borrow_mut();
+        buffer.clear();
+        buffer.push_str("Fx");
+        buffer.push_str(name);
+        buffer.push_str(event);
+        use_name(&buffer)
+    })
+}
+
 fn resolve_effect_script_callback(
     effect: &EffectState,
     callback_name: &str,
@@ -11379,8 +11409,15 @@ fn dispatch_global_effect_callback(
     audio: AudioRegistry,
 ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
     let next_object_id = world.next_object_id();
-    let callback_name = format!("Fx{}{}", effect.name, event);
-    let Some(callback) = resolve_effect_script_callback(effect, &callback_name, &world) else {
+    // The name is only materialized when a callback actually exists. The miss
+    // is the common case — most effects implement few of the events — and it
+    // now costs no allocation at all.
+    let Some((callback, callback_name)) =
+        with_effect_callback_name(&effect.name, event, |callback_name| {
+            resolve_effect_script_callback(effect, callback_name, &world)
+                .map(|callback| (callback, callback_name.to_owned()))
+        })
+    else {
         return Ok((
             EffectContextOutcome::empty(next_object_id, audio.clone()),
             audio,

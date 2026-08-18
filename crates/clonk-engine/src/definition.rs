@@ -4470,8 +4470,18 @@ impl Definition {
         parameter_conversion: compat::EffectCallbackParameterConversionPolicy,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         let next_object_id = world.next_object_id();
-        let callback_name = format!("Fx{}{}", effect.name, event);
-        let callback = resolve_effect_script_callback(effect, &callback_name, &world);
+        // The name is materialized only when a callback exists. The miss is
+        // the common case — most effects implement few of the events — and it
+        // now costs no allocation at all. `native_fire_start` below is the one
+        // miss that still proceeds, and it never reads the name.
+        let resolved = crate::with_effect_callback_name(&effect.name, event, |callback_name| {
+            resolve_effect_script_callback(effect, callback_name, &world)
+                .map(|callback| (callback, callback_name.to_owned()))
+        });
+        let (callback, callback_name) = match resolved {
+            Some((callback, name)) => (Some(callback), name),
+            None => (None, String::new()),
+        };
         // AddFunc registers the engine's FxFireStart below script functions.
         // C4Effect therefore calls the native body only when script lookup did
         // not find an override; inherited() from an override already reaches
