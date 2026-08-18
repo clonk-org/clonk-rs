@@ -1845,7 +1845,7 @@ Basement=-18\nConSizeOff=-20\n",
             r#"
         #strict 2
         local old_mask_solid, old_mask_material;
-        global func ContactRight()
+        func ContactRight()
         {
             old_mask_solid = GBackSolid(-1, 0);
             old_mask_material = GetMaterial(-1, 0);

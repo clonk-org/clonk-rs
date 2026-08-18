@@ -31,7 +31,9 @@ func FxBirthLocalStart(object target, int number, int temp)
 global func FxBirthGlobalStart(object target, int number, int temp)
 {
   if (this() != target || GetR() != 11) return -1;
-  global_started = 1;
+  // A global func may not name a declaring host's local
+  // (C4AulParse.cpp:2000-2004); LocalN is the route C4Aul leaves it.
+  LocalN("global_started") = 1;
   SetR(37);
   return 0;
 }
