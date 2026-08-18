@@ -6167,3 +6167,41 @@ fn requesting_the_application_exit_ends_the_league_registration() {
     );
     assert_eq!(app.exit_reason, Some("the main menu Quit item"));
 }
+
+/// `MasterServerSignUp` is the configuration a dedicated internet server is
+/// built around, and its refusal arm had no headless coverage. A refused
+/// registration is a dismissible notice rather than a failed host, so a
+/// windowed run shows it and keeps hosting — but a server has no renderer to
+/// draw that notice and no input to dismiss it, and
+/// `poll_startup_network_connection` reaches the refusal from `GameApp::update`,
+/// which the console event loop drives. Drawing it there would wedge the server
+/// behind a modal nobody can answer.
+#[test]
+fn a_headless_host_logs_a_refused_league_registration_instead_of_drawing_it() {
+    let refusal = "league is closed";
+
+    // The windowed notice is a `C4GUI::MessageDialog`, which refuses to open
+    // without the classic GUI resource set — the very thing a dedicated server
+    // never loads, and the reason it must not take this path at all.
+    let mut windowed = new_state_only_menu_app(320, 200);
+    assert!(
+        windowed
+            .present_refused_league_registration(refusal.to_string())
+            .is_err(),
+        "the notice needs GUI resources a server does not have"
+    );
+
+    let mut server = new_state_only_menu_app(320, 200);
+    server.headless = true;
+    server
+        .present_refused_league_registration(refusal.to_string())
+        .test_value();
+    assert!(
+        server.message_dialogs.is_empty(),
+        "a dedicated server draws no notice it could never dismiss"
+    );
+    assert!(
+        !server.take_exit_request(),
+        "and keeps hosting unregistered rather than quitting"
+    );
+}
