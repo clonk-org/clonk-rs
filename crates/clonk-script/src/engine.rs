@@ -3042,6 +3042,33 @@ mod tests {
         assert_eq!(string_registration_entry_sweeps(), 0);
     }
 
+    /// A `global func` that names a declaring host's `local` never links:
+    /// C4Aul throws while parsing the body and `C4AulScript::Parse` catches it,
+    /// counts it into `errCnt` and leaves the function an `AB_ERR` chunk
+    /// (`C4AulParse.cpp:2000-2004,3563-3586`), so every call to it raises
+    /// rather than reading a variable the engine has no instance for.
+    #[test]
+    fn calling_a_global_func_that_names_a_local_raises() {
+        let mut engine = Engine::new();
+        engine.add_script(compile(
+            "local counter;\nglobal func Read() { return counter; }\nglobal func Fine() { return 7; }",
+        ));
+
+        let error = engine
+            .call("Read", &[])
+            .expect_err("the refused function raises on call");
+        assert!(
+            error
+                .to_string()
+                .contains("using local variable in global function!"),
+            "raised with C4Aul's message, got {error}"
+        );
+
+        // Only the refused function is affected; the rest of the script links
+        // and runs, the way C4Aul truncates one function and keeps the others.
+        assert_eq!(engine.call("Fine", &[]).expect("unaffected"), Value::Int(7));
+    }
+
     fn compile(source: &str) -> Script {
         Script::compile(source).expect("test script compiles")
     }

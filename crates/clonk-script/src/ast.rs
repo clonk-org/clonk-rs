@@ -178,6 +178,24 @@ pub struct Function {
     /// records the site here and runs the same check once the overload tables
     /// exist. The failsafe `_inherited` spelling never sets it.
     pub(crate) hard_inherited_line: Option<usize>,
+    /// Identifiers this body reads or writes that could name one of the
+    /// declaring script's `local`s, with the one-based line of each first use.
+    ///
+    /// C4Aul rejects a named `local` inside a `global func` outright — in both
+    /// the lvalue and the rvalue path — because the function is owned by the
+    /// script engine rather than the script that declared the variable
+    /// (`C4AulParse.cpp:2000-2004,2731-2737`). Its preparser has registered
+    /// every `local` before any body is parsed, so the check can run inline
+    /// there; this port parses in one pass, so a body records its candidates
+    /// and the script resolves them once every declaration is known.
+    ///
+    /// Only collected for `global func` bodies: nothing else can trip the rule,
+    /// and every other function would pay for the bookkeeping.
+    pub(crate) global_local_candidates: Vec<(String, usize)>,
+    /// The declaring script's `local` this `global func` names, if it names
+    /// one. Set after the whole script is parsed; a function carrying it fails
+    /// to link and raises on every call.
+    pub(crate) global_local_reference: Option<(String, usize)>,
     /// Lazily lowered local-only instruction stream. This is derived state:
     /// function equality remains solely a property of the parsed script.
     pub(crate) compiled: std::sync::OnceLock<crate::vm::CompiledFunctionCache>,
@@ -204,6 +222,7 @@ impl std::fmt::Debug for Function {
             .field("global_link_host", &self.global_link_host)
             .field("overloaded", &self.overloaded)
             .field("hard_inherited_line", &self.hard_inherited_line)
+            .field("global_local_reference", &self.global_local_reference)
             .finish()
     }
 }
@@ -224,6 +243,8 @@ impl Clone for Function {
             global_link_host: self.global_link_host,
             overloaded: self.overloaded.clone(),
             hard_inherited_line: self.hard_inherited_line,
+            global_local_candidates: self.global_local_candidates.clone(),
+            global_local_reference: self.global_local_reference.clone(),
             compiled: std::sync::OnceLock::new(),
             resolved_snapshot: std::sync::OnceLock::new(),
         }
@@ -245,6 +266,7 @@ impl PartialEq for Function {
             && self.global_link_host == other.global_link_host
             && self.overloaded == other.overloaded
             && self.hard_inherited_line == other.hard_inherited_line
+            && self.global_local_reference == other.global_local_reference
     }
 }
 
