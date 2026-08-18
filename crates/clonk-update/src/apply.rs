@@ -1252,26 +1252,47 @@ fn remove_any(path: &Path) -> Result<(), ApplyError> {
     Ok(())
 }
 
-/// Top-level names of the old tree that the new archive does not contain.
+/// Top-level names the staged archive brings, i.e. what this release owns.
+fn staged_top_level_names(locations: &Locations) -> Result<Vec<String>, ApplyError> {
+    if !std::fs::symlink_metadata(&locations.staged).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&locations.staged).map_err(io("listing", &locations.staged))? {
+        let entry = entry.map_err(io("listing", &locations.staged))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str().filter(|name| safe_child_name(name)) else {
+            continue;
+        };
+        names.push(name.to_string());
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Top-level names of the old tree the new archive does not contain and the
+/// previous release did not own — that is, the user's own packs.
 ///
 /// Users legitimately drop packs into `content/`, which `clonk-app` scans.
 /// `planet` and the binaries directory are complete release-owned snapshots:
 /// carrying anything there would produce a hybrid installation. The launcher
 /// recreates its `System.c4g` and `Graphics.c4g` copies from `planet` before it
 /// starts the runtime, so those copies do not need to survive an engine swap.
-fn carry_over_names(component: &str, locations: &Locations) -> Result<Vec<String>, ApplyError> {
+///
+/// `previously_owned` is what the installed release recorded owning here. A
+/// name in it that the new archive omits is an official pack that release
+/// dropped, and it goes; every other omitted name is the user's and stays.
+/// Deleting a user-installed scenario or definition is unrecoverable, so an
+/// empty `previously_owned` — a state file written before ownership was
+/// recorded — keeps everything, exactly as before.
+fn carry_over_names(
+    component: &str,
+    locations: &Locations,
+    previously_owned: &[String],
+) -> Result<Vec<String>, ApplyError> {
     if component != "content" {
         return Ok(Vec::new());
     }
-    // Installed state currently records only the archive's digest and version,
-    // not the top-level names it owned, so an omitted release pack and an
-    // omitted user pack are indistinguishable here. Preserve the established
-    // user-pack contract: deleting a user-installed scenario or definition is
-    // unrecoverable, whereas an official pack a later release drops merely
-    // lingers as hybrid content. Engine and planet swaps are exact snapshots
-    // and have no such ambiguity. Closing this needs a package/installed-state
-    // ownership inventory so the applier can retain only names the previous
-    // release never owned (clonk-org/clonk-rs#395).
     if !std::fs::symlink_metadata(&locations.destination).is_ok_and(|meta| meta.is_dir()) {
         return Ok(Vec::new());
     }
@@ -1291,7 +1312,7 @@ fn carry_over_names(component: &str, locations: &Locations) -> Result<Vec<String
                 path: locations.destination.clone(),
             })?
             .to_string();
-        if !present(&locations.staged.join(&name)) {
+        if !present(&locations.staged.join(&name)) && !previously_owned.contains(&name) {
             names.push(name);
         }
     }
@@ -1343,6 +1364,8 @@ fn swap_components(
     steps: &[Replacement],
     journal: &mut Journal,
     work: &Path,
+    previous: &crate::state::InstalledState,
+    owned: &mut Vec<(String, Vec<String>)>,
 ) -> Result<(), ApplyError> {
     for (index, step) in steps.iter().enumerate() {
         let locations = locate(
@@ -1354,7 +1377,16 @@ fn swap_components(
 
         // Recorded *before* the moves: a rollback has to know which entries
         // were the user's without being able to re-derive it afterwards.
-        let carried = carry_over_names(&step.component, &locations)?;
+        let carried = carry_over_names(
+            &step.component,
+            &locations,
+            previous.owned_names(&step.component),
+        )?;
+        // The staged tree is what this release owns. Recorded here because it
+        // is the only point where it exists and has not yet been renamed into
+        // place, and the next apply needs it to tell a retired official pack
+        // from a user-added one.
+        owned.push((step.component.clone(), staged_top_level_names(&locations)?));
         journal.steps[index].carried.clone_from(&carried);
         journal.save(work)?;
         for name in &carried {
@@ -1753,8 +1785,20 @@ where
 
     let mut state_write_attempted = false;
     let mut signing_attempted = false;
+    let previous_for_ownership = previous_state.state.clone().unwrap_or_default();
     let applied = (|| {
-        swap_components(layout, &steps, &mut journal, &work)?;
+        let mut owned = Vec::new();
+        swap_components(
+            layout,
+            &steps,
+            &mut journal,
+            &work,
+            &previous_for_ownership,
+            &mut owned,
+        )?;
+        for (component, names) in owned {
+            installed_state.set_owned_names(&component, names);
+        }
         prepare_commit(layout, &journal)?;
         state_write_attempted = true;
         installed_state.save_preserving_unknown(&layout.data_dir(), previous_state.raw())?;
@@ -2180,6 +2224,83 @@ mod tests {
         );
     }
 
+    /// Ownership is what separates the two kinds of omitted entry. Before it
+    /// was recorded the applier had to keep both, so a pack a later release
+    /// retired stayed on disk as hybrid content — and it could not simply
+    /// delete omitted entries instead, because that deletes user-installed
+    /// scenarios and definitions, which is unrecoverable.
+    #[test]
+    fn a_release_that_drops_an_official_pack_removes_it_and_keeps_the_user_s() {
+        let install = install();
+
+        // First release owns two packs.
+        let first = archive(
+            &install.downloads,
+            "content-first.zip",
+            &[
+                ("Worlds.c4f/Info.txt", "official world"),
+                ("Retired.c4f/Info.txt", "official pack this release ships"),
+            ],
+        );
+        apply_update(
+            &install.layout,
+            &plan("0.4.0", vec![component("content", &first, "content")]),
+            &FakePlatform::new(),
+        )
+        .expect("apply the first release");
+
+        let data = install.layout.data_dir();
+        // The player installs their own pack beside them.
+        std::fs::create_dir_all(data.join("content/MyPack.c4f")).expect("user pack directory");
+        std::fs::write(data.join("content/MyPack.c4f/Info.txt"), "user pack")
+            .expect("user pack contents");
+
+        let recorded = InstalledState::load(&data)
+            .expect("load installed state")
+            .expect("first apply records state");
+        assert_eq!(
+            recorded.owned_names("content"),
+            ["Retired.c4f".to_string(), "Worlds.c4f".to_string()],
+            "the first release records both of its packs and not the user's"
+        );
+
+        // Second release drops `Retired.c4f`.
+        let second = archive(
+            &install.downloads,
+            "content-second.zip",
+            &[("Worlds.c4f/Info.txt", "official world, updated")],
+        );
+        apply_update(
+            &install.layout,
+            &plan("0.5.0", vec![component("content", &second, "content")]),
+            &FakePlatform::new(),
+        )
+        .expect("apply the second release");
+
+        assert_eq!(
+            read_file(&data.join("content/Worlds.c4f/Info.txt")),
+            "official world, updated"
+        );
+        assert!(
+            !data.join("content/Retired.c4f").exists(),
+            "the pack this release dropped is gone"
+        );
+        assert_eq!(
+            read_file(&data.join("content/MyPack.c4f/Info.txt")),
+            "user pack",
+            "the user's own pack survives"
+        );
+
+        let after = InstalledState::load(&data)
+            .expect("load installed state")
+            .expect("second apply records state");
+        assert_eq!(
+            after.owned_names("content"),
+            ["Worlds.c4f".to_string()],
+            "ownership now reflects what this release ships"
+        );
+    }
+
     #[test]
     fn a_successful_apply_records_the_component_release_and_digest() {
         let install = install();
@@ -2193,12 +2314,15 @@ mod tests {
         let state = InstalledState::load(&install.layout.data_dir())
             .expect("load installed state")
             .expect("successful apply records installed state");
-        assert_eq!(
-            state.component("content"),
-            Some(&crate::state::InstalledComponent {
-                version: "0.4.0".to_string(),
-                sha256: digest,
-            })
+        let content = state.component("content").expect("content is recorded");
+        assert_eq!(content.version, "0.4.0");
+        assert_eq!(content.sha256, digest);
+        // The apply also records what the archive owned, so the next one can
+        // tell a pack this release drops from a pack the user added.
+        assert!(
+            content.owned_names.contains(&"Worlds.c4f".to_string()),
+            "recorded ownership covers the archive's packs, got {:?}",
+            content.owned_names
         );
     }
 

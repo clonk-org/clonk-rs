@@ -29,6 +29,20 @@ pub struct InstalledComponent {
     /// SHA-256 of the archive that produced them, so the next manifest can be
     /// compared without re-hashing the unpacked tree.
     pub sha256: String,
+    /// Top-level names this component's archive owned when it was installed.
+    ///
+    /// Without it an omitted release pack and a user-installed one are
+    /// indistinguishable at apply time, so the applier had to keep both and an
+    /// official pack a later release drops lingered as hybrid content
+    /// (clonk-org/clonk-rs#395).
+    ///
+    /// Absent in state files written before this was recorded, and empty then.
+    /// That is the safe reading: "the previous release owned nothing here", so
+    /// every name looks user-added and is carried over exactly as it was
+    /// before — an installation only starts pruning once an apply has recorded
+    /// what it owns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owned_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,6 +348,23 @@ impl InstalledState {
                     "sha256".to_string(),
                     serde_json::Value::String(component.sha256.clone()),
                 );
+                // Written only once there is something to write, so a state
+                // file for a component that owns nothing keeps its previous
+                // shape rather than growing an empty array.
+                if component.owned_names.is_empty() {
+                    fields.remove("owned_names");
+                } else {
+                    fields.insert(
+                        "owned_names".to_string(),
+                        serde_json::Value::Array(
+                            component
+                                .owned_names
+                                .iter()
+                                .map(|name| serde_json::Value::String(name.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
                 (name.clone(), serde_json::Value::Object(fields))
             })
             .collect();
@@ -362,12 +393,49 @@ impl InstalledState {
         self.components.get(name)
     }
 
+    /// Top-level names the installed build of `name` owns, empty for a state
+    /// file written before ownership was recorded.
+    pub fn owned_names(&self, name: &str) -> &[String] {
+        self.components
+            .get(name)
+            .map(|component| component.owned_names.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// Attach the names an archive owned to an already recorded component.
+    ///
+    /// Separate from [`Self::record`] because the staged tree that answers the
+    /// question only exists once the applier has unpacked it.
+    pub fn set_owned_names(&mut self, name: &str, mut owned_names: Vec<String>) {
+        let Some(component) = self.components.get_mut(name) else {
+            return;
+        };
+        owned_names.sort();
+        owned_names.dedup();
+        component.owned_names = owned_names;
+    }
+
     pub fn record(&mut self, name: &str, version: &str, sha256: &str) {
+        self.record_owning(name, version, sha256, Vec::new());
+    }
+
+    /// [`Self::record`] plus the top-level names the archive owned, which the
+    /// next apply uses to tell a retired official pack from a user-added one.
+    pub fn record_owning(
+        &mut self,
+        name: &str,
+        version: &str,
+        sha256: &str,
+        mut owned_names: Vec<String>,
+    ) {
+        owned_names.sort();
+        owned_names.dedup();
         self.components.insert(
             name.to_string(),
             InstalledComponent {
                 version: version.to_string(),
                 sha256: sha256.to_string(),
+                owned_names,
             },
         );
     }
