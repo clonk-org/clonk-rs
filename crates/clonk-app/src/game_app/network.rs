@@ -7924,10 +7924,10 @@ impl GameApp {
             // `clear_live_network_session`.
             //
             // `QuitGame` returns to the startup dialog only when one is in use
-            // (src/C4Application.cpp:373-405); a server was launched with a
-            // scenario, so it reaches `Quit()` and the process ends. Leaving
-            // the round paused behind an undrawable dialog instead would wedge
-            // it with no input able to dismiss it.
+            // (src/C4Application.cpp:373-405). Leaving the round paused behind
+            // an undrawable dialog is never an option — no input could dismiss
+            // it — but which of the two exits it takes depends on how the round
+            // was started.
             if let Some(network) = self.network.as_ref() {
                 let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
                 if let Err(error) = network.drain_league_record_stream(now) {
@@ -7937,7 +7937,20 @@ impl GameApp {
             let title = self
                 .active_scenario
                 .as_ref()
-                .map_or("Scenario", |scenario| scenario.title.as_str());
+                .map_or("Scenario", |scenario| scenario.title.as_str())
+                .to_owned();
+            if self.startup_dialog_in_use() {
+                // A console engine reaching `C4AS_Startup` "just stay[s] in
+                // this state until aborted or new commands arrive on stdin"
+                // (src/C4Application.cpp:428-429), so the operator's next
+                // `/open` starts another round in this same process.
+                tracing::info!(
+                    scenario = title,
+                    "round finished; waiting for the next console command"
+                );
+                self.park_console_session_after_round();
+                return Ok(());
+            }
             tracing::info!(scenario = title, "round finished; quitting the server");
             self.request_exit("the round ended on a headless server");
             return Ok(());

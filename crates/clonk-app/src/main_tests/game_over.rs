@@ -1253,8 +1253,13 @@ fn headless_round_end_quits_instead_of_pausing_behind_an_evaluation_dialog() {
     assert!(windowed.runtime_halt_active());
     assert!(!windowed.take_exit_request());
 
+    // A server launched with a command-line scenario has no startup
+    // generation to return to: `ParseCommandLine` clears `UseStartupDialog`
+    // for a nonempty `ScenarioFilename` (C4Game.cpp:3299), so `QuitGame`
+    // falls through to `Quit()` (C4Application.cpp:373-405).
     let mut server = running_browser_sandbox(ScenarioSelectorMode::Local);
     server.headless = true;
+    server.classic_command_line.scenario = Some(PathBuf::from("Server.c4s"));
     server.handle_game_over().test_value();
     assert!(
         server.game_over_dialog.is_none(),
@@ -1265,6 +1270,57 @@ fn headless_round_end_quits_instead_of_pausing_behind_an_evaluation_dialog() {
         "and must not pause behind the dialog it never drew"
     );
     assert!(server.take_exit_request());
+}
+
+#[test]
+fn a_console_opened_round_parks_the_server_for_the_next_open() {
+    // `/open` sets `UseStartupDialog` back (C4Application.cpp:598-612), so the
+    // round end's `QuitGame` reconstructs the startup state rather than
+    // reaching `Quit()` (C4Application.cpp:373-405) — and a console engine
+    // then "just stay[s] in this state until aborted or new commands arrive on
+    // stdin" (C4Application.cpp:428-429). Exiting instead forces an operator to
+    // supervise the process for every round.
+    let mut server = running_browser_sandbox(ScenarioSelectorMode::Local);
+    server.headless = true;
+    server.console_restored_startup_dialog = true;
+
+    server.handle_game_over().test_value();
+
+    assert!(
+        server.game_over_dialog.is_none(),
+        "a dedicated server still draws no evaluation dialog"
+    );
+    assert!(
+        !server.take_exit_request(),
+        "but it parks for the next /open instead of ending the process"
+    );
+    assert!(
+        server.console_startup_active(),
+        "and it parks in the startup state that /open is accepted from"
+    );
+
+    // The finished round must not be left on the command line, or the parked
+    // server would relaunch it instead of waiting.
+    assert_eq!(server.classic_command_line.scenario, None);
+
+    // A second round starts in this same process. Boot deferral stands in for
+    // the scenario load here, the way `console_open_close_and_message_fallback_
+    // follow_app_state` does: the point is that `/open` is accepted and its
+    // parameters land, not that the file exists.
+    let (_boot_sender, boot_receiver) = mpsc::channel();
+    server.boot_loading = Some(BootLoadingState::new(boot_receiver));
+    server
+        .process_console_command("/open \"Missions/Second Round/Scenario.txt\"")
+        .test_value();
+    assert_eq!(
+        server.classic_command_line.scenario,
+        Some(PathBuf::from("Missions/Second Round"))
+    );
+    assert!(
+        server.auto_start_classic_command_line_scenario,
+        "the operator's next round is queued without restarting the process"
+    );
+    assert!(!server.take_exit_request());
 }
 
 #[test]
