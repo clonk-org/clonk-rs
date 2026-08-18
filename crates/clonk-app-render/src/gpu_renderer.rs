@@ -1560,7 +1560,13 @@ impl GpuTimestampProfiler {
                 continue;
             }
             let byte_len = u64::from(slot.used_queries) * 8;
-            let mapped = slot.staging_buffer.slice(0..byte_len).get_mapped_range();
+            let Ok(mapped) = slot.staging_buffer.slice(0..byte_len).get_mapped_range() else {
+                history.telemetry.readback_errors =
+                    history.telemetry.readback_errors.saturating_add(1);
+                slot.staging_buffer.unmap();
+                slot.in_flight = false;
+                continue;
+            };
             let ticks = mapped
                 .chunks_exact(8)
                 .map(|bytes| u64::from_ne_bytes(bytes.try_into().expect("eight-byte timestamp")))
@@ -2139,7 +2145,9 @@ impl GpuReadbackTicket {
             .map_err(|_| GpuRendererError::ReadbackCallbackDropped)?;
         result.map_err(|error| GpuRendererError::ReadbackMap(error.to_string()))?;
 
-        let mapped = slice.get_mapped_range();
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|error| GpuRendererError::ReadbackMap(error.to_string()))?;
         let output_len = self
             .unpadded_bytes_per_row
             .checked_mul(self.extent[1] as usize)
@@ -6746,7 +6754,7 @@ fn scene_pipeline_with_vertex_layout(
     vertex_layout: wgpu::VertexBufferLayout<'static>,
     vertex_entry_point: &'static str,
 ) -> wgpu::RenderPipeline {
-    let vertex_layouts = [vertex_layout];
+    let vertex_layouts = [Some(vertex_layout)];
     let targets = [Some(wgpu::ColorTargetState {
         format: wgpu::TextureFormat::Rgba8Unorm,
         blend: Some(blend_state(blend, alpha_mode)),
@@ -11909,6 +11917,7 @@ mod tests {
                         power_preference: wgpu::PowerPreference::HighPerformance,
                         compatible_surface: None,
                         force_fallback_adapter: false,
+                        apply_limit_buckets: false,
                     })
                     .await;
                 if primary.is_ok() || !allow_fallback {
@@ -11919,6 +11928,7 @@ mod tests {
                             power_preference: wgpu::PowerPreference::LowPower,
                             compatible_surface: None,
                             force_fallback_adapter: true,
+                            apply_limit_buckets: false,
                         })
                         .await
                 }
@@ -12035,7 +12045,9 @@ mod tests {
             .recv()
             .expect("shader landscape readback callback")
             .expect("map shader landscape readback");
-        let mapped = slice.get_mapped_range();
+        let mapped = slice
+            .get_mapped_range()
+            .expect("map shader landscape readback range");
         let row_bytes = extent[0] as usize * 4;
         (0..extent[1] as usize)
             .flat_map(|row| mapped[row * padded..row * padded + row_bytes].to_vec())

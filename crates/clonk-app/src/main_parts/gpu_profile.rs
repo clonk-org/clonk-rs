@@ -221,7 +221,8 @@ pub(crate) struct RetainedGpuAdapterRecord {
     pub(crate) backend: &'static str,
     pub(crate) subgroup_min_size: u32,
     pub(crate) subgroup_max_size: u32,
-    pub(crate) transient_saves_memory: bool,
+    /// `None` where the adapter does not report it — the GL backend never does.
+    pub(crate) transient_saves_memory: Option<bool>,
 }
 
 impl From<wgpu::AdapterInfo> for RetainedGpuAdapterRecord {
@@ -238,6 +239,9 @@ impl From<wgpu::AdapterInfo> for RetainedGpuAdapterRecord {
             subgroup_min_size,
             subgroup_max_size,
             transient_saves_memory,
+            // Bucketing is never requested, so this is always `None` and is no
+            // evidence about the adapter.
+            limit_bucket: _,
         } = info;
         let device_type = match device_type {
             wgpu::DeviceType::Other => "other",

@@ -55,7 +55,8 @@ pub(crate) struct AdapterEvidence {
     backend: &'static str,
     subgroup_min_size: u32,
     subgroup_max_size: u32,
-    transient_saves_memory: bool,
+    /// `None` where the adapter does not report it — the GL backend never does.
+    transient_saves_memory: Option<bool>,
 }
 
 impl AdapterEvidence {
@@ -72,6 +73,9 @@ impl AdapterEvidence {
             subgroup_min_size,
             subgroup_max_size,
             transient_saves_memory,
+            // Bucketing is never requested, so this is always `None` and is no
+            // evidence about the adapter.
+            limit_bucket: _,
         } = info.clone();
         let device_type = match device_type {
             wgpu::DeviceType::Other => "other",

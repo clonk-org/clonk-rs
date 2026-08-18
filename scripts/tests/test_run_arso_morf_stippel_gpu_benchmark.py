@@ -637,6 +637,15 @@ class RetainedGpuProfileTests(unittest.TestCase):
         ):
             MODULE.parse_retained_gpu_profile([line], required=True)
 
+    def test_accepts_an_adapter_that_does_not_report_transient_attachment_savings(self):
+        profile = retained_gpu_profile()
+        profile["fingerprint"]["adapter"]["transient_saves_memory"] = None
+        line = "LC_APP_RETAINED_GPU_PROFILE " + json.dumps(profile)
+
+        parsed = MODULE.parse_retained_gpu_profile([line], required=True)
+
+        self.assertIsNone(parsed["fingerprint"]["adapter"]["transient_saves_memory"])
+
     def test_rejects_booleans_in_integer_fields(self):
         profile = retained_gpu_profile()
         profile["frames"][0]["renderer"]["draw_calls"] = True

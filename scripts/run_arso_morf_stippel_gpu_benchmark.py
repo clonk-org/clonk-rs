@@ -410,10 +410,12 @@ def validate_retained_gpu_profile(
         raise BenchmarkFailure(
             "retained GPU adapter subgroup bounds are reversed"
         )
-    _exact_bool(
-        adapter.get("transient_saves_memory"),
-        "retained GPU adapter.transient_saves_memory",
-    )
+    transient_saves_memory = adapter.get("transient_saves_memory")
+    if transient_saves_memory is not None:
+        _exact_bool(
+            transient_saves_memory,
+            "retained GPU adapter.transient_saves_memory",
+        )
     adapter_features = _feature_bits(
         fingerprint.get("adapter_feature_bits"),
         "retained GPU adapter_feature_bits",
