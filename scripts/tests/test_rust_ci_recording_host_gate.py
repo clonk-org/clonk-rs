@@ -16,6 +16,7 @@ EXPECTED_ORACLES = {
     "real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence",
     "tutorial02_virtual_player_completes_the_real_tutorial_route",
     "tutorial07_seed_zero_landscape_matches_cpp_surface8",
+    "tutorial_landscapes_match_cpp_surface8_across_scenarios_and_seeds",
 }
 
 

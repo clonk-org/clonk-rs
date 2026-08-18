@@ -142,6 +142,70 @@ fn tutorial07_seed_zero_landscape_matches_cpp_surface8() {
     assert_eq!(surface8_hash(grid), 0x2310_7266_3100_b0cd);
 }
 
+/// Oracle: the pinned C++ engine's Surface8 for every tutorial at two seeds.
+///
+/// Taken at `C4Game::Execute()` entry rather than at the end of
+/// `C4Landscape::Init`, because that is the first moment the plane is final:
+/// `ScenarioInit` has created the scenario's objects and `C4SolidMask::Put` has
+/// stamped their masks into the landscape as `MCVehic`
+/// (`C4SolidMask.cpp:100,164`). Tutorial01 and Tutorial07 are the two rows here
+/// that actually distinguish the two moments — for the rest no object carries a
+/// SolidMask, and both points hash the same. The hook sits above
+/// `Control.Prepare()`/`HaltCount` so that a joined player's `PlaceReadyBase`
+/// digging has not run either, matching this player-less load.
+///
+/// Recorded on the pinned oracle (`7d43b47b7d789b533f32d005e64596e0a07019cd`)
+/// with `LC_PIN_SEED` and an instrumentation hook, driven through the
+/// `USE_CONSOLE` build. Five distinct landscape extents are covered, where the
+/// single Tutorial07/seed-0 oracle covered one.
+#[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "recording-host material order; required macOS CI job"
+)]
+fn tutorial_landscapes_match_cpp_surface8_across_scenarios_and_seeds() {
+    // (tutorial, seed, width, height, C++ Surface8 hash)
+    const ORACLE: [(u8, u64, u32, u32, u64); 20] = [
+        (1, 0, 640, 480, 0x41c9_17aa_9e08_89d6),
+        (1, 1, 640, 480, 0x5761_e42e_0119_040d),
+        (2, 0, 640, 480, 0xf3ba_f81b_00b3_511e),
+        (2, 1, 640, 480, 0x2413_0d99_a8aa_1f87),
+        (3, 0, 640, 470, 0x24f0_39cd_2683_e3c4),
+        (3, 1, 640, 470, 0xf030_ceeb_127f_3f34),
+        (4, 0, 640, 480, 0xbddc_7efb_2f16_83b8),
+        (4, 1, 640, 480, 0x5a19_94a9_c752_7012),
+        (5, 0, 640, 480, 0x3144_f3ef_319e_13e2),
+        (5, 1, 640, 480, 0x3132_55ed_a402_3fe1),
+        (6, 0, 680, 480, 0x935b_a004_4dc7_cdfd),
+        (6, 1, 680, 480, 0xe0d3_5406_8f3c_c354),
+        (7, 0, 680, 480, 0x2310_7266_3100_b0cd),
+        (7, 1, 680, 480, 0xf31b_106d_9a4e_9066),
+        (8, 0, 800, 800, 0xb16a_da4c_5c16_fc50),
+        (8, 1, 800, 800, 0x3c5a_39f1_43d1_8cee),
+        (9, 0, 640, 400, 0x6cce_5e58_0e0f_6708),
+        (9, 1, 640, 400, 0x0a17_d50b_a298_f58a),
+        (10, 0, 1280, 960, 0x4ea9_fc3f_be38_00f7),
+        (10, 1, 1280, 960, 0x180a_4101_ea8e_8025),
+    ];
+
+    for (tutorial, seed, width, height, expected) in ORACLE {
+        let engine = load_tutorial(tutorial, seed);
+        let grid = crate::support::TestValueExt::test_value(
+            engine.landscape().and_then(Landscape::pixel_grid),
+        );
+        assert_eq!(
+            (grid.width(), grid.height()),
+            (width, height),
+            "Tutorial{tutorial:02} seed {seed} landscape extent"
+        );
+        assert_eq!(
+            surface8_hash(grid),
+            expected,
+            "Tutorial{tutorial:02} seed {seed} Surface8"
+        );
+    }
+}
+
 /// FNV-1a over the whole Surface8 plane, in the order C++ walks it.
 ///
 /// Each byte is a texmap index in the low 7 bits with the IFT bit 0x80, and the
