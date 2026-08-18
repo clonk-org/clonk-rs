@@ -2429,7 +2429,10 @@ fn copy_tracked_directory(repository: &Path, directory: &Path, dst: &Path) -> Re
                     )
                 })?
         };
-        if !is_safe_relative_path(relative) || !is_runtime_package_path(relative) {
+        if !is_safe_relative_path(relative)
+            || !is_runtime_package_path(relative)
+            || starts_with_non_runtime_root(relative)
+        {
             continue;
         }
 
@@ -2473,11 +2476,41 @@ fn is_runtime_package_path(path: &Path) -> bool {
     })
 }
 
+/// Packaging infrastructure in a copied source root, matched **only there**.
+///
+/// Mirrors `NON_CONTENT_ROOT_ENTRIES` in the content repository
+/// (`.github/pack-content/src/main.rs`), which keeps the same files out of
+/// `content.zip`. The two must agree, or a file ships in the installer and never
+/// reaches a client that updates in place — or the reverse.
+///
+/// Separate from `is_runtime_package_path` because these are ordinary names a
+/// game pack could legitimately contain: that function matches every component,
+/// so a definition shipping its own `README.md` would silently vanish. Anchoring
+/// them to the root confines the rule to where the names mean infrastructure.
+///
+/// The engine's own `README.md`, `COPYING` and `credits.txt` are copied
+/// explicitly by `copy_file` and never reach this filter.
+const NON_RUNTIME_ROOT_ENTRIES: [&str; 4] =
+    ["Makefile", "README.md", "set_version.sh", "third_party"];
+
+/// Whether a source-root-relative path starts with packaging infrastructure.
+fn starts_with_non_runtime_root(path: &Path) -> bool {
+    path.components().next().is_some_and(|component| {
+        matches!(component, std::path::Component::Normal(name)
+            if name.to_str().is_some_and(|name| NON_RUNTIME_ROOT_ENTRIES.contains(&name)))
+    })
+}
+
 fn is_runtime_package_entry(entry: &walkdir::DirEntry) -> bool {
     if entry.depth() == 0 {
         return true;
     }
     if entry.file_type().is_symlink() {
+        return false;
+    }
+    // Depth 1 is the root of the directory being copied, which is the only
+    // place these names are infrastructure rather than game data.
+    if entry.depth() == 1 && starts_with_non_runtime_root(Path::new(entry.file_name())) {
         return false;
     }
     is_runtime_package_path(Path::new(entry.file_name()))
@@ -3613,6 +3646,55 @@ mod tests {
                 "development-only path leaked into package: {relative}"
             );
         }
+    }
+
+    /// Mirrors `NON_CONTENT_ROOT_ENTRIES` in the content repository, which keeps
+    /// the same files out of `content.zip`. If this fails because the list
+    /// genuinely changed, change `.github/pack-content/src/main.rs` in the same
+    /// breath — a file excluded on one side only ships in the installer and never
+    /// reaches a client that updates in place, or the reverse.
+    #[test]
+    fn package_layout_excludes_content_packaging_infrastructure() {
+        let (_temp, paths) = package_fixture();
+        for name in ["Makefile", "README.md", "set_version.sh"] {
+            write_fixture(
+                &paths.repo_root.join("content").join(name),
+                b"infrastructure",
+            );
+        }
+        write_fixture(
+            &paths
+                .repo_root
+                .join("content/third_party/Hazard/readme.txt"),
+            b"documentation",
+        );
+        // The same names inside a pack are game data, and must survive.
+        write_fixture(
+            &paths.repo_root.join("content/Objects.c4d/README.md"),
+            b"definition readme",
+        );
+
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+
+        for relative in [
+            "content/Makefile",
+            "content/README.md",
+            "content/set_version.sh",
+            "content/third_party",
+        ] {
+            assert!(
+                !package_dir.join(relative).exists(),
+                "packaging infrastructure leaked into package: {relative}"
+            );
+        }
+        assert!(
+            package_dir.join("content/Objects.c4d/README.md").exists(),
+            "a pack's own README.md is game data and must ship"
+        );
+        assert!(
+            package_dir.join("README.md").exists(),
+            "the engine's own README.md is copied explicitly and must still ship"
+        );
     }
 
     #[test]
