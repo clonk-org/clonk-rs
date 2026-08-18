@@ -46,6 +46,20 @@ pub struct Parser<'a> {
     /// Site of the first hard `inherited(...)` in the function being parsed,
     /// carried onto that `Function` for the link-time check.
     hard_inherited_line: Option<usize>,
+    /// Whether the body being parsed belongs to a `global func`, which is the
+    /// only place a named `local` is rejected (`C4AulParse.cpp:2000-2004`).
+    parsing_global_function: bool,
+    /// Identifiers that body named, with the line of each first use. Resolved
+    /// against the script's `local` declarations once the whole script is
+    /// parsed, because a `local` may be declared below the function that names
+    /// it and C4Aul's preparser has already registered every one.
+    global_local_candidates: Vec<(String, usize)>,
+    /// Names that reach C4Aul's identifier chain before `LocalNamed` and so
+    /// shadow the rule: the function's own parameters and every `var` it has
+    /// declared *so far* (`C4AulParse.cpp:2702-2730`). Built as parsing
+    /// proceeds, exactly like `Fn->VarNamed`, so a use above its own `var`
+    /// still falls through to the local check the way C4Aul's does.
+    global_function_shadowing_names: std::collections::HashSet<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -64,6 +78,9 @@ impl<'a> Parser<'a> {
             non_fatal_diagnostics: Vec::new(),
             loop_depth: 0,
             hard_inherited_line: None,
+            parsing_global_function: false,
+            global_local_candidates: Vec::new(),
+            global_function_shadowing_names: std::collections::HashSet::new(),
         }
     }
 
@@ -189,6 +206,12 @@ impl<'a> Parser<'a> {
 
         diagnostics.append(&mut self.non_fatal_diagnostics);
         diagnostics.extend(self.lexer.take_diagnostics());
+        // Runs here rather than inline: C4Aul's preparser has registered every
+        // `local` before it parses a single body, so a `global func` above the
+        // declaration is rejected just like one below it. This port parses in
+        // one pass, so the bodies recorded what they named and the answer is
+        // only complete now (`C4AulParse.cpp:2000-2004,2731-2737`).
+        resolve_global_local_references(&mut functions, &self.script_var_decls, &mut diagnostics);
 
         (
             Script::with_directives(
@@ -234,6 +257,15 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
         self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
         let body_depth = self.brace_depth;
+        // Only a `global func` can name a declaring host's `local`
+        // (`C4AulParse.cpp:2000-2004`), so only its body collects candidates.
+        self.parsing_global_function = access == AccessLevel::Global;
+        self.global_local_candidates.clear();
+        self.global_function_shadowing_names.clear();
+        if self.parsing_global_function {
+            self.global_function_shadowing_names
+                .extend(params.iter().map(|param| param.name.clone()));
+        }
 
         let mut description = None;
         let mut body = Vec::new();
@@ -276,6 +308,8 @@ impl<'a> Parser<'a> {
                 global_link_host: None,
                 overloaded: None,
                 hard_inherited_line: self.hard_inherited_line.take(),
+                global_local_candidates: std::mem::take(&mut self.global_local_candidates),
+                global_local_reference: None,
                 compiled: std::sync::OnceLock::new(),
                 resolved_snapshot: std::sync::OnceLock::new(),
             },
@@ -358,6 +392,8 @@ impl<'a> Parser<'a> {
                 global_link_host: None,
                 overloaded: None,
                 hard_inherited_line: self.hard_inherited_line.take(),
+                global_local_candidates: std::mem::take(&mut self.global_local_candidates),
+                global_local_reference: None,
                 compiled: std::sync::OnceLock::new(),
                 resolved_snapshot: std::sync::OnceLock::new(),
             },
@@ -722,6 +758,27 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Note an identifier a `global func` body named, for the named-`local`
+    /// check that runs once every declaration in the script is known.
+    ///
+    /// Both of C4Aul's rejection sites are identifier reads in the same body —
+    /// the statement/lvalue path at `C4AulParse.cpp:2000-2004` and the
+    /// parameter/rvalue path at `:2731-2737` — so one record per name covers
+    /// them both. Only the first use is kept: C4Aul throws at the first one and
+    /// never reaches a second.
+    fn note_global_local_candidate(&mut self, name: &str, line: usize) {
+        if !self.parsing_global_function
+            || self.global_function_shadowing_names.contains(name)
+            || self
+                .global_local_candidates
+                .iter()
+                .any(|(candidate, _)| candidate == name)
+        {
+            return;
+        }
+        self.global_local_candidates.push((name.to_string(), line));
+    }
+
     fn parse_loop_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
         self.loop_depth += 1;
         let body = self.parse_stmt_or_block_vec();
@@ -910,6 +967,12 @@ impl<'a> Parser<'a> {
         loop {
             // Parse one variable
             let (name, _) = self.expect_identifier("expected variable name")?;
+            // `AddVar` registers the name before the initializer is parsed, so
+            // `var counter = counter;` resolves the right-hand side to the new
+            // `var` rather than falling through to the local check.
+            if self.parsing_global_function {
+                self.global_function_shadowing_names.insert(name.clone());
+            }
             let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
                 // Commas in variable declarations separate declarators.
                 Some(self.parse_assignment()?)
@@ -2085,6 +2148,7 @@ impl<'a> Parser<'a> {
                 if name == "inherited" {
                     self.hard_inherited_line.get_or_insert(token.line);
                 }
+                self.note_global_local_candidate(&name, token.line);
                 Ok(Expr::Variable(name))
             }
             // Contextual keywords: declaration words carry no expression
@@ -2670,8 +2734,127 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Reject a `global func` that names one of its declaring script's `local`s.
+///
+/// ```text
+/// else if (a->LocalNamed.GetItemNr(Idtf) != -1) {
+///   if (Fn->Owner == &Game.ScriptEngine)
+///     throw C4AulParseError(this, "using local variable in global function!");
+/// }
+/// ```
+///
+/// (`C4AulParse.cpp:2000-2004`, and the same three lines again in the parameter
+/// path at `:2731-2737`.) The function is owned by the script engine, which has
+/// no instance to read the variable from, so C4Aul refuses it at parse time
+/// rather than at the call.
+///
+/// Only `local` counts. A `static` is engine-global storage a `global func` may
+/// use, and `static const` is a compile-time constant; C4Aul checks
+/// `LocalNamed` alone.
+fn resolve_global_local_references(
+    functions: &mut [Function],
+    var_decls: &[VarDecl],
+    diagnostics: &mut Vec<ParseError>,
+) {
+    if !functions
+        .iter()
+        .any(|function| !function.global_local_candidates.is_empty())
+    {
+        return;
+    }
+    let named_locals = var_decls
+        .iter()
+        .filter(|decl| decl.kind == VarDeclKind::Local)
+        .map(|decl| decl.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if named_locals.is_empty() {
+        return;
+    }
+    for function in functions {
+        let candidates = std::mem::take(&mut function.global_local_candidates);
+        let Some((name, line)) = candidates
+            .into_iter()
+            .find(|(name, _)| named_locals.contains(name.as_str()))
+        else {
+            continue;
+        };
+        diagnostics.push(ParseError::new(
+            "using local variable in global function!",
+            line,
+            0,
+        ));
+        function.global_local_reference = Some((name, line));
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// ```text
+    /// else if (a->LocalNamed.GetItemNr(Idtf) != -1) {
+    ///   if (Fn->Owner == &Game.ScriptEngine)
+    ///     throw C4AulParseError(this, "using local variable in global function!");
+    /// }
+    /// ```
+    ///
+    /// `C4AulParse.cpp:2000-2004` is the statement/lvalue path and `:2731-2737`
+    /// the parameter/rvalue path — the same three lines twice, so a `global
+    /// func` is refused whichever way it names the variable.
+    #[test]
+    fn a_global_func_naming_a_declaring_hosts_local_is_refused() {
+        for source in [
+            // rvalue
+            "local counter;\nglobal func Read() { return counter; }",
+            // lvalue
+            "local counter;\nglobal func Write() { counter = 1; }",
+            // The declaration may follow the function: C4Aul's preparser has
+            // registered every `local` before it parses a single body.
+            "global func Early() { return counter; }\nlocal counter;",
+        ] {
+            let (script, diagnostics) = Parser::new(source).parse_script_recovering();
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|error| error.message() == "using local variable in global function!"),
+                "expected C4Aul's refusal for {source:?}, got {diagnostics:?}"
+            );
+            assert!(
+                script.functions[0].global_local_reference.is_some(),
+                "the refused function is marked for the link, {source:?}"
+            );
+        }
+    }
+
+    /// The rule is about `local` and about `global func`, and it is neither
+    /// wider nor narrower than that: an ordinary function reads its host's
+    /// locals normally, and a `global func` may use engine-global `static`
+    /// storage and `static const` constants, which C4Aul checks against
+    /// separate tables (`C4AulParse.cpp:2005-2010`).
+    #[test]
+    fn the_global_local_rule_spares_object_functions_statics_and_constants() {
+        for source in [
+            "local counter;\nfunc Read() { return counter; }",
+            "local counter;\npublic func Read() { return counter; }",
+            "static counter;\nglobal func Read() { return counter; }",
+            "static const Counter = 7;\nglobal func Read() { return Counter; }",
+            "local counter;\nglobal func Unrelated() { return other; }",
+        ] {
+            let (script, diagnostics) = Parser::new(source).parse_script_recovering();
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|error| error.message() == "using local variable in global function!"),
+                "unexpected refusal for {source:?}, got {diagnostics:?}"
+            );
+            assert!(
+                script
+                    .functions
+                    .iter()
+                    .all(|function| function.global_local_reference.is_none()),
+                "nothing is marked for {source:?}"
+            );
+        }
+    }
     #[test]
     fn static_const_multi_declarators_parse() {
         // Talker.c4d:5-6: static const _TLK_ID = _TLK,\n _TLK_TimerInterval = 1;

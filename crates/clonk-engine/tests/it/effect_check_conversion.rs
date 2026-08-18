@@ -418,7 +418,9 @@ func FxObjectLocalEffect(id new_name)
 
 global func FxObjectGlobalEffect(id new_name)
 {
-  ++object_global_checks;
+  // A global func may not name its declaring script's local
+  // (C4AulParse.cpp:2000-2004); LocalN is the route C4Aul leaves open.
+  LocalN("object_global_checks") = LocalN("object_global_checks") + 1;
   return(0);
 }
 

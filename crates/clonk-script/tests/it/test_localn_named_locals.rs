@@ -12,7 +12,7 @@ fn localn_reads_a_named_object_local() {
     // is visible to LocalN in the caller.
     let source = r#"
         local iUsedItems;
-        global func Prime() { iUsedItems = 7; return 0; }
+        global func Prime() { LocalN("iUsedItems") = 7; return 0; }
         global func Probe() { Prime(); return LocalN("iUsedItems"); }
     "#;
     let mut engine = Engine::new();
@@ -45,7 +45,9 @@ fn localn_is_assignable_like_a_reference() {
         global func Probe() {
             LocalN("iWater") = 5;
             LocalN("iWater") += 2;
-            return iWater;
+            // Read back through LocalN too: a global func may not name the
+            // declaring host's local directly (C4AulParse.cpp:2000-2004).
+            return LocalN("iWater");
         }
     "#;
     let mut engine = Engine::new();

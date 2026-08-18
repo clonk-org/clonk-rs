@@ -4845,6 +4845,20 @@ impl<'a> Vm<'a> {
         caller: Option<ScriptCallerContext>,
     ) -> Result<ReturnValue, RuntimeError> {
         let function = target.function;
+        // A `global func` that named one of its declaring script's `local`s
+        // never linked: C4Aul threw while parsing the body, and
+        // `C4AulScript::Parse` caught it, counted it and left the function's
+        // code an `AB_ERR` chunk (`C4AulParse.cpp:2000-2004,3563-3586`). So the
+        // call raises rather than running. The statements C4Aul had already
+        // emitted before the offending token still run there and do not here;
+        // truncating a body at a token needs expression spans the parser does
+        // not carry, and is tracked as clonk-org/clonk-rs#344.
+        if let Some((local, line)) = function.global_local_reference.as_ref() {
+            return Err(RuntimeError::new(format!(
+                "using local variable in global function! ({} names local `{local}` at line {line})",
+                function.name
+            )));
+        }
         // C4AulScriptFunc inherits GetParCount()==10. These are the caller's
         // balanced argument slots and become the callee's parameter frame;
         // cross-host AB_CALL may provide the same count through the one-shot
