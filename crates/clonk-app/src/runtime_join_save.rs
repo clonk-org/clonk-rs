@@ -744,9 +744,19 @@ mod tests {
     }
 
     #[test]
-    fn user_restore_basename_accepts_both_c4_path_separators() {
-        assert_eq!(legacy_basename(b"C:\\Players\\Alice.c4p"), b"Alice.c4p");
+    fn user_restore_basename_follows_the_cpp_host_separator() {
+        // The composed join filename is `{name}-{GetFilename(joinFile)}`
+        // (C4PlayerInfo.cpp:1665), and GetFilename treats a backslash as a
+        // separator only on Windows (StdFile.cpp:43-49, StdFile.h:41-49), so
+        // this expectation is host-conditional in the same way.
         assert_eq!(legacy_basename(b"Players/Bob.c4p"), b"Bob.c4p");
+        let windows_path: &[u8] = b"C:\\Players\\Alice.c4p";
+        let expected: &[u8] = if cfg!(windows) {
+            b"Alice.c4p"
+        } else {
+            windows_path
+        };
+        assert_eq!(legacy_basename(windows_path), expected);
     }
 
     #[test]
