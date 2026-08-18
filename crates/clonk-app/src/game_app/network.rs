@@ -1997,6 +1997,14 @@ impl GameApp {
                 if self.control_clients.contains(client_id) {
                     let muted = !self.control_messages.is_muted(client_id);
                     self.control_messages.set_muted(client_id, muted);
+                    // Silencing a participant silences all of them. Voice is a
+                    // port-only extension with no C++ mute of its own, so it
+                    // follows the client list's existing one rather than adding
+                    // a second control the player has to find. Purely local:
+                    // the peer keeps transmitting and is never told
+                    // (clonk-org/clonk-rs#301).
+                    let silenced = self.voice_chat.set_client_muted(client_id, muted);
+                    self.remove_voice_playback(silenced);
                 }
             }
             RuntimeClientListAction::ToggleActivate(client_id) => {
