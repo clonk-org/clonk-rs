@@ -92,6 +92,84 @@ fn classic_command_line_join_urls_and_update_stub_are_disjoint() {
 }
 
 #[test]
+fn a_headless_host_with_masterserver_signup_prepares_a_league_registration() {
+    // The one link in the headless signup path that nothing exercised. What
+    // happens either side of it is covered: `run_host_worker` issues the Start
+    // and applies the response
+    // (`host_worker_returns_live_start_response_and_initializes_puncher`), and a
+    // *refused* registration is logged rather than drawn
+    // (`a_headless_host_logs_a_refused_league_registration_instead_of_drawing_it`).
+    // Untested was whether a dedicated server's host preparation carries a
+    // league config at all - without one the worker reaches neither.
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .test_value();
+    let scenario = || {
+        let mut scenario = FrontendScenario::fallback();
+        scenario.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
+        scenario
+    };
+    let definition_load = || ScenarioDefinitionLoad::Seed {
+        modules: vec!["Objects.c4d".to_string()],
+        definition_root: None,
+    };
+
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+    app.headless = true;
+    app.scenario_game_options = GameOptionButtons::new(
+        GameOptionContext::NetworkHostSelector,
+        GameOptionValues {
+            master_server_signup: true,
+            ..GameOptionValues::default()
+        },
+    );
+    let staged = app
+        .prepare_network_host_scenario(scenario(), definition_load())
+        .test_value();
+    let preparation = build_network_host_preparation(
+        &app,
+        &staged.frontend,
+        &staged.definition_load,
+        &staged.effective_definition_modules,
+        &staged.definition_resources,
+        Some((&staged.definition_executable_path, &staged.definition_path)),
+        Some((&staged.lobby.local_name, &staged.lobby.nick)),
+    )
+    .test_value();
+    assert!(
+        preparation.league.is_some(),
+        "a headless host with MasterServerSignUp must carry the config the Start is built from"
+    );
+
+    // The same boot without it registers nothing, so the flag decides rather
+    // than the headless mode.
+    let mut plain = new_menu_app_with_paths(640, 480, &paths);
+    plain.headless = true;
+    plain.scenario_game_options = GameOptionButtons::new(
+        GameOptionContext::NetworkHostSelector,
+        GameOptionValues::default(),
+    );
+    let staged = plain
+        .prepare_network_host_scenario(scenario(), definition_load())
+        .test_value();
+    let preparation = build_network_host_preparation(
+        &plain,
+        &staged.frontend,
+        &staged.definition_load,
+        &staged.effective_definition_modules,
+        &staged.definition_resources,
+        Some((&staged.definition_executable_path, &staged.definition_path)),
+        Some((&staged.lobby.local_name, &staged.lobby.nick)),
+    )
+    .test_value();
+    assert!(preparation.league.is_none());
+}
+
+#[test]
 fn staged_host_prebind_accepts_league_signup_and_rejects_missing_resource() {
     let _lock = env_lock().lock();
     let user_data = tempdir();
