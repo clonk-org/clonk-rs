@@ -1371,6 +1371,9 @@ pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
 pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
         value @ 58..=69 => function_key(value - 58),
+        // 104..106 are SDL's own F13..F15, which its Cocoa table never
+        // produces; the range is kept so a config written elsewhere still
+        // decodes, and 107 upward is where a Mac's F16.. actually land.
         value @ 104..=115 => function_key(value - 104 + 12),
         value @ 4..=29 => letter_from_offset(value - 4),
         value @ 30..=38 => digit_key(value - 29),
@@ -1393,9 +1396,16 @@ pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         55 => Some(VirtualKeyCode::Period),
         56 => Some(VirtualKeyCode::Slash),
         57 => Some(VirtualKeyCode::CapsLock),
-        70 => Some(VirtualKeyCode::PrintScreen),
-        71 => Some(VirtualKeyCode::ScrollLock),
-        72 => Some(VirtualKeyCode::Pause),
+        // SDL's Cocoa table names these three after the PC positions they
+        // occupy, not the keycaps: kVK_F13/F14/F15 are
+        // `SDL_SCANCODE_PRINTSCREEN`/`SCROLLLOCK`/`PAUSE`
+        // (`scancodes_darwin.h`). A Mac has no PrintScreen, ScrollLock or Pause
+        // key for winit to report, so decoding these to those names would name
+        // a key that can never arrive, and the codec would stop round-tripping
+        // the F13..F15 the encoder writes.
+        70 => Some(VirtualKeyCode::F13),
+        71 => Some(VirtualKeyCode::F14),
+        72 => Some(VirtualKeyCode::F15),
         73 => Some(VirtualKeyCode::Insert),
         74 => Some(VirtualKeyCode::Home),
         75 => Some(VirtualKeyCode::PageUp),
@@ -1549,10 +1559,22 @@ pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     if let Some(index) = function_key_index(key) {
-        return Some(if index < 12 {
-            58 + index
-        } else {
-            104 + index - 12
+        return Some(match index {
+            0..=11 => 58 + index,
+            // C++ forwards SDL's platform scancode (`C4FullScreen.cpp:387-400`),
+            // and SDL's Cocoa table does not name these three after the keycaps:
+            // `scancodes_darwin.h` maps kVK_F13/F14/F15 to
+            // `SDL_SCANCODE_PRINTSCREEN`/`SCROLLLOCK`/`PAUSE` (70/71/72), the
+            // PC positions they occupy, not to `SDL_SCANCODE_F13`..`F15`
+            // (104..106). winit names the same physical keys F13..F15, so
+            // encoding them by name would report a different identity than the
+            // oracle does for the same key.
+            12 => 70,
+            13 => 71,
+            14 => 72,
+            // F16 upwards SDL does name after the keycap: kVK_F16..F20 are
+            // `SDL_SCANCODE_F16`..`F20` (107..111).
+            _ => 104 + index - 12,
         });
     }
     if let Some(offset) = letter_offset(key) {
@@ -2564,6 +2586,41 @@ mod tests {
                 assert_eq!(bindings.key_for_set(set, id), defaults.key_for_set(set, id));
             }
         }
+    }
+
+    /// C++ forwards SDL's platform scancode on macOS
+    /// (`C4FullScreen.cpp:387-400`), so the encoder has to agree with SDL's
+    /// Cocoa table rather than with the keycaps. `scancodes_darwin.h` maps
+    /// kVK_F13/F14/F15 to `SDL_SCANCODE_PRINTSCREEN`/`SCROLLLOCK`/`PAUSE`
+    /// (70/71/72) — the PC positions those keys occupy — and only names
+    /// kVK_F16 upward after the keycap (`SDL_SCANCODE_F16` = 107).
+    ///
+    /// winit calls the same physical keys F13..F15, so encoding them by name
+    /// reported 104..106 and gave a different key identity than the oracle for
+    /// the same key.
+    ///
+    /// Gated on the same target as the encoder it pins: the Windows and Linux
+    /// arms are different functions with their own tables.
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[test]
+    fn macos_function_keys_follow_sdls_cocoa_scancode_table() {
+        assert_eq!(encode_virtual_key_code(VirtualKeyCode::F13), Some(70));
+        assert_eq!(encode_virtual_key_code(VirtualKeyCode::F14), Some(71));
+        assert_eq!(encode_virtual_key_code(VirtualKeyCode::F15), Some(72));
+
+        assert_eq!(
+            encode_virtual_key_code(VirtualKeyCode::F16),
+            Some(107),
+            "F16 upward keep SDL's own F-key scancodes"
+        );
+        assert_eq!(encode_virtual_key_code(VirtualKeyCode::F20), Some(111));
+
+        assert_eq!(
+            encode_virtual_key_code(VirtualKeyCode::F1),
+            Some(58),
+            "F1..F12 are unchanged"
+        );
+        assert_eq!(encode_virtual_key_code(VirtualKeyCode::F12), Some(69));
     }
 
     #[test]
