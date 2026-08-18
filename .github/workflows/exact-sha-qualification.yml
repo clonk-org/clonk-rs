@@ -446,4 +446,4 @@ jobs:
             --test engine_it \
             --test frontend_inline \
             --locked \
-            -E 'test(/(alchemy_real_scenario_subcases_batch_4|app_virtual_keyboard_completes_real_tutorial02_route|committed_real_scenario_replays_are_deterministic|real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence|tutorial02_virtual_player_completes_the_real_tutorial_route|tutorial07_seed_zero_landscape_matches_cpp_surface8)$/)'
+            -E 'test(/(alchemy_real_scenario_subcases_batch_4|app_virtual_keyboard_completes_real_tutorial02_route|committed_real_scenario_replays_are_deterministic|real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence|tutorial02_virtual_player_completes_the_real_tutorial_route|tutorial07_seed_zero_landscape_matches_cpp_surface8|tutorial_landscapes_match_cpp_surface8_across_scenarios_and_seeds)$/)'
