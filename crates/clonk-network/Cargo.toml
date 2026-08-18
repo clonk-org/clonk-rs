@@ -43,6 +43,18 @@ serde_json = "1"
 tokio = { version = "1", features = ["test-util"] }
 tracing-core = "0.1"
 
+# `GetAdaptersAddresses` backs the IPv6 multicast fallback's interface
+# enumeration on Windows; the unix arm uses `if_nameindex` from libc.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    # `GetAdaptersAddresses` and `IP_ADAPTER_ADDRESSES_LH` are both gated on
+    # Ndis *and* WinSock, not on IpHelper alone.
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
+
 [[test]]
 name = "integration"
 path = "tests/main.rs"

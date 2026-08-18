@@ -396,8 +396,14 @@ jobs:
       - name: Test the Windows crash-log descriptor
         run: cargo nextest run -p clonk-logging --test crash_log_descriptor --locked
 
+      # clonk-network carries a Windows-only `GetAdaptersAddresses` arm for the
+      # IPv6 multicast discovery fallback; without it in a required gate the
+      # arm compiles nowhere.
+      - name: Test the Windows multicast discovery fallback
+        run: cargo nextest run -p clonk-network --lib --locked -E 'test(/^search::tests::(discovery_multicast_target_uses_cpp_default_interface|an_accepted_default_multicast_join_enumerates_no_interfaces|a_refused_default_multicast_join_keeps_every_joinable_interface|a_scoped_join_set_sends_one_probe_per_joined_interface|an_unjoinable_host_still_probes_the_cpp_default_interface|the_cpp_default_interface_never_sets_ipv6_multicast_if|enumerated_multicast_interfaces_do_not_depend_on_kernel_listing_order)$/)'
+
       - name: Lint Windows paths
-        run: cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
+        run: cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-network -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
 
       - name: Install NSIS
         run: |
