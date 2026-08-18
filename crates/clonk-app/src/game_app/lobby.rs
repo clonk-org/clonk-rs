@@ -7328,7 +7328,7 @@ impl GameApp {
                     return Ok(());
                 }
                 if let Some(password) = remember_for_next_round.as_ref() {
-                    self.persist_game_option_value("Network", "LastPassword", password.clone());
+                    self.persist_game_option_text("Network", "LastPassword", password);
                 }
                 let comment = self
                     .advertised_game_reference
@@ -7353,7 +7353,7 @@ impl GameApp {
                         "Network comment contains an unsupported NUL byte".to_string();
                     return Ok(());
                 };
-                self.persist_game_option_value("Network", "Comment", comment.clone());
+                self.persist_game_option_text("Network", "Comment", &comment);
                 let password_needed = self
                     .advertised_game_reference
                     .as_ref()

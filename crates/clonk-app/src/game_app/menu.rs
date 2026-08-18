@@ -3125,6 +3125,18 @@ impl GameApp {
                             Some(Ok(())) => {
                                 match self.reload_application_language_resources() {
                                     Ok(charset) => {
+                                        // Stays eager. `C4Language::InitInfos`
+                                        // overwrites
+                                        // `Config.General.LanguageCharset` from
+                                        // the loaded table (C4Language.cpp:311)
+                                        // and the Options dialog then writes the
+                                        // whole config —
+                                        // `C4StartupOptionsDlg::SaveConfig` ends
+                                        // in an outright `Config.Save()`
+                                        // "in case the game crashes later on"
+                                        // (C4StartupOptionsDlg.cpp:1183) — so
+                                        // the charset reaches the file with the
+                                        // options that changed it.
                                         if let Some(paths) = self.app_paths.as_ref() {
                                             if let Err(error) = persist_config_value(
                                                 paths,
@@ -4282,15 +4294,15 @@ impl GameApp {
                 self.startup_network_ignore_redirect = true;
             }
             MessageDialogContinuation::ClassicLobbyStart { countdown_seconds } => {
-                if let (Some(paths), Some(checked)) = (self.app_paths.as_ref(), checkbox_checked) {
-                    if let Err(error) = persist_config_value(
-                        paths,
+                // `C4GameLobby` hands `Config.Startup.HideMsgPlrNoTakeOver` to
+                // `ShowMessageModal` by pointer (C4GameLobby.cpp:462), which
+                // writes it in memory; that file contains no `Config.Save()`.
+                if let Some(checked) = checkbox_checked {
+                    self.deferred_config.set(
                         "Startup",
                         "HideMsgPlrNoTakeOver",
                         i32::from(checked).to_string(),
-                    ) {
-                        tracing::warn!(%error, "failed to persist unassociated savegame-player warning preference");
-                    }
+                    );
                 }
                 if result == clonk_frontend::message_dialog::MessageDialogResult::Yes
                     && self.classic_host_lobby_active()
@@ -4305,15 +4317,15 @@ impl GameApp {
             }
             MessageDialogContinuation::LobbyResourceOverwrite { .. } => {}
             MessageDialogContinuation::NetworkScenarioPlayerCountWarning { scenario } => {
-                if let (Some(paths), Some(checked)) = (self.app_paths.as_ref(), checkbox_checked) {
-                    if let Err(error) = persist_config_value(
-                        paths,
+                // `C4StartupScenSelDlg` likewise passes
+                // `Config.Startup.HideMsgStartDedicated` to `ShowMessageModal`
+                // by pointer (C4StartupScenSelDlg.cpp:1697) and never saves.
+                if let Some(checked) = checkbox_checked {
+                    self.deferred_config.set(
                         "Startup",
                         "HideMsgStartDedicated",
                         i32::from(checked).to_string(),
-                    ) {
-                        tracing::warn!(%error, "failed to persist scenario-start warning preference");
-                    }
+                    );
                 }
                 if result == clonk_frontend::message_dialog::MessageDialogResult::Ok {
                     self.continue_scenario_from_selector(scenario)?;

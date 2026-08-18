@@ -2124,17 +2124,37 @@ impl GameApp {
         }
     }
 
+    /// A scenario-selector or lobby game option, which C++ keeps in its
+    /// process-wide `Config` until the shutdown save.
+    ///
+    /// None of the sites behind these keys writes the file: the runtime-join
+    /// toggle is `Config.Network.NoRuntimeJoin = !fAllowed`
+    /// (`C4GameOptions.cpp:169`), the league checkbox and remembered password
+    /// are plain assignments (`C4Network2Dialogs.cpp:676-686,748`), the control
+    /// rate and mode are written from the control layer
+    /// (`C4Control.cpp:141`; `C4Network2.cpp:853`), and internet signup and
+    /// recording are the `OnBtnInternet`/`OnBtnRecord` toggles already cited on
+    /// `deferred_config` (`C4StartupNetDlg.cpp:840-850`). The whole C++ tree
+    /// holds seven `Config.Save()` calls and not one of them is a game-option
+    /// surface, so an eager write here would keep a change a crash should have
+    /// discarded.
     pub(crate) fn persist_game_option_value(&mut self, section: &str, key: &str, value: String) {
-        // Saving now makes the file authoritative again, so an older deferred
-        // change to the same key must not keep shadowing it.
-        self.deferred_config.clear(section, key);
-        let Some(paths) = self.app_paths.as_ref() else {
+        self.deferred_config.set(section, key, value);
+    }
+
+    /// The escaped-string form of [`Self::persist_game_option_value`], for a
+    /// `CFG_MaxString` field whose flush needs C++'s quoting rather than a raw
+    /// scalar (`C4Config.cpp:379`).
+    pub(crate) fn persist_game_option_text(&mut self, section: &str, key: &str, value: &str) {
+        let Some(native) = clonk_resources::encode_legacy_script_text(value) else {
+            tracing::warn!(
+                section,
+                key,
+                "game option text is not representable in the classic Windows-1252 config"
+            );
             return;
         };
-        if let Err(error) = persist_config_value(paths, section, key, value) {
-            tracing::error!(%error, section, key, "failed to persist game option");
-            self.status_text = format!("Unable to save game option: {error}");
-        }
+        self.deferred_config.set_escaped(section, key, native);
     }
 
     /// Saves a complete config while carrying the five in-game Display values
@@ -2287,11 +2307,11 @@ impl GameApp {
                     ..
                 } => {
                     if let Some(password) = remember_for_next_round {
-                        self.persist_game_option_value("Network", "LastPassword", password);
+                        self.persist_game_option_text("Network", "LastPassword", &password);
                     }
                 }
                 GameOptionAction::CommentChanged(comment) => {
-                    self.persist_game_option_value("Network", "Comment", comment);
+                    self.persist_game_option_text("Network", "Comment", &comment);
                     tracing::info!(
                         "{}",
                         clonk_frontend::game_option_buttons::COMMENT_CHANGED_LOG

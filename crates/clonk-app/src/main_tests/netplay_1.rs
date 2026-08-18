@@ -3290,11 +3290,18 @@ fn control_rate_submits_relative_set_and_waits_for_echo() {
     assert_eq!(app.engine.control_rate(), 7);
     assert_eq!(app.network_control_clock.unwrap().control_rate(), 7);
     assert_eq!(
+        app.deferred_config.get("Network", "ControlRate"),
+        Some("7"),
+        "only the authoritative host echo records the next-session setting"
+    );
+    // `C4ControlSet` assigns `Config.Network.ControlRate` in memory
+    // (C4Control.cpp:141); the file catches up at the shutdown save.
+    app.flush_deferred_config();
+    assert_eq!(
         Config::load(paths.config_file())
             .expect("reload echoed control rate")
             .get_in(Some("Network"), "ControlRate"),
-        Some("7"),
-        "only the authoritative host echo writes the next-session setting"
+        Some("7")
     );
     assert!(app
         .classic_host_lobby
@@ -3338,6 +3345,14 @@ fn runtime_join_persists_inverse_policy_and_refreshes_the_host_row() {
             .any(|row| row.kind == LobbyOptionKind::RuntimeJoin
                 && row.value == "Runtime join allowed")
     );
+    // `C4GameOptions` assigns `Config.Network.NoRuntimeJoin = !fAllowed` and
+    // saves nothing (C4GameOptions.cpp:169), so the policy reaches the file
+    // through the shutdown flush.
+    assert_eq!(
+        app.deferred_config.get("Network", "NoRuntimeJoin"),
+        Some("0")
+    );
+    app.flush_deferred_config();
     assert_eq!(
         Config::load(paths.config_file())
             .expect("reload enabled runtime-join policy")
@@ -3354,6 +3369,7 @@ fn runtime_join_persists_inverse_policy_and_refreshes_the_host_row() {
         .classic_host_lobby
         .as_ref()
         .is_some_and(|lobby| lobby.runtime_join_allowed));
+    app.flush_deferred_config();
     assert_eq!(
         Config::load(paths.config_file())
             .expect("reload prohibited runtime-join policy")
@@ -3507,6 +3523,13 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
         .test_value();
     assert!(commands.take_submitted_lobby_countdowns().is_empty());
     assert!(app.host_lobby_countdown.is_none());
+    // `ShowMessageModal` takes the flag by pointer and writes it in memory
+    // (C4GameLobby.cpp:462); the file catches up at the shutdown save.
+    assert_eq!(
+        app.deferred_config.get("Startup", "HideMsgPlrNoTakeOver"),
+        Some("1")
+    );
+    app.flush_deferred_config();
     assert_eq!(
         Config::load(paths.config_file())
             .expect("load persisted warning preference")

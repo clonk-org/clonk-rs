@@ -3908,15 +3908,19 @@ fn an_unflushed_internet_toggle_outranks_the_config_file() {
         "rebuilding the dialog must not resurrect the on-disk value either"
     );
 
-    // The scenario selector's Internet checkbox saves immediately, which is one
-    // of the surfaces C++ also writes straight through, so it supersedes the
-    // netdlg's unflushed change instead of being shadowed by it.
+    // The scenario selector's Internet checkbox is the same in-memory toggle —
+    // no C++ game-option surface saves the file — so it replaces the netdlg's
+    // pending change rather than superseding it through the file.
     app.persist_game_option_value("Network", "MasterServerSignUp", "1".to_string());
     assert_eq!(
         app.deferred_config.get("Network", "MasterServerSignUp"),
-        None
+        Some("1")
     );
     assert!(app.masterserver_signup_setting());
+    assert!(
+        load_network_startup_settings(Some(&paths)).0,
+        "and the file still holds the value this session started from"
+    );
 }
 
 #[test]
@@ -6250,6 +6254,11 @@ fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
         "three".to_string(),
         "four".to_string(),
     ]));
+    // `ChangeMode` writes only memory (C4MessageBoard.cpp:65-118); the subject
+    // here is the written *content*, so flush the session's pending value the
+    // way a clean shutdown would.
+    assert_eq!(app.deferred_config.get("Graphics", "MsgBoard"), Some("1"));
+    app.flush_deferred_config();
     let config = Config::load(paths.config_file()).test_value();
     assert_eq!(config.get_in(Some("Graphics"), "MsgBoard"), Some("1"));
 
@@ -6264,6 +6273,7 @@ fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
 
     app.process_running_chat_text("/msgboard 0");
     assert_eq!(app.message_board.mode, MessageBoardMode::Hidden);
+    app.flush_deferred_config();
     let config = Config::load(paths.config_file()).test_value();
     assert_eq!(config.get_in(Some("Graphics"), "MsgBoard"), Some("0"));
     let mut hidden_reloaded = ClassicMessageBoardState::default();
@@ -6291,6 +6301,9 @@ fn running_set_comment_is_direct_host_effect() {
 
     app.process_running_chat_text("/set comment live runtime comment");
 
+    // `/set comment` assigns `Config.Network.Comment` and saves nothing
+    // (C4MessageInput.cpp:497), so the file only catches up at a save surface.
+    app.flush_deferred_config();
     assert_eq!(
         Config::load(paths.config_file())
             .expect("load updated runtime config")
@@ -6316,6 +6329,11 @@ fn running_set_comment_is_direct_host_effect() {
     client.app_paths = Some(paths.clone());
     let (_events, mut client_commands) = install_running_network_stub(&mut client, 7, 0, 2);
     client.process_running_chat_text("/set comment rejected client comment");
+    assert!(
+        client.deferred_config.is_empty(),
+        "a client's refused /set comment records nothing to write"
+    );
+    client.flush_deferred_config();
     assert_eq!(
         Config::load(paths.config_file())
             .expect("load host-only runtime config")
