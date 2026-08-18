@@ -481,3 +481,101 @@ fn shipped_hazard_jumper_bite_check_uses_strict1_raw_string_identity() {
     bite_numbers.sort_unstable();
     assert_eq!(bite_numbers, [1, 2]);
 }
+
+/// A `Stop` callback answering `C4Fx_Stop_Deny` leaves the effect exactly where
+/// it was.
+///
+/// `C4Effect::Kill` remembers `iPrevPrio`, calls `SetDead()` (which zeroes the
+/// priority), and on `C4Fx_Stop_Deny` restores `iPriority = iPrevPrio`
+/// (`C4Effect.cpp:365-396`). The effect is never unlinked and relinked, so its
+/// list position, number and variables are all untouched — which is what makes
+/// a denial different from a remove followed by a fresh add.
+///
+/// The port unlinks and re-inserts on this path, so the recovered effect has to
+/// land back in the same slot. Priority-ordered insertion only does that if the
+/// recovered effect still carries its original priority rather than the zero
+/// `SetDead` would leave.
+#[test]
+fn a_denied_stop_keeps_its_list_position_number_and_variables() {
+    let mut engine = Engine::new();
+    engine.register_test_script_definition(
+        "DENY",
+        "Denied stop retains its slot",
+        r#"#strict 2
+local iStops;
+
+func Install()
+{
+  iStops = 0;
+  AddEffect("Low", this(), 100, 0, this());
+  AddEffect("Mid", this(), 200, 0, this());
+  AddEffect("High", this(), 300, 0, this());
+  return(0);
+}
+
+func FxMidStart(object target, int number, int temp)
+{
+  if (!temp) EffectVar(0, target, number) = 4242;
+  return(0);
+}
+
+// Refuse the removal. The temp calls that bracket an unrelated removal must
+// not be refused, or the effect would never be re-added.
+func FxMidStop(object target, int number, int reason, bool temp)
+{
+  if (temp) return(0);
+  ++iStops;
+  return(-1);
+}
+
+func Deny()
+{
+  RemoveEffect("Mid", this());
+  return(iStops);
+}
+
+func ReadMidVar()
+{
+  return(EffectVar(0, this(), GetEffect("Mid", this())));
+}
+"#,
+    );
+
+    let object = engine.spawn_test_object(SpawnConfig::new("DENY"));
+    let index = engine.test_object_index(object);
+    engine.call_test_object_function(index, "Install", Vec::new());
+
+    let before = engine
+        .test_object_snapshot(object)
+        .effects
+        .iter()
+        .map(|effect| (effect.name.clone(), effect.number, effect.priority))
+        .collect::<Vec<_>>();
+    assert_eq!(before.len(), 3, "three effects are installed: {before:?}");
+
+    let index = engine.test_object_index(object);
+    assert_eq!(
+        engine.call_test_object_function(index, "Deny", Vec::new()),
+        Value::Int(1),
+        "the Stop callback ran once and refused"
+    );
+
+    let after = engine
+        .test_object_snapshot(object)
+        .effects
+        .iter()
+        .map(|effect| (effect.name.clone(), effect.number, effect.priority))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        after, before,
+        "a denied removal restores the effect in place, with its priority and \
+         number, rather than re-adding it at the head or tail"
+    );
+
+    let index = engine.test_object_index(object);
+    assert_eq!(
+        engine.call_test_object_function(index, "ReadMidVar", Vec::new()),
+        Value::Int(4242),
+        "and its EffectVars survive the denial"
+    );
+}
