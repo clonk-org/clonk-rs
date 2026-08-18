@@ -1016,6 +1016,74 @@ fn fs_monitor_srgb(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Area ("box") reduction of a presented composition, reproducing
+/// `clonk_graphics::surface::downsample_rgba_box` byte for byte.
+///
+/// The destination is an integer (`Rgba8Uint`) attachment, so the accumulated
+/// bytes reach the readback buffer without a normalization round trip.
+const PRESENTATION_REDUCE_SHADER: &str = r#"
+struct ReduceParams {
+    source_extent: vec2<u32>,
+    dest_extent: vec2<u32>,
+};
+
+@group(0) @binding(0) var source_image: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> params: ReduceParams;
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    if index == 0u {
+        return vec4<f32>(-1.0, -1.0, 0.0, 1.0);
+    } else if index == 1u {
+        return vec4<f32>(3.0, -1.0, 0.0, 1.0);
+    }
+    return vec4<f32>(-1.0, 3.0, 0.0, 1.0);
+}
+
+// Half-open source span of one destination cell. The spans tile the source
+// exactly, so every source pixel contributes to exactly one cell; a
+// destination wider than the source collapses to one pixel, which reproduces
+// the CPU reference's nearest-neighbour magnification.
+fn span(index: u32, dest_extent: u32, source_extent: u32) -> vec2<u32> {
+    let start = index * source_extent / dest_extent;
+    let end = (index + 1u) * source_extent / dest_extent;
+    return vec2<u32>(start, min(max(end, start + 1u), source_extent));
+}
+
+@fragment
+fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<u32> {
+    let cell = vec2<u32>(position.xy);
+    let horizontal = span(cell.x, params.dest_extent.x, params.source_extent.x);
+    let vertical = span(cell.y, params.dest_extent.y, params.source_extent.y);
+    var alpha_sum = 0u;
+    var premultiplied = vec3<u32>(0u, 0u, 0u);
+    for (var y = vertical.x; y < vertical.y; y = y + 1u) {
+        for (var x = horizontal.x; x < horizontal.y; x = x + 1u) {
+            // An `Rgba8Unorm` texel is exactly k/255 for an integer k, so
+            // rounding recovers the stored byte with no loss.
+            let texel = vec4<u32>(round(
+                textureLoad(source_image, vec2<i32>(i32(x), i32(y)), 0) * 255.0
+            ));
+            alpha_sum = alpha_sum + texel.w;
+            premultiplied = premultiplied + texel.xyz * texel.w;
+        }
+    }
+    // A fully transparent cell keeps no colour at all, exactly like the CPU
+    // reference's zeroed destination pixel.
+    if alpha_sum == 0u {
+        return vec4<u32>(0u, 0u, 0u, 0u);
+    }
+    let samples = (horizontal.y - horizontal.x) * (vertical.y - vertical.x);
+    // Round half up on both the unpremultiply and the coverage mean.
+    let color = min(
+        (premultiplied + vec3<u32>(alpha_sum / 2u)) / vec3<u32>(alpha_sum),
+        vec3<u32>(255u, 255u, 255u),
+    );
+    let alpha = min((alpha_sum + samples / 2u) / samples, 255u);
+    return vec4<u32>(color, alpha);
+}
+"#;
+
 /// Recovery decision published by wgpu's device-loss and uncaptured-error hooks.
 ///
 /// Device loss has a dedicated callback. The validation-message check remains
@@ -2112,6 +2180,214 @@ struct CompositionTarget {
     gamma_resolved_present_bind_group: wgpu::BindGroup,
 }
 
+/// Retained pipeline and destination for [`RetainedGpuRenderer::readback_last_presentation_reduced`].
+///
+/// A save thumbnail is 200x150 whatever the frame is. Reading a 4K
+/// presentation back only to reduce it on the CPU maps about 31.6 MiB to
+/// produce about 117 KiB, so the reduction runs against the presented texture
+/// and only its result is copied out.
+#[derive(Debug)]
+struct PresentationReducer {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    target: Option<ReducedPresentationTarget>,
+}
+
+#[derive(Debug)]
+struct ReducedPresentationTarget {
+    extent: [u32; 2],
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+impl PresentationReducer {
+    /// An integer attachment carries the accumulated bytes out untouched; a
+    /// normalized one would depend on the backend's unorm rounding.
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Uint;
+
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lc_gpu_presentation_reduce_layout"),
+            entries: &[
+                texture_layout_entry(0, wgpu::TextureSampleType::Float { filterable: true }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let module = shader(
+            device,
+            "lc_gpu_presentation_reduce_shader",
+            PRESENTATION_REDUCE_SHADER,
+        );
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("lc_gpu_presentation_reduce_pipeline_layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let targets = [Some(wgpu::ColorTargetState {
+            format: Self::FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("lc_gpu_presentation_reduce"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+            target: None,
+        }
+    }
+
+    fn ensure_target(&mut self, device: &wgpu::Device, extent: [u32; 2]) {
+        if self
+            .target
+            .as_ref()
+            .is_none_or(|target| target.extent != extent)
+        {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("lc_gpu_reduced_presentation"),
+                size: wgpu::Extent3d {
+                    width: extent[0],
+                    height: extent[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: Self::FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.target = Some(ReducedPresentationTarget {
+                extent,
+                texture,
+                view,
+            });
+        }
+    }
+
+    /// Records the reduction of `source` into the retained target.
+    ///
+    /// Two requests in one frame reuse that target, which is safe because the
+    /// caller copies each result out before recording the next pass.
+    fn reduce(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        source_extent: [u32; 2],
+        dest_extent: [u32; 2],
+    ) -> &wgpu::Texture {
+        let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lc_gpu_presentation_reduce_params"),
+            contents: u32_bytes(&[
+                source_extent[0],
+                source_extent[1],
+                dest_extent[0],
+                dest_extent[1],
+            ]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lc_gpu_presentation_reduce_bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        });
+        self.ensure_target(device, dest_extent);
+        let target = self
+            .target
+            .as_ref()
+            .expect("the reduced presentation target was just ensured");
+        let attachments = [Some(wgpu::RenderPassColorAttachment {
+            view: &target.view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })];
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lc_gpu_presentation_reduce_pass"),
+            color_attachments: &attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        &target.texture
+    }
+}
+
+/// Largest source span one destination cell may cover before the shader's
+/// `u32` accumulator could overflow.
+///
+/// A cell of `s` samples accumulates at most `255 * 255 * s` of premultiplied
+/// colour and adds `255 * s / 2` to round the unpremultiply half up, so the
+/// divisor is `65025 + 127.5` rounded up.
+const MAX_REDUCTION_SAMPLES: u32 = u32::MAX / 65153;
+
+/// True when the GPU reduction of `source` to `dest` is provably exact.
+fn reduction_accumulator_fits(source: [u32; 2], dest: [u32; 2]) -> bool {
+    if source.contains(&0) || dest.contains(&0) {
+        return false;
+    }
+    // A span is `floor((i + 1) * source / dest) - floor(i * source / dest)`,
+    // so it never exceeds `ceil(source / dest)`; magnification collapses it to
+    // a single source pixel.
+    let max_span = |source: u32, dest: u32| {
+        if dest < source {
+            source.div_ceil(dest)
+        } else {
+            1
+        }
+    };
+    max_span(source[0], dest[0])
+        .checked_mul(max_span(source[1], dest[1]))
+        .is_some_and(|samples| samples <= MAX_REDUCTION_SAMPLES)
+}
+
 /// A submitted, padded texture-to-buffer copy.
 #[derive(Debug)]
 pub struct GpuReadbackTicket {
@@ -2128,6 +2404,11 @@ pub struct GpuReadbackFrame {
 }
 
 impl GpuReadbackTicket {
+    /// Bytes this ticket will map, including WebGPU's per-row padding.
+    pub fn mapped_bytes(&self) -> u64 {
+        self.buffer.size()
+    }
+
     /// Wait for a copy already submitted by `Pixels::render_with` (or a test
     /// queue submission), remove WebGPU row padding, and return tightly packed
     /// physical RGBA pixels.
@@ -2258,6 +2539,9 @@ pub struct RetainedGpuRenderer {
     draw_call_scratch: Vec<DrawCall>,
     composition: Option<CompositionTarget>,
     last_presented_monitor_gamma: Option<bool>,
+    /// Built the first time a caller asks for a reduced presentation, so a
+    /// session that never saves a thumbnail owns no reduction pipeline.
+    presentation_reducer: Option<PresentationReducer>,
     timestamp_profiler: Option<GpuTimestampProfiler>,
     timestamp_history: GpuTimestampHistory,
     last_stats: GpuRendererStats,
@@ -2770,6 +3054,7 @@ impl RetainedGpuRenderer {
             draw_call_scratch: Vec::new(),
             composition: None,
             last_presented_monitor_gamma: None,
+            presentation_reducer: None,
             timestamp_profiler: GpuTimestampProfiler::new(device),
             timestamp_history: GpuTimestampHistory::default(),
             last_stats: GpuRendererStats::default(),
@@ -2950,6 +3235,44 @@ impl RetainedGpuRenderer {
             &composition.texture
         };
         encode_readback(device, encoder, texture, composition.extent).map(Some)
+    }
+
+    /// Encodes an area-reduced copy of the most recently presented composition
+    /// before the next render pass overwrites its retained target.
+    ///
+    /// The result is byte-identical to reducing a full readback with
+    /// `clonk_graphics::surface::downsample_rgba_box`, but only `dest_extent`
+    /// pixels are copied out: a 200x150 save thumbnail of a 4K frame maps
+    /// about 117 KiB instead of about 31.6 MiB.
+    ///
+    /// Returns `Ok(None)` when nothing has been presented yet, and when the
+    /// reduction is not provably exact for this source. Both cases leave
+    /// [`Self::readback_last_presentation`] and a CPU reduction as the
+    /// caller's fallback.
+    pub fn readback_last_presentation_reduced(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        dest_extent: [u32; 2],
+    ) -> Result<Option<GpuReadbackTicket>, GpuRendererError> {
+        let monitor_gamma = self.last_presented_monitor_gamma;
+        let (Some(composition), Some(monitor_gamma)) = (self.composition.as_ref(), monitor_gamma)
+        else {
+            return Ok(None);
+        };
+        if !reduction_accumulator_fits(composition.extent, dest_extent) {
+            return Ok(None);
+        }
+        let source = if monitor_gamma {
+            &composition.gamma_resolved_view
+        } else {
+            &composition.view
+        };
+        let reducer = self
+            .presentation_reducer
+            .get_or_insert_with(|| PresentationReducer::new(device));
+        let reduced = reducer.reduce(device, encoder, source, composition.extent, dest_extent);
+        encode_readback(device, encoder, reduced, dest_extent).map(Some)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -13785,6 +14108,191 @@ mod tests {
             ),
             "{label}: landscape draw runs",
         );
+    }
+
+    #[test]
+    fn reduced_presentation_readback_matches_the_cpu_box_reduction() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping reduced presentation readback test");
+            return;
+        };
+        // Odd extents with a non-integer ratio on both axes: every destination
+        // cell covers a different source span, so a reduction that assumed one
+        // uniform box would disagree with the CPU oracle on most pixels.
+        const SOURCE: [u32; 2] = [37, 23];
+        const DEST: [u32; 2] = [7, 5];
+        let mut renderer = test_renderer(&device, &queue);
+        let scene = reduction_source_scene(GpuTextureId::fresh(), SOURCE);
+        let full = render_extent_readback(&mut renderer, &device, &queue, &scene, SOURCE);
+        let reduced = read_reduced_presentation(&mut renderer, &device, &queue, DEST);
+        let expected = clonk_graphics::surface::downsample_rgba_box(
+            &full.rgba, SOURCE[0], SOURCE[1], DEST[0], DEST[1],
+        )
+        .expect("CPU reduction of the presented frame");
+        assert_eq!(reduced.extent, DEST);
+        assert_eq!(
+            reduced.rgba, expected,
+            "GPU thumbnail reduction must match downsample_rgba_box byte for byte"
+        );
+    }
+
+    #[test]
+    fn reduced_presentation_readback_matches_the_cpu_box_reduction_at_edge_extents() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping reduced presentation edge extent test");
+            return;
+        };
+        let mut renderer = test_renderer(&device, &queue);
+        for (source, dest) in [
+            // A single pixel, and a single-pixel axis on either side.
+            ([1_u32, 1_u32], [1_u32, 1_u32]),
+            ([1, 47], [1, 5]),
+            ([47, 1], [5, 1]),
+            // A source smaller than the thumbnail magnifies by repetition.
+            ([64, 48], SAVE_THUMBNAIL_TEST_EXTENT),
+            // An exact integer ratio, then one that divides on neither axis.
+            ([400, 300], SAVE_THUMBNAIL_TEST_EXTENT),
+            ([401, 301], SAVE_THUMBNAIL_TEST_EXTENT),
+        ] {
+            let scene = reduction_source_scene(GpuTextureId::fresh(), source);
+            let full = render_extent_readback(&mut renderer, &device, &queue, &scene, source);
+            let reduced = read_reduced_presentation(&mut renderer, &device, &queue, dest);
+            let expected = clonk_graphics::surface::downsample_rgba_box(
+                &full.rgba, source[0], source[1], dest[0], dest[1],
+            )
+            .expect("CPU reduction of the presented frame");
+            assert_eq!(reduced.extent, dest, "{source:?} -> {dest:?}");
+            assert_eq!(reduced.rgba, expected, "{source:?} -> {dest:?}");
+        }
+    }
+
+    #[test]
+    fn a_reduced_presentation_maps_only_the_thumbnail_and_its_row_padding() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping reduced presentation transfer size test");
+            return;
+        };
+        const SOURCE: [u32; 2] = [1024, 768];
+        let mut renderer = test_renderer(&device, &queue);
+        let scene = reduction_source_scene(GpuTextureId::fresh(), SOURCE);
+        let _ = render_extent_readback(&mut renderer, &device, &queue, &scene, SOURCE);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_reduced_presentation_transfer_test_encoder"),
+        });
+        let reduced = renderer
+            .readback_last_presentation_reduced(&device, &mut encoder, SAVE_THUMBNAIL_TEST_EXTENT)
+            .expect("encode reduced retained GPU frame")
+            .expect("reduced retained GPU frame exists");
+        let full = renderer
+            .readback_last_presentation(&device, &mut encoder)
+            .expect("encode full retained GPU frame")
+            .expect("full retained GPU frame exists");
+        queue.submit(Some(encoder.finish()));
+
+        let thumbnail_pixels =
+            u64::from(SAVE_THUMBNAIL_TEST_EXTENT[0]) * u64::from(SAVE_THUMBNAIL_TEST_EXTENT[1]) * 4;
+        let padding = u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * u64::from(SAVE_THUMBNAIL_TEST_EXTENT[1]);
+        assert!(
+            reduced.mapped_bytes() <= thumbnail_pixels + padding,
+            "a thumbnail-only request maps {} bytes for {thumbnail_pixels} thumbnail bytes",
+            reduced.mapped_bytes(),
+        );
+        assert_eq!(
+            full.mapped_bytes(),
+            u64::from(SOURCE[0]) * u64::from(SOURCE[1]) * 4,
+            "the full readback this replaces transfers the complete frame",
+        );
+    }
+
+    #[test]
+    fn a_reduction_that_could_overflow_the_shader_accumulator_is_refused() {
+        assert!(reduction_accumulator_fits([3840, 2160], [200, 150]));
+        assert!(reduction_accumulator_fits([200, 150], [200, 150]));
+        assert!(reduction_accumulator_fits([64, 48], [200, 150]));
+        // The largest 2D source any device reports still reduces exactly.
+        assert!(reduction_accumulator_fits([32768, 32768], [200, 150]));
+        // One cell's premultiplied sum must stay inside the shader's u32.
+        assert!(reduction_accumulator_fits(
+            [MAX_REDUCTION_SAMPLES, 1],
+            [1, 1]
+        ));
+        assert!(!reduction_accumulator_fits(
+            [MAX_REDUCTION_SAMPLES + 1, 1],
+            [1, 1]
+        ));
+        assert!(!reduction_accumulator_fits([0, 150], [200, 150]));
+        assert!(!reduction_accumulator_fits([200, 150], [200, 0]));
+    }
+
+    /// The engine's save thumbnail size. `clonk-app` owns the constant; this
+    /// crate only has to prove the reduction is exact at that extent.
+    const SAVE_THUMBNAIL_TEST_EXTENT: [u32; 2] = [200, 150];
+
+    /// A frame that spans the alpha and colour extremes the box reduction has
+    /// to average, drawn 1:1 so the presented composition carries them intact.
+    fn reduction_source_scene(id: GpuTextureId, extent: [u32; 2]) -> GpuScene {
+        let pixels: Vec<u8> = (0..extent[0] as usize * extent[1] as usize)
+            .flat_map(|index| {
+                // Fully transparent texels must contribute nothing at all, and
+                // opaque ones must not be dragged toward whatever they store.
+                let alpha = [0_u8, 255, 17, 128, 254][index % 5];
+                [
+                    (index * 37 % 256) as u8,
+                    (index * 91 % 256) as u8,
+                    (index * 13 % 256) as u8,
+                    alpha,
+                ]
+            })
+            .collect();
+        test_scene(
+            extent,
+            Color::new(0, 0, 0, 0),
+            vec![GpuTextureResource {
+                id,
+                extent,
+                revision: 0,
+                base_revision: None,
+                format: GpuTextureFormat::Rgba8,
+                pixels: Arc::from(pixels.into_boxed_slice()),
+                dirty: Vec::new(),
+            }],
+            vec![GpuCommand::Quad {
+                texture: id,
+                owner_mask: None,
+                vertices: quad(
+                    0.0,
+                    0.0,
+                    extent[0] as f32,
+                    extent[1] as f32,
+                    1.0,
+                    [1.0, 1.0, 1.0, 0.0],
+                ),
+                clip: None,
+                blend: GpuBlend::Replace,
+                base_mod2: false,
+                owner_mod2: false,
+                sampler: GpuSampler::Nearest,
+                gamma: false,
+            }],
+        )
+    }
+
+    fn read_reduced_presentation(
+        renderer: &mut RetainedGpuRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        extent: [u32; 2],
+    ) -> GpuReadbackFrame {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_reduced_presentation_test_encoder"),
+        });
+        let ticket = renderer
+            .readback_last_presentation_reduced(device, &mut encoder, extent)
+            .expect("encode reduced retained GPU frame")
+            .expect("reduced retained GPU frame exists");
+        queue.submit(Some(encoder.finish()));
+        ticket.read(device).expect("map reduced retained GPU frame")
     }
 
     fn render_layers_readback(
