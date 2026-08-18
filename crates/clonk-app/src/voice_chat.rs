@@ -53,7 +53,7 @@
 //! this app layer's [`VoiceActivityTracker`] owns duplicate/late suppression
 //! through its shared epoch and sequence window.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -559,6 +559,17 @@ pub(crate) struct VoiceChatState {
     stream_epoch: u32,
     next_sequence: u16,
     pub(crate) remote_streams: BTreeMap<(i32, i32), RemoteVoiceStream>,
+    /// Clients this player has silenced, mirroring the runtime client list's
+    /// existing per-client mute so one control silences a participant rather
+    /// than text and voice needing separate ones. A client is muted as a whole,
+    /// which also covers every local player speaking from it.
+    ///
+    /// Muting is purely local and purely presentational: it discards frames
+    /// after they arrive, tells the muted peer nothing, and never reaches the
+    /// control stream — the same boundary the whole feature sits behind
+    /// (clonk-org/clonk-rs#301). It outlives any one stream, so a peer that
+    /// reconnects or restarts its stream stays muted for the session.
+    muted_clients: BTreeSet<i32>,
 }
 
 impl Default for VoiceChatState {
@@ -601,6 +612,7 @@ impl VoiceChatState {
             stream_epoch: 0,
             next_sequence: 0,
             remote_streams: BTreeMap::new(),
+            muted_clients: BTreeSet::new(),
         }
     }
 
@@ -939,6 +951,37 @@ impl VoiceChatState {
         disposition
     }
 
+    /// Whether this player has silenced a participant's voice.
+    pub(crate) fn is_client_muted(&self, client_id: i32) -> bool {
+        self.muted_clients.contains(&client_id)
+    }
+
+    /// Silence or unsilence one participant, returning the streams that must
+    /// stop playing.
+    ///
+    /// Muting drops the peer's live streams so the buffered tail stops too,
+    /// rather than letting the last few frames play out after the player asked
+    /// for silence. Nothing is sent: the muted peer keeps transmitting and is
+    /// never told, which is what keeps this local and out of the control
+    /// stream.
+    pub(crate) fn set_client_muted(&mut self, client_id: i32, muted: bool) -> Vec<(i32, i32)> {
+        if !muted {
+            self.muted_clients.remove(&client_id);
+            return Vec::new();
+        }
+        self.muted_clients.insert(client_id);
+        let silenced = self
+            .remote_streams
+            .keys()
+            .copied()
+            .filter(|(stream_client, _)| *stream_client == client_id)
+            .collect::<Vec<_>>();
+        for key in &silenced {
+            self.remote_streams.remove(key);
+        }
+        silenced
+    }
+
     pub(crate) fn accept_remote_frame(
         &mut self,
         snapshot: &SimulationSnapshot,
@@ -981,8 +1024,13 @@ impl VoiceChatState {
         &self,
         frame: &clonk_network::VoiceFrame,
     ) -> Option<(i32, [i16; clonk_audio::VOICE_FRAME_SAMPLES])> {
-        let samples = decode_voice_frame(&frame.payload).ok()?;
         let client_id = i32::try_from(frame.client_id).ok()?;
+        // Before decoding: a muted peer costs nothing beyond the bytes the
+        // transport already read.
+        if self.is_client_muted(client_id) {
+            return None;
+        }
+        let samples = decode_voice_frame(&frame.payload).ok()?;
         if self
             .remote_streams
             .get(&(client_id, frame.player_id))

@@ -17175,3 +17175,45 @@ fn an_observer_is_not_a_voice_source_and_a_multi_player_client_speaks_as_its_sel
     )
     .is_none());
 }
+
+/// A hot or abusive microphone used to mean turning voice off entirely. Muting
+/// a participant in the runtime client list now silences their voice too, and
+/// that has to stay local: the muted peer keeps transmitting and is never told,
+/// and nothing about it reaches the control stream.
+#[test]
+fn muting_a_participant_discards_their_voice_locally_for_the_session() {
+    let mut voice = crate::voice_chat::VoiceChatState::default();
+    let noisy_client = 5;
+    let noisy_player = 11;
+
+    assert!(!voice.is_client_muted(noisy_client));
+
+    // Muting drops the live stream so the buffered tail stops with it.
+    voice.set_client_muted(noisy_client, true);
+    assert!(voice.is_client_muted(noisy_client));
+
+    // A frame from the muted peer is discarded before it is decoded, so it
+    // never reaches playback however many arrive.
+    let mut frame =
+        clonk_network::VoiceFrame::outbound(noisy_player, 1, 0, vec![0_u8; 164]).test_value();
+    frame.client_id = noisy_client as u32;
+    let now = Instant::now();
+    assert!(voice.accept_authorized_remote_frame(&frame, now).is_none());
+    assert!(voice.remote_streams.is_empty());
+
+    // The mute outlives any one stream: a peer that restarts its stream stays
+    // silent for the rest of the session.
+    let mut restarted =
+        clonk_network::VoiceFrame::outbound(noisy_player, 2, 0, vec![0_u8; 164]).test_value();
+    restarted.client_id = noisy_client as u32;
+    assert!(voice
+        .accept_authorized_remote_frame(&restarted, now)
+        .is_none());
+
+    // Another participant is unaffected.
+    assert!(!voice.is_client_muted(noisy_client + 1));
+
+    // Unmuting restores them.
+    voice.set_client_muted(noisy_client, false);
+    assert!(!voice.is_client_muted(noisy_client));
+}
