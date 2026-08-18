@@ -5429,3 +5429,43 @@ fn menu_resize_renders_at_new_dimensions() {
         "the resized menu must reach the enlarged frame"
     );
 }
+
+/// `General.Participants` is a `CFG_MaxString` escaped-string field
+/// (`is_cpp_escaped_config_field`), so C++ reads and writes it quoted. The
+/// deferred store flushed it through the raw writer, which emits it bare — a
+/// shape a LegacyClonk install sharing the file does not read back as the same
+/// value.
+#[test]
+fn a_deferred_participant_list_is_flushed_in_its_quoted_native_form() {
+    let _lock = env_lock().lock();
+    let fixture = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+    fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+    fs::write(
+        paths.config_file(),
+        b"[General]\r\nParticipants=\"Old.c4p\"\r\n",
+    )
+    .test_value();
+    let mut app = new_state_only_menu_app(320, 200);
+    app.app_paths = Some(paths.clone());
+
+    app.defer_participant_list("Alice.c4p;Bob.c4p");
+    assert_eq!(
+        app.deferred_config.get("General", "Participants"),
+        Some("Alice.c4p;Bob.c4p"),
+        "the running session reads its own pending list"
+    );
+
+    app.flush_deferred_config();
+
+    let native = fs::read(paths.config_file()).test_value();
+    let expected = b"Participants=\"Alice.c4p;Bob.c4p\"";
+    assert!(
+        native
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "flushed config kept the quoted native form, got {}",
+        String::from_utf8_lossy(&native)
+    );
+    reset_cached_app_paths();
+}
