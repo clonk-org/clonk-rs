@@ -46,6 +46,18 @@ pub struct Parser<'a> {
     /// Site of the first hard `inherited(...)` in the function being parsed,
     /// carried onto that `Function` for the link-time check.
     hard_inherited_line: Option<usize>,
+    /// Column of that same site, so a link-time truncation can report the
+    /// position C4AulParseError would have printed.
+    hard_inherited_column: Option<usize>,
+    /// Index, in the function body's top-level statement list, of the statement
+    /// that contains it. C4Aul truncates the emitted code at the offending
+    /// token (`C4AulParse.cpp:3553-3577`); the port truncates at the enclosing
+    /// statement, which is the same boundary its ordinary parse-error recovery
+    /// already uses.
+    hard_inherited_stmt_index: Option<usize>,
+    /// Top-level body statement currently being parsed, tracked so the site
+    /// above can be attributed without walking the tree afterwards.
+    current_body_stmt_index: usize,
     /// Whether the body being parsed belongs to a `global func`, which is the
     /// only place a named `local` is rejected (`C4AulParse.cpp:2000-2004`).
     parsing_global_function: bool,
@@ -78,6 +90,9 @@ impl<'a> Parser<'a> {
             non_fatal_diagnostics: Vec::new(),
             loop_depth: 0,
             hard_inherited_line: None,
+            hard_inherited_column: None,
+            hard_inherited_stmt_index: None,
+            current_body_stmt_index: 0,
             parsing_global_function: false,
             global_local_candidates: Vec::new(),
             global_function_shadowing_names: std::collections::HashSet::new(),
@@ -308,6 +323,8 @@ impl<'a> Parser<'a> {
                 global_link_host: None,
                 overloaded: None,
                 hard_inherited_line: self.hard_inherited_line.take(),
+                hard_inherited_column: self.hard_inherited_column.take(),
+                hard_inherited_stmt_index: self.hard_inherited_stmt_index.take(),
                 global_local_candidates: std::mem::take(&mut self.global_local_candidates),
                 global_local_reference: None,
                 compiled: std::sync::OnceLock::new(),
@@ -392,6 +409,8 @@ impl<'a> Parser<'a> {
                 global_link_host: None,
                 overloaded: None,
                 hard_inherited_line: self.hard_inherited_line.take(),
+                hard_inherited_column: self.hard_inherited_column.take(),
+                hard_inherited_stmt_index: self.hard_inherited_stmt_index.take(),
                 global_local_candidates: std::mem::take(&mut self.global_local_candidates),
                 global_local_reference: None,
                 compiled: std::sync::OnceLock::new(),
@@ -683,6 +702,7 @@ impl<'a> Parser<'a> {
                 Ok(false) => {}
                 Err(error) => return (statements, Some(error)),
             }
+            self.current_body_stmt_index = statements.len();
             match self.parse_statement() {
                 Ok(statement) => statements.push(statement),
                 Err(error) => return (statements, Some(error)),
@@ -2145,8 +2165,10 @@ impl<'a> Parser<'a> {
                 // mirrors `C4AulParse.cpp:2799`. C4Aul reaches this identifier
                 // only in the inherited-call form (`:2785` shifts straight into
                 // Parse_Params), so identifier position is the call site.
-                if name == "inherited" {
-                    self.hard_inherited_line.get_or_insert(token.line);
+                if name == "inherited" && self.hard_inherited_line.is_none() {
+                    self.hard_inherited_line = Some(token.line);
+                    self.hard_inherited_column = Some(token.column);
+                    self.hard_inherited_stmt_index = Some(self.current_body_stmt_index);
                 }
                 self.note_global_local_candidate(&name, token.line);
                 Ok(Expr::Variable(name))

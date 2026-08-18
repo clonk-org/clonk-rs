@@ -1748,6 +1748,31 @@ impl Engine {
     /// Resolution deliberately mirrors the VM exactly — own-owner list, then
     /// C4Aul's owner hop into the engine table, then the same-name native.
     /// A narrower oracle would report functions that resolve perfectly well.
+    /// Applies C4Aul's link-time truncation to every function this host holds
+    /// whose hard `inherited(...)` has no overload target, and returns the same
+    /// diagnostics `unresolved_inherited_diagnostics` reports.
+    ///
+    /// `C4AulScript::Parse` catches the parse throw, counts it and leaves that
+    /// one function truncated onto an `AB_ERR` chunk with every unresolved
+    /// forward jump repointed at it (`C4AulParse.cpp:3553-3577`). Reporting
+    /// alone left a path through the function that returned normally whenever
+    /// the call sat in a branch that was not taken.
+    ///
+    /// This runs at link time rather than during the parse because C4Aul binds
+    /// `inherited` only once every func table exists (`C4AulParse.cpp:1406`)
+    /// while the port parses first and resolves afterwards.
+    pub fn truncate_unresolved_inherited(&mut self) -> Vec<UnresolvedInherited> {
+        let diagnostics = self.unresolved_inherited_diagnostics();
+        for diagnostic in &diagnostics {
+            let message = diagnostic.to_string();
+            if let Some(function) = self.functions.get_mut(&diagnostic.function) {
+                let column = function.hard_inherited_column.unwrap_or(1);
+                function.truncate_at_link_error(&message, diagnostic.line, column);
+            }
+        }
+        diagnostics
+    }
+
     pub fn unresolved_inherited_diagnostics(&self) -> Vec<UnresolvedInherited> {
         let mut unresolved = self
             .functions
@@ -3529,6 +3554,73 @@ mod tests {
             tail_mutates_source(&hopped),
             expected,
             "the hopped target's result copies exactly like the chain target's"
+        );
+    }
+
+    /// `C4AulScript::Parse` keeps the bytecode emitted before the offending
+    /// token, repoints every jump that still has no destination at the
+    /// truncation point and appends `AB_ERR` (`C4AulParse.cpp:3553-3577`):
+    ///
+    /// ```cpp
+    /// for (std::intptr_t i = reinterpret_cast<std::intptr_t>(Fn->Code); i < CPos - Code; i++)
+    /// {
+    ///   C4AulBCC *pBCC = Code + i;
+    ///   if (IsJumpType(pBCC->bccType))
+    ///     if (!pBCC->bccX)
+    ///       pBCC->bccX = CPos - Code - i;
+    /// }
+    /// AddBCC(AB_ERR);
+    /// ```
+    ///
+    /// So a branch that would have jumped *over* the offending token lands on
+    /// the error instead, and there is nothing past `AB_ERR` to reach. Once the
+    /// function is entered the only path that returns normally is a `return`
+    /// reached before the token.
+    #[test]
+    fn an_unresolvable_hard_inherited_leaves_no_path_returning_normally() {
+        // The offending call sits in a branch that is never taken, so evaluating
+        // the `inherited` node alone would never raise.
+        let mut skipping = Engine::new();
+        skipping
+            .load_script("#strict\nfunc Skip() { if (0) { return inherited(); } return 42; }")
+            .expect("script compiles");
+        assert_eq!(skipping.truncate_unresolved_inherited().len(), 1);
+        assert!(
+            skipping.call("Skip", &[]).is_err(),
+            "the redirected forward jump lands on the error chunk"
+        );
+
+        // Statements before the token still run: C++ keeps their bytecode and
+        // only appends the error chunk after it.
+        let marks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink = std::sync::Arc::clone(&marks);
+        let mut prefix = Engine::new();
+        prefix.register_host_function("Mark", move |_arguments| {
+            sink.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Value::Nil)
+        });
+        prefix
+            .load_script("#strict\nfunc Run() { Mark(); return inherited(); }")
+            .expect("script compiles");
+        assert_eq!(prefix.truncate_unresolved_inherited().len(), 1);
+        assert!(prefix.call("Run", &[]).is_err(), "and then it raises");
+        assert_eq!(
+            marks.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the call before the token executed"
+        );
+
+        // A `return` reached before the token is the one normal exit.
+        let mut early = Engine::new();
+        early
+            .load_script("#strict\nfunc Early() { return 7; return inherited(); }")
+            .expect("script compiles");
+        assert_eq!(early.truncate_unresolved_inherited().len(), 1);
+        assert_eq!(
+            early
+                .call("Early", &[])
+                .expect("AB_RETURN runs before AB_ERR"),
+            Value::Int(7)
         );
     }
 
