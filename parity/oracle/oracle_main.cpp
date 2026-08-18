@@ -1697,6 +1697,136 @@ static void printCases()
 }
 } // namespace player_join_capacity_oracle
 
+namespace savegame_matching_oracle
+{
+// C4PlayerInfo.h:332. The order is what RestoreSavegameInfos iterates over
+// (`for (int eMatchingLevel = 0; eMatchingLevel <= PML_Any; ++eMatchingLevel)`).
+enum MatchingLevel { PML_PlrFileName = 0, PML_PlrName, PML_PrefColor, PML_Any };
+
+template <class T> inline constexpr bool Inside(T ival, T lbound, T rbound)
+{
+    return ival >= lbound && ival <= rbound;
+}
+
+constexpr std::size_t SizeMax = static_cast<std::size_t>(-1);
+
+#include "char_capital.inc"
+// The default length lives on the declaration, not the definition
+// (C4Strings.h:55), and the extracted switch calls the two-argument form.
+bool SEqualNoCase(const char *szStr1, const char *szStr2, size_t iLen = SizeMax);
+#include "sequal_no_case.inc"
+
+// StdFile.h:41-49 verbatim. GetFilename therefore splits on both slashes on
+// Windows but only on '/' elsewhere — which is why no case below uses a
+// backslash path, so the recorded values do not depend on the recording host.
+#ifdef _WIN32
+#define DirectorySeparator '\\'
+#else
+#define DirectorySeparator '/'
+#endif
+#include "get_filename.inc"
+
+static const char *GetFilename(const char *szPath)
+{
+    return GetFilename(const_cast<char *>(szPath));
+}
+
+// Only the four accessors the extracted switch reads.
+class C4PlayerInfo
+{
+public:
+    const char *Filename{};
+    const char *Name{};
+    uint32_t OriginalColor{};
+
+    const char *GetFilename() const { return Filename; }
+    const char *GetName() const { return Name; }
+    uint32_t GetOriginalColor() const { return OriginalColor; }
+};
+
+// The extracted switch verbatim, with its `return pInfo` reaching this
+// function's result. A level that declines falls out to nullptr.
+static C4PlayerInfo *matchAtLevel(const C4PlayerInfo *pMatchInfo, C4PlayerInfo *pInfo, int iMatchLvl)
+{
+#include "savegame_matching_switch.inc"
+    return nullptr;
+}
+
+static void printLatin1Bytes(const char *text)
+{
+    printf("[");
+    for (const unsigned char *cursor = reinterpret_cast<const unsigned char *>(text); *cursor; ++cursor)
+    {
+        if (cursor != reinterpret_cast<const unsigned char *>(text)) printf(",");
+        printf("%u", static_cast<unsigned>(*cursor));
+    }
+    printf("]");
+}
+
+void printCases()
+{
+    struct MatchCase
+    {
+        const char *name;
+        const char *currentFilename;
+        const char *currentName;
+        uint32_t currentColor;
+        const char *savedFilename;
+        const char *savedName;
+        uint32_t savedColor;
+    };
+
+    // Deliberately no backslash paths: GetFilename splits on
+    // DirectorySeparator, which is '\\' only on Windows (StdFile.h:41-49), so a
+    // backslash case would record a host-specific expectation into a
+    // cross-platform gate.
+    const MatchCase cases[] = {
+        {"file_and_name", "Players/Ada.c4p", "Ada", 0xff0000, "Save/Ada.c4p", "Ada", 0x00ff00},
+        {"same_file_other_name", "Players/Ada.c4p", "Ada", 0xff0000, "Save/Ada.c4p", "Bert", 0x00ff00},
+        {"other_file_same_name", "Players/Ada.c4p", "Ada", 0xff0000, "Save/Zoe.c4p", "Ada", 0x00ff00},
+        {"name_case_insensitive", "Players/Ada.c4p", "aDa", 0xff0000, "Save/Zoe.c4p", "AdA", 0x00ff00},
+        {"name_umlaut_fold", "Players/A.c4p", "J\xfcrgen", 0xff0000, "Save/B.c4p", "J\xdcRGEN", 0x00ff00},
+        {"color_only", "Players/Ada.c4p", "Ada", 0x123456, "Save/Zoe.c4p", "Bert", 0x123456},
+        {"nothing_in_common", "Players/Ada.c4p", "Ada", 0xff0000, "Save/Zoe.c4p", "Bert", 0x00ff00},
+        {"empty_current_filename", "", "Ada", 0xff0000, "Save/Ada.c4p", "Ada", 0x00ff00},
+        {"empty_saved_filename", "Players/Ada.c4p", "Ada", 0xff0000, "", "Ada", 0x00ff00},
+    };
+
+    printf("\"savegame_player_matching\":[");
+    for (std::size_t index = 0; index < std::size(cases); ++index)
+    {
+        const MatchCase &test = cases[index];
+        C4PlayerInfo current;
+        current.Filename = test.currentFilename;
+        current.Name = test.currentName;
+        current.OriginalColor = test.currentColor;
+        C4PlayerInfo saved;
+        saved.Filename = test.savedFilename;
+        saved.Name = test.savedName;
+        saved.OriginalColor = test.savedColor;
+
+        if (index) printf(",");
+        // Player names are legacy Latin-1 byte strings, so they are emitted as
+        // byte arrays: the umlaut case carries 0xfc/0xdc, which is not UTF-8 and
+        // would make the golden undecodable as a JSON string.
+        printf("{\"name\":\"%s\",\"current_filename\":\"%s\",\"current_name\":",
+               test.name, test.currentFilename);
+        printLatin1Bytes(test.currentName);
+        printf(",\"current_color\":%u,\"saved_filename\":\"%s\",\"saved_name\":",
+               test.currentColor, test.savedFilename);
+        printLatin1Bytes(test.savedName);
+        printf(",\"saved_color\":%u,\"matches\":[", test.savedColor);
+        for (int level = PML_PlrFileName; level <= PML_Any; ++level)
+        {
+            if (level) printf(",");
+            printf("%s", matchAtLevel(&current, &saved, level) ? "true" : "false");
+        }
+        printf("]}");
+    }
+    printf("]");
+}
+} // namespace savegame_matching_oracle
+
 static void printDigOutMaterialCastCase()
 {
     constexpr uint32_t seed = 28;
@@ -3346,6 +3476,11 @@ int main()
     // 16b. Exact C4PlayerList linked count and Join capacity gate. The matrix
     //      pins zero-as-closed, one remaining slot, and exact-full rejection.
     player_join_capacity_oracle::printCases();
+    printf(",\n");
+
+    // 16c. The four MatchingLevel passes RestoreSavegameInfos runs when it
+    //      associates joining players with a savegame's stored players.
+    savegame_matching_oracle::printCases();
     printf(",\n");
 
     // 17. Exact DigOutMaterialCast spawn arguments and the twenty following
