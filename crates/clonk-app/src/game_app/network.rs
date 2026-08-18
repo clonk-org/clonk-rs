@@ -7790,6 +7790,16 @@ impl GameApp {
             &[&error],
         );
         tracing::error!(%message, "league server refused the host registration");
+        // A refused registration is a dismissible notice, not a failed host —
+        // the round goes on unregistered either way. A dedicated server has no
+        // renderer to draw the notice and no input to dismiss it, and
+        // `poll_startup_network_connection` reaches here from `GameApp::update`,
+        // which the console event loop drives, so drawing it would wedge the
+        // server behind a modal nobody can answer. The log above is the whole
+        // notice there.
+        if self.headless {
+            return Ok(());
+        }
         self.push_league_end_error_dialog(
             message.clone(),
             clonk_frontend::message_dialog::MessageDialogButtons::OK_CANCEL,
