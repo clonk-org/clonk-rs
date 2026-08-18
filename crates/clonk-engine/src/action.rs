@@ -624,6 +624,14 @@ impl ActionProcedure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionLibrary {
     default: String,
+    /// Deliberately still on `RandomState` even though `spec_for_entry` probes
+    /// it on the hot path: `chop_action`
+    /// (`compat/contexts.rs`) is a `find_map` over these entries, so which
+    /// `Chop` action a definition reports depends on iteration order and
+    /// reaches simulation state. Making the seed fixed would only freeze that
+    /// choice per build; it has to become an explicit total order — the
+    /// physical ActMap slot order `physical` already preserves — before this
+    /// map can carry the engine hasher.
     specs: HashMap<String, ActionSpec>,
     /// Names physically declared in the ActMap/configuration. `specs` also
     /// contains a convenience default action that must not become visible to

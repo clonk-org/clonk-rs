@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::{DefinitionRect, ObjectId, Vector2};
 
@@ -55,9 +55,13 @@ pub struct SectorMap {
     height: i32,
     sectors: Vec<Sector>,
     outside: Sector,
-    memberships: HashMap<ObjectId, SectorMembership>,
+    /// Both maps are probed by `ObjectId` from `update` on every moved object
+    /// and are never iterated: `ranks` is rebuilt from `order`, the explicit
+    /// total order, and every read is a `get`/`insert`/`remove`. So they carry
+    /// the engine's fixed-seed hasher rather than `RandomState`'s.
+    memberships: rustc_hash::FxHashMap<ObjectId, SectorMembership>,
     order: Vec<ObjectId>,
-    ranks: HashMap<ObjectId, usize>,
+    ranks: rustc_hash::FxHashMap<ObjectId, usize>,
 }
 
 impl SectorMap {
@@ -79,9 +83,9 @@ impl SectorMap {
             height,
             sectors,
             outside: Sector::new(-1, -1),
-            memberships: HashMap::new(),
+            memberships: rustc_hash::FxHashMap::default(),
             order: Vec::new(),
-            ranks: HashMap::new(),
+            ranks: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -628,7 +632,7 @@ fn remove_id(ids: &mut Vec<ObjectId>, id: ObjectId) {
 }
 
 fn insert_index_by_rank(
-    ranks: &HashMap<ObjectId, usize>,
+    ranks: &rustc_hash::FxHashMap<ObjectId, usize>,
     rank: usize,
     ids: &[ObjectId],
     id: ObjectId,

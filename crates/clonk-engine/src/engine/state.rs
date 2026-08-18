@@ -1657,7 +1657,7 @@ impl Engine {
 
     pub(crate) fn run_effect_events_for_object(
         definition: &Definition,
-        definitions: &HashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
         game_over_triggered: bool,
         mut rng: LcgRng,
         object_id: ObjectId,

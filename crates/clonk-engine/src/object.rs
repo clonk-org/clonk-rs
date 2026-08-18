@@ -3790,7 +3790,7 @@ impl Object {
         materials: &MaterialSet,
         mut landscape: Option<&mut Landscape>,
         action_library: &ActionLibrary,
-        definitions: &HashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
         players: &HashMap<i32, Player>,
     ) -> CommandQueueOutcome {
         #[cfg(test)]

@@ -281,7 +281,7 @@ impl Engine {
     }
 
     fn host_world_object(
-        definitions: &HashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
         object: &Object,
     ) -> HostWorldObject {
         Self::host_world_object_with_snapshot(
@@ -292,7 +292,7 @@ impl Engine {
     }
 
     fn host_world_object_with_snapshot(
-        definitions: &HashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
         object: &Object,
         state_snapshot: Rc<ObjectState>,
     ) -> HostWorldObject {
@@ -300,7 +300,7 @@ impl Engine {
     }
 
     fn host_world_object_projection(
-        definitions: &HashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
         object: &Object,
     ) -> HostWorldObject {
         #[cfg(test)]
