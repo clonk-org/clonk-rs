@@ -17070,3 +17070,108 @@ fn test_loading_state(
         offline_random_seed: None,
     }
 }
+
+/// Proximity voice has no C++ oracle, so the source rule is a decision, and
+/// these are the two cases that previously fell out of the cursor lookup rather
+/// than being stated: an observer, which has no crew to mix from, and a client
+/// holding more than one local player, where the source would otherwise be
+/// whichever player happened to be looked up first.
+#[test]
+fn an_observer_is_not_a_voice_source_and_a_multi_player_client_speaks_as_its_selected_one() {
+    let mut app = new_classic_running_sandbox_app();
+    let local_client = 7;
+    let local_player = app.local_owner;
+    app.engine
+        .test_player_mut(local_player)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    app.snapshot = app.engine.snapshot();
+
+    // A selected crew is what makes a participant a source.
+    assert!(crate::voice_chat::authenticated_selected_voice_crew(
+        &app.snapshot,
+        local_client,
+        local_player,
+    )
+    .is_some());
+
+    // An observer at the same client: joined and active, but holding no crew,
+    // so there is no selected cursor to mix from.
+    let observer = 33;
+    app.engine
+        .register_player(PlayerConfig::new(observer, "Observer"))
+        .test_value();
+    app.engine
+        .test_player_mut(observer)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    app.snapshot = app.engine.snapshot();
+    assert!(
+        app.snapshot
+            .players
+            .iter()
+            .any(|player| player.id == observer && player.cursor.is_none()),
+        "the observer holds no crew"
+    );
+    assert!(
+        crate::voice_chat::authenticated_selected_voice_crew(
+            &app.snapshot,
+            local_client,
+            observer,
+        )
+        .is_none(),
+        "an observer has no position to mix from"
+    );
+    assert!(
+        app.local_voice_identity().is_none(),
+        "and with no network attached this client is no local source either"
+    );
+
+    // A second local player at the same client. Each player keeps its own
+    // source, so the receiving side needs no tie-break: it mixes the claimed
+    // player's own crew.
+    let second_player = 21;
+    app.engine
+        .register_player(PlayerConfig::new(second_player, "Second local"))
+        .test_value();
+    app.engine
+        .test_player_mut(second_player)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    let second_cursor = app.engine.spawn_test_object(
+        SpawnConfig::new("CLNK")
+            .with_owner(second_player)
+            .with_position(Vector2::new(320, 140)),
+    );
+    app.engine
+        .test_player_mut(second_player)
+        .set_cursor(Some(second_cursor));
+    app.snapshot = app.engine.snapshot();
+
+    let second_source = crate::voice_chat::authenticated_selected_voice_crew(
+        &app.snapshot,
+        local_client,
+        second_player,
+    )
+    .test_value();
+    assert_eq!(
+        second_source.id, second_cursor,
+        "the claimed player is mixed from its own crew, not another local player's"
+    );
+    let first_source = crate::voice_chat::authenticated_selected_voice_crew(
+        &app.snapshot,
+        local_client,
+        local_player,
+    )
+    .test_value();
+    assert_ne!(
+        first_source.id, second_source.id,
+        "two local players are two independently positioned sources"
+    );
+
+    // Ownership is still revalidated: the same player claimed by a different
+    // client is not a source at all.
+    assert!(crate::voice_chat::authenticated_selected_voice_crew(
+        &app.snapshot,
+        local_client + 1,
+        second_player,
+    )
+    .is_none());
+}
