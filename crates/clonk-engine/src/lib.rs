@@ -7507,8 +7507,16 @@ pub struct Engine {
     /// `FnSetNextMission` substitutes for omitted arguments. Presentation text
     /// is host state, so it stays out of the serialized `EngineState`.
     pub(crate) next_mission_defaults: (String, String),
+    /// Keyed by `DefinitionId`, so the per-tick probes from
+    /// `active_solid_mask_indices` pay a fixed-seed hash rather than
+    /// `RandomState`'s. Every iteration over this map is order-independent:
+    /// four `values_mut()` loops assign the same value to every entry
+    /// (`engine/config.rs`, `engine/definitions.rs`, `engine/host_tables.rs`
+    /// twice), `active_solid_mask_indices` reduces with `.any()`,
+    /// `report_unresolved_inherited` only logs, and `definition_ids` is
+    /// consumed into keyed maps and `.any()` predicates.
     #[doc(hidden)]
-    pub(crate) definitions: HashMap<DefinitionId, Definition>,
+    pub(crate) definitions: rustc_hash::FxHashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
     /// registration order (C4AulScript::Child0 walk, C4AulLink.cpp:31),
     /// which decides the overload chain when several appends hit the same
@@ -8482,7 +8490,7 @@ enum MovementContactDispatch {
 
 fn movement_live_config_for(
     object: &Object,
-    definitions: &HashMap<DefinitionId, Definition>,
+    definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
     layer_bounds: Option<LayerMovementBounds>,
 ) -> MovementLiveConfig {
     let definition = definitions.get(&object.definition_id);
@@ -9946,7 +9954,7 @@ impl Engine {
                 compat::DEFAULT_NEXT_MISSION_TEXT.to_string(),
                 compat::DEFAULT_NEXT_MISSION_DESCRIPTION.to_string(),
             ),
-            definitions: HashMap::new(),
+            definitions: rustc_hash::FxHashMap::default(),
             definition_load_order: Vec::new(),
             runtime_definition_order: Rc::new(Vec::new()),
             script_globals: clonk_script::new_global_variables(),
@@ -11563,7 +11571,7 @@ fn dispatch_global_effect_callback(
 fn resolve_effect_dispatch_definition<'a>(
     effect: &EffectState,
     world: &HostWorldContext,
-    definitions: &'a HashMap<DefinitionId, Definition>,
+    definitions: &'a rustc_hash::FxHashMap<DefinitionId, Definition>,
     live_host: Option<(ObjectId, &str)>,
     fallback: &'a Definition,
 ) -> &'a Definition {

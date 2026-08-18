@@ -1543,6 +1543,18 @@ mod hasher_tests {
         let second = rustc_hash::FxBuildHasher;
         assert_eq!(first.hash_one(id), second.hash_one(id));
 
+        // `Engine::definitions` is keyed by `DefinitionId`, which the
+        // per-tick `active_solid_mask_indices` probe hashes on every frame.
+        let definition = DefinitionId::from("CLNK");
+        assert_eq!(
+            rustc_hash::FxBuildHasher.hash_one(&definition),
+            rustc_hash::FxBuildHasher.hash_one(&definition)
+        );
+        assert_ne!(
+            std::hash::RandomState::new().hash_one(&definition),
+            std::hash::RandomState::new().hash_one(&definition)
+        );
+
         let seeded = std::hash::RandomState::new();
         let reseeded = std::hash::RandomState::new();
         assert_ne!(seeded.hash_one(id), reseeded.hash_one(id));

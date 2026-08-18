@@ -425,7 +425,7 @@ impl Engine {
         mover: &mut Object,
         before: &mut [Object],
         after: &mut [Object],
-        definitions: &HashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
         materials: &MaterialSet,
         mass_movers: &mut MassMoverSet,
         landscape: &mut Landscape,
