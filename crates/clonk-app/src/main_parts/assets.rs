@@ -56,6 +56,9 @@ pub(crate) const PRESENTATION_BENCHMARK_KEEP_RUNNING_ENV: &str =
 pub(crate) const PRESENTATION_BENCHMARK_WARMUP: Duration = Duration::from_secs(2);
 pub(crate) const SAVE_THUMBNAIL_WIDTH: u32 = 200;
 pub(crate) const SAVE_THUMBNAIL_HEIGHT: u32 = 150;
+/// The same size the retained GPU renderer reduces a presentation to when a
+/// frame is read back only to become a save thumbnail.
+pub(crate) const SAVE_THUMBNAIL_EXTENT: [u32; 2] = [SAVE_THUMBNAIL_WIDTH, SAVE_THUMBNAIL_HEIGHT];
 pub(crate) static LOBBY_PRELOAD_SERIAL: AtomicU64 = AtomicU64::new(0);
 pub(crate) const NETWORK_CONTROL_OVERFLOW_LIMIT: u32 = 3;
 pub(crate) const NETWORK_RENDER_SKIP_BEHIND: u32 = 25;
