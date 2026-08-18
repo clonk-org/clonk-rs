@@ -606,9 +606,59 @@ impl Engine {
             }
         }
 
+        let errors = reports.len();
         for (host, diagnostic) in reports {
             tracing::error!(%host, %diagnostic, "script link error");
         }
+        self.report_link_summary(errors);
+    }
+
+    /// `C4AulScriptEngine::Link`'s closing tally
+    /// (`C4AulLink.cpp:299-301`):
+    ///
+    /// ```text
+    /// LogNTr(spdlog::level::info, "C4AulScriptEngine linked - {} line{}, {} warning{}, {} error{}",
+    ///     lineCnt, ..., warnCnt, ..., errCnt, ...);
+    /// ```
+    ///
+    /// Each counter agrees singular/plural separately, and C++ resets all of
+    /// them (plus `nonStrictCnt`) immediately after. Nothing accumulates across
+    /// links here either: the counts are derived from the hosts present at this
+    /// link, so a relink reports that link rather than a running total.
+    ///
+    /// The warning count is the port's own parse diagnostics. C4Aul's `warnCnt`
+    /// counts its `Warn` call sites (`C4AulParse.cpp:224,237`), which are not
+    /// the same set, so this number is comparable across port runs rather than
+    /// against a C++ build.
+    fn report_link_summary(&self, errors: usize) {
+        let (mut lines, mut warnings) = (0_usize, 0_usize);
+        let mut tally = |host: &clonk_script::Engine| {
+            lines += host.linked_source_lines();
+            warnings += host.linked_parse_warnings();
+        };
+        for definition in self.definitions.values() {
+            tally(&definition.script);
+        }
+        for source in &self.script_link_sources {
+            if let ScriptLinkSource::Script { script, .. } = source {
+                tally(script);
+            }
+        }
+
+        fn plural(count: usize) -> &'static str {
+            if count == 1 {
+                ""
+            } else {
+                "s"
+            }
+        }
+
+        tracing::info!(
+            "C4AulScriptEngine linked - {lines} line{}, {warnings} warning{}, {errors} error{}",
+            plural(lines),
+            plural(warnings),
+            plural(errors),
+        );
     }
 
     /// Rebuilds the complete script tree from its preparsed hosts. Shared

@@ -98,6 +98,40 @@ fn an_appendto_hosts_hard_inherited_resolves_through_its_target() {
         .is_err());
 }
 
+/// `C4AulScriptEngine::Link` closes with a tally of lines, warnings and errors,
+/// each agreeing singular/plural separately (`C4AulLink.cpp:299-301`).
+///
+/// The counts come from the hosts present at *this* link, so a relink reports
+/// that link rather than a running total — C++ resets all of its counters
+/// immediately after logging them.
+#[test]
+fn the_link_summary_counts_lines_and_errors_of_this_link() {
+    let mut engine = Engine::new();
+    // Three lines, and an `inherited()` with no target anywhere: one link error.
+    register(
+        &mut engine,
+        "ADEF",
+        "#strict\nfunc Orphan() { return inherited(); }\n",
+    );
+    crate::TestValueExt::test_value(engine.relink_scripts());
+
+    let host = crate::TestValueExt::test_value(engine.definitions.get("ADEF"));
+    assert_eq!(
+        host.script.linked_source_lines(),
+        2,
+        "the host reports the lines it parsed"
+    );
+
+    // Relinking the same tree must not double the line count.
+    crate::TestValueExt::test_value(engine.relink_scripts());
+    let host = crate::TestValueExt::test_value(engine.definitions.get("ADEF"));
+    assert_eq!(
+        host.script.linked_source_lines(),
+        2,
+        "a relink reports this link, not a running total"
+    );
+}
+
 #[test]
 fn initial_link_preparses_every_host_constant_before_function_literal_holds() {
     let mut engine = Engine::new();

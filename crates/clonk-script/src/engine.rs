@@ -971,13 +971,30 @@ pub struct Script {
     var_decls: Vec<VarDecl>, // Script-level variable declarations
     string_literals: Vec<String>,
     parse_diagnostics: Vec<ParseError>,
+    /// Lines this script's source occupies, for the link summary's line count.
+    ///
+    /// `C4AulScript::Parse` accumulates `SGetLine(Script.getData(), ...end)`
+    /// into `Game.ScriptEngine.lineCnt` (`C4AulParse.cpp:3601`), which is the
+    /// 1-based line number at the end of the source.
+    source_lines: usize,
+}
+
+/// `SGetLine` over a whole source: the 1-based line number at its end.
+///
+/// An empty source is zero lines; otherwise it is the newline count plus one
+/// for the final line, whether or not it ends in a newline.
+fn count_source_lines(source: &str) -> usize {
+    if source.is_empty() {
+        return 0;
+    }
+    source.bytes().filter(|byte| *byte == b'\n').count() + usize::from(!source.ends_with('\n'))
 }
 
 impl Script {
     pub fn compile(source: &str) -> Result<Self, ParseError> {
         let mut parser = Parser::new(source);
         let (ast, diagnostics) = parser.parse_script_recovering();
-        Ok(Self::from_ast(ast, diagnostics))
+        Ok(Self::from_ast(ast, diagnostics, count_source_lines(source)))
     }
 
     /// Compile a System/global script whose legacy old-style functions have
@@ -986,14 +1003,14 @@ impl Script {
     pub fn compile_global(source: &str) -> Result<Self, ParseError> {
         let mut parser = Parser::new_global_script(source);
         let (ast, diagnostics) = parser.parse_script_recovering();
-        Ok(Self::from_ast(ast, diagnostics))
+        Ok(Self::from_ast(ast, diagnostics, count_source_lines(source)))
     }
 
     #[doc(hidden)]
     pub fn compile_c4_string(source: &str) -> Result<Self, ParseError> {
         let mut parser = Parser::with_strict_level_c4_string(source, None);
         let (ast, diagnostics) = parser.parse_script_recovering();
-        Ok(Self::from_ast(ast, diagnostics))
+        Ok(Self::from_ast(ast, diagnostics, count_source_lines(source)))
     }
 
     /// Compile a byte-projected System/global script while retaining the
@@ -1002,10 +1019,10 @@ impl Script {
     pub fn compile_global_c4_string(source: &str) -> Result<Self, ParseError> {
         let mut parser = Parser::new_global_script_c4_string(source);
         let (ast, diagnostics) = parser.parse_script_recovering();
-        Ok(Self::from_ast(ast, diagnostics))
+        Ok(Self::from_ast(ast, diagnostics, count_source_lines(source)))
     }
 
-    fn from_ast(ast: AstScript, parse_diagnostics: Vec<ParseError>) -> Self {
+    fn from_ast(ast: AstScript, parse_diagnostics: Vec<ParseError>, source_lines: usize) -> Self {
         let mut functions: FxHashMap<String, Function> = FxHashMap::default();
         let mut local_function_order = Vec::new();
         let mut global_function_order = Vec::new();
@@ -1038,6 +1055,7 @@ impl Script {
             var_decls: ast.var_decls,
             string_literals: ast.string_literals,
             parse_diagnostics,
+            source_lines,
         }
     }
 
@@ -1075,6 +1093,11 @@ impl Script {
     /// AB_ERR analogue that raises if execution reaches the bad suffix.
     pub fn parse_diagnostics(&self) -> &[ParseError] {
         &self.parse_diagnostics
+    }
+
+    /// Lines of source this script was parsed from.
+    pub fn source_lines(&self) -> usize {
+        self.source_lines
     }
 
     /// Returns the script body used by C4AulScript::AppendTo after global
@@ -1179,6 +1202,12 @@ pub struct Engine {
     string_literals: Vec<String>,
     /// Deferred preparser failures for named static-constant initializers.
     static_const_link_errors: Vec<StaticConstLinkError>,
+    /// Source lines and parse warnings of every script this host has taken,
+    /// for the link summary (`C4AulLink.cpp:299-301`). Accumulated on add and
+    /// cleared by a replace, so a relink reports that link and not a running
+    /// total.
+    linked_source_lines: usize,
+    linked_parse_warnings: usize,
 }
 
 /// A hard `inherited(...)` left without an overload target once linking
@@ -1306,6 +1335,8 @@ impl Engine {
             string_registrations: Some(new_string_registrations()),
             string_literals: Vec::new(),
             static_const_link_errors: Vec::new(),
+            linked_source_lines: 0,
+            linked_parse_warnings: 0,
         }
     }
 
@@ -1494,6 +1525,12 @@ impl Engine {
                 register_c4_literal_string(registrations, literal);
             }
         }
+        self.linked_source_lines = self
+            .linked_source_lines
+            .saturating_add(script.source_lines());
+        self.linked_parse_warnings = self
+            .linked_parse_warnings
+            .saturating_add(script.parse_diagnostics().len());
         self.string_literals
             .extend(script.string_literals.iter().cloned());
         for function in script.functions.values_mut() {
@@ -1568,6 +1605,10 @@ impl Engine {
             function.bind_global_link_host(self.host_identity);
         }
         self.owner_strict_level = Some(script.strict_level);
+        // Replacement, not accumulation: the host now carries this script
+        // alone, so the link summary must count it alone.
+        self.linked_source_lines = script.source_lines();
+        self.linked_parse_warnings = script.parse_diagnostics().len();
         self.functions.clear();
         self.local_function_order
             .clone_from(&script.local_function_order);
@@ -2816,6 +2857,16 @@ impl Engine {
     /// Own linked script functions, including inherited definition functions.
     /// Consumers such as C4MN_Context need the retained C4Aul description
     /// metadata, not merely name-based execution.
+    /// Total source lines of the scripts linked into this host.
+    pub fn linked_source_lines(&self) -> usize {
+        self.linked_source_lines
+    }
+
+    /// Total parse warnings of the scripts linked into this host.
+    pub fn linked_parse_warnings(&self) -> usize {
+        self.linked_parse_warnings
+    }
+
     pub fn functions(&self) -> &FxHashMap<String, Function> {
         &self.functions
     }
@@ -3971,6 +4022,32 @@ mod tests {
 
         assert_eq!(value, Value::Array(vec![Value::Object(42), Value::Int(7)]));
         assert_eq!(cells.snapshot().get("Shared"), Some(&Value::Int(7)));
+    }
+
+    /// The link summary's line count comes off the host, and a relink resets
+    /// every host to its base script before re-applying appends
+    /// (`C4AulScriptEngine::Link` re-parses rather than accumulating, and
+    /// resets `lineCnt` right after logging it, `C4AulLink.cpp:299-303`).
+    /// A replace that left the previous script's count in place would report
+    /// the *old* tree on every link after the first.
+    #[test]
+    fn replace_script_counts_the_replacement_alone() {
+        let mut engine = Engine::new();
+        engine
+            .load_script("func Probe() { return 1; }")
+            .expect("base script loads");
+        assert_eq!(engine.linked_source_lines(), 1);
+
+        engine.replace_script(
+            compile("func Probe() { return 2; }\nfunc Other() { return 7; }\n"),
+            true,
+        );
+
+        assert_eq!(
+            engine.linked_source_lines(),
+            2,
+            "the host counts its current script, not the one it replaced"
+        );
     }
 
     #[test]
