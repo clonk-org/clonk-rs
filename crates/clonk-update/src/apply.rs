@@ -65,8 +65,8 @@ use crate::decide::PlannedComponent;
 use crate::digest::{verify_file, DigestError};
 use crate::extract::{extract_archive, ExtractError};
 use crate::journal::{
-    safe_child_name, Journal, JournalError, JournalStep, PreviousInstalledState, StepState,
-    TransactionPhase,
+    safe_child_name, InstallIdentity, Journal, JournalError, JournalStep, PreviousInstalledState,
+    StepState, TransactionPhase,
 };
 use crate::state::{InstalledState, InstalledStateSnapshot, StateError};
 use clonk_platform::AppPaths;
@@ -1026,7 +1026,14 @@ fn resolve(layout: &InstallLayout, component: &StagedComponent) -> Result<Replac
 fn validate_journal_layout(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError> {
     if journal.schema == crate::journal::JOURNAL_SCHEMA {
         let requested = canonical_install_root(layout)?;
-        if journal.install_root != requested {
+        // The pathname is only a proxy for the install. When both sides expose
+        // a filesystem identity it answers the question directly, and a rename
+        // stops looking like a different install.
+        let identities_agree = matches!(
+            (journal.install_identity, InstallIdentity::of(&requested)),
+            (Some(recorded), Some(current)) if recorded == current
+        );
+        if !identities_agree && journal.install_root != requested {
             return Err(ApplyError::InstallRootMismatch {
                 recorded: journal.install_root.clone(),
                 requested,
@@ -1882,11 +1889,67 @@ pub fn resume_interrupted_update(install_root: &Path) -> Result<ResumeOutcome, A
 /// tree, so every retry continues that rollback. A legacy journal is first
 /// upgraded with the missing recovery state; one without component digests, or
 /// one for a macOS bundle, is rejected before recovery mutates the install.
+/// Where this install's in-flight transaction actually lives.
+///
+/// Normally its own [`InstallLayout::work_dir`]. A bundle keeps its sidecar
+/// beside the `.app` under the bundle's *name*, so renaming an interrupted
+/// bundle leaves the sidecar under the old one; the rename is invisible to the
+/// name-derived path but not to the recorded identity, so the sibling namespace
+/// is searched for the journal this install owns.
+///
+/// A bundle moved to a different parent directory is out of reach of this:
+/// its sidecar stays in the namespace beside where it used to be, and nothing
+/// short of a filesystem-wide search or a separate registry would find it.
+fn transaction_dir_for(layout: &InstallLayout) -> Result<PathBuf, ApplyError> {
+    let own = layout.work_dir();
+    if !layout.is_bundle() || Journal::load(&own)?.is_some() {
+        return Ok(own);
+    }
+    let Ok(root) = canonical_install_root(layout) else {
+        return Ok(own);
+    };
+    let Some(identity) = InstallIdentity::of(&root) else {
+        return Ok(own);
+    };
+    let Some(namespace) = own.parent() else {
+        return Ok(own);
+    };
+    let Ok(entries) = std::fs::read_dir(namespace) else {
+        return Ok(own);
+    };
+    let mut adopted: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|candidate| *candidate != own)
+        .filter(|candidate| {
+            matches!(
+                Journal::load(candidate),
+                Ok(Some(journal)) if journal.install_identity == Some(identity)
+            )
+        })
+        .collect();
+    // Deterministic when more than one names this install, which only a
+    // hand-edited namespace can produce.
+    adopted.sort();
+    let Some(found) = adopted.into_iter().next() else {
+        return Ok(own);
+    };
+    // Move it into this bundle's own namespace rather than working out of the
+    // old one: every staged, backup and quarantine path is derived from
+    // `work_dir()`, so a transaction read from somewhere else would look for
+    // its backups under the new name and find nothing.
+    if own.exists() {
+        std::fs::remove_dir(&own).map_err(io("clearing the transaction directory", &own))?;
+    }
+    rename(&found, &own)?;
+    Ok(own)
+}
+
 pub fn resume_interrupted_update_with(
     layout: &InstallLayout,
     ops: &dyn PlatformOps,
 ) -> Result<ResumeOutcome, ApplyError> {
-    let work = layout.work_dir();
+    let work = transaction_dir_for(layout)?;
     let journal_present = Journal::load(&work)?.is_some();
     if let Err(error) = ensure_dir(&work) {
         if !journal_present
@@ -1923,6 +1986,17 @@ pub fn resume_interrupted_update_with(
     let Some(mut journal) = Journal::load(&work)? else {
         return Ok(ResumeOutcome::NothingToDo);
     };
+    // A journal recorded against a different install belongs to whatever was
+    // at this path before. Leaving it untouched is the whole point: adopting
+    // it would restore a stranger's backup over this install.
+    if let (Some(recorded), Some(current)) = (
+        journal.install_identity,
+        InstallIdentity::of(&canonical_install_root(layout)?),
+    ) {
+        if recorded != current {
+            return Ok(ResumeOutcome::NothingToDo);
+        }
+    }
     validate_journal_layout(layout, &journal)?;
     upgrade_legacy_journal(layout, &mut journal, &work)?;
     validate_journal_layout(layout, &journal)?;
@@ -3808,6 +3882,100 @@ mod tests {
         assert!(
             matches!(error, ApplyError::MissingBundleRecoveryState),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_install_at_the_same_path_refuses_the_stale_recovery_state() {
+        // The pathname says "same location", which is not the same question as
+        // "same install". A bundle removed and replaced by an unrelated one
+        // leaves the sidecar behind, and the replacement must not consume it.
+        let directory = TempDir::new().expect("bundle parent");
+        let path = directory.path().join("Clonk.app");
+        let stranger = InstallLayout::macos_bundle(path.clone());
+        let nonce = "interrupted-by-a-previous-install";
+        write_file(&stranger.root().join("Contents/Info.plist"), "metadata");
+        let planet = stranger.data_dir().join("planet/System.c4g/Rank.txt");
+        write_file(&planet, "the replacement install");
+        let backup = stranger.quarantine_dir(nonce).join("planet");
+        write_file(
+            &backup.join("System.c4g/Rank.txt"),
+            "the interrupted install",
+        );
+
+        let mut step = JournalStep::new("planet", &"aa".repeat(32), "Contents/Resources/planet");
+        step.state = StepState::BackupMoved;
+        let mut journal = Journal::new(
+            "0.7.0",
+            nonce,
+            canonical_install_root(&stranger).expect("canonical bundle"),
+            vec![step],
+        );
+        journal.previous_bundle_icon_present = Some(false);
+        // Same canonical path, a different install: exactly what removing the
+        // old bundle and installing a new one at that path leaves behind.
+        journal.install_identity = Some(InstallIdentity { volume: 0, file: 0 });
+        journal
+            .save(&stranger.work_dir())
+            .expect("save the stale journal");
+
+        let recovery = resume_interrupted_update_with(&stranger, &FakePlatform::new())
+            .expect("a stranger declines the state rather than failing");
+
+        assert_eq!(recovery, ResumeOutcome::NothingToDo);
+        assert_eq!(
+            std::fs::read_to_string(&planet).expect("read the untouched replacement"),
+            "the replacement install"
+        );
+    }
+
+    #[test]
+    fn a_renamed_bundle_still_recovers_its_own_transaction() {
+        // `install_root` no longer matches after a rename, but the identity
+        // does, and the sidecar is found by identity in the parent namespace.
+        let directory = TempDir::new().expect("bundle parent");
+        let original = InstallLayout::macos_bundle(directory.path().join("Clonk.app"));
+        write_file(&original.root().join("Contents/Info.plist"), "metadata");
+        // The data directory has to exist for the restore to land in it; the
+        // interrupted `planet` is the one thing missing from it.
+        write_file(&original.data_dir().join("Graphics.c4g/Keep.txt"), "kept");
+        let nonce = "renamed-mid-update";
+        let backup = original.quarantine_dir(nonce).join("planet");
+        write_file(
+            &backup.join("System.c4g/Rank.txt"),
+            "the interrupted install",
+        );
+
+        let mut step = JournalStep::new("planet", &"aa".repeat(32), "Contents/Resources/planet");
+        step.state = StepState::BackupMoved;
+        step.destination_existed = Some(true);
+        let mut journal = Journal::new(
+            "0.7.0",
+            nonce,
+            canonical_install_root(&original).expect("canonical bundle"),
+            vec![step],
+        );
+        journal.previous_bundle_icon_present = Some(false);
+        journal
+            .save(&original.work_dir())
+            .expect("save the journal for the original name");
+
+        let renamed_path = directory.path().join("Clonk Renamed.app");
+        std::fs::rename(original.root(), &renamed_path).expect("rename the bundle");
+        let renamed = InstallLayout::macos_bundle(renamed_path);
+
+        let recovery = resume_interrupted_update_with(&renamed, &FakePlatform::new())
+            .expect("the renamed bundle owns this transaction");
+
+        assert_ne!(
+            recovery,
+            ResumeOutcome::NothingToDo,
+            "the sidecar has to be found under the bundle's old name"
+        );
+        assert_eq!(
+            std::fs::read_to_string(renamed.data_dir().join("planet/System.c4g/Rank.txt"))
+                .expect("the backup was restored into the renamed bundle"),
+            "the interrupted install"
         );
     }
 
