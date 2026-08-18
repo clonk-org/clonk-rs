@@ -3914,7 +3914,7 @@ mod tests {
         journal.previous_bundle_icon_present = Some(false);
         // Same canonical path, a different install: exactly what removing the
         // old bundle and installing a new one at that path leaves behind.
-        journal.install_identity = Some(InstallIdentity { volume: 0, file: 0 });
+        journal.install_identity = Some(InstallIdentity::Inode { volume: 0, file: 0 });
         journal
             .save(&stranger.work_dir())
             .expect("save the stale journal");

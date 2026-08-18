@@ -38,18 +38,29 @@ pub const JOURNAL_FILE_NAME: &str = "clonk-update-journal.json";
 /// the wrong question twice: an unrelated install placed at a path that once
 /// held an interrupted one matches it, and an interrupted install that has been
 /// renamed no longer does.
+/// Which of the two the platform could supply. The variants never mix in
+/// practice — an install is recovered by the build that wrote its journal — and
+/// comparing across them is inequality, which declines rather than adopts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstallIdentity {
-    /// `st_dev` on unix, the volume serial number on Windows.
-    pub volume: u64,
-    /// `st_ino` on unix, the file index on Windows.
-    pub file: u64,
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum InstallIdentity {
+    /// `st_dev` and `st_ino`.
+    Inode { volume: u64, file: u64 },
+    /// Creation time, in the platform's own units.
+    ///
+    /// Windows' real identity — `volume_serial_number` and `file_index` — is
+    /// still behind the unstable `windows_by_handle` feature, and reaching it
+    /// otherwise means `GetFileInformationByHandle` through an FFI dependency.
+    /// Creation time is stable, needs no dependency, and answers the same two
+    /// questions this is asked: a rename preserves it, and a directory created
+    /// at a path an earlier install used does not share it.
+    Created { at: u64 },
 }
 
 impl InstallIdentity {
     /// Reads the identity of an existing directory. `None` when the platform
-    /// does not expose one, which keeps recovery on the pathname check rather
-    /// than failing an install that is otherwise fine.
+    /// exposes neither, which keeps recovery on the pathname check rather than
+    /// failing an install that is otherwise fine.
     pub fn of(path: &Path) -> Option<Self> {
         let metadata = std::fs::metadata(path).ok()?;
         Self::from_metadata(&metadata)
@@ -58,7 +69,7 @@ impl InstallIdentity {
     #[cfg(unix)]
     fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
         use std::os::unix::fs::MetadataExt;
-        Some(Self {
+        Some(Self::Inode {
             volume: metadata.dev(),
             file: metadata.ino(),
         })
@@ -67,9 +78,8 @@ impl InstallIdentity {
     #[cfg(windows)]
     fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
         use std::os::windows::fs::MetadataExt;
-        Some(Self {
-            volume: u64::from(metadata.volume_serial_number()?),
-            file: metadata.file_index()?,
+        Some(Self::Created {
+            at: metadata.creation_time(),
         })
     }
 
