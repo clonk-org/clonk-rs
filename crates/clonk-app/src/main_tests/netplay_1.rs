@@ -6743,3 +6743,34 @@ fn scale_three_open_startup_dialog_keeps_native_text_in_z_order() {
     );
     assert_one_pixel_native_edge(&chrome, &rendered, 1920, 1440, upper, 3.0);
 }
+
+/// The host's async deadline drops an absent client's control rather than
+/// deferring it (`force_expired_async_control`, mirroring `PackCompleteCtrl`,
+/// C4GameControlNetwork.cpp:741-784), and `ControlCoordinator::ingest` then
+/// rejects the late packet as stale. Losing input silently is indistinguishable
+/// from an engine bug, so the attribution that resolves the wait carries the
+/// outcome and the client records it.
+#[test]
+fn a_client_learns_when_the_async_deadline_dropped_its_control() {
+    let mut app = new_state_only_menu_app(320, 200);
+    assert_eq!(app.discarded_control_ticks, 0);
+    assert_eq!(app.last_reported_discarded_control_tick, None);
+
+    app.note_discarded_control_tick(41);
+    assert_eq!(app.discarded_control_ticks, 1);
+    assert_eq!(app.last_reported_discarded_control_tick, Some(41));
+
+    // A redelivery of the same tick is the same loss, so the player is told
+    // once; the count still reflects every observation.
+    app.note_discarded_control_tick(41);
+    assert_eq!(app.discarded_control_ticks, 2);
+    assert_eq!(app.last_reported_discarded_control_tick, Some(41));
+
+    app.note_discarded_control_tick(42);
+    assert_eq!(app.discarded_control_ticks, 3);
+    assert_eq!(app.last_reported_discarded_control_tick, Some(42));
+
+    // The notice is a diagnostic and never a control: recording it queues
+    // nothing for the synchronized stream.
+    assert!(app.network.is_none());
+}

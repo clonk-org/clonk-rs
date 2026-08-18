@@ -2725,6 +2725,7 @@ mod tests {
             tick: 73,
             waited_for_recipient: false,
             waited_for_other: true,
+            discarded_recipient_control: false,
         };
 
         record_host_control_wait_attribution(7, attribution, &snapshot);

@@ -440,6 +440,7 @@ pub(crate) async fn run_host(
         ),
         control_mode: config.initial_status.control_mode,
         control_waiting_clients: BTreeMap::new(),
+        control_discarded_clients: BTreeMap::new(),
         straggler_late: Default::default(),
         peer_capabilities: Default::default(),
         async_control_wait: None,
@@ -1661,6 +1662,18 @@ async fn force_expired_async_control(state: &mut HostState) {
             // not failed at anything and must not be written off for it.
             *late = late.saturating_add(1);
         }
+    }
+    // Whoever is still missing at this point loses the tick: `force_current_tick`
+    // packs without them and `ControlCoordinator::ingest` rejects their packet
+    // afterwards as stale. Record it so the aggregate carries the outcome back
+    // to each affected client, which otherwise sees its input vanish with no
+    // way to tell that from an engine bug.
+    if !missing.is_empty() {
+        state
+            .control_discarded_clients
+            .entry(waiting.tick)
+            .or_default()
+            .extend(missing.iter().copied());
     }
     let ready = state.coordinator.force_current_tick();
     resolve_host_ready(ready, state).await;

@@ -390,6 +390,18 @@ pub(crate) struct GameApp {
     /// inherit. C++ reads the two separately too, and either alone makes the
     /// lobby a console lobby (C4Network2.cpp:463).
     pub(crate) headless: bool,
+    /// Control ticks this client sent that the host's async deadline gave up
+    /// on, so the input never executed anywhere
+    /// (`force_expired_async_control`, mirroring `PackCompleteCtrl`,
+    /// C4GameControlNetwork.cpp:741-784). A diagnostic count only — it is read
+    /// back by the network diagnostics and never by simulation, because the
+    /// host alone decides the timeout and every client executes the one
+    /// aggregate it broadcasts.
+    pub(crate) discarded_control_ticks: u32,
+    /// The last discarded tick already reported to the player, so a peer that
+    /// loses several ticks in a burst is described once per tick rather than
+    /// once per redelivery.
+    pub(crate) last_reported_discarded_control_tick: Option<i32>,
     /// A console command has put `Application.UseStartupDialog` back, so this
     /// session has a startup generation to return to even though it was
     /// launched without one. `/open` and `/close` both set it

@@ -15158,6 +15158,7 @@ Message=Server says Andr\xe9\r\n\
             tick: 7,
             waited_for_recipient: false,
             waited_for_other: true,
+            discarded_recipient_control: false,
         };
         manager.control_wait_attribution =
             clonk_network::ControlWaitAttributionSnapshot::from_attributions([attribution]);
@@ -15326,6 +15327,7 @@ Message=Server says Andr\xe9\r\n\
                 tick: 20,
                 waited_for_recipient: true,
                 waited_for_other: false,
+                discarded_recipient_control: false,
             },
         );
         let change = clock.calculate_performance_for_mode(2).test_value();
@@ -15354,6 +15356,7 @@ Message=Server says Andr\xe9\r\n\
                 tick: 20,
                 waited_for_recipient: false,
                 waited_for_other: true,
+                discarded_recipient_control: false,
             },
         );
         clock.calculate_performance_for_mode(2);
