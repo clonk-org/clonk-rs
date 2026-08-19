@@ -5951,3 +5951,37 @@ fn configured_scroll_smooth_drives_runtime_camera_divisor() {
         );
     }
 }
+
+#[test]
+fn a_below_floor_adapter_is_reported_as_such_not_as_a_missing_one() {
+    use clonk_surface::capability::{
+        probe_capabilities, PresentationChoice, SoftwareReason, REQUIRED_BUFFER_USAGES,
+    };
+
+    // The capability report travels inside the error that reached the caller,
+    // under whatever context was added on the way. Recovering it is what lets
+    // an operator tell "your GPU fell short" from "no GPU answered"; failing
+    // to recover it reports the wrong one, silently.
+    let report = probe_capabilities(
+        &[wgpu::TextureFormat::Bgra8Unorm],
+        1024,
+        REQUIRED_BUFFER_USAGES,
+        (2048, 480),
+    );
+    assert!(!report.is_supported());
+    let below_floor = anyhow::Error::new(clonk_surface::SurfaceError::BelowGraphicsFloor(report))
+        .context("failed to create pixel framebuffer")
+        .context("no GPU adapter on any backend");
+    assert_eq!(
+        crate::main_audio::software_choice_for_gpu_failure(&below_floor),
+        PresentationChoice::Software(SoftwareReason::BelowFloor),
+    );
+
+    // An adapter that never answered carries no report at all.
+    let no_adapter = anyhow::anyhow!("no GPU backends were attempted")
+        .context("failed to create pixel framebuffer");
+    assert_eq!(
+        crate::main_audio::software_choice_for_gpu_failure(&no_adapter),
+        PresentationChoice::Software(SoftwareReason::NoAdapter),
+    );
+}

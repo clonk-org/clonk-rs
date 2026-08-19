@@ -998,6 +998,24 @@ pub(crate) fn software_presentation_requested() -> bool {
         .is_some_and(|value| parse_config_bool(&value))
 }
 
+/// Which software reason a failed GPU build implies.
+///
+/// An adapter that answered but fell short of the floor is a different message
+/// from one that never answered, and `SoftwareReason` is only worth carrying if
+/// the right one is carried. The report travels inside the error, so it has to
+/// be recovered from the chain rather than guessed at.
+pub(crate) fn software_choice_for_gpu_failure(
+    gpu_error: &anyhow::Error,
+) -> clonk_surface::capability::PresentationChoice {
+    let below_floor = gpu_error
+        .downcast_ref::<clonk_surface::SurfaceError>()
+        .and_then(|error| match error {
+            clonk_surface::SurfaceError::BelowGraphicsFloor(report) => Some(report),
+            _ => None,
+        });
+    clonk_surface::capability::choose_presentation(false, below_floor)
+}
+
 /// Build whatever the primary window can present through.
 ///
 /// A forced request never creates a wgpu instance, adapter or device: the
@@ -1034,10 +1052,14 @@ pub(crate) fn build_primary_presentation(
     match build_framebuffer(window, size) {
         Ok(pixels) => Ok((PrimaryPresentation::Gpu(pixels), PresentationChoice::Gpu)),
         Err(gpu_error) => {
+            // Say *why* the GPU path was unavailable. An adapter that answered
+            // but fell short of the floor is a different message from one that
+            // never answered, and carrying `SoftwareReason` is only worth
+            // anything if the right one is carried.
+            let choice = software_choice_for_gpu_failure(&gpu_error);
             // Report both failures when both happen. An operator whose machine
             // has neither a GPU nor a working window system needs to see that
             // it was both, not whichever was tried last.
-            let choice = choose_presentation(false, None);
             software(choice).map_err(|software_error| {
                 software_error.context(format!(
                     "no GPU adapter was usable ({gpu_error:#}), and software \
