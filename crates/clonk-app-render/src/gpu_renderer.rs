@@ -1822,6 +1822,12 @@ pub struct GpuRendererStats {
     /// assertion rather than a reading of the upload code.
     pub shader_landscape_upload_calls: usize,
     pub shader_landscape_upload_bytes: u64,
+    /// Output texels the composition pass actually rewrote.
+    ///
+    /// The whole output on a fresh composition or a catalogue change; only the
+    /// dirty rectangle, scaled by the detail factor, when a retained output is
+    /// recomposed after a map edit.
+    pub shader_landscape_composed_texels: u64,
 }
 
 /// One painter-ordered retained scene and its coordinate transform.
@@ -3828,8 +3834,17 @@ impl RetainedGpuRenderer {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             (texture, view)
         });
-        composer.compose_into_profiled(device, queue, encoder, &view, inputs, timestamp_writes)?;
+        composer.compose_into_profiled(
+            device,
+            queue,
+            encoder,
+            &view,
+            inputs,
+            !recreated,
+            timestamp_writes,
+        )?;
         let uploads = composer.last_uploads();
+        let composed_texels = composer.last_composed_texels();
 
         let byte_len = u64::from(extent[0]) * u64::from(extent[1]) * 4;
         self.textures.insert(
@@ -3850,6 +3865,7 @@ impl RetainedGpuRenderer {
         self.last_stats.created_shader_landscape_outputs += usize::from(recreated);
         self.last_stats.shader_landscape_upload_calls += uploads.calls;
         self.last_stats.shader_landscape_upload_bytes += uploads.bytes;
+        self.last_stats.shader_landscape_composed_texels += composed_texels;
         if recreated {
             self.quad_bind_groups.clear();
             self.object_bind_groups.clear();
@@ -7643,6 +7659,8 @@ pub struct ShaderLandscapeComposer {
     retained: Option<RetainedShaderLandscape>,
     /// What the last composition wrote, for `GpuRendererStats`.
     last_uploads: ShaderLandscapeUploads,
+    /// Output texels the last composition pass rewrote.
+    last_composed_texels: u64,
 }
 
 /// One composition's GPU resources, kept across compositions.
@@ -7687,14 +7705,23 @@ impl RetainedShaderLandscape {
             self.key.extent,
             1,
         );
-        uploads.add(upload_changed_rows(
+        let shading = upload_changed_rows(
             queue,
             &self.shading,
             &mut self.shading_plane,
             shading_plane,
             shading_extent,
             2,
-        ));
+        );
+        // With shading off the plane is a 1x1 neutral texel, so its rectangle
+        // is not in map space and must not widen the map's.
+        uploads.add(match self.key.shading {
+            true => shading,
+            false => ShaderLandscapeUploads {
+                dirty: Some([0, 0, 0, 0]),
+                ..shading
+            },
+        });
         uploads
     }
 
@@ -7764,6 +7791,8 @@ impl RetainedShaderLandscape {
         let uploads = ShaderLandscapeUploads {
             calls: 1,
             bytes: atlas_bytes.len() as u64,
+            // A different catalogue re-colours every texel.
+            dirty: None,
         };
         (
             Self {
@@ -7796,7 +7825,17 @@ impl RetainedShaderLandscape {
         atlas: &[u8],
         extent: [u32; 2],
     ) -> ShaderLandscapeUploads {
-        upload_changed_rows(queue, &self.atlas, &mut self.atlas_bytes, atlas, extent, 4)
+        let uploaded =
+            upload_changed_rows(queue, &self.atlas, &mut self.atlas_bytes, atlas, extent, 4);
+        // The atlas is sampled by every texel, so a changed one is unbounded
+        // in output space however few of its own rows moved.
+        match uploaded.calls {
+            0 => uploaded,
+            _ => ShaderLandscapeUploads {
+                dirty: None,
+                ..uploaded
+            },
+        }
     }
 
     /// The uniforms are small enough to rewrite whole, but only when the
@@ -7807,13 +7846,16 @@ impl RetainedShaderLandscape {
         config: [u32; 4],
         table: &[ShaderLandscapeSlot; SHADER_LANDSCAPE_SLOTS],
     ) -> ShaderLandscapeUploads {
-        let mut uploads = ShaderLandscapeUploads::default();
+        let mut uploads = ShaderLandscapeUploads::clean();
+        // Neither of these is confined to a rectangle: a changed detail
+        // factor or slot table re-colours every texel of the output.
         if self.config != config {
             self.config = config;
             let bytes = u32_bytes(&config);
             uploads.add(ShaderLandscapeUploads {
                 calls: 1,
                 bytes: bytes.len() as u64,
+                dirty: None,
             });
             queue.write_buffer(&self.params, 0, bytes);
         }
@@ -7823,6 +7865,7 @@ impl RetainedShaderLandscape {
             uploads.add(ShaderLandscapeUploads {
                 calls: 1,
                 bytes: bytes.len() as u64,
+                dirty: None,
             });
             queue.write_buffer(&self.slots, 0, bytes);
         }
@@ -7846,7 +7889,7 @@ fn upload_changed_rows(
     let texel_bytes = bytes_per_texel as usize;
     let row_bytes = extent[0] as usize * texel_bytes;
     let Some((rows, columns)) = changed_rect(previous, next, row_bytes, texel_bytes) else {
-        return ShaderLandscapeUploads::default();
+        return ShaderLandscapeUploads::clean();
     };
     // The source keeps the plane's own stride and starts at the rectangle's
     // first texel, so wgpu reads `width` texels out of each row rather than
@@ -7883,6 +7926,7 @@ fn upload_changed_rows(
     ShaderLandscapeUploads {
         calls: 1,
         bytes: u64::from(height) * u64::from(width) * texel_bytes as u64,
+        dirty: Some([columns.start as u32, rows.start as u32, width, height]),
     }
 }
 
@@ -7891,13 +7935,51 @@ fn upload_changed_rows(
 struct ShaderLandscapeUploads {
     calls: usize,
     bytes: u64,
+    /// The map texels the uploads covered, as `(x, y, width, height)`.
+    ///
+    /// `None` means "not known to be bounded" — a fresh composition, or a
+    /// change whose effect is not confined to a rectangle — and the pass then
+    /// composes everything.
+    dirty: Option<[u32; 4]>,
 }
 
 impl ShaderLandscapeUploads {
+    /// Accumulates another upload's cost and widens the dirty rectangle to
+    /// cover both. An unbounded contribution makes the union unbounded.
     fn add(&mut self, other: Self) {
         self.calls += other.calls;
         self.bytes += other.bytes;
+        self.dirty = match (self.dirty, other.dirty) {
+            (Some(left), Some(right)) => Some(union_rect(left, right)),
+            (Some(only), None) if other.calls == 0 => Some(only),
+            (left, None) if other.calls == 0 => left,
+            _ => None,
+        };
     }
+
+    /// An upload that wrote nothing, and so dirtied nothing.
+    fn clean() -> Self {
+        Self {
+            calls: 0,
+            bytes: 0,
+            dirty: Some([0, 0, 0, 0]),
+        }
+    }
+}
+
+/// The smallest rectangle covering both, ignoring empty ones.
+fn union_rect(left: [u32; 4], right: [u32; 4]) -> [u32; 4] {
+    if left[2] == 0 || left[3] == 0 {
+        return right;
+    }
+    if right[2] == 0 || right[3] == 0 {
+        return left;
+    }
+    let x = left[0].min(right[0]);
+    let y = left[1].min(right[1]);
+    let right_edge = (left[0] + left[2]).max(right[0] + right[2]);
+    let bottom_edge = (left[1] + left[3]).max(right[1] + right[3]);
+    [x, y, right_edge - x, bottom_edge - y]
 }
 
 impl ShaderLandscapeComposer {
@@ -7973,12 +8055,18 @@ impl ShaderLandscapeComposer {
             bind_group_layout,
             retained: None,
             last_uploads: ShaderLandscapeUploads::default(),
+            last_composed_texels: 0,
         }
     }
 
     /// What the last composition wrote to its retained resources.
     fn last_uploads(&self) -> ShaderLandscapeUploads {
         self.last_uploads
+    }
+
+    /// Output texels the last composition pass rewrote.
+    fn last_composed_texels(&self) -> u64 {
+        self.last_composed_texels
     }
 
     /// Composes into `target`, which must be an `Rgba8Unorm` view of exactly
@@ -7991,9 +8079,14 @@ impl ShaderLandscapeComposer {
         target: &wgpu::TextureView,
         inputs: ShaderLandscapeInputs<'_>,
     ) -> Result<(), GpuRendererError> {
-        self.compose_into_profiled(device, queue, encoder, target, inputs, None)
+        // A caller that does not say whether the target kept its contents gets
+        // the whole composition, which is always correct.
+        self.compose_into_profiled(device, queue, encoder, target, inputs, false, None)
     }
 
+    /// `output_reused` is whether `target` still holds the previous
+    /// composition. Only then may the pass preserve what it does not redraw.
+    #[allow(clippy::too_many_arguments)]
     fn compose_into_profiled(
         &mut self,
         device: &wgpu::Device,
@@ -8001,6 +8094,7 @@ impl ShaderLandscapeComposer {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         inputs: ShaderLandscapeInputs<'_>,
+        output_reused: bool,
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) -> Result<(), GpuRendererError> {
         inputs.validate()?;
@@ -8037,7 +8131,9 @@ impl ShaderLandscapeComposer {
             retained = None;
         }
 
-        let mut uploads = ShaderLandscapeUploads::default();
+        // Starts clean rather than `default()`: an empty rectangle unions with
+        // the first real one, where an unbounded `None` would swallow it.
+        let mut uploads = ShaderLandscapeUploads::clean();
         // A catalogue reload reshapes the atlas and nothing else. Swapping it
         // in place keeps the map planes, whose textures and byte caches the
         // reload did not touch — the criterion is to invalidate exactly what
@@ -8082,6 +8178,9 @@ impl ShaderLandscapeComposer {
                     uploads.add(ShaderLandscapeUploads {
                         calls: 1,
                         bytes: written as u64,
+                        // A fresh output holds nothing to preserve, so this
+                        // composition writes all of it.
+                        dirty: None,
                     });
                 }
                 let (index_texture, index) = uint_plane(
@@ -8169,6 +8268,19 @@ impl ShaderLandscapeComposer {
         self.last_uploads = uploads;
         let retained = self.retained.insert(retained);
 
+        // The fragment shader reads only the map texel under it, so a bounded
+        // dirty rectangle scales straight to an output scissor. Preserving
+        // what lies outside it means loading the attachment instead of
+        // clearing it, which is sound exactly when the caller reused the
+        // output it composed last time.
+        let scissor =
+            output_reused
+                .then_some(uploads.dirty)
+                .flatten()
+                .map(|[x, y, width, height]| {
+                    let detail = inputs.detail.max(1);
+                    [x * detail, y * detail, width * detail, height * detail]
+                });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lc_gpu_shader_landscape_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -8176,7 +8288,10 @@ impl ShaderLandscapeComposer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: match scissor {
+                        Some(_) => wgpu::LoadOp::Load,
+                        None => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -8187,7 +8302,18 @@ impl ShaderLandscapeComposer {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &retained.bind_group, &[]);
+        if let Some([x, y, width, height]) = scissor {
+            pass.set_scissor_rect(x, y, width, height);
+        }
         pass.draw(0..3, 0..1);
+        drop(pass);
+        self.last_composed_texels = match scissor {
+            Some([_, _, width, height]) => u64::from(width) * u64::from(height),
+            None => {
+                let detail = u64::from(inputs.detail.max(1));
+                u64::from(inputs.extent[0]) * u64::from(inputs.extent[1]) * detail * detail
+            }
+        };
         Ok(())
     }
 }
@@ -13742,6 +13868,67 @@ mod tests {
         assert_ne!(
             after, before,
             "the reloaded catalogue still has to reach the output"
+        );
+    }
+
+    /// clonk-org/clonk-rs#273's second criterion, recompose half: *a small
+    /// edit recomposes only its exact index region*.
+    ///
+    /// The fragment shader reads its own map texel and nothing else —
+    /// `textureLoad(index_plane, map, 0)` with `map = fine / detail` — so the
+    /// composition of an output texel depends only on the map texel under it,
+    /// the slot table and the atlas. A dirty map rectangle therefore scales
+    /// straight to an output scissor with no neighbourhood expansion.
+    ///
+    /// The risk a scissor carries is stale pixels outside it, which a
+    /// from-scratch comparison is the only thing that catches: the existing
+    /// parity tests compose on a fresh composer every time and would miss it.
+    #[test]
+    fn an_incremental_recompose_matches_composing_the_same_plan_from_scratch() {
+        let Some((_runtime, _instance, _adapter, device, queue)) =
+            test_wgpu_device("lc_gpu_shader_landscape_scissor_device", true)
+        else {
+            return;
+        };
+        let extent = [32_u32, 32_u32];
+        let base = GpuTextureId::fresh();
+        let scene = shader_landscape_scene_fixture(base, extent, extent, 1);
+        let plan = shader_landscape_plan_fixture(extent);
+
+        let mut edited = plan.clone();
+        for row in 8..11_usize {
+            for column in 5..9_usize {
+                let texel = row * extent[0] as usize + column;
+                edited.index_plane[texel] = u8::from(edited.index_plane[texel] == 0);
+            }
+        }
+
+        // Incremental: the edit lands on a composer that already holds the
+        // previous composition and its output.
+        let mut incremental = test_renderer(&device, &queue);
+        incremental.set_shader_landscape(true);
+        incremental.set_landscape_detail(1);
+        incremental.set_pending_shader_landscape(Some((base, plan)));
+        let _ = render_identity_readback(&mut incremental, &device, &queue, &scene);
+        incremental.set_pending_shader_landscape(Some((base, edited.clone())));
+        let after_edit = render_identity_readback(&mut incremental, &device, &queue, &scene);
+        let composed = incremental.last_stats().shader_landscape_composed_texels;
+
+        // From scratch: the same plan with nothing retained.
+        let mut fresh = test_renderer(&device, &queue);
+        fresh.set_shader_landscape(true);
+        fresh.set_landscape_detail(1);
+        fresh.set_pending_shader_landscape(Some((base, edited)));
+        let from_scratch = render_identity_readback(&mut fresh, &device, &queue, &scene);
+
+        assert_eq!(
+            after_edit, from_scratch,
+            "an incrementally recomposed landscape must be the landscape"
+        );
+        let full = u64::from(extent[0]) * u64::from(extent[1]);
+        assert!(
+            composed < full,
+            "a 4x3 edit recomposed {composed} of {full} texels"
         );
     }
 
