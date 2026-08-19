@@ -1221,6 +1221,36 @@ mod tests {
         );
     }
 
+    /// The row a narrower action draws after `SetAction` left the direction
+    /// alone.
+    ///
+    /// C++ refreshes `Action.DrawDir` only when the FlipDir *value* differs
+    /// between the old and the new action (`C4Object.cpp:4156-4157`) and never
+    /// clamps it to the new action's `Directions`, so it keeps drawing a row
+    /// that action does not define. `SetDir` is the only bound, and it checks
+    /// against the action live at the time
+    /// (`if (!Inside<int32_t>(iDir, 0, Def->ActMap[Action.Act].Directions - 1)) return;`,
+    /// `C4Object.cpp:4239`).
+    ///
+    /// Deriving the row rather than storing it reproduces that, because the
+    /// derivation reads the same unclamped `Action.Dir` C++ keeps: the engine
+    /// half of this is
+    /// `a_narrower_action_keeps_the_wider_actions_draw_direction`, which pins
+    /// that `SetAction` leaves the direction at 3.
+    #[test]
+    fn a_narrower_action_draws_the_row_the_wider_one_left_behind() {
+        let narrow = DefinitionActionGraphics {
+            directions: 2,
+            flip_dir: Some(0),
+            ..DefinitionActionGraphics::default()
+        };
+        assert_eq!(
+            GraphicsSystem::resolve_draw_direction(&narrow, Direction::from_script_value(3)),
+            3,
+            "the row is not clamped to the two the action declares"
+        );
+    }
+
     #[test]
     fn renderer_resolves_raw_draw_direction_rows() {
         // C4Object::UpdateFlipDir keeps raw Action.Dir and computes
