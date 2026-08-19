@@ -47,6 +47,7 @@ mod game_message;
 mod gamepad;
 mod gpu_instance;
 mod headed_surface_smoke;
+mod software_present_smoke;
 use clonk_app_menus::ingame_menu;
 use clonk_app_netplay::host_game_resource_sources;
 use clonk_app_render::gpu_renderer;
@@ -577,6 +578,9 @@ fn run() -> Result<()> {
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     let cli = Cli::parse();
+    if let Some(report_path) = cli.software_present_smoke.as_deref() {
+        software_present_smoke::prepare(report_path)?;
+    }
     if let Some(report_path) = cli.headed_surface_smoke.as_deref() {
         headed_surface_smoke::prepare(report_path)?;
     }
@@ -1039,6 +1043,16 @@ fn run() -> Result<()> {
                 )
             })
             .transpose()?;
+        let mut software_present_smoke = cli
+            .software_present_smoke
+            .clone()
+            .map(|report_path| {
+                software_present_smoke::SoftwarePresentSmoke::start(
+                    report_path,
+                    &mut developer_windows,
+                )
+            })
+            .transpose()?;
         // Set when the shell takes a graphics pass; consumed on the next event
         // loop entry, before the shell record is borrowed.
         let mut viewport_redraw_pending = false;
@@ -1049,6 +1063,31 @@ fn run() -> Result<()> {
 
         let mut dock_tile_attached = false;
         Ok(Box::new(move |event, event_target| {
+            if let Some(smoke) = software_present_smoke.as_mut() {
+                let (outcome, consumed) = match &event {
+                    Event::AboutToWait => (
+                        smoke.about_to_wait(event_target, &mut developer_windows),
+                        true,
+                    ),
+                    Event::WindowEvent {
+                        window_id,
+                        event: WindowEvent::RedrawRequested,
+                    } => (
+                        smoke.redraw(*window_id, event_target, &mut developer_windows),
+                        true,
+                    ),
+                    _ => (Ok(()), false),
+                };
+                if let Err(error) = outcome {
+                    tracing::error!(%error, "software presentation smoke failed");
+                    smoke.fail(&error);
+                    event_handler_exit_code.store(1, AtomicOrdering::Relaxed);
+                    event_target.exit();
+                }
+                if consumed {
+                    return;
+                }
+            }
             if let Some(smoke) = headed_surface_smoke.as_mut() {
                 let (outcome, consumed) = match &event {
                     Event::AboutToWait => (
@@ -2030,6 +2069,12 @@ fn run() -> Result<()> {
                     windows = destroyed.len(),
                     "released the developer windows before the event loop returned"
                 );
+                if let Some(smoke) = software_present_smoke.as_mut() {
+                    if let Err(error) = smoke.finish(developer_windows.is_empty()) {
+                        tracing::error!(%error, "software presentation smoke report failed");
+                        event_handler_exit_code.store(1, AtomicOrdering::Relaxed);
+                    }
+                }
                 if let Some(smoke) = headed_surface_smoke.as_mut() {
                     if let Err(error) = smoke.finish(&destroyed, developer_windows.is_empty()) {
                         tracing::error!(%error, "headed surface smoke report failed");
