@@ -19,6 +19,35 @@ pub const VOICE_FRAME_DURATION_MS: u16 = 20;
 /// making this version sender-sized.
 pub const VOICE_PAYLOAD_BYTES: usize = 164;
 pub const MAX_VOICE_PAYLOAD_BYTES: usize = VOICE_PAYLOAD_BYTES;
+/// How many peers one talking client will address directly before it stops and
+/// leans on the host relay.
+///
+/// # Why the mesh, and not a relay (clonk-org/clonk-rs#425)
+///
+/// Send bandwidth in a mesh grows with the number of listeners, which is worth
+/// measuring rather than assuming. Measured off the real encoder by
+/// `the_voice_mesh_costs_one_sealed_datagram_per_listener_per_frame`: a sealed
+/// direct datagram is 231 bytes, 259 with IPv4 and UDP headers, sent 50 times a
+/// second — **103.6 kbit/s of the speaker's uplink per listener**.
+///
+/// Two things bound what that can reach:
+///
+/// - **Push-to-talk.** A peer that is not holding its key sends nothing at all,
+///   so this is a cost per *speaker*, not per participant. The mesh's total is
+///   set by how many people talk at once, which in practice is one or two.
+/// - **This cap.** A speaker addresses at most 32 peers directly, so the worst
+///   case the code permits is about **3.3 Mbit/s** of uplink while the key is
+///   held. Beyond 32 the host relay carries the rest.
+///
+/// A relay that *replaced* direct fanout would move that load onto the host —
+/// which pays it for every speaker at once — and add a hop of latency to every
+/// listener, on a lane whose whole design is bounded and droppable. At the
+/// session sizes this project targets that is a worse trade, so the mesh
+/// stands and the relay stays what it already is: the path for peers direct
+/// fanout cannot reach, and the valve for a saturated media queue.
+///
+/// Revisit if the codec, the frame rate or this cap change — the test above
+/// fails rather than letting the figure drift silently.
 pub(crate) const MAX_VOICE_DIRECT_RECIPIENTS: usize = 32;
 pub(crate) const VOICE_ROUTE_COOKIE_BYTES: usize = 16;
 
@@ -798,6 +827,47 @@ pub(crate) fn host_relay_selects(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the mesh actually costs, measured off the real encoder rather than
+    /// added up from header constants (clonk-org/clonk-rs#425).
+    ///
+    /// A talking peer sends one sealed datagram per listener per 20 ms frame,
+    /// so its uplink carries `listeners x 50 x datagram` for as long as the
+    /// key is held. Pinning it here means a codec, header or sealing change
+    /// cannot move that number without saying so.
+    #[test]
+    fn the_voice_mesh_costs_one_sealed_datagram_per_listener_per_frame() {
+        /// IPv4 20 + UDP 8. The lane is UDP, and this is the smaller of the
+        /// two IP header sizes, so the figure is a floor rather than a
+        /// flattering estimate.
+        const IP_AND_UDP_HEADER_BYTES: usize = 28;
+        const FRAMES_PER_SECOND: usize = 1000 / VOICE_FRAME_DURATION_MS as usize;
+
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
+            [0x42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let packet = VoicePacket::Direct(
+            VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
+        );
+        let wire = encode_authenticated_voice_packet(cipher, &packet).unwrap();
+        let datagram = wire.len() + IP_AND_UDP_HEADER_BYTES;
+
+        let per_listener_bits = datagram * FRAMES_PER_SECOND * 8;
+        assert!(
+            (95_000..115_000).contains(&per_listener_bits),
+            "one listener costs {per_listener_bits} bit/s of a speaker's uplink"
+        );
+
+        // The worst case this code permits: one peer talking with the direct
+        // fanout saturated. Beyond this the sender stops adding direct
+        // recipients and leans on the host relay.
+        let saturated = per_listener_bits * MAX_VOICE_DIRECT_RECIPIENTS;
+        assert!(
+            saturated < 4_000_000,
+            "a saturated direct fanout must stay inside a few Mbit/s: {saturated} bit/s"
+        );
+    }
 
     #[test]
     fn voice_frame_wire_round_trip_preserves_fixed_twenty_millisecond_metadata() {
