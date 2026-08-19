@@ -51,9 +51,44 @@
 //! unexplained. When the instrument contradicts itself the reading is not
 //! evidence, whichever number would have been more convenient.
 //!
-//! Per-piece cost inside the base is therefore still unknown. A sampling
-//! profiler is the right tool for it; hand-placed timers on a path taken 15
-//! times a frame are not.
+//! Per-piece cost inside the base needed a sampling profiler rather than
+//! hand-placed timers, and that is what settled it.
+//!
+//! # The sampling profile, and the answer
+//!
+//! macOS `sample` over this probe with `PROFILED_FRAMES` raised so the tick
+//! loop runs long enough to sample, 5,961 samples inside
+//! `tick_without_snapshot`:
+//!
+//! | frame | samples | share of tick |
+//! |---|---|---|
+//! | `advance_tick` | 3,280 | 55% |
+//! | ‣ `dispatch_object_effect_events` | 2,822 | 47% |
+//! | ‣‣ descending into the script VM | ~2,400 | ~40% |
+//! | every `host_world_context*` frame combined | 370 | **6.2%** |
+//! | `script_state_snapshot` | 28 | 0.5% |
+//!
+//! **Transient state around effect callbacks is not the bottleneck.** Object
+//! effect dispatch is 86% of `advance_tick`, and almost all of it descends
+//! into `call_effect_timer` → the C4Script VM →
+//! `invoke_resolved_host_value` → `call_self` →
+//! `call_world_object_function_with_options` → the VM again. The cost is
+//! content script *executing*, not the world being built for it to execute
+//! against.
+//!
+//! Two corrections to clonk-org/clonk-rs#291's premise fall out of this:
+//!
+//! - Its profile attributed 47.7% to `tick_global_effects`. Here the global
+//!   list is 4.8 timer events a frame against 15.3 context builds — it is
+//!   *object* effect dispatch that dominates.
+//! - Context construction, the thing the issue set out to reduce, is 6.2%.
+//!   Worth something eventually, but not what an effect-heavy tick is
+//!   spending its time on.
+//!
+//! That satisfies the acceptance criterion allowing this issue to close "with
+//! evidence that remaining materialization is not a bottleneck". Effect-tick
+//! cost is a C4Script VM question, which is clonk-org/clonk-rs#292's
+//! territory.
 //!
 //! # What still holds regardless
 //!
