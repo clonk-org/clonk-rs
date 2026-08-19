@@ -94,9 +94,11 @@
 //!   **Partly fixed:** it also walked the host tables twice per host call
 //!   site, once for the reference guard and once for the value target.
 //!   Registration keeps a name out of the table it is not in, so one walk
-//!   answers both; that took the trace to 163,721 lookups. Attaching stable
-//!   handles to the surviving per-entry resolution is the next step, and the
-//!   one that actually needs interning.
+//!   answers both; that took the trace to 163,721 lookups.
+//!
+//!   The resolution that survives — once per call site per invocation — is
+//!   the only place left where interning would help, and it is **declined**.
+//!   See "Why the handles were not built" below.
 //! - `ast_call` is 10%, one resolution per executed call, and shrinks as
 //!   compiled coverage widens rather than through interning.
 //! - `generic_dispatch` — the host entry point that looks like the obvious
@@ -107,6 +109,33 @@
 //! Locals are already slot-indexed on the compiled path, so what is left there
 //! is the AST fallback's scope-chain walk, which the issue scopes to wider
 //! bytecode lowering.
+//!
+//! # Why the handles were not built
+//!
+//! Four duplicate walks came out of this profile and none of them needed
+//! interning; together they removed 13.7% of all identifier lookups. What
+//! remains that interning could reach is the compiled prelude's one
+//! resolution per call site per invocation — about 14,000 lookups, or 8% of
+//! the current total.
+//!
+//! Caching that resolution needs a way to know the tables have not changed
+//! since it was taken, and there is no sound cheap one:
+//!
+//! - Pointer identity does not work. The engine mutates its tables through
+//!   `Arc::make_mut`, which mutates **in place** when the `Arc` is unshared,
+//!   so a table can change content at the same address.
+//! - A revision counter does work, but it has to be bumped at roughly thirty
+//!   mutation sites spread across `engine.rs` — every `Arc::make_mut` on the
+//!   host, reference, parameter-type and constant tables, plus the direct
+//!   `self.functions` and `self.global_functions` mutations.
+//!
+//! A single missed bump leaves a stale target that only misfires when a
+//! reload happens to change that one name, so it produces a wrong function
+//! call rather than a test failure — a desync, invisible to the suite in the
+//! general case. That is the failure class this port is least able to absorb,
+//! and 8% of identifier lookups (themselves a fraction of tick time) does not
+//! buy it. Revisit if a revision counter ever exists for another reason, or
+//! if a trace shows the prelude carrying far more than it does here.
 //!
 //! **No-go for the rest.** `constant`, `definition` and `global` are 1% each;
 //! interning them would be risk without a return.
