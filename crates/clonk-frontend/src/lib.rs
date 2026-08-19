@@ -20,6 +20,7 @@ pub mod game_lobby;
 pub mod game_option_buttons;
 mod graphics_system;
 pub mod hud;
+pub mod ime;
 pub mod info_dialog;
 mod input;
 pub mod input_dialog;
