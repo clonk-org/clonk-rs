@@ -26,8 +26,10 @@ pub struct ShellWindowHost {
     pub window: Arc<Window>,
     pub pixels: Option<WindowSurface>,
     pub presenter: clonk_scaling::FramePresenter,
-    /// Built from `pixels`' device/queue/format, so it is part of this surface.
-    pub renderer: RetainedGpuRenderer,
+    /// Built from `pixels`' device/queue/format, so it is part of this
+    /// surface. `None` once a presenter exists that has no device to build it
+    /// from — see clonk-org/clonk-rs#299.
+    pub renderer: Option<RetainedGpuRenderer>,
     /// Limits prompt redraws while a replacement surface remains unproven.
     pub surface_rebuild: SurfaceRebuildState,
     visible: bool,
@@ -38,7 +40,7 @@ impl ShellWindowHost {
         window: Arc<Window>,
         pixels: WindowSurface,
         presenter: clonk_scaling::FramePresenter,
-        renderer: RetainedGpuRenderer,
+        renderer: Option<RetainedGpuRenderer>,
     ) -> Self {
         // Leave winit's IME disabled for the game shell. While preedit is
         // active winit suppresses KeyboardInput, which can lose releases and
@@ -90,7 +92,11 @@ impl DeveloperWindowPresenter<GameApp> for ShellWindowHost {
             .pixels
             .as_ref()
             .ok_or_else(|| "the shell framebuffer is unavailable".to_string())?;
-        present_retained_gpu_frame(app, pixels, &self.presenter, &mut self.renderer)
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or_else(|| "the shell has no retained GPU renderer".to_string())?;
+        present_retained_gpu_frame(app, pixels, &self.presenter, renderer)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }

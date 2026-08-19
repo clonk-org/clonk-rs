@@ -1005,7 +1005,7 @@ fn run() -> Result<()> {
                 window,
                 pixels,
                 presenter,
-                retained_gpu_renderer,
+                Some(retained_gpu_renderer),
             )),
         );
         // The next viewport window's key. `SHELL_WINDOW` is 0, so console windows
@@ -1361,10 +1361,13 @@ fn run() -> Result<()> {
                             .as_ref()
                             .context("presentation benchmark ended without a drawable surface")
                             .and_then(|pixels| {
+                                let renderer = retained_gpu_renderer.as_mut().context(
+                                    "presentation benchmark ran without a retained GPU renderer",
+                                )?;
                                 finish_retained_gpu_profile_artifact(
                                     &mut report,
                                     pixels,
-                                    retained_gpu_renderer,
+                                    renderer,
                                     app.graphics.advanced_renderer_config(),
                                     presenter.presentation_geometry(),
                                 )
@@ -1546,11 +1549,18 @@ fn run() -> Result<()> {
                     if matches!(
                         app.mode,
                         AppMode::Menu | AppMode::Loading | AppMode::Running
-                    ) && should_attempt_retained_gpu_presentation(
-                        retained_gpu_renderer.requires_cpu_presentation(),
-                    ) {
+                    ) && retained_gpu_renderer.as_ref().is_some_and(|renderer| {
+                        should_attempt_retained_gpu_presentation(
+                            renderer.requires_cpu_presentation(),
+                        )
+                    }) {
                         app.retained_gpu_presentation_active = true;
                         let Some(pixels) = pixels_slot.as_mut() else {
+                            return;
+                        };
+                        // Guarded by the condition above, which only enters
+                        // this branch when a renderer exists.
+                        let Some(retained_gpu_renderer) = retained_gpu_renderer.as_mut() else {
                             return;
                         };
                         if pixels.buffer_extent().0 != 1 || pixels.buffer_extent().1 != 1 {
@@ -1850,11 +1860,15 @@ fn run() -> Result<()> {
                                     ?error,
                                     "CPU presentation surface requires recreation"
                                 );
-                                match rebuild_retained_gpu_device(
-                                    window,
-                                    pixels_slot,
-                                    retained_gpu_renderer,
-                                ) {
+                                // Software presentation owns no GPU device,
+                                // so there is nothing for it to rebuild.
+                                let rebuild = match retained_gpu_renderer.as_mut() {
+                                    Some(renderer) => {
+                                        rebuild_retained_gpu_device(window, pixels_slot, renderer)
+                                    }
+                                    None => Ok(()),
+                                };
+                                match rebuild {
                                     Ok(()) => {
                                         render_floor.note_refused_presentation(Instant::now());
                                         if rebuild_schedule == SurfaceRebuildSchedule::Immediate {
