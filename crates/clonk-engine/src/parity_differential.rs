@@ -1185,6 +1185,78 @@ fn rust_component_order(case: &Value, case_index: usize) {
     }
 }
 
+/// C4PlayerInfo.cpp:1373-1391 — the pass loop the four matching levels run
+/// inside, which decides *which* savegame player each join ends up with.
+///
+/// The per-level predicate is already compared by `savegame_player_matching`;
+/// what this adds is the loop's own semantics — pass ordering, first-accepting
+/// candidate, the eligibility test, and which associations C++ calls "wild".
+fn rust_savegame_association(case: &Value, case_index: usize) {
+    const SECTION: &str = "savegame_association";
+
+    let players = |key: &str| -> Vec<crate::control::ControlPlayerInfoEntry> {
+        case[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{SECTION} {key} is a C++ oracle array"))
+            .iter()
+            .map(|player| {
+                let name = player["name"]
+                    .as_array()
+                    .expect("player name is a C++ oracle byte array")
+                    .iter()
+                    .map(|byte| byte.as_u64().expect("name byte is a number") as u8)
+                    .collect::<Vec<_>>();
+                crate::control::ControlPlayerInfoEntry {
+                    id: i(player, "id") as i32,
+                    name: crate::control::LegacyCString::from_bytes(name)
+                        .expect("oracle names carry no interior NUL"),
+                    filename: crate::control::LegacyCString::from_bytes(
+                        player["filename"]
+                            .as_str()
+                            .expect("player filename is a string")
+                            .as_bytes()
+                            .to_vec(),
+                    )
+                    .expect("oracle filenames carry no interior NUL"),
+                    original_color: u(player, "color") as u32,
+                    ..Default::default()
+                }
+            })
+            .collect()
+    };
+
+    let mut participants = players("participants");
+    let savegame_players = players("savegame_players");
+    let wild = crate::savegame_association::associate_savegame_players(
+        &mut participants,
+        &savegame_players,
+    );
+
+    expect_json_eq(
+        SECTION,
+        case_index,
+        "associations",
+        case["associations"].clone(),
+        serde_json::json!(participants
+            .iter()
+            .map(|player| player.savegame_player)
+            .collect::<Vec<_>>()),
+    );
+    expect_json_eq(
+        SECTION,
+        case_index,
+        "wild",
+        case["wild"].clone(),
+        serde_json::json!(wild
+            .iter()
+            .map(|takeover| serde_json::json!({
+                "participant": takeover.participant,
+                "savegame_player": takeover.savegame_player,
+            }))
+            .collect::<Vec<_>>()),
+    );
+}
+
 fn rust_player_join_capacity(case: &Value, case_index: usize) {
     const SECTION: &str = "player_join_capacity";
     let initial_names = case["names_before"]
@@ -1313,6 +1385,21 @@ fn parity_differential_matches_cpp_golden() {
     );
     for (case_index, case) in savegame_matching_cases.iter().enumerate() {
         rust_savegame_player_matching(case, case_index);
+    }
+
+    // C4PlayerInfo.cpp:1373-1391. The pass loop those levels run inside: no
+    // shipped scenario sets Head.SaveGame, so this path is reachable only from
+    // runtime-written saves and had no differential coverage at all.
+    let savegame_association_cases = golden["savegame_association"]
+        .as_array()
+        .expect("savegame_association is a C++ oracle array");
+    assert_eq!(
+        savegame_association_cases.len(),
+        6,
+        "savegame_association must retain its exact six-row matrix"
+    );
+    for (case_index, case) in savegame_association_cases.iter().enumerate() {
+        rust_savegame_association(case, case_index);
     }
 
     // C4IDList.cpp:33-103. Component order is inside the replay hash, so a

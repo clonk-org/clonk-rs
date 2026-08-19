@@ -1826,17 +1826,23 @@ static const char *GetFilename(const char *szPath)
     return GetFilename(const_cast<char *>(szPath));
 }
 
-// Only the four accessors the extracted switch reads.
+// The accessors the extracted switch reads, plus the two IDs the association
+// passes carry: the player's own and the savegame player it took over.
 class C4PlayerInfo
 {
 public:
     const char *Filename{};
     const char *Name{};
     uint32_t OriginalColor{};
+    int32_t ID{};
+    int32_t AssociatedSavegamePlayer{};
 
     const char *GetFilename() const { return Filename; }
     const char *GetName() const { return Name; }
     uint32_t GetOriginalColor() const { return OriginalColor; }
+    int32_t GetID() const { return ID; }
+    int32_t GetAssociatedSavegamePlayerID() const { return AssociatedSavegamePlayer; }
+    void SetAssociatedSavegamePlayer(int32_t id) { AssociatedSavegamePlayer = id; }
 };
 
 // The extracted switch verbatim, with its `return pInfo` reaching this
@@ -1915,6 +1921,163 @@ void printCases()
         {
             if (level) printf(",");
             printf("%s", matchAtLevel(&current, &saved, level) ? "true" : "false");
+        }
+        printf("]}");
+    }
+    printf("]");
+}
+
+// C4PlayerInfo.cpp:1373-1391, with FindSavegameResumePlayerInfo's search
+// (:1094-1121) inlined over one client's player list.
+//
+// The eligibility test is the production one at :1101: a savegame player is a
+// candidate only while no joining player carries its ID *and* none is already
+// associated with it. Both halves matter — the first is what stops a savegame
+// player being taken over by a join that already holds that ID.
+static bool eligible(const std::vector<C4PlayerInfo> &joining, const C4PlayerInfo &candidate)
+{
+    return std::none_of(joining.begin(), joining.end(), [&candidate](const C4PlayerInfo &player)
+    {
+        return player.GetID() == candidate.GetID()
+            || player.GetAssociatedSavegamePlayerID() == candidate.GetID();
+    });
+}
+
+struct WildTakeover
+{
+    std::size_t participant;
+    int32_t savegamePlayer;
+};
+
+// The pass loop itself. Every level runs over every still-unassociated joining
+// player before the next level starts, which is what makes an exact file+name
+// match claim its savegame player before any colour-only match can.
+static std::vector<WildTakeover> associate(
+    std::vector<C4PlayerInfo> &joining,
+    std::vector<C4PlayerInfo> &savegamePlayers)
+{
+    std::vector<WildTakeover> wild;
+    for (int level = PML_PlrFileName; level <= PML_Any; ++level)
+        for (std::size_t index = 0; index < joining.size(); ++index)
+        {
+            if (joining[index].GetAssociatedSavegamePlayerID()) continue;
+            for (C4PlayerInfo &candidate : savegamePlayers)
+            {
+                if (!eligible(joining, candidate)) continue;
+                if (!matchAtLevel(&joining[index], &candidate, level)) continue;
+                joining[index].SetAssociatedSavegamePlayer(candidate.GetID());
+                if (level > PML_PlrName)
+                    wild.push_back({index, candidate.GetID()});
+                break;
+            }
+        }
+    return wild;
+}
+
+void printAssociationCases()
+{
+    struct Player
+    {
+        int32_t id;
+        const char *filename;
+        const char *name;
+        uint32_t color;
+    };
+
+    struct AssociationCase
+    {
+        const char *name;
+        std::vector<Player> joining;
+        std::vector<Player> saved;
+    };
+
+    const AssociationCase cases[] = {
+        // The exact match claims its savegame player in the first pass, so the
+        // colour-only join cannot take it later even though it would match at
+        // PML_PrefColor.
+        {"exact_match_claims_before_a_wild_one",
+         {{41, "Players/Ada.c4p", "Ada", 0x111111}, {42, "Players/Bert.c4p", "Bert", 0x222222}},
+         {{7, "Save/Ada.c4p", "Ada", 0x222222}, {8, "Save/Zoe.c4p", "Zoe", 0x222222}}},
+        // Order within a pass: the first accepting savegame player wins, and
+        // the second join falls through to the next one.
+        {"first_accepting_savegame_player_wins",
+         {{41, "Players/A.c4p", "Ada", 0x111111}, {42, "Players/B.c4p", "Ada", 0x111111}},
+         {{7, "Save/X.c4p", "Ada", 0x999999}, {8, "Save/Y.c4p", "Ada", 0x999999}}},
+        // PML_Any takes anything left, and every association past PML_PlrName
+        // is reported as wild.
+        {"leftovers_are_taken_by_any_and_reported_wild",
+         {{41, "Players/A.c4p", "Ada", 0x111111}, {42, "Players/B.c4p", "Bert", 0x222222}},
+         {{7, "Save/X.c4p", "Zoe", 0x222222}, {8, "Save/Y.c4p", "Cid", 0x333333}}},
+        // Fewer savegame players than joins: the surplus join stays at 0.
+        {"a_surplus_join_stays_unassociated",
+         {{41, "Players/A.c4p", "Ada", 0x111111}, {42, "Players/B.c4p", "Bert", 0x222222}},
+         {{7, "Save/A.c4p", "Ada", 0x111111}}},
+        // The other half of the eligibility test: a savegame player whose ID a
+        // joining player already carries is not a candidate at all, so the
+        // join that would otherwise match it falls through to the next one.
+        {"a_savegame_id_a_join_already_carries_is_skipped",
+         {{7, "Players/A.c4p", "Ada", 0x111111}},
+         {{7, "Save/A.c4p", "Ada", 0x111111}, {8, "Save/B.c4p", "Ada", 0x111111}}},
+        // No savegame players at all: every join is left alone.
+        {"no_savegame_players_associates_nothing",
+         {{41, "Players/A.c4p", "Ada", 0x111111}},
+         {}},
+    };
+
+    const auto emit = [](const std::vector<C4PlayerInfo> &players)
+    {
+        printf("[");
+        for (std::size_t index = 0; index < players.size(); ++index)
+        {
+            if (index) printf(",");
+            printf("{\"id\":%d,\"filename\":\"%s\",\"name\":", players[index].ID, players[index].Filename);
+            printLatin1Bytes(players[index].Name);
+            printf(",\"color\":%u}", players[index].OriginalColor);
+        }
+        printf("]");
+    };
+
+    printf("\"savegame_association\":[");
+    for (std::size_t index = 0; index < std::size(cases); ++index)
+    {
+        const AssociationCase &test = cases[index];
+        const auto build = [](const std::vector<Player> &rows)
+        {
+            std::vector<C4PlayerInfo> players;
+            for (const Player &row : rows)
+            {
+                C4PlayerInfo player;
+                player.ID = row.id;
+                player.Filename = row.filename;
+                player.Name = row.name;
+                player.OriginalColor = row.color;
+                players.push_back(player);
+            }
+            return players;
+        };
+        std::vector<C4PlayerInfo> joining = build(test.joining);
+        std::vector<C4PlayerInfo> saved = build(test.saved);
+
+        if (index) printf(",");
+        printf("{\"name\":\"%s\",\"participants\":", test.name);
+        emit(joining);
+        printf(",\"savegame_players\":");
+        emit(saved);
+
+        const std::vector<WildTakeover> wild = associate(joining, saved);
+
+        printf(",\"associations\":[");
+        for (std::size_t player = 0; player < joining.size(); ++player)
+        {
+            if (player) printf(",");
+            printf("%d", joining[player].GetAssociatedSavegamePlayerID());
+        }
+        printf("],\"wild\":[");
+        for (std::size_t entry = 0; entry < wild.size(); ++entry)
+        {
+            if (entry) printf(",");
+            printf("{\"participant\":%zu,\"savegame_player\":%d}",
+                   wild[entry].participant, wild[entry].savegamePlayer);
         }
         printf("]}");
     }
@@ -3576,6 +3739,12 @@ int main()
     // 16c. The four MatchingLevel passes RestoreSavegameInfos runs when it
     //      associates joining players with a savegame's stored players.
     savegame_matching_oracle::printCases();
+    printf(",\n");
+
+    // 16c-2. The pass loop those levels run inside: which savegame player each
+    //        joining player ends up associated with, and which associations
+    //        C++ reports as "wild".
+    savegame_matching_oracle::printAssociationCases();
     printf(",\n");
 
     // 16d. Component (C4IDList) order, which is inside the replay hash but had
