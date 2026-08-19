@@ -243,7 +243,12 @@ mod backend {
 
     impl Drop for RegistryKey {
         fn drop(&mut self) {
-            unsafe { RegCloseKey(self.0) };
+            // Nothing actionable can be done from a `Drop`, but a failure to
+            // close a key this process opened is worth seeing rather than
+            // discarding silently.
+            if let Err(error) = unsafe { RegCloseKey(self.0) }.ok() {
+                tracing::debug!(%error, "failed to close the AppUserModelId registry key");
+            }
         }
     }
 
