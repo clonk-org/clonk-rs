@@ -538,7 +538,7 @@ impl Engine {
         args: Vec<Value>,
         require_nonzero_status: bool,
     ) -> Result<Value, EngineError> {
-        let (object_id, definition_id, state_snapshot) = {
+        let (object_id, definition_id) = {
             let object = self
                 .objects
                 .get(index)
@@ -552,11 +552,7 @@ impl Engine {
             {
                 return Ok(Value::Nil);
             }
-            (
-                object.id,
-                object.definition_id.clone(),
-                Rc::new(object.script_state_snapshot()),
-            )
+            (object.id, object.definition_id.clone())
         };
         let object_definition = self
             .definitions
@@ -569,6 +565,28 @@ impl Engine {
                 .ok_or_else(|| EngineError::UnknownDefinition(callback_definition_id.clone()))?,
             None => object_definition,
         };
+        // `C4Object::Call` resolves the function before it does anything else
+        // and returns C4VNull when the definition does not declare it
+        // (`C4Object.cpp:2224-2240`), so an absent callback costs a name lookup
+        // and nothing more. `Definition::call_object_callback` already answers
+        // this exactly, but only after the caller has built every argument it
+        // takes — the object's script state, the global effect list, the action
+        // library and a host world. Ask the same question first: scenario
+        // activation is dominated by placement callbacks, and most definitions
+        // declare only some of the lifecycle ones.
+        if callback.resolution().is_none()
+            && !callback_definition
+                .script
+                .has_function(callback.function_name())
+        {
+            return Ok(Value::Nil);
+        }
+        let state_snapshot = Rc::new(
+            self.objects
+                .get(index)
+                .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?
+                .script_state_snapshot(),
+        );
         let action_library = object_definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();

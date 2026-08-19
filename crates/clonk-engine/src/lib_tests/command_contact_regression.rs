@@ -441,6 +441,59 @@ fn targeted_move_to_snapshots_only_its_explicit_dependencies() {
 }
 
 #[test]
+/// `C4Object::Call` resolves the function first and returns C4VNull when the
+/// definition does not declare it (`C4Object.cpp:2224-2240`), so an absent
+/// callback costs a name lookup and nothing else.
+///
+/// Here the whole calling context — the object's script state, the global
+/// effect list, the action library and a host world — was materialised
+/// *before* the resolution that finds nothing. Scenario activation is
+/// dominated by placement callbacks, and most definitions declare only some of
+/// the lifecycle ones, so that was paid hundreds of times per load for calls
+/// that never ran.
+fn an_absent_callback_materialises_nothing() {
+    let mut engine = Engine::new();
+    engine.register_test_script_definition(
+        "LAZY",
+        "Lazy",
+        "#strict\nfunc Present() { return(1); }\n",
+    );
+    let object =
+        engine.spawn_test_object(SpawnConfig::new("LAZY").with_position(Vector2::new(50, 50)));
+    let index = engine.test_object_index(object);
+
+    HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+    SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
+    assert_eq!(
+        crate::TestValueExt::test_value(engine.call_object_function(index, "Absent", Vec::new())),
+        Value::Nil,
+        "an undeclared callback is a silent no-op returning nil"
+    );
+    assert_eq!(
+        SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "an undeclared callback copies no object state"
+    );
+    assert_eq!(
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "an undeclared callback builds no host world"
+    );
+
+    // The declared one still runs, and still pays for exactly one snapshot.
+    SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
+    assert_eq!(
+        crate::TestValueExt::test_value(engine.call_object_function(index, "Present", Vec::new())),
+        Value::Int(1),
+    );
+    assert_eq!(
+        SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "a declared callback is unaffected"
+    );
+}
+
+#[test]
 fn lazy_host_world_call_object_materializes_only_on_world_access() {
     let mut engine = Engine::with_seed(0);
     let mut landscape = crate::TestValueExt::test_value(Landscape::with_default_material(
