@@ -7994,12 +7994,14 @@ impl<'a> Vm<'a> {
         self.engine_global_script_function(name)
             .map(|function| function.returns_reference)
             .unwrap_or_else(|| {
-                name == "EffectVar"
-                    || !self.has_host_function(name)
-                        && matches!(
-                            name,
-                            "Var" | "VarN" | "Local" | "LocalN" | "Global" | "GlobalN"
-                        )
+                // Name before tables, as in `variable_call_returns_reference`:
+                // only these builtins can have their reference-ness decided by
+                // a host registration.
+                matches!(
+                    name,
+                    "Var" | "VarN" | "Local" | "LocalN" | "Global" | "GlobalN"
+                ) && !self.has_host_function(name)
+                    || name == "EffectVar"
             })
     }
 
@@ -9837,14 +9839,18 @@ impl<'a> Vm<'a> {
             return false;
         }
 
-        name == "EffectVar"
-            || !self.has_host_function(name)
-                && (matches!(name, "Var" | "Local") && args.len() <= 2
-                    || name == "Par" && args.len() <= 1
-                    || name == "VarN"
-                    || name == "LocalN" && (1..=2).contains(&args.len())
-                    || name == "Global"
-                    || name == "GlobalN" && args.len() == 1)
+        // Test the name before the tables. Only these seven builtins can have
+        // their reference-ness decided by a host registration, so probing the
+        // host tables first walked them for every ordinary call as well —
+        // both operands are pure, so the order is free to choose.
+        (matches!(name, "Var" | "Local") && args.len() <= 2
+            || name == "Par" && args.len() <= 1
+            || name == "VarN"
+            || name == "LocalN" && (1..=2).contains(&args.len())
+            || name == "Global"
+            || name == "GlobalN" && args.len() == 1)
+            && !self.has_host_function(name)
+            || name == "EffectVar"
     }
 
     fn call_expression_returns_reference(&self, expr: &Expr, env: &Environment) -> bool {

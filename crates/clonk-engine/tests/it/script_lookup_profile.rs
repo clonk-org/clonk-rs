@@ -42,6 +42,17 @@
 //! 18.7% fewer hashed bytes**, with no interning, no change to how a function
 //! is selected, and `parity verify` and `engine-snapshots verify` unmoved.
 //!
+//! **The figures above under-count.** `has_host_function` probes the value
+//! table and only falls through to the reference table on a miss, so `||`
+//! short-circuited past the one recording site and every *successful* host
+//! probe went uncounted. With that fixed the same tree measures 192,846
+//! lookups, and it immediately showed a third duplicate: the predicate
+//! deciding whether a call yields a reference walked the host tables for every
+//! name before the cheap test of whether the name is one of the seven builtins
+//! a host registration can affect. Testing the name first took the trace to
+//! **177,831 lookups and 1,688,613 hashed bytes, 7.8% fewer**. Totals from
+//! here on are not comparable with the ones above.
+//!
 //! Split by the call path that issued each probe, over the same trace:
 //!
 //! | call path | lookups | share | composition |
