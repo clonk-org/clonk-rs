@@ -37,6 +37,11 @@
 //! Totals: 199,415 lookups and 1,879,374 bytes hashed over 400 frames, or
 //! roughly 500 lookups and 4.7 KiB hashed per frame.
 //!
+//! Acting on the two duplicate walks this profile exposed took the same trace
+//! to **163,721 lookups and 1,528,432 bytes hashed — 17.9% fewer lookups and
+//! 18.7% fewer hashed bytes**, with no interning, no change to how a function
+//! is selected, and `parity verify` and `engine-snapshots verify` unmoved.
+//!
 //! Split by the call path that issued each probe, over the same trace:
 //!
 //! | call path | lookups | share | composition |
@@ -65,10 +70,15 @@
 //!   12.3% fewer lookups and 13.9% fewer hashed bytes, with no interning and
 //!   no change to how a function is selected. One probe per call remains, on
 //!   `set_no_ref_keeps_reference`'s separate evaluator entry point.
-//! - `compiled_prelude` is 19%. It re-resolves every call site in a function
+//! - `compiled_prelude` was 19%. It re-resolves every call site in a function
 //!   body on each entry, which `function_name_lookups_do_not_scale_with_the
 //!   _work_a_call_does` pins as per invocation rather than per executed call.
-//!   This is where stable handles are worth their risk, and it is second.
+//!   **Partly fixed:** it also walked the host tables twice per host call
+//!   site, once for the reference guard and once for the value target.
+//!   Registration keeps a name out of the table it is not in, so one walk
+//!   answers both; that took the trace to 163,721 lookups. Attaching stable
+//!   handles to the surviving per-entry resolution is the next step, and the
+//!   one that actually needs interning.
 //! - `ast_call` is 10%, one resolution per executed call, and shrinks as
 //!   compiled coverage widens rather than through interning.
 //! - `generic_dispatch` — the host entry point that looks like the obvious

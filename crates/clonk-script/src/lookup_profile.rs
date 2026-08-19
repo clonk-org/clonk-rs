@@ -629,6 +629,72 @@ mod tests {
     }
 
     #[test]
+    fn a_compiled_host_call_site_walks_the_host_tables_once() {
+        // The prelude asked `host_reference_functions` whether the callee is a
+        // reference function and then asked `host_functions` for the value
+        // target, walking the host tables twice for every host call site.
+        // Registration keeps a name out of the table it is not in, so one walk
+        // answers both.
+        let engine = driver_engine();
+        const ITERATIONS: i32 = 8;
+        reset();
+        engine
+            .call("Driver", &[crate::Value::Int(ITERATIONS)])
+            .expect("compiled driver runs");
+        let profile = snapshot();
+        let host = profile
+            .family_at(LookupFamily::HostFunction, LookupSite::CompiledPrelude)
+            .lookups;
+
+        assert!(
+            host > 0,
+            "the compiled prelude must resolve this script's host call site"
+        );
+        assert_eq!(
+            host, 1,
+            "one host call site is one walk of the host tables, not two"
+        );
+    }
+
+    #[test]
+    fn registering_a_host_function_removes_the_same_name_from_the_other_table() {
+        // The invariant the single walk above rests on. If a name could sit in
+        // both tables at once, probing values first would silently select a
+        // value function where the reference guard used to bail.
+        let mut engine = crate::Engine::new();
+        engine
+            .load_script("global func Ask() { return Ambiguous(); }")
+            .expect("ambiguity probe script loads");
+
+        engine.register_host_function("Ambiguous", |_: &[crate::Value]| Ok(crate::Value::Int(1)));
+        assert_eq!(
+            engine
+                .call("Ask", &[])
+                .expect("value host function answers"),
+            crate::Value::Int(1)
+        );
+
+        engine
+            .register_host_reference_function("Ambiguous", [0_usize], |_| Ok(crate::Value::Int(7)));
+        assert_eq!(
+            engine
+                .call("Ask", &[])
+                .expect("reference host function answers"),
+            crate::Value::Int(7),
+            "registering a reference function must evict the same-named value function"
+        );
+
+        engine.register_host_function("Ambiguous", |_: &[crate::Value]| Ok(crate::Value::Int(2)));
+        assert_eq!(
+            engine
+                .call("Ask", &[])
+                .expect("re-registered value host function answers"),
+            crate::Value::Int(2),
+            "registering a value function must evict the same-named reference function"
+        );
+    }
+
+    #[test]
     fn one_reference_query_resolves_its_callee_once() {
         // `direct_value_call_has_materialized_result` asked
         // `call_expression_returns_reference` whether the result is a

@@ -11407,7 +11407,14 @@ impl CompiledFunction {
                 call_targets.push(CompiledCallTarget::Script(target));
                 continue;
             }
-            if vm.host_reference_function(name).is_some()
+            // One walk of the host tables serves both the reference guard and
+            // the value target. `register_host_function` and
+            // `register_host_reference_function` each remove a same-named
+            // entry from the other table, so a name is in at most one of them
+            // and asking for the reference first could never have changed
+            // which target is selected — it only probed twice.
+            let host = vm.resolved_host_function(name);
+            if matches!(host, Some(ResolvedHostFunction::Reference(_)))
                 || vm
                     .host_function_parameter_types
                     .and_then(|types| types.get(name))
@@ -11415,7 +11422,7 @@ impl CompiledFunction {
             {
                 return Ok(None);
             }
-            if let Some(target @ ResolvedHostFunction::Value(_)) = vm.resolved_host_function(name) {
+            if let Some(target @ ResolvedHostFunction::Value(_)) = host {
                 call_targets.push(CompiledCallTarget::Host(target));
                 continue;
             }
