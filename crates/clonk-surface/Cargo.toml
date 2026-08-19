@@ -12,6 +12,7 @@ publish.workspace = true
 [dependencies]
 pollster = "1.0"
 raw-window-handle = "0.6"
+softbuffer = "0.4.8"
 thiserror = "2"
 tracing = "0.1"
 wgpu = "30"
