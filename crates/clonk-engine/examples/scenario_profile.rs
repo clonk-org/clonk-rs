@@ -415,6 +415,17 @@ fn main() {
         "frames > 27.7ms  {over_budget} ({:.1}%)",
         over_budget as f64 / frames as f64 * 100.0
     );
+    // What the PXS Execute pass walks against what it finds
+    // (clonk-org/clonk-rs#296): the pass visits every slot of every allocated
+    // chunk, so this is the sparse-scan baseline for the final frame.
+    let pxs = engine.pxs_execute_scan_baseline();
+    println!(
+        "pxs scan         {} slots in {} chunk(s) for {} live ({} empty)",
+        pxs.visited_slots,
+        pxs.allocated_chunks,
+        pxs.live,
+        pxs.scanned_empty()
+    );
     if !advance_times.is_empty() || !snapshot_times.is_empty() {
         println!("\nphase                    mean        p50        p95        p99        max");
         print_timing_row("advance", &advance_times);
