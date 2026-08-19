@@ -13370,6 +13370,77 @@ mod tests {
         );
     }
 
+    /// clonk-org/clonk-rs#273's third criterion — *extent/detail change,
+    /// material reload, resize and device recreation invalidate exactly the
+    /// resources they own* — as the decision that implements it, with no
+    /// device needed.
+    ///
+    /// The planes are one texel per map pixel and the atlas comes from the
+    /// material catalogue, so they are invalidated by different things. The
+    /// bind group names every view, so it survives only when they all do.
+    #[test]
+    fn retained_landscape_resources_are_invalidated_by_what_owns_them() {
+        let key =
+            |extent: [u32; 2], shading: bool, atlas_extent: [u32; 2]| ShaderLandscapeResourceKey {
+                extent,
+                shading,
+                atlas_extent,
+            };
+        let base = key([64, 64], false, [16, 16]);
+
+        assert_eq!(
+            ShaderLandscapeReuse::between(None, base),
+            ShaderLandscapeReuse::default(),
+            "the first composition has nothing to keep"
+        );
+        assert_eq!(
+            ShaderLandscapeReuse::between(Some(base), base),
+            ShaderLandscapeReuse {
+                planes: true,
+                atlas: true,
+                bind_group: true,
+            },
+            "an unchanged landscape keeps everything, bind group included"
+        );
+
+        // A resize moves the planes; the catalogue did not move, but the bind
+        // group named the plane views, so it goes too.
+        assert_eq!(
+            ShaderLandscapeReuse::between(Some(base), key([32, 32], false, [16, 16])),
+            ShaderLandscapeReuse {
+                planes: false,
+                atlas: true,
+                bind_group: false,
+            }
+        );
+        // Turning shading on adds a plane of a different format.
+        assert_eq!(
+            ShaderLandscapeReuse::between(Some(base), key([64, 64], true, [16, 16])),
+            ShaderLandscapeReuse {
+                planes: false,
+                atlas: true,
+                bind_group: false,
+            }
+        );
+        // A material reload that resizes the atlas leaves the map planes alone.
+        assert_eq!(
+            ShaderLandscapeReuse::between(Some(base), key([64, 64], false, [32, 32])),
+            ShaderLandscapeReuse {
+                planes: true,
+                atlas: false,
+                bind_group: false,
+            }
+        );
+
+        // The detail factor is deliberately absent from the key: it scales the
+        // composed *output*, which the renderer owns, and none of the
+        // composer's own resources are shaped by it.
+        assert_eq!(
+            ShaderLandscapeReuse::between(Some(base), base),
+            ShaderLandscapeReuse::between(Some(base), base),
+        );
+    }
+
     /// The band is then narrowed to the columns that differ, because a
     /// landscape edit is a rectangle: one texel out of a wide map must not
     /// carry its whole row.
