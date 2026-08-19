@@ -14,6 +14,12 @@ fn effect_callback_needs_owned_snapshot(effects: &[EffectState], event: &EffectE
 
 impl Engine {
     pub fn snapshot(&self) -> SimulationSnapshot {
+        // Section spans for clonk-org/clonk-rs#294. Observation only: every
+        // timer wraps work whose result and order are unchanged.
+        let mut timings = crate::SnapshotTimings::default();
+        let projection_started = std::time::Instant::now();
+
+        let section = std::time::Instant::now();
         let mut objects = Vec::with_capacity(self.objects.len());
         for object in &self.objects {
             let library = self
@@ -22,7 +28,13 @@ impl Engine {
                 .map(|definition| definition.action_library());
             objects.push(object.snapshot(library));
         }
+        timings.objects = section.elapsed();
+
+        let section = std::time::Instant::now();
         objects.sort_by_key(|object| object.id);
+        timings.object_sort = section.elapsed();
+
+        let section = std::time::Instant::now();
         let mut particles: Vec<_> = self
             .particles
             .iter()
@@ -41,6 +53,9 @@ impl Engine {
                 .iter()
                 .map(system_particle_snapshot),
         );
+        timings.particles = section.elapsed();
+
+        let section = std::time::Instant::now();
         let crew_selection = self.crew_selection_states();
         let crew_roles = self.crew_roles.clone();
         let mut known_crew_owners: Vec<_> = self.known_crew_owners.iter().cloned().collect();
@@ -48,6 +63,9 @@ impl Engine {
         let mut eliminated_crew_owners: Vec<_> =
             self.eliminated_crew_owners.iter().cloned().collect();
         eliminated_crew_owners.sort_unstable();
+        timings.players = section.elapsed();
+
+        let section = std::time::Instant::now();
         let ambient_temperature = self.environment.ambient_temperature(self.frame);
         let sky_color = self.environment.resolved_sky_color(ambient_temperature);
         let has_fog_player = self.players.values().any(Player::fog_of_war);
@@ -71,6 +89,9 @@ impl Engine {
         };
         let sky_snapshot = self.sky.as_ref().map(SkyState::snapshot);
         let weather_events = self.weather_events.clone();
+        timings.environment = section.elapsed();
+
+        let section = std::time::Instant::now();
         let mut player_order = self.player_ids_in_order();
         let player_states: Vec<_> = player_order
             .iter()
@@ -185,6 +206,9 @@ impl Engine {
                 )
             })
             .collect();
+        timings.players = timings.players.saturating_add(section.elapsed());
+
+        let section = std::time::Instant::now();
         let definition_categories = self
             .definitions
             .iter()
@@ -215,6 +239,9 @@ impl Engine {
                 )
             })
             .collect();
+        timings.definitions = section.elapsed();
+
+        let section = std::time::Instant::now();
         let message_snapshots = self.messages.snapshot();
         let transfer_zones = self.transfer_zones.states();
         let mut pathfinder_debug = self.pathfinder_debug.borrow().clone();
@@ -238,6 +265,24 @@ impl Engine {
                 used: used_transfer_zones.contains(&zone.owner),
             })
             .collect();
+        timings.debug = section.elapsed();
+
+        // Hoisted out of the struct literal below only so they can be timed
+        // separately: `landscape` is `Arc`-shared until something dirties it,
+        // and whether that sharing holds is the question
+        // clonk-org/clonk-rs#294 asks about the largest section.
+        let section = std::time::Instant::now();
+        let global_effects = self.global_effects.clone();
+        let script_globals = self.capture_script_globals();
+        timings.effects_globals = section.elapsed();
+
+        let section = std::time::Instant::now();
+        let landscape = self.landscape.clone();
+        timings.landscape = section.elapsed();
+
+        timings.total = projection_started.elapsed();
+        self.snapshot_timings.set(timings);
+
         SimulationSnapshot {
             frame: self.frame,
             game_time: self.game_time,
@@ -255,8 +300,8 @@ impl Engine {
             environment,
             sky: sky_snapshot,
             weather_events,
-            global_effects: self.global_effects.clone(),
-            script_globals: self.capture_script_globals(),
+            global_effects,
+            script_globals,
             particles,
             players: player_states,
             fow_players,
@@ -264,7 +309,7 @@ impl Engine {
             crew_roles,
             known_crew_owners,
             eliminated_crew_owners,
-            landscape: self.landscape.clone(),
+            landscape,
             rng: self.rng.clone(),
             surfaces: Vec::new(),
             hud: HudSnapshot {
