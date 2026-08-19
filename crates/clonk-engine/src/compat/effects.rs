@@ -580,11 +580,16 @@ fn check_effect_with_policy(
         // C++ re-tests IsDead and signed priority as it reaches each linked
         // node. An earlier checker may synchronously remove a later one, so
         // never dispatch from the stale entry snapshot.
-        let Some(checker) = snapshot_effects_from_context(scope)
-            .unwrap_or_default()
-            .into_iter()
-            .find(|effect| effect.number == checker_number)
-        else {
+        // Re-read live, but copy only the one entry: copying the whole list
+        // per iteration is O(n) per checker and so O(n²) per CheckEffect,
+        // which is itself once per AddEffect (clonk-org/clonk-rs#749).
+        let Some(checker) = with_effects_from_context(scope, |effects| {
+            effects
+                .iter()
+                .find(|effect| effect.number == checker_number)
+                .cloned()
+        })
+        .flatten() else {
             continue;
         };
         if checker.priority == 0 || checker.priority < priority {
