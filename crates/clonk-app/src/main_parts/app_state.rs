@@ -6674,6 +6674,21 @@ impl MenuState {
         })
     }
 
+    /// The scenario-selection screen described for a platform accessibility
+    /// bridge (clonk-org/clonk-rs#392).
+    ///
+    /// The count and the no-result guidance are read from the same accessors
+    /// the screen draws from, so an announcement cannot drift from the pixels
+    /// a sighted player is looking at.
+    pub(crate) fn scen_sel_accessibility(&self) -> clonk_frontend::accessibility::ScenSelSemantics {
+        clonk_frontend::accessibility::scen_sel_semantics(
+            self.search_text(),
+            self.search_focused(),
+            self.enhanced_search_caption().as_deref(),
+            self.enhanced_search_empty_message().as_deref(),
+        )
+    }
+
     pub(crate) fn set_search_text(&mut self, text: impl Into<String>) {
         self.search_edit.set_text(text);
     }
