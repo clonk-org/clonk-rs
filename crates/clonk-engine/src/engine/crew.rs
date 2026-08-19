@@ -587,17 +587,6 @@ impl Engine {
                 .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?
                 .script_state_snapshot(),
         );
-        let object_definition = self
-            .definitions
-            .get(&definition_id)
-            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let callback_definition = match callback_definition_id {
-            Some(callback_definition_id) => self
-                .definitions
-                .get(callback_definition_id)
-                .ok_or_else(|| EngineError::UnknownDefinition(callback_definition_id.clone()))?,
-            None => object_definition,
-        };
         let action_library = object_definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
