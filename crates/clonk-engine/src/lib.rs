@@ -7689,6 +7689,83 @@ impl PlacementTimings {
     }
 }
 
+/// Where `Engine::snapshot` spends its time, by the section of the projection
+/// that spends it (clonk-org/clonk-rs#294).
+///
+/// The issue's first criterion is a materiality threshold recorded *before*
+/// any optimisation, and its second is a per-section split to read against it —
+/// a total alone cannot say whether a cost is one section worth attacking or
+/// the whole projection being inherently proportional to the world.
+///
+/// Observation only; nothing in the simulation reads it, and the projection
+/// itself is unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotTimings {
+    /// Projecting each object, excluding the ordering pass.
+    pub objects: std::time::Duration,
+    /// `sort_by_key` over the projected objects — called out separately
+    /// because sort work is one of the candidate costs.
+    pub object_sort: std::time::Duration,
+    /// Active particles, PXS slots and system particles.
+    pub particles: std::time::Duration,
+    /// Crew selection, player states, HUD rows and fog-of-war players.
+    pub players: std::time::Duration,
+    /// Environment, sky and weather.
+    pub environment: std::time::Duration,
+    /// Definition metadata reached by id.
+    pub definitions: std::time::Duration,
+    /// Global effects and script globals.
+    pub effects_globals: std::time::Duration,
+    /// Landscape backing, which is `Arc`-shared until something dirties it.
+    pub landscape: std::time::Duration,
+    /// Messages, transfer zones and pathfinder debug state.
+    pub debug: std::time::Duration,
+    /// The whole projection, so the sections read as shares and whatever they
+    /// miss stays visible.
+    pub total: std::time::Duration,
+}
+
+impl SnapshotTimings {
+    /// Time the sections account for.
+    pub fn sectioned(&self) -> std::time::Duration {
+        [
+            self.objects,
+            self.object_sort,
+            self.particles,
+            self.players,
+            self.environment,
+            self.definitions,
+            self.effects_globals,
+            self.landscape,
+            self.debug,
+        ]
+        .into_iter()
+        .sum()
+    }
+
+    /// Time no section accounts for.
+    pub fn unattributed(&self) -> std::time::Duration {
+        self.total.saturating_sub(self.sectioned())
+    }
+
+    /// Every section with its label, heaviest first.
+    pub fn ranked(&self) -> Vec<(&'static str, std::time::Duration)> {
+        let mut sections = vec![
+            ("objects", self.objects),
+            ("object_sort", self.object_sort),
+            ("particles", self.particles),
+            ("players", self.players),
+            ("environment", self.environment),
+            ("definitions", self.definitions),
+            ("effects_globals", self.effects_globals),
+            ("landscape", self.landscape),
+            ("debug", self.debug),
+        ];
+        sections.sort_by_key(|(_, span)| std::cmp::Reverse(*span));
+        sections
+    }
+}
+
 /// The activation stage a span belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivationStage {
@@ -7714,6 +7791,9 @@ pub struct Engine {
     pub(crate) activation_timings: ActivationTimings,
     /// Observation only; see `PlacementTimings`.
     pub(crate) placement_timings: PlacementTimings,
+    /// Observation only; see `SnapshotTimings`. Behind a `Cell` because
+    /// `snapshot` projects from `&self`.
+    pub(crate) snapshot_timings: std::cell::Cell<SnapshotTimings>,
     /// Keyed by `DefinitionId`, so the per-tick probes from
     /// `active_solid_mask_indices` pay a fixed-seed hash rather than
     /// `RandomState`'s. Every iteration over this map is order-independent:
@@ -10160,6 +10240,7 @@ impl Engine {
             effect_dispatch_stats: std::cell::Cell::default(),
             activation_timings: ActivationTimings::default(),
             placement_timings: PlacementTimings::default(),
+            snapshot_timings: std::cell::Cell::new(SnapshotTimings::default()),
             next_mission_defaults: (
                 compat::DEFAULT_NEXT_MISSION_TEXT.to_string(),
                 compat::DEFAULT_NEXT_MISSION_DESCRIPTION.to_string(),
@@ -10697,6 +10778,12 @@ impl Engine {
     /// (clonk-org/clonk-rs#732).
     pub fn placement_timings(&self) -> PlacementTimings {
         self.placement_timings
+    }
+
+    /// Where the last `snapshot()` spent its time, by section
+    /// (clonk-org/clonk-rs#294).
+    pub fn snapshot_timings(&self) -> SnapshotTimings {
+        self.snapshot_timings.get()
     }
 
     /// Adds a stage's span. Stages accumulate because placement runs from more

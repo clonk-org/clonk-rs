@@ -141,6 +141,7 @@ shard_modules!(
     script_counter,
     script_goto,
     script_lookup_profile,
+    snapshot_section_profile,
     set_builtin,
     set_vertex,
     spawn_container_order,
