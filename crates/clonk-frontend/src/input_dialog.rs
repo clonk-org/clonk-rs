@@ -5,6 +5,7 @@
 //! [`InputDialogAction::Accepted`] into the C++ callback's side effect and
 //! retain ownership of configuration, networking, and the modal stack.
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,9 @@ const TITLE_SCROLL_DELAY: Duration = Duration::from_millis(3000);
 
 const EDIT_BACKGROUND: u32 = 0x7f00_0000;
 const EDIT_SELECTION: u32 = 0x7f7f_7f00;
+/// The composition underline. Opaque white in `draw_engine_box`'s packed form,
+/// matching the text it sits under.
+const EDIT_COMPOSITION_UNDERLINE: u32 = 0x00ff_ffff;
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 
 /// A normal 40px `GUIIcons.png` phase or extended 64px `GUIIcons2.png`
@@ -390,6 +394,29 @@ struct TitleDrag {
     offset: (i32, i32),
 }
 
+/// An IME composition in progress, as `WindowEvent::Ime::Preedit` reports it.
+///
+/// Provisional text: it is drawn in the field so the user can see what they are
+/// composing, and it never enters the committed text. Only `Ime::Commit`
+/// reaches the ordinary input path, which is why enabling this changes nothing
+/// about what the field finally submits.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ImeComposition {
+    pub text: String,
+    /// The IME's own cursor inside `text`, as a byte range. `None` means the
+    /// IME reported no cursor, which winit documents as "hide the cursor"; the
+    /// caret then sits after the whole composition.
+    pub cursor: Option<(usize, usize)>,
+}
+
+impl ImeComposition {
+    /// Where the caret belongs inside the composition, in bytes from its start.
+    fn caret_offset(&self) -> usize {
+        self.cursor
+            .map_or(self.text.len(), |(start, _)| start.min(self.text.len()))
+    }
+}
+
 /// Pure controller for one classic input dialog, including the compact chat layout.
 #[derive(Clone, Debug)]
 pub struct InputDialogController {
@@ -406,6 +433,7 @@ pub struct InputDialogController {
     max_text: usize,
     caret: usize,
     selection: Option<(usize, usize)>,
+    composition: Option<ImeComposition>,
     horizontal_scroll: i32,
     focus: InputDialogControl,
     pointer: Option<GuiPoint>,
@@ -441,6 +469,7 @@ impl InputDialogController {
             max_text: DEFAULT_MAX_TEXT,
             caret: 0,
             selection: None,
+            composition: None,
             horizontal_scroll: 0,
             focus: InputDialogControl::Edit,
             pointer: None,
@@ -534,6 +563,78 @@ impl InputDialogController {
 
     pub const fn caret(&self) -> usize {
         self.caret
+    }
+
+    /// Replaces the composition in progress. `None` ends it, which is what
+    /// `Ime::Commit` and `Ime::Disabled` both mean.
+    pub fn set_composition(&mut self, composition: Option<ImeComposition>) {
+        self.composition = composition.filter(|composition| !composition.text.is_empty());
+    }
+
+    pub fn composition(&self) -> Option<&ImeComposition> {
+        self.composition.as_ref()
+    }
+
+    /// The text the field draws: the committed text with any composition
+    /// inserted at the caret.
+    ///
+    /// Borrowed when nothing is being composed, which is every frame outside an
+    /// IME session.
+    pub fn displayed_text(&self) -> Cow<'_, str> {
+        match &self.composition {
+            None => Cow::Borrowed(self.text.as_str()),
+            Some(composition) => {
+                let mut displayed = String::with_capacity(self.text.len() + composition.text.len());
+                displayed.push_str(&self.text[..self.caret]);
+                displayed.push_str(&composition.text);
+                displayed.push_str(&self.text[self.caret..]);
+                Cow::Owned(displayed)
+            }
+        }
+    }
+
+    /// The caret's byte offset within [`Self::displayed_text`].
+    pub fn displayed_caret(&self) -> usize {
+        self.caret
+            + self
+                .composition
+                .as_ref()
+                .map_or(0, ImeComposition::caret_offset)
+    }
+
+    /// The caret's rectangle inside the edit, for positioning the platform IME
+    /// candidate window.
+    ///
+    /// The same arithmetic `render_edit` uses for the caret, so the candidate
+    /// list appears under the character actually being composed rather than at
+    /// the window origin.
+    pub fn caret_area(&self, layout: &InputDialogLayout, font: &ClonkFont) -> IntRect {
+        let client = edit_client(layout.edit);
+        let displayed = self.displayed_text();
+        let caret_x = client.x + font.measure(&displayed[..self.displayed_caret()], false).0
+            - self.horizontal_scroll;
+        let (text_y0, height) = if client.h <= font.line_height {
+            (client.y, client.h)
+        } else {
+            (
+                client.y + (client.h - font.line_height) / 2 + 1,
+                font.line_height - 2,
+            )
+        };
+        IntRect {
+            x: caret_x.clamp(client.x, client.x + client.w),
+            y: text_y0,
+            w: 1,
+            h: height.max(1),
+        }
+    }
+
+    /// The composition's byte range within [`Self::displayed_text`], which is
+    /// what the underline spans.
+    pub fn displayed_composition_range(&self) -> Option<(usize, usize)> {
+        self.composition
+            .as_ref()
+            .map(|composition| (self.caret, self.caret + composition.text.len()))
     }
 
     pub const fn selection(&self) -> Option<(usize, usize)> {
@@ -1727,19 +1828,44 @@ impl InputDialogController {
                 );
             }
         }
+        // An IME composition is provisional text drawn at the caret; with none
+        // in progress this is the committed text and the committed caret, so
+        // the ordinary field is pixel-for-pixel what it was.
+        let displayed = self.displayed_text();
+        let displayed_caret = self.displayed_caret();
         draw_clipped_text(
             surface,
             font,
             client.x - self.horizontal_scroll,
             text_y0 - 1,
-            &self.text,
+            &displayed,
             WHITE,
             TextAlign::Left,
             gamma,
             clip,
         );
+        // The composition is underlined, which is how every platform marks
+        // text the IME has not committed yet.
+        if let Some((start, end)) = self.displayed_composition_range() {
+            let x1 = client.x + font.measure(&displayed[..start], false).0 - self.horizontal_scroll;
+            let x2 = client.x + font.measure(&displayed[..end], false).0 - self.horizontal_scroll;
+            let underline_y = text_y0 + selection_height - 1;
+            let clipped_x1 = x1.max(clip.x);
+            let clipped_x2 = (x2 - 1).min(clip.x + clip.w - 1);
+            if clipped_x1 <= clipped_x2 {
+                draw_engine_box(
+                    surface,
+                    clipped_x1,
+                    underline_y,
+                    clipped_x2,
+                    underline_y,
+                    EDIT_COMPOSITION_UNDERLINE,
+                    gamma,
+                );
+            }
+        }
         if active && self.focus == InputDialogControl::Edit && cursor_visible {
-            let caret_x = client.x + font.measure(&self.text[..self.caret], false).0
+            let caret_x = client.x + font.measure(&displayed[..displayed_caret], false).0
                 - font.measure("\u{a6}", false).0 / 2
                 - self.horizontal_scroll;
             draw_scaled_caret(
@@ -2251,6 +2377,65 @@ mod tests {
             "Password",
             InputDialogIcon::LOCKED_FRONTAL,
         )
+    }
+
+    /// An IME composition is *shown* at the caret without entering the
+    /// committed text: `WindowEvent::Ime::Preedit` is provisional, and only
+    /// `Ime::Commit` reaches the existing input path.
+    #[test]
+    fn a_composition_is_drawn_at_the_caret_without_entering_the_text() {
+        let mut controller = controller();
+        controller.set_input_text("ab");
+        controller.set_composition(Some(ImeComposition {
+            text: "\u{304b}".to_owned(),
+            cursor: None,
+        }));
+
+        assert_eq!(
+            controller.text(),
+            "ab",
+            "a composition never enters the committed text"
+        );
+        assert_eq!(controller.displayed_text(), "ab\u{304b}");
+        assert_eq!(
+            controller.displayed_caret(),
+            "ab\u{304b}".len(),
+            "with no IME cursor the caret sits at the end of the composition"
+        );
+
+        // Clearing it leaves the field exactly as it was.
+        controller.set_composition(None);
+        assert_eq!(controller.displayed_text(), "ab");
+        assert_eq!(controller.displayed_caret(), controller.caret());
+    }
+
+    /// winit reports the IME's own cursor as a byte range inside the preedit,
+    /// and `None` when the IME asks for it to be hidden.
+    #[test]
+    fn the_ime_cursor_places_the_caret_inside_the_composition() {
+        let mut controller = controller();
+        controller.set_input_text("ab");
+        controller.set_composition(Some(ImeComposition {
+            text: "\u{304b}\u{306a}".to_owned(),
+            cursor: Some((0, 0)),
+        }));
+
+        assert_eq!(
+            controller.displayed_caret(),
+            "ab".len(),
+            "a cursor at the composition's start keeps the caret before it"
+        );
+        assert_eq!(
+            controller.displayed_composition_range(),
+            Some(("ab".len(), "ab\u{304b}\u{306a}".len())),
+            "the underline spans the whole composition regardless of the cursor"
+        );
+
+        // An empty preedit is how an IME cancels: it ends the composition
+        // rather than leaving a zero-width one to underline.
+        controller.set_composition(Some(ImeComposition::default()));
+        assert!(controller.composition().is_none());
+        assert_eq!(controller.displayed_composition_range(), None);
     }
 
     fn point_in(rect: IntRect) -> GuiPoint {

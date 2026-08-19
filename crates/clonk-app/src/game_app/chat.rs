@@ -540,6 +540,31 @@ impl GameApp {
             .map(InputDialogController::text)
     }
 
+    /// Routes an IME composition to the open classic input dialog.
+    ///
+    /// Provisional text only: `Ime::Preedit` is drawn in the field and never
+    /// reaches `handle_text_input`, so what the dialog finally submits is
+    /// exactly what it submitted before — only `Ime::Commit` enters text.
+    /// With no dialog open there is nowhere to compose and the event is
+    /// dropped, which is also what clears a stale composition.
+    pub(crate) fn set_ime_composition(
+        &mut self,
+        composition: Option<clonk_frontend::input_dialog::ImeComposition>,
+    ) {
+        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            dialog.controller.set_composition(composition);
+        }
+    }
+
+    /// The caret's rectangle in GUI coordinates, for positioning the platform
+    /// IME candidate window. `None` when no field is taking text.
+    pub(crate) fn ime_caret_area(&self) -> Option<clonk_frontend::classic_gui::IntRect> {
+        let dialog = self.game_option_input_dialog.as_ref()?;
+        let layout = self.game_option_input_layout()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        Some(dialog.controller.caret_area(&layout, &fonts.text))
+    }
+
     pub(crate) fn running_chat_active(&self) -> bool {
         self.running_chat.as_ref().is_some_and(|chat| chat.active)
             && (self.mode != AppMode::Running
