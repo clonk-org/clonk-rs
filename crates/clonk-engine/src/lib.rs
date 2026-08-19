@@ -10470,6 +10470,12 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
 }
 
 impl Engine {
+    /// What the next PXS Execute pass will walk, against what it will find
+    /// (clonk-org/clonk-rs#296). Observation only.
+    pub fn pxs_execute_scan_baseline(&self) -> crate::pxs::PxsScanBaseline {
+        self.pxs_system.execute_scan_baseline()
+    }
+
     /// What effect dispatch has materialised since the last reset.
     pub fn effect_dispatch_stats(&self) -> EffectDispatchStats {
         self.effect_dispatch_stats.get()

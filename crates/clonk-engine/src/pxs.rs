@@ -12,6 +12,23 @@ use crate::MaterialId;
 use serde::{Deserialize, Serialize};
 
 /// `PXSChunkSize` / `PXSMaxChunk` (C4PXS.h:40).
+/// What one PXS Execute pass walks, against what it finds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PxsScanBaseline {
+    pub allocated_chunks: usize,
+    /// `allocated_chunks * PXS_CHUNK_SIZE`: every slot the pass visits.
+    pub visited_slots: usize,
+    /// Live PXS the previous pass executed.
+    pub live: usize,
+}
+
+impl PxsScanBaseline {
+    /// Visited slots that held nothing.
+    pub fn scanned_empty(&self) -> usize {
+        self.visited_slots.saturating_sub(self.live)
+    }
+}
+
 pub const PXS_CHUNK_SIZE: usize = 500;
 pub const PXS_MAX_CHUNK: usize = 20;
 const PXS_RECORD_BYTES: usize = 5 * std::mem::size_of::<i32>();
@@ -135,6 +152,30 @@ impl PxsSystem {
     /// from C++'s per-Execute public `Count` ledger.
     pub fn count(&self) -> usize {
         self.chunk_counts.iter().sum()
+    }
+
+    /// Slots the next Execute pass will visit, against the live PXS it will
+    /// find there.
+    ///
+    /// `C4PXSSystem::Execute` walks every slot of every allocated chunk in
+    /// chunk-major order (`C4PXS.cpp:212-234`), and the port does the same, so
+    /// the visited count is the allocated chunks times the chunk size however
+    /// few pixels are live. The gap between the two is what an ordered
+    /// occupancy index would remove — and whether that gap is worth removing
+    /// is a question about real workloads, so the numbers are reported rather
+    /// than assumed.
+    ///
+    /// Observation only: this reads state the pass already keeps and changes
+    /// no slot order.
+    pub fn execute_scan_baseline(&self) -> PxsScanBaseline {
+        let chunks = (0..PXS_MAX_CHUNK)
+            .filter(|chunk| self.chunk_allocated(*chunk))
+            .count();
+        PxsScanBaseline {
+            allocated_chunks: chunks,
+            visited_slots: chunks * PXS_CHUNK_SIZE,
+            live: self.execute_count,
+        }
     }
 
     /// `C4PXSSystem::Count` as observed by `C4ControlSyncCheck::Set` after
@@ -589,6 +630,55 @@ mod tests {
         assert_eq!(
             PxsSystem::from_c4b(&oversized).unwrap_err(),
             PxsComponentError::TooManyChunks(PXS_MAX_CHUNK + 1)
+        );
+    }
+}
+
+#[cfg(test)]
+mod scan_baseline_tests {
+    use super::*;
+
+    /// A PXS Execute pass visits every slot of every allocated chunk in
+    /// chunk-major order (`C4PXS.cpp:212-234`), so what it walks is fixed by
+    /// the chunks that exist rather than by the pixels in them.
+    ///
+    /// This is the baseline clonk-org/clonk-rs#296 asks for before deciding
+    /// whether an ordered occupancy index is worth its complexity: the gap
+    /// between visited and live is the work such an index would remove.
+    #[test]
+    fn the_execute_scan_visits_whole_chunks_however_few_pixels_are_live() {
+        let mut system = PxsSystem::default();
+        assert_eq!(
+            system.execute_scan_baseline(),
+            PxsScanBaseline::default(),
+            "an empty system allocates no chunk and walks nothing"
+        );
+
+        let pixel = Pxs {
+            mat: crate::TestValueExt::test_value(MaterialId::new(1)),
+            x: C4Fixed::from_raw(0),
+            y: C4Fixed::from_raw(0),
+            xdir: C4Fixed::from_raw(0),
+            ydir: C4Fixed::from_raw(0),
+        };
+        assert!(system.create_at(0, 0, pixel));
+        let baseline = system.execute_scan_baseline();
+        assert_eq!(baseline.allocated_chunks, 1);
+        assert_eq!(
+            baseline.visited_slots, PXS_CHUNK_SIZE,
+            "one allocated chunk is 500 visited slots"
+        );
+
+        // A pixel in a later chunk allocates it, and every slot of both is
+        // walked — the sparse case the issue is about.
+        assert!(system.create_at(3, 17, pixel));
+        let baseline = system.execute_scan_baseline();
+        assert_eq!(baseline.allocated_chunks, 2);
+        assert_eq!(baseline.visited_slots, 2 * PXS_CHUNK_SIZE);
+        assert_eq!(
+            baseline.scanned_empty(),
+            2 * PXS_CHUNK_SIZE - baseline.live,
+            "the empty slots walked are what an occupancy index would skip"
         );
     }
 }
