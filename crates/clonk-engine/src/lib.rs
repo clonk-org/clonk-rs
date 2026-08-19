@@ -10597,6 +10597,34 @@ impl Engine {
     /// described by [`developer_reload::definition_reload_outcome`] and applied
     /// by the caller, exactly as `C4Game::ReloadDef` applies them around
     /// `Defs.Reload`.
+    /// `Defs.Load(szFilename, C4D_Load_RX, …)` for one dropped group
+    /// (`C4Game.cpp:1650`).
+    ///
+    /// The editor drop is the only caller, and it reaches this exactly where
+    /// C++ does: after `C4Id2Def` missed. C++ then looks the id up a *second*
+    /// time and treats either failure the same way, so a group that cannot be
+    /// read simply answers `false` and the caller reports `IDS_CNS_DROPNODEF`.
+    ///
+    /// Unlike [`Self::reload_definition`] this never removes anything. A group
+    /// whose id is already loaded leaves the loaded one in place, because the
+    /// caller only gets here when that lookup already missed — reloading from
+    /// a dropped file would be `ReloadDef`'s destructive path, which the drop
+    /// does not ask for.
+    pub fn load_definition_from_path(&mut self, path: &std::path::Path) -> bool {
+        let loaded = clonk_resources::Group::open(path)
+            .ok()
+            .and_then(|group| ResourceDefinitionData::load(&group).ok())
+            .and_then(|resource| Definition::from_resource(&resource).ok());
+        let Some(mut definition) = loaded else {
+            return false;
+        };
+        if self.definition(definition.id()).is_some() {
+            return true;
+        }
+        definition.set_source_path(Some(path.to_path_buf()));
+        self.register_definition(definition).is_ok()
+    }
+
     pub fn reload_definition(&mut self, id: &str, network_enabled: bool) -> bool {
         // The network refusal is `C4Game::ReloadDef`'s first line.
         if network_enabled {

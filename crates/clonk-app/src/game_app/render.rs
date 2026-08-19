@@ -2876,18 +2876,24 @@ impl GameApp {
         let Some(projection) = self.console_viewport_projections.get(&identity).copied() else {
             return;
         };
-        let outcome = drop_file(
-            self.developer_console_editing(),
-            path,
-            |path| Self::dropped_definition_id(&self.engine, path),
-            |id| self.engine.definition(id).is_some(),
-            // `Defs.Load(szFilename, C4D_Load_RX, …)` mid-round. The port has
-            // no runtime loader for a definition it has never seen — only
-            // `ReloadDef` for one it already holds — so the second lookup
-            // fails and the drop reports `IDS_CNS_DROPNODEF`, which is the
-            // arm C++ takes when its own load fails.
-            |_| false,
-        );
+        let editing = self.developer_console_editing();
+        let outcome = {
+            // `drop_file` asks its three questions strictly in sequence — the
+            // id, whether it is already loaded, and only then the load — and
+            // the last one mutates what the others read. The cell scopes that
+            // alternation to this call; the borrows cannot overlap, because
+            // `drop_file` never holds one across another.
+            let engine = std::cell::RefCell::new(&mut self.engine);
+            drop_file(
+                editing,
+                path,
+                |path| Self::dropped_definition_id(&engine.borrow(), path),
+                |id| engine.borrow().definition(id).is_some(),
+                // `Defs.Load(szFilename, C4D_Load_RX, …) && C4Id2Def(c_id)`
+                // (`C4Game.cpp:1650`): C++ tests both, and so does `drop_file`.
+                |path| engine.borrow_mut().load_definition_from_path(path),
+            )
+        };
         match outcome {
             DropOutcome::Refused => {
                 let message =
