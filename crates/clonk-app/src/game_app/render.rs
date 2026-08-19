@@ -4308,6 +4308,27 @@ impl GameApp {
             self.developer_selection.objects(),
             self.edit_cursor_drag_frame,
         );
+        // `ScrollBarsByViewPosition` is fed the view the frame was drawn with,
+        // not a later one, so a bar can never describe a position the window
+        // is not showing.
+        if let Some((view_x, view_y, view_width, view_height)) =
+            self.graphics.detached_viewport_view(identity)
+        {
+            let locked = self.console_viewport_player_lock(identity);
+            let ranges = self.snapshot.landscape.as_ref().and_then(|landscape| {
+                clonk_engine::developer_viewport::scroll_ranges(
+                    locked,
+                    view_x,
+                    view_y,
+                    view_width,
+                    view_height,
+                    landscape.width() as i32,
+                    // `GBackHgt`, resolved the way the renderer resolves it.
+                    landscape.estimated_height().max(1),
+                )
+            });
+            Self::draw_console_scroll_bars(&mut frame.surface, ranges);
+        }
         // The frame a window drew is what its pointer input must be converted
         // through; nothing else records this viewport's own ViewX/ViewY.
         self.console_viewport_projections
@@ -4332,6 +4353,56 @@ impl GameApp {
     /// rectangle outline, and nothing at all when the shape is under a pixel
     /// wide or tall — `select_mark_pixels` owns that rule. Coordinates are
     /// viewport-space: `cobj->x + cobj->Shape.x - ViewX`.
+    /// Draws an unlocked viewport's scroll bars onto its own surface.
+    ///
+    /// The thickness and the two greys are this port's own: the reference
+    /// macOS build compiles `ScrollBarsByViewPosition` away entirely
+    /// (`C4Viewport.cpp:634-635`), so there is no C++ presentation to mirror —
+    /// only the proportions, which [`scroll_bar_layout`] takes straight from
+    /// the ranges. A locked viewport is handed `None` and draws nothing, which
+    /// is C++'s `if (PlayerLock) return false` (`C4Viewport.cpp:272`).
+    fn draw_console_scroll_bars(
+        surface: &mut clonk_graphics::Surface,
+        ranges: Option<(
+            clonk_engine::developer_viewport::ScrollRange,
+            clonk_engine::developer_viewport::ScrollRange,
+        )>,
+    ) {
+        use clonk_engine::developer_viewport::scroll_bar_layout;
+
+        /// Wide enough to hit with a pointer, narrow enough not to eat the
+        /// view a 400x250 window starts with.
+        const THICKNESS: i32 = 6;
+
+        let Some(layout) = scroll_bar_layout(
+            ranges,
+            surface.width() as i32,
+            surface.height() as i32,
+            THICKNESS,
+        ) else {
+            return;
+        };
+        let track = clonk_graphics::Color::opaque(24, 24, 24);
+        let thumb = clonk_graphics::Color::opaque(168, 168, 168);
+        for bar in [layout.horizontal, layout.vertical] {
+            Self::fill_surface_rect(surface, bar.track, track);
+            Self::fill_surface_rect(surface, bar.thumb, thumb);
+        }
+    }
+
+    /// Fills one rectangle, clipped to the surface.
+    fn fill_surface_rect(
+        surface: &mut clonk_graphics::Surface,
+        rect: clonk_engine::developer_viewport::BarRect,
+        color: clonk_graphics::Color,
+    ) {
+        for y in rect.y.max(0)..(rect.y + rect.height).min(surface.height() as i32) {
+            for x in rect.x.max(0)..(rect.x + rect.width).min(surface.width() as i32) {
+                let _ = surface.set_pixel(x as u32, y as u32, color);
+            }
+        }
+    }
+
     fn draw_console_overlay(
         surface: &mut clonk_graphics::Surface,
         snapshot: &SimulationSnapshot,

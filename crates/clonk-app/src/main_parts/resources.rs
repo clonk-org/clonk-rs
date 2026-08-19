@@ -3764,6 +3764,44 @@ pub(crate) fn store_console_window_position(paths: &AppPaths, x: i32, y: i32) ->
     )
 }
 
+/// A detached viewport's remembered geometry (`C4ViewportWindow::GetPositionData`,
+/// `C4Viewport.cpp:217-222`). Same `Console` section as the console's own
+/// entry, keyed `Viewport{Player + 1}`.
+pub(crate) fn load_viewport_window_position(
+    paths: Option<&AppPaths>,
+    player: i32,
+) -> Option<crate::console_window_position::ConsoleWindowPlacement> {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        crate::console_window_position::CONSOLE_POSITION_SECTION,
+        &crate::console_window_position::viewport_position_key(player),
+    )
+    .as_deref()
+    .and_then(crate::console_window_position::parse_console_position)
+}
+
+/// Stores that geometry. `storeSize` is set for a viewport, so the size goes
+/// with the position — the difference from `store_console_window_position`.
+pub(crate) fn store_viewport_window_position(
+    paths: &AppPaths,
+    player: i32,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> io::Result<()> {
+    let key = crate::console_window_position::viewport_position_key(player);
+    let value = crate::console_window_position::format_viewport_position(x, y, width, height);
+    persist_native_config_values(
+        paths,
+        crate::console_window_position::CONSOLE_POSITION_SECTION,
+        &[(
+            key.as_str(),
+            clonk_app_netplay::NativeConfigValue::RawAscii(&value),
+        )],
+    )
+}
+
 /// `Graphics.VerboseObjectLoading`, default 0 (C4Config.cpp:453). Gates the
 /// definition and particle loading diagnostics in `clonk-engine`.
 pub(crate) fn load_verbose_object_loading(paths: Option<&AppPaths>) -> i32 {

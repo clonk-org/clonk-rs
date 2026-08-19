@@ -90,6 +90,110 @@ pub fn scroll_ranges(
     ))
 }
 
+/// A filled rectangle on the viewport surface, in surface pixels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BarRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// One bar: the channel it runs in, and the thumb inside it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScrollBar {
+    pub track: BarRect,
+    pub thumb: BarRect,
+}
+
+/// Both bars of an unlocked viewport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScrollBarLayout {
+    pub horizontal: ScrollBar,
+    pub vertical: ScrollBar,
+}
+
+/// The shortest thumb that still reads as a thumb rather than a mark.
+const MINIMUM_THUMB: i32 = 4;
+
+/// Where an unlocked viewport's bars land on a surface of this size.
+///
+/// `None` for a locked viewport — this takes what [`scroll_ranges`] returned
+/// so the two answers cannot drift apart — and also for a window too small to
+/// hold a track, which would otherwise ask for a negative-width rectangle.
+///
+/// The proportions are `ScrollBarsByViewPosition`'s: the thumb carries `nPage`
+/// as its extent against `nMax`, and `nPos` as its offset. The thickness and
+/// the colours are not portable — the reference macOS build compiles
+/// `ScrollBarsByViewPosition` as `{ return false; }` (`C4Viewport.cpp:634-635`),
+/// so there is no C++ presentation to mirror.
+pub fn scroll_bar_layout(
+    ranges: Option<(ScrollRange, ScrollRange)>,
+    surface_width: i32,
+    surface_height: i32,
+    thickness: i32,
+) -> Option<ScrollBarLayout> {
+    let (horizontal, vertical) = ranges?;
+    // The bars give up their shared corner, so neither draws over the other.
+    let horizontal_track = surface_width.checked_sub(thickness)?;
+    let vertical_track = surface_height.checked_sub(thickness)?;
+    if thickness <= 0 || horizontal_track <= 0 || vertical_track <= 0 {
+        return None;
+    }
+
+    let horizontal_thumb = thumb_extent(&horizontal, horizontal_track);
+    let vertical_thumb = thumb_extent(&vertical, vertical_track);
+    Some(ScrollBarLayout {
+        horizontal: ScrollBar {
+            track: BarRect {
+                x: 0,
+                y: surface_height - thickness,
+                width: horizontal_track,
+                height: thickness,
+            },
+            thumb: BarRect {
+                x: horizontal_thumb.0,
+                y: surface_height - thickness,
+                width: horizontal_thumb.1,
+                height: thickness,
+            },
+        },
+        vertical: ScrollBar {
+            track: BarRect {
+                x: surface_width - thickness,
+                y: 0,
+                width: thickness,
+                height: vertical_track,
+            },
+            thumb: BarRect {
+                x: surface_width - thickness,
+                y: vertical_thumb.0,
+                width: thickness,
+                height: vertical_thumb.1,
+            },
+        },
+    })
+}
+
+/// The `(offset, extent)` of one thumb within a track of `track` pixels.
+///
+/// A landscape no larger than the view has nothing to scroll, so the thumb
+/// fills the track — the bar then says "all of it is visible" rather than
+/// showing a stub that cannot move.
+fn thumb_extent(range: &ScrollRange, track: i32) -> (i32, i32) {
+    let max = i64::from(range.max);
+    let page = i64::from(range.page).clamp(0, max.max(0));
+    let track_len = i64::from(track);
+    if max <= 0 || page >= max {
+        return (0, track);
+    }
+    let extent = (page * track_len / max).clamp(i64::from(MINIMUM_THUMB), track_len);
+    let scrollable = max - page;
+    let position = i64::from(range.position).clamp(0, scrollable);
+    let offset = position * (track_len - extent) / scrollable;
+    (offset as i32, extent as i32)
+}
+
 /// The window a console viewport materialises with (`C4Viewport.cpp:1350-1351`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ViewportWindowSpec {
@@ -205,6 +309,88 @@ pub fn route_viewport_event(mode: CursorMode) -> ViewportEventRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bars are drawn from `ScrollBarsByViewPosition`'s own numbers, so
+    /// the thumb has to carry `nPage` as its extent and `nPos` as its offset
+    /// against `nMax`. The reference macOS build compiles the bars away
+    /// (`C4Viewport.cpp:634-635`), so only these proportions are portable —
+    /// the thickness and the colours are this port's own.
+    #[test]
+    fn scroll_bars_track_the_page_and_position_they_are_given() {
+        const THICKNESS: i32 = 5;
+        let surface = (200, 100);
+        let landscape = (1000, 500);
+        let view = (200, 100);
+
+        let ranges =
+            |x: i32, y: i32| scroll_ranges(false, x, y, view.0, view.1, landscape.0, landscape.1);
+
+        // The horizontal track gives up its last `THICKNESS` pixels to the
+        // vertical bar, so the two never overlap in the corner.
+        let layout = scroll_bar_layout(ranges(0, 0), surface.0, surface.1, THICKNESS)
+            .expect("an unlocked viewport has bars");
+        assert_eq!(layout.horizontal.track.width, surface.0 - THICKNESS);
+        assert_eq!(layout.vertical.track.height, surface.1 - THICKNESS);
+
+        // `nPage / nMax` of the track: 200/1000 of 195.
+        assert_eq!(layout.horizontal.thumb.width, 39);
+        assert_eq!(layout.horizontal.thumb.x, layout.horizontal.track.x);
+        // 100/500 of 95.
+        assert_eq!(layout.vertical.thumb.height, 19);
+        assert_eq!(layout.vertical.thumb.y, layout.vertical.track.y);
+
+        // Scrolled fully right, the thumb ends flush with the track — that is
+        // what makes the bar read as "this is the end of the landscape".
+        let layout = scroll_bar_layout(
+            ranges(landscape.0 - view.0, landscape.1 - view.1),
+            surface.0,
+            surface.1,
+            THICKNESS,
+        )
+        .expect("an unlocked viewport has bars");
+        assert_eq!(
+            layout.horizontal.thumb.x + layout.horizontal.thumb.width,
+            layout.horizontal.track.x + layout.horizontal.track.width
+        );
+        assert_eq!(
+            layout.vertical.thumb.y + layout.vertical.thumb.height,
+            layout.vertical.track.y + layout.vertical.track.height
+        );
+
+        // Halfway along, the thumb is halfway along.
+        let layout = scroll_bar_layout(ranges(400, 0), surface.0, surface.1, THICKNESS)
+            .expect("an unlocked viewport has bars");
+        assert_eq!(layout.horizontal.thumb.x, layout.horizontal.track.x + 78);
+    }
+
+    /// The issue's own criterion: the bars disappear exactly when
+    /// `scroll_ranges` refuses, which is the locked case
+    /// (`C4Viewport.cpp:272`).
+    #[test]
+    fn scroll_bars_are_absent_exactly_when_the_ranges_are() {
+        let locked = scroll_ranges(true, 0, 0, 200, 100, 1000, 500);
+        assert!(locked.is_none(), "the lock is what refuses");
+        assert!(
+            scroll_bar_layout(locked, 200, 100, 5).is_none(),
+            "a locked viewport draws no bars"
+        );
+
+        let unlocked = scroll_ranges(false, 0, 0, 200, 100, 1000, 500);
+        assert!(unlocked.is_some());
+        assert!(
+            scroll_bar_layout(unlocked, 200, 100, 5).is_some(),
+            "an unlocked one does"
+        );
+    }
+
+    /// A window too small to hold a track draws nothing rather than a
+    /// negative-width rectangle.
+    #[test]
+    fn a_viewport_smaller_than_its_bars_draws_none() {
+        let ranges = scroll_ranges(false, 0, 0, 200, 100, 1000, 500);
+        assert!(scroll_bar_layout(ranges, 4, 100, 5).is_none());
+        assert!(scroll_bar_layout(ranges, 200, 4, 5).is_none());
+    }
 
     // C4Viewport.cpp:250-272 — the lock's asymmetry, the scrollbar gate, and
     // the per-mode input route.
