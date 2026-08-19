@@ -61,6 +61,10 @@ pub struct MassMoverSet {
     /// slots whether one mover is live or none.
     #[serde(skip)]
     scan: MassMoverScan,
+    /// Occupancy accelerator over `slots`. Skipped by serde and rebuilt from
+    /// the array on load, so it can never disagree with a restored save.
+    #[serde(skip)]
+    occupancy: SlotOccupancy,
 }
 
 /// What one `Execute` inspected.
@@ -68,6 +72,106 @@ pub struct MassMoverSet {
 pub struct MassMoverScan {
     inspected: u64,
     executed: u64,
+}
+
+/// Occupancy of the slot array, one bit per slot.
+///
+/// An accelerator over the canonical `slots`, never an authority: every answer
+/// it gives is one the linear scan would give, and `rebuild` restores it from
+/// the array whenever that array is replaced wholesale. The slot layout is
+/// observable to C++ (`CreatePtr`, save order, RNG), so nothing here may
+/// reorder or compact it — this only skips the empties faster.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SlotOccupancy {
+    words: Vec<u64>,
+}
+
+impl SlotOccupancy {
+    const BITS: usize = u64::BITS as usize;
+
+    fn rebuild(slots: &[Option<MassMover>]) -> Self {
+        let mut occupancy = Self {
+            words: vec![0; CHUNK.div_ceil(Self::BITS)],
+        };
+        for (index, slot) in slots.iter().enumerate().take(CHUNK) {
+            if slot.is_some() {
+                occupancy.set(index);
+            }
+        }
+        occupancy
+    }
+
+    fn ensure(&mut self) {
+        if self.words.len() < CHUNK.div_ceil(Self::BITS) {
+            self.words.resize(CHUNK.div_ceil(Self::BITS), 0);
+        }
+    }
+
+    fn set(&mut self, index: usize) {
+        self.ensure();
+        self.words[index / Self::BITS] |= 1 << (index % Self::BITS);
+    }
+
+    fn clear(&mut self, index: usize) {
+        self.ensure();
+        if let Some(word) = self.words.get_mut(index / Self::BITS) {
+            *word &= !(1 << (index % Self::BITS));
+        }
+    }
+
+    fn is_live(&self, index: usize) -> bool {
+        self.words
+            .get(index / Self::BITS)
+            .is_some_and(|word| word & (1 << (index % Self::BITS)) != 0)
+    }
+
+    /// The first free slot strictly after `start`, wrapping, testing `start`
+    /// itself last — the do-while at `C4MassMover.cpp:75-87`.
+    fn first_free_after(&self, start: usize) -> Option<usize> {
+        let mut cursor = start;
+        loop {
+            cursor += 1;
+            if cursor >= CHUNK {
+                cursor = 0;
+            }
+            if !self.is_live(cursor) {
+                return Some(cursor);
+            }
+            if cursor == start {
+                return None;
+            }
+        }
+    }
+
+    /// The highest live slot strictly below `cursor`, which is what walking
+    /// the array downward finds next.
+    ///
+    /// Read fresh on every step, so a mover inserted below the cursor during
+    /// the pass is still reached and one inserted above it is still missed —
+    /// the descending scan's observable behaviour, unchanged.
+    fn last_live_below(&self, cursor: usize) -> Option<usize> {
+        if cursor == 0 {
+            return None;
+        }
+        let last = cursor - 1;
+        let mut word_index = last / Self::BITS;
+        // Mask off the bits at or above the cursor in its own word.
+        let top_bit = last % Self::BITS;
+        let mut word = self.words.get(word_index).copied().unwrap_or(0)
+            & (u64::MAX >> (Self::BITS - 1 - top_bit));
+        loop {
+            if word != 0 {
+                return Some(
+                    word_index * Self::BITS + (Self::BITS - 1 - word.leading_zeros() as usize),
+                );
+            }
+            if word_index == 0 {
+                return None;
+            }
+            word_index -= 1;
+            word = self.words.get(word_index).copied().unwrap_or(0);
+        }
+    }
 }
 
 /// Sparse serialized form: only the occupied slots (with their indices, so
@@ -90,6 +194,7 @@ impl From<MassMoverSetSnapshot> for MassMoverSet {
             create_ptr: snapshot.create_ptr.min(CHUNK - 1),
             count: snapshot.count,
             scan: MassMoverScan::default(),
+            occupancy: SlotOccupancy::default(),
         };
         for (index, mover) in snapshot.movers {
             let index = index as usize;
@@ -98,6 +203,9 @@ impl From<MassMoverSetSnapshot> for MassMoverSet {
                 set.slots[index] = Some(mover);
             }
         }
+        // Derived from the array rather than carried in the save, so a state
+        // written before this accelerator existed still loads correctly.
+        set.occupancy = SlotOccupancy::rebuild(&set.slots);
         set
     }
 }
@@ -133,6 +241,7 @@ impl MassMoverSet {
         self.slots.clear();
         self.create_ptr = 0;
         self.count = 0;
+        self.occupancy = SlotOccupancy::default();
     }
 
     /// C4MassMoverSet::Save consolidates occupied slots, resets CreatePtr,
@@ -145,11 +254,13 @@ impl MassMoverSet {
             .filter_map(|slot| *slot)
             .map(Some)
             .collect::<Vec<_>>();
+        let occupancy = SlotOccupancy::rebuild(&slots);
         Self {
             count: slots.len() as i32,
             slots,
             create_ptr: 0,
             scan: MassMoverScan::default(),
+            occupancy,
         }
     }
 
@@ -179,6 +290,13 @@ impl MassMoverSet {
     /// do-while tests every slot including `CreatePtr` itself. Read-only —
     /// `CreatePtr` only advances on a successful `Init` (`fill_slot`).
     pub(crate) fn find_free_slot(&self) -> Option<usize> {
+        self.occupancy.first_free_after(self.create_ptr)
+    }
+
+    /// The linear scan `find_free_slot` replaces, kept as the reference the
+    /// model test compares against (`C4MassMover.cpp:75-87`).
+    #[cfg(test)]
+    pub(crate) fn find_free_slot_linear(&self) -> Option<usize> {
         let start = self.create_ptr;
         let mut cptr = start;
         loop {
@@ -193,6 +311,24 @@ impl MassMoverSet {
                 return None;
             }
         }
+    }
+
+    /// The next live slot strictly below `cursor`, which is where a
+    /// descending scan would arrive next.
+    pub(crate) fn next_live_below(&self, cursor: usize) -> Option<usize> {
+        self.occupancy.last_live_below(cursor)
+    }
+
+    /// Moves the allocation cursor, for the model test's independent walk.
+    #[cfg(test)]
+    pub(crate) fn set_create_ptr_for_test(&mut self, value: usize) {
+        self.create_ptr = value.min(CHUNK - 1);
+    }
+
+    /// Whether the accelerator still agrees with the canonical array.
+    #[cfg(test)]
+    pub(crate) fn occupancy_matches_slots(&self) -> bool {
+        (0..CHUNK).all(|index| self.occupancy.is_live(index) == self.slot(index).is_some())
     }
 
     /// Slots the last `Execute` inspected across both descending passes.
@@ -220,6 +356,7 @@ impl MassMoverSet {
     pub(crate) fn fill_slot(&mut self, index: usize, mover: MassMover) {
         self.ensure_slots();
         self.slots[index] = Some(mover);
+        self.occupancy.set(index);
         self.create_ptr = index;
     }
 
@@ -227,6 +364,7 @@ impl MassMoverSet {
     /// decrement `Count`.
     pub(crate) fn cease(&mut self, index: usize) {
         if self.slots.get_mut(index).and_then(Option::take).is_some() {
+            self.occupancy.clear(index);
             self.count -= 1;
         }
     }
@@ -258,6 +396,7 @@ impl MassMoverSet {
             create_ptr: 0,
             count: record_count as i32,
             scan: MassMoverScan::default(),
+            occupancy: SlotOccupancy::default(),
         };
         if record_count != 0 {
             set.ensure_slots();
@@ -277,6 +416,7 @@ impl MassMoverSet {
                 y: read_component_i32(&record[8..12]),
             });
         }
+        set.occupancy = SlotOccupancy::rebuild(&set.slots);
         Ok(set)
     }
 
@@ -390,6 +530,8 @@ impl MassMoverSet {
             }
         }
         self.create_ptr = 0;
+        // The array was permuted in place; the accelerator follows it.
+        self.occupancy = SlotOccupancy::rebuild(&self.slots);
     }
 
     /// `C4MassMoverSet::Synchronize` (C4MassMover.cpp:249-252).
@@ -452,13 +594,17 @@ impl Engine {
         self.mass_movers.reset_count();
         self.mass_movers.begin_scan();
         for _speed in 0..2 {
-            for index in (0..CHUNK).rev() {
-                let live = self.mass_movers.slot(index).is_some();
-                self.mass_movers.record_inspected_slot(live);
-                if live {
-                    self.mass_movers.bump_count();
-                    self.execute_mass_mover(index);
-                }
+            // The occupancy index is read fresh at every step, so a mover
+            // inserted BELOW the cursor mid-pass is still reached and one
+            // inserted above it is still missed — the descending scan's
+            // observable order (C4MassMover.cpp:56-63), without walking the
+            // empties between them.
+            let mut cursor = CHUNK;
+            while let Some(index) = self.mass_movers.next_live_below(cursor) {
+                self.mass_movers.record_inspected_slot(true);
+                self.mass_movers.bump_count();
+                self.execute_mass_mover(index);
+                cursor = index;
             }
         }
     }
@@ -977,35 +1123,134 @@ mod tests {
         assert_eq!(engine.rng.hold, expected.hold);
     }
 
-    /// clonk-org/clonk-rs#297's first requirement: the scan cost has to be
-    /// *reported* before an accelerator is justified.
+    /// clonk-org/clonk-rs#297: the two descending passes no longer walk the
+    /// empties between live movers.
     ///
-    /// `tick_mass_movers` walks all 10,000 slots twice every frame
-    /// (C4MassMover.cpp:50-65), so a landscape with one live mover inspects
-    /// 20,000 entries to execute it. Nothing measured that, which left "the
-    /// cost is material" as a claim about the code rather than a number.
+    /// `Execute` used to inspect all 10,000 slots twice a frame
+    /// (C4MassMover.cpp:50-65), so an empty landscape paid 20,000 slot reads
+    /// and a landscape with one mover paid the same 20,000 to execute it.
+    /// The occupancy index answers "next live slot below the cursor"
+    /// directly, so the cost now follows the movers rather than the array.
     #[test]
-    fn a_frame_reports_the_slots_its_two_descending_passes_inspected() {
+    fn a_frame_inspects_its_live_movers_rather_than_every_slot() {
         let mut engine = water_drop_engine();
         engine.tick_mass_movers();
         assert_eq!(
             engine.mass_movers.last_inspected_slots(),
-            2 * CHUNK as u64,
-            "an empty set still walks every slot of both passes"
+            0,
+            "an empty set inspects nothing at all, where it walked 20000"
         );
 
         assert!(engine.mass_mover_create(1, 0, false));
         engine.tick_mass_movers();
+        let inspected = engine.mass_movers.last_inspected_slots();
         assert_eq!(
-            engine.mass_movers.last_inspected_slots(),
-            2 * CHUNK as u64,
-            "and one live mover costs exactly the same scan"
+            inspected,
+            engine.mass_movers.last_executed_slots(),
+            "every slot inspected is a live one"
         );
         assert!(
-            engine.mass_movers.last_executed_slots() < 8,
-            "while the work that matters is a handful of slots: {}",
-            engine.mass_movers.last_executed_slots()
+            inspected < 8,
+            "one drop costs a handful of slots, not 20000: {inspected}"
         );
+        assert!(engine.mass_movers.occupancy_matches_slots());
+    }
+
+    /// The accelerator must answer exactly what the linear scan answered, for
+    /// every occupancy and `CreatePtr` combination
+    /// (clonk-org/clonk-rs#297's first two acceptance criteria).
+    ///
+    /// A deterministic pseudo-random walk rather than a fixed table: the
+    /// failure this guards against is a wrap or boundary case nobody thought
+    /// to enumerate.
+    #[test]
+    fn the_occupancy_index_answers_what_the_linear_scans_answer() {
+        let mut set = MassMoverSet::new();
+        let mover = MassMover {
+            mat: MaterialId::new(1).expect("material"),
+            x: 0,
+            y: 0,
+        };
+        // xorshift, so the sequence is fixed without pulling in a dependency.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for step in 0..2_000 {
+            let index = (next() as usize) % CHUNK;
+            if step % 3 == 0 {
+                set.cease(index);
+            } else {
+                set.fill_slot(index, mover);
+            }
+            if step % 7 == 0 {
+                set.set_create_ptr_for_test((next() as usize) % CHUNK);
+            }
+
+            assert!(
+                set.occupancy_matches_slots(),
+                "index drifted from the array at step {step}"
+            );
+            assert_eq!(
+                set.find_free_slot(),
+                set.find_free_slot_linear(),
+                "free lookup diverged at step {step}"
+            );
+
+            let indexed = {
+                let mut visited = Vec::new();
+                let mut cursor = CHUNK;
+                while let Some(live) = set.next_live_below(cursor) {
+                    visited.push(live);
+                    cursor = live;
+                }
+                visited
+            };
+            let linear = (0..CHUNK)
+                .rev()
+                .filter(|index| set.slot(*index).is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(indexed, linear, "descending order diverged at step {step}");
+        }
+    }
+
+    /// Every path that replaces the slot array wholesale has to leave the
+    /// accelerator agreeing with it, or a later frame skips a live mover.
+    #[test]
+    fn rebuilding_paths_leave_the_index_agreeing_with_the_array() {
+        let mover = MassMover {
+            mat: MaterialId::new(1).expect("material"),
+            x: 3,
+            y: 4,
+        };
+        let mut set = MassMoverSet::new();
+        for index in [0_usize, 1, 500, CHUNK - 1] {
+            set.fill_slot(index, mover);
+        }
+
+        let saved = set.prepared_for_save();
+        assert!(saved.occupancy_matches_slots(), "prepared_for_save");
+
+        let mut consolidated = set.clone();
+        consolidated.consolidate();
+        assert!(consolidated.occupancy_matches_slots(), "consolidate");
+
+        let bytes = set.to_c4b().expect("c4b bytes");
+        let loaded = MassMoverSet::from_c4b(&bytes).expect("c4b load");
+        assert!(loaded.occupancy_matches_slots(), "from_c4b");
+
+        let json = serde_json::to_string(&set).expect("serialize");
+        let restored: MassMoverSet = serde_json::from_str(&json).expect("deserialize");
+        assert!(restored.occupancy_matches_slots(), "snapshot restore");
+        assert_eq!(restored.find_free_slot(), restored.find_free_slot_linear());
+
+        let mut cleared = set;
+        cleared.clear();
+        assert!(cleared.occupancy_matches_slots(), "clear");
     }
 
     #[test]
