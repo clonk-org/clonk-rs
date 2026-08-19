@@ -4,6 +4,90 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-08-19
+
+### Bug fixes
+
+- Resolve monitor gamma into the CPU-path savegame thumbnail (#717)
+- Say why the headed GPU probe cannot validate software presentation (#716)
+- Report a below-floor adapter as such when falling back to software (#715)
+- Deliver the macOS keys SDL names but winit leaves unidentified (#696)
+- Size point and line rasters from the world zoom as well as the scale (#685)
+- Encode the JIS keyboard keys as SDL's international scancodes (#677)
+- Find a moved bundle's interrupted update through its install identity (#671)
+- Enumerate multicast interfaces on Windows for LAN discovery (#663)
+- Encode macOS F13-F15 as SDL's Cocoa scancodes (#664)
+- Send the league End when macOS terminates the app (#662)
+- Stop packaging the content repository's own infrastructure (#661)
+- Keep repeated component IDs as independent C4IDList entries (#658)
+- Split player-file basenames on backslash only where C++ does (#655)
+- Bind update recovery to the install identity rather than its pathname (#650)
+- Match ControlConfigArea's gamepad claim, key capture and config defaults (#649)
+- Truncate a function whose hard inherited has no overload target (#648)
+
+### Documentation
+
+- Record the sampling profile that answers the effect dispatch question (#704)
+- Withdraw the effect dispatch timing attribution that did not reproduce (#702)
+- Record why the compiled prelude keeps resolving its call sites (#698)
+- Record the two accepted keyboard-identity gaps beside their encoders (#694)
+- Stop the Pi 0-3 row from ruling out a wgpu-independent presenter (#691)
+- Record which call paths the measured lookups come from (#684)
+- Link the graphics support matrix and name the surface-lost variant exactly (#682)
+- Drop the references to the deleted third-party content document (#657)
+
+### Features
+
+- Run the interactive window without a GPU adapter (#714)
+- Choose between GPU and software presentation from the graphics floor (#710)
+- Present the CPU frame through a wgpu-free window surface (#708)
+- Composite the CPU frame for a presenter with no GPU adapter (#706)
+- Compose with an IME in the scenario search field (#687)
+- Fall back to a software adapter when no hardware one answers (#686)
+- Show IME composition in the classic edit and place the candidate window (#681)
+- Declare and document the interactive graphics floor (#674)
+- Add the symbolised stack walk and loaded-module list to the Windows crash report (#673)
+- Count what effect dispatch materialises per tick (#672)
+- Log the C4AulScriptEngine link summary (#668)
+- Report every unmet graphics requirement in one diagnostic (#665)
+
+### Performance
+
+- Recompose only the landscape region an edit dirtied (#707)
+- Keep the map planes when only the material catalogue changed (#705)
+- Upload a landscape edit's own rectangle instead of its whole rows (#701)
+- Resolve a call's host callee once instead of once per argument (#697)
+- Test a call's name before walking the host tables for its reference-ness (#695)
+- Stop resolving a call's name twice to answer one question (#693)
+- Resolve a callback before materialising its calling context (#680)
+- Retain the shader-landscape composition resources across updates (#669)
+- Read back only the thumbnail for a thumbnail-only save (#670)
+- Stop allocating an effect callback name per dispatch (#667)
+
+### Refactoring
+
+- Route the CPU presentation branch through a target it does not own (#713)
+- Let the shell window hold no retained GPU renderer (#712)
+- Add an ordered C4IDList component list type (#656)
+
+### Testing
+
+- Pin that an oversized landscape degrades to CPU presentation (#711)
+- Pin the landscape scissor at a detail factor above one (#709)
+- Pin which retained landscape resources each change invalidates (#703)
+- Measure what an effect-heavy tick materialises around callbacks (#700)
+- Pin that an unchanged shader landscape uploads nothing (#699)
+- Report what a PXS execute pass walks against what it finds (#690)
+- Attribute C4Script identifier lookups to their call path (#689)
+- Bench the snapshot projection against the advance it follows (#688)
+- Differential-check the savegame association pass loop (#679)
+- Measure C4Script identifier lookups by family (#678)
+- Export component order from the C++ bridge and compare it field-wise (#676)
+- Pin that a denied effect stop keeps its slot (#666)
+- Differential-check the four savegame player matching passes (#653)
+- Pin every tutorial landscape against the C++ Surface8 oracle (#652)
+- Cover a headless host preparing its masterserver registration (#651)
+
 ## [0.15.0] - 2026-08-18
 
 ### Bug fixes
