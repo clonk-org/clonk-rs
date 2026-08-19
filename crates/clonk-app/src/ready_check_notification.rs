@@ -112,6 +112,52 @@ pub(crate) fn closed_reason_ends_prompt(reason: u32) -> bool {
     reason != 3
 }
 
+/// One signal from the notification service, already parsed and filtered to
+/// the notification a listener is watching.
+///
+/// Backends translate their platform's callback into this, so the decision of
+/// what a signal *means* stays here and is testable without a daemon.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NotificationSignal {
+    /// `ActionInvoked(id, key)` — carries the action key.
+    ActionInvoked(String),
+    /// `NotificationClosed(id, reason)` — carries the reason.
+    Closed(u32),
+}
+
+/// Routes one signal to the continuation, returning whether the listener
+/// should stop.
+///
+/// A stop means the toast this listener was watching no longer exists. An
+/// unrecognised action key is the one case that keeps it running: it belongs
+/// to another application, so it is neither our answer nor a reason to stop
+/// waiting for ours.
+pub(crate) fn dispatch_signal(
+    signal: &NotificationSignal,
+    continuation: &ReadyCheckContinuation,
+    sink: &dyn NotificationSink,
+) -> bool {
+    match signal {
+        NotificationSignal::ActionInvoked(key) => activation_for_action_key(key)
+            .map(|activation| {
+                // The return is deliberately discarded: losing the race just
+                // means the dialog already answered, which is not an error.
+                continuation.activate(activation, sink);
+                true
+            })
+            .unwrap_or(false),
+        // Reason 3 is our own `CloseNotification`, issued *because* the
+        // continuation already resolved; re-resolving it would hide a toast
+        // that is already gone. Every other reason ends the prompt.
+        NotificationSignal::Closed(reason) => {
+            if closed_reason_ends_prompt(*reason) {
+                continuation.close(sink);
+            }
+            true
+        }
+    }
+}
+
 /// How a ready check finished.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReadyCheckOutcome {
@@ -159,6 +205,17 @@ impl ReadyCheckContinuation {
     /// Whether this continuation has already been resolved.
     pub(crate) fn resolved(&self) -> bool {
         self.claimed.load(Ordering::Acquire)
+    }
+
+    /// The id of the toast currently shown for this continuation, if any.
+    ///
+    /// A backend listener filters incoming signals by it. The notification
+    /// service broadcasts every application's activations on the same
+    /// connection, so an unfiltered listener would read a stranger's button
+    /// press as an answer to this prompt. `None` once the toast is hidden, or
+    /// when the backend could not show one at all.
+    pub(crate) fn shown_id(&self) -> Option<NotificationId> {
+        self.shown.lock().ok().and_then(|shown| *shown)
     }
 
     /// The recorded outcome, once resolved.
@@ -443,6 +500,105 @@ mod tests {
             "closed by us — already resolved"
         );
         assert!(closed_reason_ends_prompt(4), "undefined");
+    }
+
+    // A backend has to filter incoming signals by notification id, so it needs
+    // to read back the id its own `show` produced.
+    #[test]
+    fn a_shown_continuation_reports_the_notification_id_until_it_is_hidden() {
+        let sink = FakeSink::default();
+        let continuation = ReadyCheckContinuation::new();
+        assert_eq!(continuation.shown_id(), None, "nothing shown yet");
+
+        continuation.show(&sink, &actions());
+        assert_eq!(continuation.shown_id(), Some(NotificationId(1)));
+
+        // Resolving hides the toast, so there is no longer an id to watch.
+        assert!(continuation.answer(true, &sink));
+        assert_eq!(continuation.shown_id(), None);
+    }
+
+    // A backend that could not show anything has no id to filter on, and must
+    // not be handed one belonging to nothing.
+    #[test]
+    fn a_continuation_whose_toast_failed_to_show_reports_no_notification_id() {
+        let sink = FakeSink {
+            fail_show: true,
+            ..FakeSink::default()
+        };
+        let continuation = ReadyCheckContinuation::new();
+        continuation.show(&sink, &actions());
+        assert_eq!(continuation.shown_id(), None);
+    }
+
+    // Signal routing: what a backend listener does with each signal it reads
+    // off the bus, decided here so both platforms share it and it can be
+    // tested without a notification daemon.
+    #[test]
+    fn notification_signals_resolve_the_continuation_and_stop_the_listener() {
+        let labels = actions();
+
+        // A button press answers, hides the toast, and ends the listener.
+        let sink = FakeSink::default();
+        let continuation = ReadyCheckContinuation::new();
+        continuation.show(&sink, &labels);
+        assert!(dispatch_signal(
+            &NotificationSignal::ActionInvoked(YES_ACTION_KEY.to_owned()),
+            &continuation,
+            &sink,
+        ));
+        assert_eq!(
+            continuation.outcome(),
+            Some(ReadyCheckOutcome::Answered(true))
+        );
+        assert_eq!(sink.hidden(), vec![NotificationId(1)]);
+
+        // A foreign action key leaves the prompt alone. The listener keeps
+        // running: another application's action is not our answer, and not a
+        // reason to stop watching for ours.
+        let sink = FakeSink::default();
+        let continuation = ReadyCheckContinuation::new();
+        continuation.show(&sink, &labels);
+        assert!(!dispatch_signal(
+            &NotificationSignal::ActionInvoked("some-other-app".to_owned()),
+            &continuation,
+            &sink,
+        ));
+        assert!(!continuation.resolved());
+        assert!(sink.hidden().is_empty());
+
+        // A user dismissal ends the prompt without an answer.
+        let sink = FakeSink::default();
+        let continuation = ReadyCheckContinuation::new();
+        continuation.show(&sink, &labels);
+        assert!(dispatch_signal(
+            &NotificationSignal::Closed(2),
+            &continuation,
+            &sink
+        ));
+        assert_eq!(continuation.outcome(), Some(ReadyCheckOutcome::Closed));
+
+        // Reason 3 is our own CloseNotification, which we issue *because* the
+        // continuation already resolved. It must not re-resolve or re-hide —
+        // but the toast is gone, so the listener still stops.
+        let sink = FakeSink::default();
+        let continuation = ReadyCheckContinuation::new();
+        continuation.show(&sink, &labels);
+        assert!(continuation.answer(true, &sink));
+        assert!(dispatch_signal(
+            &NotificationSignal::Closed(3),
+            &continuation,
+            &sink
+        ));
+        assert_eq!(
+            continuation.outcome(),
+            Some(ReadyCheckOutcome::Answered(true))
+        );
+        assert_eq!(
+            sink.hidden(),
+            vec![NotificationId(1)],
+            "reason 3 must not hide a second time"
+        );
     }
 
     #[test]
