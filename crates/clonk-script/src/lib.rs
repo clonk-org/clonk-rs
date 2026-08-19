@@ -3,6 +3,7 @@ mod debugger;
 mod engine;
 mod error;
 mod lexer;
+pub mod lookup_profile;
 mod parser;
 mod token;
 mod vm;

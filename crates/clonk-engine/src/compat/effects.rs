@@ -1391,6 +1391,9 @@ pub(crate) fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     };
 
+    clonk_script::lookup_profile::record_key_allocation(
+        clonk_script::lookup_profile::LookupFamily::EffectCallback,
+    );
     let function = format!("Fx{effect_name}{call_fn}");
     // DoCall argument layout (C4Effect.cpp:455): pObj, iNumber, then the
     // seven forwarded values.

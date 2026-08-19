@@ -137,6 +137,7 @@ shard_modules!(
     sailboat_hull_solid_mask,
     script_counter,
     script_goto,
+    script_lookup_profile,
     set_builtin,
     set_vertex,
     spawn_container_order,

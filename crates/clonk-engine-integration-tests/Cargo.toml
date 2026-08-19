@@ -12,6 +12,10 @@ autotests = false
 
 [features]
 default = []
+# Turns on the VM's per-family identifier-lookup counters so the manual
+# `script_lookup_profile` probe can report a real scenario rather than a
+# synthetic loop. Off by default: the counters sit on the VM's hottest paths.
+lookup-profile = ["clonk-script/lookup-profile"]
 engine-it-sharded = []
 engine-it-shard-1 = ["engine-it-sharded"]
 engine-it-shard-2 = ["engine-it-sharded"]
