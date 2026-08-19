@@ -821,11 +821,19 @@ impl GameApp {
         let capture_title = self.engine.frame() != 0 && !self.console_mode && self.window_active;
         let title_png = if capture_title && !self.retained_gpu_presentation_active {
             let surface = self.graphics.surface();
-            match encode_presented_save_thumbnail(
-                surface.width(),
-                surface.height(),
-                surface.pixels(),
-            ) {
+            // C++ saves the back buffer with gamma resolved either way: with
+            // shaders it is already baked in, without them `SavePNG` applies it
+            // through `fApplyGamma` (C4Game.cpp:2102-2138, C4Surface.h:107).
+            // This path composes pre-gamma and applies the ramp to the
+            // presenter frame afterwards, so it is C++'s no-shader branch and
+            // has to apply the ramp here too. Encoding the raw surface would
+            // embed a thumbnail dimmer or brighter than the frame the player
+            // saw, and would match neither C++ branch.
+            let mut presented = surface.pixels().to_vec();
+            if let Some(gamma) = self.presentation_monitor_gamma() {
+                gamma.apply_to_rgba_bytes(&mut presented);
+            }
+            match encode_presented_save_thumbnail(surface.width(), surface.height(), &presented) {
                 Ok(encoded) => Some(encoded),
                 Err(error) => {
                     tracing::warn!(?error, "failed to encode native savegame Title.png");
@@ -864,6 +872,20 @@ impl GameApp {
             .map(|scenario| scenario.title.clone())
             .unwrap_or_else(|| self.scenario_label.clone());
         format!("{} {}", base, current_unix_timestamp())
+    }
+
+    /// The monitor gamma ramp presentation would apply to this frame, if any.
+    ///
+    /// Mirrors the redraw path's selection so a saved thumbnail carries the
+    /// same ramp the player is looking at.
+    pub(crate) fn presentation_monitor_gamma(&self) -> Option<clonk_graphics::GammaRamp> {
+        match self.mode {
+            AppMode::Menu | AppMode::Loading => self.startup_monitor_gamma(),
+            AppMode::Running => self.graphics.monitor_gamma_enabled().then(|| {
+                self.graphics
+                    .active_gamma_ramp(&self.snapshot.environment.gamma)
+            }),
+        }
     }
 
     pub(crate) fn finish_pending_native_save_thumbnails(&mut self, title_png: Option<&[u8]>) {
@@ -1476,6 +1498,42 @@ mod save_thumbnail_tests {
                 .chunks_exact(4)
                 .all(|pixel| pixel == [64, 64, 64, 255]),
             "every thumbnail cell must average its whole 4x4 source block"
+        );
+    }
+
+    #[test]
+    fn the_saved_thumbnail_carries_the_monitor_ramp_the_player_is_looking_at() {
+        // C++ resolves gamma into the saved title either through the shader or
+        // through `SavePNG`'s `fApplyGamma` (C4Game.cpp:2102-2138,
+        // C4Surface.h:107), so a thumbnail must never be the raw pre-gamma
+        // composition. Applying a non-identity ramp has to change the bytes.
+        let (width, height) = (64_u32, 48_u32);
+        let frame: Vec<u8> = (0..width as usize * height as usize)
+            .flat_map(|index| [(index % 200 + 20) as u8, 90, 140, 255])
+            .collect();
+
+        let raw =
+            encode_presented_save_thumbnail(width, height, &frame).expect("encode without a ramp");
+
+        let ramp = clonk_graphics::GammaRamp::from_control_points([0x102030, 0x708090, 0xd0e0f0]);
+        let mut ramped = frame.clone();
+        ramp.apply_to_rgba_bytes(&mut ramped);
+        let with_gamma =
+            encode_presented_save_thumbnail(width, height, &ramped).expect("encode with a ramp");
+
+        assert_ne!(
+            raw, with_gamma,
+            "a monitor ramp must reach the saved thumbnail, or it shows a frame \
+             the player never saw"
+        );
+
+        // An identity ramp is the no-monitor-gamma case and must change nothing.
+        let mut identity_applied = frame.clone();
+        clonk_graphics::GammaRamp::identity().apply_to_rgba_bytes(&mut identity_applied);
+        assert_eq!(
+            encode_presented_save_thumbnail(width, height, &identity_applied)
+                .expect("encode with the identity ramp"),
+            raw,
         );
     }
 
