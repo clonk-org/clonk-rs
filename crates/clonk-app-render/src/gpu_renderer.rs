@@ -7559,6 +7559,39 @@ fn changed_rows(previous: &[u8], next: &[u8], row_bytes: usize) -> Option<std::o
     Some(first..last + 1)
 }
 
+/// The changed rows narrowed to the columns that actually differ.
+///
+/// A landscape edit is a rectangle, not a set of whole rows: digging one texel
+/// out of a 4096-wide map changes one byte, and uploading its row would carry
+/// 4095 unchanged ones with it. `Queue::write_texture` takes an origin and a
+/// source row stride, so the columns are boundable exactly as the rows are.
+///
+/// Columns are in **texels**; the caller scales by the format's texel size.
+fn changed_rect(
+    previous: &[u8],
+    next: &[u8],
+    row_bytes: usize,
+    bytes_per_texel: usize,
+) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let rows = changed_rows(previous, next, row_bytes)?;
+    let texels = row_bytes.checked_div(bytes_per_texel).filter(|w| *w > 0)?;
+    if previous.len() != next.len() {
+        return Some((rows, 0..texels));
+    }
+    let texel = |row: usize, column: usize| {
+        let start = row * row_bytes + column * bytes_per_texel;
+        start..start + bytes_per_texel
+    };
+    let column_differs = |column: &usize| {
+        rows.clone()
+            .any(|row| previous[texel(row, *column)] != next[texel(row, *column)])
+    };
+    // `changed_rows` already found a difference, so both ends exist.
+    let first = (0..texels).find(column_differs)?;
+    let last = (first..texels).rev().find(column_differs).unwrap_or(first);
+    Some((rows, first..last + 1))
+}
+
 /// What a retained composition's resources are shaped by. The planes are one
 /// texel per map pixel, so they follow the map extent and — because an absent
 /// shading plane composes from a 1x1 neutral texel — whether shading is on.
@@ -7720,31 +7753,37 @@ fn upload_changed_rows(
     extent: [u32; 2],
     bytes_per_texel: u32,
 ) -> ShaderLandscapeUploads {
-    let row_bytes = extent[0] as usize * bytes_per_texel as usize;
-    let Some(rows) = changed_rows(previous, next, row_bytes) else {
+    let texel_bytes = bytes_per_texel as usize;
+    let row_bytes = extent[0] as usize * texel_bytes;
+    let Some((rows, columns)) = changed_rect(previous, next, row_bytes, texel_bytes) else {
         return ShaderLandscapeUploads::default();
     };
-    let offset = rows.start * row_bytes;
+    // The source keeps the plane's own stride and starts at the rectangle's
+    // first texel, so wgpu reads `width` texels out of each row rather than
+    // the whole one. `write_texture` has no 256-byte row alignment rule —
+    // that applies to buffer-to-texture copies.
+    let offset = rows.start * row_bytes + columns.start * texel_bytes;
     let height = (rows.end - rows.start) as u32;
+    let width = (columns.end - columns.start) as u32;
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: view.texture(),
             mip_level: 0,
             origin: wgpu::Origin3d {
-                x: 0,
+                x: columns.start as u32,
                 y: rows.start as u32,
                 z: 0,
             },
             aspect: wgpu::TextureAspect::All,
         },
-        &next[offset..offset + (height as usize * row_bytes)],
+        &next[offset..],
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(extent[0] * bytes_per_texel),
             rows_per_image: Some(height),
         },
         wgpu::Extent3d {
-            width: extent[0],
+            width,
             height,
             depth_or_array_layers: 1,
         },
@@ -7753,7 +7792,7 @@ fn upload_changed_rows(
     previous.extend_from_slice(next);
     ShaderLandscapeUploads {
         calls: 1,
-        bytes: height as u64 * row_bytes as u64,
+        bytes: u64::from(height) * u64::from(width) * texel_bytes as u64,
     }
 }
 
@@ -13331,6 +13370,54 @@ mod tests {
         );
     }
 
+    /// The band is then narrowed to the columns that differ, because a
+    /// landscape edit is a rectangle: one texel out of a wide map must not
+    /// carry its whole row.
+    #[test]
+    fn a_retained_plane_narrows_its_band_to_the_columns_that_changed() {
+        // 4 texels per row, 3 rows, one byte per texel.
+        let previous = vec![0_u8; 4 * 3];
+
+        assert_eq!(changed_rect(&previous, &previous, 4, 1), None);
+
+        let mut single = previous.clone();
+        single[5] = 1;
+        assert_eq!(
+            changed_rect(&previous, &single, 4, 1),
+            Some((1..2, 1..2)),
+            "one texel is one row and one column"
+        );
+
+        // Two edits on the same row bound the columns between them.
+        let mut spread = previous.clone();
+        spread[4] = 1;
+        spread[7] = 1;
+        assert_eq!(changed_rect(&previous, &spread, 4, 1), Some((1..2, 0..4)));
+
+        // Edits on different rows and columns give the covering rectangle,
+        // which is what a single `write_texture` can carry.
+        let mut diagonal = previous.clone();
+        diagonal[1] = 1;
+        diagonal[10] = 1;
+        assert_eq!(changed_rect(&previous, &diagonal, 4, 1), Some((0..3, 1..3)));
+
+        // A multi-byte texel is compared whole, so a change in either byte
+        // moves the column.
+        let wide_previous = vec![0_u8; 2 * 2 * 2];
+        let mut wide_next = wide_previous.clone();
+        wide_next[3] = 1;
+        assert_eq!(
+            changed_rect(&wide_previous, &wide_next, 4, 2),
+            Some((0..1, 1..2))
+        );
+
+        assert_eq!(
+            changed_rect(&previous, &[0_u8; 4 * 5], 4, 1),
+            Some((0..5, 0..4)),
+            "a plane of a different length is uploaded whole"
+        );
+    }
+
     /// A landscape update composes into the output it already has. Creating a
     /// new one each update also invalidated every quad, object and landscape
     /// bind group that named it, so the whole scene's bindings were rebuilt
@@ -13387,6 +13474,47 @@ mod tests {
         assert_eq!(
             repeated, first,
             "and still presents the same pixels it did before"
+        );
+    }
+
+    /// clonk-org/clonk-rs#273's second criterion, upload half: *a small edit
+    /// uploads only its exact index region*.
+    ///
+    /// clonk-org/clonk-rs#669 uploads the changed **rows**, so one texel on a
+    /// wide map still costs its whole row — 64 bytes here for a one-byte edit,
+    /// and a 4096-wide map would pay 4096. The region is a rectangle, and
+    /// `Queue::write_texture` takes an origin and a row stride, so the columns
+    /// can be bounded the same way the rows already are.
+    #[test]
+    fn a_small_landscape_edit_uploads_only_its_own_rectangle() {
+        let Some((_runtime, _instance, _adapter, device, queue)) =
+            test_wgpu_device("lc_gpu_shader_landscape_rect_upload_device", true)
+        else {
+            return;
+        };
+        let extent = [64_u32, 64_u32];
+        let base = GpuTextureId::fresh();
+        let scene = shader_landscape_scene_fixture(base, extent, extent, 1);
+        let mut renderer = test_renderer(&device, &queue);
+        renderer.set_shader_landscape(true);
+        renderer.set_landscape_detail(1);
+        let plan = shader_landscape_plan_fixture(extent);
+
+        renderer.set_pending_shader_landscape(Some((base, plan.clone())));
+        let before = render_identity_readback(&mut renderer, &device, &queue, &scene);
+
+        // One texel, in the middle of a 64-wide row.
+        let mut edited = plan.clone();
+        let texel = 10 * extent[0] as usize + 32;
+        edited.index_plane[texel] = u8::from(edited.index_plane[texel] == 0);
+        renderer.set_pending_shader_landscape(Some((base, edited)));
+        let after = render_identity_readback(&mut renderer, &device, &queue, &scene);
+
+        assert_ne!(after, before, "the edit has to reach the output");
+        assert_eq!(
+            renderer.last_stats().shader_landscape_upload_bytes,
+            1,
+            "a one-texel edit is one byte, not its whole row"
         );
     }
 
