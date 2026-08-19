@@ -1426,6 +1426,7 @@ pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         98 => Some(VirtualKeyCode::Numpad0),
         99 => Some(VirtualKeyCode::NumpadDecimal),
         101 => Some(VirtualKeyCode::ContextMenu),
+        102 => Some(VirtualKeyCode::Power),
         103 => Some(VirtualKeyCode::NumpadEqual),
         133 => Some(VirtualKeyCode::NumpadComma),
         // A JIS keyboard's own keys. SDL scancodes are the USB HID usage IDs
@@ -1639,6 +1640,10 @@ pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::NumpadDecimal => 99,
         VirtualKeyCode::IntlBackslash => 100,
         VirtualKeyCode::ContextMenu => 101,
+        // kVK_ANSI_... has no Power; `scancodes_darwin.h` names 0x7f
+        // SDL_SCANCODE_POWER, which winit reports only as an unidentified
+        // native keycode (see `macos_unidentified_virtual_key`).
+        VirtualKeyCode::Power => 102,
         VirtualKeyCode::NumpadEqual => 103,
         VirtualKeyCode::NumpadComma => 133,
         VirtualKeyCode::IntlRo => 135,

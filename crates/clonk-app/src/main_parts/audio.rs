@@ -419,6 +419,57 @@ mod window_api_tests {
         assert_eq!(keypad_enter, Some(VirtualKeyCode::NumpadEnter));
     }
 
+    /// C++ forwards SDL's platform scancode (`C4FullScreen.cpp:387-400`), and
+    /// SDL's Cocoa table names four keycodes that winit's
+    /// `scancode_to_physicalkey` leaves out — `0x34`/`0x5f` (the JIS keypad's
+    /// Enter and comma), `0x6e` (Application) and `0x7f` (Power). winit reports
+    /// those as `PhysicalKey::Unidentified(NativeKeyCode::MacOS(..))`, which the
+    /// port dropped, so pressing them reached the engine as nothing at all
+    /// where C++ delivers a key.
+    ///
+    /// Unlike the ISO grave collapse documented on `encode_virtual_key_code`,
+    /// the raw keycode *does* survive here, so these are recoverable.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_unidentified_keycodes_sdl_names_still_reach_the_engine() {
+        use winit::keyboard::NativeKeyCode;
+
+        for (keycode, expected, scancode, name) in [
+            (
+                0x34_u16,
+                VirtualKeyCode::NumpadEnter,
+                88,
+                "SDL_SCANCODE_KP_ENTER",
+            ),
+            (
+                0x5f,
+                VirtualKeyCode::NumpadComma,
+                133,
+                "SDL_SCANCODE_KP_COMMA",
+            ),
+            (
+                0x6e,
+                VirtualKeyCode::ContextMenu,
+                101,
+                "SDL_SCANCODE_APPLICATION",
+            ),
+            (0x7f, VirtualKeyCode::Power, 102, "SDL_SCANCODE_POWER"),
+        ] {
+            let key = legacy_virtual_key(
+                &Key::Unidentified(winit::keyboard::NativeKey::MacOS(keycode)),
+                KeyLocation::Standard,
+                PhysicalKey::Unidentified(NativeKeyCode::MacOS(keycode)),
+                false,
+            );
+            assert_eq!(key, Some(expected), "macOS {keycode:#04x} is {name}");
+            assert_eq!(
+                crate::input::encode_virtual_key_code(expected),
+                Some(scancode),
+                "{name} is scancode {scancode}"
+            );
+        }
+    }
+
     #[test]
     fn game_shell_key_text_accepts_composition_but_rejects_shortcuts() {
         let altgr = ModifiersState::CONTROL | ModifiersState::ALT;
@@ -1709,6 +1760,37 @@ fn legacy_virtual_key_from_windows_raw(
         .and_then(crate::input::decode_windows_platform_key_code)
 }
 
+/// Recovers the keys SDL's Cocoa table names but winit's
+/// `scancode_to_physicalkey` leaves out.
+///
+/// C++ forwards SDL's platform scancode (`C4FullScreen.cpp:387-400`), so every
+/// keycode `scancodes_darwin.h` names is a key it delivers. winit maps four of
+/// them to nothing — `0x34` and `0x5f` (the JIS keypad's Enter and comma),
+/// `0x6e` (Application) and `0x7f` (Power) — and reports them as
+/// `PhysicalKey::Unidentified(NativeKeyCode::MacOS(..))`. Dropping that is a
+/// key the engine never sees where C++ sees one.
+///
+/// Only these four: the rest of the keycodes winit leaves out are
+/// `SDL_SCANCODE_UNKNOWN` there too, so C++ delivers nothing for them either
+/// and inventing an identity would be worse than the gap.
+#[cfg(target_os = "macos")]
+fn macos_unidentified_virtual_key(
+    physical_key: winit::keyboard::PhysicalKey,
+) -> Option<VirtualKeyCode> {
+    let winit::keyboard::PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::MacOS(keycode)) =
+        physical_key
+    else {
+        return None;
+    };
+    Some(match keycode {
+        0x34 => VirtualKeyCode::NumpadEnter,
+        0x5f => VirtualKeyCode::NumpadComma,
+        0x6e => VirtualKeyCode::ContextMenu,
+        0x7f => VirtualKeyCode::Power,
+        _ => return None,
+    })
+}
+
 #[cfg(any(target_os = "windows", test))]
 fn legacy_virtual_key_from_windows_named(
     logical_key: &winit::keyboard::Key,
@@ -1755,7 +1837,7 @@ fn legacy_virtual_key(
     #[cfg(target_os = "macos")]
     let selected = {
         let _ = (logical_key, location);
-        physical
+        physical.or_else(|| macos_unidentified_virtual_key(physical_key))
     };
     #[cfg(target_os = "windows")]
     let selected = {
