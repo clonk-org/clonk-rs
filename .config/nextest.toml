@@ -43,6 +43,22 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 filter = 'package(clonk-network) and test(control_sync_and_reconnect_smoke)'
 retries = 2
 
+# A wgpu test that cannot get an adapter is supposed to skip; one that *hangs*
+# inside adapter or device creation never reaches that check, and takes the
+# whole shard with it. That happened twice in consecutive merge-queue entries
+# (clonk-org/clonk-rs#721): `Linux / remaining workspace 1/2` ran 15 minutes
+# against ~5 for its seventeen siblings, was cancelled with three live
+# `clonk_app_render` processes, and the `Landing gate` then evicted the entry
+# for a cancelled result — forcing everything queued behind it to rebuild.
+#
+# The whole package finishes in about two seconds locally, so this cap is two
+# orders of magnitude of headroom. It cannot make a healthy run fail; what it
+# does is turn a stuck adapter call into one failed test with a name on it,
+# instead of an eviction that reads as infrastructure noise.
+[[profile.default.overrides]]
+filter = 'package(clonk-app-render)'
+slow-timeout = { period = "120s", terminate-after = 1 }
+
 # Nextest otherwise launches tests lexicographically. Start the longest
 # scenario routes first so they overlap the thousands of short unit tests
 # instead of becoming a serial tail at the end of the workspace gate.
