@@ -81,12 +81,66 @@ pub(crate) fn format_console_position(x: i32, y: i32) -> String {
     format!("{x},{y}")
 }
 
+/// The `Viewport{Player + 1}` key a detached viewport remembers its geometry
+/// under (`C4ViewportWindow::GetPositionData`, `C4Viewport.cpp:217-222`).
+///
+/// The same `Console` subkey as the console's own `Main` entry, but keyed on
+/// the *player*, not a list index: two viewports following the same player
+/// then share one slot instead of colliding by position, and the ownerless
+/// viewport (`OWNER_NONE`, which is -1) lands on `Viewport0`.
+pub(crate) fn viewport_position_key(player: i32) -> String {
+    format!("Viewport{}", player.saturating_add(1))
+}
+
+/// A viewport's entry. `GetPositionData` sets `storeSize = true`
+/// (`C4Viewport.cpp:221`), so unlike the console this is the four-field form
+/// (`StdRegistry.cpp:296-297`) and the remembered size comes back with the
+/// position.
+pub(crate) fn format_viewport_position(x: i32, y: i32, width: i32, height: i32) -> String {
+    format!("{x},{y},{width},{height}")
+}
+
 #[cfg(all(
     test,
     any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
 ))]
 mod tests {
     use super::*;
+
+    // C4Viewport.cpp:220-222 — a detached viewport remembers its geometry
+    // under the same `Console` subkey, keyed by player, and unlike the console
+    // it sets `storeSize`, so the entry carries the size too.
+    #[test]
+    fn a_viewport_remembers_its_geometry_keyed_by_player() {
+        // `Viewport{Player + 1}`: the ownerless viewport is `Viewport0` and
+        // player 0 is `Viewport1`. Keying on the player rather than a list
+        // index is what stops two viewports following the same player from
+        // colliding — and what makes an ownerless one land in its own slot.
+        assert_eq!(viewport_position_key(clonk_engine::OWNER_NONE), "Viewport0");
+        assert_eq!(viewport_position_key(0), "Viewport1");
+        assert_eq!(viewport_position_key(3), "Viewport4");
+
+        // `storeSize` is set, so this is the four-field form — the one the
+        // console never writes.
+        assert_eq!(format_viewport_position(10, 20, 400, 250), "10,20,400,250");
+        assert_eq!(
+            parse_console_position(&format_viewport_position(10, 20, 400, 250)),
+            Some(ConsoleWindowPlacement::PositionAndSize {
+                x: 10,
+                y: 20,
+                width: 400,
+                height: 250,
+            }),
+            "the size survives the round trip, which is the whole point of storeSize"
+        );
+
+        // The section is shared with the console, so a viewport entry must not
+        // be able to land on the console's own key.
+        assert_ne!(
+            viewport_position_key(clonk_engine::OWNER_NONE),
+            CONSOLE_POSITION_KEY
+        );
+    }
 
     // C4Console.cpp:1278-1284; StdRegistry.cpp:283-327 — the console round-trips
     // a position through its own `Console/Main` slot and never touches the game

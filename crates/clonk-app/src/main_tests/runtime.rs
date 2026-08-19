@@ -6332,6 +6332,118 @@ fn developer_object_list_opens_and_binds_the_selection_both_ways() {
 // file on a console viewport is the editor's only way to create an object
 // without typing script. `CID_EMDropDef`'s executor and wire codec landed
 // long before anything could emit one.
+/// `C4ViewportWindow::GetPositionData` (`C4Viewport.cpp:217-222`) puts every
+/// detached viewport's geometry in the **console's** subkey, keyed
+/// `Viewport{Player + 1}` with `storeSize` set — so unlike the console's own
+/// `Main` entry the size comes back too, and two viewports following different
+/// players never share a slot.
+#[test]
+fn viewport_window_geometry_round_trips_through_the_console_subkey() {
+    use crate::console_window_position::ConsoleWindowPlacement;
+
+    let _lock = env_lock().lock();
+    reset_cached_app_paths();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+
+    assert!(
+        load_viewport_window_position(Some(&paths), clonk_engine::OWNER_NONE).is_none(),
+        "nothing is remembered before a viewport stores anything"
+    );
+
+    // The ownerless viewport is `Viewport0`.
+    store_viewport_window_position(&paths, clonk_engine::OWNER_NONE, 12, 34, 400, 250)
+        .test_value();
+    assert_eq!(
+        load_viewport_window_position(Some(&paths), clonk_engine::OWNER_NONE),
+        Some(ConsoleWindowPlacement::PositionAndSize {
+            x: 12,
+            y: 34,
+            width: 400,
+            height: 250,
+        }),
+        "storeSize is set, so the size survives with the position"
+    );
+
+    // Player 0 is `Viewport1` — a different slot, which is the point of keying
+    // on the player.
+    assert!(load_viewport_window_position(Some(&paths), 0).is_none());
+    store_viewport_window_position(&paths, 0, 5, 6, 320, 200).test_value();
+    assert_eq!(
+        load_viewport_window_position(Some(&paths), 0),
+        Some(ConsoleWindowPlacement::PositionAndSize {
+            x: 5,
+            y: 6,
+            width: 320,
+            height: 200,
+        })
+    );
+    assert_eq!(
+        load_viewport_window_position(Some(&paths), clonk_engine::OWNER_NONE)
+            .and_then(ConsoleWindowPlacement::position),
+        Some((12, 34)),
+        "and it did not disturb the ownerless viewport's slot"
+    );
+
+    // The section is shared with the console, whose own entry is separate.
+    assert!(
+        load_console_window_position(Some(&paths)).is_none(),
+        "a viewport must not land on the console's `Main` key"
+    );
+}
+
+/// `ScrollBarsByViewPosition` refuses outright while the player lock is on
+/// (`C4Viewport.cpp:272`), and `C4Viewport::Default` starts that lock **set**
+/// (`C4Viewport.cpp:1272`) — so a viewport shows no bars until it is unlocked.
+///
+/// The layout itself is pinned in `developer_viewport`; what this pins is that
+/// the viewport actually draws it. Without this, removing the draw call leaves
+/// every engine-side bar test passing.
+#[test]
+fn console_viewport_draws_scroll_bars_only_while_unlocked() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+        .test_value();
+    let identity = app.physical_viewports.last().test_value().physical_identity;
+
+    // The thumb grey `draw_console_scroll_bars` paints. Counting it is enough:
+    // the scene behind is the sandbox landscape, and the assertion that matters
+    // is presence against absence, not a particular pixel.
+    let thumb = clonk_graphics::Color::opaque(168, 168, 168);
+    let thumb_pixels = |surface: &clonk_graphics::Surface| {
+        let mut seen = 0_usize;
+        for y in 0..surface.height() {
+            for x in 0..surface.width() {
+                if surface.get_pixel(x, y) == Some(thumb) {
+                    seen += 1;
+                }
+            }
+        }
+        seen
+    };
+
+    assert!(
+        app.console_viewport_player_lock(identity),
+        "a fresh viewport starts locked, which is what makes the next assertion meaningful"
+    );
+    let locked = app.render_console_viewport(identity, 320, 200).test_value();
+    assert_eq!(
+        thumb_pixels(&locked),
+        0,
+        "a locked viewport draws no bars at all"
+    );
+
+    app.toggle_console_viewport_player_lock(identity);
+    assert!(!app.console_viewport_player_lock(identity), "unlocking always succeeds");
+    let unlocked = app.render_console_viewport(identity, 320, 200).test_value();
+    assert!(
+        thumb_pixels(&unlocked) > 0,
+        "an unlocked viewport draws both thumbs"
+    );
+}
+
 #[test]
 fn console_viewport_file_drop_emits_a_definition_drop_control() {
     let mut app = new_lightweight_running_sandbox_app();
