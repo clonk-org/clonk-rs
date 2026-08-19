@@ -44,23 +44,37 @@ pub(crate) mod freedesktop {
                 .context("failed to create the desktop notification proxy")
         }
 
-        /// Reads signals until the toast being watched is gone.
+        /// Shows the toast and reads signals until it is gone.
         ///
-        /// Blocking, so a caller runs it on its own thread. It returns when
-        /// [`dispatch_signal`] reports the toast no longer exists — which
-        /// includes the `NotificationClosed` that our own `CloseNotification`
-        /// produces. That is what makes an *unanswered* prompt's listener exit
-        /// when the lobby tears the continuation down, rather than blocking on
-        /// a bus that will never mention it again.
-        pub(crate) fn listen(
+        /// Blocking, so a caller runs it on its own thread.
+        ///
+        /// The subscription is taken *before* `Notify`, and that order is
+        /// load-bearing: the bus delivers only signals emitted after a match
+        /// rule is in place, so subscribing afterwards drops a button pressed
+        /// in the instant the toast appears — the press most likely to happen,
+        /// since that is when the user is looking at it.
+        ///
+        /// It returns when [`dispatch_signal`] reports the toast no longer
+        /// exists — including the `NotificationClosed` that our own
+        /// `CloseNotification` produces. That is what makes an *unanswered*
+        /// prompt's listener exit when the lobby tears the continuation down,
+        /// rather than blocking on a bus that will never mention it again.
+        pub(crate) fn show_and_watch(
             &self,
-            id: NotificationId,
+            actions: &NotificationActions,
             continuation: &ReadyCheckContinuation,
         ) -> Result<()> {
             let signals = self
                 .proxy()?
                 .receive_all_signals()
                 .context("failed to subscribe to desktop notification signals")?;
+            continuation.show(self, actions);
+            // No toast means no daemon, which is non-fatal by design: the
+            // in-window dialog stays the answer path, and there is nothing to
+            // watch for.
+            let Some(id) = continuation.shown_id() else {
+                return Ok(());
+            };
             for message in signals {
                 if parse_signal(&message, id)
                     .is_some_and(|signal| dispatch_signal(&signal, continuation, self))

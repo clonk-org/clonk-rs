@@ -207,6 +207,17 @@ impl ReadyCheckContinuation {
         self.claimed.load(Ordering::Acquire)
     }
 
+    /// The id of the toast currently shown for this continuation, if any.
+    ///
+    /// A backend listener filters incoming signals by it. The notification
+    /// service broadcasts every application's activations on the same
+    /// connection, so an unfiltered listener would read a stranger's button
+    /// press as an answer to this prompt. `None` once the toast is hidden, or
+    /// when the backend could not show one at all.
+    pub(crate) fn shown_id(&self) -> Option<NotificationId> {
+        self.shown.lock().ok().and_then(|shown| *shown)
+    }
+
     /// The recorded outcome, once resolved.
     pub(crate) fn outcome(&self) -> Option<ReadyCheckOutcome> {
         self.outcome.lock().ok().and_then(|outcome| *outcome)
@@ -489,6 +500,35 @@ mod tests {
             "closed by us — already resolved"
         );
         assert!(closed_reason_ends_prompt(4), "undefined");
+    }
+
+    // A backend has to filter incoming signals by notification id, so it needs
+    // to read back the id its own `show` produced.
+    #[test]
+    fn a_shown_continuation_reports_the_notification_id_until_it_is_hidden() {
+        let sink = FakeSink::default();
+        let continuation = ReadyCheckContinuation::new();
+        assert_eq!(continuation.shown_id(), None, "nothing shown yet");
+
+        continuation.show(&sink, &actions());
+        assert_eq!(continuation.shown_id(), Some(NotificationId(1)));
+
+        // Resolving hides the toast, so there is no longer an id to watch.
+        assert!(continuation.answer(true, &sink));
+        assert_eq!(continuation.shown_id(), None);
+    }
+
+    // A backend that could not show anything has no id to filter on, and must
+    // not be handed one belonging to nothing.
+    #[test]
+    fn a_continuation_whose_toast_failed_to_show_reports_no_notification_id() {
+        let sink = FakeSink {
+            fail_show: true,
+            ..FakeSink::default()
+        };
+        let continuation = ReadyCheckContinuation::new();
+        continuation.show(&sink, &actions());
+        assert_eq!(continuation.shown_id(), None);
     }
 
     // Signal routing: what a backend listener does with each signal it reads
