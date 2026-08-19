@@ -13,6 +13,7 @@ pub struct BlitTransform {
     transform: [f32; 16],
     clip_rect: (u32, u32, u32, u32),
     buffer: (f32, f32),
+    scale: u32,
 }
 
 impl BlitTransform {
@@ -63,7 +64,17 @@ impl BlitTransform {
             transform,
             clip_rect,
             buffer: (buffer_width, buffer_height),
+            scale: scale as u32,
         }
+    }
+
+    /// The whole-number magnification the buffer receives.
+    ///
+    /// Exposed so a presenter that cannot run the shader derives its geometry
+    /// from this same fit rather than recomputing it, which is what keeps the
+    /// two presentation paths aligned by construction.
+    pub const fn scale(&self) -> u32 {
+        self.scale
     }
 
     /// The scissor rectangle: the drawable's inner bounds, without the border.
