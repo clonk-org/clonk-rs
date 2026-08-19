@@ -7698,6 +7698,96 @@ impl RetainedShaderLandscape {
         uploads
     }
 
+    /// Swaps in a reshaped atlas while keeping the map planes.
+    ///
+    /// A catalogue reload changes what the atlas *is*, not the map it is
+    /// sampled for, so the index and shading textures and their byte caches
+    /// move across untouched — which is the difference between uploading the
+    /// atlas and re-uploading the whole map. The bind group names every view,
+    /// so it is rebuilt from the two that survive plus the new one.
+    fn with_reloaded_atlas(
+        self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        atlas_bytes: &[u8],
+        atlas_extent: [u32; 2],
+    ) -> (Self, ShaderLandscapeUploads) {
+        let Self {
+            key,
+            index,
+            index_plane,
+            shading,
+            shading_plane,
+            params,
+            config,
+            slots,
+            slot_table,
+            _textures: [index_texture, shading_texture, _old_atlas],
+            ..
+        } = self;
+        let (atlas_texture, atlas) = uint_plane(
+            device,
+            queue,
+            "lc_gpu_shader_landscape_atlas",
+            wgpu::TextureFormat::Rgba8Uint,
+            atlas_extent,
+            atlas_bytes,
+            4,
+        );
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lc_gpu_shader_landscape_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&index),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shading),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&atlas),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: slots.as_entire_binding(),
+                },
+            ],
+        });
+        let uploads = ShaderLandscapeUploads {
+            calls: 1,
+            bytes: atlas_bytes.len() as u64,
+        };
+        (
+            Self {
+                key: ShaderLandscapeResourceKey {
+                    atlas_extent,
+                    ..key
+                },
+                index,
+                index_plane,
+                shading,
+                shading_plane,
+                atlas,
+                atlas_bytes: atlas_bytes.to_vec(),
+                params,
+                config,
+                slots,
+                slot_table,
+                bind_group,
+                _textures: [index_texture, shading_texture, atlas_texture],
+            },
+            uploads,
+        )
+    }
+
     /// The atlas comes from the material catalogue, so it survives every
     /// composition until a reload changes it.
     fn upload_atlas(
@@ -7943,11 +8033,28 @@ impl ShaderLandscapeComposer {
         let mut retained = self.retained.take();
         // A resource the next composition cannot keep is dropped before its
         // replacement is created, so a resize does not hold both.
-        if !reuse.planes || !reuse.atlas {
+        if !reuse.planes {
             retained = None;
         }
 
         let mut uploads = ShaderLandscapeUploads::default();
+        // A catalogue reload reshapes the atlas and nothing else. Swapping it
+        // in place keeps the map planes, whose textures and byte caches the
+        // reload did not touch — the criterion is to invalidate exactly what
+        // the change owns.
+        if reuse.planes && !reuse.atlas {
+            if let Some(previous) = retained.take() {
+                let (replaced, atlas_uploads) = previous.with_reloaded_atlas(
+                    device,
+                    queue,
+                    &self.bind_group_layout,
+                    atlas_bytes,
+                    inputs.atlas_extent,
+                );
+                uploads.add(atlas_uploads);
+                retained = Some(replaced);
+            }
+        }
         let retained = match retained {
             Some(mut retained) => {
                 uploads.add(retained.upload_planes(
@@ -13586,6 +13693,55 @@ mod tests {
             renderer.last_stats().shader_landscape_upload_bytes,
             1,
             "a one-texel edit is one byte, not its whole row"
+        );
+    }
+
+    /// clonk-org/clonk-rs#273's third criterion, the half the reuse decision
+    /// already knew but the caller ignored: *invalidate exactly the resources
+    /// they own*.
+    ///
+    /// `ShaderLandscapeReuse::between` reports `planes: true, atlas: false` for
+    /// a catalogue reload that resizes the atlas, and the caller then dropped
+    /// the retained set wholesale — so the index and shading planes were
+    /// recreated and re-uploaded in full because the *catalogue* changed. On a
+    /// large map that is megabytes for a change that touched none of it.
+    #[test]
+    fn a_catalogue_reload_keeps_the_map_planes_it_did_not_change() {
+        let Some((_runtime, _instance, _adapter, device, queue)) =
+            test_wgpu_device("lc_gpu_shader_landscape_catalogue_reload_device", true)
+        else {
+            return;
+        };
+        let extent = [64_u32, 64_u32];
+        let base = GpuTextureId::fresh();
+        let scene = shader_landscape_scene_fixture(base, extent, extent, 1);
+        let mut renderer = test_renderer(&device, &queue);
+        renderer.set_shader_landscape(true);
+        renderer.set_landscape_detail(1);
+
+        let plan = shader_landscape_plan_fixture(extent);
+        renderer.set_pending_shader_landscape(Some((base, plan.clone())));
+        let before = render_identity_readback(&mut renderer, &device, &queue, &scene);
+
+        // A reloaded catalogue: a differently shaped atlas over the same map.
+        let mut reloaded = plan.clone();
+        let atlas_extent = [plan.atlas_extent[0] + 2, plan.atlas_extent[1] + 1];
+        reloaded.atlas_extent = atlas_extent;
+        reloaded.atlas = (0..(atlas_extent[0] * atlas_extent[1]) as usize * 4)
+            .map(|byte| (byte % 251) as u8)
+            .collect();
+        renderer.set_pending_shader_landscape(Some((base, reloaded)));
+        let after = render_identity_readback(&mut renderer, &device, &queue, &scene);
+
+        let atlas_bytes = u64::from(atlas_extent[0]) * u64::from(atlas_extent[1]) * 4;
+        assert_eq!(
+            renderer.last_stats().shader_landscape_upload_bytes,
+            atlas_bytes,
+            "only the atlas moved, so only the atlas is uploaded"
+        );
+        assert_ne!(
+            after, before,
+            "the reloaded catalogue still has to reach the output"
         );
     }
 
