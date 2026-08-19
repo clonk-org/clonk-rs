@@ -924,6 +924,10 @@ pub(crate) fn present_retained_gpu_frame_profiled(
         physical_extent: [physical_width, physical_height],
         scale: geometry.scale(),
         crop_top: geometry.crop_top(),
+        // The renderer sizes point and line rasters from this; the frontend is
+        // no longer the only place that knows the zoom
+        // (clonk-org/clonk-rs#359).
+        world_zoom: app.graphics.viewport_zoom(),
     };
     let request_native_save_readback = !app.pending_native_save_thumbnails.is_empty();
     let request_current_readback =

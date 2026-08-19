@@ -388,6 +388,7 @@ fn bench_pxs_render(c: &mut Criterion) {
             ],
             scale,
             crop_top: 0,
+            world_zoom: 1.0,
         };
         let scaled_target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lc_pxs_benchmark_scaled_target"),

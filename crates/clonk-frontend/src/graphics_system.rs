@@ -994,6 +994,15 @@ impl GraphicsSystem {
         self.shader_landscape = enabled;
     }
 
+    /// The viewport zoom the world is currently magnified by.
+    ///
+    /// The renderer needs it to size point and line rasters, which are widths
+    /// rather than positions and so do not pick the zoom up from the
+    /// projection (clonk-org/clonk-rs#359).
+    pub fn viewport_zoom(&self) -> f32 {
+        self.viewport_zoom.max(MIN_VIEWPORT_ZOOM)
+    }
+
     pub fn shader_landscape(&self) -> bool {
         self.shader_landscape
     }

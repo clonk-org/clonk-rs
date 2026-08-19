@@ -5829,7 +5829,10 @@ fn draw_projection(
     Ok(Some(DrawProjection {
         clipper,
         physical_extent: presentation.physical_extent,
-        line_width: presentation.scale,
+        // A raster width is not a position, so the projection's scale does not
+        // carry the zoom for it: multiply it in, or a magnified world keeps
+        // unzoomed rain, spray and debug lines.
+        line_width: presentation.scale * presentation.world_zoom.max(0.0),
         scissor,
     }))
 }
@@ -9121,6 +9124,7 @@ mod tests {
             physical_extent: [5, 4],
             scale: 1.5,
             crop_top: 1,
+            world_zoom: 1.0,
         };
         let projection = draw_projection(Some(Rect::new(1, 1, 2, 1)), [4, 3], &presentation)
             .expect("valid fractional presentation")
@@ -9154,6 +9158,7 @@ mod tests {
             physical_extent: [8, 8],
             scale: 2.0,
             crop_top: 0,
+            world_zoom: 1.0,
         };
         let projection = draw_projection(Some(Rect::new(0, 0, 2, 2)), [4, 4], &presentation)
             .expect("valid point presentation")
@@ -9236,6 +9241,7 @@ mod tests {
             physical_extent: [4, 4],
             scale: 1.0,
             crop_top: 0,
+            world_zoom: 1.0,
         };
         let projection = draw_projection(None, [4, 4], &presentation)
             .expect("valid presentation")
@@ -9300,6 +9306,7 @@ mod tests {
             physical_extent: [6, 4],
             scale: 1.0,
             crop_top: 0,
+            world_zoom: 1.0,
         };
         let projection = draw_projection(None, [6, 4], &presentation)
             .expect("valid presentation")
@@ -9344,6 +9351,7 @@ mod tests {
             physical_extent: [12, 8],
             scale: 2.0,
             crop_top: 0,
+            world_zoom: 1.0,
         };
         let projection = draw_projection(None, [6, 4], &presentation)
             .expect("valid line presentation")
@@ -9443,6 +9451,7 @@ mod tests {
             physical_extent: [17, 11],
             scale: 1.5,
             crop_top: 2,
+            world_zoom: 1.0,
         };
         let projection = draw_projection(Some(Rect::new(1, 2, 6, 4)), [9, 8], &presentation)
             .expect("valid fractional presentation")
@@ -9870,6 +9879,7 @@ mod tests {
             physical_extent: [17, 11],
             scale: 1.5,
             crop_top: 2,
+            world_zoom: 1.0,
         };
         let projection = draw_projection(Some(Rect::new(1, 2, 6, 4)), [9, 8], &presentation)
             .expect("valid fractional presentation")
@@ -11160,6 +11170,7 @@ mod tests {
             physical_extent: [5, 4],
             scale: 1.5,
             crop_top: 1,
+            world_zoom: 1.0,
         };
 
         for smooth in [false, true] {
@@ -11926,6 +11937,7 @@ mod tests {
                     physical_extent: [2, 2],
                     scale: 2.0,
                     crop_top: 0,
+                    world_zoom: 1.0,
                 }
             ),
             Err(GpuRendererError::NonFiniteCoordinate)
@@ -12060,6 +12072,7 @@ mod tests {
                     physical_extent,
                     scale: 2.0,
                     crop_top: 0,
+                    world_zoom: 1.0,
                 },
             ),
             GpuSceneLayer::new(
@@ -13151,6 +13164,55 @@ mod tests {
         );
     }
 
+    /// A PXS point and a debug line are sized from the application scale
+    /// *and* the viewport zoom.
+    ///
+    /// A vertex position picks the zoom up from the projection, but a raster
+    /// width is not a position: sizing it from `scale` alone leaves rain,
+    /// spray, dug-material sparks and every debug line at their unzoomed width
+    /// the moment the world is magnified. Zoom is pinned at 1.0 today, so this
+    /// is the term being in place rather than a visible change.
+    #[test]
+    fn point_and_line_rasters_scale_with_the_world_zoom() {
+        let projection = |scale: f32, world_zoom: f32| {
+            let presentation = GpuPresentation {
+                physical_extent: [640, 480],
+                scale,
+                crop_top: 0,
+                world_zoom,
+            };
+            draw_projection(None, [320, 240], &presentation)
+                .expect("the projection resolves")
+                .expect("the clip covers the drawable")
+        };
+
+        assert_eq!(
+            rounded_raster_width(&projection(1.0, 1.0)),
+            1,
+            "an unzoomed world at scale 1 is one physical pixel"
+        );
+        assert_eq!(
+            rounded_raster_width(&projection(1.0, 3.0)),
+            3,
+            "a 3x world magnifies the point with it"
+        );
+        assert_eq!(
+            rounded_raster_width(&projection(2.0, 2.0)),
+            4,
+            "scale and zoom compose rather than replacing one another"
+        );
+        assert_eq!(
+            rounded_raster_width(&projection(2.0, 1.0)),
+            2,
+            "an unzoomed world still follows the application scale alone"
+        );
+        assert_eq!(
+            rounded_raster_width(&projection(1.0, 0.25)),
+            1,
+            "a zoomed-out world never shrinks a point out of existence"
+        );
+    }
+
     /// A retained plane is re-uploaded by the rows that actually changed, so
     /// an unchanged landscape uploads nothing and a local edit uploads its own
     /// band rather than the whole map.
@@ -13625,6 +13687,7 @@ mod tests {
                 physical_extent: [LOGICAL[0] * 2, LOGICAL[1] * 2],
                 scale: 2.0,
                 crop_top: 0,
+                world_zoom: 1.0,
             },
         );
         for y in 8..10 {
@@ -13653,6 +13716,7 @@ mod tests {
                     physical_extent: [12, 9],
                     scale: 1.5,
                     crop_top: 0,
+                    world_zoom: 1.0,
                 },
                 9..11,
                 6..8,
@@ -13663,6 +13727,7 @@ mod tests {
                     physical_extent: [16, 12],
                     scale: 2.0,
                     crop_top: 0,
+                    world_zoom: 1.0,
                 },
                 12..14,
                 8..10,
@@ -13715,6 +13780,7 @@ mod tests {
                 physical_extent: [12, 8],
                 scale: 2.0,
                 crop_top: 0,
+                world_zoom: 1.0,
             },
         );
         for y in 0..8 {
@@ -13746,6 +13812,7 @@ mod tests {
                 physical_extent: [12, 8],
                 scale: 2.0,
                 crop_top: 0,
+                world_zoom: 1.0,
             },
         );
         for y in 0..8 {
@@ -14006,6 +14073,7 @@ mod tests {
                 physical_extent: [5, 4],
                 scale: 1.5,
                 crop_top: 1,
+                world_zoom: 1.0,
             },
         );
         for y in 0..4 {

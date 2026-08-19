@@ -139,6 +139,17 @@ pub struct GpuPresentation {
     pub physical_extent: [u32; 2],
     pub scale: f32,
     pub crop_top: u32,
+    /// The viewport zoom the world is magnified by, where `1.0` is unzoomed.
+    ///
+    /// Vertex *positions* already carry it through the projection, but a point
+    /// or line's raster footprint is a width rather than a position, so it has
+    /// to be multiplied in separately. Without it, magnifying the world would
+    /// leave rain, spray, dug-material sparks and every debug line at their
+    /// unzoomed width.
+    ///
+    /// Presentation only: nothing the lockstep simulation reads may derive
+    /// from this.
+    pub world_zoom: f32,
 }
 
 impl GpuPresentation {
@@ -147,6 +158,7 @@ impl GpuPresentation {
             physical_extent: [width, height],
             scale: 1.0,
             crop_top: 0,
+            world_zoom: 1.0,
         }
     }
 }
