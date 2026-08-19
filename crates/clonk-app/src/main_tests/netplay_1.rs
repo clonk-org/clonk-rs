@@ -5834,6 +5834,7 @@ fn retained_main_requires_scaled_native_fonts_but_headless_cpu_renders_without_t
             physical_extent: [960, 600],
             scale: 3.0,
             crop_top: 0,
+            world_zoom: 1.0,
         })
         .err()
         .test_value();
@@ -6240,6 +6241,7 @@ fn scale_native_text_keeps_logical_physical_painter_order() {
         physical_extent: [640, 400],
         scale: 2.0,
         crop_top: 0,
+        world_zoom: 1.0,
     };
 
     let frame = app.render_retained_gpu_frame(presentation).test_value();
