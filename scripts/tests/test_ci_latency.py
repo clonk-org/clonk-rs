@@ -409,8 +409,22 @@ class CiLatencyTests(unittest.TestCase):
         )
 
         self.assertIn("if: matrix.apt != ''", linux)
-        self.assertIn("if ! sudo apt-get install", linux)
+        # Install first and refresh only on failure: the hosted image's index is
+        # usually current, and an unconditional `apt-get update` costs every row
+        # a network round trip. `apt_ensure` keeps that order.
+        self.assertIn("apt_ensure", linux)
+        self.assertLess(
+            linux.index("apt_install"),
+            linux.index("apt_refresh"),
+            "the install attempt must precede the index refresh",
+        )
         self.assertEqual(linux.count("sudo apt-get update"), 1)
+        # A stalled mirror or dpkg lock evicted a merge-queue entry twice on
+        # 2026-08-19 by burning the job's whole timeout, so each apt call is
+        # bounded and the step carries its own limit.
+        self.assertIn("timeout 240 sudo apt-get install", linux)
+        self.assertIn("timeout 180 sudo apt-get update", linux)
+        self.assertIn("timeout-minutes: 10", linux)
         self.assertIn("rustc 1.97.1", linux)
         self.assertIn("id: preinstalled-rust", linux)
         self.assertIn("if: steps.preinstalled-rust.outputs.exact != 'true'", linux)
