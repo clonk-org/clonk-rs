@@ -1105,6 +1105,86 @@ fn rust_savegame_player_matching(case: &Value, case_index: usize) {
     }
 }
 
+/// C4IDList.cpp:33-103 — component order, which participates in the replay
+/// hash but had no comparable field on the C++ side.
+///
+/// The list is a `std::vector<Entry>`, so position is meaningful and the same
+/// ID may appear more than once with independent counts — the shipped Bazooka
+/// `DefCore` does exactly that. A comparator that only checked ID/count pairs
+/// would pass a model that collapsed the repeat, which is why the rows carry
+/// the ordered entries themselves.
+fn rust_component_order(case: &Value, case_index: usize) {
+    const SECTION: &str = "component_order";
+
+    let entries = |key: &str| -> Vec<(String, i32)> {
+        case[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{SECTION} {key} is a C++ oracle array"))
+            .iter()
+            .map(|entry| {
+                (
+                    entry["id"]
+                        .as_str()
+                        .expect("component id is a string")
+                        .to_owned(),
+                    i(entry, "count") as i32,
+                )
+            })
+            .collect()
+    };
+
+    // Built with `push`, not `set`: the parsed DefCore appends every entry it
+    // reads, which is the only way a repeat can exist at all.
+    let mut list = entries("initial")
+        .into_iter()
+        .map(|(id, count)| (crate::DefinitionId::from(id.as_str()), count))
+        .collect::<crate::ComponentList>();
+
+    if let Some(set) = case.get("set").filter(|set| !set.is_null()) {
+        list.set(
+            crate::DefinitionId::from(set["id"].as_str().expect("set id is a string")),
+            i(set, "count") as i32,
+        );
+    }
+
+    expect_json_eq(
+        SECTION,
+        case_index,
+        "entries",
+        serde_json::json!(entries("entries")
+            .into_iter()
+            .map(|(id, count)| serde_json::json!({"id": id, "count": count}))
+            .collect::<Vec<_>>()),
+        serde_json::json!(list
+            .iter()
+            .map(|(id, count)| serde_json::json!({"id": id.as_str(), "count": count}))
+            .collect::<Vec<_>>()),
+    );
+    expect_eq(
+        SECTION,
+        case_index,
+        "number_of_ids",
+        i(case, "number_of_ids"),
+        list.len() as i64,
+    );
+
+    // `GetIDCount` resolves through `findId`, which returns the **first**
+    // matching entry; a later repeat is unreachable by ID.
+    for lookup in case["lookups"]
+        .as_array()
+        .expect("component_order lookups is a C++ oracle array")
+    {
+        let id = lookup["id"].as_str().expect("lookup id is a string");
+        expect_eq(
+            SECTION,
+            case_index,
+            &format!("lookups[{id}]"),
+            i(lookup, "count"),
+            list.get(id).unwrap_or(0) as i64,
+        );
+    }
+}
+
 fn rust_player_join_capacity(case: &Value, case_index: usize) {
     const SECTION: &str = "player_join_capacity";
     let initial_names = case["names_before"]
@@ -1233,6 +1313,21 @@ fn parity_differential_matches_cpp_golden() {
     );
     for (case_index, case) in savegame_matching_cases.iter().enumerate() {
         rust_savegame_player_matching(case, case_index);
+    }
+
+    // C4IDList.cpp:33-103. Component order is inside the replay hash, so a
+    // model that reordered or collapsed entries is a desync this comparator
+    // can now see directly rather than only as an eventual hash mismatch.
+    let component_order_cases = golden["component_order"]
+        .as_array()
+        .expect("component_order is a C++ oracle array");
+    assert_eq!(
+        component_order_cases.len(),
+        6,
+        "component_order must retain its exact six-row matrix"
+    );
+    for (case_index, case) in component_order_cases.iter().enumerate() {
+        rust_component_order(case, case_index);
     }
 
     // 1. itofix (whole-integer + precision-denominated).
