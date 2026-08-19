@@ -503,9 +503,18 @@ jobs:
             # Linting the rest is worth far more than linting nothing, which is
             # what this row did in practice. clonk-org/clonk-rs#737 tracks
             # making the bundled build work natively so the exclusions can go.
+            # The excluded set is the transitive closure, not just the three
+            # crates that name `freetype-rs` in their own manifest: excluding
+            # only those still built them through `clonk-app-render` and the
+            # other `clonk-app-*` crates, and the row failed again identically.
+            # Recompute with `cargo metadata` if a dependency edge moves.
             scope: >-
               --workspace
               --exclude clonk-app
+              --exclude clonk-app-core
+              --exclude clonk-app-menus
+              --exclude clonk-app-netplay
+              --exclude clonk-app-render
               --exclude clonk-frontend
               --exclude clonk-frontend-unit-tests
     concurrency:
