@@ -8965,32 +8965,47 @@ fn compute_raw_positional_mix_values(
     let mut pan = 0i32;
 
     for viewport in viewports {
-        let center = Vector2::new(
-            viewport.target_x.wrapping_add(viewport.logical_width / 2),
-            viewport.target_y.wrapping_add(viewport.logical_height / 2),
-        );
-        let listener = snapshot
-            .players
-            .iter()
-            .find(|player| player.id == viewport.owner)
-            .and_then(|player| {
-                player
-                    .view_cursor
-                    .and_then(|object| snapshot.object(object))
-                    .or_else(|| {
-                        player
-                            .view_target
-                            .and_then(|object| snapshot.object(object))
-                    })
-                    .or_else(|| player.cursor.and_then(|object| snapshot.object(object)))
-            })
-            .map(|object| object.position)
-            .unwrap_or(center);
+        let center = viewport_center(viewport);
+        let listener = viewport_listener(snapshot, viewport, center);
         volume = volume.max(positional_audibility(source, listener));
         pan = pan.wrapping_add((source.x.wrapping_sub(center.x)) / 5);
     }
 
     (volume, pan.clamp(-100, 100))
+}
+
+/// The world point a viewport is centred on.
+fn viewport_center(viewport: &ActiveViewportProjection) -> Vector2 {
+    Vector2::new(
+        viewport.target_x.wrapping_add(viewport.logical_width / 2),
+        viewport.target_y.wrapping_add(viewport.logical_height / 2),
+    )
+}
+
+/// Where a viewport's owner is listening from: its cursor object if it has one,
+/// otherwise the view centre.
+fn viewport_listener(
+    snapshot: &SimulationSnapshot,
+    viewport: &ActiveViewportProjection,
+    center: Vector2,
+) -> Vector2 {
+    snapshot
+        .players
+        .iter()
+        .find(|player| player.id == viewport.owner)
+        .and_then(|player| {
+            player
+                .view_cursor
+                .and_then(|object| snapshot.object(object))
+                .or_else(|| {
+                    player
+                        .view_target
+                        .and_then(|object| snapshot.object(object))
+                })
+                .or_else(|| player.cursor.and_then(|object| snapshot.object(object)))
+        })
+        .map(|object| object.position)
+        .unwrap_or(center)
 }
 
 fn positional_audibility(source: Vector2, listener: Vector2) -> u8 {
