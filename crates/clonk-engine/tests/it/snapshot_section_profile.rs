@@ -41,19 +41,50 @@
 //!
 //! Two things worth carrying forward rather than concluding from:
 //!
-//! - **`landscape` leads on the populated scenario at 38%.** That is the
-//!   section clonk-org/clonk-rs#294 singles out, because its `Arc`/copy-on-write
-//!   backing is supposed to make it nearly free when nothing dirtied it. 39 µs
-//!   is small in absolute terms but is not a pointer bump, so the *large dirty
-//!   landscape* fixture — the one the issue lists and this probe does not yet
-//!   build — is where that section could actually move. It is the fixture most
-//!   likely to cross the threshold, and it remains unmeasured.
+//! - **`landscape` leads on the populated scenario at 38%, and it scales with
+//!   map width rather than with dirtiness.** See below; this is the section
+//!   clonk-org/clonk-rs#294 singles out, and the answer is not the one the
+//!   issue expects.
 //! - **`object_sort` is 26% on Tutorial 1 and 0% on `03_Chaos`**, on the
 //!   scenario with *fewer* objects. Read that as an artefact, not a finding:
 //!   "worst of 20" selects the run with the largest total and reports that
 //!   run's sections, so one noisy sample carries its whole row. A section this
 //!   small needs a distribution, not a maximum, before anything is claimed
 //!   about it.
+//!
+//! # What the `landscape` section actually costs
+//!
+//! clonk-org/clonk-rs#294 reasons that `PixelGrid.bytes` and `surface32_pixels`
+//! are `Arc`-backed, "so unchanged-landscape sharing is partly implemented",
+//! and lists a **large dirty landscape** as the fixture that would stress it.
+//! Both halves of that are right about the pixels and wrong about the cost.
+//!
+//! `Landscape` also holds `surface: Vec<i32>`, `liquids: Vec<LiquidColumn>`,
+//! `solid_materials: Vec<Option<MaterialId>>` and a `tunnels` map. **None are
+//! shared**, so `landscape.clone()` deep-copies one entry per column every
+//! time, whatever the pixels do. The measurements say exactly that:
+//!
+//! | scenario | `MapWidth` | landscape px | `landscape` span |
+//! |---|---|---|---|
+//! | Tutorial 1 | 64 | 512 | 12.4 µs |
+//! | `03_Chaos` | 197 | 1,576 | 39.0 µs |
+//!
+//! **3.08x the width, 3.15x the cost** — proportional to a column count, which
+//! is what an unshared per-column `Vec` costs and is not what an `Arc` bump
+//! costs.
+//!
+//! Two consequences:
+//!
+//! - **Dirtiness is irrelevant here.** Copy-on-write diverges on *write*;
+//!   `clone` never consults it. A large *dirty* landscape projects for the
+//!   same cost as a large clean one, so that fixture would measure width, not
+//!   sharing. Worth building for the other sections, not for this one.
+//! - **This section cannot reach the absolute threshold on a real map.** At
+//!   ~24.7 ns per column it needs roughly 81,000 columns to reach 2 ms, which
+//!   is a `MapWidth` around 10,000 — two orders of magnitude beyond anything
+//!   shipped. If the section is ever worth attacking it will be for its share,
+//!   not its absolute cost, and the fix is to share the per-column vectors the
+//!   way the pixels already are.
 
 use crate::support::real_scenario::load_installed_scenario;
 
