@@ -155,20 +155,7 @@ mod backend {
                     return Err(error).context("failed to initialize the WinRT apartment");
                 }
             };
-            let result = (|| {
-                if let Err(error) = unsafe {
-                    SetCurrentProcessExplicitAppUserModelID(w!("LegacyClonkTeam.LegacyClonk"))
-                } {
-                    tracing::warn!(%error, "failed to set the Clonk Rust application identity");
-                }
-                if let Err(error) = register_app_user_model_id() {
-                    tracing::warn!(%error, "failed to register the Clonk Rust application identity");
-                }
-                ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(
-                    APP_USER_MODEL_ID,
-                ))
-                .context("failed to initialize the WinRT toast notifier")
-            })();
+            let result = create_toast_notifier();
             match result {
                 Ok(notifier) => Ok(Self {
                     notifier: Some(notifier),
@@ -223,6 +210,24 @@ mod backend {
         }
     }
 
+    /// Registers the application identity and builds the toast notifier.
+    ///
+    /// Separate from `initialize` so its failure can be caught there and the
+    /// WinRT apartment uninitialized before returning: the identity calls are
+    /// advisory and only warn, but the notifier itself is fallible.
+    fn create_toast_notifier() -> Result<ToastNotifier> {
+        if let Err(error) =
+            unsafe { SetCurrentProcessExplicitAppUserModelID(w!("LegacyClonkTeam.LegacyClonk")) }
+        {
+            tracing::warn!(%error, "failed to set the Clonk Rust application identity");
+        }
+        if let Err(error) = register_app_user_model_id() {
+            tracing::warn!(%error, "failed to register the Clonk Rust application identity");
+        }
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_USER_MODEL_ID))
+            .context("failed to initialize the WinRT toast notifier")
+    }
+
     fn set_text_node(content: &XmlDocument, index: u32, text: &str) -> Result<()> {
         content
             .GetElementsByTagName(&HSTRING::from("text"))
@@ -238,7 +243,12 @@ mod backend {
 
     impl Drop for RegistryKey {
         fn drop(&mut self) {
-            unsafe { RegCloseKey(self.0) };
+            // Nothing actionable can be done from a `Drop`, but a failure to
+            // close a key this process opened is worth seeing rather than
+            // discarding silently.
+            if let Err(error) = unsafe { RegCloseKey(self.0) }.ok() {
+                tracing::debug!(%error, "failed to close the AppUserModelId registry key");
+            }
         }
     }
 

@@ -1927,7 +1927,7 @@ fn cpp_loader_real_path(logical: &Path) -> Result<PathBuf> {
                 }
             }
         }
-        return Ok(normalized);
+        Ok(normalized)
     }
 
     #[cfg(not(windows))]

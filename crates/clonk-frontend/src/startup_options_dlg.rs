@@ -38,7 +38,7 @@
 //!    hidden RGB; GL-tile padding outside the image is transparent WHITE
 //!    (C4Surface.cpp:1113).
 
-use crate::clonk_fonts::ClonkFontSet;
+use crate::clonk_fonts::{advance_pixels, ClonkFontSet};
 use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::startup_options_controls::{
     control_facets, control_sheet_hit_test, key_button_facets, ControlCaptureTarget, ControlDevice,
@@ -376,7 +376,7 @@ fn build_shadowless_font(face: &freetype::Face, px_height: u32) -> Result<ClonkF
         let buffer = bitmap.buffer();
 
         // width = max(advance, bearing + width), no shadow (StdFont.cpp:218).
-        let advance_px = (slot.advance().x >> 6) as i32;
+        let advance_px = advance_pixels(slot.advance());
         let bearing = slot.bitmap_left().max(0);
         let cell_w = advance_px.max(bearing + cov_w as i32).max(0) as usize;
         let cell_h = line_height.max(0) as usize;

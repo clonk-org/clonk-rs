@@ -311,6 +311,9 @@ const DEFAULT_USER_PATH: &str = "$HOME/Library/Application Support/Clonk Rust";
 
 fn general(config: &Config) -> AdvancedConfigSection {
     let section = "General";
+    // The one `rows.push` below is `cfg(not(windows))`, so on Windows this
+    // binding is never mutated.
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut rows = vec![
         readonly_row(config, "Version", "347"),
         text_row(config, section, "Name", ""),

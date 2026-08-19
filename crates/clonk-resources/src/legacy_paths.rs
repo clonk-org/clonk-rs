@@ -138,7 +138,7 @@ pub fn real_path(path: &Path) -> PathBuf {
                 component => normalized.push(component.as_os_str()),
             }
         }
-        return normalized;
+        normalized
     }
 
     #[cfg(not(windows))]

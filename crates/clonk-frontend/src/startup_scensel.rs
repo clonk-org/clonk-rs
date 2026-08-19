@@ -6,7 +6,7 @@
 //! (shadowless book fonts).
 
 use crate::classic_gui::{ClassicButtonState, ClassicGuiSkin};
-use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
+use crate::clonk_fonts::{advance_pixels, expand_hotkey_markup, ClonkFontSet};
 use crate::draw_scaled_caret;
 use crate::startup_main_menu::{centered_label_tooltip_at, draw_bar, IntRect, StartupTooltip};
 use crate::{draw_image_bilinear, draw_image_strip, ImageData};
@@ -161,7 +161,7 @@ pub(crate) fn build_shadowless_font(face: &freetype::Face, px_height: u32) -> Re
         let buffer = bitmap.buffer();
 
         // width = max(advance, bearing + width) + shadowSize(=0) (StdFont.cpp:218).
-        let advance_px = (slot.advance().x >> 6) as i32;
+        let advance_px = advance_pixels(slot.advance());
         let bearing = slot.bitmap_left().max(0);
         let cell_w = advance_px.max(bearing + cov_w as i32).max(1) as usize;
         let at_x = bearing as usize;

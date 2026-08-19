@@ -38,6 +38,11 @@ pub struct Group {
     kind: GroupKind,
 }
 
+// `PackedGroup` is much larger than a `PathBuf`, and boxing it would put an
+// allocation in front of every packed-group read for a type that is cloned
+// rarely and read constantly. Whether the difference crosses clippy's
+// threshold depends on `PathBuf`'s width, so this fires only on some targets.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 enum GroupKind {
     Directory(PathBuf),
