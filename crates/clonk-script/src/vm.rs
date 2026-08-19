@@ -9797,6 +9797,50 @@ impl<'a> Vm<'a> {
         Ok(None)
     }
 
+    /// Resolves the script function a reference query is asking about, in the
+    /// same own-then-global order the call itself will use.
+    fn reference_query_function(&self, name: &str, env: &Environment) -> Option<&Function> {
+        if env.engine_scope {
+            self.engine_script_function(name)
+        } else {
+            self.own_or_global_script_function(name)
+        }
+    }
+
+    /// Whether a named call yields a C4Value reference, given the callee
+    /// already resolved by [`Self::reference_query_function`].
+    ///
+    /// Takes the resolution rather than the name so a caller that needs the
+    /// function for its own decision does not resolve it a second time.
+    fn variable_call_returns_reference(
+        &self,
+        name: &str,
+        args: &[Expr],
+        function: Option<&Function>,
+    ) -> bool {
+        if function.is_some_and(|function| function.returns_reference) {
+            return true;
+        }
+        if function.is_some() {
+            return false;
+        }
+
+        let null_implicit_local = self.retain_global_call_context_for_host_paths
+            && (name == "Local" && args.len() <= 1 || name == "LocalN" && args.len() == 1);
+        if null_implicit_local {
+            return false;
+        }
+
+        name == "EffectVar"
+            || !self.has_host_function(name)
+                && (matches!(name, "Var" | "Local") && args.len() <= 2
+                    || name == "Par" && args.len() <= 1
+                    || name == "VarN"
+                    || name == "LocalN" && (1..=2).contains(&args.len())
+                    || name == "Global"
+                    || name == "GlobalN" && args.len() == 1)
+    }
+
     fn call_expression_returns_reference(&self, expr: &Expr, env: &Environment) -> bool {
         let Expr::Call { callee, args, .. } = expr else {
             return false;
@@ -9805,32 +9849,8 @@ impl<'a> Vm<'a> {
             lookup_profile::enter_site(lookup_profile::LookupSite::ReferenceQuery);
         match callee.as_ref() {
             Expr::Variable(name) => {
-                let function = if env.engine_scope {
-                    self.engine_script_function(name)
-                } else {
-                    self.own_or_global_script_function(name)
-                };
-                if function.is_some_and(|function| function.returns_reference) {
-                    return true;
-                }
-                if function.is_some() {
-                    return false;
-                }
-
-                let null_implicit_local = self.retain_global_call_context_for_host_paths
-                    && (name == "Local" && args.len() <= 1 || name == "LocalN" && args.len() == 1);
-                if null_implicit_local {
-                    return false;
-                }
-
-                name == "EffectVar"
-                    || !self.has_host_function(name)
-                        && (matches!(name.as_str(), "Var" | "Local") && args.len() <= 2
-                            || name == "Par" && args.len() <= 1
-                            || name == "VarN"
-                            || name == "LocalN" && (1..=2).contains(&args.len())
-                            || name == "Global"
-                            || name == "GlobalN" && args.len() == 1)
+                let function = self.reference_query_function(name, env);
+                self.variable_call_returns_reference(name, args, function)
             }
             Expr::Property(_, method) => {
                 matches!(method.as_str(), "Local" | "LocalN" | "Var" | "EffectVar")
