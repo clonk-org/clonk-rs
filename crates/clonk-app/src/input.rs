@@ -1428,6 +1428,19 @@ pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         101 => Some(VirtualKeyCode::ContextMenu),
         103 => Some(VirtualKeyCode::NumpadEqual),
         133 => Some(VirtualKeyCode::NumpadComma),
+        // A JIS keyboard's own keys. SDL scancodes are the USB HID usage IDs
+        // and winit's `KeyCode` names the same table, so these pairs are one
+        // usage under two names (`SDL_scancode.h:248-259`). C++ forwards
+        // whatever SDL reports (`C4FullScreen.cpp:387-400`), so leaving them
+        // unmapped did not bind them differently — it left a JIS user unable
+        // to bind them at all.
+        135 => Some(VirtualKeyCode::IntlRo),
+        136 => Some(VirtualKeyCode::KanaMode),
+        137 => Some(VirtualKeyCode::IntlYen),
+        138 => Some(VirtualKeyCode::Convert),
+        139 => Some(VirtualKeyCode::NonConvert),
+        144 => Some(VirtualKeyCode::Lang1),
+        145 => Some(VirtualKeyCode::Lang2),
         _ => None,
     }
 }
@@ -1628,6 +1641,13 @@ pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::ContextMenu => 101,
         VirtualKeyCode::NumpadEqual => 103,
         VirtualKeyCode::NumpadComma => 133,
+        VirtualKeyCode::IntlRo => 135,
+        VirtualKeyCode::KanaMode => 136,
+        VirtualKeyCode::IntlYen => 137,
+        VirtualKeyCode::Convert => 138,
+        VirtualKeyCode::NonConvert => 139,
+        VirtualKeyCode::Lang1 => 144,
+        VirtualKeyCode::Lang2 => 145,
         _ => return None,
     })
 }
@@ -2601,6 +2621,48 @@ mod tests {
     ///
     /// Gated on the same target as the encoder it pins: the Windows and Linux
     /// arms are different functions with their own tables.
+    /// C++ forwards SDL's scancode for whatever key arrives
+    /// (`C4FullScreen.cpp:387-400`), so a JIS keyboard's own keys reach the
+    /// engine there. Here they encoded to `None`, which is not a different
+    /// binding but no binding at all: a JIS user could not bind Yen, Ro,
+    /// Kana, Convert or the language keys to anything.
+    ///
+    /// SDL scancodes are the USB HID usage IDs, and winit's `KeyCode` names
+    /// the same table, so each pair below is the same HID usage under two
+    /// names — `SDL_scancode.h` numbers them 133..145.
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[test]
+    fn japanese_keyboard_keys_follow_sdls_international_scancodes() {
+        for (key, scancode, name) in [
+            (VirtualKeyCode::IntlRo, 135, "SDL_SCANCODE_INTERNATIONAL1"),
+            (VirtualKeyCode::KanaMode, 136, "SDL_SCANCODE_INTERNATIONAL2"),
+            (
+                VirtualKeyCode::IntlYen,
+                137,
+                "SDL_SCANCODE_INTERNATIONAL3 (Yen)",
+            ),
+            (VirtualKeyCode::Convert, 138, "SDL_SCANCODE_INTERNATIONAL4"),
+            (
+                VirtualKeyCode::NonConvert,
+                139,
+                "SDL_SCANCODE_INTERNATIONAL5",
+            ),
+            (VirtualKeyCode::Lang1, 144, "SDL_SCANCODE_LANG1"),
+            (VirtualKeyCode::Lang2, 145, "SDL_SCANCODE_LANG2"),
+        ] {
+            assert_eq!(
+                encode_virtual_key_code(key),
+                Some(scancode),
+                "{key:?} is {name}"
+            );
+            assert_eq!(
+                decode_platform_key_code(scancode),
+                Some(key),
+                "{name} decodes back to the key that wrote it"
+            );
+        }
+    }
+
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     #[test]
     fn macos_function_keys_follow_sdls_cocoa_scancode_table() {
