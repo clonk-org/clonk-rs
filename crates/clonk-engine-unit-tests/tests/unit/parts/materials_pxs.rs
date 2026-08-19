@@ -5546,3 +5546,62 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let snapshot = engine.test_object_snapshot(id);
         assert_eq!(snapshot.action_procedure.as_deref(), Some("flight"));
     }
+
+    /// The scan cost clonk-org/clonk-rs#296 is about, measured rather than
+    /// derived.
+    ///
+    /// `C4PXSSystem::Execute` walks every slot of every allocated chunk
+    /// (C4PXS.cpp:212-234), so `execute_scan_baseline` could only *predict*
+    /// what the next pass would visit from the chunks that exist. Predicting
+    /// it is what leaves it unfalsifiable: nothing checked a pass agreed.
+    /// Counting the slots a pass really inspected pins the gap an occupancy
+    /// index has to close, and keeps the reported number honest once it does.
+    #[test]
+    fn a_pxs_pass_reports_the_slots_it_really_inspected() {
+        let materials = materials_pxs_with_earth(
+            "[Material Sand]\nName=Sand\nDensity=25\nFriction=10\nMaxSlide=2\n",
+        );
+        let [sand] = pxs_material_ids(&materials, ["Sand"]);
+        let mut engine = pxs_engine(7, materials);
+        engine.set_landscape(Landscape::with_default_material(4, vec![40; 4], None).test_value());
+
+        engine.tick_pxs();
+        assert_eq!(
+            engine.pxs_execute_scan_baseline(),
+            clonk_engine::pxs::PxsScanBaseline::default(),
+            "an empty system allocates no chunk and walks nothing"
+        );
+
+        assert!(create_test_pxs(&mut engine, sand, 1, 1, 0, 0));
+        engine.tick_pxs();
+        let baseline = engine.pxs_execute_scan_baseline();
+        assert_eq!(baseline.allocated_chunks, 1);
+        assert_eq!(baseline.live, 1, "the one pixel executed");
+        assert_eq!(
+            baseline.visited_slots,
+            engine.pxs_last_inspected_slots(),
+            "the reported scan is the one the pass performed"
+        );
+        assert_eq!(
+            baseline.visited_slots,
+            clonk_engine::pxs::PXS_CHUNK_SIZE,
+            "one allocated chunk is 500 inspected slots"
+        );
+
+        // A pixel in a later chunk allocates it, and every slot of both is
+        // walked — the sparse case clonk-org/clonk-rs#296 is about.
+        let pixel = engine.pxs_system.peek_slot(0, 0).test_value();
+        assert!(engine.pxs_system.create_at(3, 17, pixel));
+        engine.tick_pxs();
+        let baseline = engine.pxs_execute_scan_baseline();
+        assert_eq!(baseline.allocated_chunks, 2);
+        assert_eq!(
+            baseline.visited_slots,
+            2 * clonk_engine::pxs::PXS_CHUNK_SIZE
+        );
+        assert_eq!(
+            baseline.scanned_empty(),
+            2 * clonk_engine::pxs::PXS_CHUNK_SIZE - baseline.live,
+            "the empty slots walked are what an occupancy index would skip"
+        );
+    }
