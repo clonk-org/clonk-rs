@@ -53,6 +53,21 @@ pub struct MassMoverSet {
     slots: Vec<Option<MassMover>>,
     create_ptr: usize,
     count: i32,
+    /// Slots the last `Execute` looked at, and the live ones among them.
+    ///
+    /// Diagnostic only — never serialized, never read by the simulation, and
+    /// so outside the parity surface. The gap between the two is what
+    /// clonk-org/clonk-rs#297 is about: both descending passes walk all 10,000
+    /// slots whether one mover is live or none.
+    #[serde(skip)]
+    scan: MassMoverScan,
+}
+
+/// What one `Execute` inspected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MassMoverScan {
+    inspected: u64,
+    executed: u64,
 }
 
 /// Sparse serialized form: only the occupied slots (with their indices, so
@@ -74,6 +89,7 @@ impl From<MassMoverSetSnapshot> for MassMoverSet {
             slots: Vec::new(),
             create_ptr: snapshot.create_ptr.min(CHUNK - 1),
             count: snapshot.count,
+            scan: MassMoverScan::default(),
         };
         for (index, mover) in snapshot.movers {
             let index = index as usize;
@@ -133,6 +149,7 @@ impl MassMoverSet {
             count: slots.len() as i32,
             slots,
             create_ptr: 0,
+            scan: MassMoverScan::default(),
         }
     }
 
@@ -178,6 +195,26 @@ impl MassMoverSet {
         }
     }
 
+    /// Slots the last `Execute` inspected across both descending passes.
+    pub(crate) fn last_inspected_slots(&self) -> u64 {
+        self.scan.inspected
+    }
+
+    /// Live slots the last `Execute` actually ran, of those inspected.
+    pub(crate) fn last_executed_slots(&self) -> u64 {
+        self.scan.executed
+    }
+
+    /// Starts a fresh measurement for one `Execute`.
+    pub(crate) fn begin_scan(&mut self) {
+        self.scan = MassMoverScan::default();
+    }
+
+    pub(crate) fn record_inspected_slot(&mut self, live: bool) {
+        self.scan.inspected += 1;
+        self.scan.executed += u64::from(live);
+    }
+
     /// The `Create` success branch (C4MassMover.cpp:82-83): store the mover
     /// and leave `CreatePtr` on its slot.
     pub(crate) fn fill_slot(&mut self, index: usize, mover: MassMover) {
@@ -220,6 +257,7 @@ impl MassMoverSet {
             slots: Vec::new(),
             create_ptr: 0,
             count: record_count as i32,
+            scan: MassMoverScan::default(),
         };
         if record_count != 0 {
             set.ensure_slots();
@@ -412,9 +450,12 @@ impl Engine {
             return;
         }
         self.mass_movers.reset_count();
+        self.mass_movers.begin_scan();
         for _speed in 0..2 {
             for index in (0..CHUNK).rev() {
-                if self.mass_movers.slot(index).is_some() {
+                let live = self.mass_movers.slot(index).is_some();
+                self.mass_movers.record_inspected_slot(live);
+                if live {
                     self.mass_movers.bump_count();
                     self.execute_mass_mover(index);
                 }
@@ -934,6 +975,37 @@ mod tests {
 
         assert_eq!(engine.rng.count, expected.count);
         assert_eq!(engine.rng.hold, expected.hold);
+    }
+
+    /// clonk-org/clonk-rs#297's first requirement: the scan cost has to be
+    /// *reported* before an accelerator is justified.
+    ///
+    /// `tick_mass_movers` walks all 10,000 slots twice every frame
+    /// (C4MassMover.cpp:50-65), so a landscape with one live mover inspects
+    /// 20,000 entries to execute it. Nothing measured that, which left "the
+    /// cost is material" as a claim about the code rather than a number.
+    #[test]
+    fn a_frame_reports_the_slots_its_two_descending_passes_inspected() {
+        let mut engine = water_drop_engine();
+        engine.tick_mass_movers();
+        assert_eq!(
+            engine.mass_movers.last_inspected_slots(),
+            2 * CHUNK as u64,
+            "an empty set still walks every slot of both passes"
+        );
+
+        assert!(engine.mass_mover_create(1, 0, false));
+        engine.tick_mass_movers();
+        assert_eq!(
+            engine.mass_movers.last_inspected_slots(),
+            2 * CHUNK as u64,
+            "and one live mover costs exactly the same scan"
+        );
+        assert!(
+            engine.mass_movers.last_executed_slots() < 8,
+            "while the work that matters is a handful of slots: {}",
+            engine.mass_movers.last_executed_slots()
+        );
     }
 
     #[test]
