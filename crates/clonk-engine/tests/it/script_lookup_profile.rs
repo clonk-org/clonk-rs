@@ -37,53 +37,49 @@
 //! Totals: 199,415 lookups and 1,879,374 bytes hashed over 400 frames, or
 //! roughly 500 lookups and 4.7 KiB hashed per frame.
 //!
-//! Throwaway sub-counts over the same trace attributed two of the call paths
-//! that issue those 154,727 function lookups:
+//! Split by the call path that issued each probe, over the same trace:
 //!
-//! - The compiled executor was entered 14,299 times, ran 13,098 of those, and
-//!   resolved 14,236 call sites in its per-invocation prelude (4,516 script,
-//!   9,720 host). At one script probe and two host probes per site that is
-//!   roughly 28,000 lookups, about 18%.
-//! - The AST interpreter evaluated 15,117 call expressions, each resolving its
-//!   callee by name on every executed call. With its host fallback that is
-//!   roughly 30,000 lookups, about another 20%.
-//!
-//! That leaves about 60% unattributed, spread over the other resolution sites
-//! and the host-initiated entry points. Attributing it needs per-site counters
-//! rather than more throwaway atomics, which is the next step below.
+//! | call path | lookups | share | composition |
+//! |---|---|---|---|
+//! | `unattributed` | 88,008 | 44% | 35,602 local, 33,864 host, 9,702 script |
+//! | `reference_query` | 51,266 | 25% | 50,992 script |
+//! | `compiled_prelude` | 39,492 | 19% | 15,630 script, 23,645 host |
+//! | `ast_call` | 20,265 | 10% | 15,040 script, 5,225 host |
+//! | `generic_dispatch` | 394 | 0% | the host entry point's own dispatch |
+//! | `object_call` | 0 | — | `->` is not hot in this scenario |
 //!
 //! # Go/no-go
 //!
-//! **Go on the family, not yet on a site.** Script and host function names are
-//! 76% of all lookups after clonk-org/clonk-rs#207 and #259, so the family is
-//! still material and the issue's premise survives its own staleness warning.
-//! But the obvious target is the wrong one: the compiled executor's prelude
-//! re-resolves every call site each time a function is entered — which
-//! `function_name_lookups_do_not_scale_with_the_work_a_call_does` pins as per
-//! invocation rather than per executed call — and it is only ~18% of the cost.
-//! Interning it would move a fifth of the lookups and leave the majority
-//! untouched.
+//! **Go on the family — and the first fix is not interning.** Script and host
+//! function names are 76% of all lookups after clonk-org/clonk-rs#207 and
+//! #259, so the family is still material and the issue's premise survives its
+//! own staleness warning. Where that cost sits is the surprise:
 //!
-//! The next step is therefore to extend this instrument with per-call-site
-//! attribution and find the remaining ~60% *before* choosing where handles
-//! attach. Implementing against the numbers known today would optimise a
-//! minority path.
+//! - `reference_query` is **25% of every identifier lookup in the VM and 56%
+//!   of all script-function resolutions** (50,992 of 91,393). It is waste, not
+//!   work: `direct_value_call_has_materialized_result` and
+//!   `call_expression_returns_reference` each resolve a callee's name purely
+//!   to decide whether the result needs a `C4Value::Set` copy, discard the
+//!   resolution, and then the call resolves the same name again. Resolving
+//!   once and reusing the answer removes a quarter of all lookups without
+//!   interning anything, and without touching how a function is selected.
+//! - `compiled_prelude` is 19%. It re-resolves every call site in a function
+//!   body on each entry, which `function_name_lookups_do_not_scale_with_the
+//!   _work_a_call_does` pins as per invocation rather than per executed call.
+//!   This is where stable handles are worth their risk, and it is second.
+//! - `ast_call` is 10%, one resolution per executed call, and shrinks as
+//!   compiled coverage widens rather than through interning.
+//! - `generic_dispatch` — the host entry point that looks like the obvious
+//!   answer — is 0.2%.
 //!
-//! Three traps this measurement caught, each of which would have sent the work
-//! somewhere it does not belong:
-//!
-//! - A synthetic loop that stays inside one long-running function reports
-//!   `local` three orders of magnitude heavier than the function families and
-//!   ranks them last. Real content makes many short calls.
-//! - The compiled prelude looks like the hot path from reading the code, and
-//!   is not.
-//! - A family total does not name a call site. 76% in one family still split
-//!   across at least three paths with different fixes.
+//! 44% remains unattributed and is mostly `local` (all 35,602 probes) and
+//! host-function probes from resolution helpers with no span of their own.
+//! Locals are already slot-indexed on the compiled path, so what is left there
+//! is the AST fallback's scope-chain walk, which the issue scopes to wider
+//! bytecode lowering.
 //!
 //! **No-go for the rest.** `constant`, `definition` and `global` are 1% each;
-//! interning them would be risk without a return. `local` is 17% but is
-//! already slot-indexed on the compiled path — what remains is the AST
-//! fallback, which belongs with wider bytecode lowering rather than here.
+//! interning them would be risk without a return.
 //! `effect_callback` never resolved a name over this trace and builds no keys
 //! at runtime, which is consistent with the per-dispatch allocation removed by
 //! clonk-org/clonk-rs#667; a trace over effect-heavy content should confirm
@@ -133,6 +129,20 @@ fn script_lookup_profile_over_a_shipped_scenario() {
         "totals: {total} lookups, {} bytes hashed",
         steady_state.total_hashed_bytes(),
     );
+    eprintln!("--- by call path ---");
+    for (site, counters) in steady_state.ranked_sites() {
+        let share = counters.lookups.saturating_mul(100) / total.max(1);
+        eprintln!(
+            "{site}: {share}% of {total} lookups, {} bytes hashed",
+            counters.hashed_bytes,
+        );
+        for family in LookupFamily::ALL {
+            let at = steady_state.family_at(family, site);
+            if at.lookups != 0 {
+                eprintln!("    {family}: {}", at.lookups);
+            }
+        }
+    }
     for family in LookupFamily::ALL {
         if steady_state.family(family).lookups == 0 {
             eprintln!("{family}: never reached over this trace");

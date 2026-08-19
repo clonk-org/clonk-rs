@@ -13,7 +13,7 @@
 //! so leaving them in would both cost real time and perturb the very
 //! measurement they exist to take.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 
 /// A family of identifier lookup, counted separately so a go/no-go decision
@@ -82,6 +82,110 @@ impl fmt::Display for LookupFamily {
     }
 }
 
+/// The call path that issued a lookup.
+///
+/// A family total says which table is hot; it does not say which code asks it.
+/// The first measurement of clonk-org/clonk-rs#292 found 76% of lookups in the
+/// two function families and, on sub-counting, that the path which looks
+/// hottest from reading the code accounts for under a fifth of them. Attaching
+/// a handle to the wrong path would move a minority of the cost, so the
+/// instrument separates the paths as well as the tables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LookupSite {
+    /// The compiled executor's per-invocation prelude, which resolves every
+    /// call site in a function body each time the function is entered.
+    CompiledPrelude,
+    /// The AST interpreter resolving a call expression's callee, per executed
+    /// call.
+    AstCall,
+    /// The VM's generic name dispatch, which walks own script functions,
+    /// engine globals, host functions and host reference functions in
+    /// selection order. This is the path a host entry point takes when the
+    /// engine calls into a script by name, and it also covers anything that
+    /// dispatch reaches which does not mark a span of its own.
+    GenericDispatch,
+    /// The `->` and `Call` dispatch path, which resolves a named method
+    /// against the target's own and global functions per executed call.
+    ObjectCall,
+    /// The static "does this call return a reference?" predicate the
+    /// interpreter asks before evaluating an expression. It resolves a name
+    /// only to inspect the signature and throws the answer away.
+    ReferenceQuery,
+    /// Anything not covered above. A large share here means the interesting
+    /// path is still unattributed, not that it is cheap.
+    Unattributed,
+}
+
+impl LookupSite {
+    /// Every site, in declaration order.
+    pub const ALL: [Self; 6] = [
+        Self::CompiledPrelude,
+        Self::AstCall,
+        Self::GenericDispatch,
+        Self::ObjectCall,
+        Self::ReferenceQuery,
+        Self::Unattributed,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::CompiledPrelude => 0,
+            Self::AstCall => 1,
+            Self::GenericDispatch => 2,
+            Self::ObjectCall => 3,
+            Self::ReferenceQuery => 4,
+            Self::Unattributed => 5,
+        }
+    }
+
+    /// Stable label for a profile report.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CompiledPrelude => "compiled_prelude",
+            Self::AstCall => "ast_call",
+            Self::GenericDispatch => "generic_dispatch",
+            Self::ObjectCall => "object_call",
+            Self::ReferenceQuery => "reference_query",
+            Self::Unattributed => "unattributed",
+        }
+    }
+}
+
+impl fmt::Display for LookupSite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+/// Attributes every lookup recorded while it is alive to `site`.
+///
+/// Resolution helpers are shared by all the call paths and cannot tell which
+/// one invoked them, so the caller marks the span instead of every helper
+/// growing a parameter. Restores the enclosing site on drop, so a host entry
+/// point that runs a compiled function reports each span under its own site.
+#[must_use = "the site is only attributed while the guard is alive"]
+pub struct SiteGuard {
+    #[cfg(any(test, feature = "lookup-profile"))]
+    previous: LookupSite,
+}
+
+impl Drop for SiteGuard {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "lookup-profile"))]
+        ACTIVE_SITE.with(|site| site.set(self.previous));
+    }
+}
+
+/// Attributes lookups to `site` until the returned guard is dropped.
+#[inline(always)]
+pub fn enter_site(site: LookupSite) -> SiteGuard {
+    let _ = site;
+    SiteGuard {
+        #[cfg(any(test, feature = "lookup-profile"))]
+        previous: ACTIVE_SITE.with(|active| active.replace(site)),
+    }
+}
+
 /// What one family cost over the profiled window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LookupFamilyProfile {
@@ -99,12 +203,51 @@ pub struct LookupFamilyProfile {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScriptLookupProfile {
     families: [LookupFamilyProfile; LookupFamily::ALL.len()],
+    sites: [[LookupFamilyProfile; LookupSite::ALL.len()]; LookupFamily::ALL.len()],
 }
 
 impl ScriptLookupProfile {
-    /// The counters for one family.
+    /// The counters for one family, across every call path.
     pub fn family(&self, family: LookupFamily) -> LookupFamilyProfile {
         self.families[family.index()]
+    }
+
+    /// The counters for one family issued from one call path.
+    pub fn family_at(&self, family: LookupFamily, site: LookupSite) -> LookupFamilyProfile {
+        self.sites[family.index()][site.index()]
+    }
+
+    /// Probes issued from one call path, across every family.
+    pub fn site(&self, site: LookupSite) -> LookupFamilyProfile {
+        LookupFamily::ALL
+            .into_iter()
+            .fold(LookupFamilyProfile::default(), |mut total, family| {
+                let counters = self.family_at(family, site);
+                total.lookups = total.lookups.saturating_add(counters.lookups);
+                total.hashed_bytes = total.hashed_bytes.saturating_add(counters.hashed_bytes);
+                total.key_allocations = total
+                    .key_allocations
+                    .saturating_add(counters.key_allocations);
+                total
+            })
+    }
+
+    /// Call paths ordered by probe count, heaviest first, skipping any that
+    /// issued nothing.
+    pub fn ranked_sites(&self) -> Vec<(LookupSite, LookupFamilyProfile)> {
+        let mut ranked: Vec<_> = LookupSite::ALL
+            .into_iter()
+            .map(|site| (site, self.site(site)))
+            .filter(|(_, profile)| profile.lookups != 0)
+            .collect();
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .lookups
+                .cmp(&left.1.lookups)
+                .then(left.0.cmp(&right.0))
+        });
+        ranked
     }
 
     /// Probes issued across every family.
@@ -157,29 +300,40 @@ impl fmt::Display for ScriptLookupProfile {
     }
 }
 
+const EMPTY_FAMILY: LookupFamilyProfile = LookupFamilyProfile {
+    lookups: 0,
+    hashed_bytes: 0,
+    key_allocations: 0,
+};
+
 thread_local! {
     /// One VM executes synchronously, but tests run many in parallel; the
     /// counters follow the same thread-local convention as the rest of the
     /// VM's instrumentation.
-    static PROFILE: Cell<ScriptLookupProfile> = const {
-        Cell::new(ScriptLookupProfile {
-            families: [LookupFamilyProfile {
-                lookups: 0,
-                hashed_bytes: 0,
-                key_allocations: 0,
-            }; LookupFamily::ALL.len()],
+    ///
+    /// A `RefCell` rather than a `Cell`: the site dimension makes the profile
+    /// too large to copy in and out on every probe, and a counter that
+    /// perturbs the run is not a measurement.
+    static PROFILE: RefCell<ScriptLookupProfile> = const {
+        RefCell::new(ScriptLookupProfile {
+            families: [EMPTY_FAMILY; LookupFamily::ALL.len()],
+            sites: [[EMPTY_FAMILY; LookupSite::ALL.len()]; LookupFamily::ALL.len()],
         })
     };
+    /// The call path currently being attributed. Unattributed until a caller
+    /// marks its span with [`enter_site`].
+    static ACTIVE_SITE: Cell<LookupSite> = const { Cell::new(LookupSite::Unattributed) };
 }
 
-/// Clears this thread's counters.
+/// Clears this thread's counters and returns attribution to unattributed.
 pub fn reset() {
-    PROFILE.with(|profile| profile.set(ScriptLookupProfile::default()));
+    PROFILE.with(|profile| *profile.borrow_mut() = ScriptLookupProfile::default());
+    ACTIVE_SITE.with(|site| site.set(LookupSite::Unattributed));
 }
 
 /// This thread's counters since the last [`reset`].
 pub fn snapshot() -> ScriptLookupProfile {
-    PROFILE.with(Cell::get)
+    PROFILE.with(|profile| *profile.borrow())
 }
 
 /// Counts one probe of `family` for a key of `key` bytes.
@@ -211,11 +365,15 @@ pub fn record_key_allocation(family: LookupFamily) {
 }
 
 #[cfg(any(test, feature = "lookup-profile"))]
-fn update(family: LookupFamily, apply: impl FnOnce(&mut LookupFamilyProfile)) {
+fn update(family: LookupFamily, apply: impl Fn(&mut LookupFamilyProfile)) {
+    let site = ACTIVE_SITE.with(Cell::get);
     PROFILE.with(|profile| {
-        let mut current = profile.get();
-        apply(&mut current.families[family.index()]);
-        profile.set(current);
+        // A borrow held across `apply` would deadlock if the VM ever recorded
+        // a lookup from inside one; `apply` is a plain counter bump, so it
+        // cannot, and the borrow stays inside this call.
+        let mut profile = profile.borrow_mut();
+        apply(&mut profile.families[family.index()]);
+        apply(&mut profile.sites[family.index()][site.index()]);
     });
 }
 
@@ -354,6 +512,123 @@ mod tests {
         assert_ne!(snapshot(), ScriptLookupProfile::default());
         reset();
         assert_eq!(snapshot(), ScriptLookupProfile::default());
+    }
+
+    #[test]
+    fn a_site_guard_attributes_only_the_span_it_covers() {
+        reset();
+        record(LookupFamily::ScriptFunction, "Before");
+        {
+            let _span = enter_site(LookupSite::AstCall);
+            record(LookupFamily::ScriptFunction, "Inside");
+        }
+        record(LookupFamily::ScriptFunction, "After");
+        let profile = snapshot();
+
+        assert_eq!(
+            profile
+                .family_at(LookupFamily::ScriptFunction, LookupSite::AstCall)
+                .lookups,
+            1,
+            "only the guarded probe belongs to the span"
+        );
+        assert_eq!(
+            profile
+                .family_at(LookupFamily::ScriptFunction, LookupSite::Unattributed)
+                .lookups,
+            2,
+            "dropping the guard restores the enclosing site"
+        );
+        reset();
+    }
+
+    #[test]
+    fn nested_spans_each_keep_their_own_site() {
+        reset();
+        let _outer = enter_site(LookupSite::GenericDispatch);
+        record(LookupFamily::ScriptFunction, "Outer");
+        {
+            let _inner = enter_site(LookupSite::CompiledPrelude);
+            record(LookupFamily::ScriptFunction, "Inner");
+        }
+        // A host entry point that runs a compiled function must not have the
+        // compiled prelude's probes charged to it, nor lose its own after.
+        record(LookupFamily::ScriptFunction, "OuterAgain");
+        let profile = snapshot();
+
+        assert_eq!(
+            profile
+                .family_at(LookupFamily::ScriptFunction, LookupSite::CompiledPrelude)
+                .lookups,
+            1
+        );
+        assert_eq!(
+            profile
+                .family_at(LookupFamily::ScriptFunction, LookupSite::GenericDispatch)
+                .lookups,
+            2
+        );
+        reset();
+    }
+
+    #[test]
+    fn a_family_total_is_the_sum_of_its_call_paths() {
+        reset();
+        record(LookupFamily::HostFunction, "Unguarded");
+        {
+            let _span = enter_site(LookupSite::ObjectCall);
+            record(LookupFamily::HostFunction, "Guarded");
+            record(LookupFamily::HostFunction, "AlsoGuarded");
+        }
+        let profile = snapshot();
+
+        // The two views must never disagree; a site breakdown that does not
+        // add up to its family would silently misdirect the decision it exists
+        // to inform.
+        assert_eq!(
+            profile.family(LookupFamily::HostFunction).lookups,
+            LookupSite::ALL
+                .into_iter()
+                .map(|site| profile.family_at(LookupFamily::HostFunction, site).lookups)
+                .sum::<u64>(),
+        );
+        assert_eq!(
+            profile.family(LookupFamily::HostFunction).hashed_bytes,
+            LookupSite::ALL
+                .into_iter()
+                .map(|site| {
+                    profile
+                        .family_at(LookupFamily::HostFunction, site)
+                        .hashed_bytes
+                })
+                .sum::<u64>(),
+        );
+        reset();
+    }
+
+    #[test]
+    fn executing_a_script_attributes_its_call_paths() {
+        // The instrument's whole point: a family total does not name a call
+        // site, and the sites have to add up to the families they split.
+        let engine = driver_engine();
+        reset();
+        engine
+            .call("Driver", &[crate::Value::Int(8)])
+            .expect("profile driver script runs");
+        let profile = snapshot();
+
+        assert!(
+            profile.site(LookupSite::CompiledPrelude).lookups > 0,
+            "the compiled prelude resolves this script's call sites:\n{profile}"
+        );
+        assert_eq!(
+            profile.total_lookups(),
+            LookupSite::ALL
+                .into_iter()
+                .map(|site| profile.site(site).lookups)
+                .sum::<u64>(),
+            "every probe lands in exactly one call path"
+        );
     }
 
     #[test]
