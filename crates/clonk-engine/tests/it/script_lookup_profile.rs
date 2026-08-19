@@ -194,6 +194,37 @@
 //! path in both, and after clonk-org/clonk-rs#693 it is one probe per call
 //! rather than two. It remains the place to look if the declined handle cache
 //! is ever revisited.
+//!
+//! # Activation trace: ClonkMars `03_Chaos`
+//!
+//! The steady-state probes above `reset()` after the scenario is applied, so
+//! neither of them can see load. This one measures the activation itself,
+//! which clonk-org/clonk-rs#292's criteria name and which is where the wall
+//! time actually is — the same activation runs over ten seconds
+//! (clonk-org/clonk-rs#732).
+//!
+//! **58,443 lookups for the whole activation. Three per millisecond.**
+//!
+//! | family | share | bytes hashed |
+//! |---|---|---|
+//! | `host_function` | 49% | 267,938 |
+//! | `script_function` | 37% | 203,629 |
+//! | `global` | 5% | 30,335 |
+//! | `constant` | 3% | 25,304 |
+//! | `definition` | 2% | 6,996 |
+//! | `local` | 1% | 1,602 |
+//! | `effect_callback` | — | never reached |
+//!
+//! **No-go, decisively.** A lookup is tens of nanoseconds, so 58,443 of them
+//! account for single-digit milliseconds of an eighteen-second run — on the
+//! order of **0.02%**. One activation resolves fewer identifiers than a
+//! hundred frames of Hazard gameplay does. Interning cannot reach activation
+//! cost, and clonk-org/clonk-rs#292's premise should not be extended to it.
+//!
+//! Note the wall time is inflated by the counters themselves and by running
+//! under `--features lookup-profile`; it is not comparable with the
+//! uninstrumented activation numbers recorded elsewhere. That does not affect
+//! the conclusion, which turns on the lookup *count*, not the duration.
 
 use clonk_engine::Engine;
 use clonk_script::lookup_profile::{self, LookupFamily};
@@ -226,6 +257,57 @@ fn script_lookup_profile_over_effect_heavy_content() {
     let mut engine = load_installed_scenario("Hazard.c4f/Tutorial.c4s", 0);
     let _owner = join_local_player(&mut engine, "Lookup profile");
     report_steady_state(&mut engine, "Hazard tutorial");
+}
+
+/// Identifier lookups during *activation*, which the steady-state probes
+/// deliberately reset away.
+///
+/// clonk-org/clonk-rs#292's acceptance criteria name a `03_Chaos` activation
+/// trace, and activation is the one place a lookup cost could hide from the
+/// other two probes: they call `lookup_profile::reset()` after the scenario is
+/// already applied, precisely so a one-off load does not swamp the per-frame
+/// numbers. Nothing had measured the load itself.
+///
+/// This is also where the time actually is — the same activation takes over
+/// ten seconds (clonk-org/clonk-rs#732) — so it is worth knowing whether any
+/// of it is identifier resolution before the issue's premise is extended to
+/// cover it.
+#[test]
+#[ignore = "manual profiling probe; needs --features lookup-profile to report anything"]
+fn script_lookup_profile_over_a_scenario_activation() {
+    lookup_profile::reset();
+    let started = std::time::Instant::now();
+    let _engine = load_installed_scenario("ClonkMars.c4f/03_Chaos.c4s", 0);
+    let elapsed = started.elapsed();
+    let activation = lookup_profile::snapshot();
+
+    eprintln!("--- ClonkMars 03_Chaos: identifier lookups over one activation ---");
+    eprintln!("activation wall time: {elapsed:?}");
+    if activation.total_lookups() == 0 {
+        eprintln!(
+            "counters are compiled out; re-run with --features lookup-profile for real numbers"
+        );
+        return;
+    }
+    let total = activation.total_lookups();
+    for (family, counters) in activation.ranked() {
+        let share = counters.lookups.saturating_mul(100) / total.max(1);
+        eprintln!(
+            "{family}: {share}% of {total} lookups, {} bytes hashed, {} keys built at runtime",
+            counters.hashed_bytes, counters.key_allocations,
+        );
+    }
+    eprintln!(
+        "totals: {total} lookups, {} bytes hashed, over {elapsed:?}",
+        activation.total_hashed_bytes(),
+    );
+    // The number that decides whether this family is worth anything here: a
+    // lookup is tens of nanoseconds, so a rate this low means the seconds are
+    // being spent somewhere else entirely.
+    eprintln!(
+        "that is {} lookups per millisecond of activation",
+        u128::from(total) / elapsed.as_millis().max(1),
+    );
 }
 
 fn report_steady_state(engine: &mut Engine, label: &str) {
