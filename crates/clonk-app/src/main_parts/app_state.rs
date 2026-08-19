@@ -419,6 +419,12 @@ pub(crate) struct GameApp {
     /// Away from Win32 and GTK this state *is* the tools dialog: `Open`
     /// creates no window at all on the reference build (`C4ToolsDlg.cpp:262`).
     pub(crate) developer_tools: clonk_engine::developer_tools::DeveloperTools,
+    /// Which Tools-page selector is showing its list.
+    ///
+    /// Presentation state, so it lives here rather than in the engine's
+    /// `DeveloperTools`: C++'s combo owns its own dropped-down state and the
+    /// dialog reads it back, and nothing about it reaches the simulation.
+    pub(crate) developer_tools_open_combo: Option<crate::developer_toolbox_view::ToolsCombo>,
     /// The projection each console viewport window was last drawn with,
     /// keyed by physical identity. `GraphicsSystem::active_viewports` holds
     /// the *fullscreen* layout, which console mode never renders, so a
