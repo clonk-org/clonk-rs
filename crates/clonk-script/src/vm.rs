@@ -8723,6 +8723,13 @@ impl<'a> Vm<'a> {
     ) -> Result<CallArgs, RuntimeError> {
         let mut evaluated_args = CallArgs::with_capacity(args.len());
         let mut value_stack = ValueStackReservation::empty();
+        // Which parameters a host callee wants by reference varies per index;
+        // the lookup that answers it does not. Resolving inside the loop below
+        // walked the host reference table once per argument.
+        let host_reference = function
+            .is_none()
+            .then(|| name.and_then(|name| self.host_reference_function(name)))
+            .flatten();
         for (index, arg) in args.iter().enumerate() {
             let sweep_cursor = object_reference_sweep_cursor();
             // `anyfunctakesref` (C4AulParse.cpp:2318-2331) unions the resolved
@@ -8738,10 +8745,8 @@ impl<'a> Vm<'a> {
                 || name
                     .zip(self.reference_parameter_probe)
                     .is_some_and(|(name, probe)| probe(name, index));
-            let host_wants_reference = function.is_none()
-                && name
-                    .and_then(|name| self.host_reference_function(name))
-                    .is_some_and(|function| function.wants_reference(index));
+            let host_wants_reference =
+                host_reference.is_some_and(|function| function.wants_reference(index));
             // An unresolved `this` is the context-function result, an rvalue;
             // a parameter/function-var/object-local named `this` remains the
             // ordinary live reference found by the same syntax.

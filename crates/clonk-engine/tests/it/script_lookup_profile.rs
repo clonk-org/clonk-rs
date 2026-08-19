@@ -53,6 +53,13 @@
 //! **177,831 lookups and 1,688,613 hashed bytes, 7.8% fewer**. Totals from
 //! here on are not comparable with the ones above.
 //!
+//! A fourth followed from the same corrected numbers: `build_call_args`
+//! resolved the host callee *inside* its per-argument loop, so a
+//! three-argument call walked the host reference table three times for an
+//! answer whose lookup does not vary with the argument index. Hoisting it out
+//! took the trace to **166,349 lookups and 1,553,339 hashed bytes**, 6.5%
+//! fewer again.
+//!
 //! Split by the call path that issued each probe, over the same trace:
 //!
 //! | call path | lookups | share | composition |
