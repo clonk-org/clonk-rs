@@ -223,6 +223,10 @@ pub enum MenuCommandKind {
 mod command_definition_snapshot_cache_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/snapshot_stability_regression.rs"]
+mod snapshot_stability_regression;
+
+#[cfg(test)]
 #[path = "lib_tests/fire_callback_resolver_regression.rs"]
 mod fire_callback_resolver_regression;
 
