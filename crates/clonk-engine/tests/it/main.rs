@@ -47,6 +47,7 @@ shard_modules!(
     construction_check_feedback,
     creation_owner_strictness,
     dev_feedback_replay,
+    effect_dispatch_profile,
     effect_negotiation,
     eke_pistol,
     eke_uzi_action_sound,

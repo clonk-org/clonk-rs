@@ -778,6 +778,7 @@ impl Engine {
     fn host_world_context_base(&self) -> HostWorldContext {
         #[cfg(test)]
         HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        self.record_effect_dispatch(|stats| stats.context_base_materializations += 1);
         let definition_metadata = self.definition_metadata_table();
         let host_definition_tables = self.host_definition_tables();
         let reloadable_definitions = Rc::clone(&host_definition_tables.reloadable_definitions);
@@ -967,6 +968,7 @@ impl Engine {
     }
 
     pub(crate) fn host_world_context_for_object(&self, index: usize) -> HostWorldContext {
+        self.record_effect_dispatch(|stats| stats.object_state_snapshots += 1);
         let state_snapshot = Rc::new(self.objects[index].script_state_snapshot());
         self.host_world_context_for_object_with_snapshot(index, state_snapshot)
     }
