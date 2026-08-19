@@ -1329,6 +1329,49 @@ impl ParticleSystem {
 mod tests {
     use super::*;
 
+    /// Every live newgfx particle is projected into `SimulationSnapshot`.
+    ///
+    /// This is the contract clonk-org/clonk-rs#290 turns on. That issue asks
+    /// whether newgfx state could become GPU-authoritative, and observes that
+    /// it could not "also feed a byte-identical per-tick `SimulationSnapshot`
+    /// … unless that contract changes or the CPU shadow-simulates". So the
+    /// first thing to establish is whether the projection exists at all —
+    /// stated in the issue, pinned nowhere.
+    ///
+    /// It does: `Engine::snapshot` appends `particle_system.particles()` after
+    /// the object particles and the PXS slots. A change that moved this state
+    /// to the GPU without a readback would have to delete or hollow out this
+    /// projection, which fails here rather than silently emptying a field the
+    /// frontend, recordings and dev replay all read.
+    #[test]
+    fn every_live_newgfx_particle_is_projected_into_the_snapshot() {
+        let mut engine = crate::Engine::new();
+        let particle = Particle {
+            def_name: "Smoke".to_string(),
+            x: 12.5,
+            y: -3.25,
+            xdir: 0.5,
+            ydir: -1.5,
+            life: 42,
+            a: 7.5,
+            b: 3,
+            layer: ParticleLayer::Global,
+        };
+        engine.particle_system.restore_particle(particle.clone());
+
+        let projected = engine.snapshot().particles;
+        let found = projected
+            .iter()
+            .find(|entry| entry.definition_id == "Smoke")
+            .expect("the live particle reaches the snapshot");
+
+        // The values travel, not just the count: a projection that dropped to
+        // a placeholder would still satisfy a length check.
+        assert_eq!(found.position.x, particle.x);
+        assert_eq!(found.position.y, particle.y);
+        assert_eq!(found.life, particle.life);
+    }
+
     // C4Game.cpp:2369-2394 — ReloadParticle's exact refusal and failure policy.
     #[test]
     fn reload_particle_refuses_network_and_clears_everything_on_failure() {
