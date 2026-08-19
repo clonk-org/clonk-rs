@@ -1814,6 +1814,14 @@ pub struct GpuRendererStats {
     /// output is retained, which is also what keeps the quad, object and
     /// landscape bind groups that name it valid.
     pub created_shader_landscape_outputs: usize,
+    /// Writes the composer issued for its retained planes, atlas and uniforms.
+    ///
+    /// Each is a `Queue::write_*` call, so this counts staging writes rather
+    /// than compositions. Zero on a frame whose landscape did not change,
+    /// which is what makes "an unchanged landscape uploads nothing" an
+    /// assertion rather than a reading of the upload code.
+    pub shader_landscape_upload_calls: usize,
+    pub shader_landscape_upload_bytes: u64,
 }
 
 /// One painter-ordered retained scene and its coordinate transform.
@@ -3821,6 +3829,7 @@ impl RetainedGpuRenderer {
             (texture, view)
         });
         composer.compose_into_profiled(device, queue, encoder, &view, inputs, timestamp_writes)?;
+        let uploads = composer.last_uploads();
 
         let byte_len = u64::from(extent[0]) * u64::from(extent[1]) * 4;
         self.textures.insert(
@@ -3839,6 +3848,8 @@ impl RetainedGpuRenderer {
             },
         );
         self.last_stats.created_shader_landscape_outputs += usize::from(recreated);
+        self.last_stats.shader_landscape_upload_calls += uploads.calls;
+        self.last_stats.shader_landscape_upload_bytes += uploads.bytes;
         if recreated {
             self.quad_bind_groups.clear();
             self.object_bind_groups.clear();
@@ -7597,6 +7608,8 @@ pub struct ShaderLandscapeComposer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     retained: Option<RetainedShaderLandscape>,
+    /// What the last composition wrote, for `GpuRendererStats`.
+    last_uploads: ShaderLandscapeUploads,
 }
 
 /// One composition's GPU resources, kept across compositions.
@@ -7632,8 +7645,8 @@ impl RetainedShaderLandscape {
         index_plane: &[u8],
         shading_plane: &[u8],
         shading_extent: [u32; 2],
-    ) {
-        upload_changed_rows(
+    ) -> ShaderLandscapeUploads {
+        let mut uploads = upload_changed_rows(
             queue,
             &self.index,
             &mut self.index_plane,
@@ -7641,20 +7654,26 @@ impl RetainedShaderLandscape {
             self.key.extent,
             1,
         );
-        upload_changed_rows(
+        uploads.add(upload_changed_rows(
             queue,
             &self.shading,
             &mut self.shading_plane,
             shading_plane,
             shading_extent,
             2,
-        );
+        ));
+        uploads
     }
 
     /// The atlas comes from the material catalogue, so it survives every
     /// composition until a reload changes it.
-    fn upload_atlas(&mut self, queue: &wgpu::Queue, atlas: &[u8], extent: [u32; 2]) {
-        upload_changed_rows(queue, &self.atlas, &mut self.atlas_bytes, atlas, extent, 4);
+    fn upload_atlas(
+        &mut self,
+        queue: &wgpu::Queue,
+        atlas: &[u8],
+        extent: [u32; 2],
+    ) -> ShaderLandscapeUploads {
+        upload_changed_rows(queue, &self.atlas, &mut self.atlas_bytes, atlas, extent, 4)
     }
 
     /// The uniforms are small enough to rewrite whole, but only when the
@@ -7664,20 +7683,35 @@ impl RetainedShaderLandscape {
         queue: &wgpu::Queue,
         config: [u32; 4],
         table: &[ShaderLandscapeSlot; SHADER_LANDSCAPE_SLOTS],
-    ) {
+    ) -> ShaderLandscapeUploads {
+        let mut uploads = ShaderLandscapeUploads::default();
         if self.config != config {
             self.config = config;
-            queue.write_buffer(&self.params, 0, u32_bytes(&config));
+            let bytes = u32_bytes(&config);
+            uploads.add(ShaderLandscapeUploads {
+                calls: 1,
+                bytes: bytes.len() as u64,
+            });
+            queue.write_buffer(&self.params, 0, bytes);
         }
         if self.slot_table != *table {
             self.slot_table = *table;
-            queue.write_buffer(&self.slots, 0, shader_landscape_slot_bytes(table));
+            let bytes = shader_landscape_slot_bytes(table);
+            uploads.add(ShaderLandscapeUploads {
+                calls: 1,
+                bytes: bytes.len() as u64,
+            });
+            queue.write_buffer(&self.slots, 0, bytes);
         }
+        uploads
     }
 }
 
 /// Writes the rows of `next` that differ from `previous` into `view`'s
 /// texture, and adopts them.
+///
+/// Reports the bytes written, so an unchanged plane is observably free rather
+/// than only silently cheap.
 fn upload_changed_rows(
     queue: &wgpu::Queue,
     view: &wgpu::TextureView,
@@ -7685,10 +7719,10 @@ fn upload_changed_rows(
     next: &[u8],
     extent: [u32; 2],
     bytes_per_texel: u32,
-) {
+) -> ShaderLandscapeUploads {
     let row_bytes = extent[0] as usize * bytes_per_texel as usize;
     let Some(rows) = changed_rows(previous, next, row_bytes) else {
-        return;
+        return ShaderLandscapeUploads::default();
     };
     let offset = rows.start * row_bytes;
     let height = (rows.end - rows.start) as u32;
@@ -7717,6 +7751,24 @@ fn upload_changed_rows(
     );
     previous.clear();
     previous.extend_from_slice(next);
+    ShaderLandscapeUploads {
+        calls: 1,
+        bytes: height as u64 * row_bytes as u64,
+    }
+}
+
+/// What one composition wrote to its retained resources.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ShaderLandscapeUploads {
+    calls: usize,
+    bytes: u64,
+}
+
+impl ShaderLandscapeUploads {
+    fn add(&mut self, other: Self) {
+        self.calls += other.calls;
+        self.bytes += other.bytes;
+    }
 }
 
 impl ShaderLandscapeComposer {
@@ -7791,7 +7843,13 @@ impl ShaderLandscapeComposer {
             pipeline,
             bind_group_layout,
             retained: None,
+            last_uploads: ShaderLandscapeUploads::default(),
         }
+    }
+
+    /// What the last composition wrote to its retained resources.
+    fn last_uploads(&self) -> ShaderLandscapeUploads {
+        self.last_uploads
     }
 
     /// Composes into `target`, which must be an `Rgba8Unorm` view of exactly
@@ -7850,14 +7908,36 @@ impl ShaderLandscapeComposer {
             retained = None;
         }
 
+        let mut uploads = ShaderLandscapeUploads::default();
         let retained = match retained {
             Some(mut retained) => {
-                retained.upload_planes(queue, index_plane, shading_plane, shading_extent);
-                retained.upload_atlas(queue, atlas_bytes, inputs.atlas_extent);
-                retained.upload_uniforms(queue, config, &table);
+                uploads.add(retained.upload_planes(
+                    queue,
+                    index_plane,
+                    shading_plane,
+                    shading_extent,
+                ));
+                uploads.add(retained.upload_atlas(queue, atlas_bytes, inputs.atlas_extent));
+                uploads.add(retained.upload_uniforms(queue, config, &table));
                 retained
             }
             None => {
+                // Creating a resource uploads its whole contents, so the fresh
+                // path reports what it wrote for the same reason the retained
+                // one does: the first composition is the warmup a caller
+                // measures against.
+                for written in [
+                    index_plane.len(),
+                    shading_plane.len(),
+                    atlas_bytes.len(),
+                    u32_bytes(&config).len(),
+                    shader_landscape_slot_bytes(&table).len(),
+                ] {
+                    uploads.add(ShaderLandscapeUploads {
+                        calls: 1,
+                        bytes: written as u64,
+                    });
+                }
                 let (index_texture, index) = uint_plane(
                     device,
                     queue,
@@ -7940,6 +8020,7 @@ impl ShaderLandscapeComposer {
                 }
             }
         };
+        self.last_uploads = uploads;
         let retained = self.retained.insert(retained);
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -13254,6 +13335,61 @@ mod tests {
     /// new one each update also invalidated every quad, object and landscape
     /// bind group that named it, so the whole scene's bindings were rebuilt
     /// for one landscape edit.
+    /// clonk-org/clonk-rs#273's first acceptance criterion: *after warmup, an
+    /// unchanged shader landscape creates no textures, buffers, bind groups, or
+    /// uploads*.
+    ///
+    /// clonk-org/clonk-rs#669 retained the resources and made the uploads
+    /// row-wise, but only output *creation* was observable, so "uploads
+    /// nothing" rested on reading `upload_changed_rows`. A re-upload of an
+    /// unchanged plane would have cost a staging write per frame with nothing
+    /// to catch it.
+    #[test]
+    fn an_unchanged_shader_landscape_creates_and_uploads_nothing() {
+        let Some((_runtime, _instance, _adapter, device, queue)) =
+            test_wgpu_device("lc_gpu_shader_landscape_idle_device", true)
+        else {
+            return;
+        };
+        let extent = [12_u32, 12_u32];
+        let base = GpuTextureId::fresh();
+        let scene = shader_landscape_scene_fixture(base, extent, extent, 1);
+        let mut renderer = test_renderer(&device, &queue);
+        renderer.set_shader_landscape(true);
+        renderer.set_landscape_detail(1);
+        let plan = shader_landscape_plan_fixture(extent);
+
+        // Warmup: the first composition necessarily creates and uploads.
+        renderer.set_pending_shader_landscape(Some((base, plan.clone())));
+        let first = render_identity_readback(&mut renderer, &device, &queue, &scene);
+        assert!(
+            renderer.last_stats().shader_landscape_upload_calls > 0,
+            "the first composition has to upload its planes"
+        );
+
+        // The same plan again: every resource is reusable and every plane byte
+        // is the one already on the GPU.
+        renderer.set_pending_shader_landscape(Some((base, plan)));
+        let repeated = render_identity_readback(&mut renderer, &device, &queue, &scene);
+        let stats = renderer.last_stats();
+        assert_eq!(
+            stats.created_shader_landscape_outputs, 0,
+            "an unchanged landscape composes into the output it already has"
+        );
+        assert_eq!(
+            (
+                stats.shader_landscape_upload_calls,
+                stats.shader_landscape_upload_bytes
+            ),
+            (0, 0),
+            "and uploads nothing at all"
+        );
+        assert_eq!(
+            repeated, first,
+            "and still presents the same pixels it did before"
+        );
+    }
+
     #[test]
     fn a_landscape_update_composes_into_the_retained_output() {
         let Some((_runtime, _instance, _adapter, device, queue)) =
