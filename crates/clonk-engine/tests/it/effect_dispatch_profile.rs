@@ -27,26 +27,46 @@
 //!
 //! Ticking cost 406ms, or 2.03ms per frame.
 //!
-//! A throwaway timer around `host_world_context_base` attributed **48.2ms of
-//! that 406ms — 11.9% of the whole simulation tick** — to base
-//! materialization alone, about 15.7µs per build. The timer is not part of
-//! this probe: an `Instant::now()` pair on a path taken 15 times a frame
-//! perturbs what it measures, so the figure is recorded here instead.
+//! # What the counts say
 //!
-//! # What that says
+//! Every context build materializes its base; none are avoided. A build is
+//! therefore roughly three times as frequent as a global timer event, because
+//! object dispatch builds one too.
 //!
-//! Every context build materializes its base; none are avoided. The heavy
-//! tables inside it are already cached from clonk-org/clonk-rs#228 and #229
-//! and cost only an `Rc` clone, so the 11.9% is the pieces that are *not*
-//! cached — transfer-zone states, player order, local players, and the
-//! player-view object vectors — rebuilt 15 times a frame.
+//! The caches inside the base work. A throwaway counter on
+//! `solid_mask_metadata_table` recorded **one miss in 3,057 calls**, so the
+//! definition and solid-mask tables really do cost only an `Rc` clone per
+//! build, and "the cached tables are being rebuilt" is not the explanation
+//! for anything here.
 //!
-//! That is a real target rather than the "not a bottleneck" outcome
-//! clonk-org/clonk-rs#291 also allows for. It also says where not to start:
-//! the shallow `HostWorldContext` clone the issue suspected is not the cost,
-//! and a build cannot simply be hoisted to once per tick, because
-//! `tick_global_effects` folds each event's outcome back into the engine
-//! before the next event runs and the next callback must observe it.
+//! # What no measurement here supports
+//!
+//! An earlier revision of this comment claimed 11.9% of the tick for base
+//! materialization and attributed it to the uncached transfer-zone, player
+//! order and player-view vectors. **Both claims are withdrawn.** Timing at
+//! that granularity with `Instant::now()` did not survive its own check: two
+//! timers wrapped around the same `solid_mask_metadata_table` call disagreed
+//! by more than two orders of magnitude (0.045ms from inside the function
+//! against 21.35ms from immediately outside it), and that discrepancy is
+//! unexplained. When the instrument contradicts itself the reading is not
+//! evidence, whichever number would have been more convenient.
+//!
+//! Per-piece cost inside the base is therefore still unknown. A sampling
+//! profiler is the right tool for it; hand-placed timers on a path taken 15
+//! times a frame are not.
+//!
+//! # What still holds regardless
+//!
+//! Two structural facts constrain any fix and come from reading the code
+//! rather than from timing:
+//!
+//! - A build cannot be hoisted to once per tick. `tick_global_effects` folds
+//!   each event's outcome back into the engine before the next event runs,
+//!   and the next callback must observe those mutations.
+//! - `with_solid_mask_instance_sequences` deep-clones its `HashMap` on every
+//!   build *because* a callback may mutate the resulting `RefCell` and that
+//!   mutation must not leak back. That is eager copy-on-write, and making it
+//!   lazy is a real change rather than a caching one.
 
 use std::time::Instant;
 
