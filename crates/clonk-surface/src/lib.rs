@@ -14,10 +14,12 @@ pub use wgpu;
 mod acquire;
 mod blit;
 pub mod capability;
+pub mod software;
 mod window;
 
 pub use acquire::AcquireError;
 pub use blit::BlitTransform;
+pub use software::{present_pixel_perfect, SoftwarePresentError};
 pub use window::{
     create_instance, ExtentError, FrameContext, Presentation, ProfiledPresentation, SurfaceError,
     TimestampQueryStatus, WindowSurface, WindowSurfaceBuildOptions, WindowSurfaceCpuStages,
