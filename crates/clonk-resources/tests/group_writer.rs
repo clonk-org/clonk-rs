@@ -590,6 +590,71 @@ fn group_original_marker_is_exact_and_directories_are_not_original() {
     assert!(!Group::open(unpacked).unwrap().is_original());
 }
 
+/// A group whose filename selects no stock sort list keeps the order its
+/// entries were added in, all the way through `pack` and back out of `Group`.
+///
+/// This is the property clonk-org/clonk-rs#382 needs. `C4Group`'s folder scan
+/// is unsorted and `C4MaterialMap::Load` takes material slots straight from it
+/// (`C4Material.cpp:263-299`), so a shipped *unpacked* `Material.c4g` makes
+/// material indices depend on the host filesystem. Packing fixes an order into
+/// the archive — but `Material.c4g` matches `C4FLS_MATERIAL` in the stock
+/// `C4CFN_FLS` table, so packing under that name applies the stock sort and
+/// moves every index. Building the archive under a name that matches no
+/// pattern is what allows a *chosen* order — a recording host's `readdir`
+/// order, say — to be pinned without moving anything.
+#[test]
+fn a_group_outside_the_stock_sort_table_packs_in_insertion_order() {
+    // Neither alphabetical nor reverse, and deliberately the kind of order a
+    // `readdir` produces rather than one any sort would.
+    let names = ["zulu.txt", "alpha.txt", "mike.txt", "bravo.txt"];
+
+    let mut pinned = MutableGroup::new("Pinned.c4g");
+    for name in names {
+        pinned.add_file(name, name.as_bytes().to_vec()).unwrap();
+    }
+    assert_eq!(pinned.entry_names(), names, "added in the order given");
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("Material.c4g");
+    std::fs::write(&path, pinned.pack().unwrap()).unwrap();
+
+    // Read back under the name that *does* select a sort list: the archive
+    // carries no filename, so nothing re-sorts on load. Sorting happens in
+    // `Close`/`Save`, never in `Load`.
+    let group = Group::open(&path).unwrap();
+    let read_back = group
+        .entries()
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.relative_path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(read_back, names, "the packed order survives the round trip");
+    for name in names {
+        assert_eq!(group.read_file(name).unwrap(), name.as_bytes());
+    }
+
+    // The contrast that makes the choice of name load-bearing: the same
+    // entries under `Material.c4g` come back in the stock sort's order.
+    let mut sorted = MutableGroup::new("Material.c4g");
+    for name in names {
+        sorted.add_file(name, name.as_bytes().to_vec()).unwrap();
+    }
+    let sorted_path = directory.path().join("Sorted.c4g");
+    std::fs::write(&sorted_path, sorted.pack().unwrap()).unwrap();
+    let sorted_back = Group::open(&sorted_path)
+        .unwrap()
+        .entries()
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.relative_path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_ne!(
+        sorted_back, read_back,
+        "packing under a stock-sorted name must not preserve insertion order, \
+         or this test proves nothing about the name mattering"
+    );
+}
+
 #[test]
 fn cpp_sort_uses_first_matching_rank_then_case_insensitive_filename() {
     // SortRank returns the first matching segment's descending rank. Sort then
