@@ -52,7 +52,9 @@ const LIST_ROW_HEIGHT: i32 = 14;
 
 /// Everything the Tools page draws, resolved by the caller so the view never
 /// reaches into the engine.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// `Eq` is deliberately absent: the model now carries a rendered sample, and
+/// `ImageData` compares structurally without claiming total equality.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ToolsPageModel {
     /// `Game.Landscape.Mode`, which decides the whole page's enablement.
     pub(crate) mode: LandscapeMode,
@@ -68,6 +70,13 @@ pub(crate) struct ToolsPageModel {
     pub(crate) materials: Vec<String>,
     /// `C4ToolsDlg::UpdateTextures`' combo contents (`:517-548`).
     pub(crate) textures: Vec<ToolTextureEntry>,
+    /// The rendered material sample `UpdatePreview` draws, already resolved
+    /// against the material and texture catalogues.
+    ///
+    /// Resolved by the caller rather than here because the view has no
+    /// material data of its own, and `None` when the pair does not resolve —
+    /// which is the disabled-page case where C++ shows the sunken box alone.
+    pub(crate) preview: Option<clonk_frontend::ImageData>,
 }
 
 /// One control's placement and whether it is live.
@@ -372,11 +381,15 @@ impl ToolsPageModel {
     }
 
     /// `IDC_PREVIEW` is a rendered swatch of the current material, grade and
-    /// IFT (`C4ToolsDlg::UpdatePreview`, `:601-708`). That routine draws
-    /// through the engine's own material colours; with no texture atlas here
-    /// the swatch stands in as the selection read back in words.
+    /// IFT (`C4ToolsDlg::UpdatePreview`, `:601-708`): a patterned disc whose
+    /// radius is the grade. The names are drawn only when the pair does not
+    /// resolve to one, which is the disabled-page case.
     fn render_preview(&self, surface: &mut Surface, font: &dyn TextFont, rect: IntRect) {
         draw_sunken(surface, rect, CONTROL_BACKGROUND);
+        if let Some(sample) = self.preview.as_ref() {
+            blit_preview_sample(surface, rect, sample);
+            return;
+        }
         draw_fitted_text(
             surface,
             font,
@@ -548,6 +561,35 @@ pub(crate) fn render_property_page(surface: &mut Surface, font: &dyn TextFont, t
     }
 }
 
+/// Centres a rendered sample inside the sunken preview box, clipped to it.
+///
+/// The sample is produced at the box's own size, so this is a copy rather than
+/// a scale — scaling a patterned disc would blur exactly the texture detail the
+/// swatch exists to show.
+fn blit_preview_sample(surface: &mut Surface, rect: IntRect, sample: &clonk_frontend::ImageData) {
+    let width = sample.width() as i32;
+    let height = sample.height() as i32;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let origin_x = rect.x + (rect.w - width).max(0) / 2;
+    let origin_y = rect.y + (rect.h - height).max(0) / 2;
+    let pixels = sample.pixels();
+    for y in 0..height.min(rect.h) {
+        for x in 0..width.min(rect.w) {
+            let index = ((y * width + x) * 4) as usize;
+            let Some(channels) = pixels.get(index..index + 4) else {
+                return;
+            };
+            let _ = surface.set_pixel(
+                (origin_x + x).max(0) as u32,
+                (origin_y + y).max(0) as u32,
+                clonk_graphics::Color::new(channels[0], channels[1], channels[2], channels[3]),
+            );
+        }
+    }
+}
+
 #[cfg(all(
     test,
     any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
@@ -566,6 +608,9 @@ mod tests {
             ift: true,
             material: "Earth".to_owned(),
             texture: "Rough".to_owned(),
+            // The layout and hit-test tests do not need a rendered sample; the
+            // swatch itself is pinned in clonk-frontend where it is composed.
+            preview: None,
             materials: vec![
                 TOOL_SKY_MATERIAL.to_owned(),
                 "Earth".to_owned(),

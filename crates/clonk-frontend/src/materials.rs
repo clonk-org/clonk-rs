@@ -340,6 +340,163 @@ pub(crate) fn compose_material_pixel(
     )
 }
 
+/// The tools dialog's material preview swatch.
+///
+/// `C4ToolsDlg::UpdatePreview` (`C4ToolsDlg.cpp:601-708`) builds a surface and
+/// draws one thing into it:
+/// `DrawPatternedCircle(surface, w / 2, h / 2, Grade, bCol, Pattern1, Pattern2, pal)`
+/// — a disc whose radius **is the grade**, which is what makes the swatch show
+/// the brush about to be painted with rather than only its colour.
+///
+/// Two details are carried over deliberately:
+///
+/// - `DrawPatternedCircle` (`StdDDraw2.cpp:1191-1207`) runs `ycnt` over
+///   `-r..r` and `xcnt` over `x - lwdt..x + lwdt`, both **exclusive** at the
+///   top, so the disc is a pixel short on the right and bottom. Rounding that
+///   out would make the preview disagree with the reference build.
+/// - The preview applies **`Pattern1` then `Pattern2`** — the material overlay
+///   *before* the texture — while `C4Landscape::GetClrByTex` applies them the
+///   other way round (`C4Landscape.cpp:2629-2633`). The two call sites really
+///   do differ, so this cannot reuse
+///   [`compose_material_surface_pixel`]: swapping its arguments would swap the
+///   per-role zooms with them.
+pub fn material_preview_swatch(
+    width: u32,
+    height: u32,
+    grade: i32,
+    material: &MaterialRenderInfo,
+    texture: &MaterialTextureSurface,
+    overlay: Option<&MaterialTextureSurface>,
+    background: Color,
+) -> ImageData {
+    let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    for _ in 0..(width as usize) * (height as usize) {
+        pixels.extend_from_slice(&[background.r, background.g, background.b, background.a]);
+    }
+    if grade <= 0 || width == 0 || height == 0 {
+        return ImageData::new(width, height, pixels);
+    }
+
+    let center_x = (width / 2) as i32;
+    let center_y = (height / 2) as i32;
+    let texture = MaterialPatternRef::from(texture);
+    let overlay = overlay.map(MaterialPatternRef::from);
+    for row in -grade..grade {
+        let half = ((grade * grade - row * row) as f32).sqrt() as i32;
+        for column in (center_x - half)..(center_x + half) {
+            let y = center_y + row;
+            if column < 0 || y < 0 || column >= width as i32 || y >= height as i32 {
+                continue;
+            }
+            let color = compose_material_preview_pixel(material, column, y, texture, overlay);
+            let index = ((y as u32 * width + column as u32) * 4) as usize;
+            pixels[index] = color.r;
+            pixels[index + 1] = color.g;
+            pixels[index + 2] = color.b;
+            pixels[index + 3] = color.a;
+        }
+    }
+    ImageData::new(width, height, pixels)
+}
+
+/// The preview swatch for a named material and texture.
+///
+/// Resolves the pair the way the landscape does, including the rule that a
+/// liquid — density in `25..50` — asks for `Smooth` and is given `Liquid`
+/// instead, so the swatch shows what would actually be painted rather than
+/// what was asked for. `None` when either name is unknown, which is the
+/// disabled-page case where C++ draws the grey box and nothing else.
+pub fn material_preview_swatch_for(
+    width: u32,
+    height: u32,
+    grade: i32,
+    material_name: &str,
+    texture_name: &str,
+    material_render_info: &HashMap<String, MaterialRenderInfo>,
+    material_textures: &HashMap<String, MaterialTextureSurface>,
+    background: Color,
+) -> Option<ImageData> {
+    let material =
+        material_render_info.get(&clonk_resources::material::c4_name_key(material_name))?;
+    let resolve = |name: &str| {
+        let key = if (25..50).contains(&material.density)
+            && clonk_resources::material::c4_names_equal(name, "Smooth")
+        {
+            clonk_resources::material::c4_name_key("Liquid")
+        } else {
+            clonk_resources::material::c4_name_key(name)
+        };
+        material_textures.get(&key)
+    };
+    let texture = resolve(texture_name)?;
+    let overlay = material.texture_overlay.as_deref().and_then(resolve);
+    Some(material_preview_swatch(
+        width, height, grade, material, texture, overlay, background,
+    ))
+}
+
+/// One preview pixel: the material colour, the overlay, then the texture.
+///
+/// The order is `DrawPatternedCircle`'s, which is the reverse of the
+/// landscape's. `landscape_pixel` is zero here because the preview has no
+/// landscape behind it — C++ passes `bCol` straight from
+/// `Mat2PixColDefault(...)` with no IFT bit set.
+fn compose_material_preview_pixel(
+    material: &MaterialRenderInfo,
+    x: i32,
+    y: i32,
+    texture: MaterialPatternRef<'_>,
+    overlay: Option<MaterialPatternRef<'_>>,
+) -> Color {
+    let mut pixel = MaterialPixel {
+        red: material.color[0],
+        green: material.color[1],
+        blue: material.color[2],
+        transparency: material.alpha[0],
+    };
+    let monochrome = material.overlay_type & MATERIAL_OVERLAY_MONOCHROME != 0;
+    if let Some(overlay) = overlay {
+        let overlay_zoom = if material.overlay_type & MATERIAL_OVERLAY_EXACT != 0 {
+            1
+        } else {
+            2
+        };
+        apply_material_surface(
+            &mut pixel,
+            material,
+            0,
+            overlay,
+            x,
+            y,
+            overlay_zoom,
+            monochrome,
+        );
+    }
+    let texture_zoom = if material.overlay_type & MATERIAL_OVERLAY_HUGE_ZOOM != 0 {
+        4
+    } else if material.overlay_type & MATERIAL_OVERLAY_EXACT != 0 {
+        1
+    } else {
+        0
+    };
+    apply_material_surface(
+        &mut pixel,
+        material,
+        0,
+        texture,
+        x,
+        y,
+        texture_zoom,
+        monochrome,
+    );
+    Color::new(
+        pixel.red,
+        pixel.green,
+        pixel.blue,
+        255u8.saturating_sub(pixel.transparency),
+    )
+}
+
 pub(crate) fn compose_material_surface_pixel(
     material: &MaterialRenderInfo,
     landscape_pixel: u8,
@@ -1151,6 +1308,123 @@ mod gpu_slot_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `C4ToolsDlg::UpdatePreview` draws the swatch as
+    /// `DrawPatternedCircle(surface, w / 2, h / 2, Grade, ...)` — a disc of the
+    /// **grade** radius, not a filled box (`C4ToolsDlg.cpp:673-677`,
+    /// `StdDDraw2.cpp:1191-1207`). That is why the grade slider sits beside it.
+    #[test]
+    fn the_material_preview_is_a_disc_of_the_grade_radius() {
+        let material =
+            MaterialRenderInfo::new([64, 96, 128, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 50);
+        // A neutral 128 pattern survives `ModulateClrA` and `LightenClr`
+        // unchanged — `(c * 128) >> 8` then `<< 1` — so the disc carries the
+        // material's own colour and this test is about the shape.
+        let texture =
+            MaterialTextureSurface::surface32(ImageData::new(1, 1, vec![128, 128, 128, 255]));
+        let background = Color::opaque(9, 9, 9);
+        let swatch = material_preview_swatch(16, 16, 4, &material, &texture, None, background);
+        let at = |x: usize, y: usize| {
+            let index = (y * 16 + x) * 4;
+            let pixels = swatch.pixels();
+            Color::new(
+                pixels[index],
+                pixels[index + 1],
+                pixels[index + 2],
+                pixels[index + 3],
+            )
+        };
+
+        assert_eq!(
+            at(8, 8),
+            Color::opaque(64, 96, 128),
+            "the centre is inside the disc and carries the material colour"
+        );
+        assert_eq!(at(0, 0), background, "a corner is outside it");
+
+        // The loop bounds are exclusive at the top on both axes, so the disc is
+        // one pixel short on the right. That asymmetry is C++'s, not a slip.
+        assert_eq!(
+            at(4, 8),
+            Color::opaque(64, 96, 128),
+            "the left edge is drawn"
+        );
+        assert_eq!(at(3, 8), background, "and one past it is not");
+        assert_eq!(
+            at(11, 8),
+            Color::opaque(64, 96, 128),
+            "the last drawn column"
+        );
+        assert_eq!(at(12, 8), background, "x + lwdt itself is not drawn");
+    }
+
+    /// A liquid asking for `Smooth` is given `Liquid`, the same substitution
+    /// the landscape makes, so the swatch shows what would be painted.
+    #[test]
+    fn a_liquid_preview_resolves_smooth_to_the_liquid_texture() {
+        // Density 25 puts this in the liquid band.
+        let material = MaterialRenderInfo::new([0, 190, 0, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25);
+        let materials = HashMap::from([("acid".to_owned(), material)]);
+        let textures = HashMap::from([
+            // Neutral, so the disc keeps the material colour.
+            (
+                "liquid".to_owned(),
+                MaterialTextureSurface::surface32(ImageData::new(1, 1, vec![128, 128, 128, 255])),
+            ),
+            // Black, so picking this one instead would be obvious.
+            (
+                "smooth".to_owned(),
+                MaterialTextureSurface::surface32(ImageData::new(1, 1, vec![0, 0, 0, 255])),
+            ),
+        ]);
+        let background = Color::opaque(9, 9, 9);
+
+        let swatch = material_preview_swatch_for(
+            8, 8, 3, "Acid", "Smooth", &materials, &textures, background,
+        )
+        .expect("a known pair produces a swatch");
+        let index = ((4 * 8 + 4) * 4) as usize;
+        let pixels = swatch.pixels();
+        assert_eq!(
+            [pixels[index], pixels[index + 1], pixels[index + 2]],
+            [0, 190, 0],
+            "the neutral Liquid texture was used, not the black Smooth one"
+        );
+
+        assert!(
+            material_preview_swatch_for(
+                8,
+                8,
+                3,
+                "Nonexistent",
+                "Smooth",
+                &materials,
+                &textures,
+                background
+            )
+            .is_none(),
+            "an unknown material has no swatch rather than a black one"
+        );
+    }
+
+    /// A grade of zero has no disc at all, which is what a disabled or
+    /// zero-width brush shows.
+    #[test]
+    fn a_zero_grade_preview_is_all_background() {
+        let material =
+            MaterialRenderInfo::new([64, 96, 128, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 50);
+        let texture =
+            MaterialTextureSurface::surface32(ImageData::new(1, 1, vec![128, 128, 128, 255]));
+        let background = Color::opaque(9, 9, 9);
+        let swatch = material_preview_swatch(8, 8, 0, &material, &texture, None, background);
+        assert!(
+            swatch
+                .pixels()
+                .chunks_exact(4)
+                .all(|pixel| pixel == [9, 9, 9, 255]),
+            "no radius means nothing is drawn over the background"
+        );
+    }
 
     /// The pattern atlas and packed slot table are built from the material
     /// catalogue, not from the landscape, so a landscape update must reuse

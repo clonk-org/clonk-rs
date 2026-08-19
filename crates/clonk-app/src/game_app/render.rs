@@ -3609,9 +3609,32 @@ impl GameApp {
                 .as_ref()
                 .map(|state| state.texture_catalog(&material))
                 .unwrap_or_default(),
+            preview: self.developer_tools_preview_sample(&material),
             texture: self.developer_tools.texture().to_owned(),
             material,
         }
+    }
+
+    /// The rendered material sample the Tools page's preview box shows.
+    ///
+    /// Resolved here rather than in the view because the catalogues live on the
+    /// application: the view is handed pixels, not a material library.
+    /// `C4ToolsDlg::UpdatePreview` draws a disc of the *grade* radius, so the
+    /// grade travels with it.
+    fn developer_tools_preview_sample(&self, material: &str) -> Option<clonk_frontend::ImageData> {
+        /// `IDC_PREVIEW`'s own extent in C++ (`C4ToolsDlg.cpp:604`).
+        const PREVIEW_EXTENT: u32 = 64;
+
+        clonk_frontend::material_preview_swatch_for(
+            PREVIEW_EXTENT,
+            PREVIEW_EXTENT,
+            self.developer_tools.grade(),
+            material,
+            self.developer_tools.texture(),
+            &self.material_render_info,
+            &self.material_texture_images,
+            clonk_graphics::Color::opaque(0x40, 0x40, 0x40),
+        )
     }
 
     /// `C4PropertyDlg::Update` over the live selection
