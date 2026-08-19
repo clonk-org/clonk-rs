@@ -267,42 +267,27 @@ fn associate_offline_savegame_player_info(
     // The automatic passes run for non-network savegames only; a regular
     // scenario shipping restore infos keeps its participants unassociated
     // (C4PlayerInfo.cpp:1372).
-    let mut wild_takeovers = Vec::new();
-    let matching_levels: &[u8] = if save_game && has_active_restore {
-        &[0, 1, 2, 3]
-    } else {
-        &[]
+    let wild = match save_game && has_active_restore {
+        true => clonk_engine::savegame_association::associate_savegame_players(
+            &mut player_info.players,
+            &restore_players,
+        ),
+        false => Vec::new(),
     };
-    for &matching_level in matching_levels {
-        for player_index in 0..player_info.players.len() {
-            if player_info.players[player_index].savegame_player != 0 {
-                continue;
-            }
-            let assigned = player_info
-                .players
+    // C++ names both players in the warning it logs
+    // (C4PlayerInfo.cpp:1384-1390), so the indices the passes report are
+    // resolved back to names here rather than inside the engine.
+    let wild_takeovers = wild
+        .into_iter()
+        .map(|takeover| OfflineWildTakeover {
+            participant: effective_player_name(&player_info.players[takeover.participant]).to_vec(),
+            savegame_player: restore_players
                 .iter()
-                .filter_map(|player| {
-                    (player.savegame_player != 0).then_some(player.savegame_player)
-                })
-                .collect::<HashSet<_>>();
-            let current = &player_info.players[player_index];
-            let Some(saved) = restore_players.iter().find(|saved| {
-                !assigned.contains(&saved.id)
-                    && savegame_players_match(current, saved, matching_level)
-            }) else {
-                continue;
-            };
-            player_info.players[player_index].savegame_player = saved.id;
-            // Levels past PML_PlrName are "wild": C++ warns about each one
-            // (C4PlayerInfo.cpp:1384-1390).
-            if matching_level > 1 {
-                wild_takeovers.push(OfflineWildTakeover {
-                    participant: effective_player_name(&player_info.players[player_index]).to_vec(),
-                    savegame_player: effective_player_name(saved).to_vec(),
-                });
-            }
-        }
-    }
+                .find(|saved| saved.id == takeover.savegame_player)
+                .map(|saved| effective_player_name(saved).to_vec())
+                .unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
 
     let mut external_player_paths = HashMap::new();
     for row in 0..configured_count {

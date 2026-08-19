@@ -50,6 +50,67 @@ pub fn savegame_players_match(
     }
 }
 
+/// One association a pass past `PML_PlrName` made, which C++ warns about
+/// (`C4PlayerInfo.cpp:1384-1390`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WildSavegameTakeover {
+    /// Index into the joining players.
+    pub participant: usize,
+    /// `C4PlayerInfo::GetID` of the savegame player it took over.
+    pub savegame_player: i32,
+}
+
+/// The automatic association passes `RestoreSavegameInfos` runs
+/// (`C4PlayerInfo.cpp:1373-1391`).
+///
+/// Four passes over every still-unassociated joining player, each taking the
+/// first savegame player that pass accepts. The pass order is the whole
+/// mechanism: an exact file+name match is claimed before anything can be taken
+/// on colour alone, so running the levels in one combined pass would associate
+/// different players.
+///
+/// The caller decides *whether* these run: C++ gates them on a non-network game
+/// whose scenario sets `Head.SaveGame` (:1372).
+pub fn associate_savegame_players(
+    players: &mut [ControlPlayerInfoEntry],
+    savegame_players: &[ControlPlayerInfoEntry],
+) -> Vec<WildSavegameTakeover> {
+    let mut wild = Vec::new();
+    for matching_level in [
+        MATCHING_LEVEL_PLAYER_FILE_NAME,
+        MATCHING_LEVEL_PLAYER_NAME,
+        MATCHING_LEVEL_PREFERRED_COLOR,
+        MATCHING_LEVEL_ANY,
+    ] {
+        for participant in 0..players.len() {
+            if players[participant].savegame_player != 0 {
+                continue;
+            }
+            // Re-read on every candidate rather than once per pass: an
+            // association made earlier in this same pass has to be visible.
+            let taken = |candidate: &ControlPlayerInfoEntry| {
+                players.iter().any(|player| {
+                    player.savegame_player != 0 && player.savegame_player == candidate.id
+                })
+            };
+            let current = &players[participant];
+            let Some(saved) = savegame_players.iter().find(|saved| {
+                !taken(saved) && savegame_players_match(current, saved, matching_level)
+            }) else {
+                continue;
+            };
+            players[participant].savegame_player = saved.id;
+            if matching_level > MATCHING_LEVEL_PLAYER_NAME {
+                wild.push(WildSavegameTakeover {
+                    participant,
+                    savegame_player: saved.id,
+                });
+            }
+        }
+    }
+    wild
+}
+
 /// The name C++ matches on: `C4PlayerInfo::GetName` prefers the league account,
 /// then a forced name, then the player's own.
 pub fn effective_player_name(player: &ControlPlayerInfoEntry) -> &[u8] {
