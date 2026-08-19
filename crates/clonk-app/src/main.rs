@@ -27,6 +27,7 @@ mod console_toolbox_window;
 mod console_viewport_windows;
 mod console_window_position;
 mod control_options;
+mod cpu_target;
 mod deferred_config;
 mod desktop_notification;
 mod developer_component_editor;
@@ -1187,6 +1188,7 @@ fn run() -> Result<()> {
             let shell_window_host::ShellWindowHost {
                 window,
                 pixels: pixels_slot,
+                software: software_slot,
                 presenter,
                 renderer: retained_gpu_renderer,
                 surface_rebuild,
@@ -1676,13 +1678,22 @@ fn run() -> Result<()> {
                             return;
                         }
                     }
-                    let Some(pixels) = pixels_slot.as_mut() else {
+                    let Some(mut pixels) = software_slot
+                        .as_mut()
+                        .map(crate::cpu_target::CpuTarget::Software)
+                        .or_else(|| pixels_slot.as_mut().map(crate::cpu_target::CpuTarget::Gpu))
+                    else {
                         return;
                     };
+                    let pixels = &mut pixels;
                     app.retained_gpu_presentation_active = false;
                     let (physical_width, physical_height) = presenter.physical_size();
+                    // Only a GPU target has a texture limit to exceed; the
+                    // software presenter's frame is an ordinary allocation.
                     let max_texture_dimension_2d =
-                        pixels.device().limits().max_texture_dimension_2d;
+                        pixels.gpu_surface().map_or(u32::MAX, |surface| {
+                            surface.device().limits().max_texture_dimension_2d
+                        });
                     if physical_width > max_texture_dimension_2d
                         || physical_height > max_texture_dimension_2d
                     {
@@ -1800,7 +1811,7 @@ fn run() -> Result<()> {
                             gamma.apply_to_rgba_bytes(pixels.frame_mut());
                         }
                     }
-                    match present_pixels_frame(pixels) {
+                    match pixels.present().map(retained_gpu_present_outcome) {
                         Ok(RetainedGpuPresentOutcome::Presented) => {
                             surface_rebuild.note_presented();
                             while !app.pending_screenshots.is_empty() {
