@@ -1345,28 +1345,64 @@ mod bulk_stream_tests {
         // real reliable-UDP layer rather than argued. Delivery is strictly
         // ordered, so a chunk's fragments take sequence numbers ahead of every
         // later control packet and one lost fragment withholds all of them.
-        // Outstanding bulk per connection is `per_peer_cap * chunk_size`, so
-        // these are the three configurations that matter.
+        // Outstanding bulk per connection is `per_peer_cap * chunk_size`, and
+        // these are the configurations that matter. The lobby's own window is
+        // measured below from the constants rather than a literal.
         let (quiet_mean, quiet_worst) = control_under_bulk(0);
         let (cpp_mean, cpp_worst) = control_under_bulk(300 * 1024); // 100 KiB x3
-        let (now_mean, now_worst) = control_under_bulk(30 * 1024); // 10 KiB x3
+                                                                    // 10 KiB x3 — the lobby's *former* cap, kept as a row because it is the
+                                                                    // midpoint between the shipped window and the in-game one.
+        let (former_mean, former_worst) = control_under_bulk(30 * 1024);
         let (tight_mean, tight_worst) = control_under_bulk(10 * 1024); // 10 KiB x1
 
-        assert!(
-            cpp_mean > now_mean && now_mean > tight_mean,
-            "smaller outstanding bulk must mean less delayed control: \
-             C++ {cpp_mean:?} -> shipped {now_mean:?} -> in-game {tight_mean:?}"
+        // The lobby's *actual* window, taken from the constants rather than a
+        // literal, so a change to either is measured instead of drifting away
+        // from this row (clonk-org/clonk-rs#413).
+        let lobby_bytes = crate::resource_catalog::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE
+            * crate::host_resource_core::STOCK_CHUNK_SIZE as usize;
+        let (lobby_mean, lobby_worst) = control_under_bulk(lobby_bytes);
+        assert_eq!(
+            lobby_bytes,
+            300 * 1024,
+            "30 chunks of 10 KiB — if this moved, the numbers below did too"
+        );
+        // Measured: **110.1 ms mean, 892 ms worst**. That is the answer to
+        // "what does the lobby actually cost", and it is deliberately accepted:
+        // the lobby has no lockstep control to protect, and narrowing the cap
+        // to the in-game value would divide transfer throughput by thirty and
+        // leave a joining player watching "still loading" for minutes on a
+        // definition pack.
+        //
+        // It lands on the same figures as the `100 KiB x3` row above because
+        // this harness models *outstanding bytes*, which both configurations
+        // share at 300 KiB. Chunk granularity — 30 small chunks against 3 large
+        // ones — would change retransmission cost on a lossy link, and this
+        // does not attempt to separate that.
+        assert_eq!(
+            (lobby_mean, lobby_worst),
+            (cpp_mean, cpp_worst),
+            "the lobby window carries the same outstanding bytes as C++'s, so              it must measure the same here"
         );
         assert!(
-            cpp_worst > now_worst,
-            "and the worst case must improve too: {cpp_worst:?} -> {now_worst:?}"
+            lobby_mean < Duration::from_millis(150),
+            "the accepted lobby cost is around 110 ms; a large regression is              not part of that trade: {lobby_mean:?}"
+        );
+
+        assert!(
+            cpp_mean > former_mean && former_mean > tight_mean,
+            "smaller outstanding bulk must mean less delayed control: \
+             300 KiB {cpp_mean:?} -> 30 KiB {former_mean:?} -> 10 KiB {tight_mean:?}"
+        );
+        assert!(
+            cpp_worst > former_worst,
+            "and the worst case must improve too: {cpp_worst:?} -> {former_worst:?}"
         );
         // The tightest setting gets control most of the way back to a link
         // carrying no bulk at all, which is the point of narrowing it in game.
         assert!(
-            tight_mean < quiet_mean + (now_mean - quiet_mean) / 2,
+            tight_mean < quiet_mean + (former_mean - quiet_mean) / 2,
             "in-game window should recover most of the gap: quiet {quiet_mean:?}, \
-             shipped {now_mean:?}, in-game {tight_mean:?}"
+             former lobby {former_mean:?}, in-game {tight_mean:?}"
         );
         assert!(quiet_worst < tight_worst, "bulk still costs something");
     }
