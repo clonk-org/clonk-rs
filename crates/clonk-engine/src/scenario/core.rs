@@ -4079,7 +4079,38 @@ impl Scenario {
         Ok(())
     }
 
+    /// Every `apply_before_players*` entry point funnels through here, which is
+    /// what makes it the one place the activation interval can be measured
+    /// from (clonk-org/clonk-rs#293).
+    #[allow(clippy::too_many_arguments)]
     fn apply_before_players_with_final_synchronize(
+        &self,
+        engine: &mut Engine,
+        final_synchronize: bool,
+        team_configuration_override: Option<crate::TeamConfiguration>,
+        team_registry_override: Option<Vec<TeamInfo>>,
+        game_parameter_rule_goal_lists: Option<&GameParameterRuleGoalLists>,
+        initial_network_game: Option<&InitialNetworkGameData>,
+        execute_post_init_map_callbacks: bool,
+        initial_record_capture: Option<(
+            bool,
+            &mut Option<Result<InitialNetworkGameData, InitialNetworkGameError>>,
+        )>,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_stages(
+            engine,
+            final_synchronize,
+            team_configuration_override,
+            team_registry_override,
+            game_parameter_rule_goal_lists,
+            initial_network_game,
+            execute_post_init_map_callbacks,
+            initial_record_capture,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_before_players_stages(
         &self,
         engine: &mut Engine,
         final_synchronize: bool,
