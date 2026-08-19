@@ -53,6 +53,7 @@ shard_modules!(
     eke_uzi_action_sound,
     elevator_motion_oracle,
     engine_snapshots,
+    environment_placement_profile,
     far_worlds_arctic_harpoon_drop,
     gamma,
     get_inventory,
