@@ -7523,6 +7523,18 @@ pub struct EffectDispatchStats {
     /// `HostWorldContext` constructions, each of which freezes the id lookup
     /// and builds a lazy provider.
     pub world_context_builds: usize,
+    /// `host_world_context_base` runs, which is where a build stops being
+    /// lazy: the cached definition and solid-mask tables cost only an `Rc`
+    /// clone, but the transfer-zone, player-order, local-player and
+    /// player-view vectors are rebuilt every time.
+    ///
+    /// Counted apart from `world_context_builds` because
+    /// clonk-org/clonk-rs#291 asks specifically to tell a shallow context
+    /// clone from what a build materialises.
+    pub context_base_materializations: usize,
+    /// `ObjectState` snapshots taken to seed an object's callback world, one
+    /// `Rc` allocation and deep copy each.
+    pub object_state_snapshots: usize,
 }
 
 pub struct Engine {
