@@ -2150,7 +2150,27 @@ pub(crate) fn handle_window_event(
             }
         }
         WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+            // The composition is over: drop the provisional text before the
+            // committed characters take the ordinary input path.
+            app.set_ime_composition(None);
             handle_app_text(app, &text).context("failed to process IME text input")?;
+            window.request_redraw();
+        }
+        WindowEvent::Ime(winit::event::Ime::Preedit(text, cursor)) => {
+            app.set_ime_composition(Some(clonk_frontend::input_dialog::ImeComposition {
+                text,
+                cursor,
+            }));
+            window.request_redraw();
+        }
+        WindowEvent::Ime(winit::event::Ime::Enabled) => {
+            // A fresh session starts with nothing composed; a leftover preedit
+            // from a previous one would otherwise be drawn under the new text.
+            app.set_ime_composition(None);
+        }
+        WindowEvent::Ime(winit::event::Ime::Disabled) => {
+            app.set_ime_composition(None);
+            window.request_redraw();
         }
         WindowEvent::Moved(position) => {
             if display_options.mode == DisplayMode::Window && !window.is_maximized() {

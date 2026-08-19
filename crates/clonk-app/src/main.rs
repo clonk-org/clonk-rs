@@ -1912,6 +1912,16 @@ fn run() -> Result<()> {
                 _ => {}
             }
             window.set_ime_allowed(app.platform_ime_allowed());
+            // Without this the candidate window opens at the window origin,
+            // which is where an IME puts it when nobody says otherwise.
+            if let Some(caret) = app.ime_caret_area() {
+                let (x, y) = presenter.gui_to_position(f64::from(caret.x), f64::from(caret.y));
+                let (w, h) = presenter.gui_to_position(f64::from(caret.w), f64::from(caret.h));
+                window.set_ime_cursor_area(
+                    winit::dpi::PhysicalPosition::new(x, y),
+                    winit::dpi::PhysicalSize::new(w.max(1.0), h.max(1.0)),
+                );
+            }
             // SDL hides the platform pointer throughout the game client area;
             // C4MouseControl/C4GUI draw the selected themed cell themselves.
             window.set_cursor_visible(app.platform_cursor_visible());

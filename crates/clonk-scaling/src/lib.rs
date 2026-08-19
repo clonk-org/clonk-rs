@@ -827,6 +827,13 @@ impl FramePresenter {
         (x / scale, y / scale)
     }
 
+    /// GUI coordinates back to window pixels, which is what the platform IME
+    /// wants when it is told where the caret is.
+    pub fn gui_to_position(&self, x: f64, y: f64) -> (f64, f64) {
+        let scale = f64::from(self.scale.max(f32::EPSILON));
+        (x * scale, y * scale)
+    }
+
     /// Runs `render` against the logical frame and upscales into `output`
     /// (the window-sized pixel buffer). `render` returns whether it composed
     /// new content; unchanged frames skip the upscale, relying on `output`
