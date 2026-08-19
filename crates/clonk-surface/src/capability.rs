@@ -141,6 +141,81 @@ pub fn probe_capabilities(
     CapabilityReport { missing }
 }
 
+/// Why an interactive window is presenting in software.
+///
+/// Carried rather than collapsed into a bool because startup diagnostics have
+/// to tell these apart: "this machine has no adapter" and "you asked for the
+/// software path" are very different things to read in a log
+/// (clonk-org/clonk-rs#299).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoftwareReason {
+    /// The operator asked for it. Available on capable hardware too, because
+    /// a fallback nobody can reproduce on their own machine is a fallback
+    /// nobody can debug.
+    Forced,
+    /// No adapter could be created on any backend — the GLES-2-only case the
+    /// issue exists for.
+    NoAdapter,
+    /// An adapter exists but does not meet the floor.
+    BelowFloor,
+}
+
+impl std::fmt::Display for SoftwareReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Forced => formatter.write_str("software presentation was requested"),
+            Self::NoAdapter => formatter.write_str("no GPU adapter could be created"),
+            Self::BelowFloor => {
+                formatter.write_str("the GPU adapter does not meet the graphics floor")
+            }
+        }
+    }
+}
+
+/// How an interactive window should present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationChoice {
+    /// Retained GPU presentation. The normal path, and the only one that
+    /// carries the optional retained effects.
+    Gpu,
+    /// The wgpu-free software presenter.
+    Software(SoftwareReason),
+}
+
+impl PresentationChoice {
+    /// True when this choice needs no wgpu instance, adapter or device.
+    pub const fn is_software(self) -> bool {
+        matches!(self, Self::Software(_))
+    }
+}
+
+/// Decide how to present, given what the operator asked for and what the
+/// adapter can do.
+///
+/// `adapter` is `None` when no adapter could be created at all, which is a
+/// different condition from an adapter that exists and falls short: the first
+/// has no capabilities to report, the second has a [`CapabilityReport`]
+/// naming exactly what it is missing.
+///
+/// A forced request wins over a capable adapter on purpose. The issue asks for
+/// a diagnostic mode precisely so the software path can be exercised where
+/// there is a GPU to compare it against.
+pub fn choose_presentation(
+    force_software: bool,
+    adapter: Option<&CapabilityReport>,
+) -> PresentationChoice {
+    if force_software {
+        return PresentationChoice::Software(SoftwareReason::Forced);
+    }
+    match adapter {
+        None => PresentationChoice::Software(SoftwareReason::NoAdapter),
+        Some(report) if !report.is_supported() => {
+            PresentationChoice::Software(SoftwareReason::BelowFloor)
+        }
+        Some(_) => PresentationChoice::Gpu,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +325,73 @@ mod tests {
     fn a_zero_extent_is_reported_without_a_dimension_comparison() {
         let report = probe_capabilities(&[SRGB], 8192, REQUIRED_BUFFER_USAGES, (0, 480));
         assert_eq!(report.missing, vec![MissingCapability::ZeroExtent]);
+    }
+
+    fn capable() -> CapabilityReport {
+        probe_capabilities(&[SRGB], 8192, REQUIRED_BUFFER_USAGES, (640, 480))
+    }
+
+    fn below_floor() -> CapabilityReport {
+        probe_capabilities(&[LINEAR], 1024, REQUIRED_BUFFER_USAGES, (2048, 480))
+    }
+
+    #[test]
+    fn a_capable_adapter_presents_on_the_gpu() {
+        assert!(capable().is_supported());
+        assert_eq!(
+            choose_presentation(false, Some(&capable())),
+            PresentationChoice::Gpu
+        );
+        assert!(!PresentationChoice::Gpu.is_software());
+    }
+
+    #[test]
+    fn no_adapter_and_a_short_adapter_are_reported_as_different_reasons() {
+        // Both end in software, but a log that cannot tell them apart cannot
+        // tell an operator whether to look at their driver or their hardware.
+        assert_eq!(
+            choose_presentation(false, None),
+            PresentationChoice::Software(SoftwareReason::NoAdapter)
+        );
+        assert!(!below_floor().is_supported());
+        assert_eq!(
+            choose_presentation(false, Some(&below_floor())),
+            PresentationChoice::Software(SoftwareReason::BelowFloor)
+        );
+    }
+
+    #[test]
+    fn a_forced_request_wins_over_a_capable_adapter() {
+        // The diagnostic mode exists to run the software path where there is a
+        // GPU to compare it against, so a capable adapter must not override it.
+        assert_eq!(
+            choose_presentation(true, Some(&capable())),
+            PresentationChoice::Software(SoftwareReason::Forced)
+        );
+        assert_eq!(
+            choose_presentation(true, None),
+            PresentationChoice::Software(SoftwareReason::Forced)
+        );
+    }
+
+    #[test]
+    fn every_software_reason_reads_as_its_own_sentence() {
+        let sentences: Vec<String> = [
+            SoftwareReason::Forced,
+            SoftwareReason::NoAdapter,
+            SoftwareReason::BelowFloor,
+        ]
+        .into_iter()
+        .map(|reason| reason.to_string())
+        .collect();
+        assert_eq!(
+            sentences.len(),
+            sentences
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            "a reason that reads the same as another cannot be diagnosed: {sentences:?}"
+        );
+        assert!(sentences.iter().all(|sentence| !sentence.is_empty()));
     }
 }
