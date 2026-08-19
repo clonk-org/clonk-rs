@@ -1445,6 +1445,19 @@ pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     }
 }
 
+/// Windows: the raw virtual-key code, which is what `DoKeyboardInput` receives
+/// (`C4FullScreen.cpp:62-71`).
+///
+/// # Accepted gap: Alt+F4 is never delivered
+///
+/// C++ offers `WM_SYSKEYDOWN` / `VK_F4` to `DoKeyboardInput` before Windows
+/// closes the window, so a binding on Alt+F4 fires. winit 0.30 consumes the
+/// event before application dispatch — winit 0.28 delivered it — so nothing
+/// here can encode a key that never arrives.
+///
+/// Recovering it needs upstream winit support or a native `WM_SYSKEYDOWN`
+/// interception, so it is an accepted gap rather than a mapping bug, and does
+/// not block the rest of clonk-org/clonk-rs#346.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn encode_windows_platform_key_code(key: VirtualKeyCode) -> Option<i32> {
     if let Some(index) = function_key_index(key) {
@@ -1569,6 +1582,36 @@ pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     })
 }
 
+/// macOS: SDL's Cocoa scancode, which is what C++ forwards
+/// (`C4FullScreen.cpp:387-400`).
+///
+/// # Accepted gap: the ISO grave swap
+///
+/// Two physical keys cannot be told apart here, so one of them reports the
+/// wrong identity on every keyboard. SDL maps `kVK_ISO_Section` (0x0a) to
+/// `SDL_SCANCODE_NONUSBACKSLASH` and `kVK_ANSI_Grave` (0x32) to
+/// `SDL_SCANCODE_GRAVE` (`scancodes_darwin.h`), then **exchanges the two at
+/// runtime on ISO keyboards**:
+///
+/// ```c
+/// if ((scancode == SDL_SCANCODE_NONUSBACKSLASH || scancode == SDL_SCANCODE_GRAVE) && KBGetLayoutType(LMGetKbdType()) == kKeyboardISO) {
+///     scancode = (SDL_Scancode)((SDL_SCANCODE_NONUSBACKSLASH + SDL_SCANCODE_GRAVE) - scancode);
+/// }
+/// ```
+///
+/// winit's `scancode_to_physicalkey` (`platform_impl/macos/event.rs`) maps
+/// **both** 0x0a and 0x32 to `KeyCode::Backquote`, so the raw keycode never
+/// reaches this function — it survives only in
+/// `PhysicalKey::Unidentified(NativeKeyCode::MacOS(..))`, which these keys do
+/// not produce. `Backquote` therefore encodes to `SDL_SCANCODE_GRAVE` for both,
+/// which is right for `0x32` on ANSI/JIS and for `0x0a` on ISO, and wrong for
+/// the other one.
+///
+/// Closing it needs winit to distinguish the two keycodes, or a native
+/// `NSEvent.keyCode` read beside the winit event plus `KBGetLayoutType` for the
+/// ISO test — not a change to the table below. The F13–F15 and JIS classes were
+/// fixable here precisely because winit gives *them* distinct `KeyCode`s.
+/// clonk-org/clonk-rs#346 tracks it.
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     if let Some(index) = function_key_index(key) {
