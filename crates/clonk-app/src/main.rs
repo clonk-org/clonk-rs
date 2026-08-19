@@ -861,17 +861,32 @@ fn run() -> Result<()> {
         }
 
         let size = enforce_min_size(window.inner_size());
-        let pixels = build_framebuffer(&window, size)?;
-        let mut retained_gpu_renderer = gpu_renderer::RetainedGpuRenderer::new(
-            pixels.device(),
-            pixels.queue(),
-            pixels.surface_texture_format(),
-        );
+        let (presentation, presentation_choice) =
+            build_primary_presentation(&window, size, software_presentation_requested())?;
+        if let clonk_surface::capability::PresentationChoice::Software(reason) = presentation_choice
+        {
+            // Say which of the three cases this is: the operator asked, no
+            // adapter answered, or the adapter fell short of the floor.
+            tracing::warn!(%reason, "presenting in software");
+        }
         let renderer_config = load_native_config_bytes(app_paths.as_deref());
-        retained_gpu_renderer.set_mipmaps(configured_mipmaps(&renderer_config));
-        retained_gpu_renderer.set_smooth_landscape(configured_smooth_landscape(&renderer_config));
-        retained_gpu_renderer.set_shader_landscape(configured_shader_landscape(&renderer_config));
-        retained_gpu_renderer.set_landscape_detail(configured_landscape_detail(&renderer_config));
+        // Software presentation has no device to build a retained renderer
+        // from, and never takes the retained path.
+        let retained_gpu_renderer = match &presentation {
+            PrimaryPresentation::Gpu(pixels) => {
+                let mut renderer = gpu_renderer::RetainedGpuRenderer::new(
+                    pixels.device(),
+                    pixels.queue(),
+                    pixels.surface_texture_format(),
+                );
+                renderer.set_mipmaps(configured_mipmaps(&renderer_config));
+                renderer.set_smooth_landscape(configured_smooth_landscape(&renderer_config));
+                renderer.set_shader_landscape(configured_shader_landscape(&renderer_config));
+                renderer.set_landscape_detail(configured_landscape_detail(&renderer_config));
+                Some(renderer)
+            }
+            PrimaryPresentation::Software(_) => None,
+        };
 
         // The app lays out and renders at the GUI resolution; the presenter
         // scales the finished frame to the window like the C++ engine scales
@@ -1004,9 +1019,9 @@ fn run() -> Result<()> {
             developer_windows::HostPurpose::Shell,
             developer_host::DeveloperHost::Shell(shell_window_host::ShellWindowHost::new(
                 window,
-                pixels,
+                presentation,
                 presenter,
-                Some(retained_gpu_renderer),
+                retained_gpu_renderer,
             )),
         );
         // The next viewport window's key. `SHELL_WINDOW` is 0, so console windows

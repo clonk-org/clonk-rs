@@ -977,6 +977,77 @@ pub(crate) fn build_framebuffer(
     )
 }
 
+/// What the primary window presents through.
+pub(crate) enum PrimaryPresentation {
+    /// The ordinary retained-GPU path.
+    Gpu(WindowSurface),
+    /// The wgpu-free path, for a machine with no usable adapter or an operator
+    /// who asked for it (clonk-org/clonk-rs#299).
+    Software(clonk_surface::SoftwarePresenter),
+}
+
+/// Environment opt-in for software presentation on a machine that does not
+/// need it, so the fallback can be exercised where there is a GPU to compare
+/// it against.
+pub(crate) const SOFTWARE_PRESENTATION_ENV: &str = "LC_SOFTWARE_PRESENTATION";
+
+/// True when the operator asked for software presentation.
+pub(crate) fn software_presentation_requested() -> bool {
+    std::env::var(SOFTWARE_PRESENTATION_ENV)
+        .ok()
+        .is_some_and(|value| parse_config_bool(&value))
+}
+
+/// Build whatever the primary window can present through.
+///
+/// A forced request never creates a wgpu instance, adapter or device: the
+/// point of the diagnostic mode is to exercise the path a machine with no
+/// adapter takes, which it would not do if it quietly built one first.
+pub(crate) fn build_primary_presentation(
+    window: &Arc<Window>,
+    size: PhysicalSize<u32>,
+    force_software: bool,
+) -> Result<(
+    PrimaryPresentation,
+    clonk_surface::capability::PresentationChoice,
+)> {
+    use clonk_surface::capability::{choose_presentation, PresentationChoice};
+
+    let software = |reason| -> Result<(PrimaryPresentation, PresentationChoice)> {
+        clonk_surface::SoftwarePresenter::build(
+            Arc::clone(window) as Arc<dyn clonk_surface::PresentTarget>,
+            (size.width, size.height),
+            (size.width, size.height),
+        )
+        .map(|presenter| (PrimaryPresentation::Software(presenter), reason))
+        .map_err(anyhow::Error::from)
+    };
+
+    if force_software {
+        let choice = choose_presentation(true, None);
+        return software(choice).context(
+            "failed to create a software presenter, which was requested by \
+             LC_SOFTWARE_PRESENTATION",
+        );
+    }
+
+    match build_framebuffer(window, size) {
+        Ok(pixels) => Ok((PrimaryPresentation::Gpu(pixels), PresentationChoice::Gpu)),
+        Err(gpu_error) => {
+            // Report both failures when both happen. An operator whose machine
+            // has neither a GPU nor a working window system needs to see that
+            // it was both, not whichever was tried last.
+            let choice = choose_presentation(false, None);
+            software(choice).map_err(|software_error| {
+                software_error.context(format!(
+                    "no GPU adapter was usable ({gpu_error:#}), and software \
+                     presentation could not start either"
+                ))
+            })
+        }
+    }
+}
+
 pub(crate) fn rebuild_retained_gpu_device(
     window: &Arc<Window>,
     pixels: &mut Option<WindowSurface>,

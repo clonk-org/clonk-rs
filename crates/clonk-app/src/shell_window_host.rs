@@ -42,17 +42,23 @@ pub struct ShellWindowHost {
 impl ShellWindowHost {
     pub fn new(
         window: Arc<Window>,
-        pixels: WindowSurface,
+        presentation: crate::main_audio::PrimaryPresentation,
         presenter: clonk_scaling::FramePresenter,
         renderer: Option<RetainedGpuRenderer>,
     ) -> Self {
+        // Exactly one destination exists, which is what keeps the presentation
+        // branch from having to decide between two live surfaces.
+        let (pixels, software) = match presentation {
+            crate::main_audio::PrimaryPresentation::Gpu(pixels) => (Some(pixels), None),
+            crate::main_audio::PrimaryPresentation::Software(presenter) => (None, Some(presenter)),
+        };
         // Leave winit's IME disabled for the game shell. While preedit is
         // active winit suppresses KeyboardInput, which can lose releases and
         // leave gameplay controls stuck. The legacy shell had no IME opt-in.
         Self {
             window,
-            pixels: Some(pixels),
-            software: None,
+            pixels,
+            software,
             presenter,
             renderer,
             surface_rebuild: SurfaceRebuildState::default(),
