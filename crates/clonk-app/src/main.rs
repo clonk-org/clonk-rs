@@ -8974,6 +8974,52 @@ fn compute_raw_positional_mix_values(
     (volume, pan.clamp(-100, 100))
 }
 
+/// The voice mix: the ordinary positional mix, with each viewport's audibility
+/// scaled by how much solid landscape sits between that viewport's listener and
+/// the speaker (clonk-org/clonk-rs#418).
+///
+/// Deliberately **not** folded into `compute_object_positional_mix`. That one
+/// also serves detached object sounds, which are C++ parity and must not
+/// acquire an attenuation C++ does not have. Proximity voice is a Rust-only
+/// extension with no oracle (clonk-org/clonk-rs#301), so the occlusion belongs
+/// here and only here.
+///
+/// Occlusion is applied per viewport before the maximum rather than after it,
+/// so a speaker in plain sight of one viewport is not muffled because a
+/// different viewport happens to be looking through a hill.
+///
+/// The landscape is read and never written, and the result is a pure function
+/// of the snapshot: nothing here can become observable to the simulation.
+fn compute_voice_positional_mix(
+    source: Vector2,
+    snapshot: &SimulationSnapshot,
+    viewports: &[ActiveViewportProjection],
+) -> (f32, f32) {
+    let mut volume = 0.0f32;
+    let mut pan = 0i32;
+
+    for viewport in viewports {
+        let center = viewport_center(viewport);
+        let listener = viewport_listener(snapshot, viewport, center);
+        let audibility = f32::from(positional_audibility(source, listener)) / 100.0;
+        // No landscape is the loading and teardown case, and also the window
+        // in which `advance_after_releasing_snapshot_landscape` has taken it
+        // away. Unoccluded is the right answer there: it leaves the mix exactly
+        // as it was before this existed.
+        let gain = snapshot.landscape.as_ref().map_or(1.0, |landscape| {
+            crate::voice_chat::occlusion_gain(crate::voice_chat::occluded_fraction(
+                source,
+                listener,
+                |x, y| landscape.is_solid_at(x, y),
+            ))
+        });
+        volume = volume.max(audibility * gain);
+        pan = pan.wrapping_add((source.x.wrapping_sub(center.x)) / 5);
+    }
+
+    (volume, f32::from(pan.clamp(-100, 100) as i16) / 100.0)
+}
+
 /// The world point a viewport is centred on.
 fn viewport_center(viewport: &ActiveViewportProjection) -> Vector2 {
     Vector2::new(

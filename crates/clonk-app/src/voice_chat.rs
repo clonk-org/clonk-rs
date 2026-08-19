@@ -62,7 +62,7 @@ use clonk_audio::{
     VoiceEchoReference, VoiceInputDeviceId, VoiceInputFrame, VoiceProcessingConfig,
     VoiceProcessingSwitches,
 };
-use clonk_engine::{ObjectSnapshot, PlayerStatus, SimulationSnapshot};
+use clonk_engine::{ObjectSnapshot, PlayerStatus, SimulationSnapshot, Vector2};
 
 use crate::settings::VoiceActivation;
 
@@ -1402,11 +1402,135 @@ impl VoiceActivityTracker {
     }
 }
 
+/// The quietest a fully buried voice gets, as a fraction of what the same
+/// speaker would be in open air.
+///
+/// Not zero. Occlusion here is a mix cue, not a rule: silencing a teammate
+/// outright would make the feature a way to lose information rather than to
+/// place it, and the landscape between two clonks changes constantly as they
+/// dig. A floor keeps a buried speaker faint but reachable.
+pub(crate) const MINIMUM_OCCLUDED_VOICE_GAIN: f32 = 0.15;
+
+/// How far apart the samples along the line are, in landscape pixels.
+const OCCLUSION_SAMPLE_SPACING: i32 = 8;
+
+/// The most samples any one line is worth, so a shout across a wide map cannot
+/// turn into an unbounded scan. Voice mixes every frame for every speaker.
+const OCCLUSION_SAMPLE_LIMIT: i32 = 96;
+
+/// The fraction of the straight line between two points that passes through
+/// solid landscape.
+///
+/// Takes a predicate rather than a `Landscape` on purpose: the attenuation has
+/// to come from presentation-side reads only, and a function that cannot reach
+/// the landscape at all cannot mutate it or consume synchronized RNG
+/// (clonk-org/clonk-rs#418). It also makes the geometry testable without
+/// building a world.
+///
+/// The endpoints are deliberately not sampled. A clonk standing on the ground
+/// often has solid pixels at its own feet, and counting those would attenuate
+/// two speakers standing next to each other in the open.
+pub(crate) fn occluded_fraction(
+    source: Vector2,
+    listener: Vector2,
+    solid: impl Fn(i32, i32) -> bool,
+) -> f32 {
+    let dx = source.x - listener.x;
+    let dy = source.y - listener.y;
+    let span = dx.abs().max(dy.abs());
+    if span <= OCCLUSION_SAMPLE_SPACING {
+        // Nothing between them worth sampling, including the same-position
+        // case where there is no line at all.
+        return 0.0;
+    }
+    let samples = (span / OCCLUSION_SAMPLE_SPACING).min(OCCLUSION_SAMPLE_LIMIT);
+    let mut blocked = 0i32;
+    for step in 1..=samples {
+        let numerator = i64::from(step);
+        let denominator = i64::from(samples) + 1;
+        let x = listener.x + (i64::from(dx) * numerator / denominator) as i32;
+        let y = listener.y + (i64::from(dy) * numerator / denominator) as i32;
+        if solid(x, y) {
+            blocked += 1;
+        }
+    }
+    blocked as f32 / samples as f32
+}
+
+/// Maps an occluded fraction onto the gain the voice keeps.
+///
+/// Linear, matching the shape of the 700-pixel distance falloff it multiplies:
+/// a partially buried speaker should read as "further away", not as a
+/// different kind of sound.
+pub(crate) fn occlusion_gain(occluded_fraction: f32) -> f32 {
+    let occluded = occluded_fraction.clamp(0.0, 1.0);
+    1.0 - occluded * (1.0 - MINIMUM_OCCLUDED_VOICE_GAIN)
+}
+
 #[cfg(all(
     test,
     any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
 ))]
 mod tests {
+    /// The issue's own bar: a speaker behind solid rock must be quieter than
+    /// one in open air at the same distance (clonk-org/clonk-rs#418).
+    ///
+    /// Voice occlusion is a Rust-only extension with no C++ oracle, and it
+    /// reads the landscape without touching it — these take a plain predicate
+    /// rather than a `Landscape`, which is what keeps them provably free of
+    /// anything the simulation could observe.
+    #[test]
+    fn solid_landscape_between_two_clonks_attenuates_what_one_hears_of_the_other() {
+        let listener = Vector2::new(0, 0);
+        let speaker = Vector2::new(400, 0);
+        let open_air = |_x: i32, _y: i32| false;
+        // A wall the line has to cross, well away from either end.
+        let wall = |x: i32, _y: i32| (180..220).contains(&x);
+
+        let open = occlusion_gain(occluded_fraction(speaker, listener, open_air));
+        let blocked = occlusion_gain(occluded_fraction(speaker, listener, wall));
+
+        assert_eq!(open, 1.0, "nothing between them is no attenuation at all");
+        assert!(
+            blocked < open,
+            "a wall must attenuate: open {open}, blocked {blocked}"
+        );
+        assert!(
+            blocked >= MINIMUM_OCCLUDED_VOICE_GAIN,
+            "and it must not silence them outright: {blocked}"
+        );
+    }
+
+    /// More rock between the two means less of the voice gets through, so the
+    /// attenuation has to be graded rather than a cliff.
+    #[test]
+    fn thicker_rock_attenuates_a_voice_further_than_thinner_rock() {
+        let listener = Vector2::new(0, 0);
+        let speaker = Vector2::new(400, 0);
+        let thin = |x: i32, _y: i32| (190..210).contains(&x);
+        let thick = |x: i32, _y: i32| (100..300).contains(&x);
+
+        let through_thin = occlusion_gain(occluded_fraction(speaker, listener, thin));
+        let through_thick = occlusion_gain(occluded_fraction(speaker, listener, thick));
+        assert!(
+            through_thick < through_thin,
+            "thick {through_thick} should attenuate more than thin {through_thin}"
+        );
+    }
+
+    /// Two clonks in the same spot have no line to sample, and a solid pixel
+    /// under their feet must not mute them.
+    #[test]
+    fn a_speaker_at_the_listeners_own_position_is_not_occluded() {
+        let here = Vector2::new(120, 40);
+        let everything_solid = |_x: i32, _y: i32| true;
+        assert_eq!(occluded_fraction(here, here, everything_solid), 0.0);
+        assert_eq!(
+            occlusion_gain(occluded_fraction(here, here, everything_solid)),
+            1.0
+        );
+    }
+
     use super::*;
     use clonk_engine::{Engine, PlayerAtClient, PlayerState};
     use std::cell::{Cell, RefCell};

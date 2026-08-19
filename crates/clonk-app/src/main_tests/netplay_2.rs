@@ -279,6 +279,60 @@ fn voice_capture_does_not_cross_the_game_and_lobby_identity_boundary() {
     );
 }
 
+/// The voice mix reads the landscape between each viewport's listener and the
+/// speaker, so a wall attenuates a voice that an equal distance in open air
+/// does not (clonk-org/clonk-rs#418).
+///
+/// `voice_chat`'s own tests pin the geometry against a plain predicate; this
+/// one pins that the mix actually consults the landscape, and that a snapshot
+/// without one behaves exactly as it did before occlusion existed.
+#[test]
+fn the_voice_mix_attenuates_a_speaker_behind_solid_landscape() {
+    // Deliberately an owner no player in this snapshot has, so the listener
+    // falls back to the viewport centre and sits exactly at the origin.
+    let viewports = [audio_viewport(0, 7, Vector2::new(0, 0))];
+    let speaker = Vector2::new(400, 0);
+
+    let mut engine = clonk_engine::Engine::new();
+    let open_air = engine.snapshot();
+    let (open, _pan) = compute_voice_positional_mix(speaker, &open_air, &viewports);
+    assert!(
+        open > 0.0,
+        "the speaker is inside the 700-pixel radius, so it is audible at all"
+    );
+
+    // A 40-pixel band of solid rock across the line, and nothing else.
+    let width = 512usize;
+    let mut pixels = vec![0u8; width];
+    for pixel in pixels.iter_mut().take(220).skip(180) {
+        *pixel = 1;
+    }
+    let mut densities = vec![0i32; 256];
+    densities[1] = 100;
+    let mut landscape = clonk_engine::Landscape::flat(width as u32, 1);
+    assert!(landscape.set_mode(clonk_engine::LANDSCAPE_MODE_EXACT));
+    landscape.set_pixel_grid(clonk_engine::landscape::PixelGrid::new(
+        width as u32,
+        1,
+        pixels,
+        densities,
+        vec![None; 256],
+        vec![None; 256],
+    ));
+    engine.set_landscape(landscape);
+    let walled = engine.snapshot();
+
+    let (blocked, _pan) = compute_voice_positional_mix(speaker, &walled, &viewports);
+    assert!(
+        blocked < open,
+        "solid landscape must attenuate: open {open}, blocked {blocked}"
+    );
+    assert!(
+        blocked > 0.0,
+        "and must not silence the speaker outright: {blocked}"
+    );
+}
+
 #[test]
 fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     use std::cell::RefCell;
@@ -354,7 +408,10 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     )
     .test_value()
     .position;
-    let (remote_audibility, remote_pan) = compute_object_positional_mix(
+    // The voice path mixes through `compute_voice_positional_mix`, so the
+    // expectation has to come from the same function: the shared object mix
+    // carries no occlusion and would only agree by accident.
+    let (remote_audibility, remote_pan) = compute_voice_positional_mix(
         remote_position,
         &app.snapshot,
         &app.graphics.active_viewport_projections(),

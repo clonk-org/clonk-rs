@@ -259,7 +259,7 @@ impl GameApp {
         for (client_id, player_id) in active_streams {
             let mix = if context == crate::voice_chat::VoiceChatContext::Running {
                 voice_source_position(&self.snapshot, client_id, player_id).map(|position| {
-                    compute_object_positional_mix(position, &self.snapshot, &viewports)
+                    compute_voice_positional_mix(position, &self.snapshot, &viewports)
                 })
             } else {
                 self.authenticated_lobby_voice_client(client_id, player_id)
