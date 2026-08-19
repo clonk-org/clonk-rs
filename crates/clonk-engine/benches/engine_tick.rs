@@ -82,5 +82,45 @@ fn bench_engine_ticks(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_engine_ticks);
+/// `Engine::snapshot` against the advance it follows, at two world sizes.
+///
+/// The question this exists to answer is whether snapshot *construction* is
+/// worth optimising, and that is a ratio rather than a number: `tick` is
+/// `tick_without_snapshot` plus the projection, so benching both separates
+/// them without instrumenting the engine. Two sizes show how the projection
+/// scales against the advance as the world grows — it is the growth, not the
+/// small-world cost, that the hypothesis is about.
+fn bench_snapshot_projection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("snapshot_projection");
+    for objects in [64_usize, 512] {
+        group.bench_function(format!("advance_{objects}"), |b| {
+            b.iter_batched(
+                || setup_engine(black_box(objects)),
+                |mut engine| {
+                    for _ in 0..32 {
+                        engine
+                            .tick_without_snapshot()
+                            .expect("engine advance succeeds");
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        });
+        group.bench_function(format!("advance_and_snapshot_{objects}"), |b| {
+            b.iter_batched(
+                || setup_engine(black_box(objects)),
+                |mut engine| {
+                    for _ in 0..32 {
+                        let snapshot = engine.tick().expect("engine tick succeeds");
+                        black_box(snapshot);
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_engine_ticks, bench_snapshot_projection);
 criterion_main!(benches);
