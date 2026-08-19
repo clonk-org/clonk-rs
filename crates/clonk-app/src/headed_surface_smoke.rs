@@ -192,10 +192,11 @@ impl HeadedSurfaceSmoke {
                 .shell_mut()
                 .and_then(DeveloperHost::as_shell_mut)
                 .context("the headed surface probe needs the live shell")?;
-            let pixels = shell
-                .pixels
-                .as_ref()
-                .context("the headed surface probe needs the shell framebuffer")?;
+            let pixels = shell.pixels.as_ref().context(
+                "the headed surface probe validates GPU adapter and driver teardown, so it \
+                 cannot run against software presentation; unset LC_SOFTWARE_PRESENTATION \
+                 (clonk-org/clonk-rs#299 tracks a probe for the software presenter)",
+            )?;
             shell.window.set_visible(true);
             shell.window.focus_window();
             (
