@@ -514,6 +514,7 @@ pub(crate) fn draw_scensel_dynamic(
         search_selection,
         scenario_menu.search_edit.horizontal_scroll,
         draw_focus && scenario_menu.search_edit.cursor_visible(),
+        scenario_menu.search_edit.composition(),
         Some(gamma),
     );
     if search_has_clear {

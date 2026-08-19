@@ -549,20 +549,41 @@ impl GameApp {
     /// dropped, which is also what clears a stale composition.
     pub(crate) fn set_ime_composition(
         &mut self,
-        composition: Option<clonk_frontend::input_dialog::ImeComposition>,
+        composition: Option<clonk_frontend::ime::ImeComposition>,
     ) {
+        // A dialog is modal over the startup menu, so it owns the composition
+        // whenever one is open; the scenario search takes it otherwise.
         if let Some(dialog) = self.game_option_input_dialog.as_mut() {
             dialog.controller.set_composition(composition);
+        } else if self.menu_state.search_focused() {
+            self.menu_state.search_edit.set_composition(composition);
         }
     }
 
     /// The caret's rectangle in GUI coordinates, for positioning the platform
     /// IME candidate window. `None` when no field is taking text.
     pub(crate) fn ime_caret_area(&self) -> Option<clonk_frontend::classic_gui::IntRect> {
-        let dialog = self.game_option_input_dialog.as_ref()?;
-        let layout = self.game_option_input_layout()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
-        Some(dialog.controller.caret_area(&layout, &fonts.text))
+        if let Some(dialog) = self.game_option_input_dialog.as_ref() {
+            let layout = self.game_option_input_layout()?;
+            return Some(dialog.controller.caret_area(&layout, &fonts.text));
+        }
+        if !self.menu_state.search_focused() {
+            return None;
+        }
+        let layout = clonk_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        );
+        Some(clonk_frontend::startup_scensel::search_caret_area(
+            &layout,
+            &fonts.text,
+            self.menu_state.search_text(),
+            self.menu_state.search_edit.caret(),
+            self.menu_state.search_edit.horizontal_scroll,
+            self.menu_state.search_edit.composition(),
+        ))
     }
 
     pub(crate) fn running_chat_active(&self) -> bool {

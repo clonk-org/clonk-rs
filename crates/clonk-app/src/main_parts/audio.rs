@@ -2157,10 +2157,7 @@ pub(crate) fn handle_window_event(
             window.request_redraw();
         }
         WindowEvent::Ime(winit::event::Ime::Preedit(text, cursor)) => {
-            app.set_ime_composition(Some(clonk_frontend::input_dialog::ImeComposition {
-                text,
-                cursor,
-            }));
+            app.set_ime_composition(Some(clonk_frontend::ime::ImeComposition { text, cursor }));
             window.request_redraw();
         }
         WindowEvent::Ime(winit::event::Ime::Enabled) => {

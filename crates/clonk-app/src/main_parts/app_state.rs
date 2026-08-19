@@ -1544,11 +1544,27 @@ pub(crate) struct SearchEditState {
     /// even when the selection is collapsed; an active drag reuses it.
     pub(crate) drag_anchor: usize,
     pub(crate) blink_ticks: u32,
+    /// The IME composition in progress, drawn at the caret and never entered
+    /// into `text` — only `Ime::Commit` reaches `insert_text`.
+    composition: Option<clonk_frontend::ime::ImeComposition>,
 }
 
 impl SearchEditState {
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) fn composition(&self) -> Option<&clonk_frontend::ime::ImeComposition> {
+        self.composition.as_ref()
+    }
+
+    /// Replaces the composition in progress. `None` ends it, which is what
+    /// `Ime::Commit` and `Ime::Disabled` both mean.
+    pub(crate) fn set_composition(
+        &mut self,
+        composition: Option<clonk_frontend::ime::ImeComposition>,
+    ) {
+        self.composition = composition.filter(|composition| !composition.text.is_empty());
     }
 
     pub(crate) fn caret(&self) -> usize {

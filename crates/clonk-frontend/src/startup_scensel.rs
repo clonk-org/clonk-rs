@@ -1490,6 +1490,7 @@ pub fn draw_loading_label(
 /// Draws the mutable contents of the cached scenario-search edit. The edit
 /// frame itself is part of [`ScenSelScreen::render_chrome`]; C++ routes text
 /// through `C4GUI::Edit::DrawElement` (C4GuiEdit.cpp:556-626).
+#[allow(clippy::too_many_arguments)]
 pub fn draw_search_edit_contents(
     surface: &mut Surface,
     layout: &ScenSelLayout,
@@ -1499,8 +1500,15 @@ pub fn draw_search_edit_contents(
     selection: Option<(usize, usize)>,
     horizontal_scroll: i32,
     cursor_visible: bool,
+    composition: Option<&crate::ime::ImeComposition>,
     gamma: Option<&GammaRamp>,
 ) {
+    // The IME's provisional text is drawn at the caret and never enters the
+    // field's own text; with nothing composing this is `text` and `caret`
+    // unchanged.
+    let composed = crate::ime::compose(text, caret, composition);
+    let text = composed.text.as_ref();
+    let caret = composed.caret;
     let edit = &layout.search_edit;
     // Restore the client over the cached chrome before drawing a new buffer.
     draw_box_dw(
@@ -1570,6 +1578,26 @@ pub fn draw_search_edit_contents(
         gamma,
         (clip.x, clip.y, clip.x + clip.w - 1, clip.y + clip.h - 1),
     );
+    // The composition is underlined, which is how every platform marks text an
+    // input method has not committed yet.
+    if let Some((start, end)) = composed.composition {
+        let x1 = client.x + gui_fonts.text.measure(&text[..start], false).0 - horizontal_scroll;
+        let x2 = client.x + gui_fonts.text.measure(&text[..end], false).0 - horizontal_scroll;
+        let underline_y = text_y0 + selection_height - 1;
+        let clipped_x1 = x1.max(clip.x);
+        let clipped_x2 = (x2 - 1).min(clip.x + clip.w - 1);
+        if clipped_x1 <= clipped_x2 {
+            draw_box_dw(
+                surface,
+                clipped_x1,
+                underline_y,
+                clipped_x2,
+                underline_y,
+                0x00ffffff,
+                gamma,
+            );
+        }
+    }
     if cursor_visible {
         let caret = caret.min(text.len());
         let caret = if text.is_char_boundary(caret) {
@@ -1588,6 +1616,46 @@ pub fn draw_search_edit_contents(
             clip,
             gamma,
         );
+    }
+}
+
+/// The search caret's rectangle, for positioning the platform IME candidate
+/// window.
+///
+/// The same arithmetic [`draw_search_edit_contents`] uses for the caret, so the
+/// candidate list appears under the character actually being composed rather
+/// than at the window origin.
+pub fn search_caret_area(
+    layout: &ScenSelLayout,
+    font: &ClonkFont,
+    text: &str,
+    caret: usize,
+    horizontal_scroll: i32,
+    composition: Option<&crate::ime::ImeComposition>,
+) -> IntRect {
+    let edit = &layout.search_edit;
+    let client = IntRect {
+        x: edit.x + 4,
+        y: edit.y + 2,
+        w: (edit.w - 8).max(0),
+        h: (edit.h - 4).max(0),
+    };
+    let composed = crate::ime::compose(text, caret, composition);
+    let caret_x =
+        client.x + font.measure(&composed.text[..composed.caret], false).0 - horizontal_scroll;
+    let (text_y0, height) = if client.h <= font.line_height {
+        (client.y, client.h)
+    } else {
+        (
+            client.y + (client.h - font.line_height) / 2 + 1,
+            font.line_height - 2,
+        )
+    };
+    IntRect {
+        x: caret_x.clamp(client.x, client.x + client.w),
+        y: text_y0,
+        w: 1,
+        h: height.max(1),
     }
 }
 
@@ -2787,6 +2855,68 @@ mod tests {
         );
     }
 
+    /// The scenario search is the field clonk-org/clonk-rs#392 names: an IME
+    /// has to be able to compose in it, which means the provisional text is
+    /// drawn there and the caret follows it.
+    #[test]
+    fn search_edit_draws_an_ime_composition_at_the_caret() {
+        let fonts = endeavour_font_set();
+        let layout = scen_sel_layout(800, 600, &fonts);
+        let render = |composition: Option<&crate::ime::ImeComposition>| {
+            let mut surface = Surface::new(800, 600, clonk_graphics::PixelFormat::Rgba8888);
+            draw_search_edit_contents(
+                &mut surface,
+                &layout,
+                &fonts,
+                "ab",
+                2,
+                None,
+                0,
+                true,
+                composition,
+                None,
+            );
+            surface
+        };
+
+        let plain = render(None);
+        let composing = render(Some(&crate::ime::ImeComposition {
+            text: "xy".to_owned(),
+            cursor: None,
+        }));
+        assert_ne!(
+            plain.pixels(),
+            composing.pixels(),
+            "the composition and its underline have to be visible"
+        );
+
+        // And it is provisional: an empty preedit draws exactly the field.
+        let cancelled = render(Some(&crate::ime::ImeComposition::default()));
+        assert_eq!(
+            plain.pixels(),
+            cancelled.pixels(),
+            "a cancelled composition leaves no trace"
+        );
+
+        // The caret moves with the composition rather than staying put.
+        let caret_without = search_caret_area(&layout, &fonts.text, "ab", 2, 0, None);
+        let caret_with = search_caret_area(
+            &layout,
+            &fonts.text,
+            "ab",
+            2,
+            0,
+            Some(&crate::ime::ImeComposition {
+                text: "xy".to_owned(),
+                cursor: None,
+            }),
+        );
+        assert!(
+            caret_with.x > caret_without.x,
+            "{caret_with:?} is not right of {caret_without:?}"
+        );
+    }
+
     #[test]
     fn search_edit_render_tracks_selection_caret_and_horizontal_scroll() {
         let fonts = endeavour_font_set();
@@ -2803,6 +2933,7 @@ mod tests {
                 selection,
                 horizontal_scroll,
                 cursor_visible,
+                None,
                 None,
             );
             surface
@@ -2870,7 +3001,7 @@ mod tests {
         let layout = scen_sel_layout(800, 600, &fonts);
         let mut plain = Surface::new(800, 600, clonk_graphics::PixelFormat::Rgba8888);
         draw_search_edit_contents(
-            &mut plain, &layout, &fonts, "alpha", 5, None, 0, false, None,
+            &mut plain, &layout, &fonts, "alpha", 5, None, 0, false, None, None,
         );
         let mut with_clear = plain.clone();
 
