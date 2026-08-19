@@ -333,6 +333,7 @@ fn main() {
     let mut advance_times = Vec::with_capacity(frames);
     let mut snapshot_times = Vec::with_capacity(frames);
     let run_started = Instant::now();
+    let mut peak_pxs = clonk_engine::pxs::PxsScanBaseline::default();
     for _ in 0..frames {
         let frame_started = Instant::now();
         match mode {
@@ -359,6 +360,12 @@ fn main() {
             }
         }
         frame_times.push(frame_started.elapsed());
+        // Sampled every frame, because the interesting value is the peak the
+        // scans reach rather than whatever the last frame happens to hold.
+        let pxs = engine.pxs_execute_scan_baseline();
+        if pxs.visited_slots > peak_pxs.visited_slots || pxs.live > peak_pxs.live {
+            peak_pxs = pxs;
+        }
     }
     let run_elapsed = run_started.elapsed();
     let final_census = object_census(&engine);
@@ -418,13 +425,12 @@ fn main() {
     // What the PXS Execute pass walks against what it finds
     // (clonk-org/clonk-rs#296): the pass visits every slot of every allocated
     // chunk, so this is the sparse-scan baseline for the final frame.
-    let pxs = engine.pxs_execute_scan_baseline();
     println!(
-        "pxs scan         {} slots in {} chunk(s) for {} live ({} empty)",
-        pxs.visited_slots,
-        pxs.allocated_chunks,
-        pxs.live,
-        pxs.scanned_empty()
+        "pxs scan peak    {} slots in {} chunk(s) for {} live ({} empty)",
+        peak_pxs.visited_slots,
+        peak_pxs.allocated_chunks,
+        peak_pxs.live,
+        peak_pxs.scanned_empty()
     );
     if !advance_times.is_empty() || !snapshot_times.is_empty() {
         println!("\nphase                    mean        p50        p95        p99        max");
