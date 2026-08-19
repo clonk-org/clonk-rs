@@ -76,6 +76,30 @@ pub fn content_root() -> PathBuf {
 ///
 /// Keeping this in test support makes virtual playthroughs exercise real
 /// content without gaining a state-mutation shortcut.
+/// What the load half of an activation spent, before `apply` begins.
+///
+/// `ActivationTimings` covers `Scenario::apply` and nothing before it, so for
+/// a small scenario — where load is the larger half — the recorded stages
+/// describe a minority of the interval (clonk-org/clonk-rs#293). These are the
+/// four calls this harness makes to reach an applied engine, timed where they
+/// are already made rather than by instrumenting the engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScenarioLoadTimings {
+    /// `Scenario::load_from_path_with_seed`: group I/O, the scenario core, and
+    /// every definition it resolves.
+    pub scenario: std::time::Duration,
+    /// `MaterialLibrary::from_group` over the installed `Material.c4g`.
+    pub materials: std::time::Duration,
+    /// `planet/System.c4g`: reading and parsing the global script hosts.
+    pub system_scripts: std::time::Duration,
+}
+
+impl ScenarioLoadTimings {
+    pub fn total(&self) -> std::time::Duration {
+        self.scenario + self.materials + self.system_scripts
+    }
+}
+
 pub struct PreparedInstalledScenario {
     seed: u64,
     scenario_path: PathBuf,
@@ -83,9 +107,14 @@ pub struct PreparedInstalledScenario {
     materials: MaterialLibrary,
     system_scripts: Vec<(String, String)>,
     standard_names: Option<String>,
+    load_timings: ScenarioLoadTimings,
 }
 
 impl PreparedInstalledScenario {
+    pub fn load_timings(&self) -> ScenarioLoadTimings {
+        self.load_timings
+    }
+
     pub fn generated_landscape_requires_seed_retry(&self) -> bool {
         self.scenario.generated_landscape_requires_seed_retry()
     }
@@ -144,6 +173,7 @@ pub fn prepare_installed_scenario(
         .into_iter()
         .find(|candidate| candidate.exists())
         .unwrap_or_else(|| bundled.join(relative_path));
+    let scenario_started = std::time::Instant::now();
     let scenario = Scenario::load_from_path_with_seed(
         &scenario_path,
         &ContentResolver {
@@ -152,15 +182,21 @@ pub fn prepare_installed_scenario(
         seed,
     )
     .unwrap_or_else(|error| panic!("scenario `{}` loads: {error}", scenario_path.display()));
+    let scenario_elapsed = scenario_started.elapsed();
 
+    let materials_started = std::time::Instant::now();
     let material_group = Group::open(content.join("Material.c4g"))
         .unwrap_or_else(|error| panic!("installed Material.c4g opens: {error}"));
     let materials = MaterialLibrary::from_group(&material_group)
         .unwrap_or_else(|error| panic!("installed Material.c4g loads: {error}"));
+    let materials_elapsed = materials_started.elapsed();
+
+    let system_started = std::time::Instant::now();
     let system_group = Group::open(content_install.join("planet/System.c4g"))
         .unwrap_or_else(|error| panic!("planet System.c4g opens: {error}"));
     let system_scripts = load_system_scripts(&system_group)
         .unwrap_or_else(|error| panic!("planet System.c4g scripts load: {error}"));
+    let system_elapsed = system_started.elapsed();
     let standard_names = system_group
         .read_file("Names.txt")
         .ok()
@@ -173,6 +209,11 @@ pub fn prepare_installed_scenario(
         materials,
         system_scripts,
         standard_names,
+        load_timings: ScenarioLoadTimings {
+            scenario: scenario_elapsed,
+            materials: materials_elapsed,
+            system_scripts: system_elapsed,
+        },
     }
 }
 

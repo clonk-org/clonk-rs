@@ -63,16 +63,52 @@
 //! `definition_registration` 30.1 ms (37%); `environment_placement` is 3.5 µs.
 //!
 //! **The stage that dominates a large scenario does not dominate a small one,
-//! and neither is where a small scenario's time goes at all**: 81% of
-//! Tutorial 1's activation is in *load*, before `apply` begins. `Scenario::load`
-//! has no stage instrumentation, so that share is currently unattributable —
-//! it is the next thing to measure, and clonk-org/clonk-rs#293's criteria list
-//! group I/O, definition traversal and script parse/link as the stages it wants
-//! there.
+//! and neither is where a small scenario's time goes at all**: 80% of
+//! Tutorial 1's activation is in *load*, before `apply` begins.
+//!
+//! ## The load half
+//!
+//! Timed where this harness already makes the calls, rather than by
+//! instrumenting the engine:
+//!
+//! | | Tutorial 1 | 03_Chaos |
+//! |---|---|---|
+//! | load total | 335.5 ms (**80%** of the interval) | 577.7 ms (4.6%) |
+//! | `Scenario::load_from_path_with_seed` | 333.4 ms (**99%** of load) | 575.5 ms (**99%**) |
+//! | `Material.c4g` | 311 µs (0%) | 377 µs (0%) |
+//! | `planet/System.c4g` | 1.8 ms (0%) | 1.8 ms (0%) |
+//!
+//! **Load is one call.** Group I/O, the scenario core and every definition it
+//! resolves are 99% of it on both scenarios, and the two pieces that are
+//! separate calls today are noise: materials/texmap — which
+//! clonk-org/clonk-rs#293's criteria list as a stage worth reporting — is
+//! **0.08% of load**, and the global script hosts are 0.5%. Splitting those out
+//! would report two numbers nobody can act on.
+//!
+//! So the next split belongs *inside* `Scenario::load_from_path_*`, between
+//! group decode, definition traversal and script parse/link, and it needs
+//! engine instrumentation rather than harness timing. The two scenarios also
+//! disagree about whether load matters at all — 80% against 4.6% — so a
+//! threshold taken from either alone would be wrong.
 
 use std::time::Duration;
 
-use crate::support::real_scenario::{load_installed_scenario, load_tutorial};
+use crate::support::real_scenario::{prepare_installed_scenario, ScenarioLoadTimings};
+
+/// The load half, which `ActivationTimings` cannot see: it records spans
+/// inside `Scenario::apply` and nothing before it.
+fn report_load(label: &str, load: ScenarioLoadTimings) {
+    let total = load.total();
+    let share = |span: Duration| span.as_micros().saturating_mul(100) / total.as_micros().max(1);
+    eprintln!("--- {label}: load, before apply begins — {total:?} ---");
+    for (name, span) in [
+        ("scenario (group I/O + definitions)", load.scenario),
+        ("materials (Material.c4g)", load.materials),
+        ("system_scripts (planet/System.c4g)", load.system_scripts),
+    ] {
+        eprintln!("    {name}: {span:?} ({}%)", share(span));
+    }
+}
 
 fn report(label: &str, wall: Duration, timings: clonk_engine::ActivationTimings) {
     let total = timings.total;
@@ -114,8 +150,11 @@ fn report(label: &str, wall: Duration, timings: clonk_engine::ActivationTimings)
 #[ignore = "manual profiling probe; reports timings and asserts nothing"]
 fn scenario_activation_profile_over_clonkmars_chaos() {
     let started = std::time::Instant::now();
-    let engine = load_installed_scenario("ClonkMars.c4f/03_Chaos.c4s", 0);
+    let prepared = prepare_installed_scenario("ClonkMars.c4f/03_Chaos.c4s", 0);
+    let load = prepared.load_timings();
+    let engine = prepared.instantiate();
     let wall = started.elapsed();
+    report_load("ClonkMars 03_Chaos", load);
     report("ClonkMars 03_Chaos", wall, engine.activation_timings());
 }
 
@@ -126,7 +165,10 @@ fn scenario_activation_profile_over_clonkmars_chaos() {
 #[ignore = "manual profiling probe; reports timings and asserts nothing"]
 fn scenario_activation_profile_over_a_small_tutorial() {
     let started = std::time::Instant::now();
-    let engine = load_tutorial(1, 0);
+    let prepared = prepare_installed_scenario("Tutorial.c4f/Tutorial01.c4s", 0);
+    let load = prepared.load_timings();
+    let engine = prepared.instantiate();
     let wall = started.elapsed();
+    report_load("Tutorial 1", load);
     report("Tutorial 1", wall, engine.activation_timings());
 }
