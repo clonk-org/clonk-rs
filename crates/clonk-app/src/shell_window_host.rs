@@ -25,6 +25,10 @@ use winit::window::Window;
 pub struct ShellWindowHost {
     pub window: Arc<Window>,
     pub pixels: Option<WindowSurface>,
+    /// The wgpu-free presenter, when this window has no usable adapter.
+    /// Mutually exclusive with `pixels`: a window presents one way or the
+    /// other (clonk-org/clonk-rs#299).
+    pub software: Option<clonk_surface::SoftwarePresenter>,
     pub presenter: clonk_scaling::FramePresenter,
     /// Built from `pixels`' device/queue/format, so it is part of this
     /// surface. `None` once a presenter exists that has no device to build it
@@ -48,6 +52,7 @@ impl ShellWindowHost {
         Self {
             window,
             pixels: Some(pixels),
+            software: None,
             presenter,
             renderer,
             surface_rebuild: SurfaceRebuildState::default(),
