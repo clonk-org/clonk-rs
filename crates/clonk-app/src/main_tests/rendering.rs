@@ -5985,3 +5985,45 @@ fn a_below_floor_adapter_is_reported_as_such_not_as_a_missing_one() {
         PresentationChoice::Software(SoftwareReason::NoAdapter),
     );
 }
+
+#[test]
+fn the_presentation_path_never_reaches_the_simulation() {
+    // clonk-org/clonk-rs#299 requires lockstep, RNG and saves to be identical
+    // between GPU and software presentation. Structurally they are:
+    // `retained_gpu_presentation_active` is read in exactly one place, choosing
+    // where a savegame thumbnail comes from, and never by the engine. This pins
+    // that, so a future change cannot quietly make simulation depend on how
+    // pixels reach the screen — which on a machine with no adapter would mean
+    // it simulates differently from everyone else.
+    const FRAMES: usize = 30;
+
+    let advance = |retained: bool| {
+        let mut app = new_running_sandbox_app();
+        app.retained_gpu_presentation_active = retained;
+        for _ in 0..FRAMES {
+            app.engine.tick().test_value();
+        }
+        (
+            app.engine.snapshot(),
+            app.engine.random_seed(),
+            app.engine.frame(),
+        )
+    };
+
+    let gpu = advance(true);
+    let gpu_again = advance(true);
+    // Establish the fixture is deterministic first. Without this the
+    // cross-path comparison below could pass by comparing two runs that are
+    // both wrong, or fail for a reason that has nothing to do with
+    // presentation.
+    assert_eq!(
+        gpu, gpu_again,
+        "the sandbox fixture must be deterministic before it can prove anything"
+    );
+
+    let software = advance(false);
+    assert_eq!(
+        gpu, software,
+        "presentation path changed the simulation: snapshot, RNG or frame diverged"
+    );
+}
