@@ -70,7 +70,7 @@ The four are distinguished so a user is told which of them happened:
 | No adapter at all (no installed driver, or a GLES 2-only board) | `SurfaceError::AdapterNotFound`, after every backend set has been tried |
 | An adapter below the floor | `SurfaceError::BelowGraphicsFloor`, carrying one diagnostic naming **every** unmet requirement |
 | Device creation failed on an adapter that passed | `SurfaceError::Device`, carrying wgpu's `RequestDeviceError` |
-| Surface lost while running | `SurfaceError::Lost` — the one presentation failure callers recover from, by rebuilding the surface rather than reconfiguring it |
+| Surface lost while running | `SurfaceError::SurfaceLost` — the one presentation failure callers recover from, by rebuilding the surface rather than reconfiguring it |
 
 ## Qualification
 

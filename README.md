@@ -25,6 +25,9 @@ Download the release for your platform from the
 Each download already contains the game data; no separate content install is
 needed.
 
+[docs/GRAPHICS_SUPPORT.md](docs/GRAPHICS_SUPPORT.md) lists what a machine needs
+to run the game, including which Raspberry Pi generations are supported.
+
 ## Playing
 
 ![The Clonk Rust startup menu](docs/images/startup-menu.png)
