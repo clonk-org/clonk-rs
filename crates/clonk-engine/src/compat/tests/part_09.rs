@@ -261,6 +261,39 @@ public func Probe(object carrier)
         assert_eq!(result.expect("EffectCall succeeds"), Value::Nil);
     }
 
+    /// `AddEffect` must not copy the effect stack to decide whether an
+    /// existing checker blocks the new effect.
+    ///
+    /// C4Effect::Init walks the existing chain in place (C4Effect.cpp:60-96).
+    /// Copying it instead costs O(n) per call and therefore O(n²) across a
+    /// scenario that builds a grid of them: ClonkMars `03_Chaos` adds roughly
+    /// 470 global effects during activation, and that activation takes twelve
+    /// seconds (clonk-org/clonk-rs#732).
+    #[test]
+    fn add_effect_checks_blocking_priorities_without_cloning_the_effect_stack() {
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(120),
+            ])?;
+            reset_effect_snapshot_count();
+            let number = add_effect(&[
+                Value::String("Spark".into()),
+                state.clone(),
+                Value::Int(80),
+            ])?;
+            assert_eq!(effect_snapshot_count(), 0);
+            Ok(number)
+        });
+
+        assert!(matches!(
+            result.expect("AddEffect succeeds"),
+            Value::Int(_)
+        ));
+    }
+
     #[test]
     fn get_effect_count_filters_by_name_and_priority() {
         let state = empty_state();
