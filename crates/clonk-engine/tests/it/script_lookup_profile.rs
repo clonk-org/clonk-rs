@@ -37,17 +37,48 @@
 //! Totals: 199,415 lookups and 1,879,374 bytes hashed over 400 frames, or
 //! roughly 500 lookups and 4.7 KiB hashed per frame.
 //!
+//! Throwaway sub-counts over the same trace attributed two of the call paths
+//! that issue those 154,727 function lookups:
+//!
+//! - The compiled executor was entered 14,299 times, ran 13,098 of those, and
+//!   resolved 14,236 call sites in its per-invocation prelude (4,516 script,
+//!   9,720 host). At one script probe and two host probes per site that is
+//!   roughly 28,000 lookups, about 18%.
+//! - The AST interpreter evaluated 15,117 call expressions, each resolving its
+//!   callee by name on every executed call. With its host fallback that is
+//!   roughly 30,000 lookups, about another 20%.
+//!
+//! That leaves about 60% unattributed, spread over the other resolution sites
+//! and the host-initiated entry points. Attributing it needs per-site counters
+//! rather than more throwaway atomics, which is the next step below.
+//!
 //! # Go/no-go
 //!
-//! **Go, for function name resolution only.** Script and host function names
-//! are 76% of all lookups after clonk-org/clonk-rs#207 and #259, so that
-//! family is still material and is where interning is worth its risk. The
-//! cost is per *invocation*, not per executed call: the compiled executor
-//! re-resolves every call site in a function's body each time the function is
-//! entered, which `function_name_lookups_do_not_scale_with_the_work_a_call
-//! _does` pins. Real content makes many short calls, so that prelude runs
-//! constantly — a synthetic loop that stays inside one long-running function
-//! hides this completely and reports the opposite ranking.
+//! **Go on the family, not yet on a site.** Script and host function names are
+//! 76% of all lookups after clonk-org/clonk-rs#207 and #259, so the family is
+//! still material and the issue's premise survives its own staleness warning.
+//! But the obvious target is the wrong one: the compiled executor's prelude
+//! re-resolves every call site each time a function is entered — which
+//! `function_name_lookups_do_not_scale_with_the_work_a_call_does` pins as per
+//! invocation rather than per executed call — and it is only ~18% of the cost.
+//! Interning it would move a fifth of the lookups and leave the majority
+//! untouched.
+//!
+//! The next step is therefore to extend this instrument with per-call-site
+//! attribution and find the remaining ~60% *before* choosing where handles
+//! attach. Implementing against the numbers known today would optimise a
+//! minority path.
+//!
+//! Three traps this measurement caught, each of which would have sent the work
+//! somewhere it does not belong:
+//!
+//! - A synthetic loop that stays inside one long-running function reports
+//!   `local` three orders of magnitude heavier than the function families and
+//!   ranks them last. Real content makes many short calls.
+//! - The compiled prelude looks like the hot path from reading the code, and
+//!   is not.
+//! - A family total does not name a call site. 76% in one family still split
+//!   across at least three paths with different fixes.
 //!
 //! **No-go for the rest.** `constant`, `definition` and `global` are 1% each;
 //! interning them would be risk without a return. `local` is 17% but is
