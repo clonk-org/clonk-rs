@@ -4771,6 +4771,8 @@ impl<'a> Vm<'a> {
         }
 
         maybe_grow(|| {
+            let _profiled_dispatch =
+                lookup_profile::enter_site(lookup_profile::LookupSite::GenericDispatch);
             if let Some(function) = self.own_script_function(name) {
                 #[cfg(test)]
                 if caller.is_some() {
@@ -5818,6 +5820,8 @@ impl<'a> Vm<'a> {
         if self.call_expression_returns_reference(expr, env) {
             return false;
         }
+        let _profiled_query =
+            lookup_profile::enter_site(lookup_profile::LookupSite::ReferenceQuery);
         let function = if env.engine_scope {
             self.engine_script_function(name)
         } else {
@@ -6910,12 +6914,15 @@ impl<'a> Vm<'a> {
                         .map(TrackedValue::runtime);
                 }
                 if let Expr::Variable(name) = callee.as_ref() {
+                    let profiled_call =
+                        lookup_profile::enter_site(lookup_profile::LookupSite::AstCall);
                     let function_target = self.resolved_script_function(name, env.engine_scope);
                     let function = function_target.map(|target| target.function);
                     let host_function = function
                         .is_none()
                         .then(|| self.resolved_host_function(name))
                         .flatten();
+                    drop(profiled_call);
                     let bound_context_name = name == "this" && self.has_bound_this(env);
                     if name == "this"
                         && (bound_context_name || function.is_none() && host_function.is_none())
@@ -8647,6 +8654,8 @@ impl<'a> Vm<'a> {
         depth: usize,
         retained_target: Option<(&mut Value, usize)>,
     ) -> Result<Value, RuntimeError> {
+        let profiled_object_call =
+            lookup_profile::enter_site(lookup_profile::LookupSite::ObjectCall);
         let function = self.own_or_global_script_function(name);
         if failsafe
             && function.is_none()
@@ -8670,6 +8679,9 @@ impl<'a> Vm<'a> {
             }
             return Ok(Value::Nil);
         }
+        // Only the name resolution above belongs to this site; evaluating the
+        // arguments runs arbitrary script that marks its own spans.
+        drop(profiled_object_call);
         let mut evaluated_args =
             self.build_call_args(Some(name), function, args, env, depth + 1)?;
         if forward_rest {
@@ -9789,6 +9801,8 @@ impl<'a> Vm<'a> {
         let Expr::Call { callee, args, .. } = expr else {
             return false;
         };
+        let _profiled_query =
+            lookup_profile::enter_site(lookup_profile::LookupSite::ReferenceQuery);
         match callee.as_ref() {
             Expr::Variable(name) => {
                 let function = if env.engine_scope {
@@ -11346,6 +11360,10 @@ impl CompiledFunction {
             return Ok(None);
         }
         let mut call_targets = SmallVec::<[CompiledCallTarget<'_>; 32]>::new();
+        // Scoped to the resolution prelude alone: the executed body below
+        // attributes its own lookups to whichever path it reaches.
+        let profiled_prelude =
+            lookup_profile::enter_site(lookup_profile::LookupSite::CompiledPrelude);
         for site in &self.call_sites {
             let name = &site.name;
             let argument_count = site.argument_count;
@@ -11392,6 +11410,7 @@ impl CompiledFunction {
             }
             return Ok(None);
         }
+        drop(profiled_prelude);
         let mut stack = SmallVec::<[TrackedValue; 16]>::with_capacity(self.max_stack);
         let mut registered_slots = SmallVec::<[bool; 16]>::from_elem(false, bindings.len());
         #[cfg(test)]
