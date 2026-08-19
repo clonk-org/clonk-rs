@@ -7605,6 +7605,90 @@ impl ActivationTimings {
     }
 }
 
+/// One phase of `C4Game::InitGame`'s legacy environment placements.
+///
+/// The placement count is the loop's own iteration count, not the objects that
+/// survived: a `PlaceVegetation` that finds nowhere to stand still costs a
+/// draw and a landscape probe, and dividing a span by survivors would hide
+/// exactly that.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlacementPhase {
+    pub span: std::time::Duration,
+    pub placements: u32,
+}
+
+impl PlacementPhase {
+    fn record(&mut self, span: std::time::Duration, placements: u32) {
+        self.span = self.span.saturating_add(span);
+        self.placements = self.placements.saturating_add(placements);
+    }
+}
+
+/// Where `run_legacy_init_placements` spends its time
+/// (clonk-org/clonk-rs#732), split by the `C4Game::InitGame` phase that spends
+/// it (C4Game.cpp:2493-2503).
+///
+/// Observation only; nothing in the simulation reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlacementTimings {
+    /// `InitVegetation` (C4Game.cpp:3078-3091).
+    pub vegetation: PlacementPhase,
+    /// `InitInEarth` (C4Game.cpp:3063-3076).
+    pub in_earth: PlacementPhase,
+    /// `InitAnimals`' FreeLife pass (C4Game.cpp:3093-3105).
+    pub animals: PlacementPhase,
+    /// `InitAnimals`' EarthNest pass.
+    pub nests: PlacementPhase,
+    /// `InitEnvironment` (C4Game.cpp:3988-3996).
+    pub environment: PlacementPhase,
+    /// `InitRules` plus the `UpdateRules` scan that follows it
+    /// (C4Game.cpp:3998-4008,4016-4044).
+    pub rules: PlacementPhase,
+    /// `InitGoals` (C4Game.cpp:4010-4018).
+    pub goals: PlacementPhase,
+    /// The whole pass, so the phases can be read as shares and whatever they
+    /// miss stays visible.
+    pub total: std::time::Duration,
+}
+
+impl PlacementTimings {
+    /// Time the phases account for.
+    pub fn phased(&self) -> std::time::Duration {
+        [
+            self.vegetation,
+            self.in_earth,
+            self.animals,
+            self.nests,
+            self.environment,
+            self.rules,
+            self.goals,
+        ]
+        .into_iter()
+        .map(|phase| phase.span)
+        .sum()
+    }
+
+    /// Time no phase accounts for.
+    pub fn unattributed(&self) -> std::time::Duration {
+        self.total.saturating_sub(self.phased())
+    }
+
+    /// Every phase with its label, heaviest first.
+    pub fn ranked(&self) -> Vec<(&'static str, PlacementPhase)> {
+        let mut phases = vec![
+            ("vegetation", self.vegetation),
+            ("in_earth", self.in_earth),
+            ("animals", self.animals),
+            ("nests", self.nests),
+            ("environment", self.environment),
+            ("rules", self.rules),
+            ("goals", self.goals),
+        ];
+        phases.sort_by_key(|(_, phase)| std::cmp::Reverse(phase.span));
+        phases
+    }
+}
+
 /// The activation stage a span belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivationStage {
@@ -7628,6 +7712,8 @@ pub struct Engine {
     pub(crate) effect_dispatch_stats: std::cell::Cell<EffectDispatchStats>,
     /// Observation only; see `ActivationTimings`.
     pub(crate) activation_timings: ActivationTimings,
+    /// Observation only; see `PlacementTimings`.
+    pub(crate) placement_timings: PlacementTimings,
     /// Keyed by `DefinitionId`, so the per-tick probes from
     /// `active_solid_mask_indices` pay a fixed-seed hash rather than
     /// `RandomState`'s. Every iteration over this map is order-independent:
@@ -10073,6 +10159,7 @@ impl Engine {
         let mut engine = Self {
             effect_dispatch_stats: std::cell::Cell::default(),
             activation_timings: ActivationTimings::default(),
+            placement_timings: PlacementTimings::default(),
             next_mission_defaults: (
                 compat::DEFAULT_NEXT_MISSION_TEXT.to_string(),
                 compat::DEFAULT_NEXT_MISSION_DESCRIPTION.to_string(),
@@ -10603,6 +10690,13 @@ impl Engine {
     /// Clears the stage timings, so one activation does not report another's.
     pub fn reset_activation_timings(&mut self) {
         self.activation_timings = ActivationTimings::default();
+        self.placement_timings = PlacementTimings::default();
+    }
+
+    /// Where the environment-placement stage spent its time, by phase
+    /// (clonk-org/clonk-rs#732).
+    pub fn placement_timings(&self) -> PlacementTimings {
+        self.placement_timings
     }
 
     /// Adds a stage's span. Stages accumulate because placement runs from more

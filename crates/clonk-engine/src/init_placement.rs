@@ -559,6 +559,9 @@ impl Engine {
     /// (C4Game.cpp:2493-2503); the caller applies the
     /// `!NoInitialize && LandscapeLoaded` gate.
     pub(crate) fn run_legacy_init_placements(&mut self, placement: &LegacyInitPlacement) {
+        // Phase spans, for clonk-org/clonk-rs#732. Observation only: every
+        // timer wraps a loop whose body is unchanged, so no draw moves.
+        let pass_started = std::time::Instant::now();
         let earth_material = self.earth_material(&placement.earth_material);
 
         // InitVegetation (C4Game.cpp:3078-3091): the VegLevel evaluate
@@ -566,6 +569,8 @@ impl Engine {
         let veg_amount =
             (self.gback_wdt() / 50) * placement.vegetation_level.evaluate(&mut self.rng) / 100;
         let vidlist = self.list_expand_valids(&placement.vegetation);
+        let phase_started = std::time::Instant::now();
+        let mut placements = 0_u32;
         if !vidlist.is_empty() {
             let gback_wdt = self.gback_wdt();
             let gback_hgt = self.gback_hgt();
@@ -573,48 +578,80 @@ impl Engine {
                 let pick = self.rng.random(vidlist.len() as i32) as usize;
                 let id = vidlist[pick].clone();
                 self.place_vegetation(&id, 0, 0, gback_wdt, gback_hgt, -1);
+                placements += 1;
             }
         }
+        self.placement_timings
+            .vegetation
+            .record(phase_started.elapsed(), placements);
 
         // InitInEarth (C4Game.cpp:3063-3076).
         let in_earth_amount = (self.gback_wdt() * self.gback_hgt() / 5000)
             * placement.in_earth_level.evaluate(&mut self.rng)
             / 100;
         let vidlist = self.list_expand_valids(&placement.in_earth);
+        let phase_started = std::time::Instant::now();
+        let mut placements = 0_u32;
         if !vidlist.is_empty() {
             for _ in 0..in_earth_amount {
                 let pick = self.rng.random(vidlist.len() as i32) as usize;
                 let id = vidlist[pick].clone();
                 self.place_in_earth(&id, earth_material);
+                placements += 1;
             }
         }
+        self.placement_timings
+            .in_earth
+            .record(phase_started.elapsed(), placements);
 
         // InitAnimals (C4Game.cpp:3093-3105): FreeLife then EarthNest,
         // entry order, no validity pre-filter (PlaceAnimal C4Id2Defs;
         // PlaceInEarth draws its tries regardless).
+        let phase_started = std::time::Instant::now();
+        let mut placements = 0_u32;
         for (id, count) in &placement.animals {
             for _ in 0..*count {
                 self.place_animal(id);
+                placements += 1;
             }
         }
+        self.placement_timings
+            .animals
+            .record(phase_started.elapsed(), placements);
+
+        let phase_started = std::time::Instant::now();
+        let mut placements = 0_u32;
         for (id, count) in &placement.nests {
             for _ in 0..*count {
                 self.place_in_earth(id, earth_material);
+                placements += 1;
             }
         }
+        self.placement_timings
+            .nests
+            .record(phase_started.elapsed(), placements);
 
         // InitEnvironment (C4Game.cpp:3988-3996): CreateObject(id, nullptr)
         // — C4Game.h defaults x=50, y=50, owner NO_OWNER.
+        let phase_started = std::time::Instant::now();
+        let mut placements = 0_u32;
         for (id, count) in &placement.environment {
             for _ in 0..*count {
                 self.init_create_object(id, 50, 50, 0);
+                placements += 1;
             }
         }
+        self.placement_timings
+            .environment
+            .record(phase_started.elapsed(), placements);
 
         // InitRules (C4Game.cpp:3998-4008): at least one per listed rule.
+        let phase_started = std::time::Instant::now();
+        let mut placements = 0_u32;
         for (id, count) in &placement.rules {
             for _ in 0..(*count).max(1) {
                 self.init_create_object(id, 50, 50, 0);
+                placements += 1;
             }
         }
         // InitRules immediately calls UpdateRules. It derives these flags
@@ -633,12 +670,28 @@ impl Engine {
             self.set_structures_need_energy(true);
         }
 
+        // `UpdateRules` is part of what InitRules costs, so it is inside the
+        // rules phase rather than left to the unattributed remainder.
+        self.placement_timings
+            .rules
+            .record(phase_started.elapsed(), placements);
+
         // InitGoals (C4Game.cpp:4010-4018).
+        let phase_started = std::time::Instant::now();
+        let mut placements = 0_u32;
         for (id, count) in &placement.goals {
             for _ in 0..*count {
                 self.init_create_object(id, 50, 50, 0);
+                placements += 1;
             }
         }
+        self.placement_timings
+            .goals
+            .record(phase_started.elapsed(), placements);
+        self.placement_timings.total = self
+            .placement_timings
+            .total
+            .saturating_add(pass_started.elapsed());
     }
 
     /// Fresh-game tail after Weather.Init: if any live C4D_Goal exists but
