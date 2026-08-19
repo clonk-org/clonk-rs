@@ -245,6 +245,25 @@ pub(crate) struct Cli {
     pub(crate) headed_surface_smoke: Option<std::path::PathBuf>,
 
     #[arg(
+        long = "software-present-smoke",
+        value_name = "REPORT.json",
+        conflicts_with_all = [
+            "headless",
+            "test_load",
+            "integration_test",
+            "host",
+            "join",
+            "sandbox",
+            "dump_frame",
+            "dump_menu_frame",
+            "headed_surface_smoke",
+            "classic_arguments"
+        ],
+        hide = true
+    )]
+    pub(crate) software_present_smoke: Option<std::path::PathBuf>,
+
+    #[arg(
         long = "dump-frame",
         value_name = "PATH",
         help = "Headless: boot the sandbox, advance --test-frames frames, render one in-game frame to a PNG at PATH, and exit (no window). For visual rendering-parity checks."
@@ -298,6 +317,7 @@ pub(crate) fn debug_hud_launch(cli: &Cli) -> DebugHudLaunch {
         || cli.dump_menu_frame.is_some()
         || cli.headless
         || cli.headed_surface_smoke.is_some()
+        || cli.software_present_smoke.is_some()
     {
         DebugHudLaunch::ParityCapture
     } else {
