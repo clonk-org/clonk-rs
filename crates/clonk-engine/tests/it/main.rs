@@ -136,6 +136,7 @@ shard_modules!(
     real_tutorial_campaign,
     reference_parameters,
     sailboat_hull_solid_mask,
+    scenario_activation_profile,
     script_counter,
     script_goto,
     script_lookup_profile,
