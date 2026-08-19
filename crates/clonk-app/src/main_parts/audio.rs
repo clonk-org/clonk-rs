@@ -1004,6 +1004,24 @@ pub(crate) fn software_presentation_requested() -> bool {
 /// from one that never answered, and `SoftwareReason` is only worth carrying if
 /// the right one is carried. The report travels inside the error, so it has to
 /// be recovered from the chain rather than guessed at.
+/// What an operator is told when *neither* presentation path could start.
+///
+/// Both halves have to survive into the message. A machine with no usable GPU
+/// and no working window system needs to see that it was both, not whichever
+/// was tried last — that is the third of the three cases
+/// clonk-org/clonk-rs#299 asks startup diagnostics to tell apart, and the one
+/// with no reachable state to inspect afterwards.
+///
+/// The GPU side is rendered with `{:#}` so its whole `anyhow` chain comes
+/// along: the outer message alone is usually "failed to create a framebuffer",
+/// which names nothing an operator can act on.
+pub(crate) fn both_presentations_failed_context(gpu_error: &anyhow::Error) -> String {
+    format!(
+        "no GPU adapter was usable ({gpu_error:#}), and software \
+         presentation could not start either"
+    )
+}
+
 pub(crate) fn software_choice_for_gpu_failure(
     gpu_error: &anyhow::Error,
 ) -> clonk_surface::capability::PresentationChoice {
@@ -1061,10 +1079,7 @@ pub(crate) fn build_primary_presentation(
             // has neither a GPU nor a working window system needs to see that
             // it was both, not whichever was tried last.
             software(choice).map_err(|software_error| {
-                software_error.context(format!(
-                    "no GPU adapter was usable ({gpu_error:#}), and software \
-                     presentation could not start either"
-                ))
+                software_error.context(both_presentations_failed_context(&gpu_error))
             })
         }
     }
