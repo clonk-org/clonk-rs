@@ -695,6 +695,59 @@ mod tests {
     }
 
     #[test]
+    fn a_reference_query_does_not_probe_the_host_tables_for_an_ordinary_name() {
+        // Only seven builtin names (`Var`, `Par`, `LocalN`, …) can make the
+        // host tables decide whether a call yields a reference. The predicate
+        // probed them for every other name too, before the cheap name test
+        // that is the only thing making the answer relevant.
+        let mut engine = crate::Engine::new();
+        engine.register_host_function("HostDouble", |args: &[crate::Value]| {
+            let value = args.first().and_then(crate::Value::as_c4_int).unwrap_or(0);
+            Ok(crate::Value::Int(value * 2))
+        });
+        engine
+            .load_script(
+                "global func Interpreted(&out, count) {\n\
+                     var total = 0;\n\
+                     var index = 0;\n\
+                     while (index < count) {\n\
+                         total = HostDouble(index);\n\
+                         index = index + 1;\n\
+                     }\n\
+                     out = total;\n\
+                     return total;\n\
+                 }",
+            )
+            .expect("host-calling interpreted driver loads");
+
+        const ITERATIONS: i32 = 24;
+        reset();
+        let (_, _) = engine
+            .call_with_ref_args(
+                "Interpreted",
+                &[crate::Value::Nil, crate::Value::Int(ITERATIONS)],
+            )
+            .expect("interpreted driver runs");
+        let profile = snapshot();
+        let host = profile
+            .family_at(LookupFamily::HostFunction, LookupSite::ReferenceQuery)
+            .lookups;
+        let budget = u64::try_from(ITERATIONS).expect("iteration count fits u64");
+
+        // One probe per call survives, and it is not waste: deciding whether
+        // the result is *materialized* genuinely needs to know a host function
+        // exists. The two that asked whether the result is a *reference* did
+        // not — `HostDouble` is not one of the seven builtins whose
+        // reference-ness a host registration can change.
+        assert!(
+            host <= budget,
+            "a reference query walked the host tables {host} times over {ITERATIONS} calls, \
+             over the budget of {budget}; it was 3 per call before the name test moved first:\
+             \n{profile}"
+        );
+    }
+
+    #[test]
     fn one_reference_query_resolves_its_callee_once() {
         // `direct_value_call_has_materialized_result` asked
         // `call_expression_returns_reference` whether the result is a
