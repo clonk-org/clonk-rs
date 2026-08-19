@@ -13932,6 +13932,64 @@ mod tests {
         );
     }
 
+    /// The same comparison at a detail factor above one, which is where the
+    /// scissor's own arithmetic lives.
+    ///
+    /// clonk-org/clonk-rs#707 scales the dirty map rectangle by the detail
+    /// factor to reach output space. At detail 1 that scaling is the identity,
+    /// so the test that introduced it could not tell a correct `x * detail`
+    /// from a missing one — and clonk-org/clonk-rs#273's fifth criterion asks
+    /// for detail 2–4 to keep the same semantics.
+    #[test]
+    fn an_incremental_recompose_at_detail_matches_composing_from_scratch() {
+        let Some((_runtime, _instance, _adapter, device, queue)) =
+            test_wgpu_device("lc_gpu_shader_landscape_scissor_detail_device", true)
+        else {
+            return;
+        };
+        let extent = [16_u32, 16_u32];
+        let detail = 3_u32;
+        let base = GpuTextureId::fresh();
+        let source_extent = [extent[0] * detail, extent[1] * detail];
+        let scene = shader_landscape_scene_fixture(base, extent, source_extent, 1);
+        let plan = shader_landscape_plan_fixture(extent);
+
+        // An edit that does not start at the origin: an off-by-one in the
+        // scaled origin shows up as a shifted patch rather than a missing one.
+        let mut edited = plan.clone();
+        for row in 6..9_usize {
+            for column in 4..7_usize {
+                let texel = row * extent[0] as usize + column;
+                edited.index_plane[texel] = u8::from(edited.index_plane[texel] == 0);
+            }
+        }
+
+        let mut incremental = test_renderer(&device, &queue);
+        incremental.set_shader_landscape(true);
+        incremental.set_landscape_detail(detail);
+        incremental.set_pending_shader_landscape(Some((base, plan)));
+        let _ = render_identity_readback(&mut incremental, &device, &queue, &scene);
+        incremental.set_pending_shader_landscape(Some((base, edited.clone())));
+        let after_edit = render_identity_readback(&mut incremental, &device, &queue, &scene);
+        let composed = incremental.last_stats().shader_landscape_composed_texels;
+
+        let mut fresh = test_renderer(&device, &queue);
+        fresh.set_shader_landscape(true);
+        fresh.set_landscape_detail(detail);
+        fresh.set_pending_shader_landscape(Some((base, edited)));
+        let from_scratch = render_identity_readback(&mut fresh, &device, &queue, &scene);
+
+        assert_eq!(
+            after_edit, from_scratch,
+            "a supersampled landscape must recompose to the same pixels"
+        );
+        assert_eq!(
+            composed,
+            u64::from(3 * detail) * u64::from(3 * detail),
+            "the scissor covers the edit scaled by the detail factor, and no more"
+        );
+    }
+
     #[test]
     fn a_landscape_update_composes_into_the_retained_output() {
         let Some((_runtime, _instance, _adapter, device, queue)) =
