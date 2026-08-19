@@ -3748,6 +3748,10 @@ pub(crate) fn remove_file_or_directory(path: &Path) -> io::Result<()> {
         }
         let mut permissions = metadata.permissions();
         if permissions.readonly() {
+            // Clearing `FILE_ATTRIBUTE_READONLY` is exactly what this helper
+            // exists to do, and it is compiled only for Windows, where that
+            // attribute is the entire permission being changed.
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             fs::set_permissions(path, permissions)?;
         }

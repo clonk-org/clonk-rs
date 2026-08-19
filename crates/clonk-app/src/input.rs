@@ -884,7 +884,7 @@ fn windows_user_default_language_is_german() -> bool {
 pub(super) fn is_german_system() -> bool {
     #[cfg(windows)]
     {
-        return windows_user_default_language_is_german();
+        windows_user_default_language_is_german()
     }
     #[cfg(target_os = "macos")]
     let apple_language = macos_apple_language();

@@ -872,6 +872,9 @@ pub fn compress_c4group_image(image: &[u8]) -> Result<Vec<u8>, MutableGroupError
     // SAFETY: the initialized stream remains live through the guard, and zlib
     // accepts the complete input length used for the following one-shot call.
     let output_bound = unsafe { libz_sys::deflateBound(stream, image.len() as _) };
+    // zlib's `uLong` is 32-bit on Windows and 64-bit elsewhere, so this is a
+    // widening check on one target and a no-op on the other.
+    #[allow(clippy::useless_conversion)]
     let output_length =
         u32::try_from(output_bound).map_err(|_| MutableGroupError::GroupDataTooLarge)?;
     let mut compressed = vec![0_u8; output_length as usize];

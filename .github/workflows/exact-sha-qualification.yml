@@ -447,3 +447,54 @@ jobs:
             --test frontend_inline \
             --locked \
             -E 'test(/(alchemy_real_scenario_subcases_batch_4|app_virtual_keyboard_completes_real_tutorial02_route|committed_real_scenario_replays_are_deterministic|real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence|tutorial02_virtual_player_completes_the_real_tutorial_route|tutorial07_seed_zero_landscape_matches_cpp_surface8|tutorial_landscapes_match_cpp_surface8_across_scenarios_and_seeds)$/)'
+
+  platform-lints:
+    name: Platform lints / ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    # `cargo clippy -D warnings` runs only on Linux in `landing.yml`, so the
+    # `cfg(windows)` and `cfg(target_os = "macos")` paths were never linted by
+    # anything and had accumulated findings (clonk-org/clonk-rs#725). The port
+    # carries a lot of both, and the next one could be a real bug rather than
+    # an unused `mut`.
+    #
+    # Here rather than in the queue's ordinary gates because this is a whole
+    # extra workspace build per platform. That still makes it release-blocking
+    # — `landing.yml` waits on this workflow as `release-qualification` — while
+    # staying an asynchronous diagnostic after an ordinary landing.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-latest
+          - name: Windows
+            runner: windows-latest
+    concurrency:
+      group: "main-platform-lint-${{ matrix.name }}-${{ inputs.concurrency-suffix }}"
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          components: clippy
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: . -> target
+          shared-key: platform-lints-${{ matrix.name }}
+
+      # No `--tests`, and so no `content/` checkout: the `include_bytes!` sites
+      # that need the submodule are all inside `#[test]` bodies, and keeping
+      # them out holds this to one library-and-binary build per platform.
+      - name: Lint this platform's own code paths
+        run: cargo clippy --workspace --lib --bins --locked -- -D warnings
