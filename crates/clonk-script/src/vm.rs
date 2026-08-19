@@ -5257,6 +5257,11 @@ impl<'a> Vm<'a> {
     }
 
     fn has_host_function(&self, name: &str) -> bool {
+        // Counted here rather than left to `host_reference_function`: `||`
+        // short-circuits past that call whenever the value table hits, so a
+        // successful probe would otherwise never be recorded and the host
+        // family would under-report exactly its cheapest case.
+        lookup_profile::record(lookup_profile::LookupFamily::HostFunction, name);
         self.host_functions.contains_key(name) || self.host_reference_function(name).is_some()
     }
 
