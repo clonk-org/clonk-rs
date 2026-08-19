@@ -8912,6 +8912,40 @@ mod tests {
         ));
     }
 
+    /// clonk-org/clonk-rs#273's sixth criterion: an oversized landscape takes
+    /// *an explicit tested fallback* rather than exceeding device limits.
+    ///
+    /// The validation above proves the limit is detected. What it cannot show
+    /// is that detection reaches the fallback: `requires_cpu_presentation` is
+    /// what tells the caller to present on the CPU instead of retrying
+    /// retained capture every frame, and it is set from
+    /// `RetainedGpuTextureKind::supports_cpu_fallback`. Adding a shader
+    /// landscape kind to that exclusion would turn "runs, slowly, on the CPU"
+    /// into "the frame fails" with nothing here to notice.
+    #[test]
+    fn every_shader_landscape_texture_kind_falls_back_to_cpu_presentation() {
+        for kind in [
+            RetainedGpuTextureKind::ShaderLandscapeIndex,
+            RetainedGpuTextureKind::ShaderLandscapeShading,
+            RetainedGpuTextureKind::ShaderLandscapeAtlas,
+            RetainedGpuTextureKind::ShaderLandscapeOutput,
+            RetainedGpuTextureKind::Source,
+        ] {
+            assert!(
+                kind.supports_cpu_fallback(),
+                "{kind:?} must degrade to CPU presentation, not fail the frame"
+            );
+        }
+
+        // The composition target is the one exception, and deliberately so:
+        // the CPU presentation buffer uses that same physical extent, so a
+        // fallback would land on a buffer the device cannot present either.
+        assert!(
+            !RetainedGpuTextureKind::Composition.supports_cpu_fallback(),
+            "a composition too large for the device cannot be presented on the CPU either"
+        );
+    }
+
     #[test]
     fn source_limit_requires_cpu_presentation_without_poisoning_device() {
         let Some((runtime, device, queue)) = shader_landscape_test_device() else {
