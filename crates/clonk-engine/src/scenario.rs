@@ -1061,6 +1061,81 @@ mod game_start_sync {
         );
     }
 
+    /// An activation reports how much of itself its stages explain.
+    ///
+    /// clonk-org/clonk-rs#293 exists because the only evidence about activation
+    /// cost is a sampled profile that attributed 99% of one subtree to object
+    /// placement callbacks — which says nothing about the share of the whole
+    /// interval that subtree is. Six stages are recorded, and without the
+    /// interval they sit in, a stage total cannot be turned into a share and
+    /// the work they miss cannot be seen at all. The remainder is the point:
+    /// a large unattributed share means the interesting path is still
+    /// unmeasured, not that it is cheap.
+    #[test]
+    fn scenario_activation_reports_the_interval_its_stages_sit_in() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let rock = defs.join("Rock.c4d");
+        std::fs::create_dir_all(&rock).expect("rock dir");
+        std::fs::write(
+            rock.join("DefCore.txt"),
+            "[DefCore]\nid=ROCK\nName=Rock\nCategory=2\nWidth=8\nHeight=8\nOffset=-4,-4\n",
+        )
+        .expect("rock core");
+        std::fs::write(
+            rock.join("Script.c"),
+            "#strict\nfunc Initialize() { return(1); }\n",
+        )
+        .expect("rock script");
+        write_test_definition_graphics(&rock);
+
+        let scenario_dir = dir.path().join("Interval.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Interval\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("core");
+        std::fs::write(
+            scenario_dir.join("Script.c"),
+            "#strict\nfunc Initialize() { CreateObject(ROCK, 10, 10, -1); return(1); }\n",
+        )
+        .expect("scenario script");
+
+        let resolver = ProbeResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(5);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let timings = engine.activation_timings();
+        assert!(
+            timings.total > std::time::Duration::ZERO,
+            "an activation that ran took a measurable interval"
+        );
+        assert!(
+            timings.staged() <= timings.total,
+            "stages are spans inside the activation, not alongside it: \
+             staged {:?} exceeds total {:?}",
+            timings.staged(),
+            timings.total
+        );
+        assert_eq!(
+            timings.staged() + timings.unattributed(),
+            timings.total,
+            "every part of the interval is either attributed to a stage or not"
+        );
+
+        engine.reset_activation_timings();
+        assert_eq!(
+            engine.activation_timings().total,
+            std::time::Duration::ZERO,
+            "the interval resets with the stages it holds"
+        );
+    }
+
     // GoldRush DoInitialize (Script.c:33-35) pins unowned crew NPCs from
     // the SCENARIO-SCRIPT context: `while(pObj = FindObjectOwner(0,-1,
     // 0,0,0,0,OCF_CrewMember,0,0,pObj)) AddEffect("StayThere",...)`.

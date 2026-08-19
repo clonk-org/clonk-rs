@@ -7550,6 +7550,10 @@ pub struct EffectDispatchStats {
 /// the stages are recorded, never used to decide anything.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ActivationTimings {
+    /// Walking `definition_load_steps` and registering each definition: asset
+    /// decode, `Definition` construction, and the script parse and link
+    /// `register_definition` performs.
+    pub definition_registration: std::time::Duration,
     /// `configure_materials_from_library`: material/texmap resolution.
     pub materials: std::time::Duration,
     /// Landscape installation and the scenario's landscape systems.
@@ -7558,19 +7562,58 @@ pub struct ActivationTimings {
     pub object_placement: std::time::Duration,
     /// `initialize_definition_scripts`: every definition's Initialize.
     pub definition_scripts: std::time::Duration,
+    /// `run_legacy_init_placements`: InitVegetation/InitInEarth/InitAnimals/
+    /// InitEnvironment/InitRules/InitGoals and every Initialize they run
+    /// (C4Game.cpp:2493-2503).
+    pub environment_placement: std::time::Duration,
     /// Map-creator callbacks that run after placement.
     pub post_init_map_callbacks: std::time::Duration,
     /// The scenario script's own Initialize.
     pub scenario_script: std::time::Duration,
+    /// The whole activation the stages above sit inside.
+    ///
+    /// Without it a stage span cannot be turned into a share, and the work no
+    /// stage covers is invisible — which is the failure clonk-org/clonk-rs#293
+    /// exists to fix, since its only prior evidence was a subtree percentage
+    /// with no denominator.
+    pub total: std::time::Duration,
+}
+
+impl ActivationTimings {
+    /// The activation time the recorded stages account for.
+    pub fn staged(&self) -> std::time::Duration {
+        [
+            self.definition_registration,
+            self.materials,
+            self.landscape,
+            self.object_placement,
+            self.definition_scripts,
+            self.environment_placement,
+            self.post_init_map_callbacks,
+            self.scenario_script,
+        ]
+        .into_iter()
+        .sum()
+    }
+
+    /// The activation time no stage accounts for.
+    ///
+    /// A large share here means the interesting path is still unmeasured, not
+    /// that it is cheap.
+    pub fn unattributed(&self) -> std::time::Duration {
+        self.total.saturating_sub(self.staged())
+    }
 }
 
 /// The activation stage a span belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivationStage {
+    DefinitionRegistration,
     Materials,
     Landscape,
     ObjectPlacement,
     DefinitionScripts,
+    EnvironmentPlacement,
     PostInitMapCallbacks,
     ScenarioScript,
 }
@@ -10566,14 +10609,21 @@ impl Engine {
     ) {
         let timings = &mut self.activation_timings;
         let slot = match stage {
+            ActivationStage::DefinitionRegistration => &mut timings.definition_registration,
             ActivationStage::Materials => &mut timings.materials,
             ActivationStage::Landscape => &mut timings.landscape,
             ActivationStage::ObjectPlacement => &mut timings.object_placement,
             ActivationStage::DefinitionScripts => &mut timings.definition_scripts,
+            ActivationStage::EnvironmentPlacement => &mut timings.environment_placement,
             ActivationStage::PostInitMapCallbacks => &mut timings.post_init_map_callbacks,
             ActivationStage::ScenarioScript => &mut timings.scenario_script,
         };
         *slot = slot.saturating_add(elapsed);
+    }
+
+    /// Record the whole activation interval the stages sit inside.
+    pub(crate) fn record_activation_total(&mut self, elapsed: std::time::Duration) {
+        self.activation_timings.total = self.activation_timings.total.saturating_add(elapsed);
     }
 
     /// `C4DefList::Reload` plus the `C4Game::ReloadDef` policy around it

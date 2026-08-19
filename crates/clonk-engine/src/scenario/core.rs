@@ -4097,7 +4097,11 @@ impl Scenario {
             &mut Option<Result<InitialNetworkGameData, InitialNetworkGameError>>,
         )>,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_stages(
+        // Timed around the call rather than inside it: the interval has to
+        // cover the work no stage claims, and an early `?` return inside the
+        // body would otherwise leave that work out of the denominator.
+        let started = std::time::Instant::now();
+        let applied = self.apply_before_players_stages(
             engine,
             final_synchronize,
             team_configuration_override,
@@ -4106,7 +4110,9 @@ impl Scenario {
             initial_network_game,
             execute_post_init_map_callbacks,
             initial_record_capture,
-        )
+        );
+        engine.record_activation_total(started.elapsed());
+        applied
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4280,6 +4286,7 @@ impl Scenario {
             }
         }
 
+        let definition_registration_started = std::time::Instant::now();
         for step in &self.definition_load_steps {
             let definition = match step {
                 DefinitionLoadStep::Definition(id) => self
@@ -4487,6 +4494,10 @@ impl Scenario {
             );
             engine.register_definition(compiled)?;
         }
+        engine.record_activation_stage(
+            crate::ActivationStage::DefinitionRegistration,
+            definition_registration_started.elapsed(),
+        );
 
         // C++ loads Script.c first and then the scenario-local System.c4g,
         // both after InitDefs for overload priority (C4Game.cpp:2606-2617,
@@ -4773,8 +4784,13 @@ impl Scenario {
                     .collect();
                 placement
             });
+            let environment_started = std::time::Instant::now();
             engine
                 .run_legacy_init_placements(authoritative_placement.as_ref().unwrap_or(placement));
+            engine.record_activation_stage(
+                crate::ActivationStage::EnvironmentPlacement,
+                environment_started.elapsed(),
+            );
             // C4Landscape::PostInitMap follows InitGoals inside the same
             // !NoInitialize/LandscapeLoaded block. Callback arrays execute
             // in field-registration order and each bitset in descending
@@ -4831,9 +4847,14 @@ impl Scenario {
     pub fn apply(&self, engine: &mut Engine) -> Result<Vec<ObjectId>, ScenarioError> {
         let mut created = self.apply_before_players(engine)?;
         let started = std::time::Instant::now();
-        let mut additional = engine.initialize_scenario_script()?;
-        engine.record_activation_stage(crate::ActivationStage::ScenarioScript, started.elapsed());
-        created.append(&mut additional);
+        let additional = engine.initialize_scenario_script();
+        let elapsed = started.elapsed();
+        engine.record_activation_stage(crate::ActivationStage::ScenarioScript, elapsed);
+        // The scenario script runs after `apply_before_players` has closed its
+        // own interval, so its span has to be added to the total as well or the
+        // stage would exceed the activation it belongs to.
+        engine.record_activation_total(elapsed);
+        created.append(&mut additional?);
         Ok(created)
     }
 
