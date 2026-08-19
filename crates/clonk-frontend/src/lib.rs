@@ -5,6 +5,7 @@
     clippy::too_many_arguments
 )]
 
+pub mod accessibility;
 pub mod classic_gui;
 pub mod clonk_fonts;
 pub mod context_menu;
