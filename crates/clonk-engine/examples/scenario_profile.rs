@@ -22,6 +22,45 @@
 //! target. The checked-in Arso-Morf save starts with 20 Stippels; the profiler
 //! creates the remainder with the real loaded ST5B definition and its normal
 //! `Initialize` callback before any measured frame.
+//!
+//! # `SimulationSnapshot` materiality threshold
+//!
+//! clonk-org/clonk-rs#294 requires an absolute and percentage-of-tick
+//! threshold to be **recorded before** any snapshot-construction optimisation,
+//! so that a decision is made against a number chosen in advance rather than
+//! against whatever the first measurement happens to show.
+//!
+//! The threshold: `Engine::snapshot` is material if, on a supported workload,
+//! it exceeds **either 10% of the combined frame or 2 ms absolute**.
+//!
+//! Ten percent is where removing it would change a frame-budget decision
+//! rather than disappear into the advance's own variance — the p95/p50 spread
+//! on the measurements below is already wider than the projection itself. Two
+//! milliseconds is about 12% of a 60 FPS budget, which is the point at which
+//! an absolute cost matters even when the relative share looks tame because
+//! the advance is slow.
+//!
+//! Measured with `LC_PROFILE_MODE=split`, 300 frames, aarch64:
+//!
+//! | workload | advance | snapshot | share |
+//! |---|---|---|---|
+//! | 128 objects (recorded in the issue) | — | 0.09 ms | 2.7% |
+//! | `ClonkMars.c4f/03_Chaos.c4s`, seed 0 | 2.513 ms | **122.5 µs** | **4.6%** |
+//! | Arso-Morf with 1,000 Stippels, seed 424242 | 14.431 ms | **765.5 µs** | **5.0%** |
+//!
+//! **Neither crosses either half of the threshold, and the share is flat.**
+//! The world grows roughly eightfold in per-frame cost between the second and
+//! third rows and the projection's share moves 4.6% → 5.0%: it scales with the
+//! world at the same rate the advance does rather than degrading against it.
+//! Worst observed absolute cost is 1.013 ms, half the absolute limit, at the
+//! largest object count the profiler can build.
+//!
+//! That is the shape of the negative evidence clonk-org/clonk-rs#294 asks to
+//! close on. It is not yet complete: the issue's fixture list also wants
+//! repeated unchanged frames, dense PXS/newgfx particles, many
+//! players/effects, and a large dirty landscape, plus a per-section split with
+//! allocation counts and shared-versus-cloned backing. Those remain open, and
+//! the threshold above is what they should be read against.
 
 use std::collections::HashMap;
 use std::env;
