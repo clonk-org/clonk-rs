@@ -858,13 +858,16 @@ fn add_effect_constructor(
     // same/higher-priority effects exist whose Fx*Effect check chain must
     // rule first (C4Effect.cpp:97-116). Live objects run that check above,
     // then invoke the native start immediately.
-    let has_checkers = snapshot_effects_from_context(scope)
-        .map(|effects| {
-            effects
-                .iter()
-                .any(|existing| existing.priority != 0 && existing.priority >= priority)
-        })
-        .unwrap_or(false);
+    // Borrowed, not copied: this asks only whether *some* live effect outranks
+    // the new one. Copying the stack to answer it costs O(n) per AddEffect and
+    // so O(n²) across a scenario that builds a grid of them — ClonkMars
+    // `03_Chaos` adds roughly 470 during activation (clonk-org/clonk-rs#732).
+    let has_checkers = with_effects_from_context(scope, |effects| {
+        effects
+            .iter()
+            .any(|existing| existing.priority != 0 && existing.priority >= priority)
+    })
+    .unwrap_or(false);
     let engine_fire_start = !global_scope
         && name == crate::C4FX_FIRE
         && !effect_script_fx_callback_exists(
