@@ -494,6 +494,68 @@ fn an_absent_callback_materialises_nothing() {
 }
 
 #[test]
+/// C++ leaves `Action.DrawDir` alone when `SetAction` moves to an action with
+/// the *same* `FlipDir` value, and never clamps it to the new action's
+/// `Directions` (`C4Object.cpp:4156-4157`, and `UpdateFlipDir` at
+/// `C4Object.cpp:404-425`). So an object that reached `Dir` 3 under a
+/// four-direction action keeps drawing row 3 after switching to a
+/// two-direction one, which that action does not define.
+///
+/// `SetDir` is what bounds the value, and only against the action live at the
+/// time: `if (!Inside<int32_t>(iDir, 0, Def->ActMap[Action.Act].Directions - 1))
+/// return;` (`C4Object.cpp:4239`). Nothing re-bounds it afterwards.
+fn a_narrower_action_keeps_the_wider_actions_draw_direction() {
+    let mut engine = Engine::with_seed(0);
+    let mut definition = test_definition("TURN", "Turner", "");
+    definition.configure_actions(
+        Some("Wide".to_owned()),
+        HashMap::from([
+            (
+                "Wide".to_owned(),
+                ActionSpec::default().with_directions(4).with_flip_dir(0),
+            ),
+            (
+                // The same FlipDir as `Wide`, which is what makes SetAction
+                // skip the refresh.
+                "Narrow".to_owned(),
+                ActionSpec::default().with_directions(2).with_flip_dir(0),
+            ),
+        ]),
+    );
+    engine.register_test_definition(definition);
+    let object = engine.spawn_test_object(
+        SpawnConfig::new("TURN")
+            .with_position(Vector2::new(10, 10))
+            .with_action(ActionState::new("Wide")),
+    );
+    let index = engine.test_object_index(object);
+
+    let definition_id = engine.objects[index].definition_id.clone();
+    crate::TestValueExt::test_value(engine.set_exec_action_direction(
+        index,
+        &definition_id,
+        Direction::from_raw(3),
+    ));
+    assert_eq!(
+        engine.objects[index].state.direction,
+        Direction::from_raw(3),
+        "a four-direction action accepts direction 3"
+    );
+
+    assert!(crate::TestValueExt::test_value(engine.action_with_calls(
+        index,
+        &definition_id,
+        "Narrow",
+    )));
+    assert_eq!(
+        engine.objects[index].state.direction,
+        Direction::from_raw(3),
+        "SetAction neither refreshes nor clamps the direction the drawn row \
+         comes from, so the two-direction action keeps drawing row 3"
+    );
+}
+
+#[test]
 fn lazy_host_world_call_object_materializes_only_on_world_access() {
     let mut engine = Engine::with_seed(0);
     let mut landscape = crate::TestValueExt::test_value(Landscape::with_default_material(
