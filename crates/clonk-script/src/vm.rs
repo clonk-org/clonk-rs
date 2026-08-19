@@ -5800,7 +5800,7 @@ impl<'a> Vm<'a> {
     /// applied C4Value::Set, including its identical-value early return. Other
     /// expression forms still need their ordinary SetNoRef/value-stack copy.
     fn direct_value_call_has_materialized_result(&self, expr: &Expr, env: &Environment) -> bool {
-        let Expr::Call { callee, .. } = expr else {
+        let Expr::Call { callee, args, .. } = expr else {
             return false;
         };
         let Expr::Variable(name) = callee.as_ref() else {
@@ -5817,16 +5817,17 @@ impl<'a> Vm<'a> {
             }
             return self.has_host_function(&env.function_name);
         }
-        if self.call_expression_returns_reference(expr, env) {
-            return false;
-        }
         let _profiled_query =
             lookup_profile::enter_site(lookup_profile::LookupSite::ReferenceQuery);
-        let function = if env.engine_scope {
-            self.engine_script_function(name)
-        } else {
-            self.own_or_global_script_function(name)
-        };
+        // One resolution answers both questions. Asking
+        // `call_expression_returns_reference` first and then resolving again
+        // walked the same tables twice per executed call, which the lookup
+        // profile measured as the single largest consumer of script-function
+        // resolution (clonk-org/clonk-rs#292).
+        let function = self.reference_query_function(name, env);
+        if self.variable_call_returns_reference(name, args, function) {
+            return false;
+        }
         function.is_some() || self.has_host_function(name)
     }
 

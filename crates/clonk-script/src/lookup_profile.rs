@@ -606,6 +606,63 @@ mod tests {
         reset();
     }
 
+    /// A driver the compiled executor refuses (a reference parameter), so its
+    /// body runs on the AST path where the reference-returning predicate lives.
+    fn interpreted_driver_engine() -> crate::Engine {
+        let mut engine = crate::Engine::new();
+        engine
+            .load_script(
+                "global func Helper(value) { return value + 1; }\n\
+                 global func Interpreted(&out, count) {\n\
+                     var total = 0;\n\
+                     var index = 0;\n\
+                     while (index < count) {\n\
+                         total = Helper(index);\n\
+                         index = index + 1;\n\
+                     }\n\
+                     out = total;\n\
+                     return total;\n\
+                 }",
+            )
+            .expect("interpreted driver script loads");
+        engine
+    }
+
+    #[test]
+    fn one_reference_query_resolves_its_callee_once() {
+        // `direct_value_call_has_materialized_result` asked
+        // `call_expression_returns_reference` whether the result is a
+        // reference and then resolved the same callee again to decide whether
+        // it is materialized — two walks of the same tables to answer one
+        // question about one call site.
+        //
+        // The remaining probe per call belongs to `set_no_ref_keeps_reference`
+        // on a separate evaluator entry point. Sharing it would mean threading
+        // a resolution between two entry points that encode C++'s SetNoRef
+        // decision, so it is deliberately left to its own change.
+        let engine = interpreted_driver_engine();
+        const ITERATIONS: i32 = 32;
+        reset();
+        let (_, _) = engine
+            .call_with_ref_args(
+                "Interpreted",
+                &[crate::Value::Nil, crate::Value::Int(ITERATIONS)],
+            )
+            .expect("interpreted driver runs");
+        let profile = snapshot();
+        let query = profile
+            .family_at(LookupFamily::ScriptFunction, LookupSite::ReferenceQuery)
+            .lookups;
+        let budget = u64::try_from(ITERATIONS).expect("iteration count fits u64") * 2;
+
+        assert!(query > 0, "the interpreted path must reach the predicate");
+        assert!(
+            query <= budget,
+            "a reference query resolved the callee {query} times over {ITERATIONS} calls, \
+             over the budget of {budget}; it was 3 per call before the duplicate was removed"
+        );
+    }
+
     #[test]
     fn executing_a_script_attributes_its_call_paths() {
         // The instrument's whole point: a family total does not name a call
