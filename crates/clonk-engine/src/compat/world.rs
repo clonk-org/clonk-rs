@@ -3486,6 +3486,10 @@ impl HostWorldContext {
     }
 
     pub(crate) fn definition_script(&self, id: &str) -> Option<&Arc<ScriptEngine>> {
+        clonk_script::lookup_profile::record(
+            clonk_script::lookup_profile::LookupFamily::Definition,
+            id,
+        );
         self.definition_scripts.get(id)
     }
 

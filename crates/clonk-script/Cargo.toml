@@ -12,6 +12,10 @@ publish.workspace = true
 [features]
 default = []
 bench = ["dep:criterion"]
+# Count identifier lookups by family. Off by default: the counters sit on the
+# VM's hottest paths, where leaving them live would cost real time and perturb
+# the measurement they exist to take.
+lookup-profile = []
 
 [dependencies]
 thiserror = "2"

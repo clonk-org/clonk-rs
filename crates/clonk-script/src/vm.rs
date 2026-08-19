@@ -19,6 +19,7 @@ use crate::engine::{
     RegisteredHostFunction,
 };
 use crate::error::{RuntimeCallFrame, RuntimeError};
+use crate::lookup_profile;
 use crate::value::{
     c4_id_text, c4_string_bytes, c4_string_from_bytes, c4_strings_equal, C4StringValue, C4VType,
     Literal, Value, ValueMap,
@@ -3807,6 +3808,7 @@ impl<'a> Vm<'a> {
                 env.strict_level,
             ));
         }
+        lookup_profile::record(lookup_profile::LookupFamily::Constant, name);
         self.constants
             .and_then(|constants| constants.get(name).cloned())
             .map(|value| {
@@ -4647,6 +4649,7 @@ impl<'a> Vm<'a> {
     }
 
     fn engine_script_function(&self, name: &str) -> Option<&Function> {
+        lookup_profile::record(lookup_profile::LookupFamily::ScriptFunction, name);
         self.global_functions
             .map_or_else(|| self.functions.get(name), |functions| functions.get(name))
     }
@@ -4657,6 +4660,7 @@ impl<'a> Vm<'a> {
     /// the engine table. Ordinary same-name local functions still win. A
     /// bare/partial fixture VM with no table entry retains its only global.
     fn own_script_function(&self, name: &str) -> Option<&Function> {
+        lookup_profile::record(lookup_profile::LookupFamily::ScriptFunction, name);
         let function = self.functions.get(name)?;
         if self.exact_global_link_lookup
             || self
@@ -5245,6 +5249,7 @@ impl<'a> Vm<'a> {
     }
 
     fn host_reference_function(&self, name: &str) -> Option<&HostReferenceFunction> {
+        lookup_profile::record(lookup_profile::LookupFamily::HostFunction, name);
         self.host_reference_functions
             .and_then(|functions| functions.get(name))
     }
@@ -5254,6 +5259,7 @@ impl<'a> Vm<'a> {
     }
 
     fn resolved_host_function(&self, name: &str) -> Option<ResolvedHostFunction<'_>> {
+        lookup_profile::record(lookup_profile::LookupFamily::HostFunction, name);
         self.host_functions
             .get(name)
             .map(ResolvedHostFunction::Value)
@@ -5744,6 +5750,7 @@ impl<'a> Vm<'a> {
     }
 
     fn global_variable_cell(&self, name: &str) -> Option<ValueCell> {
+        lookup_profile::record(lookup_profile::LookupFamily::Global, name);
         self.globals_named
             .and_then(|table| table.borrow().get(name).cloned())
     }
@@ -5758,6 +5765,7 @@ impl<'a> Vm<'a> {
     }
 
     fn global_constant_cell(&self, name: &str) -> Option<ValueCell> {
+        lookup_profile::record(lookup_profile::LookupFamily::Constant, name);
         self.globals_consts
             .and_then(|table| table.borrow().get(name).cloned())
     }
@@ -12070,6 +12078,7 @@ impl Environment {
     }
 
     fn binding(&self, name: &str) -> Option<Binding> {
+        lookup_profile::record(lookup_profile::LookupFamily::Local, name);
         self.scopes
             .iter()
             .rev()
@@ -12084,6 +12093,7 @@ impl Environment {
     }
 
     fn function_var_binding(&self, name: &str) -> Option<Binding> {
+        lookup_profile::record(lookup_profile::LookupFamily::Local, name);
         self.frame_locals.function_vars.borrow().get(name).cloned()
     }
 

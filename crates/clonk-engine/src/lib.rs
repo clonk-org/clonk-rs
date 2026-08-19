@@ -11327,6 +11327,10 @@ fn resolve_effect_script_callback(
     callback_name: &str,
     world: &HostWorldContext,
 ) -> Option<EffectScriptCallback> {
+    clonk_script::lookup_profile::record(
+        clonk_script::lookup_profile::LookupFamily::EffectCallback,
+        callback_name,
+    );
     if let Some(command_object) = effect
         .command_target
         .map(|target| ObjectId::new(target as u64))

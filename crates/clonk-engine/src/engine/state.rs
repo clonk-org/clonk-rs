@@ -1882,6 +1882,9 @@ impl Engine {
                 if event.effect.priority != 1
                     && !temp_wrapped_started.contains(&event.effect.number)
                 {
+                    clonk_script::lookup_profile::record_key_allocation(
+                        clonk_script::lookup_profile::LookupFamily::EffectCallback,
+                    );
                     let callback_name = format!("Fx{}Start", event.effect.name);
                     let has_start = event.effect.name == C4FX_FIRE
                         || resolve_effect_script_callback(&event.effect, &callback_name, &world)
@@ -2044,6 +2047,9 @@ impl Engine {
             // C4Effect.cpp:563-565).
             if event.effect.name == C4FX_FIRE {
                 let engine_native = |callback: &str| -> bool {
+                    clonk_script::lookup_profile::record_key_allocation(
+                        clonk_script::lookup_profile::LookupFamily::EffectCallback,
+                    );
                     let callback_name = format!("Fx{C4FX_FIRE}{callback}");
                     resolve_effect_script_callback(&event.effect, &callback_name, &world).is_none()
                 };
