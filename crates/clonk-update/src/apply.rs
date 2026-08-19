@@ -1433,9 +1433,13 @@ fn swap_components(
             }
             rename(&locations.destination, &locations.backup)?;
         }
-        journal.steps[index].state = StepState::BackupMoved;
-        journal.save(work)?;
-
+        // Nothing durable between the two renames. The window they leave open
+        // is the one clonk-org/clonk-rs#387 is about — for the engine component
+        // no executable exists at the shortcut path while it is open — so it is
+        // kept to two metadata operations. A `Journal::save` here would put two
+        // fsyncs inside it and make it orders of magnitude longer in wall time,
+        // for a fact recovery does not need: the paths already carry it, which
+        // is how `roll_back` and `roll_forward` both read this state.
         rename(&locations.staged, &locations.destination)?;
         journal.steps[index].state = StepState::Completed;
         journal.save(work)?;
@@ -2153,6 +2157,10 @@ fn roll_forward(
 
         match step.state {
             StepState::Completed => continue,
+            // No longer written — the paths carry this state instead — but
+            // still read: the binary that resumes a transaction is whichever
+            // one starts next, which after a completed engine swap is the new
+            // one, consuming a journal an older version wrote.
             StepState::BackupMoved => {
                 if !present(&locations.destination) {
                     // Only the staged tree contains the new component. The
@@ -2164,7 +2172,19 @@ fn roll_forward(
             }
             StepState::Pending => {
                 if !present(&locations.staged) {
-                    return Err(lost());
+                    // A staged tree is missing either because this step never
+                    // got one, or because the swap already renamed it into
+                    // place and the journal had not caught up. The paths tell
+                    // the two apart, and they are the durable facts —
+                    // `roll_back` reads the backup's presence the same way.
+                    let already_swapped = present(&locations.destination)
+                        && (present(&locations.backup) || step.destination_existed == Some(false));
+                    if !already_swapped {
+                        return Err(lost());
+                    }
+                    journal.steps[index].state = StepState::Completed;
+                    journal.save(work)?;
+                    continue;
                 }
                 // Idempotent: only entries still in the old tree move.
                 for name in &step.carried {
@@ -2180,8 +2200,8 @@ fn roll_forward(
                     }
                     rename(&locations.destination, &locations.backup)?;
                 }
-                journal.steps[index].state = StepState::BackupMoved;
-                journal.save(work)?;
+                // Same window as `swap_components`, kept equally narrow — this
+                // runs on a machine that has already lost power once.
                 rename(&locations.staged, &locations.destination)?;
             }
         }
@@ -3555,6 +3575,103 @@ mod tests {
             .save(&install.layout.work_dir())
             .expect("save the journal");
         journal
+    }
+
+    /// The on-disk state a crash leaves when it lands *after* a rename but
+    /// before the journal write that records it. The filesystem is ahead of
+    /// the journal, which is the only direction this write ordering produces.
+    fn interrupt_with_journal_behind(
+        install: &Install,
+        nonce: &str,
+        filesystem: [StepState; 2],
+        journalled: [StepState; 2],
+    ) -> Journal {
+        let mut journal = interrupt(install, nonce, filesystem);
+        for (step, state) in journal.steps.iter_mut().zip(journalled) {
+            step.state = state;
+        }
+        journal
+            .save(&install.layout.work_dir())
+            .expect("save the journal");
+        journal
+    }
+
+    /// A crash in the gap between the second rename and the journal write that
+    /// records it must still finish the update.
+    ///
+    /// The durable facts are the paths, not the journal — `roll_back` already
+    /// says so in as many words, and
+    /// `rollback_restores_a_backup_moved_before_its_state_was_journalled`
+    /// pins it for the rollback direction. Rolling forward has to read them the
+    /// same way: a step whose staged tree is gone because it has already been
+    /// renamed into place is finished, not lost, and reporting it lost aborts
+    /// a resume that has nothing left to do.
+    #[test]
+    fn rolling_forward_finishes_a_swap_completed_before_its_state_was_journalled() {
+        let install = install();
+        interrupt_with_journal_behind(
+            &install,
+            "swap-before-save",
+            [StepState::Completed, StepState::Completed],
+            [StepState::Completed, StepState::Pending],
+        );
+
+        let outcome =
+            resume_interrupted_update_with(&install.layout, &FakePlatform::new()).expect("resume");
+
+        assert_eq!(
+            outcome,
+            ResumeOutcome::RolledForward {
+                version: "0.4.0".to_string()
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(install.layout.data_dir().join("planet/Fresh.txt"))
+                .expect("the swapped tree is in place"),
+            "new planet"
+        );
+    }
+
+    /// A crash *inside* the window the two renames leave open.
+    ///
+    /// This is the state clonk-org/clonk-rs#387 is about: the destination has
+    /// moved to its backup and the staged tree has not yet taken its name, so
+    /// for the engine component there is no executable at the shortcut path.
+    /// The journal says `Pending` because nothing durable is written between
+    /// the two renames — the paths carry the state instead.
+    #[test]
+    fn rolling_forward_completes_a_swap_interrupted_between_its_two_renames() {
+        let install = install();
+        let nonce = "between-renames";
+        interrupt_with_journal_behind(
+            &install,
+            nonce,
+            [StepState::Completed, StepState::BackupMoved],
+            [StepState::Completed, StepState::Pending],
+        );
+        let destination = install.layout.data_dir().join("planet");
+        assert!(
+            !destination.exists(),
+            "the window is exactly the interval where the destination is absent"
+        );
+        assert!(destination
+            .with_file_name(format!("planet.old-{nonce}"))
+            .exists());
+
+        let outcome =
+            resume_interrupted_update_with(&install.layout, &FakePlatform::new()).expect("resume");
+
+        assert_eq!(
+            outcome,
+            ResumeOutcome::RolledForward {
+                version: "0.4.0".to_string()
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("Fresh.txt"))
+                .expect("the staged tree took the destination's name"),
+            "new planet"
+        );
     }
 
     #[test]
