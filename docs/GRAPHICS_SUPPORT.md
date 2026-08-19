@@ -32,11 +32,21 @@ because the GL backend probes for libEGL and logs a spurious "Unable to open
 libEGL" on macOS; widening on failure is what lets a board whose only usable
 driver is GLES start at all.
 
+Every one of those attempts asks for the machine's *default* adapter, so
+hardware always wins. Only after they have all failed does `framebuffer_attempts`
+add a last pass with `force_fallback_adapter`, which asks wgpu for a software
+adapter by name — the difference between "no adapter, cannot start" and "slow,
+but running" on a machine whose only implementation is llvmpipe, lavapipe or
+WARP. Landing there is logged, because the user cannot otherwise see why the
+game is slow.
+
 An explicit `WGPU_BACKEND` is an operator instruction: it is honoured exactly and
 **never** widened past, which
-`framebuffer_backends_widen_to_gl_before_giving_up` pins. `WGPU_ADAPTER_NAME`
-selects among the adapters that support the surface, and a name matching none of
-them logs and falls back to the default adapter rather than failing startup.
+`framebuffer_backends_widen_to_gl_before_giving_up` pins. The software pass
+stays inside it — asking a named backend for its software adapter is not
+widening to another backend. `WGPU_ADAPTER_NAME` selects among the adapters that
+support the surface, and a name matching none of them logs and falls back to the
+default adapter rather than failing startup.
 
 ## Devices
 
@@ -67,7 +77,7 @@ The four are distinguished so a user is told which of them happened:
 
 | Class | Surfaced as |
 |---|---|
-| No adapter at all (no installed driver, or a GLES 2-only board) | `SurfaceError::AdapterNotFound`, after every backend set has been tried |
+| No adapter at all (no installed driver, or a GLES 2-only board) | `SurfaceError::AdapterNotFound`, after every backend set **and** the explicit software-adapter pass have been tried |
 | An adapter below the floor | `SurfaceError::BelowGraphicsFloor`, carrying one diagnostic naming **every** unmet requirement |
 | Device creation failed on an adapter that passed | `SurfaceError::Device`, carrying wgpu's `RequestDeviceError` |
 | Surface lost while running | `SurfaceError::Lost` — the one presentation failure callers recover from, by rebuilding the surface rather than reconfiguring it |

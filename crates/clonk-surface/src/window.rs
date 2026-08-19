@@ -133,6 +133,12 @@ pub struct FrameContext<'a> {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WindowSurfaceBuildOptions {
     pub timestamp_queries: bool,
+    /// `force_fallback_adapter`: ask wgpu for a software adapter rather than
+    /// the default one.
+    ///
+    /// A caller uses this only after the ordinary request found no adapter, so
+    /// a machine with working hardware never reaches it.
+    pub fallback_adapter: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -242,7 +248,7 @@ impl WindowSurface {
         W: wgpu::WindowHandle + raw_window_handle::HasDisplayHandle + 'static,
     {
         let surface = instance.create_surface(window)?;
-        let adapter = adapter_for(instance, &surface).await?;
+        let adapter = adapter_for(instance, &surface, options.fallback_adapter).await?;
         let adapter_features = adapter.features();
         let timestamp_query_status =
             timestamp_query_status(options.timestamp_queries, adapter_features);
@@ -555,6 +561,7 @@ fn adapter_matching_name(adapter_names: &[impl AsRef<str>], desired: &str) -> Op
 async fn adapter_for(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'_>,
+    fallback_adapter: bool,
 ) -> Result<wgpu::Adapter, SurfaceError> {
     if let Some(desired) = std::env::var("WGPU_ADAPTER_NAME")
         .ok()
@@ -583,7 +590,10 @@ async fn adapter_for(
     instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(surface),
-            force_fallback_adapter: false,
+            // Only ever true on a caller's last attempt, after the ordinary
+            // request found nothing: a software adapter is above the floor
+            // (docs/GRAPHICS_SUPPORT.md) but must never displace hardware.
+            force_fallback_adapter: fallback_adapter,
             power_preference: wgpu::PowerPreference::from_env().unwrap_or_default(),
             apply_limit_buckets: false,
         })

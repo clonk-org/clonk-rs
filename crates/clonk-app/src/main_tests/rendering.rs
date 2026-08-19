@@ -781,6 +781,49 @@ fn framebuffer_backends_widen_to_gl_before_giving_up() {
     );
 }
 
+/// `docs/GRAPHICS_SUPPORT.md` lists software adapters (llvmpipe, lavapipe,
+/// WARP) as meeting the floor, but nothing ever asked wgpu for one: every
+/// attempt requested the default adapter, which on a machine with no usable
+/// hardware one is nothing at all. The last attempt asks explicitly, so such a
+/// machine starts slowly instead of not at all.
+#[test]
+fn the_last_framebuffer_attempt_asks_for_a_software_adapter() {
+    use wgpu::Backends;
+
+    let attempts = framebuffer_attempts(None);
+
+    assert!(
+        attempts
+            .iter()
+            .take(attempts.len() - 1)
+            .all(|attempt| !attempt.fallback_adapter),
+        "hardware is tried first, on every backend set: {attempts:?}"
+    );
+    let last = attempts.last().expect("at least one attempt");
+    assert!(
+        last.fallback_adapter,
+        "the final attempt is the explicit software one: {attempts:?}"
+    );
+    assert!(
+        last.backends.contains(Backends::GL),
+        "and it keeps the widest backend set: {attempts:?}"
+    );
+
+    // An explicit WGPU_BACKEND still names the backend; asking that backend
+    // for its software adapter is not widening to another one.
+    let explicit = framebuffer_attempts(Some(Backends::VULKAN));
+    assert!(
+        explicit
+            .iter()
+            .all(|attempt| attempt.backends == Backends::VULKAN),
+        "{explicit:?}"
+    );
+    assert!(
+        explicit.last().is_some_and(|attempt| attempt.fallback_adapter),
+        "{explicit:?}"
+    );
+}
+
 #[test]
 fn a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent() {
     // On hardware that cannot hold the tick budget, one application pass

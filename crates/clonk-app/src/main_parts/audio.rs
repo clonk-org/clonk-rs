@@ -814,6 +814,43 @@ pub(crate) fn framebuffer_backend_attempts(
     )
 }
 
+/// One framebuffer creation attempt: a backend set, and whether wgpu is asked
+/// for a software adapter rather than the default one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FramebufferAttempt {
+    pub(crate) backends: wgpu::Backends,
+    /// `force_fallback_adapter`.
+    pub(crate) fallback_adapter: bool,
+}
+
+/// The full ladder: every backend set on hardware first, then the widest set
+/// again asking explicitly for a software adapter.
+///
+/// `docs/GRAPHICS_SUPPORT.md` lists software adapters (llvmpipe, lavapipe,
+/// WARP) as meeting the floor, but a plain `request_adapter` returns the
+/// *default* adapter, which on a machine with no usable hardware one is
+/// nothing at all. Asking for the fallback explicitly is what turns "no
+/// adapter, cannot start" into "slow, but running" there. It is last precisely
+/// so no machine with working hardware ever lands on it.
+///
+/// An explicit `WGPU_BACKEND` still bounds every attempt to that backend:
+/// asking it for its software adapter is not widening to another backend.
+pub(crate) fn framebuffer_attempts(requested: Option<wgpu::Backends>) -> Vec<FramebufferAttempt> {
+    let hardware = framebuffer_backend_attempts(requested);
+    let widest = hardware.last().copied().unwrap_or(wgpu::Backends::all());
+    hardware
+        .into_iter()
+        .map(|backends| FramebufferAttempt {
+            backends,
+            fallback_adapter: false,
+        })
+        .chain(std::iter::once(FramebufferAttempt {
+            backends: widest,
+            fallback_adapter: true,
+        }))
+        .collect()
+}
+
 /// Create the framebuffer, widening the backend set rather than aborting.
 ///
 /// Note what this cannot fix: wgpu-hal's GLES backend rejects any context
@@ -825,12 +862,16 @@ pub(crate) fn build_framebuffer(
     window: &Arc<Window>,
     size: PhysicalSize<u32>,
 ) -> Result<WindowSurface> {
-    let attempts = framebuffer_backend_attempts(wgpu::Backends::from_env());
+    let attempts = framebuffer_attempts(wgpu::Backends::from_env());
     let timestamp_queries = std::env::var("LC_GPU_TIMESTAMP_QUERIES")
         .ok()
         .is_some_and(|value| parse_config_bool(&value));
     let mut last_error = None;
-    for backends in attempts {
+    for FramebufferAttempt {
+        backends,
+        fallback_adapter,
+    } in attempts
+    {
         // Every window shares the process's instance for this backend set.
         // Building one per window meant closing a window destroyed a
         // `VkInstance`, which is what took the console down in
@@ -846,11 +887,30 @@ pub(crate) fn build_framebuffer(
             // independently scheduled simulation and graphics timers behind an
             // implicit FIFO-vsync wait that the C++ application does not request.
             wgpu::PresentMode::AutoNoVsync,
-            clonk_surface::WindowSurfaceBuildOptions { timestamp_queries },
+            clonk_surface::WindowSurfaceBuildOptions {
+                timestamp_queries,
+                fallback_adapter,
+            },
         ) {
-            Ok(pixels) => return Ok(pixels),
+            Ok(pixels) => {
+                if fallback_adapter {
+                    // Worth saying out loud: the machine is running on a CPU
+                    // rasterizer because no hardware adapter answered, and it
+                    // will be slow for reasons the user cannot see otherwise.
+                    tracing::warn!(
+                        ?backends,
+                        "no hardware GPU adapter answered; running on a software adapter"
+                    );
+                }
+                return Ok(pixels);
+            }
             Err(error) => {
-                tracing::warn!(?backends, %error, "no usable GPU adapter for these backends");
+                tracing::warn!(
+                    ?backends,
+                    fallback_adapter,
+                    %error,
+                    "no usable GPU adapter for these backends"
+                );
                 last_error = Some(error);
             }
         }
