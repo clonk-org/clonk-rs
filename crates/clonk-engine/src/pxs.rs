@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PxsScanBaseline {
     pub allocated_chunks: usize,
-    /// `allocated_chunks * PXS_CHUNK_SIZE`: every slot the pass visits.
+    /// Slots the previous pass actually inspected, live or empty.
     pub visited_slots: usize,
     /// Live PXS the previous pass executed.
     pub live: usize,
@@ -62,14 +62,123 @@ pub struct Pxs {
     pub ydir: C4Fixed,
 }
 
+/// Ascending occupancy index over the PXS slot array.
+///
+/// An accelerator, never an authority: every bit mirrors one slot of `chunks`,
+/// and the answers it gives are the ones the linear scans gave. It exists so
+/// `C4PXSSystem::Execute` (C4PXS.cpp:212-234) and the inner free-slot scan of
+/// `C4PXSSystem::New` (C4PXS.cpp:189-196) stop reading the empties between
+/// live pixels. The visit order is unchanged: the index is read fresh at every
+/// step, so a pixel created into a not-yet-visited slot is still executed in
+/// the same pass and one created below the cursor is still missed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SlotOccupancy {
+    /// One bit per slot, chunk-major: `chunk * PXS_CHUNK_SIZE + slot`.
+    words: Vec<u64>,
+}
+
+impl SlotOccupancy {
+    const SLOTS: usize = PXS_MAX_CHUNK * PXS_CHUNK_SIZE;
+    const WORDS: usize = Self::SLOTS.div_ceil(u64::BITS as usize);
+
+    fn ensure(&mut self) {
+        if self.words.len() != Self::WORDS {
+            self.words.resize(Self::WORDS, 0);
+        }
+    }
+
+    fn set(&mut self, slot: usize) {
+        if slot < Self::SLOTS {
+            self.ensure();
+            self.words[slot / 64] |= 1_u64 << (slot % 64);
+        }
+    }
+
+    fn unset(&mut self, slot: usize) {
+        if let Some(word) = self.words.get_mut(slot / 64) {
+            *word &= !(1_u64 << (slot % 64));
+        }
+    }
+
+    fn is_live(&self, slot: usize) -> bool {
+        self.words
+            .get(slot / 64)
+            .is_some_and(|word| word & (1_u64 << (slot % 64)) != 0)
+    }
+
+    /// Where an ascending scan arrives next: the first live slot at or after
+    /// `slot`, or `None` once the array is exhausted.
+    fn next_live_at_or_after(&self, slot: usize) -> Option<usize> {
+        (slot < Self::SLOTS)
+            .then(|| {
+                let mut index = slot / 64;
+                let mut word = self.words.get(index).copied()? & (!0_u64 << (slot % 64));
+                loop {
+                    if word != 0 {
+                        let found = index * 64 + word.trailing_zeros() as usize;
+                        return (found < Self::SLOTS).then_some(found);
+                    }
+                    index += 1;
+                    word = self.words.get(index).copied()?;
+                }
+            })
+            .flatten()
+    }
+
+    /// The slot `C4PXSSystem::New`'s inner scan would take: the chunk's first
+    /// free slot, or `None` when it is full.
+    fn first_free_in_chunk(&self, chunk: usize) -> Option<usize> {
+        let base = chunk * PXS_CHUNK_SIZE;
+        let end = base + PXS_CHUNK_SIZE;
+        let mut slot = base;
+        while slot < end {
+            let offset = slot % 64;
+            let word = self.words.get(slot / 64).copied().unwrap_or(0);
+            // Slots before `offset` belong to an earlier chunk position, so
+            // mask them occupied rather than let them win the scan.
+            let free = !(word | ((1_u64 << offset) - 1));
+            if free != 0 {
+                let found = slot - offset + free.trailing_zeros() as usize;
+                return (found < end).then_some(found - base);
+            }
+            slot = slot - offset + 64;
+        }
+        None
+    }
+
+    fn clear_chunk(&mut self, chunk: usize) {
+        let base = chunk * PXS_CHUNK_SIZE;
+        (base..base + PXS_CHUNK_SIZE).for_each(|slot| self.unset(slot));
+    }
+
+    /// Rebuild from the canonical array, for every path that replaces it
+    /// wholesale rather than slot by slot.
+    fn rebuild(chunks: &[Option<Vec<Option<Pxs>>>]) -> Self {
+        let mut index = Self::default();
+        index.ensure();
+        for (chunk, slots) in chunks.iter().enumerate() {
+            let live = slots.iter().flat_map(|slots| slots.iter().enumerate());
+            for (slot, entry) in live.filter(|(_, entry)| entry.is_some()) {
+                index.set(chunk * PXS_CHUNK_SIZE + slot);
+            }
+        }
+        index
+    }
+}
+
 /// Mirror of `C4PXSSystem` (C4PXS.h:42-70) minus drawing.
 #[derive(Debug, Clone, Default)]
 pub struct PxsSystem {
     chunks: Vec<Option<Vec<Option<Pxs>>>>,
     chunk_counts: Vec<usize>,
+    /// Accelerator over `chunks`, never an authority — see `SlotOccupancy`.
+    occupancy: SlotOccupancy,
     /// `C4PXSSystem::Count`: number of occupied slots encountered by the
     /// latest Execute pass, including pixels that deactivated while running.
     execute_count: usize,
+    /// Slots the latest Execute pass inspected. Diagnostic only — nothing in
+    /// the simulation reads it.
+    inspected_slots: usize,
 }
 
 impl PxsSystem {
@@ -78,6 +187,7 @@ impl PxsSystem {
             self.chunks.resize_with(PXS_MAX_CHUNK, || None);
             self.chunk_counts.resize(PXS_MAX_CHUNK, 0);
         }
+        self.occupancy.ensure();
     }
 
     /// `C4PXSSystem::New` (C4PXS.cpp:175-199): scan chunks in order,
@@ -96,13 +206,13 @@ impl PxsSystem {
             if self.chunks[chunk_index].is_none() {
                 self.chunks[chunk_index] = Some(vec![None; PXS_CHUNK_SIZE]);
                 self.chunk_counts[chunk_index] = 0;
+                self.occupancy.clear_chunk(chunk_index);
             }
             if self.chunk_counts[chunk_index] < PXS_CHUNK_SIZE {
-                let chunk = self.chunks[chunk_index]
-                    .as_mut()
-                    .expect("chunk allocated above");
-                if let Some(slot) = chunk.iter_mut().find(|slot| slot.is_none()) {
-                    *slot = Some(Pxs {
+                if let Some(slot) = self.occupancy.first_free_in_chunk(chunk_index) {
+                    self.chunks[chunk_index]
+                        .as_mut()
+                        .expect("chunk allocated above")[slot] = Some(Pxs {
                         mat,
                         x,
                         y,
@@ -110,6 +220,7 @@ impl PxsSystem {
                         ydir,
                     });
                     self.chunk_counts[chunk_index] += 1;
+                    self.occupancy.set(chunk_index * PXS_CHUNK_SIZE + slot);
                     return true;
                 }
             }
@@ -154,28 +265,75 @@ impl PxsSystem {
         self.chunk_counts.iter().sum()
     }
 
-    /// Slots the next Execute pass will visit, against the live PXS it will
-    /// find there.
+    /// What the last Execute pass walked, against the live PXS it found.
     ///
-    /// `C4PXSSystem::Execute` walks every slot of every allocated chunk in
-    /// chunk-major order (`C4PXS.cpp:212-234`), and the port does the same, so
-    /// the visited count is the allocated chunks times the chunk size however
-    /// few pixels are live. The gap between the two is what an ordered
-    /// occupancy index would remove — and whether that gap is worth removing
-    /// is a question about real workloads, so the numbers are reported rather
-    /// than assumed.
+    /// `C4PXSSystem::Execute` visits every slot of every allocated chunk in
+    /// chunk-major order (`C4PXS.cpp:212-234`), so the visited count could be
+    /// *derived* from the allocated chunks. Deriving it is what left it
+    /// unfalsifiable — nothing checked a pass agreed — so the pass reports
+    /// what it inspected instead. The gap between visited and live is the work
+    /// an ordered occupancy index removes.
     ///
     /// Observation only: this reads state the pass already keeps and changes
     /// no slot order.
     pub fn execute_scan_baseline(&self) -> PxsScanBaseline {
-        let chunks = (0..PXS_MAX_CHUNK)
-            .filter(|chunk| self.chunk_allocated(*chunk))
-            .count();
         PxsScanBaseline {
-            allocated_chunks: chunks,
-            visited_slots: chunks * PXS_CHUNK_SIZE,
+            allocated_chunks: (0..PXS_MAX_CHUNK)
+                .filter(|chunk| self.chunk_allocated(*chunk))
+                .count(),
+            visited_slots: self.inspected_slots,
             live: self.execute_count,
         }
+    }
+
+    /// Slots the last Execute pass inspected, live or empty.
+    pub fn inspected_slots(&self) -> usize {
+        self.inspected_slots
+    }
+
+    /// Where the ascending Execute walk arrives next, as a flat slot index
+    /// (`chunk * PXS_CHUNK_SIZE + slot`). Read fresh at every step of the
+    /// pass, so mid-pass creation is seen exactly as the linear scan saw it.
+    pub fn next_live_slot(&self, from: usize) -> Option<usize> {
+        self.occupancy.next_live_at_or_after(from)
+    }
+
+    /// Whether the accelerator still agrees with the canonical array.
+    ///
+    /// The index is only ever a mirror, so any disagreement is a bug in a path
+    /// that writes slots — this is what the model test asserts after each step.
+    pub fn occupancy_matches_slots(&self) -> bool {
+        // `ensure` first: an untouched system carries no words at all, which
+        // is the same empty index a rebuild spells as all-zero words.
+        let mut mirror = self.occupancy.clone();
+        mirror.ensure();
+        mirror == SlotOccupancy::rebuild(&self.chunks)
+    }
+
+    /// The free-slot answer read straight off the array, kept as the reference
+    /// the indexed lookup is checked against (`C4PXS.cpp:189-196`).
+    #[cfg(test)]
+    fn first_free_in_chunk_linear(&self, chunk: usize) -> Option<usize> {
+        // `New` allocates a missing chunk before scanning it
+        // (C4PXS.cpp:180-187), so an absent chunk is an entirely free one.
+        self.chunks
+            .get(chunk)
+            .and_then(|slots| slots.as_ref())
+            .map_or(Some(0), |slots| slots.iter().position(Option::is_none))
+    }
+
+    /// The ascending walk read straight off the array, likewise.
+    #[cfg(test)]
+    fn live_slots_linear(&self) -> Vec<usize> {
+        (0..PXS_MAX_CHUNK)
+            .flat_map(|chunk| (0..PXS_CHUNK_SIZE).map(move |slot| (chunk, slot)))
+            .filter(|(chunk, slot)| self.peek_slot(*chunk, *slot).is_some())
+            .map(|(chunk, slot)| chunk * PXS_CHUNK_SIZE + slot)
+            .collect()
+    }
+
+    pub(crate) fn note_inspected_slots(&mut self, inspected: usize) {
+        self.inspected_slots = inspected;
     }
 
     /// `C4PXSSystem::Count` as observed by `C4ControlSyncCheck::Set` after
@@ -186,6 +344,7 @@ impl PxsSystem {
 
     pub(crate) fn begin_execute(&mut self) {
         self.execute_count = 0;
+        self.inspected_slots = 0;
     }
 
     pub(crate) fn note_executed(&mut self) {
@@ -228,6 +387,8 @@ impl PxsSystem {
             self.chunks[index] = None;
             self.chunk_counts[index] = 0;
         }
+        // Chunks moved, so every bit did: rebuild rather than track the shift.
+        self.occupancy = SlotOccupancy::rebuild(&self.chunks);
     }
 
     /// Slot accessors for the engine-driven execute loop. The engine walks
@@ -248,6 +409,7 @@ impl PxsSystem {
     pub fn put_slot(&mut self, chunk: usize, slot: usize, pxs: Pxs) {
         if let Some(slots) = self.chunks.get_mut(chunk).and_then(|chunk| chunk.as_mut()) {
             slots[slot] = Some(pxs);
+            self.occupancy.set(chunk * PXS_CHUNK_SIZE + slot);
         }
     }
 
@@ -262,6 +424,7 @@ impl PxsSystem {
             .and_then(|entry| entry.take())
             .is_some();
         if cleared {
+            self.occupancy.unset(chunk * PXS_CHUNK_SIZE + slot);
             if let Some(count) = self.chunk_counts.get_mut(chunk) {
                 *count = count.saturating_sub(1);
             }
@@ -275,6 +438,7 @@ impl PxsSystem {
         for chunk_index in 0..PXS_MAX_CHUNK {
             if self.chunks[chunk_index].is_some() && self.chunk_counts[chunk_index] == 0 {
                 self.chunks[chunk_index] = None;
+                self.occupancy.clear_chunk(chunk_index);
             }
         }
     }
@@ -321,6 +485,7 @@ impl PxsSystem {
         if slots[slot].replace(pxs).is_none() {
             self.chunk_counts[chunk] += 1;
         }
+        self.occupancy.set(chunk * PXS_CHUNK_SIZE + slot);
         true
     }
 
@@ -380,6 +545,7 @@ impl PxsSystem {
                 system.chunk_counts[chunk_index] += 1;
             }
         }
+        system.occupancy = SlotOccupancy::rebuild(&system.chunks);
         Ok(system)
     }
 
@@ -414,7 +580,9 @@ impl PxsSystem {
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.chunk_counts.clear();
+        self.occupancy = SlotOccupancy::default();
         self.execute_count = 0;
+        self.inspected_slots = 0;
     }
 }
 
@@ -638,15 +806,11 @@ mod tests {
 mod scan_baseline_tests {
     use super::*;
 
-    /// A PXS Execute pass visits every slot of every allocated chunk in
-    /// chunk-major order (`C4PXS.cpp:212-234`), so what it walks is fixed by
-    /// the chunks that exist rather than by the pixels in them.
-    ///
-    /// This is the baseline clonk-org/clonk-rs#296 asks for before deciding
-    /// whether an ordered occupancy index is worth its complexity: the gap
-    /// between visited and live is the work such an index would remove.
+    /// The chunks a pass will walk, which is what `PxsSystem` alone can
+    /// answer — the slots it inspects are counted by the pass itself and
+    /// pinned at the engine level, where `Execute` actually runs.
     #[test]
-    fn the_execute_scan_visits_whole_chunks_however_few_pixels_are_live() {
+    fn allocated_chunks_track_the_pixels_placed_in_them() {
         let mut system = PxsSystem::default();
         assert_eq!(
             system.execute_scan_baseline(),
@@ -662,23 +826,127 @@ mod scan_baseline_tests {
             ydir: C4Fixed::from_raw(0),
         };
         assert!(system.create_at(0, 0, pixel));
-        let baseline = system.execute_scan_baseline();
-        assert_eq!(baseline.allocated_chunks, 1);
-        assert_eq!(
-            baseline.visited_slots, PXS_CHUNK_SIZE,
-            "one allocated chunk is 500 visited slots"
-        );
+        assert_eq!(system.execute_scan_baseline().allocated_chunks, 1);
 
-        // A pixel in a later chunk allocates it, and every slot of both is
-        // walked — the sparse case the issue is about.
+        // A pixel in a later chunk allocates that chunk and no chunk between —
+        // the sparse case clonk-org/clonk-rs#296 is about.
         assert!(system.create_at(3, 17, pixel));
-        let baseline = system.execute_scan_baseline();
-        assert_eq!(baseline.allocated_chunks, 2);
-        assert_eq!(baseline.visited_slots, 2 * PXS_CHUNK_SIZE);
-        assert_eq!(
-            baseline.scanned_empty(),
-            2 * PXS_CHUNK_SIZE - baseline.live,
-            "the empty slots walked are what an occupancy index would skip"
-        );
+        assert_eq!(system.execute_scan_baseline().allocated_chunks, 2);
+    }
+
+    /// The accelerator has to answer exactly what the linear scans answered,
+    /// for every occupancy the slot array can reach.
+    ///
+    /// A deterministic pseudo-random walk rather than a fixed table: the
+    /// failure this guards against is a chunk-boundary or word-boundary case
+    /// nobody thought to enumerate — `PXS_CHUNK_SIZE` is 500, so a chunk
+    /// neither starts nor ends on a 64-bit word.
+    #[test]
+    fn the_occupancy_index_answers_what_the_linear_scans_answer() {
+        let mut system = PxsSystem::default();
+        let material = crate::TestValueExt::test_value(MaterialId::new(1));
+        // xorshift, so the sequence is fixed without pulling in a dependency.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for step in 0..2_000_usize {
+            let chunk = (next() as usize) % PXS_MAX_CHUNK;
+            let slot = (next() as usize) % PXS_CHUNK_SIZE;
+            match step % 4 {
+                0 => system.clear_slot(chunk, slot),
+                1 => {
+                    system.create_at(
+                        chunk,
+                        slot,
+                        Pxs {
+                            mat: material,
+                            x: C4Fixed::from_raw(step as i32),
+                            y: C4Fixed::ZERO,
+                            xdir: C4Fixed::ZERO,
+                            ydir: C4Fixed::ZERO,
+                        },
+                    );
+                }
+                2 => {
+                    system.create(
+                        material,
+                        C4Fixed::ZERO,
+                        C4Fixed::ZERO,
+                        C4Fixed::ZERO,
+                        C4Fixed::ZERO,
+                    );
+                }
+                _ if step % 40 == 3 => system.free_empty_chunks(),
+                _ if step % 80 == 7 => system.sync_clearance(),
+                _ => system.clear_slot(chunk, PXS_CHUNK_SIZE - 1 - slot),
+            }
+
+            assert!(
+                system.occupancy_matches_slots(),
+                "index drifted from the array at step {step}"
+            );
+            assert_eq!(
+                system.occupancy.first_free_in_chunk(chunk),
+                system.first_free_in_chunk_linear(chunk),
+                "free lookup diverged at step {step}"
+            );
+
+            let indexed = {
+                let mut visited = Vec::new();
+                let mut cursor = 0;
+                while let Some(live) = system.next_live_slot(cursor) {
+                    visited.push(live);
+                    cursor = live + 1;
+                }
+                visited
+            };
+            assert_eq!(
+                indexed,
+                system.live_slots_linear(),
+                "ascending order diverged at step {step}"
+            );
+        }
+    }
+
+    /// Every path that replaces the slot array wholesale has to leave the
+    /// accelerator agreeing with it, or a later pass skips a live pixel.
+    #[test]
+    fn rebuilding_paths_leave_the_index_agreeing_with_the_array() {
+        let pixel = Pxs {
+            mat: crate::TestValueExt::test_value(MaterialId::new(1)),
+            x: C4Fixed::from_raw(7),
+            y: C4Fixed::from_raw(9),
+            xdir: C4Fixed::ZERO,
+            ydir: C4Fixed::ZERO,
+        };
+        let mut system = PxsSystem::default();
+        for (chunk, slot) in [(0, 0), (0, 63), (0, 64), (2, PXS_CHUNK_SIZE - 1), (5, 17)] {
+            assert!(system.create_at(chunk, slot, pixel));
+        }
+
+        let bytes = system.to_c4b().expect("c4b bytes");
+        let loaded = PxsSystem::from_c4b(&bytes).expect("c4b load");
+        assert!(loaded.occupancy_matches_slots(), "from_c4b");
+        // Save renumbers chunks to their rank among the allocated ones
+        // (C4PXS.cpp:346-349), so the slots move but the pixels do not.
+        assert_eq!(loaded.iter().count(), system.iter().count());
+
+        let mut compacted = system.clone();
+        compacted.sync_clearance();
+        assert!(compacted.occupancy_matches_slots(), "sync_clearance");
+
+        let mut freed = system.clone();
+        freed.free_empty_chunks();
+        assert!(freed.occupancy_matches_slots(), "free_empty_chunks");
+
+        let mut cleared = system;
+        cleared.clear();
+        assert!(cleared.occupancy_matches_slots(), "clear");
+        assert_eq!(cleared.next_live_slot(0), None);
     }
 }

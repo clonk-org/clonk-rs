@@ -5546,3 +5546,60 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let snapshot = engine.test_object_snapshot(id);
         assert_eq!(snapshot.action_procedure.as_deref(), Some("flight"));
     }
+
+    /// clonk-org/clonk-rs#296: a pass no longer walks the empties between
+    /// live pixels.
+    ///
+    /// `C4PXSSystem::Execute` visits every slot of every allocated chunk
+    /// (C4PXS.cpp:212-234), so a single pixel in chunk 0 cost 500 slot reads
+    /// and one more in chunk 3 cost 1,000 — the sparse case is the expensive
+    /// one, because a chunk stays allocated for as long as any pixel in it
+    /// lives. The occupancy index answers "next live slot at or after here"
+    /// directly, so the cost follows the pixels rather than the chunks.
+    #[test]
+    fn a_pxs_pass_inspects_its_live_pixels_rather_than_whole_chunks() {
+        let materials = materials_pxs_with_earth(
+            "[Material Sand]\nName=Sand\nDensity=25\nFriction=10\nMaxSlide=2\n",
+        );
+        let [sand] = pxs_material_ids(&materials, ["Sand"]);
+        let mut engine = pxs_engine(7, materials);
+        engine.set_landscape(Landscape::with_default_material(4, vec![40; 4], None).test_value());
+
+        engine.tick_pxs();
+        assert_eq!(
+            engine.pxs_execute_scan_baseline(),
+            clonk_engine::pxs::PxsScanBaseline::default(),
+            "an empty system allocates no chunk and walks nothing"
+        );
+
+        assert!(create_test_pxs(&mut engine, sand, 1, 1, 0, 0));
+        engine.tick_pxs();
+        let baseline = engine.pxs_execute_scan_baseline();
+        assert_eq!(baseline.allocated_chunks, 1);
+        assert_eq!(baseline.live, 1, "the one pixel executed");
+        assert_eq!(
+            baseline.visited_slots,
+            engine.pxs_last_inspected_slots(),
+            "the reported scan is the one the pass performed"
+        );
+        assert_eq!(
+            baseline.visited_slots, 1,
+            "one pixel costs one slot, where a whole 500-slot chunk was walked"
+        );
+
+        // A pixel in a later chunk keeps that chunk allocated for as long as
+        // it lives, so the walked span used to grow to 1,000 slots while the
+        // work stayed at two — the sparse case clonk-org/clonk-rs#296 is about.
+        let pixel = engine.pxs_system.peek_slot(0, 0).test_value();
+        assert!(engine.pxs_system.create_at(3, 17, pixel));
+        engine.tick_pxs();
+        let baseline = engine.pxs_execute_scan_baseline();
+        assert_eq!(baseline.allocated_chunks, 2);
+        assert_eq!(baseline.live, 2);
+        assert_eq!(baseline.visited_slots, 2);
+        assert_eq!(
+            baseline.scanned_empty(),
+            0,
+            "every slot inspected now holds a live pixel"
+        );
+    }

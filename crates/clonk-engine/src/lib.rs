@@ -10523,10 +10523,15 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
 }
 
 impl Engine {
-    /// What the next PXS Execute pass will walk, against what it will find
+    /// What the last PXS Execute pass walked, against what it found
     /// (clonk-org/clonk-rs#296). Observation only.
     pub fn pxs_execute_scan_baseline(&self) -> crate::pxs::PxsScanBaseline {
         self.pxs_system.execute_scan_baseline()
+    }
+
+    /// Slots the last PXS Execute pass inspected, live or empty.
+    pub fn pxs_last_inspected_slots(&self) -> usize {
+        self.pxs_system.inspected_slots()
     }
 
     /// What effect dispatch has materialised since the last reset.

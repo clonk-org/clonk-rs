@@ -1215,21 +1215,22 @@ impl Engine {
         // deactivates the pixel (C4PXS.cpp:212-234).
         self.pxs_system.begin_execute();
         self.pxs_system.free_empty_chunks();
-        for chunk in 0..pxs::PXS_MAX_CHUNK {
-            if !self.pxs_system.chunk_allocated(chunk) {
+        let mut inspected = 0_usize;
+        let mut cursor = 0_usize;
+        while let Some(index) = self.pxs_system.next_live_slot(cursor) {
+            let (chunk, slot) = (index / pxs::PXS_CHUNK_SIZE, index % pxs::PXS_CHUNK_SIZE);
+            cursor = index + 1;
+            inspected += 1;
+            let Some(pixel) = self.pxs_system.peek_slot(chunk, slot) else {
                 continue;
+            };
+            match self.execute_pxs(pixel) {
+                Some(updated) => self.pxs_system.put_slot(chunk, slot, updated),
+                None => self.pxs_system.clear_slot(chunk, slot),
             }
-            for slot in 0..pxs::PXS_CHUNK_SIZE {
-                let Some(pixel) = self.pxs_system.peek_slot(chunk, slot) else {
-                    continue;
-                };
-                match self.execute_pxs(pixel) {
-                    Some(updated) => self.pxs_system.put_slot(chunk, slot, updated),
-                    None => self.pxs_system.clear_slot(chunk, slot),
-                }
-                self.pxs_system.note_executed();
-            }
+            self.pxs_system.note_executed();
         }
+        self.pxs_system.note_inspected_slots(inspected);
     }
 
     /// `GBackMat` (C4Wrappers.h:164-167): the PXS step loop and reaction
