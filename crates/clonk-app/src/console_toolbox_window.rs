@@ -377,7 +377,12 @@ pub(crate) fn handle_developer_component_editor_event(
                 _ => None,
             };
             if let Some(editing) = editing {
-                edit.text.key(editing);
+                // Held shift extends a selection instead of dropping it. Read
+                // from this window's own modifiers for the same reason the
+                // commit is: a handler reading the shared field would find
+                // whatever the last other window left there.
+                edit.text
+                    .key_extending(editing, editor_modifiers.shift_key());
                 windows.request_redraw(key);
                 return;
             }
@@ -392,6 +397,44 @@ pub(crate) fn handle_developer_component_editor_event(
                 }
                 Key::Named(NamedKey::Space) => {
                     edit.text.insert(' ');
+                    windows.request_redraw(key);
+                }
+                // The editing shortcuts, which are the reason a modified
+                // character is not typed. Cut, copy and paste move text
+                // between the editor and the system clipboard; the editor
+                // itself only ever handles strings, so a clipboard that is
+                // unavailable costs the edit rather than the session.
+                Key::Character(text) if commit => {
+                    let shortcut = text.chars().next().map(|c| c.to_ascii_lowercase());
+                    match shortcut {
+                        Some('c') => {
+                            if let Some(selected) = edit.text.copy_selection() {
+                                set_clipboard_text(&selected);
+                            }
+                        }
+                        Some('x') => {
+                            if let Some(selected) = edit.text.cut_selection() {
+                                set_clipboard_text(&selected);
+                            }
+                        }
+                        Some('v') => {
+                            if let Some(text) = clipboard_text() {
+                                edit.text.paste(&text);
+                            }
+                        }
+                        // Shift-Z is redo on the same key, which is what a
+                        // macOS editor does; Ctrl-Y is the Windows spelling.
+                        Some('z') if editor_modifiers.shift_key() => {
+                            edit.text.redo();
+                        }
+                        Some('z') => {
+                            edit.text.undo();
+                        }
+                        Some('y') => {
+                            edit.text.redo();
+                        }
+                        _ => return,
+                    }
                     windows.request_redraw(key);
                 }
                 // A modified character is a shortcut, not text: without this
@@ -498,5 +541,29 @@ pub(crate) fn handle_developer_toolbox_event(
             }
         }
         _ => {}
+    }
+}
+
+/// Puts text on the system clipboard, logging rather than failing the edit.
+///
+/// The editor's own cut and copy are pure string operations; this is the only
+/// part that touches the machine, which is what keeps the editor testable
+/// without reading or writing the developer's clipboard.
+fn set_clipboard_text(text: &str) {
+    if let Err(error) =
+        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text.to_string()))
+    {
+        tracing::warn!(%error, "failed to copy component editor text");
+    }
+}
+
+/// Reads the system clipboard, or `None` when there is nothing to paste.
+fn clipboard_text() -> Option<String> {
+    match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+        Ok(text) => Some(text),
+        Err(error) => {
+            tracing::warn!(%error, "failed to paste into the component editor");
+            None
+        }
     }
 }
