@@ -55,18 +55,24 @@ default adapter rather than failing startup.
 | Desktop Windows / macOS / Linux with a current driver | Supported | Vulkan, Metal or DX12 |
 | Software adapters (llvmpipe, lavapipe, WARP) | Supported when they report GLES 3.0/Vulkan 1.0 and an sRGB surface | slow, but above the floor; this is the lowest tier the probe can be exercised against without hardware |
 | Raspberry Pi 4 / Pi 5 | Supported | V3D exposes GLES 3.1; not blocked by the GLES 2 limit, though a driver may still fail device creation |
-| Raspberry Pi Zero 2 W / Pi 3 | **Unsupported** | VideoCore IV exposes GLES 2.0 only |
-| Raspberry Pi 0 / Pi 1 / Pi 2 | **Unsupported** | VideoCore IV exposes GLES 2.0 only |
+| Raspberry Pi Zero 2 W / Pi 3 | **Unsupported by this build** | VideoCore IV exposes GLES 2.0 only, so wgpu creates no adapter; see the decision below |
+| Raspberry Pi 0 / Pi 1 / Pi 2 | **Unsupported by this build** | VideoCore IV exposes GLES 2.0 only, so wgpu creates no adapter; see the decision below |
 
 ### The Pi 0–3 decision
 
-Pi 0–3 are **explicitly unsupported for interactive play**, and software
-presentation does not change that. The blocker is not the speed of the
-rasteriser: wgpu-hal refuses to create a GLES context below 3.0, so those boards
-produce no adapter on any backend, and the presentation path needs a wgpu device
-even to blit a CPU buffer. A software presenter (clonk-org/clonk-rs#299) is
-therefore scoped to machines that *have* a usable adapter but cannot drive the
-retained pipeline well — not to recovering VideoCore IV.
+Pi 0–3 are **explicitly unsupported by the shipped interactive path**. wgpu-hal
+refuses to create a GLES context below 3.0, so VideoCore IV produces no adapter
+on any backend — including the software-adapter pass, which still needs wgpu —
+and every presentation path in the build today goes through a wgpu device, even
+the one that only blits a CPU buffer.
+
+That is a statement about **this** build, not a proof that the boards cannot be
+served. A wgpu-independent presenter (clonk-org/clonk-rs#299) would not need an
+adapter at all — `softbuffer` and the like hand a CPU buffer to X11, Wayland or
+KMS directly — so whether Pi 0–3 come into scope is a question for that issue to
+answer on its own evidence, and the remaining doubt there is simulation speed on
+a VideoCore IV-era CPU rather than the graphics API. Do not read this row as
+closing that off.
 
 Headless server mode (`--headless`) is unaffected: it initializes no device and
 runs anywhere the rest of the engine does.
