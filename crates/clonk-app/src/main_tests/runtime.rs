@@ -6406,6 +6406,60 @@ fn console_viewport_file_drop_emits_a_definition_drop_control() {
     assert!(!app.developer_console.log().text().is_empty());
 }
 
+/// The other half of `C4Game::DropFile`: when `C4Id2Def` misses, C++ loads the
+/// group and resolves the id a *second* time
+/// (`Defs.Load(szFilename, C4D_Load_RX, …) && (cdef = C4Id2Def(c_id))`,
+/// `C4Game.cpp:1647-1651`), so a definition dropped from outside the loaded
+/// set reaches `DropDef` instead of reporting `IDS_CNS_DROPNODEF`.
+///
+/// The sibling test above covers the id the engine already holds, which is the
+/// arm that never touches the loader. This one is what fails if the drop stops
+/// loading: the engine-side loader has its own tests, but only this pins that
+/// the drop actually reaches it.
+#[test]
+fn console_viewport_file_drop_loads_a_definition_outside_the_loaded_set() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+        .test_value();
+    let identity = app.physical_viewports.last().test_value().physical_identity;
+    assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+    // Deliberately never registered, so the first `C4Id2Def` misses and the
+    // load is the only way the id can resolve.
+    let definition = "DRPD".to_owned();
+    assert!(
+        app.engine.definition(&definition).is_none(),
+        "the id must start outside the loaded set for this to test anything"
+    );
+    let directory = tempfile::tempdir().test_value();
+    let source = directory.path().join("Dropped.c4d");
+    std::fs::create_dir(&source).test_value();
+    std::fs::write(
+        source.join("DefCore.txt"),
+        format!("[DefCore]\nid={definition}\nVersion=4,9,8\nName=Dropped\nWidth=8\nHeight=8\n"),
+    )
+    .test_value();
+
+    let local = (40, 24);
+    app.drop_file_on_console_viewport(identity, &source, local);
+
+    let decided = commands.take_submitted_decided_controls();
+    let [(_, clonk_engine::ControlPacket::EmDropDef(drop), false)] = decided.as_slice() else {
+        panic!(
+            "expected one definition drop control, got {decided:?}; console said {:?}",
+            app.developer_console.log().text()
+        );
+    };
+    assert_eq!(drop.id, definition.as_bytes());
+    assert!(
+        app.engine.definition(&definition).is_some(),
+        "the dropped group was loaded, which is what lets the second lookup resolve"
+    );
+}
+
 // C4EditCursor.cpp:361-374,503-518 and C4ToolsDlg.cpp:865-879 — the
 // context menu's Properties/Tools row is the only thing that opens the
 // toolbox, the page follows the cursor mode, and the landscape mode

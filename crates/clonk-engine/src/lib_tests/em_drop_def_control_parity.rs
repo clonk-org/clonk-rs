@@ -119,3 +119,54 @@ fn nonstructures_use_create_object_and_invalid_drops_are_noops() {
     );
     assert_eq!(edge.position, Vector2::new(i32::MIN, 11));
 }
+
+/// `C4Game::DropFile` loads a dropped `.c4d` whose id the engine has never
+/// seen and then looks the id up a *second* time
+/// (`Defs.Load(szFilename, C4D_Load_RX, …) && (cdef = C4Id2Def(c_id))`,
+/// `C4Game.cpp:1647-1651`). Without a runtime loader the port could only
+/// resolve ids already in the loaded set, so a definition dropped from outside
+/// it reported `IDS_CNS_DROPNODEF` — the arm C++ takes only when its own load
+/// fails.
+#[test]
+fn a_definition_from_outside_the_loaded_set_loads_from_its_own_group() {
+    let root = tempfile::tempdir().expect("temporary definition group");
+    let group = root.path().join("Dropped.c4d");
+    std::fs::create_dir(&group).expect("definition group directory");
+    std::fs::write(
+        group.join("DefCore.txt"),
+        "[DefCore]\nid=DRPD\nVersion=4,9,8\nName=Dropped\nWidth=8\nHeight=8\n",
+    )
+    .expect("definition core");
+
+    let mut engine = Engine::new();
+    assert!(
+        engine.definition("DRPD").is_none(),
+        "the id is not in the loaded set to begin with, which is the case that used to fail"
+    );
+
+    assert!(
+        engine.load_definition_from_path(&group),
+        "the dropped group loads"
+    );
+    assert!(
+        engine.definition("DRPD").is_some(),
+        "and the second lookup C++ performs now resolves"
+    );
+}
+
+/// The failure arm has to stay reachable: `IDS_CNS_DROPNODEF` is still what a
+/// genuinely unloadable group reports.
+#[test]
+fn a_group_that_cannot_be_loaded_still_reports_no_definition() {
+    let root = tempfile::tempdir().expect("temporary definition group");
+    let group = root.path().join("Broken.c4d");
+    std::fs::create_dir(&group).expect("definition group directory");
+    // No `DefCore.txt` at all, so there is nothing to load an id from.
+
+    let mut engine = Engine::new();
+    assert!(
+        !engine.load_definition_from_path(&group),
+        "a group with no definition core does not load"
+    );
+    assert!(engine.definition("DRPD").is_none());
+}
