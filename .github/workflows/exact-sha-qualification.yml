@@ -487,8 +487,27 @@ jobs:
         include:
           - name: macOS
             runner: macos-latest
+            # Everything builds natively here.
+            scope: --workspace
           - name: Windows
             runner: windows-latest
+            # `freetype-rs` is taken with `features = ["bundled"]`, which
+            # compiles vendored libpng and needs `zlib.h`. That has never built
+            # under native MSVC here — the shipped Windows binaries are
+            # cross-built with mingw — so the three crates that depend on it
+            # fail before clippy sees a single lint:
+            #
+            #   freetype-sys .. libpng\pngstruct.h: fatal error C1083:
+            #   Cannot open include file: 'zlib.h'
+            #
+            # Linting the rest is worth far more than linting nothing, which is
+            # what this row did in practice. clonk-org/clonk-rs#737 tracks
+            # making the bundled build work natively so the exclusions can go.
+            scope: >-
+              --workspace
+              --exclude clonk-app
+              --exclude clonk-frontend
+              --exclude clonk-frontend-unit-tests
     concurrency:
       group: "main-platform-lint-${{ matrix.name }}-${{ inputs.concurrency-suffix }}"
       cancel-in-progress: true
@@ -516,4 +535,6 @@ jobs:
       # that need the submodule are all inside `#[test]` bodies, and keeping
       # them out holds this to one library-and-binary build per platform.
       - name: Lint this platform's own code paths
-        run: cargo clippy --workspace --lib --bins --locked -- -D warnings
+        env:
+          LINT_SCOPE: ${{ matrix.scope }}
+        run: cargo clippy $LINT_SCOPE --lib --bins --locked -- -D warnings
