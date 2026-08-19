@@ -86,11 +86,19 @@ pub fn associate_savegame_players(
             if players[participant].savegame_player != 0 {
                 continue;
             }
+            // `FindSavegameResumePlayerInfo`'s eligibility test
+            // (`C4PlayerInfo.cpp:1101`): a savegame player is a candidate only
+            // while `GetPlayerInfoByID` **and** `GetPlayerInfoBySavegameID`
+            // both come up empty against the joining list. Testing only the
+            // second lets a join take over the savegame player whose ID it
+            // already carries, which C++ never does.
+            //
             // Re-read on every candidate rather than once per pass: an
             // association made earlier in this same pass has to be visible.
             let taken = |candidate: &ControlPlayerInfoEntry| {
                 players.iter().any(|player| {
-                    player.savegame_player != 0 && player.savegame_player == candidate.id
+                    player.id == candidate.id
+                        || (player.savegame_player != 0 && player.savegame_player == candidate.id)
                 })
             };
             let current = &players[participant];
@@ -164,6 +172,65 @@ pub fn legacy_basename(path: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::LegacyCString;
+
+    fn player(id: i32, filename: &str, name: &str, color: u32) -> ControlPlayerInfoEntry {
+        ControlPlayerInfoEntry {
+            id,
+            filename: LegacyCString::from_bytes(filename.as_bytes().to_vec()).unwrap(),
+            name: LegacyCString::from_bytes(name.as_bytes().to_vec()).unwrap(),
+            original_color: color,
+            ..Default::default()
+        }
+    }
+
+    /// `C4PlayerInfo.cpp:1101` tests `GetPlayerInfoByID` as well as
+    /// `GetPlayerInfoBySavegameID`, so a savegame player whose ID a joining
+    /// player already carries is not a candidate at all — the join falls
+    /// through to the next savegame player instead of taking its own ID.
+    #[test]
+    fn a_savegame_player_whose_id_a_join_carries_is_not_a_candidate() {
+        let mut joining = vec![player(7, "Players/A.c4p", "Ada", 0x111111)];
+        let saved = vec![
+            player(7, "Save/A.c4p", "Ada", 0x111111),
+            player(8, "Save/B.c4p", "Ada", 0x111111),
+        ];
+
+        let wild = associate_savegame_players(&mut joining, &saved);
+
+        assert_eq!(joining[0].savegame_player, 8);
+        assert!(wild.is_empty(), "a player-name match is not wild");
+    }
+
+    /// Every level runs over every unassociated player before the next level
+    /// starts, so an exact file+name match claims its savegame player before a
+    /// colour-only join can reach it (`C4PlayerInfo.cpp:1374-1375`).
+    #[test]
+    fn an_exact_match_claims_its_savegame_player_before_a_wild_one() {
+        let mut joining = vec![
+            player(41, "Players/Ada.c4p", "Ada", 0x111111),
+            player(42, "Players/Bert.c4p", "Bert", 0x222222),
+        ];
+        let saved = vec![
+            player(7, "Save/Ada.c4p", "Ada", 0x222222),
+            player(8, "Save/Zoe.c4p", "Zoe", 0x222222),
+        ];
+
+        let wild = associate_savegame_players(&mut joining, &saved);
+
+        assert_eq!(
+            [joining[0].savegame_player, joining[1].savegame_player],
+            [7, 8]
+        );
+        assert_eq!(
+            wild,
+            vec![WildSavegameTakeover {
+                participant: 1,
+                savegame_player: 8,
+            }],
+            "only the association past PML_PlrName is wild"
+        );
+    }
 
     /// `StdFile.cpp:43-49` splits on `DirectorySeparator || '/'`, and
     /// `StdFile.h:41-49` makes `DirectorySeparator` `'\\'` on Windows and `'/'`
