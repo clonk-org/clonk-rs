@@ -213,12 +213,30 @@ jobs:
 
       - name: Install Linux build dependencies
         if: matrix.name == 'linux'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libasound2-dev \
-            libudev-dev \
-            pkg-config
+          # Bound each apt call so a stalled mirror or dpkg lock cannot burn the
+          # job's whole timeout, and retry so a transient stall self-heals
+          # instead of evicting the merge-queue entry behind it.
+          apt_install() {
+            timeout 240 sudo apt-get install --yes --no-install-recommends "$@"
+          }
+          apt_refresh() { timeout 180 sudo apt-get update; }
+          apt_ensure() {
+            for attempt in 1 2 3; do
+              if apt_install "$@"; then
+                return 0
+              fi
+              apt_refresh || true
+              if apt_install "$@"; then
+                return 0
+              fi
+              echo "apt attempt ${attempt} failed; retrying" >&2
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
+          apt_ensure libasound2-dev libudev-dev pkg-config
 
       - name: Build the packaging tool
         run: cargo build --profile test --locked -p xtask --features engine-tools --bin xtask-engine-tools
@@ -342,12 +360,30 @@ jobs:
 
       - name: Install Linux build dependencies
         if: matrix.name == 'linux'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libasound2-dev \
-            libudev-dev \
-            pkg-config
+          # Bound each apt call so a stalled mirror or dpkg lock cannot burn the
+          # job's whole timeout, and retry so a transient stall self-heals
+          # instead of evicting the merge-queue entry behind it.
+          apt_install() {
+            timeout 240 sudo apt-get install --yes --no-install-recommends "$@"
+          }
+          apt_refresh() { timeout 180 sudo apt-get update; }
+          apt_ensure() {
+            for attempt in 1 2 3; do
+              if apt_install "$@"; then
+                return 0
+              fi
+              apt_refresh || true
+              if apt_install "$@"; then
+                return 0
+              fi
+              echo "apt attempt ${attempt} failed; retrying" >&2
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
+          apt_ensure libasound2-dev libudev-dev pkg-config
 
       - name: Install the macOS runtime target
         if: startsWith(matrix.name, 'macos-')
