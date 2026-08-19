@@ -5986,6 +5986,39 @@ fn a_below_floor_adapter_is_reported_as_such_not_as_a_missing_one() {
     );
 }
 
+/// The third of clonk-org/clonk-rs#299's three startup-diagnostic cases: not
+/// "the GPU failed" or "software failed", but *both*.
+///
+/// It is the one an operator can least afford to see truncated — there is no
+/// working presentation left to inspect afterwards — and the one most easily
+/// lost, because the natural shape is to report whichever failure was raised
+/// last and drop the other.
+#[test]
+fn a_machine_with_neither_presentation_path_is_told_it_was_both() {
+    // A realistic GPU failure: the actionable detail is at the bottom of the
+    // chain, under two layers of context added on the way out.
+    let gpu_error = anyhow::anyhow!("no GPU backends were attempted")
+        .context("failed to create pixel framebuffer")
+        .context("no GPU adapter on any backend");
+
+    let message = crate::main_audio::both_presentations_failed_context(&gpu_error);
+
+    assert!(
+        message.contains("software presentation could not start either"),
+        "the software half must survive: {message}"
+    );
+    assert!(
+        message.contains("no GPU adapter on any backend"),
+        "the GPU half must survive: {message}"
+    );
+    // `{:#}` renders the whole chain; the outer context alone names nothing an
+    // operator can act on.
+    assert!(
+        message.contains("no GPU backends were attempted"),
+        "the GPU cause must survive, not just its outermost context: {message}"
+    );
+}
+
 #[test]
 fn the_presentation_path_never_reaches_the_simulation() {
     // clonk-org/clonk-rs#299 requires lockstep, RNG and saves to be identical
