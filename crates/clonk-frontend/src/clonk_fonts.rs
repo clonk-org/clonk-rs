@@ -1607,6 +1607,17 @@ fn cp1252_to_char(byte: u8) -> Option<char> {
 /// (`StdFont.cpp:307-315,386-430`). Rust cells are independent allocations,
 /// so eagerly materializing the face's bounded charmap is equivalent while
 /// retaining the complete CP1252 map used by the default language.
+/// Whole-pixel advance from FreeType's 26.6 fixed-point vector.
+///
+/// `FT_Pos` is `c_long`, which is 32-bit on Windows and 64-bit everywhere else,
+/// so the narrowing is a real conversion on one target and a no-op on the
+/// other. Written once here because a per-site cast reads as redundant on
+/// whichever platform its author happened to build for.
+#[allow(clippy::unnecessary_cast)]
+pub(crate) fn advance_pixels(advance: Vector) -> i32 {
+    (advance.x >> 6) as i32
+}
+
 fn classic_font_characters(face: &freetype::Face) -> BTreeSet<char> {
     let mut characters = (0x20_u16..=0xff)
         .filter_map(|byte| cp1252_to_char(byte as u8))
@@ -1646,7 +1657,7 @@ fn loaded_glyph_cell(
         .collect();
 
     // width = max(advance, bearing+width) + shadow (StdFont.cpp:218).
-    let advance_px = (slot.advance().x >> 6) as i32;
+    let advance_px = advance_pixels(slot.advance());
     let bearing = slot.bitmap_left().max(0);
     let shadow_size = i32::from(shadow);
     let cell_w = (advance_px.max(bearing + cov_w as i32) + shadow_size).max(1) as usize;
@@ -1855,7 +1866,7 @@ fn loaded_native_glyph_cell(
             buffer[start..start + cov_w].iter().copied()
         })
         .collect();
-    let advance_px = (slot.advance().x >> 6) as i32;
+    let advance_px = advance_pixels(slot.advance());
     let bearing = slot.bitmap_left().max(0);
     let cell_width = (advance_px.max(bearing + cov_w as i32) + shadow_size as i32).max(1) as usize;
     let at_x = bearing as usize;

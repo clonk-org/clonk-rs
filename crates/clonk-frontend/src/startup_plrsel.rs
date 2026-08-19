@@ -7,7 +7,7 @@
 //! widgets it instantiates. All geometry uses C++ integer math; all blits go
 //! through the CStdDDraw-faithful helpers in this crate.
 
-use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
+use crate::clonk_fonts::{advance_pixels, expand_hotkey_markup, ClonkFontSet};
 use crate::rename_edit::RenameEdit;
 use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
@@ -298,7 +298,7 @@ fn build_book_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
         let buffer = bitmap.buffer();
 
         // width = max(advance, bearing+width) + shadowSize(0) (StdFont.cpp:218).
-        let advance_px = (slot.advance().x >> 6) as i32;
+        let advance_px = advance_pixels(slot.advance());
         let bearing = slot.bitmap_left().max(0);
         let cell_w = advance_px.max(bearing + cov_w as i32).max(0) as usize;
         let at_x = bearing as usize;
