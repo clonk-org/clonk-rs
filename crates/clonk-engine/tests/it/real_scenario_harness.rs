@@ -769,6 +769,10 @@ fn alchemy_real_scenario_subcases_batch_3() {
             "shipped_invisibility_recast_carries_remaining_time_into_reset_timer",
             shipped_invisibility_recast_carries_remaining_time_into_reset_timer,
         ),
+        (
+            "learned_firebreath_aims_and_attaches_its_breath_to_the_caster",
+            alchemy_learned_firebreath_aims_and_attaches_its_breath_to_the_caster,
+        ),
     ]);
 }
 
@@ -2679,6 +2683,172 @@ fn alchemy_learned_fireball_aims_steers_and_explodes_through_player_controls(
             .is_none_or(|flying| !flying.status.is_active())
     });
     assert!(expired, "FIRB removes itself instead of flying forever");
+}
+
+fn alchemy_learned_firebreath_aims_and_attaches_its_breath_to_the_caster(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy firebreath parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+
+    // MDBT is the most expensive of Alchemy's sphere spells at ISPH=3 against
+    // the scenario's seeded ISPH=1, so two harvested spheres go through
+    // ALC_::Transfer on top of the shipped bag
+    // (Alchemy.c4s/Script.c:21-37; Firebreath.c4d/DefCore.txt;
+    // Bag.c4d/Script.c:148-160).
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("ISPH") == Some(1)
+                    && object.components.get("IGOL") == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag_index = engine.test_object_index(attached_bag);
+    let extra_spheres = [
+        engine.spawn_test_object(
+            SpawnConfig::new("ALC_").with_ordered_components(vec![("ISPH".to_owned(), 1)]),
+        ),
+        engine.spawn_test_object(
+            SpawnConfig::new("ALC_").with_ordered_components(vec![("ISPH".to_owned(), 1)]),
+        ),
+    ];
+    for source in [seeded_bag, extra_spheres[0], extra_spheres[1]] {
+        engine.call_test_object_function(
+            attached_bag_index,
+            "Transfer",
+            vec![Value::Object(source.as_u64())],
+        );
+    }
+    assert_eq!(
+        engine.call_test_object_function(
+            engine.test_object_index(mage),
+            "CheckMagicRequirements",
+            vec![Value::C4Id("MDBT".into()), Value::Bool(true)],
+        ),
+        Value::Int(1)
+    );
+
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "MDBT"));
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let firebreath_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MDBT"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        firebreath_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+
+    // MDBT aims before it creates anything: unlike MFRB there is no object to
+    // show until the angle is released (Firebreath.c4d/Script.c:18-24).
+    let aimer = crate::support::TestValueExt::test_value((0..12).find_map(|_| {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "AIMR" && object.status.is_active())
+            .map(|object| object.id)
+    }));
+    assert_eq!(engine.crew_cursor(owner), Some(aimer));
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "FBRT" && object.status.is_active()),
+        "no breath exists while the mage is still aiming"
+    );
+
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_UP, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_THROW + COM_RELEASE_OFFSET,
+        0,
+    ));
+
+    // ActivateAngle creates the breath through the shipped global
+    // CreateFireBreath and then deletes the spell object itself
+    // (Firebreath.c4d/Script.c:28-39; FBreath.c4d/Script.c:84-87).
+    let breath = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "FBRT" && object.status.is_active())
+            .map(|object| object.id),
+    );
+    let breath_state = engine.test_object_snapshot(breath);
+    assert_eq!(
+        breath_state.action.name, "Exist",
+        "FBRT::Activate pseudo-attaches the breath with SetAction(\"Exist\", caster)"
+    );
+    assert_eq!(
+        breath_state.action.target,
+        Some(mage),
+        "the breath hangs off the caster, which is what its timer reads back"
+    );
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "MDBT" && object.status.is_active()),
+        "MDBT removes itself once the breath exists"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("ISPH")),
+        Some(0),
+        "a successful MDBT cast consumes all three spheres"
+    );
+
+    // The breath is not permanent: its timer counts the lifetime handed to
+    // Activate down to removal (FBreath.c4d/Script.c:13,29-32).
+    let expired = (0..400).any(|_| {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        engine
+            .object_snapshot(breath)
+            .is_none_or(|breath| !breath.status.is_active())
+    });
+    assert!(expired, "FBRT expires instead of burning forever");
 }
 
 fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
