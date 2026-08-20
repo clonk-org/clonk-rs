@@ -66,6 +66,7 @@ shard_modules!(
     get_inventory,
     get_material_color,
     get_material_val,
+    global_add_effect_scaling,
     goldrush_scenario_batches,
     hangle_movement,
     harpoonrace_reload,
