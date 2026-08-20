@@ -835,6 +835,10 @@ fn alchemy_real_scenario_subcases_batch_4() {
             alchemy_curse_family_selects_a_foreign_target_through_the_shipped_selector,
         ),
         (
+            "recovery_pair_each_installs_its_own_cure_effect",
+            alchemy_recovery_pair_each_installs_its_own_cure_effect,
+        ),
+        (
             "mage_uses_context_magic_and_casts_the_shipped_gravity_spells",
             alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells,
         ),
@@ -3600,6 +3604,108 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
         Some(0),
         "the successful MLGT cast consumes its shipped two-bone recipe"
     );
+}
+
+fn alchemy_recovery_pair_each_installs_its_own_cure_effect(prepared: &PreparedInstalledScenario) {
+    // ELX1 and ELX2 are the same spell twice with different reach and a
+    // different effect: 200 and CurePSpell against 300 and CurePlusPSpell
+    // (Elixir.c4d/Script.c:11,25; Recovery.c4d/Script.c:11,25).
+    for (elixir, effect_name) in [("ELX1", "CurePSpell"), ("ELX2", "CurePlusPSpell")] {
+        let mut engine = prepared.instantiate();
+        let owner = join_local_player(&mut engine, "Alchemy recovery parity");
+        let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
+                mage,
+                ObjectUpdate::new()
+                    .with_position(Vector2::new(500, 200))
+                    .with_velocity(Vector2::ZERO)
+                    .with_action("Walk")
+                    .clear_container(),
+            ),
+        );
+        let mage_position = engine.test_object_snapshot(mage).position;
+
+        // Only a target that is hurt (or under a negative NSpell) is eligible
+        // (Elixir.c4d/Script.c:39). Damaging the patient and leaving the mage
+        // at full energy makes the patient the only thing the selector can
+        // pick, which is what lets the test assert *where* the cure landed.
+        let patient = crate::support::TestValueExt::test_value(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| {
+                    object.definition_id == "CLNK"
+                        && object.owner == owner
+                        && object.status.is_active()
+                })
+                .map(|object| object.id),
+        );
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
+                patient,
+                ObjectUpdate::new()
+                    .with_position(Vector2::new(mage_position.x + 30, mage_position.y))
+                    .with_velocity(Vector2::ZERO)
+                    .with_action("Walk")
+                    .clear_container(),
+            ),
+        );
+        crate::support::TestValueExt::test_value(engine.change_object_energy(
+            engine.test_object_index(patient),
+            -20,
+            0,
+            -1,
+        ));
+
+        let spell = engine.spawn_test_object(
+            clonk_engine::SpawnConfig::new(elixir)
+                .with_position(mage_position)
+                .with_owner(owner),
+        );
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(mage.as_u64())],
+        );
+        let selector = crate::support::TestValueExt::test_value(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "SLCR" && object.status.is_active())
+                .map(|object| object.id),
+        );
+        assert_eq!(engine.crew_cursor(owner), Some(selector));
+        crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+        assert_eq!(engine.crew_cursor(owner), Some(mage));
+
+        assert!(
+            engine
+                .test_object_snapshot(patient)
+                .effects
+                .iter()
+                .any(|effect| effect.name == effect_name),
+            "{elixir} installs {effect_name} on the hurt target"
+        );
+        assert!(
+            !engine
+                .test_object_snapshot(mage)
+                .effects
+                .iter()
+                .any(|effect| effect.name == effect_name),
+            "{elixir} cures the target it was pointed at, not the caster"
+        );
+        assert!(
+            !engine
+                .snapshot()
+                .objects
+                .iter()
+                .any(|object| object.definition_id == elixir && object.status.is_active()),
+            "{elixir} removes itself once the cure is placed"
+        );
+    }
 }
 
 fn alchemy_learned_fireball_aims_steers_and_explodes_through_player_controls(
