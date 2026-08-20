@@ -5256,3 +5256,60 @@ fn a_headless_host_logs_a_refused_league_registration_instead_of_drawing_it() {
     main_assert!(server.message_dialogs.is_empty(), "a dedicated server draws no notice it could never dismiss");
     main_assert!(!server.take_exit_request(), "and keeps hosting unregistered rather than quitting");
 }
+
+#[test]
+fn compat_profile_resolves_from_the_launch_override_then_the_saved_key() {
+    use crate::settings::{resolve_compat_profile, CompatProfile};
+    use clonk_core::std_config::Config;
+
+    // Absent means Normal. The profile is a narrowing -- it forces port-only
+    // features off and refuses combinations its promise does not cover -- so a
+    // player who never asked for it is never placed in it.
+    main_assert_eq!(resolve_compat_profile(None, None) => CompatProfile::Normal);
+
+    let mut saved = Config::default();
+    saved.set_in(Some("General"), "CompatProfile", CompatProfile::LEGACY_CLONK);
+    main_assert_eq!(resolve_compat_profile(Some(&saved), None) => CompatProfile::LegacyClonk);
+
+    // The launch override wins over the saved key, in both directions, and is
+    // never written back: `/compatprofile:` is a property of the run.
+    main_assert_eq!(
+        resolve_compat_profile(Some(&saved), Some(CompatProfile::Normal)) => CompatProfile::Normal
+    );
+    let mut plain = Config::default();
+    plain.set_in(Some("General"), "CompatProfile", CompatProfile::NORMAL);
+    main_assert_eq!(
+        resolve_compat_profile(Some(&plain), Some(CompatProfile::LegacyClonk))
+            => CompatProfile::LegacyClonk
+    );
+
+    // The enum row stores a canonical token but accepts the index beside it,
+    // exactly like every other advanced-config enum.
+    let mut numeric = Config::default();
+    numeric.set_in(Some("General"), "CompatProfile", "1");
+    main_assert_eq!(resolve_compat_profile(Some(&numeric), None) => CompatProfile::LegacyClonk);
+
+    // An unrecognised value leaves Normal in place rather than guessing: a
+    // typo must not enrol a session in a promise the port would have to keep.
+    let mut broken = Config::default();
+    broken.set_in(Some("General"), "CompatProfile", "legacyclonk");
+    main_assert_eq!(resolve_compat_profile(Some(&broken), None) => CompatProfile::Normal);
+}
+
+#[test]
+fn compat_profile_launch_override_is_parsed_but_never_persisted() {
+    use crate::settings::CompatProfile;
+
+    let parsed = parse_classic_command_line(&[OsString::from("/compatprofile:legacy-clonk")]);
+    main_assert_eq!(parsed.compat_profile => Some(CompatProfile::LegacyClonk));
+
+    // Case-sensitive on the token, like the other enum rows, and an unknown
+    // token leaves the override unset rather than falling back to a default
+    // that would silently differ from what was asked for.
+    let unknown = parse_classic_command_line(&[OsString::from("/compatprofile:turbo")]);
+    main_assert_eq!(unknown.compat_profile => None);
+
+    let mut app = new_state_only_menu_app(320, 200);
+    app.apply_classic_command_line(&parsed).test_value();
+    main_assert_eq!(app.compat_profile => CompatProfile::LegacyClonk);
+}

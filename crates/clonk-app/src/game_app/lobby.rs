@@ -7035,6 +7035,29 @@ impl GameApp {
         self.process_classic_lobby_actions(actions)
     }
 
+    /// State the operating mode in the lobby both a host and a joining client
+    /// see, so the profile is visible *before* anyone commits to the session.
+    ///
+    /// Only a non-default profile says anything. `CompatProfile::Normal`
+    /// promises nothing and is what every session runs today, so announcing it
+    /// would add a line to a C++-mirrored surface for no information — the
+    /// default lobby stays exactly as it was.
+    fn announce_compat_profile_in_lobby(&mut self) {
+        if self.compat_profile == crate::settings::CompatProfile::Normal {
+            return;
+        }
+        let text = format!(
+            "Compatibility profile: {}",
+            self.compat_profile.display_name()
+        );
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.push_log(clonk_frontend::game_lobby::LobbyLogLine {
+                text,
+                color: [0xff, 0xff, 0xff, 0xff],
+            });
+        }
+    }
+
     pub(crate) fn open_network_lobby(&mut self) {
         self.close_context_menu_silently();
         self.replace_startup_view(StartupView::NetworkLobby);
@@ -7056,6 +7079,7 @@ impl GameApp {
             self.scenario_label = "Network lobby unavailable".to_string();
         }
         self.sync_network_lobby_game_option_state();
+        self.announce_compat_profile_in_lobby();
         self.status_text.clear();
         self.acknowledge_initial_lobby_status_if_ready();
     }
