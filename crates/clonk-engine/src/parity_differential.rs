@@ -1471,6 +1471,66 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
+    // 0b. mrfPoof's synchronised-draw discipline (C4Material.cpp:663-688). The
+    //     arm extracts the landscape material, then draws Rnd3 twice: smoke on
+    //     the first zero, a positional sound on the second. Both draws happen
+    //     unconditionally and in that order, and — the parity fact worth
+    //     pinning — neither touches the synchronised ledger, because Rnd3 reads
+    //     the Randomize3 table rather than `Random`. A port that skipped the
+    //     sound's draw when it had no sound to play, or that routed either
+    //     through `Random`, would desynchronise everything downstream.
+    for (idx, e) in golden["material_poof_reaction"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let seed = i(e, "seed") as i32;
+        let mut rng = crate::LcgRng::new(seed as u32);
+        rng.randomize3();
+        expect_eq(
+            "material_poof_reaction",
+            idx,
+            "random_count",
+            i(e, "random_count"),
+            i64::from(rng.count),
+        );
+        expect_eq(
+            "material_poof_reaction",
+            idx,
+            "random_hold",
+            i(e, "random_hold"),
+            i64::from(rng.hold),
+        );
+
+        // The two draws the arm makes, in order.
+        let smoke = i32::from(rng.rnd3() == 0);
+        let sound = i32::from(rng.rnd3() == 0);
+        expect_eq(
+            "material_poof_reaction",
+            idx,
+            "smoke",
+            i(e, "smoke"),
+            smoke as i64,
+        );
+        expect_eq(
+            "material_poof_reaction",
+            idx,
+            "sound",
+            i(e, "sound"),
+            sound as i64,
+        );
+
+        // And neither draw moved the synchronised ledger.
+        expect_eq(
+            "material_poof_reaction",
+            idx,
+            "random_count after rnd3",
+            i(e, "random_count"),
+            i64::from(rng.count),
+        );
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));

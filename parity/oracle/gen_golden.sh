@@ -533,6 +533,18 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4PXS.cpp" > "$gen/pxs_delete.inc"
 
+# 3y. Lift C4MaterialMap::mrfPoof. Its mass-move and PXS-position arms consume
+#     the synchronised RNG twice through Rnd3 and gate a smoke puff and a sound
+#     on those draws, so the *order and count* of the draws is parity state, not
+#     presentation. Everything the arms touch besides Rnd3 is a side effect the
+#     oracle records rather than performs.
+awk '
+  /^bool C4MaterialMap::mrfPoof\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Material.cpp" > "$gen/mrf_poof.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;
