@@ -109,10 +109,15 @@ impl DownloadDialogState {
         self.outcome.as_ref()
     }
 
+    /// The displayed percentage, if a bar is showing at all.
+    ///
+    /// `None` covers both "no transfer dialog" and "a transfer whose length is
+    /// unknown", which is what the caller needs to distinguish from a real
+    /// zero per cent (clonk-org/clonk-rs#575).
     pub fn progress(&self) -> Option<u8> {
         self.transfer_dialog
             .as_ref()
-            .map(ProgressDialogState::progress)
+            .and_then(|transfer| transfer.dialog().progress())
     }
 
     /// Applies a transport callback. Late callbacks after a terminal event are
@@ -151,6 +156,12 @@ impl DownloadDialogState {
             return;
         };
         if total_bytes == 0 {
+            // A transfer that never reports a total has no percentage to
+            // show. C++ leaves the bar out for these rather than drawing one
+            // that cannot move; returning early here would instead freeze
+            // whatever the last known-length callback left on screen
+            // (clonk-org/clonk-rs#575).
+            dialog.hide_progress();
             return;
         }
         let percent = ((u128::from(downloaded_bytes) * 100) / u128::from(total_bytes)).min(100);
@@ -192,6 +203,34 @@ mod tests {
             "Cancel",
             "User abort",
         )
+    }
+
+    /// A transfer whose total length is never reported has no percentage to
+    /// show, so the bar is dropped rather than drawn stuck
+    /// (clonk-org/clonk-rs#575).
+    ///
+    /// The interesting case is a transfer that *starts* with a known length
+    /// and then reports zero — a server that stops sending `Content-Length`
+    /// part way, or a redirect onto a chunked response. Returning early there
+    /// left the last real percentage frozen on screen, which reads as a
+    /// stalled download rather than an unmeasurable one.
+    #[test]
+    fn an_unknown_total_length_suppresses_the_progress_bar() {
+        let mut state = dialog();
+        state.on_byte_progress(25, 100);
+        assert_eq!(state.progress(), Some(25), "a known length drives the bar");
+
+        state.on_byte_progress(30, 0);
+        assert_eq!(
+            state.progress(),
+            None,
+            "an unknown total drops the bar instead of freezing it at 25"
+        );
+
+        // Once suppressed it stays suppressed: `set_progress` deliberately
+        // cannot resurrect a bar the layout has stopped reserving space for.
+        state.on_byte_progress(60, 100);
+        assert_eq!(state.progress(), None);
     }
 
     #[test]
