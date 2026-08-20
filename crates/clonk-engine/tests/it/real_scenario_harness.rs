@@ -717,6 +717,10 @@ fn alchemy_real_scenario_subcases_batch_1() {
             alchemy_firelump_collects_its_same_call_fireball_into_the_mage,
         ),
         (
+            "gravity_spell_replaces_itself_with_an_attached_carrier",
+            alchemy_gravity_spell_replaces_itself_with_an_attached_carrier,
+        ),
+        (
             "learned_warp_builds_a_connected_hole_pair_and_consumes_its_gold",
             alchemy_learned_warp_builds_a_connected_hole_pair_and_consumes_its_gold,
         ),
@@ -2330,6 +2334,69 @@ fn alchemy_learned_heal_cast_sustains_magic_and_restores_the_casters_energy(
             .any(|effect| effect.name == "HealPSpell"),
         "a fully healed target ends the spell instead of leaving it running: {finished:?}"
     );
+}
+
+fn alchemy_gravity_spell_replaces_itself_with_an_attached_carrier(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy gravity parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let spell = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("GVTY")
+            .with_position(engine.test_object_snapshot(mage).position)
+            .with_owner(owner),
+    );
+
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+
+    // The cast object deletes itself, but the effect it installed immediately
+    // creates a *second* GVTY and hangs it off the caster as its carrier
+    // (Gravity.c4d/Script.c:12-17,22-27). So "one GVTY exists afterwards" is
+    // true, and it is not the one that was cast.
+    assert!(
+        engine
+            .object_snapshot(spell)
+            .is_none_or(|spell| !spell.status.is_active()),
+        "the cast GVTY removes itself"
+    );
+    let carriers: Vec<_> = engine
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "GVTY" && object.status.is_active())
+        .map(|object| (object.id, object.action.name.clone(), object.action.target))
+        .collect();
+    assert_eq!(
+        carriers.len(),
+        1,
+        "exactly one carrier remains: {carriers:?}"
+    );
+    assert_ne!(
+        carriers[0].0, spell,
+        "and it is a new object, not the cast one"
+    );
+    assert_eq!(carriers[0].1, "Exist");
+    assert_eq!(
+        carriers[0].2,
+        Some(mage),
+        "the carrier hangs off the floating clonk"
+    );
+
+    // EffectVar(0) is the float's countdown, seeded at 200 (`:25`).
+    let duration = crate::support::TestValueExt::test_value(
+        engine
+            .test_object_snapshot(mage)
+            .effects
+            .iter()
+            .find(|effect| effect.name == "FloatPSpell")
+            .map(|effect| effect.var(0)),
+    );
+    assert_eq!(duration, EffectVarValue::Int(200));
 }
 
 fn alchemy_learned_eternal_flame_scatters_its_shipped_flame_cast(
