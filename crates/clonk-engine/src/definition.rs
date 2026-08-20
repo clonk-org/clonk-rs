@@ -3856,7 +3856,6 @@ impl Definition {
         ),
         EngineError,
     > {
-        let effects = state.effects.clone();
         let (value, outcome, audio, rng) = self.exec_in_object_context(
             state,
             object_id,
@@ -3871,7 +3870,7 @@ impl Definition {
             "GetInfoString",
             |_script, _cells, _this| {
                 Ok(Value::Array(
-                    compat::object_effect_info_lines(object_id, &effects)
+                    compat::object_effect_info_lines(object_id)
                         .into_iter()
                         .map(Value::from)
                         .collect(),

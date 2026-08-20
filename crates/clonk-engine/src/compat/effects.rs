@@ -1665,18 +1665,84 @@ fn dispatch_effect_fx_callback_with_parameter_conversion_policy(
 /// list order through fail-safe `Fx<Name>Info(target, number)` dispatch.
 /// Callback side effects remain in the surrounding host context and are
 /// folded by the engine after this returns.
-pub(crate) fn object_effect_info_lines(target: ObjectId, effects: &[EffectState]) -> Vec<String> {
+///
+/// The walk is live, matching `for (C4Effect *pEff = pEffects; pEff; pEff = pEff->pNext)`
+/// (C4Object.cpp:6140-6158): the successor is read *after* the callback ran, so
+/// an `Fx*Info` hook that adds an effect behind the cursor is visited and one
+/// that adds ahead of it is not. Iterating a cloned list instead would show the
+/// list as it was before the first callback.
+///
+/// Unlike [`dispatch_effects_do_damage`] there is **no dead-effect filter**:
+/// `C4Effect::DoCall` (C4Effect.cpp:439-457) has no `IsDead` gate and
+/// `GetInfoString` does not add one, so a zero-priority effect still gets asked
+/// for its info line. `DoDamage` is the arm that checks, and only because
+/// C4Effect.cpp:427-437 checks explicitly.
+pub(crate) fn object_effect_info_lines(target: ObjectId) -> Vec<String> {
     let target_value = object_reference_value(target);
     let mut lines = Vec::new();
-    for effect in effects {
+    let mut current_number = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(target) {
+            return None;
+        }
+        context
+            .object_scope(target)?
+            .effects
+            .effects
+            .first()
+            .map(|effect| effect.number)
+    });
+
+    while let Some(number) = current_number {
+        let live_effect = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_scope(target))
+                .and_then(|scope| {
+                    scope
+                        .effects
+                        .effects
+                        .iter()
+                        .find(|live| live.number == number)
+                        .cloned()
+                })
+        });
+        // The node may have been unlinked by an earlier callback; C++ would
+        // still hold a pointer to it, but it can no longer be reached to call.
+        let Some(effect) = live_effect else {
+            break;
+        };
+
         let function = format!("Fx{}Info", effect.name);
         let call_args = [target_value.clone(), Value::Int(effect.number)];
-        let Some(result) = dispatch_effect_fx_callback(
+        let dispatched = dispatch_effect_fx_callback(
             effect.command_target,
             effect.command_id.as_deref(),
             &function,
             &call_args,
-        ) else {
+        );
+
+        // `pEff = pEff->pNext`, resolved after the callback rather than before.
+        current_number = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_scope(target))
+                .and_then(|scope| {
+                    let position = scope
+                        .effects
+                        .effects
+                        .iter()
+                        .position(|live| live.number == number)?;
+                    scope
+                        .effects
+                        .effects
+                        .get(position + 1)
+                        .map(|live| live.number)
+                })
+        });
+
+        let Some(result) = dispatched else {
             continue;
         };
         match result {
