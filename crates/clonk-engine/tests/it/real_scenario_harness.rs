@@ -799,6 +799,10 @@ fn alchemy_real_scenario_subcases_batch_4() {
             "seeded_bag_collects_and_activates_through_player_controls",
             alchemy_seeded_bag_collects_and_activates_through_player_controls,
         ),
+        (
+            "learned_fireball_aims_steers_and_explodes_through_player_controls",
+            alchemy_learned_fireball_aims_steers_and_explodes_through_player_controls,
+        ),
     ]);
 }
 
@@ -2486,6 +2490,195 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
         Some(0),
         "the successful MLGT cast consumes its shipped two-bone recipe"
     );
+}
+
+fn alchemy_learned_fireball_aims_steers_and_explodes_through_player_controls(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy fireball parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+
+    // MFRB costs the same ISPH=2/IGOL=1 as MICS while Alchemy seeds ISPH=1
+    // and IGOL=3, so the bag needs one harvested sphere on top of the shipped
+    // one, transferred through ALC_::Transfer exactly as ordinary play does
+    // (Alchemy.c4s/Script.c:21-37; Fireball.c4d/DefCore.txt:7;
+    // Bag.c4d/Script.c:148-160).
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("ISPH") == Some(1)
+                    && object.components.get("IGOL") == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    let extra_sphere = engine.spawn_test_object(
+        SpawnConfig::new("ALC_").with_ordered_components(vec![("ISPH".to_owned(), 1)]),
+    );
+    let attached_bag_index = engine.test_object_index(attached_bag);
+    for source in [seeded_bag, extra_sphere] {
+        engine.call_test_object_function(
+            attached_bag_index,
+            "Transfer",
+            vec![Value::Object(source.as_u64())],
+        );
+    }
+    assert_eq!(
+        engine.call_test_object_function(
+            engine.test_object_index(mage),
+            "CheckMagicRequirements",
+            vec![Value::C4Id("MFRB".into()), Value::Bool(true)],
+        ),
+        Value::Int(1)
+    );
+
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "MFRB"));
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let fireball_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MFRB"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        fireball_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+
+    // MFRB::Activate creates the ball first and only then offers it to
+    // DoSpellAim, so both objects exist before the aimer takes the cursor
+    // (Fireball.c4d/Script.c:19-24).
+    let (aimer, fireball) = crate::support::TestValueExt::test_value((0..12).find_map(|_| {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        let snapshot = engine.snapshot();
+        let aimer = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "AIMR" && object.status.is_active())
+            .map(|object| object.id)?;
+        let fireball = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "FIRB" && object.status.is_active())
+            .map(|object| object.id)?;
+        Some((aimer, fireball))
+    }));
+    assert_eq!(engine.crew_cursor(owner), Some(aimer));
+
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_UP, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    // Unlike MICS, MFRB never hands the cursor to what it launched: the ball
+    // has no crew-control path of its own, so releasing the aim returns
+    // control to the mage and the ball flies on unattended
+    // (Fireball.c4d/Script.c:59-69; Fireballf.c4d/Script.c has no SetCursor).
+    assert_eq!(
+        engine.crew_cursor(owner),
+        Some(mage),
+        "releasing MFRB's aim returns the cursor to the mage"
+    );
+    // FxFireballFlightSetAngle stores the released aim in EffectVar(2) and
+    // frees the launch in EffectVar(3) (Fireballf.c4d/Script.c:86-92).
+    let launch = crate::support::TestValueExt::test_value(
+        engine.object_snapshot(fireball).and_then(|fireball| {
+            fireball
+                .effects
+                .iter()
+                .find(|effect| effect.name == "FireballFlight")
+                .map(|effect| (effect.var(2), effect.var(3)))
+        }),
+    );
+    assert_eq!(
+        launch,
+        (EffectVarValue::Int(70), EffectVarValue::Int(1)),
+        "aiming straight up releases at 70 and stamps the launch on the first          effect tick"
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_THROW + COM_RELEASE_OFFSET,
+        0,
+    ));
+
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("ISPH")),
+        Some(0),
+        "a successful MFRB cast consumes both spheres"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IGOL")),
+        Some(2),
+        "a successful MFRB cast consumes one gold"
+    );
+
+    // Freeing the launch does not start the flight. The effect is added with
+    // size 1 and a maximum of 100, and every timer tick spent below the
+    // maximum grows the ball by one and returns early -- so the ball charges
+    // in place for a hundred ticks before a single SetXDir runs
+    // (Fireballf.c4d/Script.c:22,154-166,171-174).
+    let launch_position = engine.test_object_snapshot(fireball).position;
+    for _ in 0..20 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    assert_eq!(
+        engine.test_object_snapshot(fireball).position,
+        launch_position,
+        "a charging FIRB holds its position"
+    );
+
+    for _ in 0..120 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    assert!(
+        engine
+            .object_snapshot(fireball)
+            .is_none_or(|flying| flying.position != launch_position),
+        "a fully charged FIRB flies instead of hovering at its creation point"
+    );
+
+    // And it always ends: the flight either detonates on what it hits or
+    // expires, but it never becomes a permanent object
+    // (Fireballf.c4d/Script.c:47-51,135-136,172).
+    let expired = (0..600).any(|_| {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        engine
+            .object_snapshot(fireball)
+            .is_none_or(|flying| !flying.status.is_active())
+    });
+    assert!(expired, "FIRB removes itself instead of flying forever");
 }
 
 fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
