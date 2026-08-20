@@ -52,6 +52,7 @@ shard_modules!(
     component_order,
     construction_check_feedback,
     creation_owner_strictness,
+    deep_sea_volcano_profile,
     dev_feedback_replay,
     effect_dispatch_profile,
     effect_negotiation,
