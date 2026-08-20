@@ -3150,6 +3150,19 @@ impl HostCallArg {
 /// asymmetry of `C4Value::operator==` (notably Bool versus C4ID), while
 /// STRICT3 checks only the outer type before container content recurses
 /// through that same operator.
+impl Value {
+    /// `C4Value::operator==` (C4Value.cpp:862-919) applied directly to two
+    /// values.
+    ///
+    /// This is the STRICT2 arm of [`c4_values_equal`] without the backing
+    /// identity the NONSTRICT/STRICT1 arm needs, so it is the operator itself
+    /// rather than the script `==`. Use `HostCallArg::c4_equals` when the
+    /// comparison has to honour a lower strict level's raw provenance.
+    pub fn c4_operator_equals(&self, other: &Self) -> bool {
+        c4_operator_equal(self, other)
+    }
+}
+
 fn c4_values_equal(
     left: &Value,
     right: &Value,
