@@ -236,6 +236,78 @@ impl crate::engine_splash::SplashHost for SplashProbe {
     }
 }
 
+/// The 24x16 landscape `parity/oracle/oracle_main.cpp`'s `shape_contact`
+/// scaffolds: sky above y=10, earth below, a water pocket at x=3..5 and a
+/// pillar at x=17..18, with the border configuration under test. Installing it
+/// on the engine is what resolves the grid's material names.
+fn install_contact_oracle_landscape(
+    engine: &mut Engine,
+    left_open: i32,
+    right_open: i32,
+    top_open: bool,
+    bottom_open: bool,
+) {
+    const WIDTH: u32 = 24;
+    const HEIGHT: i32 = 16;
+
+    let mut bytes = vec![0u8; WIDTH as usize * HEIGHT as usize];
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH as i32 {
+            let mut byte = u8::from(y >= 10);
+            if y >= 11 && (3..=5).contains(&x) {
+                byte = 2;
+            }
+            if (17..=18).contains(&x) && y >= 6 {
+                byte = 1;
+            }
+            bytes[y as usize * WIDTH as usize + x as usize] = byte;
+        }
+    }
+    let mut densities = vec![0; 128];
+    densities[1] = 50;
+    densities[2] = 30;
+    let mut material_names = vec![None; 128];
+    material_names[1] = Some("Earth".to_string());
+    material_names[2] = Some("Water".to_string());
+
+    let mut landscape = Landscape::flat(WIDTH, HEIGHT);
+    landscape.set_pixel_grid(PixelGrid::new(
+        WIDTH,
+        HEIGHT as u32,
+        bytes,
+        densities,
+        material_names,
+        vec![None; 128],
+    ));
+    landscape.set_border_open(left_open, right_open, top_open, bottom_open);
+    let vehicle = engine
+        .materials
+        .id_of("Vehicle")
+        .expect("the fixture declares Vehicle");
+    landscape.set_vehicle_material(Some(vehicle));
+    engine.set_landscape(landscape);
+}
+
+/// The material library the `shape_contact` grid's bytes map onto.
+fn contact_oracle_materials() -> clonk_resources::MaterialLibrary {
+    clonk_resources::MaterialLibrary::parse(
+        r#"
+        [Material Earth]
+        Name=Earth
+        Density=50
+
+        [Material Water]
+        Name=Water
+        Density=30
+
+        [Material Vehicle]
+        Name=Vehicle
+        Density=100
+        "#,
+    )
+    .expect("contact oracle materials parse")
+}
+
 fn expect_json_eq(section: &str, index: usize, field: &str, cpp: Value, rust: Value) {
     if cpp != rust {
         write_parity_diff_from_environment(section, index, field, cpp.clone(), rust.clone());
@@ -2006,6 +2078,295 @@ fn parity_differential_matches_cpp_golden() {
             "PARITY DIVERGENCE in `weather_execute` case {case_index}: \
              the port never reached every recorded tick"
         );
+    }
+
+    // 0g. C4Shape::ContactCheck (C4Shape.cpp:370-406), the per-pixel probe every
+    //     step of C4Object::DoMovement runs — the explicit Phase 2 per-pixel
+    //     collision gap in parity/README.md, for this bounded matrix. It decides
+    //     ContactCNAT, ContactCount and the per-vertex VtxContactCNAT, so a
+    //     vertex that answers differently by one pixel moves the object
+    //     differently for the rest of the frame.
+    //
+    //     Its density reads go through GetPix's border rules
+    //     (C4Landscape.h:163-180), where a CLOSED border answers MCVehic —
+    //     solid — rather than sky. That is what stops an object at the edge of
+    //     the map instead of letting it walk out of the world, and the
+    //     `*_border` cases pin it from both sides.
+    {
+        let library = contact_oracle_materials();
+
+        for (idx, case) in golden["shape_contact_check"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let mut engine = Engine::with_seed(0);
+            engine.configure_materials_from_library(&library);
+            install_contact_oracle_landscape(
+                &mut engine,
+                i(case, "left_open") as i32,
+                i(case, "right_open") as i32,
+                i(case, "top_open") != 0,
+                i(case, "bottom_open") != 0,
+            );
+            let landscape = engine
+                .landscape()
+                .expect("contact oracle landscape remains");
+
+            let rows = case["vertices"].as_array().expect("case vertices");
+            let vertices = rows
+                .iter()
+                .map(|row| {
+                    crate::ObjectVertex::new(i(row, "x") as i32, i(row, "y") as i32)
+                        .with_cnat(i(row, "cnat") as u32)
+                })
+                .collect::<Vec<_>>();
+            let position = crate::Vector2::new(i(case, "at_x") as i32, i(case, "at_y") as i32);
+            let contact = crate::shape_contact_check(
+                &vertices,
+                position,
+                landscape,
+                &engine.materials,
+                &[],
+                None,
+                i(case, "contact_density") as i32,
+            );
+
+            expect_eq(
+                "shape_contact_check",
+                idx,
+                "any",
+                i(case, "any"),
+                i64::from(u8::from(contact.is_contact())),
+            );
+            expect_eq(
+                "shape_contact_check",
+                idx,
+                "contact_cnat",
+                i(case, "contact_cnat"),
+                i64::from(contact.contact_cnat),
+            );
+            expect_eq(
+                "shape_contact_check",
+                idx,
+                "contact_count",
+                i(case, "contact_count"),
+                i64::from(contact.count()),
+            );
+            for (vertex_index, row) in rows.iter().enumerate() {
+                expect_eq(
+                    "shape_contact_check",
+                    idx,
+                    "vertex contact_cnat",
+                    i(row, "contact_cnat"),
+                    i64::from(contact.vertex_contacts[vertex_index]),
+                );
+                // C4Shape stores VtxContactMat, which the port does not carry on
+                // ShapeContact — so the material is compared through the
+                // landscape probe both sides read, GBackMat
+                // (C4Wrappers.h:179-182). A CNAT_NoCollision vertex is skipped
+                // before that assignment, so its golden value is the fixture's
+                // own initialiser rather than an engine answer.
+                if i(row, "cnat") & 64 != 0 {
+                    continue;
+                }
+                let expected = match i(row, "mat") {
+                    -1 => None,
+                    1 => Some("Earth"),
+                    2 => Some("Water"),
+                    3 => Some("Vehicle"),
+                    other => panic!("unmapped oracle material index {other}"),
+                };
+                let actual = landscape
+                    .border_material_at(
+                        position.x + i(row, "x") as i32,
+                        position.y + i(row, "y") as i32,
+                    )
+                    .and_then(|id| engine.materials.get_by_id(id))
+                    .map(|material| material.name().to_owned());
+                assert_eq!(
+                    expected,
+                    actual.as_deref(),
+                    "PARITY DIVERGENCE in `shape_contact_check` entry {idx} vertex \
+                     {vertex_index} material"
+                );
+            }
+        }
+    }
+
+    // 0h. C4Object::TargetBounds (C4Movement.cpp:128-164), the clamp
+    //     SideBounds and VerticalBounds run every movement target through. Both
+    //     comparisons are strict, so sitting exactly on a limit is not a
+    //     crossing; and when the limits cross each other, clamping to the low
+    //     one puts the target above the high one, so BOTH bounds fire with the
+    //     low contact first.
+    //
+    //     The port splits the C++ body: `target_bounds` returns which bounds
+    //     fired, and its callers clear `fixed_velocity.x` for the side pair and
+    //     `.y` for the vertical one. The golden records the C++ zeroing for the
+    //     record; what is compared here is the clamp and the contact order the
+    //     shared function decides.
+    for (idx, case) in golden["target_bounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let mut target = i(case, "target") as i32;
+        let contacts = crate::target_bounds(
+            &mut target,
+            i(case, "low") as i32,
+            i(case, "high") as i32,
+            i(case, "cnat_low") as u32,
+            i(case, "cnat_hi") as u32,
+        );
+
+        expect_eq(
+            "target_bounds",
+            idx,
+            "bounded",
+            i(case, "bounded"),
+            i64::from(target),
+        );
+        let expected = case["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_i64().unwrap())
+            .collect::<Vec<_>>();
+        let actual = contacts
+            .into_iter()
+            .flatten()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected, actual,
+            "PARITY DIVERGENCE in `target_bounds` entry {idx} contacts"
+        );
+    }
+
+    // 0i. C4Shape::Attach (C4Shape.cpp:165-271), the search attached movement
+    //     runs instead of the ordinary collision loop. The two branches differ
+    //     in a way that shows up in play: the old-style search loops vertices
+    //     OUTSIDE and the range inside, so a second matching vertex starts from
+    //     the position the first already moved to — `two_vertices_old_style`
+    //     ends up BELOW the surface at y=11 — while CNAT_MultiAttach loops the
+    //     range outside and takes the nearest attachment across all vertices,
+    //     landing on the surface at y=9. That is the "stucking" the C++ comment
+    //     at C4Shape.cpp:179-194 describes, and it is why both branches exist.
+    //
+    //     `closed_border_no_attach` pins the other asymmetry worth knowing: a
+    //     closed border answers solid to a density probe, but Attach also
+    //     requires `ax >= 0`, so an object can CONTACT the edge of the map
+    //     without attaching to it.
+    {
+        let library = contact_oracle_materials();
+
+        for (idx, case) in golden["shape_attach"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let mut engine = Engine::with_seed(0);
+            engine.configure_materials_from_library(&library);
+            install_contact_oracle_landscape(
+                &mut engine,
+                i(case, "left_open") as i32,
+                i(case, "right_open") as i32,
+                i(case, "top_open") != 0,
+                i(case, "bottom_open") != 0,
+            );
+            let landscape = engine.landscape().expect("attach oracle landscape remains");
+
+            let vertices = case["vertices"]
+                .as_array()
+                .expect("case vertices")
+                .iter()
+                .map(|row| {
+                    crate::ObjectVertex::new(i(row, "x") as i32, i(row, "y") as i32)
+                        .with_cnat(i(row, "cnat") as u32)
+                })
+                .collect::<Vec<_>>();
+            let mut position = crate::Vector2::new(i(case, "at_x") as i32, i(case, "at_y") as i32);
+            let mut record = crate::ShapeAttachRecord::default();
+            let attached = crate::shape_attach(
+                &vertices,
+                &mut position,
+                i(case, "attach") as u32,
+                landscape,
+                &engine.materials,
+                &[],
+                None,
+                50,
+                &mut record,
+            );
+
+            expect_eq(
+                "shape_attach",
+                idx,
+                "attached",
+                i(case, "attached"),
+                i64::from(u8::from(attached)),
+            );
+            expect_eq(
+                "shape_attach",
+                idx,
+                "x",
+                i(case, "x"),
+                i64::from(position.x),
+            );
+            expect_eq(
+                "shape_attach",
+                idx,
+                "y",
+                i(case, "y"),
+                i64::from(position.y),
+            );
+            // C4Shape keeps AttachMat itself; the port keeps only whether the
+            // attachment landed on a valid material and whether that material
+            // is Vehicle, so the oracle's index is compared through those two.
+            expect_eq(
+                "shape_attach",
+                idx,
+                "attach_mat valid",
+                i64::from(i(case, "attach_mat") >= 0),
+                i64::from(u8::from(record.mat_valid)),
+            );
+            expect_eq(
+                "shape_attach",
+                idx,
+                "attach_mat vehicle",
+                i64::from(i(case, "attach_mat") == 3),
+                i64::from(u8::from(record.mat_vehicle)),
+            );
+            // The position fields only overwrite on success
+            // (C4Shape.cpp:217-219, 253-255).
+            if attached {
+                expect_eq(
+                    "shape_attach",
+                    idx,
+                    "attach_x",
+                    i(case, "attach_x"),
+                    i64::from(record.x),
+                );
+                expect_eq(
+                    "shape_attach",
+                    idx,
+                    "attach_y",
+                    i(case, "attach_y"),
+                    i64::from(record.y),
+                );
+                expect_eq(
+                    "shape_attach",
+                    idx,
+                    "attach_vtx",
+                    i(case, "attach_vtx"),
+                    i64::from(record.vtx),
+                );
+            }
+        }
     }
 
     // 1. itofix (whole-integer + precision-denominated).

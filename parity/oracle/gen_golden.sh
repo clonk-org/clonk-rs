@@ -636,6 +636,33 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Scenario.cpp" > "$gen/c4sval_evaluate.inc"
 
+# 3s. Lift C4Shape::ContactCheck, the per-pixel probe every step of
+#     C4Object::DoMovement runs. It decides ContactCNAT, ContactCount and the
+#     per-vertex VtxContactCNAT/VtxContactMat, so a vertex that answers
+#     differently by one pixel moves the object differently for the rest of the
+#     frame. Its density reads go through GetPix's border rules, where a CLOSED
+#     border answers MCVehic — solid — rather than sky.
+awk '
+  /^void C4Object::TargetBounds\(int32_t &ctco, int32_t limit_low, int32_t limit_hi, int32_t cnat_low, int32_t cnat_hi\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Movement.cpp" > "$gen/target_bounds.inc"
+
+awk '
+  /^bool C4Shape::Attach\(int32_t &cx, int32_t &cy, uint8_t cnat_pos\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Shape.cpp" > "$gen/shape_attach.inc"
+
+awk '
+  /^bool C4Shape::ContactCheck\(int32_t cx, int32_t cy\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Shape.cpp" > "$gen/shape_contact_check.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;
