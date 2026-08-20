@@ -3595,6 +3595,108 @@ mod tests {
         assert!(empty_oracle.generation_calls.is_empty());
     }
 
+    /// `randomTeamCount` bounds the *scan*, not just team generation
+    /// (`src/C4Teams.cpp:446-463`, oracle `7d43b47`).
+    ///
+    /// ```cpp
+    /// int32_t iCnt = limitRandomTeamCount && randomTeamCount > 1 ? randomTeamCount : iTeamCount;
+    /// for (; iCnt--; ++ppCheck)
+    /// ```
+    ///
+    /// A team past that bound is never a candidate, however empty it is, and
+    /// however full the teams ahead of it are. Every existing test here leaves
+    /// `random_team_count` at 0, which takes the `iTeamCount` arm and never
+    /// exercises the bound at all — so this pins the arm the deterministic path
+    /// can actually reach.
+    ///
+    /// Deliberately no ties: with a unique minimum inside the bound, C++
+    /// consumes no `SafeRandom` at all, which is what makes this a
+    /// clonk-org/clonk-rs#528 case rather than a clonk-org/clonk-rs#529 one.
+    #[test]
+    fn initial_host_team_scan_stops_at_the_random_team_count_like_cpp() {
+        // Teams 1 and 2 are inside the bound; team 3 is emptier than both and
+        // must still never be chosen.
+        let teams = vec![
+            initial_team(1, vec![10, 11], 0x00f4_0000, 0),
+            initial_team(2, vec![12], 0x0000_c800, 0),
+            initial_team(3, vec![], 0x0020_20ff, 0),
+        ];
+        let mut oracle = recording_oracle([]);
+
+        assert_eq!(
+            initial_random_smallest_team(&teams, true, 2, &mut oracle),
+            Some(1),
+            "team 3 is outside randomTeamCount and cannot be selected",
+        );
+        assert!(
+            oracle.ranges.is_empty(),
+            "a unique minimum consumes no SafeRandom",
+        );
+
+        // The same list without the bound reaches team 3 and prefers it, which
+        // is what shows the bound above did the work rather than the ordering.
+        assert_eq!(
+            initial_random_smallest_team(&teams, false, 2, &mut oracle),
+            Some(2),
+            "unbounded, the emptiest team wins",
+        );
+        // `limitRandomTeamCount` alone does nothing: the C++ condition is
+        // `limitRandomTeamCount && randomTeamCount > 1`, so 1 and 0 both fall
+        // through to the full count.
+        for degenerate in [0, 1] {
+            assert_eq!(
+                initial_random_smallest_team(&teams, true, degenerate, &mut oracle),
+                Some(2),
+                "randomTeamCount {degenerate} must not bound the scan",
+            );
+        }
+        assert!(oracle.ranges.is_empty(), "still no ties anywhere above");
+    }
+
+    /// Full teams are skipped, and an all-full list yields no team at all
+    /// (`src/C4Teams.cpp:451`: `if ((*ppCheck)->IsFull()) continue;`, returning
+    /// the still-null `pLowestTeam`).
+    ///
+    /// The existing order test covers a full team sitting among joinable ones;
+    /// this covers the boundary where nothing is joinable, which is the case
+    /// that has to produce "no assignment" rather than falling back to the
+    /// least-full team.
+    #[test]
+    fn initial_host_team_selection_declines_when_every_team_is_full() {
+        let mut oracle = recording_oracle([]);
+        let full = vec![
+            initial_team(1, vec![10], 0x00f4_0000, 1),
+            initial_team(2, vec![12, 13], 0x0000_c800, 2),
+        ];
+
+        assert_eq!(
+            initial_random_smallest_team(&full, false, 0, &mut oracle),
+            None,
+            "no team has room, so C++ returns its null pLowestTeam",
+        );
+        assert!(
+            oracle.ranges.is_empty(),
+            "a skipped team never reaches the tie arm"
+        );
+
+        // A team over its own cap is full too — `>=`, not `==`.
+        let over = vec![initial_team(1, vec![10, 11, 12], 0x00f4_0000, 2)];
+        assert_eq!(
+            initial_random_smallest_team(&over, false, 0, &mut oracle),
+            None,
+            "IsFull compares player count >= max, so an over-capacity team stays closed",
+        );
+
+        // max_players 0 means uncapped, which is the arm that keeps an empty
+        // team joinable at all.
+        let uncapped = vec![initial_team(1, vec![10, 11, 12], 0x00f4_0000, 0)];
+        assert_eq!(
+            initial_random_smallest_team(&uncapped, false, 0, &mut oracle),
+            Some(0),
+            "max_players 0 is uncapped",
+        );
+    }
+
     #[test]
     fn initial_host_team_assignment_matches_cpp_order_full_skip_and_team_colors() {
         // RecheckPlayerInfoTeams processes the packet in order. Its
