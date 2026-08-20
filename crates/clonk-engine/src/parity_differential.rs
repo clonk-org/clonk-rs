@@ -3762,6 +3762,33 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
+    // 0s. WildcardMatch (StdFile.cpp:337-366), the matcher `C4Group::GetEntry`
+    //     applies while walking stored entry order (C4Group.cpp:1221,:1230) and
+    //     that every stock sort list is evaluated through.
+    //
+    //     It is case-insensitive, `?` matches exactly one character and never
+    //     the end of the string, and `*` matches any run including the empty
+    //     one -- with real backtracking, so a pattern like `a*b*c` may have to
+    //     retry a star from several positions before it succeeds.
+    for (idx, case) in golden["wildcard_match"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let pattern = case["pattern"].as_str().unwrap();
+        let name = case["name"].as_str().unwrap();
+        let actual =
+            clonk_resources::group::group_name_wildcard_match(pattern.as_bytes(), name.as_bytes());
+        expect_eq(
+            "wildcard_match",
+            idx,
+            "match",
+            i(case, "match"),
+            i64::from(actual),
+        );
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));

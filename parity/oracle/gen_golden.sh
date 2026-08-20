@@ -800,6 +800,23 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4GameSave.h" > "$gen/game_save_network_queries.inc"
 
+# 3p. Lift WildcardMatch, the matcher behind C4Group entry access, child-group
+#     opening and every stock sort list. It is a self-contained backtracking
+#     loop over two C strings and needs nothing but tolower.
+#
+#     The details that a rewrite loses: it is CASE-INSENSITIVE through tolower,
+#     `?` does NOT match the end of the string (the empty-`pPos` break is tested
+#     before it), a trailing `*` matches the empty remainder, and the loop
+#     condition `*pWild || pLWild` keeps running on backtracking state alone
+#     after the pattern is exhausted. A port that treats `*` as a literal still
+#     passes every exact-name lookup, so only a `*` case can catch it.
+awk '
+  /^bool WildcardMatch\(const char \*szWildcard, const char \*szString\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/StdFile.cpp" > "$gen/wildcard_match.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

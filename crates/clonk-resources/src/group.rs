@@ -1314,14 +1314,44 @@ fn group_name_eq(left: &[u8], right: &[u8]) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
-/// `WildcardMatch` (StdFile.cpp:337), the matcher `C4Group::GetEntry` applies
-/// while walking stored entry order.
+/// `WildcardMatch` (StdFile.cpp:337-366), the matcher `C4Group::GetEntry`
+/// applies while walking stored entry order (C4Group.cpp:1221,:1230).
+///
+/// The single backtracking point is the last `*` seen: when the tail after it
+/// fails to match, the match restarts from that `*` one character further
+/// along the name, which is why `a*b*c` can retry a star several times before
+/// it succeeds. `?` consumes exactly one character and never the end of the
+/// name -- C++ tests the exhausted-name arm before the `?` arm -- while a
+/// trailing `*` matches the empty remainder. Case folding is ASCII-only, which
+/// is what `tolower` does under the C locale the engine runs in.
 pub fn group_name_wildcard_match(pattern: &[u8], name: &[u8]) -> bool {
-    pattern.len() == name.len()
-        && pattern
-            .iter()
-            .zip(name)
-            .all(|(pattern, name)| *pattern == b'?' || pattern.eq_ignore_ascii_case(name))
+    let (mut wild, mut pos) = (0usize, 0usize);
+    // `pLWild`/`pLPos`: both are set together, so one Option gates both.
+    let (mut last_wild, mut last_pos) = (None, 0usize);
+
+    while wild < pattern.len() || last_wild.is_some() {
+        if pattern.get(wild) == Some(&b'*') {
+            wild += 1;
+            last_wild = Some(wild);
+            last_pos = pos;
+        } else if pos >= name.len() {
+            break;
+        } else if pattern
+            .get(wild)
+            .is_some_and(|byte| *byte == b'?' || byte.eq_ignore_ascii_case(&name[pos]))
+        {
+            wild += 1;
+            pos += 1;
+        } else if let Some(resume) = last_wild {
+            wild = resume;
+            last_pos += 1;
+            pos = last_pos;
+        } else {
+            return false;
+        }
+    }
+
+    wild >= pattern.len() && pos >= name.len()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
