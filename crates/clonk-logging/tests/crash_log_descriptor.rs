@@ -1,11 +1,10 @@
 #![cfg(windows)]
 
-use std::{
-    env, fs,
-    path::PathBuf,
-    process,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::fs;
+
+mod common;
+
+use common::unique_temp_dir;
 
 const RAW_MARKER: &[u8] = b"windows crash descriptor marker\n";
 const TRACING_MARKER: &str = "tracing writer survived closing the crash descriptor";
@@ -15,7 +14,7 @@ const TRACING_MARKER: &str = "tracing writer survived closing the crash descript
 // ownership and remains usable until the log sink is destroyed.
 #[test]
 fn windows_crash_descriptor_is_binary_and_owns_a_duplicate_handle() {
-    let directory = unique_temp_dir();
+    let directory = unique_temp_dir("clonk-logging-crash-descriptor");
     let log_path = directory.join("Clonk.log");
 
     assert_eq!(clonk_logging::crash_log_descriptor(), -1);
@@ -56,17 +55,4 @@ fn windows_crash_descriptor_is_binary_and_owns_a_duplicate_handle() {
     );
 
     let _ = fs::remove_dir_all(directory);
-}
-
-fn unique_temp_dir() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after epoch")
-        .as_nanos();
-    let directory = env::temp_dir().join(format!(
-        "clonk-logging-crash-descriptor-{}-{nonce}",
-        process::id()
-    ));
-    fs::create_dir_all(&directory).expect("create test directory");
-    directory
 }

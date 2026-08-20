@@ -1,9 +1,8 @@
-use std::{
-    env, fs, io,
-    path::PathBuf,
-    process,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{fs, io};
+
+mod common;
+
+use common::unique_temp_dir;
 
 #[test]
 fn a_failed_install_leaves_the_session_log_untouched() {
@@ -11,7 +10,7 @@ fn a_failed_install_leaves_the_session_log_untouched() {
     // makes our install fail. Discovering that only after rotating and
     // truncating would spend the user's log file on a session that never
     // recorded anything.
-    let directory = unique_temp_dir();
+    let directory = unique_temp_dir("clonk-logging-failed");
     let log_path = directory.join("Clonk.log");
     fs::write(&log_path, "prior session\n").expect("seed the previous session log");
 
@@ -33,14 +32,4 @@ fn a_failed_install_leaves_the_session_log_untouched() {
     );
 
     let _ = fs::remove_dir_all(&directory);
-}
-
-fn unique_temp_dir() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after epoch")
-        .as_nanos();
-    let directory = env::temp_dir().join(format!("clonk-logging-failed-{}-{nonce}", process::id()));
-    fs::create_dir_all(&directory).expect("create test directory");
-    directory
 }

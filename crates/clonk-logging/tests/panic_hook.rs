@@ -1,9 +1,8 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    process::{self, Command},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{env, fs, path::PathBuf, process::Command};
+
+mod common;
+
+use common::unique_temp_dir;
 
 const CHILD_LOG_PATH: &str = "LC_PANIC_HOOK_CHILD_LOG";
 const PANIC_MESSAGE: &str = "deliberate child panic";
@@ -20,7 +19,7 @@ fn a_panic_reaches_the_session_log() {
         panic!("{PANIC_MESSAGE}");
     }
 
-    let directory = unique_temp_dir();
+    let directory = unique_temp_dir("clonk-logging-panic");
     let log_path = directory.join("Clonk.log");
     let output = Command::new(env::current_exe().expect("integration-test executable"))
         .args(["--exact", "a_panic_reaches_the_session_log", "--nocapture"])
@@ -45,14 +44,4 @@ fn a_panic_reaches_the_session_log() {
     );
 
     let _ = fs::remove_dir_all(&directory);
-}
-
-fn unique_temp_dir() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after epoch")
-        .as_nanos();
-    let directory = env::temp_dir().join(format!("clonk-logging-panic-{}-{nonce}", process::id()));
-    fs::create_dir_all(&directory).expect("create test directory");
-    directory
 }
