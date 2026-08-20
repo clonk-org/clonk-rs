@@ -765,6 +765,10 @@ fn alchemy_real_scenario_subcases_batch_3() {
             alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw,
         ),
         (
+            "stone_shield_reads_its_rock_combo_into_the_shield_strength",
+            alchemy_stone_shield_reads_its_rock_combo_into_the_shield_strength,
+        ),
+        (
             "raise_undead_selects_a_dead_clonk_and_animates_it",
             alchemy_raise_undead_selects_a_dead_clonk_and_animates_it,
         ),
@@ -2924,6 +2928,98 @@ fn alchemy_curse_family_selects_a_foreign_target_through_the_shipped_selector(
                 .any(|object| object.definition_id == curse && object.status.is_active()),
             "{curse} removes itself once the curse is placed"
         );
+    }
+}
+
+fn alchemy_stone_shield_reads_its_rock_combo_into_the_shield_strength(
+    prepared: &PreparedInstalledScenario,
+) {
+    // MSSH is worth two casts rather than one: carrying a ROCK is a combo that
+    // is consumed at Activate and reaches the effect as its only parameter,
+    // where it decides the shield's strength -- 50000 with the rock against
+    // 30000 without (Stoneshield.c4d/Script.c:13-18,33,55-62).
+    for (carries_rock, expected_strength) in [(true, 50_000), (false, 30_000)] {
+        let mut engine = prepared.instantiate();
+        let owner = join_local_player(&mut engine, "Alchemy stone shield parity");
+        let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+        let mage_position = engine.test_object_snapshot(mage).position;
+        let rock = carries_rock.then(|| {
+            engine.spawn_test_object(clonk_engine::SpawnConfig::new("ROCK").with_container(mage))
+        });
+
+        // Same range problem the curse family has: the shipped second crew
+        // member starts outside the 300 the spell searches, and with nobody in
+        // it DoSpellSelect never opens a selector.
+        let patient = crate::support::TestValueExt::test_value(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| {
+                    object.definition_id == "CLNK"
+                        && object.owner == owner
+                        && object.status.is_active()
+                })
+                .map(|object| object.id),
+        );
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
+                patient,
+                ObjectUpdate::new()
+                    .with_position(Vector2::new(mage_position.x + 30, mage_position.y))
+                    .with_velocity(Vector2::ZERO)
+                    .with_action("Walk")
+                    .clear_container(),
+            ),
+        );
+
+        let spell = engine.spawn_test_object(
+            clonk_engine::SpawnConfig::new("MSSH")
+                .with_position(mage_position)
+                .with_owner(owner),
+        );
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(mage.as_u64())],
+        );
+
+        let selector = crate::support::TestValueExt::test_value(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "SLCR" && object.status.is_active())
+                .map(|object| object.id),
+        );
+        assert_eq!(engine.crew_cursor(owner), Some(selector));
+        crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+        assert_eq!(engine.crew_cursor(owner), Some(mage));
+
+        let shielded = crate::support::TestValueExt::test_value(
+            engine.snapshot().objects.iter().find_map(|object| {
+                object
+                    .effects
+                    .iter()
+                    .find(|effect| effect.name == "StoneShieldPSpell")
+                    .map(|effect| effect.var(0))
+            }),
+        );
+        assert_eq!(
+            shielded,
+            EffectVarValue::Int(expected_strength),
+            "a shield cast with carries_rock={carries_rock} is worth {expected_strength}"
+        );
+
+        // The combo is spent, not merely read.
+        if let Some(rock) = rock {
+            assert!(
+                engine
+                    .object_snapshot(rock)
+                    .is_none_or(|rock| !rock.status.is_active()),
+                "the rock combo is consumed by the cast"
+            );
+        }
     }
 }
 
