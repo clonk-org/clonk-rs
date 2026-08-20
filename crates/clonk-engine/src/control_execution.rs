@@ -3658,6 +3658,153 @@ mod tests {
         assert_eq!(teams.teams[3].player_ids, vec![3]);
     }
 
+    /// Melee reuses the smallest team **only when it is empty**
+    /// (`src/C4Teams.cpp:510-521`, oracle `7d43b47`):
+    ///
+    /// ```cpp
+    /// if (IsAutoGenerateTeams() && !IsRandomTeam())
+    /// {
+    ///     // reuse old team only if it's empty
+    ///     if (pLowestTeam && !pLowestTeam->GetPlayerCount())
+    ///         pAssignTeam = pLowestTeam;
+    ///     else
+    ///     {
+    ///         GenerateDefaultTeams(iLastTeamID + 1);
+    ///         pAssignTeam = GetTeamByID(iLastTeamID);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// `initial_host_team_assignment_generates_empty_active_teams_at_cpp_timing`
+    /// covers the *else* — every candidate already holds a player, so every
+    /// join generates. Nothing covers the branch it is guarding: an empty team
+    /// already exists and must be filled rather than joined by a fresh one.
+    /// Getting that wrong grows `last_team_id` on every melee join and leaves a
+    /// trail of permanently empty teams.
+    #[test]
+    fn melee_team_assignment_reuses_an_empty_team_instead_of_generating() {
+        let mut teams = crate::InitialNetworkTeamMetadata {
+            auto_generate_teams: true,
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            teams: vec![
+                initial_team(1, vec![10], 0x00f4_0000, 0),
+                initial_team(2, vec![], 0x0000_c800, 0),
+            ],
+            ..initial_team_metadata()
+        };
+        let mut players = vec![ControlPlayerInfoEntry {
+            id: 11,
+            ..Default::default()
+        }];
+        let mut oracle = GeneratingTeamAssignmentOracle::default();
+
+        assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
+
+        assert!(
+            oracle.generation_calls.is_empty(),
+            "an empty team was available, so nothing may be generated",
+        );
+        assert_eq!(teams.last_team_id, 2, "and the id counter must not move");
+        assert_eq!(players[0].team, 2, "the player joins the empty team");
+        assert_eq!(
+            teams
+                .teams
+                .iter()
+                .map(|team| (team.id, team.player_ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![(1, vec![10]), (2, vec![11])],
+        );
+    }
+
+    /// Teamwork mode declines the join when every defined team is full and a
+    /// second team already exists (`src/C4Teams.cpp:523-534`):
+    ///
+    /// ```cpp
+    /// if (!pLowestTeam)
+    /// {
+    ///     if (!GetTeamByIndex(1)) GenerateDefaultTeams(2);
+    ///     else
+    ///         // otherwise, all defined teams are full. This is a scenario error,
+    ///         // because MaxPlayer should have been adjusted
+    ///         return false;
+    ///     pLowestTeam = GetTeamByIndex(0);
+    /// }
+    /// ```
+    ///
+    /// The failure to avoid is generating a third team to absorb the overflow,
+    /// which would silently paper over the scenario's own `MaxPlayer` mistake
+    /// and put a player somewhere the scenario never defined.
+    #[test]
+    fn teamwork_assignment_declines_when_all_defined_teams_are_full() {
+        let mut teams = crate::InitialNetworkTeamMetadata {
+            auto_generate_teams: false,
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            teams: vec![
+                initial_team(1, vec![10], 0x00f4_0000, 1),
+                initial_team(2, vec![12, 13], 0x0000_c800, 2),
+            ],
+            ..initial_team_metadata()
+        };
+        let mut players = vec![ControlPlayerInfoEntry {
+            id: 11,
+            ..Default::default()
+        }];
+        let mut oracle = GeneratingTeamAssignmentOracle::default();
+
+        assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
+
+        assert!(
+            oracle.generation_calls.is_empty(),
+            "a full teamwork list is a scenario error, not a reason to generate",
+        );
+        assert_eq!(teams.last_team_id, 2);
+        assert_eq!(players[0].team, 0, "the player is left unassigned");
+        assert_eq!(
+            teams
+                .teams
+                .iter()
+                .map(|team| team.player_ids.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![10], vec![12, 13]],
+            "and no team gains a player past its cap",
+        );
+    }
+
+    /// The other half of the same branch: with no joinable team and fewer than
+    /// two defined, teamwork mode generates the two defaults and assigns the
+    /// **first** of them — `pLowestTeam = GetTeamByIndex(0)`, not the team it
+    /// just created last.
+    #[test]
+    fn teamwork_assignment_generates_two_defaults_and_takes_the_first() {
+        let mut teams = crate::InitialNetworkTeamMetadata {
+            auto_generate_teams: false,
+            last_team_id: 0,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            teams: Vec::new(),
+            ..initial_team_metadata()
+        };
+        let mut players = vec![ControlPlayerInfoEntry {
+            id: 11,
+            ..Default::default()
+        }];
+        let mut oracle = GeneratingTeamAssignmentOracle::default();
+
+        assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
+
+        assert_eq!(
+            oracle.generation_calls,
+            vec![(1, vec![]), (2, vec![1])],
+            "GenerateDefaultTeams(2) creates exactly two, in id order",
+        );
+        assert_eq!(teams.last_team_id, 2);
+        assert_eq!(
+            players[0].team, 1,
+            "GetTeamByIndex(0) is the first generated team, not the last",
+        );
+    }
+
     #[test]
     fn initial_host_team_assignment_generates_empty_active_teams_at_cpp_timing() {
         // Existing Teams.txt with no Team sections forces AutoGenerateTeams
