@@ -2437,6 +2437,244 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
+    // 6c-2. C4Game::BlastObjects (C4Game.cpp:1265-1319) and C4Object::Blast
+    // (C4Object.cpp:1416-1426), both compiled from the mechanically extracted
+    // bodies. Three things are pinned that nothing else in the tree covers:
+    //
+    //   * the two independent hit tests — a direct hit widens the shape by five
+    //     pixels on every side, while the shock wave is a plain `<= level`
+    //     square around the object's own position, so `far_out_of_range` takes
+    //     neither and `boundary_in`/`boundary_out` straddle the shock wave
+    //     alone;
+    //   * the shock-wave gate's shape (category, NoHorizontalMove, then a Grab
+    //     of exactly 1 excusing vehicles and DFA_FLOAT actors); and
+    //   * that the whole call consumes NOTHING from the synchronised stream and
+    //     one Rnd3 per fling. `RandomCount` and `RandomHold` are unchanged
+    //     across it while the Rnd3 pointer advances once per flung object, so a
+    //     port that routed the fling's sign through `Random` would desynchronise
+    //     every later frame while looking correct in isolation.
+    //
+    // `blast_incinerate_gate` runs the same fixture for Blast's
+    // `Damage >= Def->BlastIncinerate` arm. It is a separate case, and one
+    // without an RNG comparison, because the oracle records the `Incinerate`
+    // call where the port starts the real fire effect — and that effect draws.
+    for section in ["blast_objects", "blast_incinerate_gate"] {
+        let case = &golden[section];
+        let rows = case["objects"].as_array().expect("blast objects array");
+        let blast_x = i(case, "x") as i32;
+        let blast_y = i(case, "y") as i32;
+        let level = i(case, "level") as i32;
+        let caused_by = i(case, "caused_by") as i32;
+
+        let mut engine = Engine::with_seed(i(case, "seed") as u64);
+        let caller_script = format!(
+            "#strict\npublic func Boom() {{ SetController({caused_by}); BlastObjects({blast_x}, {blast_y}, {level}); SetController(-1); }}\n"
+        );
+        let mut caller = Definition::from_script("BLSO", "Blast oracle", &caller_script)
+            .expect("blast oracle caller compiles");
+        caller.set_category(CATEGORY_OBJECT);
+        engine
+            .register_definition(caller)
+            .expect("blast caller registers");
+        engine
+            .register_player(PlayerConfig::new(caused_by, "Blast cause"))
+            .expect("blast cause player registers");
+
+        // One definition per row: Grab, NoHorizontalMove, BlastIncinerate, mass
+        // and the shape rect are all C4Def state, and the DFA_FLOAT row needs
+        // an action map of its own.
+        let mut ids = HashMap::new();
+        let mut master_order = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            let name = row["name"].as_str().expect("row name");
+            let definition_id = format!("BL{index:02}");
+            let mut definition = Definition::from_script(&definition_id, name, "#strict\n")
+                .expect("blast row definition compiles");
+            definition.set_category(i(row, "category") as i32);
+            definition.set_mass(i(row, "mass") as i32);
+            definition.set_grab(i(row, "grab") as i32);
+            definition.set_no_horizontal_move(i(row, "no_horizontal_move") as i32);
+            definition.set_blast_incinerate(i(row, "blast_incinerate") as i32);
+            definition.set_shape_rect(Some(crate::DefinitionRect::new(
+                i(row, "shape_x") as i32,
+                i(row, "shape_y") as i32,
+                i(row, "wdt") as i32,
+                i(row, "hgt") as i32,
+            )));
+            // The oracle's `procedure` column is the C4Def ActMap entry the
+            // object's action points at; -1 is ActIdle.
+            if i(row, "procedure") >= 0 {
+                definition.configure_actions(
+                    Some("Float".to_owned()),
+                    HashMap::from([(
+                        "Float".to_owned(),
+                        crate::ActionSpec::default().with_procedure("FLOAT"),
+                    )]),
+                );
+            }
+            engine
+                .register_definition(definition)
+                .expect("blast row definition registers");
+
+            let id = engine
+                .spawn_object(
+                    SpawnConfig::new(&definition_id)
+                        .with_custom_name(name)
+                        .with_category(i(row, "category") as i32)
+                        .with_controller(OWNER_NONE)
+                        .with_alive(i(row, "alive") != 0),
+                )
+                .expect("blast oracle row spawns");
+            let object_index = engine.find_object_index(id).expect("blast row exists");
+            // Set the position rather than spawning at it: a spawn y is the
+            // object's BOTTOM (C4Game::CreateObject), and these rows carry a
+            // shape offset, so passing the oracle's y through SpawnConfig would
+            // place the object eight pixels off its own coordinate.
+            engine.objects[object_index].state.position =
+                crate::Vector2::new(i(row, "x") as i32, i(row, "y") as i32);
+            engine.objects[object_index].state.status =
+                ObjectStatus::from_script_value(i(row, "status") as i32)
+                    .expect("valid C4Object status");
+            engine.objects[object_index].state.mobile = false;
+            ids.insert(name.to_owned(), id);
+            master_order.push(id);
+        }
+        // The oracle's contained row sits inside the first row's object, which
+        // is what keeps it out of the uncontained arm entirely.
+        if let Some(contained) = ids.get("contained").copied() {
+            let container = ids["living_center"];
+            let contained_index = engine
+                .find_object_index(contained)
+                .expect("contained row exists");
+            engine.objects[contained_index].state.container = Some(container);
+        }
+
+        // The caller is not one of the oracle's rows; it sits far outside both
+        // hit tests so it can run the blast without taking part in it.
+        let caller_id = engine
+            .spawn_object(
+                SpawnConfig::new("BLSO")
+                    .with_position(crate::Vector2::new(5_000, 5_000))
+                    .with_controller(OWNER_NONE),
+            )
+            .expect("blast caller spawns");
+        master_order.push(caller_id);
+        engine.exec_list = master_order.iter().rev().copied().collect();
+
+        let compares_rng = case.get("rng_before").is_some();
+        if compares_rng {
+            let rng_before = &case["rng_before"];
+            expect_eq(
+                "blast_objects.rng_before",
+                0,
+                "count",
+                i(rng_before, "count"),
+                engine.rng.count as i64,
+            );
+            expect_eq_u64(
+                "blast_objects.rng_before",
+                0,
+                "hold",
+                u(rng_before, "hold"),
+                u64::from(engine.rng.hold),
+            );
+            expect_eq(
+                "blast_objects.rng_before",
+                0,
+                "rnd3_ptr",
+                i(rng_before, "rnd3_ptr"),
+                engine.rng.rnd3_ptr() as i64,
+            );
+        }
+
+        let caller_index = engine
+            .find_object_index(caller_id)
+            .expect("blast caller exists");
+        engine
+            .call_object_function(caller_index, "Boom", Vec::new())
+            .expect("BlastObjects executes");
+
+        if compares_rng {
+            let rng_after = &case["rng_after"];
+            expect_eq(
+                "blast_objects.rng_after",
+                0,
+                "count",
+                i(rng_after, "count"),
+                engine.rng.count as i64,
+            );
+            expect_eq_u64(
+                "blast_objects.rng_after",
+                0,
+                "hold",
+                u(rng_after, "hold"),
+                u64::from(engine.rng.hold),
+            );
+            expect_eq(
+                "blast_objects.rng_after",
+                0,
+                "rnd3_ptr",
+                i(rng_after, "rnd3_ptr"),
+                engine.rng.rnd3_ptr() as i64,
+            );
+        }
+
+        for (index, row) in rows.iter().enumerate() {
+            let name = row["name"].as_str().expect("row name");
+            let object_index = engine
+                .find_object_index(ids[name])
+                .unwrap_or_else(|| panic!("blast oracle row `{name}` remains"));
+            let object = &engine.objects[object_index];
+            expect_eq(
+                section,
+                index,
+                "xdir_after",
+                i(row, "xdir_after"),
+                object.fixed_velocity.x.val() as i64,
+            );
+            expect_eq(
+                section,
+                index,
+                "ydir_after",
+                i(row, "ydir_after"),
+                object.fixed_velocity.y.val() as i64,
+            );
+            expect_eq(
+                section,
+                index,
+                "mobile_after",
+                i(row, "mobile_after"),
+                i64::from(u8::from(object.state.mobile)),
+            );
+            expect_eq(
+                section,
+                index,
+                "controller_after",
+                i(row, "controller_after"),
+                i64::from(object.state.controller),
+            );
+            // The oracle records DoDamage's arguments; the port runs the real
+            // body, which for a plain fixture with no rules or effects lands on
+            // exactly that sum.
+            expect_eq(
+                section,
+                index,
+                "damage_sum",
+                i(row, "damage_sum"),
+                i64::from(object.state.damage),
+            );
+            // Likewise Incinerate: the oracle counts the call, the port sets
+            // the flag the real effect leads to.
+            expect_eq(
+                section,
+                index,
+                "incinerate_calls",
+                i(row, "incinerate_calls"),
+                i64::from(u8::from(object.state.on_fire)),
+            );
+        }
+    }
+
     // 6c. C4Landscape::BlastFree (C4Landscape.cpp:881-888, 941-960,
     // 1022-1062): the oracle mechanically compiles the complete ClearPix,
     // BlastFreePix, and BlastFree bodies. A 7x7 authoritative Surface8 plane

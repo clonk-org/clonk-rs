@@ -595,6 +595,27 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/is_in_liquid_check.inc"
 
+# 3u. Lift C4Game::BlastObjects and C4Object::Blast. The selection chain
+#     decides who is
+#     hit at all — direct hit widens the shape by five pixels on every side,
+#     while the shock wave gates on category, NoHorizontalMove, Grab, and a
+#     DFA_FLOAT action — and the fling force is another forced-evaluation-order
+#     pair whose `p1` alone consumes an Rnd3 draw. Both are lifted rather than
+#     restated because the order of those two lines is the parity fact.
+awk '
+  /^void C4Game::BlastObjects\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Game.cpp" > "$gen/blast_objects.inc"
+
+awk '
+  /^void C4Object::Blast\(int32_t iLevel, int32_t iCausedBy\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_blast.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

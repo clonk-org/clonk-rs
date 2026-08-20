@@ -1109,8 +1109,12 @@ static void printLandscapeScanCase()
 // gen_golden.sh extracts the two method bodies unchanged from src/. Only the
 // minimal fields those methods touch are modeled here. Tumble/Jump return false
 // so both C++ and Rust exercise C4Object::Fling's raw-velocity fallback.
+inline constexpr int32_t C4D_Vehicle_Oracle = 1 << 2; // C4Def.h:46
 inline constexpr int32_t C4D_Living_Oracle = 1 << 3;
 inline constexpr int32_t C4D_Object_Oracle = 1 << 4;
+inline constexpr int32_t DFA_FLOAT_Oracle = 13;             // C4Def.h:443
+inline constexpr int32_t C4FxCall_DmgBlast_Oracle = 1;      // C4Effects.h:54
+inline constexpr int32_t C4FxCall_EngBlast_Oracle = 33;     // C4Effects.h:60
 inline constexpr int32_t MNone_Oracle = -1;
 inline constexpr int32_t DIR_Left = 0;
 inline constexpr int32_t DIR_Right = 1;
@@ -1150,13 +1154,61 @@ struct C4Object
     {
         uint8_t t_attach{};
         int32_t Dir{};
+        // C4Object.h:440 reads ActMap through Action.Act; ActIdle is -1.
+        int32_t Act{-1};
     } Action;
     struct ShapeState
     {
         int32_t AttachMat{MNone_Oracle};
+        int32_t x{};
         int32_t y{};
+        int32_t Wdt{};
         int32_t Hgt{};
     } Shape;
+
+    // Only the C4Def fields BlastObjects and Blast read.
+    struct DefOracle
+    {
+        int32_t NoHorizontalMove{};
+        int32_t Grab{};
+        int32_t BlastIncinerate{};
+        struct ActMapEntry
+        {
+            int32_t Procedure{-1};
+        } ActMap[4];
+    } *Def{};
+
+    int32_t Mass{};
+    C4Object *pLayer{};
+    int32_t Alive{};
+    int32_t Damage{};
+
+    // Blast's callees are recorded rather than run: their real bodies reach
+    // rules, effects and script, none of which this section scaffolds. What is
+    // compared is which object received which call, with which argument, in
+    // what order.
+    int32_t DamageCalls{};
+    int32_t DamageSum{};
+    int32_t EnergyCalls{};
+    int32_t EnergySum{};
+    int32_t IncinerateCalls{};
+
+    void DoDamage(int32_t change, int32_t, int32_t)
+    {
+        ++DamageCalls;
+        DamageSum += change;
+        Damage += change;
+    }
+
+    void DoEnergy(int32_t change, bool, int32_t, int32_t)
+    {
+        ++EnergyCalls;
+        EnergySum += change;
+    }
+
+    void Incinerate(int32_t, bool) { ++IncinerateCalls; }
+
+    void Blast(int32_t iLevel, int32_t iCausedBy);
 
     int32_t MaterialContents[C4MaxMaterial_Oracle]{};
     int32_t Status{};
@@ -1405,6 +1457,8 @@ struct C4Game
     } DigSpawn;
 
     void ShakeObjects(int32_t tx, int32_t ty, int32_t range, int32_t causedBy);
+    void BlastObjects(
+        int32_t tx, int32_t ty, int32_t level, C4Object *inobj, int32_t causedBy, C4Object *byObj);
     void InitRules();
     void InitGoals();
     void UpdateRules() { ++UpdateRulesCalls; }
@@ -1454,6 +1508,19 @@ static C4Game DigGameOracle;
 #define C4D_Living C4D_Living_Oracle
 #include "shake_objects.inc"
 #include "object_fling.inc"
+
+#define C4D_Object C4D_Object_Oracle
+#define C4D_Vehicle C4D_Vehicle_Oracle
+#define DFA_FLOAT DFA_FLOAT_Oracle
+#define C4FxCall_EngBlast C4FxCall_EngBlast_Oracle
+#define C4FxCall_DmgBlast C4FxCall_DmgBlast_Oracle
+#include "blast_objects.inc"
+#include "object_blast.inc"
+#undef C4FxCall_DmgBlast
+#undef C4FxCall_EngBlast
+#undef DFA_FLOAT
+#undef C4D_Vehicle
+#undef C4D_Object
 #undef C4D_Living
 
 static C4IDList makeIDList(
@@ -2131,6 +2198,167 @@ static void printDigOutMaterialCastCase()
     }
     printf("],\"rng_after\":{\"count\":%d,\"hold\":%u}}", RandomCount, RandomHold);
 }
+
+namespace blast_objects_oracle
+{
+struct Row
+{
+    const char *Name;
+    int32_t Status;
+    bool Contained;
+    int32_t Category;
+    int32_t X;
+    int32_t Y;
+    int32_t ShapeX;
+    int32_t ShapeY;
+    int32_t Wdt;
+    int32_t Hgt;
+    int32_t Mass;
+    int32_t Alive;
+    int32_t Grab;
+    int32_t NoHorizontalMove;
+    int32_t Procedure;
+    int32_t BlastIncinerate;
+};
+
+// The blast lands at (50, 50) with level 20. Every row isolates one gate of the
+// selection chain.
+const Row selection[] = {
+    // Straddles the blast: direct hit AND shock wave, and living, so it takes
+    // the extra energy/damage pair before the fling.
+    {"living_center", 1, false, C4D_Living_Oracle | C4D_Object_Oracle, 50, 50, -4, -8, 8, 16, 100,
+     1, 0, 0, -1, 0},
+    // Offset but still inside both the widened shape and the level range.
+    {"object_offset", 1, false, C4D_Object_Oracle, 58, 62, -4, -8, 8, 16, 50, 0, 0, 0, -1, 0},
+    // Neither test passes.
+    {"far_out_of_range", 1, false, C4D_Object_Oracle, 200, 200, -4, -8, 8, 16, 50, 0, 0, 0, -1, 0},
+    // Contained objects are skipped entirely by the uncontained arm.
+    {"contained", 1, true, C4D_Living_Oracle | C4D_Object_Oracle, 50, 50, -4, -8, 8, 16, 100, 1, 0,
+     0, -1, 0},
+    // Deleted objects never appear.
+    {"deleted", 0, false, C4D_Living_Oracle | C4D_Object_Oracle, 50, 50, -4, -8, 8, 16, 100, 1, 0,
+     0, -1, 0},
+    // A structure is outside the three shock-wave categories, so a direct hit
+    // blasts it but no force is applied.
+    {"structure", 1, false, 1 << 1, 50, 50, -4, -8, 8, 16, 100, 0, 0, 0, -1, 0},
+    // NoHorizontalMove keeps its shock wave off.
+    {"no_horizontal_move", 1, false, C4D_Object_Oracle, 58, 50, -4, -8, 8, 16, 50, 0, 0, 1, -1, 0},
+    // A vehicle is skipped unless Grab is exactly 1.
+    {"vehicle_no_grab", 1, false, C4D_Vehicle_Oracle, 58, 50, -4, -8, 8, 16, 50, 0, 0, 0, -1, 0},
+    {"vehicle_grab", 1, false, C4D_Vehicle_Oracle, 58, 50, -4, -8, 8, 16, 50, 0, 1, 0, -1, 0},
+    // A floating object is skipped on the same Grab gate.
+    {"floating", 1, false, C4D_Object_Oracle, 58, 50, -4, -8, 8, 16, 50, 0, 0, 0, DFA_FLOAT_Oracle,
+     0},
+    // Mass drives the fling divisor's clamp from both ends: 10 clamps to the
+    // lower bound of 4, 5000 to the upper bound (20, or 8 for living).
+    {"light_object", 1, false, C4D_Object_Oracle, 58, 50, -4, -8, 8, 16, 10, 0, 0, 0, -1, 0},
+    {"heavy_object", 1, false, C4D_Object_Oracle, 58, 50, -4, -8, 8, 16, 5000, 0, 0, 0, -1, 0},
+    {"heavy_living", 1, false, C4D_Living_Oracle, 58, 50, -4, -8, 8, 16, 5000, 1, 0, 0, -1, 0},
+    // Exactly on the level boundary in x: `<= level` includes it.
+    {"boundary_in", 1, false, C4D_Object_Oracle, 70, 50, -4, -8, 8, 16, 50, 0, 0, 0, -1, 0},
+    {"boundary_out", 1, false, C4D_Object_Oracle, 71, 50, -4, -8, 8, 16, 50, 0, 0, 0, -1, 0},
+};
+
+// Blast's incinerate gate is `Damage >= Def->BlastIncinerate`, read after its
+// own DoDamage — so a threshold at or below the level fires on the same call
+// that caused the damage, and one above it does not.
+//
+// These rows are a SEPARATE case because the oracle records the Incinerate call
+// instead of starting the real fire effect. The production effect draws from
+// the synchronised stream, so the RNG ledger across this case is not
+// comparable and is deliberately not emitted; the selection case above is where
+// the ledger is pinned.
+const Row incinerate[] = {
+    {"incinerates", 1, false, C4D_Object_Oracle, 50, 50, -4, -8, 8, 16, 50, 0, 0, 0, -1, 15},
+    {"survives_incinerate", 1, false, C4D_Object_Oracle, 50, 50, -4, -8, 8, 16, 50, 0, 0, 0, -1,
+     25},
+};
+
+static void print(const char *section, const Row *rows, std::size_t rowCount, bool withRng)
+{
+    std::vector<C4Object> objects(rowCount);
+    std::vector<C4Object::DefOracle> defs(rowCount);
+    std::vector<C4ObjectLink> links(rowCount);
+    for (std::size_t i = 0; i < rowCount; ++i)
+    {
+        defs[i].Grab = rows[i].Grab;
+        defs[i].NoHorizontalMove = rows[i].NoHorizontalMove;
+        defs[i].BlastIncinerate = rows[i].BlastIncinerate;
+        objects[i].Def = &defs[i];
+        objects[i].Status = rows[i].Status;
+        objects[i].Category = rows[i].Category;
+        objects[i].x = rows[i].X;
+        objects[i].y = rows[i].Y;
+        objects[i].Shape.x = rows[i].ShapeX;
+        objects[i].Shape.y = rows[i].ShapeY;
+        objects[i].Shape.Wdt = rows[i].Wdt;
+        objects[i].Shape.Hgt = rows[i].Hgt;
+        objects[i].Mass = rows[i].Mass;
+        objects[i].Alive = rows[i].Alive;
+        // OCF_Alive is derived from Alive in the engine, and Fling reads the
+        // OCF bit (C4Object.cpp:1642) where Blast reads the field (:1421) — a
+        // fixture setting only one of them would take a combination the engine
+        // cannot produce.
+        if (rows[i].Alive) objects[i].OCF |= OCF_Alive;
+        objects[i].Controller = -1;
+        if (rows[i].Procedure >= 0)
+        {
+            objects[i].Action.Act = 0;
+            defs[i].ActMap[0].Procedure = rows[i].Procedure;
+        }
+        if (rows[i].Contained) objects[i].Contained = &objects[0];
+    }
+
+    C4Game game;
+    C4ObjectLink *tail = nullptr;
+    for (std::size_t i = 0; i < rowCount; ++i)
+    {
+        links[i].Obj = &objects[i];
+        if (tail) tail->Next = &links[i]; else game.Objects.First = &links[i];
+        tail = &links[i];
+    }
+
+    FixedRandom(4);
+    Randomize3();
+    const int32_t countBefore = RandomCount;
+    const uint32_t holdBefore = RandomHold;
+    const int32_t rnd3Before = FRndPtr3;
+    game.BlastObjects(50, 50, 20, nullptr, 7, nullptr);
+
+    printf("\"%s\":{\"seed\":4,\"x\":50,\"y\":50,\"level\":20,\"caused_by\":7,", section);
+    if (withRng)
+        printf("\"rng_before\":{\"count\":%d,\"hold\":%u,\"rnd3_ptr\":%d},"
+               "\"rng_after\":{\"count\":%d,\"hold\":%u,\"rnd3_ptr\":%d},",
+               countBefore, holdBefore, rnd3Before, RandomCount, RandomHold, FRndPtr3);
+    printf("\"objects\":[");
+    for (std::size_t i = 0; i < rowCount; ++i)
+    {
+        if (i) printf(",");
+        printf("{\"name\":\"%s\",\"status\":%d,\"contained\":%d,\"category\":%d,"
+               "\"x\":%d,\"y\":%d,\"shape_x\":%d,\"shape_y\":%d,\"wdt\":%d,\"hgt\":%d,"
+               "\"mass\":%d,\"alive\":%d,\"grab\":%d,\"no_horizontal_move\":%d,"
+               "\"procedure\":%d,\"blast_incinerate\":%d,\"damage_calls\":%d,"
+               "\"damage_sum\":%d,\"energy_calls\":%d,\"energy_sum\":%d,"
+               "\"incinerate_calls\":%d,\"xdir_after\":%d,\"ydir_after\":%d,"
+               "\"mobile_after\":%d,\"controller_after\":%d}",
+               rows[i].Name, rows[i].Status, rows[i].Contained ? 1 : 0, rows[i].Category,
+               rows[i].X, rows[i].Y, rows[i].ShapeX, rows[i].ShapeY, rows[i].Wdt, rows[i].Hgt,
+               rows[i].Mass, rows[i].Alive, rows[i].Grab, rows[i].NoHorizontalMove,
+               rows[i].Procedure, rows[i].BlastIncinerate, objects[i].DamageCalls,
+               objects[i].DamageSum, objects[i].EnergyCalls, objects[i].EnergySum,
+               objects[i].IncinerateCalls, objects[i].xdir.val, objects[i].ydir.val,
+               objects[i].Mobile, objects[i].Controller);
+    }
+    printf("]}");
+}
+
+static void printCases()
+{
+    print("blast_objects", selection, sizeof(selection) / sizeof(selection[0]), true);
+    printf(",\n");
+    print("blast_incinerate_gate", incinerate, sizeof(incinerate) / sizeof(incinerate[0]), false);
+}
+} // namespace blast_objects_oracle
 
 static void printShakeObjectsCase()
 {
@@ -4404,6 +4632,8 @@ int main()
     // 18. Exact production ShakeObjects master-order/RNG gate sequence and
     //     C4Object::Fling raw fallback.
     printShakeObjectsCase();
+    printf(",\n");
+    blast_objects_oracle::printCases();
     printf(",\n");
 
     // 19. Exact C4Landscape::ClearPix / BlastFreePix / BlastFree scan,
