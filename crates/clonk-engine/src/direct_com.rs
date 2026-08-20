@@ -15357,6 +15357,66 @@ public func ContextMagic(object caller)
         assert_eq!(menu.items[0].picture_object, Some(hut));
     }
 
+    /// `GetInfoString` walks the **live** effect list, so an `Fx*Info` hook that
+    /// adds an effect behind the cursor is visited in the same pass
+    /// (`src/C4Object.cpp:6140-6158`, oracle `7d43b47`):
+    ///
+    /// ```cpp
+    /// for (C4Effect *pEff = pEffects; pEff; pEff = pEff->pNext)
+    /// {
+    ///     C4Value vInfo = pEff->DoCall(this, PSFS_FxInfo);
+    /// ```
+    ///
+    /// `pEff->pNext` is read *after* `DoCall` returned, so the successor is
+    /// whatever the callback left behind. Iterating a snapshot taken before the
+    /// first callback shows the list as it was and silently drops the addition —
+    /// which is what the port did until clonk-org/clonk-rs#562.
+    ///
+    /// Note there is deliberately no dead-effect filter: `C4Effect::DoCall`
+    /// (C4Effect.cpp:439-457) has no `IsDead` gate and `GetInfoString` adds
+    /// none, unlike `DoDamage`.
+    #[test]
+    fn object_info_menu_walks_effects_added_during_an_info_callback() {
+        let mut engine = clonk_engine("#strict\n");
+        let mut target = test_definition(
+            "TARG",
+            "Target",
+            r#"#strict
+        func FxGlowInfo(object target, int number)
+        {
+            // Appended after the cursor, so the live walk must reach it.
+            AddEffect("Late", target, 30, 0, target);
+            return "Glowing.";
+        }
+        func FxLateInfo(object target, int number) { return "Added mid-walk."; }
+        "#,
+        );
+        target.set_description(Some("Base description.".to_string()));
+        engine.register_test_definition(target);
+        let crew = register_player_crew(&mut engine);
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+        let target_index = engine.test_object_index(target);
+        let mut glow = crate::EffectState::new("Glow");
+        glow.number = 7;
+        // Lower than the addition below: C4Effect inserts at the head unless
+        // Abs(head->iPriority) < iPrio, so only a higher-priority addition
+        // lands *after* the cursor where the live walk can still reach it.
+        glow.priority = 10;
+        glow.command_target = Some(target.as_u64() as i32);
+        engine.objects[target_index].state.effects = vec![glow];
+
+        let crew_index = engine.test_object_index(crew);
+        engine
+            .open_object_info_menu(crew_index, target_index)
+            .test_value();
+
+        let menu = test_menu(&engine, crew);
+        assert_eq!(
+            menu.items[0].info_caption, "Base description.|Glowing.|Added mid-walk.",
+            "the effect added by FxGlowInfo must be visited by the same walk"
+        );
+    }
+
     #[test]
     fn object_info_menu_appends_script_and_native_effect_info_in_list_order() {
         let mut engine = clonk_engine("#strict\n");
