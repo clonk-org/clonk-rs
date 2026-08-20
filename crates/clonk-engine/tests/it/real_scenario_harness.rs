@@ -704,6 +704,10 @@ fn alchemy_real_scenario_subcases_batch_1() {
             "firelump_collects_its_same_call_fireball_into_the_mage",
             alchemy_firelump_collects_its_same_call_fireball_into_the_mage,
         ),
+        (
+            "learned_warp_builds_a_connected_hole_pair_and_consumes_its_gold",
+            alchemy_learned_warp_builds_a_connected_hole_pair_and_consumes_its_gold,
+        ),
     ]);
 }
 
@@ -1172,6 +1176,122 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
         engine.environment().wind,
         38,
         "the mage stands in tunnel background, so GetWind() is locally zero before Sin(70, 40)"
+    );
+}
+
+fn alchemy_learned_warp_builds_a_connected_hole_pair_and_consumes_its_gold(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy warp parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+
+    // MGWP costs IGOL=3, which is exactly what Alchemy seeds, so the shipped
+    // bag alone pays for it once ALC_::Transfer moves it across
+    // (Alchemy.c4s/Script.c:21-37; Warp.c4d/DefCore.txt;
+    // Bag.c4d/Script.c:148-160).
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("ISPH") == Some(1)
+                    && object.components.get("IGOL") == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(attached_bag),
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
+    assert_eq!(
+        engine.call_test_object_function(
+            engine.test_object_index(mage),
+            "CheckMagicRequirements",
+            vec![Value::C4Id("MGWP".into()), Value::Bool(true)],
+        ),
+        Value::Int(1)
+    );
+
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "MGWP"));
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let warp_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MGWP"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        warp_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    for _ in 0..20 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+
+    // MGWP is not an aimer: Activate warps immediately, creating both holes
+    // and connecting them before removing itself
+    // (Warp.c4d/Script.c:5-16,18-46).
+    let holes: Vec<_> = engine
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "WARP" && object.status.is_active())
+        .map(|object| (object.id, object.position))
+        .collect();
+    assert_eq!(
+        holes.len(),
+        2,
+        "a warp cast opens exactly one hole pair: {holes:?}"
+    );
+    assert_ne!(
+        holes[0].1, holes[1].1,
+        "the entry and exit holes are placed apart"
+    );
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "MGWP" && object.status.is_active()),
+        "MGWP removes itself once the pair is connected"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IGOL")),
+        Some(0),
+        "a successful MGWP cast consumes all three gold"
     );
 }
 
