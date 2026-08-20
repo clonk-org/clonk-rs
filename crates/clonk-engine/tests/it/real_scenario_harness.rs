@@ -838,6 +838,10 @@ fn alchemy_real_scenario_subcases_batch_4() {
             "learned_eternal_flame_scatters_its_shipped_flame_cast",
             alchemy_learned_eternal_flame_scatters_its_shipped_flame_cast,
         ),
+        (
+            "replication_combo_decides_how_many_copies_it_makes",
+            alchemy_replication_combo_decides_how_many_copies_it_makes,
+        ),
     ]);
 }
 
@@ -5372,6 +5376,81 @@ fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row(
         "C++ FnEffectVar returns a reference whose indexed array element is assignable; \
          MTNL records and frees solid pixels in its first landscape row"
     );
+}
+
+fn alchemy_replication_combo_decides_how_many_copies_it_makes(
+    prepared: &PreparedInstalledScenario,
+) {
+    // MGRP's replica count is set by which combo the caster is carrying: a
+    // WIPF makes six copies and GOLD makes three
+    // (Fantasy.c4d/Magic.c4d/MagicReplication.c4d/Script.c:16-22). Three
+    // definitions ship an `id=MGRP`; Alchemy loads the Fantasy one, and the
+    // count is what distinguishes it.
+    for (combo, expected_copies) in [("GOLD", 3), ("WIPF", 6)] {
+        let mut engine = prepared.instantiate();
+        let owner = join_local_player(&mut engine, "Alchemy replication parity");
+        let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+        let mage_definition = engine.test_object_snapshot(mage).definition_id.clone();
+        // MGRP refuses to cast from inside anything, and the shipped mage
+        // starts in a building (Script.c:10).
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
+                mage,
+                ObjectUpdate::new()
+                    .with_position(Vector2::new(500, 200))
+                    .with_velocity(Vector2::ZERO)
+                    .with_action("Walk")
+                    .clear_container(),
+            ),
+        );
+        let mage_position = engine.test_object_snapshot(mage).position;
+        let combo_object =
+            engine.spawn_test_object(clonk_engine::SpawnConfig::new(combo).with_container(mage));
+
+        let spell = engine.spawn_test_object(
+            clonk_engine::SpawnConfig::new("MGRP")
+                .with_position(mage_position)
+                .with_owner(owner),
+        );
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(mage.as_u64())],
+        );
+
+        // Every copy is a fresh object of the caster's own definition carrying
+        // the control effect, so counting those separates them from the caster
+        // itself, which never gets one (`:23-27`).
+        let copies: Vec<_> = engine
+            .snapshot()
+            .objects
+            .iter()
+            .filter(|object| {
+                object.definition_id == mage_definition
+                    && object.status.is_active()
+                    && object
+                        .effects
+                        .iter()
+                        .any(|effect| effect.name == "ReplicationSpell")
+            })
+            .map(|object| object.id)
+            .collect();
+        assert_eq!(
+            copies.len(),
+            expected_copies,
+            "a {combo} combo makes {expected_copies} copies: {copies:?}"
+        );
+        assert!(
+            !copies.contains(&mage),
+            "the caster is not one of its own replicas"
+        );
+        assert!(
+            engine
+                .object_snapshot(combo_object)
+                .is_none_or(|combo| !combo.status.is_active()),
+            "the combo is consumed by the cast"
+        );
+    }
 }
 
 fn alchemy_firefist_flame_consumes_inflammable_landscape(prepared: &PreparedInstalledScenario) {
