@@ -60,10 +60,10 @@ filter = 'package(clonk-app-render)'
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 # Nextest otherwise launches tests lexicographically. Start the longest
-# scenario routes first so they overlap the thousands of short unit tests
+# scenario cases first so they overlap the thousands of short tests
 # instead of becoming a serial tail at the end of the workspace gate.
 [[profile.default.overrides]]
-filter = '(package(clonk-app) and test(/app_virtual_keyboard_(completes_real_tutorial(0[1-3]|05)_route|delivers_tutorial08_surface_wipfs_to_hut)/)) or (package(clonk-engine-integration-tests) and test(/(dragon_rock_princess_scream_is_|tutorial(0[1-9]|10)_virtual_player_completes_)/))'
+filter = '(package(clonk-app) and test(/app_virtual_keyboard_(completes_real_tutorial(0[1-3]|05)_route|delivers_tutorial08_surface_wipfs_to_hut)/)) or (package(clonk-engine-integration-tests) and test(/(dragon_rock_princess_scream_is_|queron_assassin_death_relaunches_a_visible_paladin|shipped_scenarios_do_not_animate_the_sky_lighting_factor|tutorial(0[1-9]|10)_virtual_player_completes_)/))'
 priority = 100
 
 [[profile.default.overrides]]

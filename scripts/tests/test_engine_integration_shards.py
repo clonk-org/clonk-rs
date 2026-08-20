@@ -9,8 +9,17 @@ from _repo import REPOSITORY
 
 MANIFEST = REPOSITORY / "crates" / "clonk-engine-integration-tests" / "Cargo.toml"
 HARNESS = REPOSITORY / "crates" / "clonk-engine" / "tests" / "it"
+NEXTTEST = REPOSITORY / ".config" / "nextest.toml"
 SENTINEL = "engine-it-sharded"
-SELECTORS = ("engine-it-shard-1", "engine-it-shard-2")
+SELECTORS = ("engine-it-shard-1", "engine-it-shard-2", "engine-it-shard-3")
+REBALANCED_ROUTE_MODULES = {
+    "real_tutorial04_virtual_play",
+    "real_tutorial07_virtual_play",
+}
+LATE_SLOW_TESTS = {
+    "queron_assassin_death_relaunches_a_visible_paladin",
+    "shipped_scenarios_do_not_animate_the_sky_lighting_factor",
+}
 RECORDING_HOST_TESTS = {
     "dev_feedback_replay": "committed_real_scenario_replays_are_deterministic",
     "elevator_motion_oracle": "tutorial07_seed_zero_landscape_matches_cpp_surface8",
@@ -30,6 +39,20 @@ def squash(source: str) -> str:
 
 
 class EngineIntegrationShardTests(unittest.TestCase):
+    def test_late_slow_tests_start_with_the_route_tier(self):
+        config = tomllib.loads(NEXTTEST.read_text(encoding="utf-8"))
+        route_tiers = [
+            override
+            for override in config["profile"]["default"]["overrides"]
+            if override.get("priority") == 100
+        ]
+
+        self.assertEqual(len(route_tiers), 1)
+        route_filter = route_tiers[0]["filter"]
+        self.assertIn("package(clonk-engine-integration-tests)", route_filter)
+        for test in LATE_SLOW_TESTS:
+            self.assertIn(test, route_filter)
+
     def test_shards_form_an_exact_default_preserving_partition(self):
         manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
         features = manifest["features"]
@@ -69,6 +92,21 @@ class EngineIntegrationShardTests(unittest.TestCase):
         self.assertNotIn("support", assigned)
         self.assertRegex(source, r"(?m)^mod support;$")
 
+        owners = {
+            module: selector
+            for selector, modules in assignments.items()
+            for module in modules
+        }
+        for module in inventory:
+            module_source = (HARNESS / f"{module}.rs").read_text(encoding="utf-8")
+            dependencies = set(re.findall(r"\bcrate::([a-z][a-z0-9_]*)::", module_source))
+            for dependency in dependencies & inventory:
+                self.assertEqual(
+                    owners[module],
+                    owners[dependency],
+                    f"{module} imports the separately sharded {dependency}",
+                )
+
         self.assertIn(
             '#[cfg(any( not(feature = "engine-it-sharded"), '
             'feature = $selector, ))] mod $module;',
@@ -76,7 +114,8 @@ class EngineIntegrationShardTests(unittest.TestCase):
         )
         self.assertIn(
             '#[cfg(all(feature="engine-it-sharded",not(any('
-            'feature="engine-it-shard-1",feature="engine-it-shard-2",)),))]'
+            'feature="engine-it-shard-1",feature="engine-it-shard-2",'
+            'feature="engine-it-shard-3",)),))]'
             "compile_error!(",
             squashed_source,
         )
@@ -84,6 +123,8 @@ class EngineIntegrationShardTests(unittest.TestCase):
         shard_one = set(assignments[SELECTORS[0]])
         shard_two = set(assignments[SELECTORS[1]])
         self.assertIn("bird_flight", shard_one)
+        self.assertTrue(REBALANCED_ROUTE_MODULES <= shard_one)
+        self.assertTrue(REBALANCED_ROUTE_MODULES.isdisjoint(shard_two))
         self.assertTrue(RECORDING_HOST_TESTS.keys() <= shard_one)
         self.assertTrue(RECORDING_HOST_TESTS.keys().isdisjoint(shard_two))
         for module, test in RECORDING_HOST_TESTS.items():
