@@ -117,7 +117,7 @@ impl LiveC4SavePolicy<'_> {
         }
     }
 
-    const fn forces_runtime_landscape(self) -> bool {
+    pub(crate) const fn forces_runtime_landscape(self) -> bool {
         match self {
             Self::Scenario {
                 force_exact_landscape,
