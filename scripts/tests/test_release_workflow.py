@@ -116,7 +116,7 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
         self.assertNotIn("shared-key: release-${{", prebuild)
         for trusted_cache in (
             "full-parity",
-            "windows-runtime-msvc",
+            "windows-runtime-msvc-v2",
             "recording-host-oracles",
         ):
             with self.subTest(trusted_cache=trusted_cache):

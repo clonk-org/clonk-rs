@@ -112,16 +112,19 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertNotIn("actions/cache/save@", workflow)
 
     def test_landing_smoke_covers_c4group_everywhere_it_is_inventoried(self):
-        expected = {
-            "Test the launcher and path resolution": "-p clonk-c4group",
-            "Lint Windows paths": "-p clonk-c4group",
-            "Compile the installer over a stand-in payload": (
-                '$payload_dir/bin/c4group.exe'
+        workflow = LANDING_WORKFLOW.read_text(encoding="utf-8")
+        windows = workflow[
+            workflow.index("  windows-smoke:") : workflow.index("  landing-gate:")
+        ]
+
+        self.assertGreaterEqual(windows.count("-p clonk-c4group"), 2)
+        self.assertIn(
+            '$payload_dir/bin/c4group.exe',
+            step_script(
+                LANDING_WORKFLOW,
+                "Compile the installer over a stand-in payload",
             ),
-        }
-        for step, fragment in expected.items():
-            with self.subTest(step=step):
-                self.assertIn(fragment, step_script(LANDING_WORKFLOW, step))
+        )
 
     def test_msvc_builds_share_cached_linker_plugin_lto_configuration(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
@@ -193,7 +196,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
                 self.assertIn(fragment, script)
         self.assertIn("THINLTO_CACHE_DIR", script)
 
-    def test_thinlto_cache_is_published_only_by_trusted_main(self):
+    def test_explicit_caches_are_published_only_by_trusted_main(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
         release_prebuild = RELEASE_PREBUILD_WORKFLOW.read_text(encoding="utf-8")
@@ -206,10 +209,10 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             " # v6.1.0"
         )
 
-        self.assertEqual(landing.count(restore), 0)
+        self.assertEqual(landing.count(restore), 2)
         self.assertNotIn(save, landing)
-        self.assertEqual(main.count(restore), 1)
-        self.assertEqual(main.count(save), 1)
+        self.assertEqual(main.count(restore), 4)
+        self.assertEqual(main.count(save), 2)
         thinlto_start = release_prebuild.index("Restore trusted-main ThinLTO cache")
         thinlto_end = release_prebuild.index("\n      - name:", thinlto_start)
         thinlto_step = release_prebuild[thinlto_start:thinlto_end]

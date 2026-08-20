@@ -72,7 +72,13 @@ class RustCoverageGateTests(unittest.TestCase):
         engine_features = re.findall(r"engine-it-shard-[1-9][0-9]*", commands)
         self.assertEqual(
             Counter(engine_features),
-            Counter({"engine-it-shard-1", "engine-it-shard-2"}),
+            Counter(
+                {
+                    "engine-it-shard-1",
+                    "engine-it-shard-2",
+                    "engine-it-shard-3",
+                }
+            ),
         )
 
         selected_packages = re.findall(r"(?:^|\s)-p\s+([a-z0-9-]+)", commands)
@@ -209,7 +215,7 @@ class RustCoverageGateTests(unittest.TestCase):
         }
 
         first = by_artifact["engine-1"]
-        second = by_artifact["engine-2"]
+        second = by_artifact["engine-2-3"]
         units = by_artifact["engine-and-frontend-units"]
         self.assertNotIn("clonk-engine-unit-tests", first)
         self.assertNotIn("clonk-frontend-unit-tests", first)
@@ -219,6 +225,7 @@ class RustCoverageGateTests(unittest.TestCase):
         self.assertNotIn("clonk-frontend-unit-tests", second)
         self.assertIn("-p clonk-engine-integration-tests", second)
         self.assertIn("engine-it-shard-2", second)
+        self.assertIn("engine-it-shard-3", second)
         self.assertIn("-p clonk-engine-unit-tests", units)
         self.assertIn("-p clonk-frontend-unit-tests", units)
         self.assertNotIn("clonk-engine-integration-tests", units)

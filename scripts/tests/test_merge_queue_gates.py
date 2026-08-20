@@ -154,7 +154,14 @@ class MergeQueueGateTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 15", quality)
         self.assertIn("fetch-depth: 1", quality)
         self.assertIn("persist-credentials: false", quality)
-        self.assertIn("submodules: recursive", quality)
+        self.assertNotIn("submodules: recursive", quality)
+        self.assertIn("actions/cache/restore@", quality)
+        self.assertIn("path: .git/modules/content", quality)
+        self.assertIn(
+            "run: git submodule update --init --force --depth=1 "
+            "--filter=blob:none content",
+            quality,
+        )
         self.assertIn("libasound2-dev libudev-dev", quality)
         self.assertIn(
             "uses: dtolnay/rust-toolchain@"

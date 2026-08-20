@@ -45,9 +45,8 @@ jobs:
             exit 1
           fi
 
-  # Preserve all 18 merge-queue Linux shards. This PR-only runner can contend
-  # with a merge group; another admission leg requires revisiting the 20-runner
-  # budget.
+  # Keep admission to one long runner. An ordinary merge group uses at most 20
+  # runners across its short context resolver, Linux shards, and Windows rows.
   pull-request-quality:
     name: Pull request quality
     if: github.event_name == 'pull_request'
@@ -61,7 +60,34 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-          submodules: recursive
+
+      - name: Resolve pinned content revision
+        id: content
+        run: |
+          revision=$(git rev-parse HEAD:content)
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid content gitlink: $revision" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pinned content checkout
+        id: content-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .git/modules/content
+          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
+
+      - name: Materialize pinned content checkout
+        run: git submodule update --init --force --depth=1 --filter=blob:none content
+
+      - name: Verify pinned content checkout
+        env:
+          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
+        run: |
+          actual=$(git -C content rev-parse HEAD)
+          [[ "$actual" == "$CONTENT_REVISION" ]]
+          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
 
       - name: Install native dependencies
         timeout-minutes: 10
@@ -205,7 +231,7 @@ jobs:
     # own rolling predecessors but must not cancel required queue rows.
     concurrency:
       group: >-
-        ${{ github.event_name == 'merge_group' && matrix.name == 'app 2/12' && 'linux-landing-cache-rolling'
+        ${{ github.event_name == 'merge_group' && matrix.name == 'app 2+7/12' && 'linux-landing-cache-rolling'
           || format('landing-linux-{0}-{1}', github.run_id, matrix.name) }}
       cancel-in-progress: ${{ github.event_name == 'merge_group' }}
     defaults:
@@ -215,56 +241,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: app netplay 1/2
+          - name: app 1+12/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-1 --no-fail-fast --locked
-          - name: app netplay 2/2
+            command: cargo nextest run -p clonk-app --features app-test-shard-1,app-test-shard-12 --no-fail-fast --locked
+          - name: app 3+10/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-10 --no-fail-fast --locked
-          - name: app 2/12
+            command: cargo nextest run -p clonk-app --features app-test-shard-3,app-test-shard-10 --no-fail-fast --locked
+          - name: app 2+7/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-2 --no-fail-fast --locked
-          - name: app 3/12
+            command: cargo nextest run -p clonk-app --features app-test-shard-2,app-test-shard-7 --no-fail-fast --locked
+          - name: app 4+9/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-3 --no-fail-fast --locked
-          - name: app 4/12
-            apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-4 --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked
           - name: app 5/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
-          - name: app 6/12
-            apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-6 --no-fail-fast --locked
-          - name: app 7/12
-            apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-7 --no-fail-fast --locked
-          - name: app 8/12
-            apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-8 --no-fail-fast --locked
-          - name: app 9/12
-            apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-9 --no-fail-fast --locked
           - name: app 11/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-11 --no-fail-fast --locked
-          - name: app 12/12
+          - name: app 6+8/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-12 --no-fail-fast --locked
-          - name: engine integration 1/2
+            command: cargo nextest run -p clonk-app --features app-test-shard-6,app-test-shard-8 --no-fail-fast --locked
+          - name: engine integration 1/3
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
-          - name: workspace unit and parity
+          - name: engine integration 2/3
+            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2 --no-fail-fast --locked
+          - name: engine integration 3/3
+            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-3 --no-fail-fast --locked
+          - name: engine unit and parity
             command: |
               failed=0
-              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests -p clonk-engine-integration-tests --features clonk-engine-integration-tests/engine-it-shard-2 --no-fail-fast --locked || failed=1
+              cargo nextest run -p clonk-engine-unit-tests --no-fail-fast --locked || failed=1
               cargo xtask parity verify || failed=1
               exit "$failed"
+          - name: frontend unit
+            command: cargo nextest run -p clonk-frontend-unit-tests --no-fail-fast --locked
           - name: remaining workspace 1/2
-            apt: mesa-vulkan-drivers
-            command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-app-render -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-network -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
           - name: remaining workspace 2/2
-            apt: libasound2-dev libxmp4
-            command: cargo nextest run -p clonk-app-menus -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-network -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
+            apt: libasound2-dev libxmp4 mesa-vulkan-drivers
+            command: cargo nextest run -p clonk-app-menus -p clonk-app-render -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
           - name: workspace quality
             apt: libasound2-dev libudev-dev python3-pil
             command: |
@@ -297,7 +313,34 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-          submodules: recursive
+
+      - name: Resolve pinned content revision
+        id: content
+        run: |
+          revision=$(git rev-parse HEAD:content)
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid content gitlink: $revision" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pinned content checkout
+        id: content-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .git/modules/content
+          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
+
+      - name: Materialize pinned content checkout
+        run: git submodule update --init --force --depth=1 --filter=blob:none content
+
+      - name: Verify pinned content checkout
+        env:
+          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
+        run: |
+          actual=$(git -C content rev-parse HEAD)
+          [[ "$actual" == "$CONTENT_REVISION" ]]
+          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
 
       - name: Install native dependencies
         if: matrix.apt != ''
@@ -353,20 +396,43 @@ jobs:
         run: bash -euo pipefail -c "$SHARD_COMMAND"
 
   windows-smoke:
-    name: Windows smoke tests
+    name: Windows / ${{ matrix.name }}
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 15
-    # A queue candidate may preempt the rolling trusted-main producer so the
-    # bounded smoke job is not delayed behind the exact post-merge app build.
+    # The runtime row may preempt the rolling trusted-main producer. The other
+    # rows use run-scoped lanes so all three smoke poles execute concurrently.
     concurrency:
       group: >-
-        ${{ github.event_name == 'merge_group' && 'windows-landing-cache-rolling'
-          || format('landing-windows-smoke-{0}', github.run_id) }}
+        ${{ github.event_name == 'merge_group' && matrix.name == 'runtime tests' && 'windows-landing-cache-rolling'
+          || format('landing-windows-{0}-{1}', github.run_id, matrix.name) }}
       cancel-in-progress: ${{ github.event_name == 'merge_group' }}
     defaults:
       run:
         shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: runtime tests
+            nextest: true
+            installer: false
+            command: |
+              failed=0
+              cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core --locked --no-fail-fast || failed=1
+              cargo nextest run -p clonk-logging --test crash_log_descriptor --locked || failed=1
+              exit "$failed"
+          # clonk-network carries a Windows-only `GetAdaptersAddresses` arm for
+          # the IPv6 multicast discovery fallback; this row keeps it compiled
+          # and tested without serializing it behind the runtime packages.
+          - name: network tests
+            nextest: true
+            installer: false
+            command: cargo nextest run -p clonk-network --lib --locked -E 'test(/^search::tests::(discovery_multicast_target_uses_cpp_default_interface|an_accepted_default_multicast_join_enumerates_no_interfaces|a_refused_default_multicast_join_keeps_every_joinable_interface|a_scoped_join_set_sends_one_probe_per_joined_interface|an_unjoinable_host_still_probes_the_cpp_default_interface|the_cpp_default_interface_never_sets_ipv6_multicast_if|enumerated_multicast_interfaces_do_not_depend_on_kernel_listing_order)$/)'
+          - name: quality
+            nextest: false
+            installer: true
+            command: cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-network -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -375,34 +441,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
       - uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
+        if: matrix.nextest
         with:
           tool: cargo-nextest@0.9.91
           fallback: none
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: windows-runtime-msvc
+          shared-key: windows-runtime-msvc-v2
           save-if: false
 
-      - name: Test the launcher and path resolution
-        run: cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core --locked --no-fail-fast
-
-      - name: Test the Windows crash-log descriptor
-        run: cargo nextest run -p clonk-logging --test crash_log_descriptor --locked
-
-      # clonk-network carries a Windows-only `GetAdaptersAddresses` arm for the
-      # IPv6 multicast discovery fallback; without it in a required gate the
-      # arm compiles nowhere.
-      - name: Test the Windows multicast discovery fallback
-        run: cargo nextest run -p clonk-network --lib --locked -E 'test(/^search::tests::(discovery_multicast_target_uses_cpp_default_interface|an_accepted_default_multicast_join_enumerates_no_interfaces|a_refused_default_multicast_join_keeps_every_joinable_interface|a_scoped_join_set_sends_one_probe_per_joined_interface|an_unjoinable_host_still_probes_the_cpp_default_interface|the_cpp_default_interface_never_sets_ipv6_multicast_if|enumerated_multicast_interfaces_do_not_depend_on_kernel_listing_order)$/)'
-
-      - name: Lint Windows paths
-        run: cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-network -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
+      - name: Run ${{ matrix.name }}
+        env:
+          SHARD_COMMAND: ${{ matrix.command }}
+        run: bash -euo pipefail -c "$SHARD_COMMAND"
 
       - name: Install NSIS
+        if: matrix.installer
         run: scripts/install-nsis.sh
 
       - name: Compile the installer over a stand-in payload
+        if: matrix.installer
         run: |
           payload_dir=target/dist/clonk-rust
           mkdir -p "$payload_dir"/bin "$payload_dir"/planet "$payload_dir"/content

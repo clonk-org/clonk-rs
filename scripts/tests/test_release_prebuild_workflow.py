@@ -105,7 +105,7 @@ class ReleasePrebuildWorkflowTests(unittest.TestCase):
 
         for cache in (
             "shared-key: full-parity",
-            "shared-key: windows-runtime-msvc",
+            "shared-key: windows-runtime-msvc-v2",
             "shared-key: recording-host-oracles",
             "shared-key: shipped-msvc-runtime-v1",
         ):

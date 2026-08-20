@@ -19,6 +19,7 @@ lookup-profile = ["clonk-script/lookup-profile"]
 engine-it-sharded = []
 engine-it-shard-1 = ["engine-it-sharded"]
 engine-it-shard-2 = ["engine-it-sharded"]
+engine-it-shard-3 = ["engine-it-sharded"]
 
 [[test]]
 name = "engine_it"
