@@ -28,6 +28,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 socket2 = { version = "0.6", features = ["all"] }
 webpki-root-certs = "1"
 xml = "1"
+# Already in the graph as a rustls dependency at this version, so a direct edge
+# adds no crate to the build or the supply chain -- only the ability to name
+# the trait that erases a dropped media key (clonk-org/clonk-rs#470).
+zeroize = { version = "1", default-features = false }
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", features = ["use_std"] }
 

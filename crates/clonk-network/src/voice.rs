@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use std::{collections::BTreeMap, collections::BTreeSet};
 use thiserror::Error;
 use tokio::sync::mpsc;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::ClientId;
 
@@ -149,14 +150,40 @@ impl VoiceRouteCookie {
 /// and does not retain `(stream_epoch, sequence)` replay state. Once a frame is
 /// decoded, duplicate/late suppression belongs to the application layer's
 /// `VoiceActivityTracker`.
-/// Deliberately not `Copy`. The seal and open paths borrow a route's cipher
-/// rather than taking one by value, so the per-frame copies this type used to
-/// make no longer happen; `Clone` stays for the route tables, which do need an
-/// owned one.
+/// Deliberately not `Copy`: a `Copy` type cannot have a destructor, and every
+/// implicit copy would be one more unerasable image of the key
+/// (clonk-org/clonk-rs#470). `Clone` stays, so a route that genuinely needs a
+/// second owned cipher can still make one -- and that clone erases itself too.
 #[derive(Clone)]
 pub(crate) struct VoiceMediaCipher {
     cookie: VoiceRouteCookie,
     key: [u8; VOICE_MEDIA_KEY_BYTES],
+}
+
+/// Erases the key when the cipher goes away, so a route's key material is not
+/// left readable in memory the allocator is about to reuse.
+///
+/// This bounds honestly what it buys. A Rust move is a `memcpy` that does not
+/// clear the source, so a key that has been moved may still have images the
+/// destructor never sees; the guarantee is that no *live* owner leaks its copy
+/// on the way out, not that the key was never duplicated. The reason it is
+/// still worth having is that the long-lived owners -- the route tables in
+/// both session loops -- are exactly the ones that would otherwise hold key
+/// material for the whole match and release it unerased at teardown.
+impl Drop for VoiceMediaCipher {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+// Derived `Debug` would print the key into any log that formats a route.
+impl std::fmt::Debug for VoiceMediaCipher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VoiceMediaCipher")
+            .field("cookie", &self.cookie)
+            .finish_non_exhaustive()
+    }
 }
 
 impl VoiceMediaCipher {
@@ -238,11 +265,11 @@ fn derive_route_media_keys(
                 (
                     VoiceMediaCipher {
                         cookie: local_cookie,
-                        key: receive,
+                        key: *receive,
                     },
                     VoiceMediaCipher {
                         cookie: peer_cookie,
-                        key: send,
+                        key: *send,
                     },
                 )
             })
@@ -251,16 +278,22 @@ fn derive_route_media_keys(
     .flatten()
 }
 
+/// Expands one directional key.
+///
+/// The buffer is `Zeroizing` because it outlives its usefulness by exactly one
+/// move: the caller copies it into the cipher, and without this the derivation
+/// frame keeps a second readable image of the key for as long as that stack
+/// depth goes unreused (clonk-org/clonk-rs#470).
 fn expand_media_key(
     secret: &hkdf::Prk,
     receiver_cookie: VoiceRouteCookie,
-) -> Option<[u8; VOICE_MEDIA_KEY_BYTES]> {
+) -> Option<Zeroizing<[u8; VOICE_MEDIA_KEY_BYTES]>> {
     let receiver_cookie = receiver_cookie.into_bytes();
-    let mut key = [0_u8; VOICE_MEDIA_KEY_BYTES];
+    let mut key = Zeroizing::new([0_u8; VOICE_MEDIA_KEY_BYTES]);
     secret
         .expand(&[VOICE_MEDIA_KEY_INFO, &receiver_cookie], hkdf::HKDF_SHA256)
         .ok()?
-        .fill(&mut key)
+        .fill(&mut *key)
         .ok()?;
     Some(key)
 }
@@ -1317,6 +1350,36 @@ mod tests {
             admit_voice_ingress(&valid_wire, expected, 7, &mut limiter, start),
             None,
             "the authenticated source cannot publish or relay above its burst"
+        );
+    }
+
+    /// clonk-org/clonk-rs#470: a route's media key must not outlive the cipher
+    /// that held it.
+    ///
+    /// The destructor is run by hand so the key's storage can be read back
+    /// afterwards. `slot` still owns that storage — this is not a read of
+    /// freed memory — so what it observes is exactly the residue a real drop
+    /// leaves behind in the stack slot or heap block the allocator is then
+    /// free to hand to someone else.
+    #[test]
+    fn dropping_a_media_cipher_erases_its_key() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
+            [0xa7; VOICE_MEDIA_KEY_BYTES],
+        );
+        let mut slot = std::mem::ManuallyDrop::new(cipher);
+        let key_storage = std::ptr::addr_of!(slot.key);
+        // SAFETY: `slot` is a live local this test owns, and running its
+        // destructor exactly once is what `ManuallyDrop` exists to allow.
+        unsafe { std::mem::ManuallyDrop::drop(&mut slot) };
+        // SAFETY: the storage above is still owned and still initialised as
+        // far as `[u8; N]` is concerned — every byte was written, and a drop
+        // that zeroes them writes bytes rather than invalidating them. The
+        // read is volatile so it cannot be optimised away as dead.
+        let residue = unsafe { std::ptr::read_volatile(key_storage) };
+        assert_eq!(
+            residue, [0; VOICE_MEDIA_KEY_BYTES],
+            "the media key survived the cipher that held it"
         );
     }
 
