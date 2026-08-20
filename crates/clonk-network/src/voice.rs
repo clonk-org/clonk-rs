@@ -149,20 +149,14 @@ impl VoiceRouteCookie {
 /// and does not retain `(stream_epoch, sequence)` replay state. Once a frame is
 /// decoded, duplicate/late suppression belongs to the application layer's
 /// `VoiceActivityTracker`.
-#[derive(Clone, Copy)]
+/// Deliberately not `Copy`. The seal and open paths borrow a route's cipher
+/// rather than taking one by value, so the per-frame copies this type used to
+/// make no longer happen; `Clone` stays for the route tables, which do need an
+/// owned one.
+#[derive(Clone)]
 pub(crate) struct VoiceMediaCipher {
     cookie: VoiceRouteCookie,
     key: [u8; VOICE_MEDIA_KEY_BYTES],
-}
-
-// Derived `Debug` would print the key into any log that formats a route.
-impl std::fmt::Debug for VoiceMediaCipher {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("VoiceMediaCipher")
-            .field("cookie", &self.cookie)
-            .finish_non_exhaustive()
-    }
 }
 
 impl VoiceMediaCipher {
@@ -174,7 +168,7 @@ impl VoiceMediaCipher {
         Self { cookie, key }
     }
 
-    pub(crate) const fn cookie(self) -> VoiceRouteCookie {
+    pub(crate) const fn cookie(&self) -> VoiceRouteCookie {
         self.cookie
     }
 
@@ -370,12 +364,12 @@ impl VoiceRouteAuthentication {
         self.local_receive_cookie
     }
 
-    pub(crate) fn receive_cipher(&self) -> Option<VoiceMediaCipher> {
-        self.receive
+    pub(crate) fn receive_cipher(&self) -> Option<&VoiceMediaCipher> {
+        self.receive.as_ref()
     }
 
-    pub(crate) fn send_cipher(&self) -> Option<VoiceMediaCipher> {
-        self.send
+    pub(crate) fn send_cipher(&self) -> Option<&VoiceMediaCipher> {
+        self.send.as_ref()
     }
 
     pub(crate) const fn is_negotiated(&self) -> bool {
@@ -601,7 +595,7 @@ pub(crate) fn encode_voice_packet(packet: &VoicePacket) -> Result<Vec<u8>, Voice
 /// the lane stateless — nothing to resynchronize, so nothing that would make a
 /// dropped or reordered datagram anyone's problem.
 pub(crate) fn encode_authenticated_voice_packet(
-    cipher: VoiceMediaCipher,
+    cipher: &VoiceMediaCipher,
     packet: &VoicePacket,
 ) -> Result<Vec<u8>, VoiceCodecError> {
     let packet = encode_voice_packet(packet)?;
@@ -637,7 +631,7 @@ pub(crate) fn voice_datagram_has_cookie(wire: &[u8], expected: VoiceRouteCookie)
 
 pub(crate) fn decode_authenticated_voice_packet(
     wire: &[u8],
-    cipher: VoiceMediaCipher,
+    cipher: &VoiceMediaCipher,
 ) -> Result<VoicePacket, VoiceCodecError> {
     let body = wire
         .strip_prefix(VOICE_MEDIA_PREFIX)
@@ -674,7 +668,7 @@ pub(crate) fn decode_authenticated_voice_packet(
 
 pub(crate) fn admit_voice_ingress(
     wire: &[u8],
-    cipher: VoiceMediaCipher,
+    cipher: &VoiceMediaCipher,
     authenticated_source: ClientId,
     limiter: &mut VoiceIngressLimiter,
     now: Instant,
@@ -850,7 +844,7 @@ mod tests {
         let packet = VoicePacket::Direct(
             VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
         );
-        let wire = encode_authenticated_voice_packet(cipher, &packet).unwrap();
+        let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
         let datagram = wire.len() + IP_AND_UDP_HEADER_BYTES;
 
         let per_listener_bits = datagram * FRAMES_PER_SECOND * 8;
@@ -890,13 +884,16 @@ mod tests {
         let payload = vec![0x5a; VOICE_PAYLOAD_BYTES];
         let packet = VoicePacket::Direct(VoiceFrame::outbound(7, 11, 29, payload.clone()).unwrap());
 
-        let wire = encode_authenticated_voice_packet(cipher, &packet).unwrap();
+        let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
 
         assert!(
             !wire.windows(payload.len()).any(|window| window == payload),
             "an on-path observer must not read the encoded audio off the wire"
         );
-        assert_eq!(decode_authenticated_voice_packet(&wire, cipher), Ok(packet));
+        assert_eq!(
+            decode_authenticated_voice_packet(&wire, &cipher),
+            Ok(packet)
+        );
     }
 
     #[test]
@@ -908,14 +905,14 @@ mod tests {
         let packet = VoicePacket::Direct(
             VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
         );
-        let wire = encode_authenticated_voice_packet(cipher, &packet).unwrap();
+        let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
 
         assert_eq!(
-            decode_authenticated_voice_packet(&wire, cipher),
+            decode_authenticated_voice_packet(&wire, &cipher),
             Ok(packet.clone())
         );
         assert_eq!(
-            decode_authenticated_voice_packet(&wire, cipher),
+            decode_authenticated_voice_packet(&wire, &cipher),
             Ok(packet),
             "the network seal authenticates both deliveries; the app tracker owns replay suppression",
         );
@@ -954,7 +951,7 @@ mod tests {
         assert!(is_voice_media_datagram(&v1), "still recognized as media");
         assert!(!voice_datagram_has_cookie(&v1, cipher.cookie()));
         assert_eq!(
-            decode_authenticated_voice_packet(&v1, cipher),
+            decode_authenticated_voice_packet(&v1, &cipher),
             Err(VoiceCodecError::MissingSignature),
             "but never opened as this version"
         );
@@ -975,11 +972,11 @@ mod tests {
             direct_recipients: (0..MAX_VOICE_DIRECT_RECIPIENTS as ClientId).collect(),
         };
 
-        let wire = encode_authenticated_voice_packet(cipher, &largest).unwrap();
+        let wire = encode_authenticated_voice_packet(&cipher, &largest).unwrap();
 
         assert_eq!(wire.len(), MAX_VOICE_WIRE_BYTES);
         assert_eq!(
-            decode_authenticated_voice_packet(&wire, cipher),
+            decode_authenticated_voice_packet(&wire, &cipher),
             Ok(largest)
         );
     }
@@ -1003,7 +1000,7 @@ mod tests {
             .collect::<Vec<_>>();
         let wire = stream
             .iter()
-            .map(|packet| encode_authenticated_voice_packet(cipher, packet).unwrap())
+            .map(|packet| encode_authenticated_voice_packet(&cipher, packet).unwrap())
             .collect::<Vec<_>>();
 
         // Delivered backwards, with every third datagram lost.
@@ -1015,7 +1012,7 @@ mod tests {
             .map(|(index, wire)| {
                 (
                     index,
-                    decode_authenticated_voice_packet(wire, cipher).unwrap(),
+                    decode_authenticated_voice_packet(wire, &cipher).unwrap(),
                 )
             })
             .collect::<Vec<_>>();
@@ -1033,20 +1030,20 @@ mod tests {
             [0x42; VOICE_MEDIA_KEY_BYTES],
         );
         let packet = VoicePacket::Direct(VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap());
-        let wire = encode_authenticated_voice_packet(cipher, &packet).unwrap();
+        let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
 
         // Every byte the cookie does not already cover is under the tag.
         for index in VOICE_MEDIA_PREFIX.len() + VOICE_ROUTE_COOKIE_BYTES..wire.len() {
             let mut tampered = wire.clone();
             tampered[index] ^= 0x01;
             assert_eq!(
-                decode_authenticated_voice_packet(&tampered, cipher),
+                decode_authenticated_voice_packet(&tampered, &cipher),
                 Err(VoiceCodecError::MediaNotAuthentic),
                 "byte {index} is not covered by the seal"
             );
         }
         assert_eq!(
-            decode_authenticated_voice_packet(&wire[..wire.len() - 1], cipher),
+            decode_authenticated_voice_packet(&wire[..wire.len() - 1], &cipher),
             Err(VoiceCodecError::MediaNotAuthentic),
             "a truncated seal must not open"
         );
@@ -1067,7 +1064,7 @@ mod tests {
 
         let nonces = (0..32)
             .map(|_| {
-                encode_authenticated_voice_packet(cipher, &packet).unwrap()[nonce_range.clone()]
+                encode_authenticated_voice_packet(&cipher, &packet).unwrap()[nonce_range.clone()]
                     .to_vec()
             })
             .collect::<BTreeSet<_>>();
@@ -1122,7 +1119,7 @@ mod tests {
             Err(VoiceCodecError::InvalidRouteCookie)
         );
         let reflected = encode_authenticated_voice_packet(
-            VoiceMediaCipher::from_parts(
+            &VoiceMediaCipher::from_parts(
                 local.receive_cipher().unwrap().cookie(),
                 peer.receive_cipher().unwrap().key,
             ),
@@ -1296,7 +1293,7 @@ mod tests {
         );
         let valid_wire = encode_authenticated_voice_packet(expected, &packet).unwrap();
         let forged_wire = encode_authenticated_voice_packet(forged, &packet).unwrap();
-        let unsealable_wire = encode_authenticated_voice_packet(unsealable, &packet).unwrap();
+        let unsealable_wire = encode_authenticated_voice_packet(&unsealable, &packet).unwrap();
         let mut limiter = VoiceIngressLimiter::default();
 
         for _ in 0..100 {

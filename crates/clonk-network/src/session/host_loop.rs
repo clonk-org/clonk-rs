@@ -99,7 +99,7 @@ fn host_voice_routes(
             if !route.voice_auth.is_negotiated() {
                 return None;
             }
-            let cipher = route.voice_auth.send_cipher()?;
+            let cipher = route.voice_auth.send_cipher()?.clone();
             (route.protocol == crate::NetworkProtocol::Udp && selected.insert(route.client_id))
                 .then_some((
                     route.client_id,
@@ -128,7 +128,7 @@ fn host_voice_ingress(
                 route
                     .voice_auth
                     .receive_cipher()
-                    .map(|cipher| (route.client_id, cipher))
+                    .map(|cipher| (route.client_id, cipher.clone()))
             })
             .flatten()
     })
@@ -145,7 +145,7 @@ fn send_host_voice_frame(
     let frame = frame.with_authenticated_source(HOST_CLIENT_ID);
     for (_, peer, cipher) in host_voice_routes(state) {
         if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(
-            cipher,
+            &cipher,
             &crate::voice::VoicePacket::Relayed(frame.clone()),
         ) {
             let _ = udp_handle.try_send_voice_media(peer, wire);
@@ -165,7 +165,7 @@ fn handle_host_voice_media(
     };
     let Some(packet) = crate::voice::admit_voice_ingress(
         &media.payload,
-        receive_cipher,
+        &receive_cipher,
         source_client_id,
         limiter,
         Instant::now(),
@@ -184,7 +184,7 @@ fn handle_host_voice_media(
     for (client_id, peer, cipher) in host_voice_routes(state) {
         if crate::voice::host_relay_selects(client_id, source_client_id, &direct_recipients) {
             if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(
-                cipher,
+                &cipher,
                 &crate::voice::VoicePacket::Relayed(frame.clone()),
             ) {
                 let _ = udp_handle.try_send_voice_media(peer, wire);
