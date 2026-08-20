@@ -1704,6 +1704,135 @@ pub(crate) fn prepare_liquid_animation_fragment(
 mod fog_chunk_capacity_tests {
     use super::*;
 
+    /// A one-quad sampler whose corners are distinguishable, so a weight
+    /// vector can be read straight off the interpolated value.
+    fn corner_sampler() -> FogSpriteSampler {
+        FogSpriteSampler {
+            source_width: 1.0,
+            source_height: 1.0,
+            columns: 1,
+            x_ranges: vec![(0.0, 1.0)],
+            y_ranges: vec![(0.0, 1.0)],
+            quads: vec![FogColorQuad {
+                x: (0.0, 1.0),
+                y: (0.0, 1.0),
+                // Distinct per corner: TL, TR, BL, BR.
+                modulation: [0x0000_0000, 0x0000_0040, 0x0000_0080, 0x0000_00c0],
+            }],
+        }
+    }
+
+    /// The quad's diagonal runs TR→BL, and which triangle a sample falls in
+    /// is decided by `u + v <= 1`.
+    ///
+    /// clonk-org/clonk-rs#284 wants to move this lookup into a shader and says
+    /// plainly that it "cannot be ordinary filtered texture sampling" because
+    /// "the chosen diagonal and triangle interpolation are observable". They
+    /// were observable and unpinned: nothing asserted which diagonal splits the
+    /// quad, so a shader that picked the other one — the equally natural TL→BR
+    /// — would differ only in the interior of fogged chunks, where no existing
+    /// test looks.
+    ///
+    /// Native emits `TL, TR, BL, BR` as a triangle strip, which is what fixes
+    /// the diagonal: the strip's two triangles are `TL,TR,BL` and `TR,BL,BR`,
+    /// sharing the TR–BL edge.
+    #[test]
+    fn the_quad_diagonal_runs_from_top_right_to_bottom_left() {
+        let sampler = corner_sampler();
+
+        // Well inside the first triangle: the far corner (BR) contributes
+        // nothing, and the near corner (TL) dominates.
+        let (_, near) = sampler.quad_and_weights_for_axes(
+            FogAxisSample {
+                chunk: 0,
+                offset: 0.1,
+            },
+            FogAxisSample {
+                chunk: 0,
+                offset: 0.1,
+            },
+        );
+        assert_eq!(near[3], 0.0, "BR is outside the first triangle");
+        assert!(near[0] > 0.0, "TL contributes to the first triangle");
+
+        // Well inside the second: the roles swap.
+        let (_, far) = sampler.quad_and_weights_for_axes(
+            FogAxisSample {
+                chunk: 0,
+                offset: 0.9,
+            },
+            FogAxisSample {
+                chunk: 0,
+                offset: 0.9,
+            },
+        );
+        assert_eq!(far[0], 0.0, "TL is outside the second triangle");
+        assert!(far[3] > 0.0, "BR contributes to the second triangle");
+    }
+
+    /// The two triangles agree along the diagonal they share, so the quad has
+    /// no visible seam.
+    ///
+    /// This is what makes the split safe to reproduce: a shader may choose
+    /// either triangle for a sample exactly on `u + v == 1` and still match,
+    /// which matters because floating-point evaluation of that test is not
+    /// guaranteed to land the same way on another device.
+    #[test]
+    fn both_triangles_agree_on_the_diagonal_they_share() {
+        let sampler = corner_sampler();
+        for (u, v) in [(0.0_f32, 1.0_f32), (0.25, 0.75), (0.5, 0.5), (1.0, 0.0)] {
+            let (quad, weights) = sampler.quad_and_weights_for_axes(
+                FogAxisSample {
+                    chunk: 0,
+                    offset: u,
+                },
+                FogAxisSample {
+                    chunk: 0,
+                    offset: v,
+                },
+            );
+            // On the diagonal both corner pairs that are *off* it drop out,
+            // leaving the TR/BL edge — the same for either triangle.
+            assert!(
+                weights[0].abs() < 1e-6 && weights[3].abs() < 1e-6,
+                "at u={u} v={v} the off-diagonal corners must not contribute: {weights:?}",
+            );
+            let total: f32 = weights.iter().sum();
+            assert!(
+                (total - 1.0).abs() < 1e-6,
+                "weights at u={u} v={v} must still sum to one: {weights:?}",
+            );
+            let _ = quad;
+        }
+    }
+
+    /// Each corner resolves to exactly its own value, with no contribution
+    /// from the other three.
+    #[test]
+    fn every_corner_samples_only_itself() {
+        let sampler = corner_sampler();
+        for (index, (u, v)) in [(0.0_f32, 0.0_f32), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let (quad, weights) = sampler.quad_and_weights_for_axes(
+                FogAxisSample {
+                    chunk: 0,
+                    offset: u,
+                },
+                FogAxisSample {
+                    chunk: 0,
+                    offset: v,
+                },
+            );
+            assert_eq!(
+                interpolate_packed_modulation(quad.modulation, weights),
+                quad.modulation[index],
+                "corner {index} (u={u}, v={v}) must resolve to its own modulation",
+            );
+        }
+    }
+
     #[test]
     fn fog_axis_ranges_reserve_every_native_chunk_before_capture() {
         // CStdGL divides fogged landscape blits into source-aligned pieces no
