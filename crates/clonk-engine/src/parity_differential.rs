@@ -1879,6 +1879,135 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
+    // 0f. C4Weather::Execute's disaster block (C4Weather.cpp:104-148). Four
+    //     gates in a fixed order, and each gate spends its `Random(100)` level
+    //     test EVEN AT LEVEL ZERO — so `all_levels_zero` draws 1629 times over
+    //     400 ticks and fires nothing, while the same seed at full levels draws
+    //     1696 and fires 37 disasters. A port that skipped the test when the
+    //     level was zero, or reordered the gates, would desynchronise from the
+    //     first tick a gate opens.
+    //
+    //     The launch helpers create an object and call Activate; the oracle
+    //     records their arguments instead. The fixture registers those four
+    //     definitions with no script functions, so both sides spend exactly the
+    //     draws `Execute` itself makes.
+    for (case_index, case) in golden["weather_execute"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let width = i(case, "width") as i32;
+        let height = i(case, "height") as i32;
+
+        let mut engine = Engine::with_seed(i(case, "seed") as u64);
+        // C4Weather's Launch helpers create the effect object and call
+        // Activate on it (C4Weather.cpp:153-165, 196-203, 178-184); the port
+        // only records the weather event when that call succeeds, so the
+        // fixture's definitions answer it. The body draws nothing, which is
+        // what keeps the ledger comparable.
+        for id in ["METO", "FXL1", "FXQ1", "FXV1"] {
+            engine
+                .register_definition(
+                    Definition::from_script(
+                        id,
+                        id,
+                        "#strict\npublic func Activate() { return 1; }\n",
+                    )
+                    .expect("weather effect compiles"),
+                )
+                .expect("weather effect registers");
+        }
+        let mut landscape = Landscape::flat(width as u32, height);
+        landscape.set_world_height(height);
+        // C4Landscape's TopOpen decides where the meteor spawns and whether it
+        // gets a downward ydir (C4Weather.cpp:117-119).
+        landscape.set_border_open(0, 0, i(case, "top_open") != 0, false);
+        engine.landscape = Some(landscape);
+
+        let mut environment = crate::EnvironmentSettings::new(0);
+        environment.meteorite = i(case, "meteorite") as i32;
+        environment.lightning = i(case, "lightning") as i32;
+        environment.earthquake = i(case, "earthquake") as i32;
+        environment.volcano = i(case, "volcano") as i32;
+        engine.set_environment(environment);
+        engine.weather_events.clear();
+
+        let rows = case["ticks"].as_array().unwrap();
+        let mut row_index = 0;
+        for tick in 0..400_i64 {
+            let before = engine.weather_events.len();
+            engine
+                .tick_weather_events((tick as u64 + 1) * 10)
+                .expect("weather tick runs");
+            let fired = engine.weather_events[before..]
+                .iter()
+                .map(|event| match event {
+                    // The oracle records the meteorite's spawn arguments; the
+                    // port carries only its x on the event and the rest on the
+                    // object it spawned, so only x is compared here.
+                    crate::WeatherEvent::Meteorite { x } => ("meteorite", *x),
+                    crate::WeatherEvent::Lightning { position } => ("lightning", *position),
+                    crate::WeatherEvent::Earthquake { x, .. } => ("earthquake", *x),
+                    crate::WeatherEvent::Volcano { x, .. } => ("volcano", *x),
+                })
+                .collect::<Vec<_>>();
+
+            let Some(row) = rows.get(row_index).filter(|row| i(row, "tick") == tick) else {
+                assert!(
+                    fired.is_empty(),
+                    "PARITY DIVERGENCE in `weather_execute` case {case_index}: tick {tick} fired \
+                     {fired:?} where the C++ golden recorded nothing"
+                );
+                continue;
+            };
+            row_index += 1;
+
+            let expected = row["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                // `meteorite_rdir` is the oracle's continuation row for the
+                // meteor's rotation velocity, not a second event.
+                .filter(|event| event["kind"].as_str() != Some("meteorite_rdir"))
+                .map(|event| {
+                    (
+                        event["kind"].as_str().unwrap_or_default().to_owned(),
+                        i(event, "a") as i32,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let actual = fired
+                .iter()
+                .map(|(kind, x)| ((*kind).to_owned(), *x))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                expected, actual,
+                "PARITY DIVERGENCE in `weather_execute` case {case_index} tick {tick} events"
+            );
+            expect_eq(
+                "weather_execute",
+                case_index,
+                "random_count",
+                i(row, "random_count"),
+                i64::from(engine.rng.count),
+            );
+            expect_eq_u64(
+                "weather_execute",
+                case_index,
+                "random_hold",
+                u(row, "random_hold"),
+                u64::from(engine.rng.hold),
+            );
+        }
+        assert_eq!(
+            row_index,
+            rows.len(),
+            "PARITY DIVERGENCE in `weather_execute` case {case_index}: \
+             the port never reached every recorded tick"
+        );
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
