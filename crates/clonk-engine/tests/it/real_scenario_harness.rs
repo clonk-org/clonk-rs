@@ -749,6 +749,10 @@ fn alchemy_real_scenario_subcases_batch_3() {
             alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw,
         ),
         (
+            "dragon_call_commands_a_grown_riderless_dragon_to_follow",
+            alchemy_dragon_call_commands_a_grown_riderless_dragon_to_follow,
+        ),
+        (
             "force_field_wall_puts_its_mask_before_segment_initialize",
             alchemy_force_field_wall_puts_its_mask_before_segment_initialize,
         ),
@@ -1543,6 +1547,63 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
         .effects
         .iter()
         .any(|effect| effect.name == "IntReincDelay"));
+}
+
+fn alchemy_dragon_call_commands_a_grown_riderless_dragon_to_follow(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy dragon call parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let mage_position = engine.test_object_snapshot(mage).position;
+
+    // Alchemy ships no dragon, so the subject of the spell has to be placed.
+    // DGCL only calls one that is within 750, riderless and fully grown
+    // (DragonCall.c4d/Script.c:16-22).
+    let dragon = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("DRGN")
+            .with_position(Vector2::new(mage_position.x + 120, mage_position.y))
+            .with_owner(owner),
+    );
+    for _ in 0..5 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    let spell = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("DGCL")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+
+    // The call is a command, not a teleport: DGCL resets the dragon's control
+    // and pushes Follow onto it, aimed at the caster
+    // (DragonCall.c4d/Script.c:31-35).
+    assert_eq!(
+        engine
+            .test_object_snapshot(dragon)
+            .command_stack
+            .command_names(),
+        vec!["Follow".to_string()],
+        "DGCL commands the dragon to follow its caller"
+    );
+
+    // Like EXTG, and unlike the spells that build something, a successful DGCL
+    // does not delete itself -- the success path is a bare `return(true)`
+    // (DragonCall.c4d/Script.c:48).
+    assert_eq!(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "DGCL" && object.status.is_active())
+            .count(),
+        1,
+        "a successful DGCL survives its own cast"
+    );
 }
 
 fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
