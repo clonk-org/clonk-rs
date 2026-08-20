@@ -697,6 +697,10 @@ fn alchemy_real_scenario_subcases_batch_1() {
             alchemy_small_force_field_timer_accepts_its_shipped_sound_flags,
         ),
         (
+            "bloodsucker_aims_and_frees_its_projectile_like_the_fireball",
+            alchemy_bloodsucker_aims_and_frees_its_projectile_like_the_fireball,
+        ),
+        (
             "tunnel_spell_opens_its_first_shipped_landscape_row",
             alchemy_tunnel_spell_opens_its_first_shipped_landscape_row,
         ),
@@ -3776,6 +3780,94 @@ fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags(
         multiple: true,
         custom_falloff: Some(300),
     }));
+}
+
+fn alchemy_bloodsucker_aims_and_frees_its_projectile_like_the_fireball(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy bloodsucker parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+    let mage_position = engine.test_object_snapshot(mage).position;
+    let spell = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("MBLS")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+
+    // MBLS is MFRB's shape with a different projectile: create the ball, bind
+    // the caster, then offer the aim (Bloodsucker.c4d/Script.c:14-22).
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+    let (aimer, ball) = crate::support::TestValueExt::test_value((0..12).find_map(|_| {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        let snapshot = engine.snapshot();
+        let aimer = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "AIMR" && object.status.is_active())
+            .map(|object| object.id)?;
+        let ball = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "MBLB" && object.status.is_active())
+            .map(|object| object.id)?;
+        Some((aimer, ball))
+    }));
+    assert_eq!(engine.crew_cursor(owner), Some(aimer));
+
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_UP, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    assert_eq!(
+        engine.crew_cursor(owner),
+        Some(mage),
+        "releasing the aim returns the cursor to the mage, as MFRB does"
+    );
+
+    // The released angle and the freed launch land in the flight effect's
+    // EffectVar(2) and (3) (Projectil.c4d/Script.c:6,108-112).
+    let launch =
+        crate::support::TestValueExt::test_value(engine.object_snapshot(ball).and_then(|ball| {
+            ball.effects
+                .iter()
+                .find(|effect| effect.name == "EarthBloodSuckerFlight")
+                .map(|effect| (effect.var(2), effect.var(3)))
+        }));
+    assert_eq!(
+        launch.0,
+        EffectVarValue::Int(70),
+        "aiming straight up releases at 70"
+    );
+    // EffectVar(3) is not a flag: SetAngle stores the effect time plus one, so
+    // it doubles as the launch timestamp the timer later measures the flight
+    // against. What matters here is only that it is set
+    // (Projectil.c4d/Script.c:108-112).
+    assert_ne!(
+        launch.1,
+        EffectVarValue::Int(0),
+        "releasing the aim frees the launch"
+    );
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "MBLS" && object.status.is_active()),
+        "MBLS removes itself once the ball is away"
+    );
 }
 
 fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize(
