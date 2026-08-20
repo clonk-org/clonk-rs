@@ -5075,17 +5075,10 @@ impl EffectHostContext {
                                 ActionProcedure::from_name(name) == ActionProcedure::Chop
                             })
                         }),
-                        chop_action: metadata.action_library.specs().iter().find_map(
-                            |(name, spec)| {
-                                spec.procedure
-                                    .as_deref()
-                                    .filter(|procedure| {
-                                        ActionProcedure::from_name(procedure)
-                                            == ActionProcedure::Chop
-                                    })
-                                    .map(|_| name.clone())
-                            },
-                        ),
+                        chop_action: metadata
+                            .action_library
+                            .first_chop_action()
+                            .map(str::to_owned),
                         constructable: metadata.constructable,
                         grab: metadata.fire.grab,
                         grab_put_get: metadata.grab_put_get,

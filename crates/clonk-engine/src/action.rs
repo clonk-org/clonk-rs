@@ -732,6 +732,24 @@ impl ActionLibrary {
         self.callback_cache = ActionCallbackCache::default();
     }
 
+    /// The first `Chop` action in ActMap slot order.
+    ///
+    /// C++ has no name-keyed map here: `C4Def::GetActionByName` walks the
+    /// physical `C4ActionDef` array, so the first declared action wins and the
+    /// answer is the same in every process. Resolving this through
+    /// [`Self::specs`] instead would take whatever the `HashMap`'s per-process
+    /// `RandomState` happened to yield first, and `chop_action` reaches
+    /// simulation — it is the action the chopping Clonk is put into
+    /// (clonk-org/clonk-rs#636).
+    pub(crate) fn first_chop_action(&self) -> Option<&str> {
+        self.physical.iter().find_map(|(name, spec)| {
+            spec.procedure
+                .as_deref()
+                .filter(|procedure| ActionProcedure::from_name(procedure) == ActionProcedure::Chop)
+                .map(|_| name.as_str())
+        })
+    }
+
     pub(crate) fn first_physical_index(&self, action: &str) -> Option<u32> {
         self.first_physical.get(action).copied()
     }
@@ -1999,6 +2017,56 @@ mod tests {
             .map(|(name, spec)| (name.to_string(), spec))
             .collect();
         ActionLibrary::new(None, map)
+    }
+
+    /// `chop_action` is the action a chopping Clonk is put into, so it reaches
+    /// simulation. C++ has no name-keyed map here — `C4Def::GetActionByName`
+    /// walks the physical `C4ActionDef` array and the first declared action
+    /// wins (`C4Def.cpp`).
+    ///
+    /// Resolving it through the name-keyed `specs` map instead would take
+    /// whatever that `HashMap`'s per-process `RandomState` yielded first, so a
+    /// definition with two `Chop` actions would pick differently between two
+    /// runs of the same seed — a desync with no failing gate, because nothing
+    /// pinned the choice (clonk-org/clonk-rs#636).
+    #[test]
+    fn chop_action_resolves_to_the_first_declared_slot() {
+        let chop_one = ActionSpec {
+            procedure: Some("CHOP".to_string()),
+            ..ActionSpec::default()
+        };
+        let chop_two = ActionSpec {
+            procedure: Some("CHOP".to_string()),
+            ..ActionSpec::default()
+        };
+        let mut library = ActionLibrary::new(
+            None,
+            HashMap::from([
+                ("ChopA".to_string(), chop_one.clone()),
+                ("ChopB".to_string(), chop_two.clone()),
+            ]),
+        );
+        library.set_physical_actions(vec![
+            ("ChopA".to_string(), chop_one.clone()),
+            ("ChopB".to_string(), chop_two.clone()),
+        ]);
+        assert_eq!(library.first_chop_action(), Some("ChopA"));
+
+        // Declaration order decides it, not the names: reversing the slots
+        // reverses the answer. A hash-order resolution would be insensitive to
+        // this, which is exactly why it is the assertion worth making.
+        let mut reversed = ActionLibrary::new(
+            None,
+            HashMap::from([
+                ("ChopA".to_string(), chop_one.clone()),
+                ("ChopB".to_string(), chop_two.clone()),
+            ]),
+        );
+        reversed.set_physical_actions(vec![
+            ("ChopB".to_string(), chop_two),
+            ("ChopA".to_string(), chop_one),
+        ]);
+        assert_eq!(reversed.first_chop_action(), Some("ChopB"));
     }
 
     #[test]
