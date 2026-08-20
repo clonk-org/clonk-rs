@@ -2805,6 +2805,90 @@ mod tests {
         }
     }
 
+    fn solid_multi_glyph_native_font(glyphs: &str) -> NativeClonkFont {
+        let mut raster = ClonkFont::new(1);
+        raster.cell_height = 1;
+        raster.h_space = 0;
+        for (index, character) in glyphs.chars().enumerate() {
+            // Distinct pixels per glyph, so nothing can coincidentally share a
+            // retained identity by having identical contents.
+            let shade = 40 + (index as u8) * 20;
+            raster.add_glyph(
+                character,
+                GlyphCell {
+                    width: 1,
+                    pixels: vec![Color::opaque(shade, shade, shade)],
+                },
+            );
+        }
+        NativeClonkFont {
+            raster,
+            application_scale: 1.5,
+            effective_scale: 1.5,
+            logical_height: 2,
+            raster_height: 3,
+            logical_h_space: 0,
+            snap_to_pixels: false,
+            retained_glyph_images: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The baseline clonk-org/clonk-rs#286 gates its atlas work on: what a
+    /// string of *distinct* glyphs costs today.
+    ///
+    /// `native_gpu_text_is_one_stable_textured_quad_per_glyph` covers the
+    /// repeated-character case, where one retained identity is reused. Ordinary
+    /// text is the opposite: every distinct character owns its own
+    /// `NativeGlyphImages`, so an eight-character string binds eight textures
+    /// and cannot form a single compatible run. That per-character binding is
+    /// the cost an atlas would remove — criterion 2 there is one binding per
+    /// page rather than one per character — so it is pinned here as the number
+    /// to beat rather than left to be re-derived.
+    #[test]
+    fn distinct_native_glyphs_bind_one_texture_each() {
+        let glyphs = "ABCDEFGH";
+        let font = solid_multi_glyph_native_font(glyphs);
+        let mut surface = Surface::new(64, 8, clonk_graphics::PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        font.draw_to_physical_surface_with_offset(
+            &mut surface,
+            1,
+            1,
+            glyphs,
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            false,
+            (0, 0),
+            None,
+        );
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([64, 8], Color::transparent(), &GammaRamp::identity());
+
+        let textures = scene
+            .commands
+            .iter()
+            .map(|command| match command {
+                GpuCommand::Quad { texture, .. } => *texture,
+                other => panic!("native glyph was CPU-rasterized instead of retained: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            textures.len(),
+            glyphs.chars().count(),
+            "one quad per glyph today"
+        );
+        let distinct: std::collections::HashSet<_> = textures.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            glyphs.chars().count(),
+            "and one texture identity per distinct character, so no two adjacent \
+             glyphs can share a binding"
+        );
+    }
+
     #[test]
     fn native_gpu_text_is_one_stable_textured_quad_per_glyph() {
         let font = solid_fractional_native_font();
