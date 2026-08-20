@@ -702,6 +702,13 @@ awk '
 #     the contents are torn down BEFORE the object leaves its own container —
 #     a sequence that decides which callbacks a dying object's cargo sees.
 awk '
+  /^void C4Object::AssignDeath\(bool fForced\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_assign_death.inc"
+
+awk '
   /^void C4Object::AssignRemoval\(bool fExitContents\)$/ { p = 1 }
   p { print }
   p && /^}$/ { found = 1; exit }

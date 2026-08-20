@@ -3122,6 +3122,182 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
+    // 0n. C4Object::AssignDeath (C4Object.cpp:1164-1205). Two orderings carry
+    //     it, and both are the kind a port gets subtly wrong:
+    //
+    //       * the death-causing player is read BEFORE the effect clear —
+    //         because those callbacks can meddle with the flags — and handed to
+    //         the Death callback at the very END, so what the script sees is
+    //         the cause as it stood when the object started dying; and
+    //       * `Alive` is cleared BEFORE that clear, so a dying object cannot
+    //         recurse into its own death.
+    //
+    //     An effect clear that puts the object back on its feet ABORTS the
+    //     kill — the object stays alive, keeps its selection, and never reaches
+    //     the Death callback — unless the kill was forced.
+    for (idx, case) in golden["object_death"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let name = case["case"].as_str().unwrap_or_default();
+        let forced = i(case, "forced") != 0;
+        let alive = name != "already_dead";
+        let resurrects = name.starts_with("resurrected");
+        let cargo = if name == "contents_exited" || name == "already_dead" {
+            2
+        } else {
+            0
+        };
+
+        // An effect whose Stop callback revives the object is how a script
+        // reaches C4Object::AssignDeath's resurrection abort.
+        let revive_body = if resurrects {
+            "if (!dth_fired) { dth_fired = 1; SetAlive(1, pTarget); }"
+        } else {
+            ""
+        };
+        let object_script = format!(
+            "#strict 2\n\
+             static dth_log, dth_player, dth_fired;\n\
+             protected func Death(int iCausedBy) {{ dth_log = dth_log * 11 + 1; dth_player = iCausedBy; }}\n\
+             func FxReviveStop(object pTarget, int number, int reason, bool temp) {{ if (!temp) {{ {revive_body} }} return 0; }}\n\
+             func FxReviveStart(object pTarget, int number, int temp) {{ return 0; }}\n\
+             public func Arm() {{ AddEffect(\"Revive\", this(), 100, 0, this()); dth_log = 0; dth_player = -1; return 1; }}\n\
+             public func ReadLog() {{ return dth_log; }}\n\
+             public func ReadPlayer() {{ return dth_player; }}\n"
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("DTOB", "DTOB", &object_script)
+                    .expect("death fixture compiles"),
+            )
+            .expect("death fixture registers");
+        engine
+            .register_definition(
+                Definition::from_script("DTCG", "DTCG", "#strict 2\n")
+                    .expect("death cargo compiles"),
+            )
+            .expect("death cargo registers");
+        engine
+            .register_player(PlayerConfig::new(0, "death owner"))
+            .expect("death owner registers");
+
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("DTOB")
+                    .with_owner(0)
+                    .with_alive(alive)
+                    .with_category(crate::CATEGORY_LIVING),
+            )
+            .expect("death object spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+        // The cause the oracle configures, which the Death callback must carry.
+        engine.objects[index].last_energy_loss_cause = 3;
+        let mut cargo_ids = Vec::new();
+        for _ in 0..cargo {
+            cargo_ids.push(
+                engine
+                    .spawn_object(SpawnConfig::new("DTCG").with_container(object))
+                    .expect("cargo spawns"),
+            );
+        }
+        if resurrects {
+            engine
+                .call_object_function(index, "Arm", Vec::new())
+                .expect("the reviving effect is added");
+        }
+
+        let killer_script = format!(
+            "#strict 2\npublic func Run(object pTarget) {{ Kill(pTarget, {}); return 1; }}\n",
+            i32::from(forced)
+        );
+        engine
+            .register_definition(
+                Definition::from_script("DTKL", "DTKL", &killer_script).expect("killer compiles"),
+            )
+            .expect("killer registers");
+        let killer = engine
+            .spawn_object(SpawnConfig::new("DTKL"))
+            .expect("killer spawns");
+        let killer_index = engine.find_object_index(killer).expect("killer exists");
+        engine
+            .call_object_function(
+                killer_index,
+                "Run",
+                vec![crate::compat::object_reference_value(object)],
+            )
+            .expect("the kill runs");
+
+        let expected_log = case["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|call| call.as_str() == Some("~Death"))
+            .fold(0_i64, |log, _| log * 11 + 1);
+        let index = engine.find_object_index(object).expect("object survives");
+        let log = match engine
+            .call_object_function(index, "ReadLog", Vec::new())
+            .expect("the log reads back")
+        {
+            ScriptValue::Int(value) => i64::from(value),
+            ScriptValue::Nil | ScriptValue::Bool(false) => 0,
+            other => panic!("unexpected death log value {other:?}"),
+        };
+        expect_eq("object_death", idx, "death callback", expected_log, log);
+
+        expect_eq(
+            "object_death",
+            idx,
+            "alive_after",
+            i(case, "alive_after"),
+            i64::from(u8::from(engine.objects[index].state.alive)),
+        );
+
+        // The cause player the callback was handed, when it ran at all.
+        if expected_log != 0 {
+            let seen = match engine
+                .call_object_function(index, "ReadPlayer", Vec::new())
+                .expect("the cause reads back")
+            {
+                ScriptValue::Int(value) => i64::from(value),
+                ScriptValue::Nil | ScriptValue::Bool(false) => 0,
+                other => panic!("unexpected cause value {other:?}"),
+            };
+            expect_eq(
+                "object_death",
+                idx,
+                "death_player_seen",
+                i(case, "death_player_seen"),
+                seen,
+            );
+        }
+
+        // Contents are EXITED by a death, not removed — a dying Clonk drops
+        // its load rather than taking it along.
+        let still_contained = cargo_ids
+            .iter()
+            .filter(|id| {
+                engine
+                    .find_object_index(**id)
+                    .and_then(|index| engine.objects[index].state.container)
+                    == Some(object)
+            })
+            .count();
+        let expected_contained = if i(case, "contents_contained") != 0 {
+            cargo
+        } else {
+            0
+        };
+        assert_eq!(
+            expected_contained, still_contained,
+            "PARITY DIVERGENCE in `object_death` entry {idx} contents still contained"
+        );
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
