@@ -765,6 +765,10 @@ fn alchemy_real_scenario_subcases_batch_3() {
             alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw,
         ),
         (
+            "raise_undead_selects_a_dead_clonk_and_animates_it",
+            alchemy_raise_undead_selects_a_dead_clonk_and_animates_it,
+        ),
+        (
             "dragon_call_commands_a_grown_riderless_dragon_to_follow",
             alchemy_dragon_call_commands_a_grown_riderless_dragon_to_follow,
         ),
@@ -2672,6 +2676,79 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
         ),
         Value::Int(3),
         "the spell system finds all three IROC in MCLK's attached bag"
+    );
+}
+
+fn alchemy_raise_undead_selects_a_dead_clonk_and_animates_it(prepared: &PreparedInstalledScenario) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy raise undead parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let mage_position = engine.test_object_snapshot(mage).position;
+
+    // RUND animates the dead and nothing else, so the subject has to actually
+    // be a dead clonk: SelectorTarget wants OCF_Living, IsClonk, !GetAlive and
+    // an effect-free target (RaiseUndead.c4d/Script.c:33-39).
+    let corpse = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("CLNK")
+            .with_position(Vector2::new(mage_position.x + 30, mage_position.y))
+            .with_owner(OWNER_NONE)
+            .with_action(ActionState::new("Walk")),
+    );
+    crate::support::TestValueExt::test_value(engine.change_object_energy(
+        engine.test_object_index(corpse),
+        -100,
+        0,
+        -1,
+    ));
+    for _ in 0..5 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    assert!(
+        !engine.test_object_snapshot(corpse).alive,
+        "the subject has to be dead before RUND will look at it"
+    );
+
+    let spell = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("RUND")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+
+    let selector = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "SLCR" && object.status.is_active())
+            .map(|object| object.id),
+    );
+    assert_eq!(engine.crew_cursor(owner), Some(selector));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_RIGHT, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    assert_eq!(engine.crew_cursor(owner), Some(mage));
+
+    // ActivateTarget installs UndeadSpell and deletes the spell
+    // (RaiseUndead.c4d/Script.c:25-31).
+    assert!(
+        engine
+            .test_object_snapshot(corpse)
+            .effects
+            .iter()
+            .any(|effect| effect.name == "UndeadSpell"),
+        "RUND animates the corpse it was pointed at"
+    );
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "RUND" && object.status.is_active()),
+        "RUND removes itself once the corpse is animated"
     );
 }
 
