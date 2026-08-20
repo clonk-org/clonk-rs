@@ -4231,3 +4231,80 @@ fn explicit_config_paths_feed_audio_and_live_user_root() {
     // A pathless app walks no install media at all rather than guessing.
     main_assert!(SoundResolver::discover_for_paths(None).sample_names().is_empty());
 }
+
+/// When `GetScriptPlayerName` draws, and with what bound
+/// (`src/C4Teams.cpp:912-923`, oracle `7d43b47`):
+///
+/// ```cpp
+/// if (!sScriptPlayerNames.getLength()) return StdStrBuf::MakeRef(LoadResStr(C4ResStrTableKey::IDS_TEXT_COMPUTER));
+/// int32_t iNameIdx = 0; StdStrBuf sOut;
+/// while (sScriptPlayerNames.GetSection(iNameIdx++, &sOut, '|'))
+///     if (!Game.PlayerInfos.GetActivePlayerInfoByName(sOut.getData()))
+///         return sOut;
+/// sScriptPlayerNames.GetSection(SafeRandom(iNameIdx - 1), &sOut, '|');
+/// ```
+///
+/// `name_conflicts_use_cpp_raw_byte_case_folding` covers the one-name conflict,
+/// so the draw itself is not new here. What is: the **bound** for more than one
+/// name, and the two paths that must draw nothing at all.
+///
+/// The bound is off-by-one-prone by construction. `iNameIdx` is post-incremented
+/// on every `GetSection` call *including the one that fails*, so after N names
+/// it holds N+1, and `SafeRandom(iNameIdx - 1)` is `SafeRandom(N)` — a uniform
+/// pick over exactly the N names. Reading the loop without noticing the failing
+/// call is counted gives `SafeRandom(N-1)`, which can never return the last
+/// name.
+#[test]
+fn script_player_name_draws_only_when_every_name_is_taken() {
+    let configured =
+        LegacyCString::from_bytes(b"Alpha|Beta|Gamma".to_vec()).test_value();
+
+    // Nothing taken: the first name wins and no draw happens.
+    let mut ranges = Vec::new();
+    let selected = classic_script_player_name(&configured, &[], &mut |range| {
+        ranges.push(range);
+        0
+    });
+    main_assert_eq!(selected.as_bytes() => b"Alpha");
+    main_assert_eq!(ranges => Vec::<usize>::new());
+
+    // First taken: the next free name wins, still without drawing.
+    let mut ranges = Vec::new();
+    let selected =
+        classic_script_player_name(&configured, &[b"Alpha".as_slice()], &mut |range| {
+            ranges.push(range);
+            0
+        });
+    main_assert_eq!(selected.as_bytes() => b"Beta");
+    main_assert_eq!(ranges => Vec::<usize>::new());
+
+    // All three taken: exactly one draw, bounded by the name count.
+    let all_taken = [b"Alpha".as_slice(), b"Beta".as_slice(), b"Gamma".as_slice()];
+    let mut ranges = Vec::new();
+    let selected = classic_script_player_name(&configured, &all_taken, &mut |range| {
+        ranges.push(range);
+        2
+    });
+    main_assert_eq!(selected.as_bytes() => b"Gamma");
+    main_assert_eq!(ranges => vec![3]);
+
+    // The last index must be reachable — the whole point of the +1 above.
+    let mut selections = Vec::new();
+    for index in 0..3 {
+        let selected = classic_script_player_name(&configured, &all_taken, &mut |_| index);
+        selections.push(selected.as_bytes().to_vec());
+    }
+    main_assert_eq!(
+        selections => vec![b"Alpha".to_vec(), b"Beta".to_vec(), b"Gamma".to_vec()]
+    );
+
+    // No configured names: the IDS_TEXT_COMPUTER default, drawn from nothing.
+    let mut ranges = Vec::new();
+    let selected =
+        classic_script_player_name(&LegacyCString::default(), &all_taken, &mut |range| {
+            ranges.push(range);
+            0
+        });
+    main_assert_eq!(selected.as_bytes() => b"Computer");
+    main_assert_eq!(ranges => Vec::<usize>::new());
+}
