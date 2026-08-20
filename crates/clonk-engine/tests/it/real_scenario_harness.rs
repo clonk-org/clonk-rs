@@ -693,6 +693,10 @@ fn alchemy_real_scenario_subcases_batch_1() {
             alchemy_earthquake_cast_applies_the_shipped_view_shake,
         ),
         (
+            "fire_snakes_sends_every_summoned_snake_after_one_victim",
+            alchemy_fire_snakes_sends_every_summoned_snake_after_one_victim,
+        ),
+        (
             "small_force_field_timer_accepts_its_shipped_sound_flags",
             alchemy_small_force_field_timer_accepts_its_shipped_sound_flags,
         ),
@@ -867,6 +871,91 @@ fn attached_alchemy_bag(engine: &Engine, mage: ObjectId) -> ObjectId {
             })
             .map(|object| object.id),
     )
+}
+
+fn alchemy_fire_snakes_sends_every_summoned_snake_after_one_victim(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy fire snakes parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let mage_position = engine.test_object_snapshot(mage).position;
+
+    // The selector searches 300, and the shipped second crew member starts
+    // outside it (FireSnakes.c4d/Script.c:14).
+    let victim = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "CLNK" && object.owner == owner && object.status.is_active()
+            })
+            .map(|object| object.id),
+    );
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            victim,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(mage_position.x + 30, mage_position.y))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+
+    let spell = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("MFSK")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+    let selector = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "SLCR" && object.status.is_active())
+            .map(|object| object.id),
+    );
+    assert_eq!(engine.crew_cursor(owner), Some(selector));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_RIGHT, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+
+    // The snake count is a RandomX(3,5) draw, so the range is what C++
+    // guarantees and the exact number is not (FireSnakes.c4d/Script.c:31).
+    let snakes: Vec<_> = engine
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "FSKE" && object.status.is_active())
+        .map(|object| object.id)
+        .collect();
+    assert!(
+        (3..=5).contains(&snakes.len()),
+        "MFSK summons three to five snakes: {snakes:?}"
+    );
+
+    // What *is* exact is that every one of them is pointed at the same
+    // victim, by both halves of SetTarget: the stored local and the Follow
+    // command it issues (Snake.c4d/Script.c:16,19).
+    for snake in &snakes {
+        let state = engine.test_object_snapshot(*snake);
+        assert_eq!(
+            state.local_vars.get("pTarget").cloned(),
+            Some(Value::Object(victim.as_u64())),
+            "every snake stores the selected victim"
+        );
+        assert_eq!(
+            state.command_stack.command_names(),
+            vec!["Follow".to_string()],
+            "every snake is commanded to follow it"
+        );
+    }
 }
 
 fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
