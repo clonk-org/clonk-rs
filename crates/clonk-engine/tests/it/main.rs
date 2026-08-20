@@ -142,6 +142,7 @@ shard_modules!(
     script_counter,
     script_goto,
     script_lookup_profile,
+    sky_lighting_is_static,
     snapshot_section_profile,
     set_builtin,
     set_vertex,
