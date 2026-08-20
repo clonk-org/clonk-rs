@@ -3334,12 +3334,119 @@ static bool oracleConvertTo(int fromType, int toType, int32_t intData, bool fStr
     return false;
 }
 
+
+// ---------------------------------------------------------------------------
+// C4PXSSystem slot allocation (src/C4PXS.cpp). `New` and `Delete` touch only
+// the chunk table, so the real bodies run here against this state and nothing
+// else: no landscape, no material map, no RNG. Allocation order is what the
+// port has to match, because a freed slot is reused at its old index and the
+// chunk-major execution order that follows is fixed by it.
+namespace pxs_allocation
+{
+const int32_t MNone = -1;
+const size_t PXSChunkSize = 500, PXSMaxChunk = 20;
+
+class C4PXS
+{
+public:
+    C4PXS() : Mat(MNone) {}
+    int32_t Mat;
+};
+
+class C4PXSSystem
+{
+public:
+    C4PXSSystem()
+    {
+        for (size_t cnt = 0; cnt < PXSMaxChunk; cnt++)
+        {
+            Chunk[cnt] = nullptr;
+            iChunkPXS[cnt] = 0;
+        }
+    }
+
+    C4PXS *Chunk[PXSMaxChunk];
+    size_t iChunkPXS[PXSMaxChunk];
+
+    C4PXS *New();
+    void Delete(C4PXS *pPXS);
+
+    // Where a returned pointer sits, as (chunk, slot). The golden records this
+    // rather than the pointer, so the comparison is against slot identity.
+    void locate(const C4PXS *pxs, int &chunk, int &slot) const
+    {
+        for (size_t cnt = 0; cnt < PXSMaxChunk; cnt++)
+            if (Chunk[cnt] && pxs >= Chunk[cnt] && pxs < Chunk[cnt] + PXSChunkSize)
+            {
+                chunk = static_cast<int>(cnt);
+                slot = static_cast<int>(pxs - Chunk[cnt]);
+                return;
+            }
+        chunk = -1;
+        slot = -1;
+    }
+};
+
+#include "pxs_new.inc"
+#include "pxs_delete.inc"
+} // namespace pxs_allocation
+
 int main()
 {
     printf("{\n");
 
     // 1. itofix: whole-integer and precision-denominated construction.
     //    Covers gravity/velocity precision (default 10, FIXED100, FIXED256).
+    // C4PXSSystem::New's slot choice, including reuse of freed slots
+    // (C4PXS.cpp:181-204, 426-437). The sequence deliberately frees out of
+    // order so a naive bump allocator disagrees on the very next call.
+    arr_begin("pxs_allocation");
+    {
+        using namespace pxs_allocation;
+        C4PXSSystem system;
+        std::vector<C4PXS *> live;
+        const auto take = [&](const char *step)
+        {
+            C4PXS *pxs = system.New();
+            int chunk = -1, slot = -1;
+            if (pxs)
+            {
+                pxs->Mat = 1;
+                system.locate(pxs, chunk, slot);
+                live.push_back(pxs);
+            }
+            sep();
+            printf("{\"step\":\"%s\",\"chunk\":%d,\"slot\":%d}", step, chunk, slot);
+        };
+        const auto drop = [&](size_t index, const char *step)
+        {
+            int chunk = -1, slot = -1;
+            if (index < live.size())
+            {
+                C4PXS *pxs = live[index];
+                system.locate(pxs, chunk, slot);
+                pxs->Mat = MNone;
+                system.Delete(pxs);
+            }
+            sep();
+            printf("{\"step\":\"%s\",\"chunk\":%d,\"slot\":%d}", step, chunk, slot);
+        };
+
+        take("new0");
+        take("new1");
+        take("new2");
+        take("new3");
+        // Free the middle two, high index first, so reuse order is visibly the
+        // lowest free slot rather than the most recently freed one.
+        drop(2, "free2");
+        drop(1, "free1");
+        take("reuse_a");
+        take("reuse_b");
+        take("append");
+    }
+    arr_end();
+    printf(",\n");
+
     arr_begin("itofix");
     const int xs[] = {0, 1, -1, 7, -7, 15, 100, -100, 32767, -32768, 12345};
     const int precs[] = {1, 10, 100, 256, 1000};

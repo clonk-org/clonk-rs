@@ -513,6 +513,26 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/StdFile.cpp" > "$gen/get_filename.inc"
 
+# 3z. Lift C4PXSSystem's slot allocator and its counterpart free. Allocation
+#     order is the whole determinism story for PXS: `New` returns the first
+#     `Mat == MNone` slot of the first chunk with space, so a freed slot is
+#     reused at its old index and the execution order that follows is fixed by
+#     it. Both bodies touch only `Chunk`/`iChunkPXS`, so the oracle needs no
+#     landscape or material scaffolding to run them.
+awk '
+  /^C4PXS \*C4PXSSystem::New\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4PXS.cpp" > "$gen/pxs_new.inc"
+
+awk '
+  /^void C4PXSSystem::Delete\(C4PXS \*pPXS\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4PXS.cpp" > "$gen/pxs_delete.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

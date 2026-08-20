@@ -1417,6 +1417,60 @@ fn parity_differential_matches_cpp_golden() {
         rust_component_order(case, case_index);
     }
 
+    // 0. C4PXSSystem slot allocation (C4PXS.cpp:181-204, 426-437). The order a
+    //    freed slot is handed back in decides the chunk-major execution order
+    //    of every later pass, so it is compared against the real `New` rather
+    //    than assumed. The golden frees high-index-first, which a
+    //    most-recently-freed allocator would answer differently on the very
+    //    next call.
+    {
+        let mut system = crate::pxs::PxsSystem::default();
+        let mut live: Vec<(usize, usize)> = Vec::new();
+        let material = crate::material::MaterialId::new(1).expect("material 1");
+        // The oracle locates a returned pointer; the port has no pointer to
+        // hand back, so each pixel carries a unique x and is located by it.
+        let locate = |system: &crate::pxs::PxsSystem, tag: i32| {
+            for chunk in 0..crate::pxs::PXS_MAX_CHUNK {
+                for slot in 0..crate::pxs::PXS_CHUNK_SIZE {
+                    if let Some(pxs) = system.peek_slot(chunk, slot) {
+                        if pxs.x == itofix(tag) {
+                            return Some((chunk, slot));
+                        }
+                    }
+                }
+            }
+            None
+        };
+
+        for (idx, e) in golden["pxs_allocation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let step = e["step"].as_str().unwrap_or_default();
+            let (chunk, slot) = (i(e, "chunk"), i(e, "slot"));
+            if let Some(freed) = step.strip_prefix("free") {
+                let which: usize = freed.parse().expect("a free step names an index");
+                let (chunk_at, slot_at) = live[which];
+                expect_eq("pxs_allocation", idx, "chunk", chunk, chunk_at as i64);
+                expect_eq("pxs_allocation", idx, "slot", slot, slot_at as i64);
+                system.clear_slot(chunk_at, slot_at);
+                live.remove(which);
+                continue;
+            }
+            let tag = idx as i32;
+            assert!(
+                system.create(material, itofix(tag), itofix(0), itofix(0), itofix(0)),
+                "the golden sequence never exhausts the chunk table"
+            );
+            let placed = locate(&system, tag).expect("the created pixel is in a slot");
+            expect_eq("pxs_allocation", idx, "chunk", chunk, placed.0 as i64);
+            expect_eq("pxs_allocation", idx, "slot", slot, placed.1 as i64);
+            live.push(placed);
+        }
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
