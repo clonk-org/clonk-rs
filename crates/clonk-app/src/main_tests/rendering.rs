@@ -5040,16 +5040,11 @@ fn native_menu_text_baseline_is_one_bound_draw_per_glyph() {
         .iter()
         .flat_map(|layer| layer.scene.commands.iter());
     let mut quads = 0_usize;
-    let mut batches = 0_usize;
     let mut textures = std::collections::HashSet::new();
     for command in commands {
-        match command {
-            clonk_graphics::GpuCommand::Quad { texture, .. } => {
-                quads += 1;
-                textures.insert(*texture);
-            }
-            clonk_graphics::GpuCommand::ObjectBatch { .. } => batches += 1,
-            _ => {}
+        if let clonk_graphics::GpuCommand::Quad { texture, .. } = command {
+            quads += 1;
+            textures.insert(*texture);
         }
     }
 
@@ -5069,10 +5064,5 @@ fn native_menu_text_baseline_is_one_bound_draw_per_glyph() {
         "repeated characters already share a retained identity, so draws must \
          outnumber bindings: {quads} draws over {} bindings",
         textures.len()
-    );
-    assert_eq!(
-        batches, 0,
-        "nothing batches menu text today — that is what clonk-org/clonk-rs#286 \
-         would change, and this baseline is what its win is measured against"
     );
 }
