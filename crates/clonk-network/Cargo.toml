@@ -50,7 +50,7 @@ tracing-core = "0.1"
 # `GetAdaptersAddresses` backs the IPv6 multicast fallback's interface
 # enumeration on Windows; the unix arm uses `if_nameindex` from libc.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     # `GetAdaptersAddresses` and `IP_ADAPTER_ADDRESSES_LH` are both gated on

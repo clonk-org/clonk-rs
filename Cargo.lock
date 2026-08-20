@@ -1071,7 +1071,7 @@ dependencies = [
  "tokio",
  "tracing-core",
  "webpki-root-certs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
  "xml",
  "zeroize",
 ]
