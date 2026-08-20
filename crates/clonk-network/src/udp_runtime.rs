@@ -31,6 +31,25 @@ pub const RELIABLE_UDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub const RELIABLE_UDP_CONNECT_RETRIES: u8 = 5;
 pub const RELIABLE_UDP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The socket's receive buffer is sized to the largest payload a UDP datagram
+/// can carry, so an inbound datagram is never truncated on its way in: what
+/// arrives is either taken whole or rejected by a length check that can see
+/// its real size. Every size gate downstream depends on that
+/// (clonk-org/clonk-rs#469).
+const RECEIVE_BUFFER_BYTES: usize = u16::MAX as usize + 1;
+
+/// The voice size gate is what rejects an oversized datagram, and it can only
+/// do that if the datagram arrived whole.
+///
+/// The receive path reads into `receive_buffer` and then compares the length
+/// it got against `MAX_VOICE_WIRE_BYTES`. Were the buffer the smaller of the
+/// two, a sender could push a datagram past the cap and have it trimmed down
+/// to something the gate waves through -- the gate would be measuring the
+/// truncation rather than what was sent. This is a compile-time assertion
+/// rather than a test because both sides are constants: neither can drift into
+/// the other without the crate failing to build (clonk-org/clonk-rs#469).
+const _: () = assert!(crate::voice::MAX_VOICE_WIRE_BYTES < RECEIVE_BUFFER_BYTES);
+
 #[cfg(test)]
 thread_local! {
     static NEXT_DEADLINE_PEER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1065,7 +1084,7 @@ impl ReliableUdpSocketDriver {
             peer_statistics: BTreeMap::new(),
             statistics_topology_epoch: 0,
             started_at,
-            receive_buffer: vec![0; u16::MAX as usize + 1],
+            receive_buffer: vec![0; RECEIVE_BUFFER_BYTES],
             pending_voice_media: None,
             protocol_timer: None,
             last_send: None,
