@@ -803,6 +803,10 @@ fn alchemy_real_scenario_subcases_batch_4() {
             alchemy_seeded_bag_collects_and_activates_through_player_controls,
         ),
         (
+            "walk_on_liquid_installs_its_fixed_duration_on_the_real_caster",
+            alchemy_walk_on_liquid_installs_its_fixed_duration_on_the_real_caster,
+        ),
+        (
             "learned_fireball_aims_steers_and_explodes_through_player_controls",
             alchemy_learned_fireball_aims_steers_and_explodes_through_player_controls,
         ),
@@ -2923,6 +2927,52 @@ fn alchemy_learned_fireball_aims_steers_and_explodes_through_player_controls(
             .is_none_or(|flying| !flying.status.is_active())
     });
     assert!(expired, "FIRB removes itself instead of flying forever");
+}
+
+fn alchemy_walk_on_liquid_installs_its_fixed_duration_on_the_real_caster(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy walk on liquid parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let mage_position = engine.test_object_snapshot(mage).position;
+    let spell = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("WOLI")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+
+    // WOLI hands AddEffect a literal 1000, and the effect stashes it in
+    // EffectVar(0) as the countdown its timer spends
+    // (WalkOnLiquid.c4d/Script.c:11,38-40). Pinning the number matters because
+    // the spell has no other observable output at cast time -- the walking
+    // itself only shows up once the caster is over liquid.
+    let duration = crate::support::TestValueExt::test_value(
+        engine
+            .test_object_snapshot(mage)
+            .effects
+            .iter()
+            .find(|effect| effect.name == "WalkOnLiquidSpell")
+            .map(|effect| effect.var(0)),
+    );
+    assert_eq!(duration, EffectVarValue::Int(1000));
+
+    // The spell removes itself only when the effect took: a refused AddEffect
+    // returns false and leaves the object alive (`:11-13`).
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "WOLI" && object.status.is_active()),
+        "WOLI removes itself once its effect is installed"
+    );
 }
 
 fn alchemy_learned_firebreath_aims_and_attaches_its_breath_to_the_caster(
