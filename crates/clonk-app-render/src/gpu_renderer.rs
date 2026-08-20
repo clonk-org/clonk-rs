@@ -8521,11 +8521,29 @@ fn shader_landscape_slot_bytes(slots: &[ShaderLandscapeSlot]) -> &[u8] {
 mod tests {
     use super::*;
     use clonk_graphics::{
-        Color, GammaRamp, GpuGammaLut, GpuObjectSprite, GpuOuterModulation, GpuSolidStyle,
-        GpuSolidVertex, GpuTextureResource, PixelFormat, Surface,
+        Color, GammaRamp, GpuGammaLut, GpuObjectSprite, GpuOuterModulation, GpuOwnerMask,
+        GpuSolidStyle, GpuSolidVertex, GpuTextureResource, PixelFormat, Surface,
     };
     use clonk_gui::{ImageData, Rect as GuiRect};
     use std::sync::Arc;
+
+    macro_rules! fixture_options {
+        ($($field:ident = $value:expr),* $(,)?) => {
+            FixtureOptions {
+                $($field: $value,)*
+                ..FixtureOptions::default()
+            }
+        };
+    }
+
+    macro_rules! gpu_or_skip {
+        ($device:ident, $queue:ident, $test:literal) => {
+            let Some((_runtime, $device, $queue)) = shader_landscape_test_device() else {
+                eprintln!("no wgpu adapter; skipping {}", $test);
+                return;
+            };
+        };
+    }
 
     #[test]
     fn renderer_cpu_stage_total_reconciles_named_intervals() {
@@ -8653,21 +8671,13 @@ mod tests {
             eprintln!("adapter lacks timestamp queries; skipping timestamp query smoke");
             return;
         }
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lc_gpu_timestamp_test_target"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let (_target, target_view) = test_target(
+            &device,
+            "lc_gpu_timestamp_test_target",
+            [1, 1],
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
         let base = GpuTextureId::fresh();
         let mut scene = test_scene(
             [1, 1],
@@ -8695,9 +8705,7 @@ mod tests {
             },
         )));
         assert!(renderer.timestamp_queries_enabled());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_timestamp_test_encoder"),
-        });
+        let mut encoder = test_encoder(&device, "lc_gpu_timestamp_test_encoder");
 
         renderer
             .render(
@@ -8778,26 +8786,16 @@ mod tests {
             eprintln!("adapter lacks timestamp queries; skipping timestamp recreation smoke");
             return;
         }
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lc_gpu_timestamp_recreate_test_target"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let (_target, target_view) = test_target(
+            &device,
+            "lc_gpu_timestamp_recreate_test_target",
+            [1, 1],
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
         let scene = test_scene([1, 1], Color::transparent(), Vec::new(), Vec::new());
         let mut renderer = test_renderer(&device, &queue);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_timestamp_before_recreate_encoder"),
-        });
+        let mut encoder = test_encoder(&device, "lc_gpu_timestamp_before_recreate_encoder");
         renderer
             .render(
                 &device,
@@ -8828,9 +8826,7 @@ mod tests {
         assert_eq!(carried[0].renderer_generation, 1);
         assert_eq!(renderer.timestamp_telemetry().device_discontinuities, 1);
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_timestamp_after_recreate_encoder"),
-        });
+        let mut encoder = test_encoder(&device, "lc_gpu_timestamp_after_recreate_encoder");
         renderer
             .render(
                 &device,
@@ -8888,26 +8884,16 @@ mod tests {
             eprintln!("no timestamp-capable wgpu adapter; skipping pending recreation smoke");
             return;
         };
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lc_gpu_timestamp_pending_recreate_target"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let (_target, target_view) = test_target(
+            &device,
+            "lc_gpu_timestamp_pending_recreate_target",
+            [1, 1],
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
         let scene = test_scene([1, 1], Color::transparent(), Vec::new(), Vec::new());
         let mut renderer = test_renderer(&device, &queue);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_timestamp_pending_recreate_encoder"),
-        });
+        let mut encoder = test_encoder(&device, "lc_gpu_timestamp_pending_recreate_encoder");
 
         renderer
             .render(
@@ -8964,9 +8950,7 @@ mod tests {
                 detail: "test fault after encoding".to_owned(),
             },
         );
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_timestamp_abort_test_encoder"),
-        });
+        let mut encoder = test_encoder(&device, "lc_gpu_timestamp_abort_test_encoder");
 
         assert!(matches!(
             renderer.commit_timestamp_frame(&mut encoder, Some(active)),
@@ -9088,33 +9072,23 @@ mod tests {
             1,
             Arc::from(vec![0_u8; width as usize * 4].into_boxed_slice()),
         );
-        let scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![source],
-            commands: Vec::new(),
-        };
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lc_gpu_texture_limit_test_target"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene = GpuScene::new(
+            [1, 1],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
+            vec![source],
+            Vec::new(),
+        );
+        let (_target, target_view) = test_target(
+            &device,
+            "lc_gpu_texture_limit_test_target",
+            [1, 1],
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
         let mut renderer = test_renderer(&device, &queue);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_texture_limit_test_encoder"),
-        });
+        let mut encoder = test_encoder(&device, "lc_gpu_texture_limit_test_encoder");
         let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         assert!(matches!(
@@ -9481,19 +9455,13 @@ mod tests {
 
     #[test]
     fn mipmapped_full_upload_stats_count_every_queue_write() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping mip upload stats test");
-            return;
-        };
-        let resource = GpuTextureResource {
-            id: GpuTextureId::fresh(),
-            extent: [4, 4],
-            revision: 0,
-            base_revision: None,
-            format: GpuTextureFormat::Rgba8,
-            pixels: Arc::from(vec![0; 4 * 4 * 4].into_boxed_slice()),
-            dirty: Vec::new(),
-        };
+        gpu_or_skip!(device, queue, "mip upload stats test");
+        let resource = texture_resource(
+            GpuTextureId::fresh(),
+            [4, 4],
+            GpuTextureFormat::Rgba8,
+            vec![0; 4 * 4 * 4],
+        );
         let texture = create_source_texture(&device, &resource, true);
 
         let upload = upload_full(&queue, &texture, &resource);
@@ -9577,10 +9545,7 @@ mod tests {
 
     #[test]
     fn destroying_the_device_marks_the_renderer_for_recreation() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping retained device-loss callback check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "retained device-loss callback check");
         let renderer = test_renderer(&device, &queue);
 
         device.destroy();
@@ -9633,12 +9598,7 @@ mod tests {
 
     #[test]
     fn fractional_clipper_rounds_viewport_then_projects_relative_coordinates() {
-        let presentation = GpuPresentation {
-            physical_extent: [5, 4],
-            scale: 1.5,
-            crop_top: 1,
-            world_zoom: 1.0,
-        };
+        let presentation = presentation([5, 4], 1.5, 1, 1.0);
         let projection = draw_projection(Some(Rect::new(1, 1, 2, 1)), [4, 3], &presentation)
             .expect("valid fractional presentation")
             .expect("clip intersects the physical framebuffer");
@@ -9667,12 +9627,7 @@ mod tests {
 
     #[test]
     fn wide_point_is_center_clipped_before_physical_rasterization() {
-        let presentation = GpuPresentation {
-            physical_extent: [8, 8],
-            scale: 2.0,
-            crop_top: 0,
-            world_zoom: 1.0,
-        };
+        let presentation = presentation([8, 8], 2.0, 0, 1.0);
         let projection = draw_projection(Some(Rect::new(0, 0, 2, 2)), [4, 4], &presentation)
             .expect("valid point presentation")
             .expect("point clip intersects the framebuffer");
@@ -9804,12 +9759,7 @@ mod tests {
     fn landscape_vertices_carry_the_smoothing_flag_in_a_free_channel() {
         // `liquid_scale` only ever uses xy, so the magnification policy rides
         // along in z rather than costing another vertex attribute.
-        let presentation = GpuPresentation {
-            physical_extent: [4, 4],
-            scale: 1.0,
-            crop_top: 0,
-            world_zoom: 1.0,
-        };
+        let presentation = presentation([4, 4], 1.0, 0, 1.0);
         let projection = draw_projection(None, [4, 4], &presentation)
             .expect("valid presentation")
             .expect("clip intersects the framebuffer");
@@ -9869,12 +9819,7 @@ mod tests {
         // The solid shader reads its fragment options out of `data1`. Gamma
         // owns channel 0; the dither must land in its own channel so the two
         // stay independently switchable.
-        let presentation = GpuPresentation {
-            physical_extent: [6, 4],
-            scale: 1.0,
-            crop_top: 0,
-            world_zoom: 1.0,
-        };
+        let presentation = presentation([6, 4], 1.0, 0, 1.0);
         let projection = draw_projection(None, [6, 4], &presentation)
             .expect("valid presentation")
             .expect("clip intersects the framebuffer");
@@ -9914,12 +9859,7 @@ mod tests {
         // Every selected physical pixel is one whole rectangle, so it costs one
         // compact instance. Lowering it to a triangle pair spent six 72-byte
         // vertices restating the same rectangle and colour.
-        let presentation = GpuPresentation {
-            physical_extent: [12, 8],
-            scale: 2.0,
-            crop_top: 0,
-            world_zoom: 1.0,
-        };
+        let presentation = presentation([12, 8], 2.0, 0, 1.0);
         let projection = draw_projection(None, [6, 4], &presentation)
             .expect("valid line presentation")
             .expect("line clip intersects the framebuffer");
@@ -10014,12 +9954,7 @@ mod tests {
 
     #[test]
     fn compact_sprite_projection_matches_generic_quad_at_fractional_scale_and_crop() {
-        let presentation = GpuPresentation {
-            physical_extent: [17, 11],
-            scale: 1.5,
-            crop_top: 2,
-            world_zoom: 1.0,
-        };
+        let presentation = presentation([17, 11], 1.5, 2, 1.0);
         let projection = draw_projection(Some(Rect::new(1, 2, 6, 4)), [9, 8], &presentation)
             .expect("valid fractional presentation")
             .expect("clip intersects the framebuffer");
@@ -10117,21 +10052,14 @@ mod tests {
         let texture = GpuTextureId::fresh();
         let owner_a = GpuTextureId::fresh();
         let owner_b = GpuTextureId::fresh();
-        let command = |owner_texture, gamma, blend, outer_modulation| GpuCommand::ObjectBatch {
-            texture,
-            owner_texture,
-            sprites: vec![GpuObjectSprite::new(
-                [[0.0, 0.0, 1.0]; 4],
-                [0.0, 0.0, 1.0, 1.0],
-                [0x00ff_ffff; 4],
-                GpuSampler::Nearest,
-                0.0,
-                false,
-                outer_modulation,
-            )],
-            clip: None,
-            blend,
-            gamma,
+        let command = |owner_texture, gamma, blend, outer_modulation| {
+            object_batch(
+                texture,
+                vec![object_sprite(fixture_options!(
+                    object_outer_modulation = outer_modulation
+                ))],
+                fixture_options!(owner_texture = owner_texture, blend = blend, gamma = gamma),
+            )
         };
         let base = object_run_key(&command(
             Some(owner_a),
@@ -10191,28 +10119,30 @@ mod tests {
     #[test]
     fn compact_object_validation_rejects_invalid_tile_sizes() {
         let texture = GpuTextureId::fresh();
-        let scene = |sampler, sample_tile_size| GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::identity()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![rgba_resource(texture, [255; 4])],
-            commands: vec![GpuCommand::ObjectBatch {
-                texture,
-                owner_texture: None,
-                sprites: vec![GpuObjectSprite::new(
-                    [[0.0, 0.0, 1.0]; 4],
-                    [0.0, 0.0, 1.0, 1.0],
-                    [0x00ff_ffff; 4],
-                    sampler,
-                    sample_tile_size,
-                    false,
-                    GpuOuterModulation::Inherit,
-                )],
-                clip: None,
-                blend: GpuBlend::Normal,
-                gamma: false,
-            }],
+        let scene = |sampler, sample_tile_size| {
+            GpuScene::new(
+                [1, 1],
+                Color::transparent(),
+                GpuGammaLut::from_ramp(&GammaRamp::identity()),
+                GpuGammaMode::Disabled,
+                vec![rgba_resource(texture, [255; 4])],
+                vec![GpuCommand::ObjectBatch {
+                    texture,
+                    owner_texture: None,
+                    sprites: vec![GpuObjectSprite::new(
+                        [[0.0, 0.0, 1.0]; 4],
+                        [0.0, 0.0, 1.0, 1.0],
+                        [0x00ff_ffff; 4],
+                        sampler,
+                        sample_tile_size,
+                        false,
+                        GpuOuterModulation::Inherit,
+                    )],
+                    clip: None,
+                    blend: GpuBlend::Normal,
+                    gamma: false,
+                }],
+            )
         };
         let presentation = GpuPresentation::identity(1, 1);
 
@@ -10255,28 +10185,12 @@ mod tests {
     #[test]
     fn compact_object_validation_rejects_owner_layer_without_companion() {
         let texture = GpuTextureId::fresh();
-        let sprite = GpuObjectSprite::new(
-            [[0.0, 0.0, 1.0]; 4],
-            [0.0, 0.0, 1.0, 1.0],
-            [0x00ff_ffff; 4],
-            GpuSampler::Nearest,
-            0.0,
-            false,
-            GpuOuterModulation::Inherit,
-        )
-        .with_owner_layer();
+        let sprite = object_sprite(fixture_options!()).with_owner_layer();
         let scene = test_scene(
             [1, 1],
             Color::transparent(),
             vec![rgba_resource(texture, [255; 4])],
-            vec![GpuCommand::ObjectBatch {
-                texture,
-                owner_texture: None,
-                sprites: vec![sprite],
-                clip: None,
-                blend: GpuBlend::Normal,
-                gamma: false,
-            }],
+            vec![object_batch(texture, vec![sprite], fixture_options!())],
         );
 
         assert!(matches!(
@@ -10289,24 +10203,12 @@ mod tests {
     fn compact_object_validation_requires_compatible_owner_texture() {
         let texture = GpuTextureId::fresh();
         let owner_texture = GpuTextureId::fresh();
-        let sprite = GpuObjectSprite::new(
-            [[0.0, 0.0, 1.0]; 4],
-            [0.0, 0.0, 1.0, 1.0],
-            [0x00ff_ffff; 4],
-            GpuSampler::Nearest,
-            0.0,
-            false,
-            GpuOuterModulation::Inherit,
-        )
-        .with_owner_layer();
-        let command = GpuCommand::ObjectBatch {
+        let sprite = object_sprite(fixture_options!()).with_owner_layer();
+        let command = object_batch(
             texture,
-            owner_texture: Some(owner_texture),
-            sprites: vec![sprite],
-            clip: None,
-            blend: GpuBlend::Normal,
-            gamma: false,
-        };
+            vec![sprite],
+            fixture_options!(owner_texture = Some(owner_texture)),
+        );
         let scene = |owner| {
             let mut textures = vec![rgba_resource(texture, [255; 4])];
             textures.extend(owner);
@@ -10355,31 +10257,20 @@ mod tests {
     fn compact_object_validation_rejects_mixed_replace_outer_policy() {
         let texture = GpuTextureId::fresh();
         let sprite = |outer_modulation| {
-            GpuObjectSprite::new(
-                [[0.0, 0.0, 1.0]; 4],
-                [0.0, 0.0, 1.0, 1.0],
-                [0x00ff_ffff; 4],
-                GpuSampler::Nearest,
-                0.0,
-                false,
-                outer_modulation,
-            )
+            object_sprite(fixture_options!(object_outer_modulation = outer_modulation))
         };
         let scene = test_scene(
             [1, 1],
             Color::transparent(),
             vec![rgba_resource(texture, [255; 4])],
-            vec![GpuCommand::ObjectBatch {
+            vec![object_batch(
                 texture,
-                owner_texture: None,
-                sprites: vec![
+                vec![
                     sprite(GpuOuterModulation::Combine),
                     sprite(GpuOuterModulation::Ignore),
                 ],
-                clip: None,
-                blend: GpuBlend::Replace,
-                gamma: false,
-            }],
+                fixture_options!(blend = GpuBlend::Replace),
+            )],
         );
 
         assert!(matches!(
@@ -10391,15 +10282,7 @@ mod tests {
     #[test]
     fn compact_object_validation_rejects_reserved_packed_flags() {
         let texture = GpuTextureId::fresh();
-        let sprite = GpuObjectSprite::new(
-            [[0.0, 0.0, 1.0]; 4],
-            [0.0, 0.0, 1.0, 1.0],
-            [0x00ff_ffff; 4],
-            GpuSampler::Nearest,
-            0.0,
-            false,
-            GpuOuterModulation::Inherit,
-        );
+        let sprite = object_sprite(fixture_options!());
         #[repr(C)]
         struct RawObjectSprite {
             positions: [[f32; 3]; 4],
@@ -10418,13 +10301,13 @@ mod tests {
         // SAFETY: both `repr(C)` types have the same fields in the same order;
         // every `u32` flag bit pattern is valid memory even when semantically rejected.
         let sprite = unsafe { std::mem::transmute::<RawObjectSprite, GpuObjectSprite>(raw) };
-        let scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::identity()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![rgba_resource(texture, [255; 4])],
-            commands: vec![GpuCommand::ObjectBatch {
+        let scene = GpuScene::new(
+            [1, 1],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::identity()),
+            GpuGammaMode::Disabled,
+            vec![rgba_resource(texture, [255; 4])],
+            vec![GpuCommand::ObjectBatch {
                 texture,
                 owner_texture: None,
                 sprites: vec![sprite],
@@ -10432,7 +10315,7 @@ mod tests {
                 blend: GpuBlend::Normal,
                 gamma: false,
             }],
-        };
+        );
 
         assert!(matches!(
             RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(1, 1)),
@@ -10442,12 +10325,7 @@ mod tests {
 
     #[test]
     fn compact_object_sprite_preserves_projective_corners_and_sampling_state() {
-        let presentation = GpuPresentation {
-            physical_extent: [17, 11],
-            scale: 1.5,
-            crop_top: 2,
-            world_zoom: 1.0,
-        };
+        let presentation = presentation([17, 11], 1.5, 2, 1.0);
         let projection = draw_projection(Some(Rect::new(1, 2, 6, 4)), [9, 8], &presentation)
             .expect("valid fractional presentation")
             .expect("clip intersects the framebuffer");
@@ -10458,15 +10336,15 @@ mod tests {
             [27.0, 23.5, 4.0],
         ];
         let modulation = [0x0011_2233, 0x4044_5566, 0x8077_8899, 0xc0aa_bbcc];
-        let sprite = GpuObjectSprite::new(
-            positions,
-            [0.875, 0.25, 0.125, 0.75],
-            modulation,
-            GpuSampler::Linear,
-            128.0,
-            true,
-            GpuOuterModulation::Combine,
-        );
+        let sprite = object_sprite(fixture_options!(
+            positions = positions,
+            uv = [0.875, 0.25, 0.125, 0.75],
+            modulation = modulation,
+            sampler = GpuSampler::Linear,
+            sample_tile_size = 128.0,
+            mod2 = true,
+            object_outer_modulation = GpuOuterModulation::Combine
+        ));
 
         let packed = packed_object_sprite_instance(sprite, true, &projection)
             .expect("pack compact object sprite");
@@ -10488,20 +10366,15 @@ mod tests {
         let projection = draw_projection(None, [1, 1], &GpuPresentation::identity(1, 1))
             .expect("valid presentation")
             .expect("object intersects presentation");
-        let sprite = GpuObjectSprite::new(
-            [
+        let sprite = object_sprite(fixture_options!(
+            positions = [
                 [0.0, 0.0, 1.0],
                 [1.0, 0.0, 1.0],
                 [0.0, 1.0, 1.0],
                 [1.0, 1.0, 1.0],
             ],
-            [0.0, 0.0, 1.0, 1.0],
-            [0x00ff_ffff; 4],
-            GpuSampler::Nearest,
-            0.0,
-            false,
-            GpuOuterModulation::Combine,
-        )
+            object_outer_modulation = GpuOuterModulation::Combine
+        ))
         .with_owner_layer();
 
         let without_gamma = packed_object_sprite_instance(sprite, false, &projection)
@@ -10518,10 +10391,7 @@ mod tests {
 
     #[test]
     fn mixed_object_sampling_uses_one_ordered_draw_without_generic_instances() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping compact object sampling check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "compact object sampling check");
         let texture = GpuTextureId::fresh();
         let positions = [
             [0.0, 0.0, 1.0],
@@ -10529,47 +10399,18 @@ mod tests {
             [0.0, 2.0, 1.0],
             [4.0, 2.0, 1.0],
         ];
-        let nearest = GpuObjectSprite::new(
-            positions,
-            [0.0, 0.0, 1.0, 1.0],
-            [0x00ff_ffff; 4],
-            GpuSampler::Nearest,
-            0.0,
-            false,
-            GpuOuterModulation::Combine,
-        );
-        let linear = GpuObjectSprite::new(
-            positions,
-            [1.0, 0.0, 0.0, 1.0],
-            [0x4000_ffff, 0x40ff_00ff, 0x4000_ff00, 0x40ff_ffff],
-            GpuSampler::Linear,
-            2.0,
-            false,
-            GpuOuterModulation::Combine,
-        );
-        let generic_vertices = |sprite: GpuObjectSprite| {
-            let uv = [
-                [sprite.uv[0], sprite.uv[1]],
-                [sprite.uv[2], sprite.uv[1]],
-                [sprite.uv[0], sprite.uv[3]],
-                [sprite.uv[2], sprite.uv[3]],
-            ];
-            std::array::from_fn(|index| {
-                let packed = sprite.modulation[index];
-                let modulation = [
-                    ((packed >> 16) & 0xff) as f32 / 255.0,
-                    ((packed >> 8) & 0xff) as f32 / 255.0,
-                    (packed & 0xff) as f32 / 255.0,
-                    (packed >> 24) as f32 / 255.0,
-                ];
-                let vertex = GpuVertex::new(sprite.positions[index], uv[index], modulation);
-                if sprite.sampler() == GpuSampler::Linear {
-                    vertex.with_sample_tile(0.0, 0.0, sprite.sample_tile_size)
-                } else {
-                    vertex
-                }
-            })
-        };
+        let nearest = object_sprite(fixture_options!(
+            positions = positions,
+            object_outer_modulation = GpuOuterModulation::Combine
+        ));
+        let linear = object_sprite(fixture_options!(
+            positions = positions,
+            uv = [1.0, 0.0, 0.0, 1.0],
+            modulation = [0x4000_ffff, 0x40ff_00ff, 0x4000_ff00, 0x40ff_ffff],
+            sampler = GpuSampler::Linear,
+            sample_tile_size = 2.0,
+            object_outer_modulation = GpuOuterModulation::Combine
+        ));
         let resource = rgba_resource_2x1(texture, [255, 48, 16, 255], [16, 64, 255, 255]);
         let scene = |commands| {
             test_scene(
@@ -10579,37 +10420,22 @@ mod tests {
                 commands,
             )
         };
-        let compact = scene(vec![GpuCommand::ObjectBatch {
+        let compact = scene(vec![object_batch(
             texture,
-            owner_texture: None,
-            sprites: vec![nearest, linear],
-            clip: None,
-            blend: GpuBlend::Normal,
-            gamma: false,
-        }]);
+            vec![nearest, linear],
+            fixture_options!(),
+        )]);
         let expanded = scene(vec![
-            GpuCommand::Quad {
+            quad_command(
                 texture,
-                owner_mask: None,
-                vertices: generic_vertices(nearest),
-                clip: None,
-                blend: GpuBlend::Normal,
-                base_mod2: nearest.mod2(),
-                owner_mod2: false,
-                sampler: nearest.sampler(),
-                gamma: false,
-            },
-            GpuCommand::Quad {
+                object_quad_vertices(nearest, None),
+                fixture_options!(base_mod2 = nearest.mod2(), sampler = nearest.sampler()),
+            ),
+            quad_command(
                 texture,
-                owner_mask: None,
-                vertices: generic_vertices(linear),
-                clip: None,
-                blend: GpuBlend::Normal,
-                base_mod2: linear.mod2(),
-                owner_mod2: false,
-                sampler: linear.sampler(),
-                gamma: false,
-            },
+                object_quad_vertices(linear, None),
+                fixture_options!(base_mod2 = linear.mod2(), sampler = linear.sampler()),
+            ),
         ]);
         let mut renderer = test_renderer(&device, &queue);
 
@@ -10628,10 +10454,7 @@ mod tests {
     fn owner_texture_pair_matches_explicit_base_owner_painter_sequence() {
         // LegacyClonk StdDDraw2.cpp:759-778 submits the base pass before the
         // owner-color pass for each face.
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping compact owner-pair parity check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "compact owner-pair parity check");
         let texture = GpuTextureId::fresh();
         let owner_texture = GpuTextureId::fresh();
         let base_resource = rgba_resource_2x1(texture, [220, 40, 20, 160], [20, 180, 60, 192]);
@@ -10648,34 +10471,6 @@ mod tests {
                 [right * w[3], 2.0 * w[3], w[3]],
             ]
         };
-        let normalized = |packed: u32| {
-            [
-                ((packed >> 16) & 0xff) as f32 / 255.0,
-                ((packed >> 8) & 0xff) as f32 / 255.0,
-                (packed & 0xff) as f32 / 255.0,
-                (packed >> 24) as f32 / 255.0,
-            ]
-        };
-        let generic_vertices = |sprite: GpuObjectSprite| {
-            let uv = [
-                [sprite.uv[0], sprite.uv[1]],
-                [sprite.uv[2], sprite.uv[1]],
-                [sprite.uv[0], sprite.uv[3]],
-                [sprite.uv[2], sprite.uv[3]],
-            ];
-            std::array::from_fn(|index| {
-                let vertex = GpuVertex::new(
-                    sprite.positions[index],
-                    uv[index],
-                    normalized(sprite.modulation[index]),
-                );
-                if sprite.sampler() == GpuSampler::Linear {
-                    vertex.with_sample_tile(0.0, 0.0, sprite.sample_tile_size)
-                } else {
-                    vertex
-                }
-            })
-        };
         let mut renderer = test_renderer(&device, &queue);
 
         for sampler in [GpuSampler::Nearest, GpuSampler::Linear] {
@@ -10685,15 +10480,15 @@ mod tests {
                 0.0
             };
             let sprite = |positions, uv, modulation, mod2| {
-                GpuObjectSprite::new(
-                    positions,
-                    uv,
-                    modulation,
-                    sampler,
-                    sample_tile_size,
-                    mod2,
-                    GpuOuterModulation::Combine,
-                )
+                object_sprite(fixture_options!(
+                    positions = positions,
+                    uv = uv,
+                    modulation = modulation,
+                    sampler = sampler,
+                    sample_tile_size = sample_tile_size,
+                    mod2 = mod2,
+                    object_outer_modulation = GpuOuterModulation::Combine
+                ))
             };
             let base_1 = sprite(
                 positions(0.0, 2.25, [1.0, 1.2, 0.9, 1.1]),
@@ -10727,32 +10522,36 @@ mod tests {
                 GpuGammaMode::Monitor,
             ] {
                 for blend in [GpuBlend::Normal, GpuBlend::Additive, GpuBlend::Replace] {
-                    let scene = |commands| GpuScene {
-                        logical_extent: [3, 2],
-                        clear: Color::new(11, 19, 31, 113),
-                        gamma: gamma.clone(),
-                        gamma_mode,
-                        textures: vec![base_resource.clone(), owner_resource.clone()],
-                        commands,
+                    let scene = |commands| {
+                        GpuScene::new(
+                            [3, 2],
+                            Color::new(11, 19, 31, 113),
+                            gamma.clone(),
+                            gamma_mode,
+                            vec![base_resource.clone(), owner_resource.clone()],
+                            commands,
+                        )
                     };
-                    let compact = scene(vec![GpuCommand::ObjectBatch {
+                    let compact = scene(vec![object_batch(
                         texture,
-                        owner_texture: Some(owner_texture),
-                        sprites: vec![base_1, owner_1, base_2, owner_2],
-                        clip: None,
-                        blend,
-                        gamma: true,
-                    }]);
-                    let generic = |texture, sprite: GpuObjectSprite| GpuCommand::Quad {
-                        texture,
-                        owner_mask: None,
-                        vertices: generic_vertices(sprite),
-                        clip: None,
-                        blend,
-                        base_mod2: sprite.mod2(),
-                        owner_mod2: false,
-                        sampler: sprite.sampler(),
-                        gamma: true,
+                        vec![base_1, owner_1, base_2, owner_2],
+                        fixture_options!(
+                            owner_texture = Some(owner_texture),
+                            blend = blend,
+                            gamma = true
+                        ),
+                    )]);
+                    let generic = |texture, sprite: GpuObjectSprite| {
+                        quad_command(
+                            texture,
+                            object_quad_vertices(sprite, None),
+                            fixture_options!(
+                                blend = blend,
+                                base_mod2 = sprite.mod2(),
+                                sampler = sprite.sampler(),
+                                gamma = true
+                            ),
+                        )
                     };
                     let expanded = scene(vec![
                         generic(texture, base_1),
@@ -10786,10 +10585,7 @@ mod tests {
     fn fog_chunked_owner_pair_with_ownclr_matches_explicit_painter_passes() {
         // LegacyClonk StdDDraw2.cpp:759-778 paints base then owner, and
         // StdDDraw2.cpp:773-777 leaves OWNCLR owner modulation untouched.
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping fogged owner-pair parity check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "fogged owner-pair parity check");
         let texture = GpuTextureId::fresh();
         let owner_texture = GpuTextureId::fresh();
         let resource = |id, owner: bool| {
@@ -10806,45 +10602,12 @@ mod tests {
             }
             GpuTextureResource::immutable_rgba(id, 128, 64, Arc::from(pixels.into_boxed_slice()))
         };
-        let normalized = |packed: u32| {
-            [
-                ((packed >> 16) & 0xff) as f32 / 255.0,
-                ((packed >> 8) & 0xff) as f32 / 255.0,
-                (packed & 0xff) as f32 / 255.0,
-                (packed >> 24) as f32 / 255.0,
-            ]
-        };
         let generic = |texture, sprite: GpuObjectSprite| {
-            let uv = [
-                [sprite.uv[0], sprite.uv[1]],
-                [sprite.uv[2], sprite.uv[1]],
-                [sprite.uv[0], sprite.uv[3]],
-                [sprite.uv[2], sprite.uv[3]],
-            ];
-            let vertices = std::array::from_fn(|index| {
-                let vertex = GpuVertex::new(
-                    sprite.positions[index],
-                    uv[index],
-                    normalized(sprite.modulation[index]),
-                )
-                .with_outer_modulation(sprite.outer_modulation());
-                if sprite.sampler() == GpuSampler::Linear {
-                    vertex.with_sample_tile(0.0, 0.0, sprite.sample_tile_size)
-                } else {
-                    vertex
-                }
-            });
-            GpuCommand::Quad {
+            quad_command(
                 texture,
-                owner_mask: None,
-                vertices,
-                clip: None,
-                blend: GpuBlend::Normal,
-                base_mod2: sprite.mod2(),
-                owner_mod2: false,
-                sampler: sprite.sampler(),
-                gamma: false,
-            }
+                object_quad_vertices(sprite, Some(sprite.outer_modulation())),
+                fixture_options!(base_mod2 = sprite.mod2(), sampler = sprite.sampler()),
+            )
         };
         let positions = |left: f32, right: f32| {
             [
@@ -10863,15 +10626,14 @@ mod tests {
                 0.0
             };
             let sprite = |positions, uv, modulation, outer_modulation| {
-                GpuObjectSprite::new(
-                    positions,
-                    uv,
-                    modulation,
-                    sampler,
-                    sample_tile_size,
-                    false,
-                    outer_modulation,
-                )
+                object_sprite(fixture_options!(
+                    positions = positions,
+                    uv = uv,
+                    modulation = modulation,
+                    sampler = sampler,
+                    sample_tile_size = sample_tile_size,
+                    object_outer_modulation = outer_modulation
+                ))
             };
             let base = [
                 sprite(
@@ -10904,14 +10666,11 @@ mod tests {
                 .with_owner_layer(),
             ];
             let original_owner_modulation = owner.map(|sprite| sprite.modulation);
-            let mut compact_command = GpuCommand::ObjectBatch {
+            let mut compact_command = object_batch(
                 texture,
-                owner_texture: Some(owner_texture),
-                sprites: vec![base[0], base[1], owner[0], owner[1]],
-                clip: None,
-                blend: GpuBlend::Normal,
-                gamma: false,
-            };
+                vec![base[0], base[1], owner[0], owner[1]],
+                fixture_options!(owner_texture = Some(owner_texture)),
+            );
             compact_command
                 .apply_packed_c4_modulation(0x4080_ff40)
                 .expect("compact C4 colors accept enclosing modulation");
@@ -10936,13 +10695,15 @@ mod tests {
                 "CLRSFC_OWNCLR suppresses enclosing modulation on owner layers"
             );
 
-            let scene = |commands| GpuScene {
-                logical_extent: [4, 2],
-                clear: Color::new(9, 17, 25, 101),
-                gamma: GpuGammaLut::from_ramp(&GammaRamp::identity()),
-                gamma_mode: GpuGammaMode::Disabled,
-                textures: vec![resource(texture, false), resource(owner_texture, true)],
-                commands,
+            let scene = |commands| {
+                GpuScene::new(
+                    [4, 2],
+                    Color::new(9, 17, 25, 101),
+                    GpuGammaLut::from_ramp(&GammaRamp::identity()),
+                    GpuGammaMode::Disabled,
+                    vec![resource(texture, false), resource(owner_texture, true)],
+                    commands,
+                )
             };
             let compact = scene(vec![compact_command]);
             let expanded = scene(generic_commands);
@@ -10965,50 +10726,45 @@ mod tests {
 
     #[test]
     fn owner_pair_draws_split_exactly_at_run_boundaries() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping compact owner-pair run check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "compact owner-pair run check");
         let texture = GpuTextureId::fresh();
         let owner_a = GpuTextureId::fresh();
         let owner_b = GpuTextureId::fresh();
         let sprite = |outer_modulation| {
-            GpuObjectSprite::new(
-                [
+            object_sprite(fixture_options!(
+                positions = [
                     [0.0, 0.0, 1.0],
                     [1.0, 0.0, 1.0],
                     [0.0, 1.0, 1.0],
                     [1.0, 1.0, 1.0],
                 ],
-                [0.0, 0.0, 1.0, 1.0],
-                [0x00ff_ffff; 4],
-                GpuSampler::Nearest,
-                0.0,
-                false,
-                outer_modulation,
-            )
+                object_outer_modulation = outer_modulation
+            ))
             .with_owner_layer()
         };
-        let command =
-            |owner_texture, clip, blend, gamma, outer_modulation| GpuCommand::ObjectBatch {
+        let command = |owner_texture, clip, blend, gamma, outer_modulation| {
+            object_batch(
                 texture,
-                owner_texture: Some(owner_texture),
-                sprites: vec![sprite(outer_modulation)],
-                clip,
-                blend,
-                gamma,
-            };
-        let scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Fragment,
-            textures: vec![
+                vec![sprite(outer_modulation)],
+                fixture_options!(
+                    owner_texture = Some(owner_texture),
+                    clip = clip,
+                    blend = blend,
+                    gamma = gamma
+                ),
+            )
+        };
+        let scene = GpuScene::new(
+            [1, 1],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Fragment,
+            vec![
                 rgba_resource(texture, [0, 0, 0, 0]),
                 rgba_resource(owner_a, [255, 64, 16, 96]),
                 rgba_resource(owner_b, [16, 64, 255, 96]),
             ],
-            commands: vec![
+            vec![
                 command(
                     owner_a,
                     None,
@@ -11073,7 +10829,7 @@ mod tests {
                     GpuOuterModulation::Ignore,
                 ),
             ],
-        };
+        );
         let mut renderer = test_renderer(&device, &queue);
 
         let _ = render_identity_readback(&mut renderer, &device, &queue, &scene);
@@ -11087,26 +10843,18 @@ mod tests {
 
     #[test]
     fn owner_pair_bind_group_is_invalidated_when_owner_view_is_recreated() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping owner bind-group invalidation check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "owner bind-group invalidation check");
         let texture = GpuTextureId::fresh();
         let owner_texture = GpuTextureId::fresh();
-        let sprite = GpuObjectSprite::new(
-            [
+        let sprite = object_sprite(fixture_options!(
+            positions = [
                 [0.0, 0.0, 1.0],
                 [1.0, 0.0, 1.0],
                 [0.0, 1.0, 1.0],
                 [1.0, 1.0, 1.0],
             ],
-            [0.0, 0.0, 1.0, 1.0],
-            [0x00ff_ffff; 4],
-            GpuSampler::Nearest,
-            0.0,
-            false,
-            GpuOuterModulation::Combine,
-        )
+            object_outer_modulation = GpuOuterModulation::Combine
+        ))
         .with_owner_layer();
         let scene = test_scene(
             [1, 1],
@@ -11115,14 +10863,11 @@ mod tests {
                 rgba_resource(texture, [0; 4]),
                 rgba_resource(owner_texture, [255; 4]),
             ],
-            vec![GpuCommand::ObjectBatch {
+            vec![object_batch(
                 texture,
-                owner_texture: Some(owner_texture),
-                sprites: vec![sprite],
-                clip: None,
-                blend: GpuBlend::Normal,
-                gamma: false,
-            }],
+                vec![sprite],
+                fixture_options!(owner_texture = Some(owner_texture)),
+            )],
         );
         let mut renderer = test_renderer(&device, &queue);
         let _ = render_identity_readback(&mut renderer, &device, &queue, &scene);
@@ -11143,10 +10888,7 @@ mod tests {
 
     #[test]
     fn compact_fog_chunks_match_generic_pixels_through_both_axis_flips() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping compact fog-chunk parity check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "compact fog-chunk parity check");
         let texture = GpuTextureId::fresh();
         let mut pixels = Vec::with_capacity(128 * 128 * 4);
         for y in 0..128_u8 {
@@ -11155,14 +10897,6 @@ mod tests {
             }
         }
         let resource = GpuTextureResource::immutable_rgba(texture, 128, 128, pixels.into());
-        let normalized = |packed: u32| {
-            [
-                ((packed >> 16) & 0xff) as f32 / 255.0,
-                ((packed >> 8) & 0xff) as f32 / 255.0,
-                (packed & 0xff) as f32 / 255.0,
-                (packed >> 24) as f32 / 255.0,
-            ]
-        };
         let gamma = GpuGammaLut::from_ramp(&GammaRamp::from_control_points([
             0x102030, 0x708090, 0xd0e0f0,
         ]));
@@ -11214,15 +10948,15 @@ mod tests {
                         base.saturating_add(0x303b_2715),
                     ];
                     let mod2 = chunk_index % 2 != 0;
-                    sprites.push(GpuObjectSprite::new(
-                        positions,
-                        uv,
-                        modulation,
-                        GpuSampler::Linear,
-                        128.0,
-                        mod2,
-                        GpuOuterModulation::Combine,
-                    ));
+                    sprites.push(object_sprite(fixture_options!(
+                        positions = positions,
+                        uv = uv,
+                        modulation = modulation,
+                        sampler = GpuSampler::Linear,
+                        sample_tile_size = 128.0,
+                        mod2 = mod2,
+                        object_outer_modulation = GpuOuterModulation::Combine
+                    )));
                     let source_uv = [
                         [uv[0], uv[1]],
                         [uv[2], uv[1]],
@@ -11233,38 +10967,35 @@ mod tests {
                         GpuVertex::new(
                             positions[index],
                             source_uv[index],
-                            normalized(modulation[index]),
+                            packed_modulation(modulation[index]),
                         )
                         .with_sample_tile(0.0, 0.0, 128.0)
                     });
-                    generic.push(GpuCommand::Quad {
+                    generic.push(quad_command(
                         texture,
-                        owner_mask: None,
                         vertices,
-                        clip: None,
-                        blend: GpuBlend::Normal,
-                        base_mod2: mod2,
-                        owner_mod2: false,
-                        sampler: GpuSampler::Linear,
-                        gamma: true,
-                    });
+                        fixture_options!(
+                            base_mod2 = mod2,
+                            sampler = GpuSampler::Linear,
+                            gamma = true
+                        ),
+                    ));
                 }
-                let scene = |commands| GpuScene {
-                    logical_extent: [30, 30],
-                    clear: Color::new(17, 29, 43, 113),
-                    gamma: gamma.clone(),
-                    gamma_mode: GpuGammaMode::Fragment,
-                    textures: vec![resource.clone()],
-                    commands,
+                let scene = |commands| {
+                    GpuScene::new(
+                        [30, 30],
+                        Color::new(17, 29, 43, 113),
+                        gamma.clone(),
+                        GpuGammaMode::Fragment,
+                        vec![resource.clone()],
+                        commands,
+                    )
                 };
-                let compact = scene(vec![GpuCommand::ObjectBatch {
+                let compact = scene(vec![object_batch(
                     texture,
-                    owner_texture: None,
                     sprites,
-                    clip: None,
-                    blend: GpuBlend::Normal,
-                    gamma: true,
-                }]);
+                    fixture_options!(gamma = true),
+                )]);
                 let expanded = scene(generic);
                 let mut renderer = test_renderer(&device, &queue);
 
@@ -11289,10 +11020,7 @@ mod tests {
 
     #[test]
     fn compact_top_faces_and_generic_construction_fallback_match_expanded_pixels() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping compact TopFace/fallback parity check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "compact TopFace/fallback parity check");
         let object_texture = GpuTextureId::fresh();
         let construction_texture = GpuTextureId::fresh();
         let object_resource = GpuTextureResource::immutable_rgba(
@@ -11321,15 +11049,12 @@ mod tests {
             ]
         };
         let sprite = |positions, uv, modulation| {
-            GpuObjectSprite::new(
-                positions,
-                uv,
-                [modulation; 4],
-                GpuSampler::Nearest,
-                0.0,
-                false,
-                GpuOuterModulation::Combine,
-            )
+            object_sprite(fixture_options!(
+                positions = positions,
+                uv = uv,
+                modulation = [modulation; 4],
+                object_outer_modulation = GpuOuterModulation::Combine
+            ))
         };
         // This is the native list-wide order: every object base precedes every
         // TopFace, and the global construction facet remains a generic barrier.
@@ -11360,58 +11085,25 @@ mod tests {
             [0.0, 0.0, 1.0, 1.0],
             0x00ff_ffff,
         );
-        let normalized_modulation = |packed: u32| {
-            [
-                ((packed >> 16) & 0xff) as f32 / 255.0,
-                ((packed >> 8) & 0xff) as f32 / 255.0,
-                (packed & 0xff) as f32 / 255.0,
-                (packed >> 24) as f32 / 255.0,
-            ]
+        let generic_quad = |texture, sprite: GpuObjectSprite| {
+            quad_command(
+                texture,
+                object_quad_vertices(sprite, Some(GpuOuterModulation::Combine)),
+                fixture_options!(),
+            )
         };
-        let generic_vertices = |sprite: GpuObjectSprite| {
-            let uv = [
-                [sprite.uv[0], sprite.uv[1]],
-                [sprite.uv[2], sprite.uv[1]],
-                [sprite.uv[0], sprite.uv[3]],
-                [sprite.uv[2], sprite.uv[3]],
-            ];
-            std::array::from_fn(|index| {
-                GpuVertex::new(
-                    sprite.positions[index],
-                    uv[index],
-                    normalized_modulation(sprite.modulation[index]),
-                )
-                .with_outer_modulation(GpuOuterModulation::Combine)
-            })
-        };
-        let generic_quad = |texture, sprite: GpuObjectSprite| GpuCommand::Quad {
-            texture,
-            owner_mask: None,
-            vertices: generic_vertices(sprite),
-            clip: None,
-            blend: GpuBlend::Normal,
-            base_mod2: false,
-            owner_mod2: false,
-            sampler: GpuSampler::Nearest,
-            gamma: false,
-        };
-        let scene = |commands| GpuScene {
-            logical_extent: [5, 5],
-            clear: Color::opaque(8, 12, 24),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::identity()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![object_resource.clone(), construction_resource.clone()],
-            commands,
+        let scene = |commands| {
+            GpuScene::new(
+                [5, 5],
+                Color::opaque(8, 12, 24),
+                GpuGammaLut::from_ramp(&GammaRamp::identity()),
+                GpuGammaMode::Disabled,
+                vec![object_resource.clone(), construction_resource.clone()],
+                commands,
+            )
         };
         let compact = scene(vec![
-            GpuCommand::ObjectBatch {
-                texture: object_texture,
-                owner_texture: None,
-                sprites: object_sprites.clone(),
-                clip: None,
-                blend: GpuBlend::Normal,
-                gamma: false,
-            },
+            object_batch(object_texture, object_sprites.clone(), fixture_options!()),
             generic_quad(construction_texture, construction),
         ]);
         let mut expanded_commands = object_sprites
@@ -11435,22 +11127,18 @@ mod tests {
 
     #[test]
     fn compatible_pxs_line_commands_share_one_draw_of_compact_instances() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping compact PXS fragment check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "compact PXS fragment check");
         const SOLID: [u8; 4] = [255, 64, 32, 255];
         const CLEAR: [u8; 4] = [0, 0, 0, 255];
-        let line = |row: f32| GpuCommand::Solid {
-            vertices: vec![
-                solid_vertex(0.5, row, rgba_f32(SOLID)),
-                solid_vertex(3.5, row, rgba_f32(SOLID)),
-            ],
-            topology: GpuPrimitiveTopology::LineList,
-            alpha_mode: GpuSolidAlphaMode::SourceOver,
-            clip: None,
-            blend: GpuBlend::Replace,
-            style: GpuSolidStyle::NONE,
+        let line = |row: f32| {
+            solid_command(
+                vec![
+                    solid_vertex(0.5, row, rgba_f32(SOLID)),
+                    solid_vertex(3.5, row, rgba_f32(SOLID)),
+                ],
+                GpuPrimitiveTopology::LineList,
+                fixture_options!(),
+            )
         };
         let scene = test_scene(
             [6, 4],
@@ -11508,52 +11196,38 @@ mod tests {
 
     #[test]
     fn compact_sprite_matches_expanded_quad_modulation_modes_and_blends() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping compact sprite parity check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "compact sprite parity check");
         let texture = GpuTextureId::fresh();
         let packed_modulation = 0x407f_3fc0;
         let normalized_modulation = [127.0 / 255.0, 63.0 / 255.0, 192.0 / 255.0, 64.0 / 255.0];
         let gamma = GpuGammaLut::from_ramp(&GammaRamp::from_control_points([
             0x102030, 0x708090, 0xd0e0f0,
         ]));
-        let scene = |command| GpuScene {
-            logical_extent: [2, 2],
-            clear: Color::new(17, 29, 43, 113),
-            gamma: gamma.clone(),
-            gamma_mode: GpuGammaMode::Fragment,
-            textures: vec![rgba_resource(texture, [96, 144, 208, 191])],
-            commands: vec![command],
+        let scene = |command| {
+            GpuScene::new(
+                [2, 2],
+                Color::new(17, 29, 43, 113),
+                gamma.clone(),
+                GpuGammaMode::Fragment,
+                vec![rgba_resource(texture, [96, 144, 208, 191])],
+                vec![command],
+            )
         };
         let mut renderer = test_renderer(&device, &queue);
 
         for blend in [GpuBlend::Normal, GpuBlend::Additive] {
             for mod2 in [false, true] {
-                let expanded = scene(GpuCommand::Quad {
+                let expanded = scene(quad_command(
                     texture,
-                    owner_mask: None,
-                    vertices: quad(0.0, 0.0, 2.0, 2.0, 1.0, normalized_modulation),
-                    clip: None,
-                    blend,
-                    base_mod2: mod2,
-                    owner_mod2: false,
-                    sampler: GpuSampler::Nearest,
-                    gamma: true,
-                });
-                let compact = scene(GpuCommand::SpriteBatch {
+                    quad(0.0, 0.0, 2.0, 2.0, 1.0, normalized_modulation),
+                    fixture_options!(blend = blend, base_mod2 = mod2, gamma = true),
+                ));
+                let compact = scene(sprite_batch(
                     texture,
-                    quads: vec![GpuSpriteQuad {
-                        rect: [0.0, 0.0, 2.0, 2.0],
-                        uv: [0.0, 0.0, 1.0, 1.0],
-                        modulation: packed_modulation,
-                    }],
-                    clip: None,
-                    blend,
-                    mod2,
-                    gamma: true,
-                    outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
-                });
+                    [0.0, 0.0, 2.0, 2.0],
+                    packed_modulation,
+                    fixture_options!(blend = blend, mod2 = mod2, gamma = true),
+                ));
 
                 let expanded = render_identity_readback(&mut renderer, &device, &queue, &expanded);
                 let compact = render_identity_readback(&mut renderer, &device, &queue, &compact);
@@ -11570,13 +11244,13 @@ mod tests {
     fn recovery_validation_requires_every_command_texture_in_the_current_scene() {
         let texture = GpuTextureId::fresh();
         let identity = [1.0, 1.0, 1.0, 0.0];
-        let mut scene = GpuScene {
-            logical_extent: [2, 2],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Fragment,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Quad {
+        let mut scene = GpuScene::new(
+            [2, 2],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Fragment,
+            Vec::new(),
+            vec![GpuCommand::Quad {
                 texture,
                 owner_mask: None,
                 vertices: quad(0.0, 0.0, 2.0, 2.0, 1.0, identity),
@@ -11587,7 +11261,7 @@ mod tests {
                 sampler: GpuSampler::Nearest,
                 gamma: false,
             }],
-        };
+        );
         assert!(matches!(
             RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(2, 2)),
             Err(GpuRendererError::MissingTexture(id)) if id == texture
@@ -11603,21 +11277,14 @@ mod tests {
 
     #[test]
     fn compatible_particle_quads_share_one_painter_order_draw_call() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping particle draw-call batching check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "particle draw-call batching check");
         let texture = GpuTextureId::fresh();
-        let command = |modulation| GpuCommand::Quad {
-            texture,
-            owner_mask: None,
-            vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, modulation),
-            clip: None,
-            blend: GpuBlend::Normal,
-            base_mod2: false,
-            owner_mod2: false,
-            sampler: GpuSampler::Nearest,
-            gamma: false,
+        let command = |modulation| {
+            quad_command(
+                texture,
+                quad(0.0, 0.0, 1.0, 1.0, 1.0, modulation),
+                fixture_options!(),
+            )
         };
         let commands = vec![
             command([1.0, 0.0, 0.0, 127.0 / 255.0]),
@@ -11639,22 +11306,17 @@ mod tests {
 
     #[test]
     fn compatible_fogged_landscape_chunks_share_one_painter_order_draw_call() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping landscape draw-call coalescing check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "landscape draw-call coalescing check");
         let shared_base = GpuTextureId::fresh();
         let split_first_base = GpuTextureId::fresh();
         let split_second_base = GpuTextureId::fresh();
         let clip = Some(Rect::new(1, 0, 1, 1));
-        let chunk = |base, modulation| GpuCommand::Landscape {
-            base,
-            liquid_mask: None,
-            liquid: None,
-            vertices: quad(0.0, 0.0, 3.0, 1.0, 1.0, modulation),
-            clip,
-            phase: [0.0; 3],
-            gamma: false,
+        let chunk = |base, modulation| {
+            landscape_command(
+                base,
+                quad(0.0, 0.0, 3.0, 1.0, 1.0, modulation),
+                fixture_options!(clip = clip),
+            )
         };
         let scene =
             |textures, commands| test_scene([3, 1], Color::transparent(), textures, commands);
@@ -11698,10 +11360,7 @@ mod tests {
 
     #[test]
     fn compact_landscape_matches_the_forced_generic_path() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping compact landscape parity check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "compact landscape parity check");
         let texture = GpuTextureId::fresh();
         let modulation = [
             [255.0 / 255.0, 31.0 / 255.0, 63.0 / 255.0, 0.0],
@@ -11710,14 +11369,16 @@ mod tests {
             [255.0 / 255.0, 127.0 / 255.0, 63.0 / 255.0, 0.0],
         ];
         let compact_vertices = modulated_quad(0.0, 0.0, 3.0, 2.0, modulation);
-        let command = |vertices| GpuCommand::Landscape {
-            base: texture,
-            liquid_mask: None,
-            liquid: None,
-            vertices,
-            clip: Some(Rect::new(1, 0, 2, 2)),
-            phase: [0.25, -0.5, 0.75],
-            gamma: true,
+        let command = |vertices| {
+            landscape_command(
+                texture,
+                vertices,
+                fixture_options!(
+                    clip = Some(Rect::new(1, 0, 2, 2)),
+                    phase = [0.25, -0.5, 0.75],
+                    gamma = true
+                ),
+            )
         };
         let scene = |vertices| {
             let mut scene = test_scene(
@@ -11733,12 +11394,7 @@ mod tests {
             scene
         };
         let mut renderer = test_renderer(&device, &queue);
-        let presentation = GpuPresentation {
-            physical_extent: [5, 4],
-            scale: 1.5,
-            crop_top: 1,
-            world_zoom: 1.0,
-        };
+        let presentation = presentation([5, 4], 1.5, 1, 1.0);
 
         for smooth in [false, true] {
             renderer.set_smooth_landscape(smooth);
@@ -11767,19 +11423,14 @@ mod tests {
 
     #[test]
     fn generic_landscape_fallback_is_an_ordered_compact_stream_barrier() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping mixed landscape fallback check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "mixed landscape fallback check");
         let texture = GpuTextureId::fresh();
-        let command = |w, modulation| GpuCommand::Landscape {
-            base: texture,
-            liquid_mask: None,
-            liquid: None,
-            vertices: quad(0.0, 0.0, 1.0, 1.0, w, modulation),
-            clip: None,
-            phase: [0.0; 3],
-            gamma: false,
+        let command = |w, modulation| {
+            landscape_command(
+                texture,
+                quad(0.0, 0.0, 1.0, 1.0, w, modulation),
+                fixture_options!(),
+            )
         };
         let red = [1.0, 0.0, 0.0, 127.0 / 255.0];
         let green = [0.0, 1.0, 0.0, 127.0 / 255.0];
@@ -11819,25 +11470,18 @@ mod tests {
 
     #[test]
     fn compact_landscape_upload_updates_without_resizing_its_buffer() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping compact landscape upload check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "compact landscape upload check");
         let texture = GpuTextureId::fresh();
         let scene = |modulation| {
             test_scene(
                 [1, 1],
                 Color::transparent(),
                 vec![rgba_resource(texture, [255; 4])],
-                vec![GpuCommand::Landscape {
-                    base: texture,
-                    liquid_mask: None,
-                    liquid: None,
-                    vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, modulation),
-                    clip: None,
-                    phase: [0.0; 3],
-                    gamma: false,
-                }],
+                vec![landscape_command(
+                    texture,
+                    quad(0.0, 0.0, 1.0, 1.0, 1.0, modulation),
+                    fixture_options!(),
+                )],
             )
         };
         let mut renderer = test_renderer(&device, &queue);
@@ -11855,24 +11499,19 @@ mod tests {
 
     #[test]
     fn landscape_coalescing_keeps_binding_clip_and_layer_boundaries() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping landscape boundary check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "landscape boundary check");
         let base_a = GpuTextureId::fresh();
         let base_b = GpuTextureId::fresh();
         let mask_a = GpuTextureId::fresh();
         let mask_b = GpuTextureId::fresh();
         let liquid_a = GpuTextureId::fresh();
         let liquid_b = GpuTextureId::fresh();
-        let command = |base, liquid_mask, liquid, clip| GpuCommand::Landscape {
-            base,
-            liquid_mask,
-            liquid,
-            vertices: quad(0.0, 0.0, 2.0, 2.0, 1.0, [1.0, 1.0, 1.0, 0.0]),
-            clip,
-            phase: [0.0; 3],
-            gamma: false,
+        let command = |base, liquid_mask, liquid, clip| {
+            landscape_command(
+                base,
+                quad(0.0, 0.0, 2.0, 2.0, 1.0, [1.0, 1.0, 1.0, 0.0]),
+                fixture_options!(liquid_mask = liquid_mask, liquid = liquid, clip = clip),
+            )
         };
         let resources = vec![
             rgba_resource(base_a, [255, 0, 0, 255]),
@@ -11924,10 +11563,7 @@ mod tests {
 
     #[test]
     fn no_box_fades_landscape_triangles_keep_flat_colors_when_coalesced() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping NoBoxFades landscape parity check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "NoBoxFades landscape parity check");
         let shared_base = GpuTextureId::fresh();
         let split_first_base = GpuTextureId::fresh();
         let split_second_base = GpuTextureId::fresh();
@@ -11935,17 +11571,15 @@ mod tests {
         // and each strip triangle's provoking vertex colour for NoBoxFades
         // (src/StdGL.cpp:667,710-763).
         let corners = quad(0.0, 0.0, 4.0, 4.0, 1.0, [1.0; 4]);
-        let triangle = |base, indices: [usize; 4], modulation| GpuCommand::Landscape {
-            base,
-            liquid_mask: None,
-            liquid: None,
-            vertices: std::array::from_fn(|slot| {
-                let corner = corners[indices[slot]];
-                GpuVertex::new(corner.position, corner.uv, modulation)
-            }),
-            clip: None,
-            phase: [0.0; 3],
-            gamma: false,
+        let triangle = |base, indices: [usize; 4], modulation| {
+            landscape_command(
+                base,
+                std::array::from_fn(|slot| {
+                    let corner = corners[indices[slot]];
+                    GpuVertex::new(corner.position, corner.uv, modulation)
+                }),
+                fixture_options!(),
+            )
         };
         let scene =
             |textures, commands| test_scene([4, 4], Color::transparent(), textures, commands);
@@ -11999,10 +11633,7 @@ mod tests {
 
     #[test]
     fn liquid_phase_and_fragment_gamma_remain_per_chunk_when_coalesced() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping liquid landscape parity check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "liquid landscape parity check");
         let shared = [
             GpuTextureId::fresh(),
             GpuTextureId::fresh(),
@@ -12018,16 +11649,18 @@ mod tests {
             GpuTextureId::fresh(),
             GpuTextureId::fresh(),
         ];
-        let command =
-            |ids: [GpuTextureId; 3], left, right, modulation, phase, gamma| GpuCommand::Landscape {
-                base: ids[0],
-                liquid_mask: Some(ids[1]),
-                liquid: Some(ids[2]),
-                vertices: quad(left, 0.0, right, 1.0, 1.0, modulation),
-                clip: None,
-                phase,
-                gamma,
-            };
+        let command = |ids: [GpuTextureId; 3], left, right, modulation, phase, gamma| {
+            landscape_command(
+                ids[0],
+                quad(left, 0.0, right, 1.0, 1.0, modulation),
+                fixture_options!(
+                    liquid_mask = Some(ids[1]),
+                    liquid = Some(ids[2]),
+                    phase = phase,
+                    gamma = gamma
+                ),
+            )
+        };
         let resources = |ids: [GpuTextureId; 3]| {
             vec![
                 GpuTextureResource::immutable_rgba(
@@ -12039,15 +11672,7 @@ mod tests {
                         255,
                     ]),
                 ),
-                GpuTextureResource {
-                    id: ids[1],
-                    extent: [4, 1],
-                    revision: 0,
-                    base_revision: None,
-                    format: GpuTextureFormat::R8,
-                    pixels: Arc::from([255_u8; 4]),
-                    dirty: Vec::new(),
-                },
+                texture_resource(ids[1], [4, 1], GpuTextureFormat::R8, [255_u8; 4]),
                 rgba_resource_2x1(ids[2], [220, 96, 48, 255], [48, 208, 160, 255]),
             ]
         };
@@ -12074,13 +11699,15 @@ mod tests {
         let gamma = GpuGammaLut::from_ramp(&GammaRamp::from_control_points([
             0x102030, 0x708090, 0xd0e0f0,
         ]));
-        let scene = |textures, commands| GpuScene {
-            logical_extent: [2, 1],
-            clear: Color::new(11, 19, 31, 47),
-            gamma: gamma.clone(),
-            gamma_mode: GpuGammaMode::Fragment,
-            textures,
-            commands,
+        let scene = |textures, commands| {
+            GpuScene::new(
+                [2, 1],
+                Color::new(11, 19, 31, 47),
+                gamma.clone(),
+                GpuGammaMode::Fragment,
+                textures,
+                commands,
+            )
         };
         let coalesced = scene(resources(shared), vec![first(shared), second(shared)]);
         let forced_split = scene(
@@ -12118,21 +11745,16 @@ mod tests {
 
     #[test]
     fn adjacent_multi_tile_landscape_runs_keep_order_without_regrouping() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping multi-tile landscape parity check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "multi-tile landscape parity check");
         let tile_a = GpuTextureId::fresh();
         let tile_a_split = GpuTextureId::fresh();
         let tile_b = GpuTextureId::fresh();
-        let chunk = |base, left, right| GpuCommand::Landscape {
-            base,
-            liquid_mask: None,
-            liquid: None,
-            vertices: quad(left, 0.0, right, 1.0, 1.0, [1.0, 1.0, 1.0, 0.0]),
-            clip: None,
-            phase: [0.0; 3],
-            gamma: false,
+        let chunk = |base, left, right| {
+            landscape_command(
+                base,
+                quad(left, 0.0, right, 1.0, 1.0, [1.0, 1.0, 1.0, 0.0]),
+                fixture_options!(),
+            )
         };
         let scene = |commands| {
             test_scene(
@@ -12182,20 +11804,15 @@ mod tests {
 
     #[test]
     fn clipped_landscape_noop_does_not_split_a_compatible_run() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping clipped landscape run check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "clipped landscape run check");
         let visible_base = GpuTextureId::fresh();
         let clipped_base = GpuTextureId::fresh();
-        let chunk = |base, modulation, clip| GpuCommand::Landscape {
-            base,
-            liquid_mask: None,
-            liquid: None,
-            vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, modulation),
-            clip,
-            phase: [0.0; 3],
-            gamma: false,
+        let chunk = |base, modulation, clip| {
+            landscape_command(
+                base,
+                quad(0.0, 0.0, 1.0, 1.0, 1.0, modulation),
+                fixture_options!(clip = clip),
+            )
         };
         let scene = test_scene(
             [1, 1],
@@ -12224,196 +11841,104 @@ mod tests {
 
     #[test]
     fn compatible_quad_before_sprite_batch_keeps_every_painter_order_instance() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping mixed particle batch check");
-            return;
-        };
-        let texture = GpuTextureId::fresh();
-        let scene = test_scene(
-            [1, 1],
-            Color::transparent(),
-            vec![rgba_resource(texture, [255; 4])],
-            vec![
-                GpuCommand::Quad {
-                    texture,
-                    owner_mask: None,
-                    vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, [1.0, 0.0, 0.0, 127.0 / 255.0]),
-                    clip: None,
-                    blend: GpuBlend::Normal,
-                    base_mod2: false,
-                    owner_mod2: false,
-                    sampler: GpuSampler::Nearest,
-                    gamma: false,
-                },
-                GpuCommand::SpriteBatch {
-                    texture,
-                    quads: vec![GpuSpriteQuad {
-                        rect: [0.0, 0.0, 1.0, 1.0],
-                        uv: [0.0, 0.0, 1.0, 1.0],
-                        modulation: 0x7f00_ff00,
-                    }],
-                    clip: None,
-                    blend: GpuBlend::Normal,
-                    mod2: false,
-                    gamma: false,
-                    outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
-                },
-            ],
+        assert_single_texture_commands(
+            "mixed particle batch check",
+            |texture| {
+                vec![
+                    quad_command(
+                        texture,
+                        quad(0.0, 0.0, 1.0, 1.0, 1.0, [1.0, 0.0, 0.0, 127.0 / 255.0]),
+                        fixture_options!(),
+                    ),
+                    sprite_batch(
+                        texture,
+                        [0.0, 0.0, 1.0, 1.0],
+                        0x7f00_ff00,
+                        fixture_options!(),
+                    ),
+                ]
+            },
+            [64, 128, 0, 192],
+            2,
         );
-        let mut renderer = test_renderer(&device, &queue);
-
-        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
-
-        assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
-        assert_eq!(renderer.last_stats().draw_calls, 2);
     }
 
     #[test]
     fn clipped_quad_does_not_consume_following_visible_sprite_batch() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping clipped mixed particle batch check");
-            return;
-        };
-        let texture = GpuTextureId::fresh();
-        let scene = test_scene(
-            [1, 1],
-            Color::transparent(),
-            vec![rgba_resource(texture, [255; 4])],
-            vec![
-                GpuCommand::Quad {
-                    texture,
-                    owner_mask: None,
-                    vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0]),
-                    clip: Some(Rect::new(2, 0, 1, 1)),
-                    blend: GpuBlend::Normal,
-                    base_mod2: false,
-                    owner_mod2: false,
-                    sampler: GpuSampler::Nearest,
-                    gamma: false,
-                },
-                GpuCommand::SpriteBatch {
-                    texture,
-                    quads: vec![GpuSpriteQuad {
-                        rect: [0.0, 0.0, 1.0, 1.0],
-                        uv: [0.0, 0.0, 1.0, 1.0],
-                        modulation: 0x0000_ff00,
-                    }],
-                    clip: None,
-                    blend: GpuBlend::Normal,
-                    mod2: false,
-                    gamma: false,
-                    outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
-                },
-            ],
+        assert_single_texture_commands(
+            "clipped mixed particle batch check",
+            |texture| {
+                vec![
+                    quad_command(
+                        texture,
+                        quad(0.0, 0.0, 1.0, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0]),
+                        fixture_options!(clip = Some(Rect::new(2, 0, 1, 1))),
+                    ),
+                    sprite_batch(
+                        texture,
+                        [0.0, 0.0, 1.0, 1.0],
+                        0x0000_ff00,
+                        fixture_options!(),
+                    ),
+                ]
+            },
+            [0, 255, 0, 255],
+            1,
         );
-        let mut renderer = test_renderer(&device, &queue);
-
-        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
-
-        assert_eq!(frame.rgba, vec![0, 255, 0, 255]);
-        assert_eq!(renderer.last_stats().draw_calls, 1);
     }
 
     #[test]
     fn sprite_batch_before_compatible_quad_keeps_every_painter_order_instance() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping reverse mixed particle batch check");
-            return;
-        };
-        let texture = GpuTextureId::fresh();
-        let scene = test_scene(
-            [1, 1],
-            Color::transparent(),
-            vec![rgba_resource(texture, [255; 4])],
-            vec![
-                GpuCommand::SpriteBatch {
-                    texture,
-                    quads: vec![GpuSpriteQuad {
-                        rect: [0.0, 0.0, 1.0, 1.0],
-                        uv: [0.0, 0.0, 1.0, 1.0],
-                        modulation: 0x7fff_0000,
-                    }],
-                    clip: None,
-                    blend: GpuBlend::Normal,
-                    mod2: false,
-                    gamma: false,
-                    outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
-                },
-                GpuCommand::Quad {
-                    texture,
-                    owner_mask: None,
-                    vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, [0.0, 1.0, 0.0, 127.0 / 255.0]),
-                    clip: None,
-                    blend: GpuBlend::Normal,
-                    base_mod2: false,
-                    owner_mod2: false,
-                    sampler: GpuSampler::Nearest,
-                    gamma: false,
-                },
-            ],
+        assert_single_texture_commands(
+            "reverse mixed particle batch check",
+            |texture| {
+                vec![
+                    sprite_batch(
+                        texture,
+                        [0.0, 0.0, 1.0, 1.0],
+                        0x7fff_0000,
+                        fixture_options!(),
+                    ),
+                    quad_command(
+                        texture,
+                        quad(0.0, 0.0, 1.0, 1.0, 1.0, [0.0, 1.0, 0.0, 127.0 / 255.0]),
+                        fixture_options!(),
+                    ),
+                ]
+            },
+            [64, 128, 0, 192],
+            2,
         );
-        let mut renderer = test_renderer(&device, &queue);
-
-        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
-
-        assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
-        assert_eq!(renderer.last_stats().draw_calls, 2);
     }
 
     #[test]
     fn compatible_adjacent_sprite_batches_share_one_painter_order_draw_call() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping compact sprite coalescing check");
-            return;
-        };
-        let texture = GpuTextureId::fresh();
-        let batch = |modulation| GpuCommand::SpriteBatch {
-            texture,
-            quads: vec![GpuSpriteQuad {
-                rect: [0.0, 0.0, 1.0, 1.0],
-                uv: [0.0, 0.0, 1.0, 1.0],
-                modulation,
-            }],
-            clip: None,
-            blend: GpuBlend::Normal,
-            mod2: false,
-            gamma: false,
-            outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
-        };
-        let scene = test_scene(
-            [1, 1],
-            Color::transparent(),
-            vec![rgba_resource(texture, [255; 4])],
-            vec![batch(0x7fff_0000), batch(0x7f00_ff00)],
+        assert_single_texture_commands(
+            "compact sprite coalescing check",
+            |texture| {
+                [0x7fff_0000, 0x7f00_ff00]
+                    .map(|modulation| {
+                        sprite_batch(
+                            texture,
+                            [0.0, 0.0, 1.0, 1.0],
+                            modulation,
+                            fixture_options!(),
+                        )
+                    })
+                    .into()
+            },
+            [64, 128, 0, 192],
+            1,
         );
-        let mut renderer = test_renderer(&device, &queue);
-
-        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
-
-        assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
-        assert_eq!(renderer.last_stats().draw_calls, 1);
     }
 
     #[test]
     fn fire_like_sprite_batches_keep_texture_and_blend_state_boundaries() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping Fire-like sprite state check");
-            return;
-        };
+        gpu_or_skip!(device, queue, "Fire-like sprite state check");
         let fire_texture = GpuTextureId::fresh();
         let fire2_texture = GpuTextureId::fresh();
-        let batch = |texture, rect, modulation, blend| GpuCommand::SpriteBatch {
-            texture,
-            quads: vec![GpuSpriteQuad {
-                rect,
-                uv: [0.0, 0.0, 1.0, 1.0],
-                modulation,
-            }],
-            clip: None,
-            blend,
-            mod2: false,
-            gamma: false,
-            outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
+        let batch = |texture, rect, modulation, blend| {
+            sprite_batch(texture, rect, modulation, fixture_options!(blend = blend))
         };
         let scene = test_scene(
             [2, 1],
@@ -12452,14 +11977,14 @@ mod tests {
         resource.revision = 4;
         resource.base_revision = Some(4);
         resource.dirty = vec![Rect::new(0, 0, 1, 1)];
-        let mut scene = GpuScene {
-            logical_extent: [2, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Fragment,
-            textures: vec![resource],
-            commands: Vec::new(),
-        };
+        let mut scene = GpuScene::new(
+            [2, 1],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Fragment,
+            vec![resource],
+            Vec::new(),
+        );
         assert!(matches!(
             RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(2, 1)),
             Err(GpuRendererError::DirtyRevisionNotAdvanced {
@@ -12478,13 +12003,13 @@ mod tests {
 
     #[test]
     fn recovery_validation_rejects_projection_overflow_before_gpu_mutation() {
-        let scene = GpuScene {
-            logical_extent: [2, 2],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Fragment,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Solid {
+        let scene = GpuScene::new(
+            [2, 2],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Fragment,
+            Vec::new(),
+            vec![GpuCommand::Solid {
                 vertices: vec![GpuSolidVertex {
                     position: [f32::MAX, 0.5, 1.0],
                     color: [1.0, 1.0, 1.0, 1.0],
@@ -12496,17 +12021,9 @@ mod tests {
                 blend: GpuBlend::Replace,
                 style: GpuSolidStyle::NONE,
             }],
-        };
+        );
         assert!(matches!(
-            RetainedGpuRenderer::validate_scene(
-                &scene,
-                &GpuPresentation {
-                    physical_extent: [2, 2],
-                    scale: 2.0,
-                    crop_top: 0,
-                    world_zoom: 1.0,
-                }
-            ),
+            RetainedGpuRenderer::validate_scene(&scene, &presentation([2, 2], 2.0, 0, 1.0)),
             Err(GpuRendererError::NonFiniteCoordinate)
         ));
     }
@@ -12514,13 +12031,15 @@ mod tests {
     #[test]
     fn layered_validation_rejects_conflicting_complete_texture_backing() {
         let id = GpuTextureId::fresh();
-        let scene = |pixel| GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Fragment,
-            textures: vec![rgba_resource(id, pixel)],
-            commands: Vec::new(),
+        let scene = |pixel| {
+            GpuScene::new(
+                [1, 1],
+                Color::transparent(),
+                GpuGammaLut::from_ramp(&GammaRamp::standard()),
+                GpuGammaMode::Fragment,
+                vec![rgba_resource(id, pixel)],
+                Vec::new(),
+            )
         };
         let first = scene([1, 2, 3, 255]);
         let second = scene([4, 5, 6, 255]);
@@ -12601,13 +12120,13 @@ mod tests {
         let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let gamma = GpuGammaLut::from_ramp(&GammaRamp::standard());
-        let base = GpuScene {
-            logical_extent: [4, 3],
-            clear: Color::opaque(10, 20, 30),
-            gamma: gamma.clone(),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Solid {
+        let base = GpuScene::new(
+            [4, 3],
+            Color::opaque(10, 20, 30),
+            gamma.clone(),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![GpuCommand::Solid {
                 vertices: vec![solid_vertex(2.5, 1.5, rgba_f32(POINT))],
                 topology: GpuPrimitiveTopology::PointList,
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
@@ -12615,14 +12134,14 @@ mod tests {
                 blend: GpuBlend::Replace,
                 style: GpuSolidStyle::NONE,
             }],
-        };
-        let physical_text = GpuScene {
-            logical_extent: [8, 6],
-            clear: Color::transparent(),
+        );
+        let physical_text = GpuScene::new(
+            [8, 6],
+            Color::transparent(),
             gamma,
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Solid {
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![GpuCommand::Solid {
                 vertices: vec![solid_vertex(5.5, 2.5, rgba_f32(MAGENTA))],
                 topology: GpuPrimitiveTopology::PointList,
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
@@ -12630,7 +12149,7 @@ mod tests {
                 blend: GpuBlend::Replace,
                 style: GpuSolidStyle::NONE,
             }],
-        };
+        );
         let physical_extent = [8, 6];
         let layers = [
             GpuSceneLayer::new(
@@ -12952,15 +12471,6 @@ mod tests {
         source_extent: [u32; 2],
         revision: u64,
     ) -> GpuScene {
-        let corner = |x: f32, y: f32, u: f32, v: f32| GpuVertex {
-            position: [x, y, 1.0],
-            uv: [u, v],
-            modulation: [1.0, 1.0, 1.0, 0.0],
-            owner_modulation: [0.0; 4],
-            outer_modulation: clonk_graphics::GpuOuterModulation::default(),
-            owner_outer_modulation: clonk_graphics::GpuOuterModulation::default(),
-            sample_tile: [0.0; 4],
-        };
         let mut resource = GpuTextureResource::immutable_rgba(
             base,
             source_extent[0],
@@ -12979,13 +12489,13 @@ mod tests {
             outer_modulation: clonk_graphics::GpuOuterModulation::Ignore,
             ..vertex
         });
-        GpuScene {
+        GpuScene::new(
             logical_extent,
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![resource],
-            commands: vec![
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
+            vec![resource],
+            vec![
                 GpuCommand::Landscape {
                     base,
                     liquid_mask: None,
@@ -13007,7 +12517,47 @@ mod tests {
                     gamma: false,
                 },
             ],
+        )
+    }
+
+    fn incremental_recompose_fixture(
+        label: &'static str,
+        extent: [u32; 2],
+        detail: u32,
+        rows: std::ops::Range<usize>,
+        columns: std::ops::Range<usize>,
+    ) -> Option<(GpuReadbackFrame, GpuReadbackFrame, u64)> {
+        let (_runtime, _instance, _adapter, device, queue) = test_wgpu_device(label, true)?;
+        let base = GpuTextureId::fresh();
+        let source_extent = [extent[0] * detail, extent[1] * detail];
+        let scene = shader_landscape_scene_fixture(base, extent, source_extent, 1);
+        let plan = shader_landscape_plan_fixture(extent);
+        let mut edited = plan.clone();
+        for row in rows {
+            for column in columns.clone() {
+                let texel = row * extent[0] as usize + column;
+                edited.index_plane[texel] = u8::from(edited.index_plane[texel] == 0);
+            }
         }
+
+        // Incremental: the edit lands on a composer that already holds the
+        // previous composition and its output.
+        let mut incremental = test_renderer(&device, &queue);
+        incremental.set_shader_landscape(true);
+        incremental.set_landscape_detail(detail);
+        incremental.set_pending_shader_landscape(Some((base, plan)));
+        let _ = render_identity_readback(&mut incremental, &device, &queue, &scene);
+        incremental.set_pending_shader_landscape(Some((base, edited.clone())));
+        let after_edit = render_identity_readback(&mut incremental, &device, &queue, &scene);
+        let composed = incremental.last_stats().shader_landscape_composed_texels;
+
+        // From scratch: the same plan with nothing retained.
+        let mut fresh = test_renderer(&device, &queue);
+        fresh.set_shader_landscape(true);
+        fresh.set_landscape_detail(detail);
+        fresh.set_pending_shader_landscape(Some((base, edited)));
+        let from_scratch = render_identity_readback(&mut fresh, &device, &queue, &scene);
+        Some((after_edit, from_scratch, composed))
     }
 
     fn shader_landscape_shading_plane(extent: [u32; 2]) -> Vec<u8> {
@@ -13142,75 +12692,24 @@ mod tests {
         inputs: ShaderLandscapeInputs<'_>,
     ) -> Vec<u8> {
         let extent = inputs.composed_extent();
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lc_gpu_shader_landscape_test_target"),
-            size: wgpu::Extent3d {
-                width: extent[0],
-                height: extent[1],
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_shader_landscape_test_encoder"),
-        });
+        let (target, view) = test_target(
+            device,
+            "lc_gpu_shader_landscape_test_target",
+            [extent[0], extent[1]],
+            wgpu::TextureFormat::Rgba8Unorm,
+            true,
+        );
+        let mut encoder = test_encoder(device, "lc_gpu_shader_landscape_test_encoder");
         composer
             .compose_into(device, queue, &mut encoder, &view, inputs)
             .expect("compose landscape materials in the fragment shader");
-        let padded = (extent[0] as usize * 4).div_ceil(256) * 256;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("lc_gpu_shader_landscape_test_readback"),
-            size: (padded * extent[1] as usize) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded as u32),
-                    rows_per_image: Some(extent[1]),
-                },
-            },
-            wgpu::Extent3d {
-                width: extent[0],
-                height: extent[1],
-                depth_or_array_layers: 1,
-            },
-        );
+        let ticket = encode_readback(device, &mut encoder, &target, extent)
+            .expect("encode shader landscape readback");
         queue.submit(Some(encoder.finish()));
-        let slice = buffer.slice(..);
-        let (sender, receiver) = mpsc::sync_channel(1);
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("poll shader landscape readback");
-        receiver
-            .recv()
-            .expect("shader landscape readback callback")
-            .expect("map shader landscape readback");
-        let mapped = slice
-            .get_mapped_range()
-            .expect("map shader landscape readback range");
-        let row_bytes = extent[0] as usize * 4;
-        (0..extent[1] as usize)
-            .flat_map(|row| mapped[row * padded..row * padded + row_bytes].to_vec())
-            .collect()
+        ticket
+            .read(device)
+            .expect("map shader landscape readback")
+            .rgba
     }
 
     /// ACCEPTANCE: at detail 1 the fragment composer must be byte-identical to
@@ -13218,10 +12717,7 @@ mod tests {
     /// `Graphics.ShaderLandscape` a silent divergence rather than an opt-in.
     #[test]
     fn shader_landscape_composition_matches_the_cpu_reference() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping shader landscape composition readback");
-            return;
-        };
+        gpu_or_skip!(device, queue, "shader landscape composition readback");
         let extent = [16_u32, 12_u32];
         let index_plane = shader_landscape_index_plane(extent);
         let shading_plane = shader_landscape_shading_plane(extent);
@@ -13301,54 +12797,24 @@ mod tests {
     /// taking the plan, a stale one would recompose over a later landscape.
     #[test]
     fn a_pending_plan_replaces_the_landscape_texture_at_its_composed_extent() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping shader landscape substitution");
-            return;
-        };
+        gpu_or_skip!(device, queue, "shader landscape substitution");
         let extent = [16_u32, 12_u32];
-        let (atlas_extent, atlas, _) = shader_landscape_atlas();
-        let plan = clonk_graphics::ShaderLandscapePlan {
-            extent,
-            index_plane: shader_landscape_index_plane(extent),
-            shading_plane: None,
-            atlas,
-            atlas_extent,
-            slots: shader_landscape_slots()
-                .iter()
-                .map(|slot| {
-                    let mut words = [0_u32; 16];
-                    words[0..4].copy_from_slice(&slot.colors);
-                    words[4..8].copy_from_slice(&slot.params);
-                    words[8..12].copy_from_slice(&slot.primary);
-                    words[12..16].copy_from_slice(&slot.overlay);
-                    words
-                })
-                .collect(),
-        };
+        let plan = shader_landscape_plan_fixture(extent);
 
         let base = GpuTextureId::fresh();
-        let corner = |x: f32, y: f32, u: f32, v: f32| GpuVertex {
-            position: [x, y, 1.0],
-            uv: [u, v],
-            modulation: [1.0, 1.0, 1.0, 0.0],
-            owner_modulation: [0.0; 4],
-            outer_modulation: clonk_graphics::GpuOuterModulation::default(),
-            owner_outer_modulation: clonk_graphics::GpuOuterModulation::default(),
-            sample_tile: [0.0; 4],
-        };
         // The CPU-composed upload the plan is expected to displace.
-        let scene = GpuScene {
-            logical_extent: extent,
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![GpuTextureResource::immutable_rgba(
+        let scene = GpuScene::new(
+            extent,
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
+            vec![GpuTextureResource::immutable_rgba(
                 base,
                 extent[0],
                 extent[1],
                 vec![0_u8; (extent[0] * extent[1] * 4) as usize].into(),
             )],
-            commands: vec![GpuCommand::Landscape {
+            vec![GpuCommand::Landscape {
                 base,
                 liquid_mask: None,
                 liquid: None,
@@ -13362,7 +12828,7 @@ mod tests {
                 phase: [0.0; 3],
                 gamma: false,
             }],
-        };
+        );
 
         for (detail, expected) in [(1_u32, extent), (3, [extent[0] * 3, extent[1] * 3])] {
             let mut renderer = test_renderer(&device, &queue);
@@ -13627,10 +13093,7 @@ mod tests {
         // configured opt-ins mid-session with nothing to re-apply them: the
         // renderer is a local in `main` that GameApp never holds, so the
         // options dialog cannot push them back either.
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping renderer recreate flag carry-over");
-            return;
-        };
+        gpu_or_skip!(device, queue, "renderer recreate flag carry-over");
         let mut renderer = test_renderer(&device, &queue);
         renderer.set_mipmaps(true);
         renderer.set_smooth_landscape(true);
@@ -13667,10 +13130,7 @@ mod tests {
     /// pixel — which is exactly the detail the CPU composer cannot express.
     #[test]
     fn shader_landscape_detail_supersamples_the_same_terrain() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping shader landscape detail readback");
-            return;
-        };
+        gpu_or_skip!(device, queue, "shader landscape detail readback");
         let extent = [16_u32, 12_u32];
         let index_plane = shader_landscape_index_plane(extent);
         let (atlas_extent, atlas, _) = shader_landscape_atlas();
@@ -14099,47 +13559,21 @@ mod tests {
     /// parity tests compose on a fresh composer every time and would miss it.
     #[test]
     fn an_incremental_recompose_matches_composing_the_same_plan_from_scratch() {
-        let Some((_runtime, _instance, _adapter, device, queue)) =
-            test_wgpu_device("lc_gpu_shader_landscape_scissor_device", true)
-        else {
+        let Some((after_edit, from_scratch, composed)) = incremental_recompose_fixture(
+            "lc_gpu_shader_landscape_scissor_device",
+            [32, 32],
+            1,
+            8..11,
+            5..9,
+        ) else {
             return;
         };
-        let extent = [32_u32, 32_u32];
-        let base = GpuTextureId::fresh();
-        let scene = shader_landscape_scene_fixture(base, extent, extent, 1);
-        let plan = shader_landscape_plan_fixture(extent);
-
-        let mut edited = plan.clone();
-        for row in 8..11_usize {
-            for column in 5..9_usize {
-                let texel = row * extent[0] as usize + column;
-                edited.index_plane[texel] = u8::from(edited.index_plane[texel] == 0);
-            }
-        }
-
-        // Incremental: the edit lands on a composer that already holds the
-        // previous composition and its output.
-        let mut incremental = test_renderer(&device, &queue);
-        incremental.set_shader_landscape(true);
-        incremental.set_landscape_detail(1);
-        incremental.set_pending_shader_landscape(Some((base, plan)));
-        let _ = render_identity_readback(&mut incremental, &device, &queue, &scene);
-        incremental.set_pending_shader_landscape(Some((base, edited.clone())));
-        let after_edit = render_identity_readback(&mut incremental, &device, &queue, &scene);
-        let composed = incremental.last_stats().shader_landscape_composed_texels;
-
-        // From scratch: the same plan with nothing retained.
-        let mut fresh = test_renderer(&device, &queue);
-        fresh.set_shader_landscape(true);
-        fresh.set_landscape_detail(1);
-        fresh.set_pending_shader_landscape(Some((base, edited)));
-        let from_scratch = render_identity_readback(&mut fresh, &device, &queue, &scene);
 
         assert_eq!(
             after_edit, from_scratch,
             "an incrementally recomposed landscape must be the landscape"
         );
-        let full = u64::from(extent[0]) * u64::from(extent[1]);
+        let full = 32 * 32;
         assert!(
             composed < full,
             "a 4x3 edit recomposed {composed} of {full} texels"
@@ -14156,42 +13590,16 @@ mod tests {
     /// for detail 2–4 to keep the same semantics.
     #[test]
     fn an_incremental_recompose_at_detail_matches_composing_from_scratch() {
-        let Some((_runtime, _instance, _adapter, device, queue)) =
-            test_wgpu_device("lc_gpu_shader_landscape_scissor_detail_device", true)
-        else {
+        let detail = 3_u32;
+        let Some((after_edit, from_scratch, composed)) = incremental_recompose_fixture(
+            "lc_gpu_shader_landscape_scissor_detail_device",
+            [16, 16],
+            detail,
+            6..9,
+            4..7,
+        ) else {
             return;
         };
-        let extent = [16_u32, 16_u32];
-        let detail = 3_u32;
-        let base = GpuTextureId::fresh();
-        let source_extent = [extent[0] * detail, extent[1] * detail];
-        let scene = shader_landscape_scene_fixture(base, extent, source_extent, 1);
-        let plan = shader_landscape_plan_fixture(extent);
-
-        // An edit that does not start at the origin: an off-by-one in the
-        // scaled origin shows up as a shifted patch rather than a missing one.
-        let mut edited = plan.clone();
-        for row in 6..9_usize {
-            for column in 4..7_usize {
-                let texel = row * extent[0] as usize + column;
-                edited.index_plane[texel] = u8::from(edited.index_plane[texel] == 0);
-            }
-        }
-
-        let mut incremental = test_renderer(&device, &queue);
-        incremental.set_shader_landscape(true);
-        incremental.set_landscape_detail(detail);
-        incremental.set_pending_shader_landscape(Some((base, plan)));
-        let _ = render_identity_readback(&mut incremental, &device, &queue, &scene);
-        incremental.set_pending_shader_landscape(Some((base, edited.clone())));
-        let after_edit = render_identity_readback(&mut incremental, &device, &queue, &scene);
-        let composed = incremental.last_stats().shader_landscape_composed_texels;
-
-        let mut fresh = test_renderer(&device, &queue);
-        fresh.set_shader_landscape(true);
-        fresh.set_landscape_detail(detail);
-        fresh.set_pending_shader_landscape(Some((base, edited)));
-        let from_scratch = render_identity_readback(&mut fresh, &device, &queue, &scene);
 
         assert_eq!(
             after_edit, from_scratch,
@@ -14430,29 +13838,16 @@ mod tests {
         let liquid = GpuTextureId::fresh();
         let textures = vec![
             GpuTextureResource::immutable_rgba(base, 2, 1, vec![200, 0, 0, 255, 0, 0, 0, 0].into()),
-            GpuTextureResource {
-                format: GpuTextureFormat::R8,
-                pixels: vec![0_u8; 2].into(),
-                ..GpuTextureResource::immutable_rgba(mask, 2, 1, vec![0_u8; 8].into())
-            },
+            texture_resource(mask, [2, 1], GpuTextureFormat::R8, vec![0_u8; 2]),
             GpuTextureResource::immutable_rgba(liquid, 1, 1, vec![128, 128, 128, 255].into()),
         ];
-        let corner = |x: f32, y: f32, u: f32, v: f32| GpuVertex {
-            position: [x, y, 1.0],
-            uv: [u, v],
-            modulation: [1.0, 1.0, 1.0, 0.0],
-            owner_modulation: [0.0; 4],
-            outer_modulation: clonk_graphics::GpuOuterModulation::default(),
-            owner_outer_modulation: clonk_graphics::GpuOuterModulation::default(),
-            sample_tile: [0.0; 4],
-        };
-        let scene = GpuScene {
-            logical_extent: [16, 4],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
+        let scene = GpuScene::new(
+            [16, 4],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
             textures,
-            commands: vec![GpuCommand::Landscape {
+            vec![GpuCommand::Landscape {
                 base,
                 liquid_mask: Some(mask),
                 liquid: Some(liquid),
@@ -14466,7 +13861,7 @@ mod tests {
                 phase: [0.0; 3],
                 gamma: false,
             }],
-        };
+        );
 
         let row = |renderer: &mut RetainedGpuRenderer| {
             let frame = render_identity_readback(renderer, &device, &queue, &scene);
@@ -14605,14 +14000,14 @@ mod tests {
             "previous-frame capture must retain the presented monitor-gamma target",
         );
 
-        let hidden = GpuScene {
-            logical_extent: LOGICAL,
-            clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
-            gamma: scene.gamma.clone(),
-            gamma_mode: scene.gamma_mode,
-            textures: Vec::new(),
-            commands: Vec::new(),
-        };
+        let hidden = GpuScene::new(
+            LOGICAL,
+            Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
+            scene.gamma.clone(),
+            scene.gamma_mode,
+            Vec::new(),
+            Vec::new(),
+        );
         let _ = render_identity_readback(&mut renderer, &device, &queue, &hidden);
         assert_eq!(
             renderer.last_stats().resident_source_textures,
@@ -14633,12 +14028,7 @@ mod tests {
             &device,
             &queue,
             &scene,
-            &GpuPresentation {
-                physical_extent: [LOGICAL[0] * 2, LOGICAL[1] * 2],
-                scale: 2.0,
-                crop_top: 0,
-                world_zoom: 1.0,
-            },
+            &presentation([LOGICAL[0] * 2, LOGICAL[1] * 2], 2.0, 0, 1.0),
         );
         for y in 8..10 {
             for x in 12..14 {
@@ -14651,34 +14041,19 @@ mod tests {
         }
         assert_eq!(readback_pixel(&scaled, 14, 8), CLEAR);
 
-        let point_scene = GpuScene {
-            logical_extent: LOGICAL,
-            clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
-            gamma: scene.gamma.clone(),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![scene.commands.last().expect("point command").clone()],
-        };
+        let point_scene = GpuScene::new(
+            LOGICAL,
+            Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
+            scene.gamma.clone(),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![scene.commands.last().expect("point command").clone()],
+        );
         for (label, presentation, x_range, y_range) in [
-            (
-                "scale-1.5",
-                GpuPresentation {
-                    physical_extent: [12, 9],
-                    scale: 1.5,
-                    crop_top: 0,
-                    world_zoom: 1.0,
-                },
-                9..11,
-                6..8,
-            ),
+            ("scale-1.5", presentation([12, 9], 1.5, 0, 1.0), 9..11, 6..8),
             (
                 "scale-2",
-                GpuPresentation {
-                    physical_extent: [16, 12],
-                    scale: 2.0,
-                    crop_top: 0,
-                    world_zoom: 1.0,
-                },
+                presentation([16, 12], 2.0, 0, 1.0),
                 12..14,
                 8..10,
             ),
@@ -14701,13 +14076,13 @@ mod tests {
             }
         }
 
-        let line_scene = GpuScene {
-            logical_extent: [6, 4],
-            clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Solid {
+        let line_scene = GpuScene::new(
+            [6, 4],
+            Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![GpuCommand::Solid {
                 // DrawLineDw adds 0.5 before GL_LINES and installs
                 // glLineWidth(Application.GetScale()).
                 vertices: vec![
@@ -14720,18 +14095,13 @@ mod tests {
                 blend: GpuBlend::Replace,
                 style: GpuSolidStyle::NONE,
             }],
-        };
+        );
         let scaled_line = render_readback(
             &mut renderer,
             &device,
             &queue,
             &line_scene,
-            &GpuPresentation {
-                physical_extent: [12, 8],
-                scale: 2.0,
-                crop_top: 0,
-                world_zoom: 1.0,
-            },
+            &presentation([12, 8], 2.0, 0, 1.0),
         );
         for y in 0..8 {
             for x in 0..12 {
@@ -14758,12 +14128,7 @@ mod tests {
             &device,
             &queue,
             &reverse_line_scene,
-            &GpuPresentation {
-                physical_extent: [12, 8],
-                scale: 2.0,
-                crop_top: 0,
-                world_zoom: 1.0,
-            },
+            &presentation([12, 8], 2.0, 0, 1.0),
         );
         for y in 0..8 {
             for x in 0..12 {
@@ -14780,13 +14145,13 @@ mod tests {
             }
         }
 
-        let diagonal_line_scene = GpuScene {
-            logical_extent: [5, 4],
-            clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Solid {
+        let diagonal_line_scene = GpuScene::new(
+            [5, 4],
+            Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![GpuCommand::Solid {
                 vertices: vec![
                     solid_vertex(0.5, 0.5, rgba_f32(SOLID)),
                     solid_vertex(4.5, 2.5, rgba_f32(SOLID)),
@@ -14797,19 +14162,16 @@ mod tests {
                 blend: GpuBlend::Replace,
                 style: GpuSolidStyle::NONE,
             }],
-        };
+        );
         let negative_diagonal_line_scene = GpuScene {
-            commands: vec![GpuCommand::Solid {
-                vertices: vec![
+            commands: vec![solid_command(
+                vec![
                     solid_vertex(0.5, 2.5, rgba_f32(SOLID)),
                     solid_vertex(4.5, 0.5, rgba_f32(SOLID)),
                 ],
-                topology: GpuPrimitiveTopology::LineList,
-                alpha_mode: GpuSolidAlphaMode::SourceOver,
-                clip: None,
-                blend: GpuBlend::Replace,
-                style: GpuSolidStyle::NONE,
-            }],
+                GpuPrimitiveTopology::LineList,
+                fixture_options!(),
+            )],
             ..diagonal_line_scene.clone()
         };
         for (label, scene, expected_pixels) in [
@@ -14865,13 +14227,13 @@ mod tests {
             }
         }
 
-        let frame_scene = GpuScene {
-            logical_extent: [6, 6],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Solid {
+        let frame_scene = GpuScene::new(
+            [6, 6],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![GpuCommand::Solid {
                 vertices: [
                     (1.5, 1.5),
                     (4.5, 1.5),
@@ -14891,7 +14253,7 @@ mod tests {
                 blend: GpuBlend::Normal,
                 style: GpuSolidStyle::NONE,
             }],
-        };
+        );
         let frame = render_identity_readback(&mut renderer, &device, &queue, &frame_scene);
         for y in 0..6 {
             for x in 0..6 {
@@ -14906,13 +14268,13 @@ mod tests {
             }
         }
 
-        let translucent_point_scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::new(0, 0, 0, 128),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Solid {
+        let translucent_point_scene = GpuScene::new(
+            [1, 1],
+            Color::new(0, 0, 0, 128),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![GpuCommand::Solid {
                 vertices: vec![solid_vertex(0.5, 0.5, rgba_f32([200, 100, 50, 64]))],
                 topology: GpuPrimitiveTopology::PointList,
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
@@ -14920,7 +14282,7 @@ mod tests {
                 blend: GpuBlend::Normal,
                 style: GpuSolidStyle::NONE,
             }],
-        };
+        );
         let translucent_point =
             render_identity_readback(&mut renderer, &device, &queue, &translucent_point_scene);
         assert_eq!(
@@ -14929,13 +14291,13 @@ mod tests {
             "translucent points keep the CPU reference's source-over alpha"
         );
 
-        let additive_scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::new(0, 0, 0, 192),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Solid {
+        let additive_scene = GpuScene::new(
+            [1, 1],
+            Color::new(0, 0, 0, 192),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![GpuCommand::Solid {
                 vertices: vec![solid_vertex(0.5, 0.5, rgba_f32([200, 100, 50, 64]))],
                 topology: GpuPrimitiveTopology::PointList,
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
@@ -14943,7 +14305,7 @@ mod tests {
                 blend: GpuBlend::Additive,
                 style: GpuSolidStyle::NONE,
             }],
-        };
+        );
         let additive = render_identity_readback(&mut renderer, &device, &queue, &additive_scene);
         assert_eq!(
             readback_pixel(&additive, 0, 0),
@@ -14951,13 +14313,13 @@ mod tests {
             "additive points preserve destination alpha like the CPU reference"
         );
 
-        let additive_filled_scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::new(0, 0, 0, 192),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Solid {
+        let additive_filled_scene = GpuScene::new(
+            [1, 1],
+            Color::new(0, 0, 0, 192),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![GpuCommand::Solid {
                 vertices: vec![
                     solid_vertex(0.0, 0.0, rgba_f32([200, 100, 50, 64])),
                     solid_vertex(1.0, 0.0, rgba_f32([200, 100, 50, 64])),
@@ -14972,7 +14334,7 @@ mod tests {
                 blend: GpuBlend::Additive,
                 style: GpuSolidStyle::NONE,
             }],
-        };
+        );
         let additive_filled =
             render_identity_readback(&mut renderer, &device, &queue, &additive_filled_scene);
         assert_eq!(
@@ -14987,18 +14349,18 @@ mod tests {
         // The translucent draw also pins the source-over destination alpha.
         let fractional_clear = [0, 0, 255, 255];
         let fractional_source = rgba_f32([255, 0, 0, 128]);
-        let fractional_scene = GpuScene {
-            logical_extent: [4, 3],
-            clear: Color::new(
+        let fractional_scene = GpuScene::new(
+            [4, 3],
+            Color::new(
                 fractional_clear[0],
                 fractional_clear[1],
                 fractional_clear[2],
                 fractional_clear[3],
             ),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![GpuCommand::Solid {
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![GpuCommand::Solid {
                 vertices: vec![
                     solid_vertex(1.0, 1.0, fractional_source),
                     solid_vertex(3.0, 1.0, fractional_source),
@@ -15013,18 +14375,13 @@ mod tests {
                 blend: GpuBlend::Normal,
                 style: GpuSolidStyle::NONE,
             }],
-        };
+        );
         let fractional = render_readback(
             &mut renderer,
             &device,
             &queue,
             &fractional_scene,
-            &GpuPresentation {
-                physical_extent: [5, 4],
-                scale: 1.5,
-                crop_top: 1,
-                world_zoom: 1.0,
-            },
+            &presentation([5, 4], 1.5, 1, 1.0),
         );
         for y in 0..4 {
             for x in 0..5 {
@@ -15188,43 +14545,24 @@ mod tests {
     fn representative_scene(ids: SceneTextureIds, mutable: [u8; 4]) -> GpuScene {
         let identity = [1.0, 1.0, 1.0, 0.0];
         let mut commands = vec![
-            GpuCommand::Quad {
-                texture: ids.mutable,
-                owner_mask: None,
-                vertices: quad(0.0, 0.0, 2.0, 2.0, 1.0, identity),
-                clip: None,
-                blend: GpuBlend::Replace,
-                base_mod2: false,
-                owner_mod2: false,
-                sampler: GpuSampler::Nearest,
-                gamma: false,
-            },
-            GpuCommand::Quad {
-                texture: ids.half,
-                owner_mask: None,
-                vertices: quad(2.0, 0.0, 4.0, 2.0, 1.0, identity),
-                clip: None,
-                blend: GpuBlend::Normal,
-                base_mod2: false,
-                owner_mod2: false,
-                sampler: GpuSampler::Nearest,
-                gamma: false,
-            },
-            GpuCommand::Quad {
-                texture: ids.half,
-                owner_mask: None,
-                vertices: quad(4.0, 0.0, 6.0, 2.0, 1.0, identity),
-                clip: None,
-                blend: GpuBlend::Additive,
-                base_mod2: false,
-                owner_mod2: false,
-                sampler: GpuSampler::Nearest,
-                gamma: false,
-            },
-            GpuCommand::Quad {
-                texture: ids.black,
-                owner_mask: None,
-                vertices: quad(
+            quad_command(
+                ids.mutable,
+                quad(0.0, 0.0, 2.0, 2.0, 1.0, identity),
+                fixture_options!(blend = GpuBlend::Replace),
+            ),
+            quad_command(
+                ids.half,
+                quad(2.0, 0.0, 4.0, 2.0, 1.0, identity),
+                fixture_options!(),
+            ),
+            quad_command(
+                ids.half,
+                quad(4.0, 0.0, 6.0, 2.0, 1.0, identity),
+                fixture_options!(blend = GpuBlend::Additive),
+            ),
+            quad_command(
+                ids.black,
+                quad(
                     6.0,
                     0.0,
                     8.0,
@@ -15232,53 +14570,38 @@ mod tests {
                     1.0,
                     [127.0 / 255.0, 127.0 / 255.0, 127.0 / 255.0, 0.0],
                 ),
-                clip: None,
-                blend: GpuBlend::Replace,
-                base_mod2: true,
-                owner_mod2: false,
-                sampler: GpuSampler::Nearest,
-                gamma: true,
-            },
-            GpuCommand::Quad {
-                texture: ids.magenta,
-                owner_mask: None,
-                vertices: quad(0.0, 2.0, 4.0, 4.0, 1.0, identity),
-                clip: Some(Rect::new(1, 3, 2, 1)),
-                blend: GpuBlend::Replace,
-                base_mod2: false,
-                owner_mod2: false,
-                sampler: GpuSampler::Nearest,
-                gamma: false,
-            },
-            GpuCommand::Quad {
-                texture: ids.cyan,
-                owner_mask: None,
+                fixture_options!(blend = GpuBlend::Replace, base_mod2 = true, gamma = true),
+            ),
+            quad_command(
+                ids.magenta,
+                quad(0.0, 2.0, 4.0, 4.0, 1.0, identity),
+                fixture_options!(
+                    clip = Some(Rect::new(1, 3, 2, 1)),
+                    blend = GpuBlend::Replace
+                ),
+            ),
+            quad_command(
+                ids.cyan,
                 // A constant source texel keeps the output unambiguous while
                 // unequal positive W values exercise perspective-correct
                 // captured transforms all the way through the backend.
-                vertices: projective_quad(4.0, 2.0, 6.0, 4.0, [1.0, 1.5, 2.0, 2.5], identity),
-                clip: None,
-                blend: GpuBlend::Replace,
-                base_mod2: false,
-                owner_mod2: false,
-                sampler: GpuSampler::Nearest,
-                gamma: false,
-            },
-            GpuCommand::Landscape {
-                base: ids.landscape_base,
-                liquid_mask: Some(ids.liquid_mask),
-                liquid: Some(ids.liquid),
+                projective_quad(4.0, 2.0, 6.0, 4.0, [1.0, 1.5, 2.0, 2.5], identity),
+                fixture_options!(blend = GpuBlend::Replace),
+            ),
+            landscape_command(
+                ids.landscape_base,
                 // Two source texels stretched over four destination pixels:
                 // native nearest sampling repeats each texel exactly twice.
-                vertices: quad(0.0, 4.0, 4.0, 6.0, 1.0, identity),
-                clip: None,
-                phase: [0.25, 0.0, 0.0],
-                gamma: false,
-            },
-            GpuCommand::Quad {
-                texture: ids.owner_base,
-                owner_mask: None,
-                vertices: modulated_quad(
+                quad(0.0, 4.0, 4.0, 6.0, 1.0, identity),
+                fixture_options!(
+                    liquid_mask = Some(ids.liquid_mask),
+                    liquid = Some(ids.liquid),
+                    phase = [0.25, 0.0, 0.0]
+                ),
+            ),
+            quad_command(
+                ids.owner_base,
+                modulated_quad(
                     6.0,
                     2.0,
                     8.0,
@@ -15290,20 +14613,14 @@ mod tests {
                         [0.5, 0.5, 1.0, 0.0],
                     ],
                 ),
-                clip: None,
-                blend: GpuBlend::Normal,
-                base_mod2: false,
-                owner_mod2: false,
-                sampler: GpuSampler::Nearest,
-                gamma: false,
-            },
+                fixture_options!(),
+            ),
             // ColorByOwner surfaces are lowered to a complete base pass and
             // then a complete owner pass. Vary the red owner modulation at
             // the same corners to prove spatial FoW interpolation survives.
-            GpuCommand::Quad {
-                texture: ids.owner_overlay,
-                owner_mask: None,
-                vertices: modulated_quad(
+            quad_command(
+                ids.owner_overlay,
+                modulated_quad(
                     6.0,
                     2.0,
                     8.0,
@@ -15315,17 +14632,12 @@ mod tests {
                         [0.5, 0.0, 0.0, 0.0],
                     ],
                 ),
-                clip: None,
-                blend: GpuBlend::Normal,
-                base_mod2: false,
-                owner_mod2: false,
-                sampler: GpuSampler::Nearest,
-                gamma: false,
-            },
+                fixture_options!(),
+            ),
         ];
         let color = rgba_f32(SOLID);
-        commands.push(GpuCommand::Solid {
-            vertices: vec![
+        commands.push(solid_command(
+            vec![
                 solid_vertex(4.0, 4.0, color),
                 solid_vertex(6.0, 4.0, color),
                 solid_vertex(4.0, 6.0, color),
@@ -15333,29 +14645,23 @@ mod tests {
                 solid_vertex(6.0, 4.0, color),
                 solid_vertex(6.0, 6.0, color),
             ],
-            topology: GpuPrimitiveTopology::TriangleList,
-            alpha_mode: GpuSolidAlphaMode::SourceOver,
-            clip: None,
-            blend: GpuBlend::Replace,
-            style: GpuSolidStyle::NONE,
-        });
-        commands.push(GpuCommand::Solid {
+            GpuPrimitiveTopology::TriangleList,
+            fixture_options!(),
+        ));
+        commands.push(solid_command(
             // Producers encode logical pixel centers.  Non-unit W proves the
             // point expansion preserves homogeneous coordinates.
-            vertices: vec![solid_vertex_w(6.5, 4.5, 2.0, rgba_f32(POINT))],
-            topology: GpuPrimitiveTopology::PointList,
-            alpha_mode: GpuSolidAlphaMode::SourceOver,
-            clip: None,
-            blend: GpuBlend::Replace,
-            style: GpuSolidStyle::NONE,
-        });
+            vec![solid_vertex_w(6.5, 4.5, 2.0, rgba_f32(POINT))],
+            GpuPrimitiveTopology::PointList,
+            fixture_options!(),
+        ));
 
-        GpuScene {
-            logical_extent: LOGICAL,
-            clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Fragment,
-            textures: vec![
+        GpuScene::new(
+            LOGICAL,
+            Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Fragment,
+            vec![
                 rgba_resource(ids.mutable, mutable),
                 rgba_resource(ids.half, HALF),
                 rgba_resource(ids.black, [0, 0, 0, 255]),
@@ -15376,45 +14682,308 @@ mod tests {
                 rgba_resource(ids.owner_overlay, OWNER_OVERLAY),
             ],
             commands,
+        )
+    }
+
+    struct FixtureOptions {
+        owner_mask: Option<(GpuTextureId, GpuOwnerMask)>,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        base_mod2: bool,
+        owner_mod2: bool,
+        sampler: GpuSampler,
+        gamma: bool,
+        liquid_mask: Option<GpuTextureId>,
+        liquid: Option<GpuTextureId>,
+        phase: [f32; 3],
+        owner_texture: Option<GpuTextureId>,
+        solid_alpha_mode: GpuSolidAlphaMode,
+        solid_blend: GpuBlend,
+        solid_style: GpuSolidStyle,
+        mod2: bool,
+        outer_modulation: GpuOuterModulation,
+        positions: [[f32; 3]; 4],
+        uv: [f32; 4],
+        modulation: [u32; 4],
+        sample_tile_size: f32,
+        object_outer_modulation: GpuOuterModulation,
+    }
+
+    impl Default for FixtureOptions {
+        fn default() -> Self {
+            Self {
+                owner_mask: None,
+                clip: None,
+                blend: GpuBlend::Normal,
+                base_mod2: false,
+                owner_mod2: false,
+                sampler: GpuSampler::Nearest,
+                gamma: false,
+                liquid_mask: None,
+                liquid: None,
+                phase: [0.0; 3],
+                owner_texture: None,
+                solid_alpha_mode: GpuSolidAlphaMode::SourceOver,
+                solid_blend: GpuBlend::Replace,
+                solid_style: GpuSolidStyle::NONE,
+                mod2: false,
+                outer_modulation: GpuOuterModulation::Combine,
+                positions: [[0.0, 0.0, 1.0]; 4],
+                uv: [0.0, 0.0, 1.0, 1.0],
+                modulation: [0x00ff_ffff; 4],
+                sample_tile_size: 0.0,
+                object_outer_modulation: GpuOuterModulation::Inherit,
+            }
+        }
+    }
+
+    fn quad_command(
+        texture: GpuTextureId,
+        vertices: [GpuVertex; 4],
+        options: FixtureOptions,
+    ) -> GpuCommand {
+        GpuCommand::Quad {
+            texture,
+            owner_mask: options.owner_mask,
+            vertices,
+            clip: options.clip,
+            blend: options.blend,
+            base_mod2: options.base_mod2,
+            owner_mod2: options.owner_mod2,
+            sampler: options.sampler,
+            gamma: options.gamma,
+        }
+    }
+
+    fn landscape_command(
+        base: GpuTextureId,
+        vertices: [GpuVertex; 4],
+        options: FixtureOptions,
+    ) -> GpuCommand {
+        GpuCommand::Landscape {
+            base,
+            liquid_mask: options.liquid_mask,
+            liquid: options.liquid,
+            vertices,
+            clip: options.clip,
+            phase: options.phase,
+            gamma: options.gamma,
+        }
+    }
+
+    fn object_batch(
+        texture: GpuTextureId,
+        sprites: Vec<GpuObjectSprite>,
+        options: FixtureOptions,
+    ) -> GpuCommand {
+        GpuCommand::ObjectBatch {
+            texture,
+            owner_texture: options.owner_texture,
+            sprites,
+            clip: options.clip,
+            blend: options.blend,
+            gamma: options.gamma,
+        }
+    }
+
+    fn solid_command(
+        vertices: Vec<GpuSolidVertex>,
+        topology: GpuPrimitiveTopology,
+        options: FixtureOptions,
+    ) -> GpuCommand {
+        GpuCommand::Solid {
+            vertices,
+            topology,
+            alpha_mode: options.solid_alpha_mode,
+            clip: options.clip,
+            blend: options.solid_blend,
+            style: options.solid_style,
+        }
+    }
+
+    fn sprite_batch(
+        texture: GpuTextureId,
+        rect: [f32; 4],
+        modulation: u32,
+        options: FixtureOptions,
+    ) -> GpuCommand {
+        GpuCommand::SpriteBatch {
+            texture,
+            quads: vec![GpuSpriteQuad {
+                rect,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                modulation,
+            }],
+            clip: options.clip,
+            blend: options.blend,
+            mod2: options.mod2,
+            gamma: options.gamma,
+            outer_modulation: options.outer_modulation,
+        }
+    }
+
+    fn object_sprite(options: FixtureOptions) -> GpuObjectSprite {
+        GpuObjectSprite::new(
+            options.positions,
+            options.uv,
+            options.modulation,
+            options.sampler,
+            options.sample_tile_size,
+            options.mod2,
+            options.object_outer_modulation,
+        )
+    }
+
+    fn packed_modulation(packed: u32) -> [f32; 4] {
+        [
+            ((packed >> 16) & 0xff) as f32 / 255.0,
+            ((packed >> 8) & 0xff) as f32 / 255.0,
+            (packed & 0xff) as f32 / 255.0,
+            (packed >> 24) as f32 / 255.0,
+        ]
+    }
+
+    fn object_quad_vertices(
+        sprite: GpuObjectSprite,
+        outer_modulation: Option<GpuOuterModulation>,
+    ) -> [GpuVertex; 4] {
+        let uv = [
+            [sprite.uv[0], sprite.uv[1]],
+            [sprite.uv[2], sprite.uv[1]],
+            [sprite.uv[0], sprite.uv[3]],
+            [sprite.uv[2], sprite.uv[3]],
+        ];
+        std::array::from_fn(|index| {
+            let mut vertex = GpuVertex::new(
+                sprite.positions[index],
+                uv[index],
+                packed_modulation(sprite.modulation[index]),
+            );
+            if let Some(outer_modulation) = outer_modulation {
+                vertex = vertex.with_outer_modulation(outer_modulation);
+            }
+            if sprite.sampler() == GpuSampler::Linear {
+                vertex.with_sample_tile(0.0, 0.0, sprite.sample_tile_size)
+            } else {
+                vertex
+            }
+        })
+    }
+
+    fn assert_single_texture_commands(
+        test: &str,
+        commands: impl FnOnce(GpuTextureId) -> Vec<GpuCommand>,
+        expected: [u8; 4],
+        expected_draw_calls: usize,
+    ) {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping {test}");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![rgba_resource(texture, [255; 4])],
+            commands(texture),
+        );
+        let mut renderer = test_renderer(&device, &queue);
+        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
+
+        assert_eq!(frame.rgba, expected);
+        assert_eq!(renderer.last_stats().draw_calls, expected_draw_calls);
+    }
+
+    fn presentation(
+        physical_extent: [u32; 2],
+        scale: f32,
+        crop_top: u32,
+        world_zoom: f32,
+    ) -> GpuPresentation {
+        GpuPresentation {
+            physical_extent,
+            scale,
+            crop_top,
+            world_zoom,
+        }
+    }
+
+    fn test_target(
+        device: &wgpu::Device,
+        label: &'static str,
+        extent: [u32; 2],
+        format: wgpu::TextureFormat,
+        copy_src: bool,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | if copy_src {
+                wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::empty()
+            };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: extent[0],
+                height: extent[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
+    fn test_encoder(device: &wgpu::Device, label: &'static str) -> wgpu::CommandEncoder {
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) })
+    }
+
+    fn texture_resource(
+        id: GpuTextureId,
+        extent: [u32; 2],
+        format: GpuTextureFormat,
+        pixels: impl Into<Arc<[u8]>>,
+    ) -> GpuTextureResource {
+        GpuTextureResource {
+            id,
+            extent,
+            revision: 0,
+            base_revision: None,
+            format,
+            pixels: pixels.into(),
+            dirty: Vec::new(),
         }
     }
 
     fn rgba_resource(id: GpuTextureId, pixel: [u8; 4]) -> GpuTextureResource {
-        GpuTextureResource {
-            id,
-            extent: [1, 1],
-            revision: 0,
-            base_revision: None,
-            format: GpuTextureFormat::Rgba8,
-            pixels: Arc::from(pixel),
-            dirty: Vec::new(),
-        }
+        texture_resource(id, [1, 1], GpuTextureFormat::Rgba8, pixel)
     }
 
     fn r8_resource(id: GpuTextureId, pixel: u8) -> GpuTextureResource {
-        GpuTextureResource {
-            id,
-            extent: [1, 1],
-            revision: 0,
-            base_revision: None,
-            format: GpuTextureFormat::R8,
-            pixels: Arc::from([pixel]),
-            dirty: Vec::new(),
-        }
+        texture_resource(id, [1, 1], GpuTextureFormat::R8, [pixel])
     }
 
     fn rgba_resource_2x1(id: GpuTextureId, left: [u8; 4], right: [u8; 4]) -> GpuTextureResource {
         let mut pixels = Vec::with_capacity(8);
         pixels.extend_from_slice(&left);
         pixels.extend_from_slice(&right);
-        GpuTextureResource {
-            id,
-            extent: [2, 1],
-            revision: 0,
-            base_revision: None,
-            format: GpuTextureFormat::Rgba8,
-            pixels: Arc::from(pixels),
-            dirty: Vec::new(),
+        texture_resource(id, [2, 1], GpuTextureFormat::Rgba8, pixels)
+    }
+
+    fn corner(x: f32, y: f32, u: f32, v: f32) -> GpuVertex {
+        GpuVertex {
+            position: [x, y, 1.0],
+            uv: [u, v],
+            modulation: [1.0, 1.0, 1.0, 0.0],
+            owner_modulation: [0.0; 4],
+            outer_modulation: GpuOuterModulation::default(),
+            owner_outer_modulation: GpuOuterModulation::default(),
+            sample_tile: [0.0; 4],
         }
     }
 
@@ -15491,14 +15060,14 @@ mod tests {
         textures: Vec<GpuTextureResource>,
         commands: Vec<GpuCommand>,
     ) -> GpuScene {
-        GpuScene {
+        GpuScene::new(
             logical_extent,
             clear,
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
+            GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            GpuGammaMode::Disabled,
             textures,
             commands,
-        }
+        )
     }
 
     /// Renders one scene to a surface of `format` and returns the surface
@@ -15515,41 +15084,15 @@ mod tests {
         scene: &GpuScene,
         request_readback: bool,
     ) -> Vec<u8> {
-        let extent = scene.logical_extent;
         let mut renderer = RetainedGpuRenderer::new(device, queue, format);
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lc_gpu_fused_monitor_surface"),
-            size: wgpu::Extent3d {
-                width: extent[0],
-                height: extent[1],
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
+        render_surface_pixels_with(
+            &mut renderer,
+            device,
+            queue,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_fused_monitor_encoder"),
-        });
-        renderer
-            .render(
-                device,
-                queue,
-                &mut encoder,
-                &target_view,
-                scene,
-                &GpuPresentation::identity(extent[0], extent[1]),
-                request_readback,
-            )
-            .expect("encode monitor gamma frame");
-        let ticket = encode_readback(device, &mut encoder, &target, extent)
-            .expect("encode surface readback");
-        queue.submit(Some(encoder.finish()));
-        ticket.read(device).expect("map surface readback").rgba
+            scene,
+            request_readback,
+        )
     }
 
     /// clonk-org/clonk-rs#274: an ordinary Monitor frame folds the LUT into the
@@ -15676,24 +15219,9 @@ mod tests {
         request_readback: bool,
     ) -> Vec<u8> {
         let extent = scene.logical_extent;
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lc_gpu_fused_monitor_surface"),
-            size: wgpu::Extent3d {
-                width: extent[0],
-                height: extent[1],
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_fused_monitor_encoder"),
-        });
+        let (target, target_view) =
+            test_target(device, "lc_gpu_fused_monitor_surface", extent, format, true);
+        let mut encoder = test_encoder(device, "lc_gpu_fused_monitor_encoder");
         renderer
             .render(
                 device,
@@ -15827,10 +15355,7 @@ mod tests {
 
     #[test]
     fn reduced_presentation_readback_matches_the_cpu_box_reduction() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping reduced presentation readback test");
-            return;
-        };
+        gpu_or_skip!(device, queue, "reduced presentation readback test");
         // Odd extents with a non-integer ratio on both axes: every destination
         // cell covers a different source span, so a reduction that assumed one
         // uniform box would disagree with the CPU oracle on most pixels.
@@ -15853,10 +15378,7 @@ mod tests {
 
     #[test]
     fn reduced_presentation_readback_matches_the_cpu_box_reduction_at_edge_extents() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping reduced presentation edge extent test");
-            return;
-        };
+        gpu_or_skip!(device, queue, "reduced presentation edge extent test");
         let mut renderer = test_renderer(&device, &queue);
         for (source, dest) in [
             // A single pixel, and a single-pixel axis on either side.
@@ -15883,17 +15405,13 @@ mod tests {
 
     #[test]
     fn a_reduced_presentation_maps_only_the_thumbnail_and_its_row_padding() {
-        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
-            eprintln!("no wgpu adapter; skipping reduced presentation transfer size test");
-            return;
-        };
+        gpu_or_skip!(device, queue, "reduced presentation transfer size test");
         const SOURCE: [u32; 2] = [1024, 768];
         let mut renderer = test_renderer(&device, &queue);
         let scene = reduction_source_scene(GpuTextureId::fresh(), SOURCE);
         let _ = render_extent_readback(&mut renderer, &device, &queue, &scene, SOURCE);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_reduced_presentation_transfer_test_encoder"),
-        });
+        let mut encoder =
+            test_encoder(&device, "lc_gpu_reduced_presentation_transfer_test_encoder");
         let reduced = renderer
             .readback_last_presentation_reduced(&device, &mut encoder, SAVE_THUMBNAIL_TEST_EXTENT)
             .expect("encode reduced retained GPU frame")
@@ -15963,19 +15481,15 @@ mod tests {
         test_scene(
             extent,
             Color::new(0, 0, 0, 0),
-            vec![GpuTextureResource {
+            vec![texture_resource(
                 id,
                 extent,
-                revision: 0,
-                base_revision: None,
-                format: GpuTextureFormat::Rgba8,
-                pixels: Arc::from(pixels.into_boxed_slice()),
-                dirty: Vec::new(),
-            }],
-            vec![GpuCommand::Quad {
-                texture: id,
-                owner_mask: None,
-                vertices: quad(
+                GpuTextureFormat::Rgba8,
+                pixels,
+            )],
+            vec![quad_command(
+                id,
+                quad(
                     0.0,
                     0.0,
                     extent[0] as f32,
@@ -15983,13 +15497,8 @@ mod tests {
                     1.0,
                     [1.0, 1.0, 1.0, 0.0],
                 ),
-                clip: None,
-                blend: GpuBlend::Replace,
-                base_mod2: false,
-                owner_mod2: false,
-                sampler: GpuSampler::Nearest,
-                gamma: false,
-            }],
+                fixture_options!(blend = GpuBlend::Replace),
+            )],
         )
     }
 
@@ -15999,9 +15508,7 @@ mod tests {
         queue: &wgpu::Queue,
         extent: [u32; 2],
     ) -> GpuReadbackFrame {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_reduced_presentation_test_encoder"),
-        });
+        let mut encoder = test_encoder(device, "lc_gpu_reduced_presentation_test_encoder");
         let ticket = renderer
             .readback_last_presentation_reduced(device, &mut encoder, extent)
             .expect("encode reduced retained GPU frame")
@@ -16021,24 +15528,14 @@ mod tests {
             .expect("at least one retained test layer")
             .presentation
             .physical_extent;
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lc_gpu_parity_test_surface"),
-            size: wgpu::Extent3d {
-                width: extent[0],
-                height: extent[1],
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_parity_test_encoder"),
-        });
+        let (_target, target_view) = test_target(
+            device,
+            "lc_gpu_parity_test_surface",
+            [extent[0], extent[1]],
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
+        let mut encoder = test_encoder(device, "lc_gpu_parity_test_encoder");
         let ticket = renderer
             .render_layers(device, queue, &mut encoder, &target_view, layers, true)
             .expect("encode retained GPU scene")
@@ -16052,9 +15549,7 @@ mod tests {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> GpuReadbackFrame {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lc_gpu_previous_frame_test_encoder"),
-        });
+        let mut encoder = test_encoder(device, "lc_gpu_previous_frame_test_encoder");
         let ticket = renderer
             .readback_last_presentation(device, &mut encoder)
             .expect("encode previous retained GPU frame")

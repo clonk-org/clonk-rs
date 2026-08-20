@@ -249,12 +249,12 @@ pub struct DefinitionSelLayout {
 
 impl DefinitionSelLayout {
     pub fn row_rect(&self, index: usize, scroll_y: i32) -> IntRect {
-        IntRect {
-            x: self.list_client.x,
-            y: self.list_client.y + index as i32 * self.row_pitch - scroll_y,
-            w: self.list_client.w,
-            h: self.row_height,
-        }
+        IntRect::new(
+            self.list_client.x,
+            self.list_client.y + index as i32 * self.row_pitch - scroll_y,
+            self.list_client.w,
+            self.row_height,
+        )
     }
 }
 
@@ -1324,12 +1324,7 @@ impl DefinitionSelController {
             if y >= layout.list_client.h || y + layout.row_height <= 0 {
                 continue;
             }
-            let row_cell = IntRect {
-                x: 0,
-                y,
-                w: layout.row_height,
-                h: layout.row_height,
-            };
+            let row_cell = IntRect::new(0, y, layout.row_height, layout.row_height);
             let icon_x = if self.mode.is_multi_selection() {
                 let phase = u32::from(row.checked) + 2 * u32::from(row.fixed);
                 let cell = resources.checkbox.height();
@@ -1349,10 +1344,7 @@ impl DefinitionSelController {
             } else {
                 0
             };
-            let icon_rect = IntRect {
-                x: icon_x,
-                ..row_cell
-            };
+            let icon_rect = row_cell.with_x(icon_x);
             draw_icon_phase(
                 &mut clipped,
                 icon_rect,
@@ -1374,15 +1366,15 @@ impl DefinitionSelController {
                 },
                 TextAlign::Left,
                 gamma,
-                IntRect {
-                    x: label_x,
-                    y: y.max(0),
-                    w: (layout.list_client.w - label_x).max(0),
-                    h: layout
+                IntRect::new(
+                    label_x,
+                    y.max(0),
+                    (layout.list_client.w - label_x).max(0),
+                    layout
                         .row_height
                         .min(layout.list_client.h - y.max(0))
                         .max(0),
-                },
+                ),
             );
 
             if self.mode.is_multi_selection()
@@ -1396,12 +1388,7 @@ impl DefinitionSelController {
                 let size = layout.row_height / 2;
                 draw_highlight(
                     &mut clipped,
-                    IntRect {
-                        x: layout.row_height / 4,
-                        y: y + layout.row_height / 4,
-                        w: size,
-                        h: size,
-                    },
+                    IntRect::new(layout.row_height / 4, y + layout.row_height / 4, size, size),
                     resources.button_highlight,
                     gamma,
                 );
@@ -1607,79 +1594,54 @@ pub fn definition_sel_layout(
     let title_height = text_line_height.max(MIN_CAPTION_HEIGHT);
     let x = (screen_width - width) / 2 + dialog_offset.0;
     let y = (screen_height - height) / 2 + dialog_offset.1;
-    let client = IntRect {
-        x,
-        y: y + title_height,
-        w: width,
-        h: height - title_height,
-    };
+    let client = IntRect::new(x, y + title_height, width, height - title_height);
     let upper_height = client.h - 40;
-    let file_list = IntRect {
-        x: client.x + 10,
-        y: client.y + 10,
-        w: width / 2,
-        h: upper_height - 20,
-    };
-    let list_client = IntRect {
-        x: file_list.x + 3,
-        y: file_list.y + 3,
-        w: file_list.w - 6 - SCROLLBAR_WIDTH,
-        h: file_list.h - 6,
-    };
-    let preview = IntRect {
-        x: client.x + width / 2 + 20,
-        y: client.y + 10,
-        w: width - width / 2 - 30,
-        h: upper_height - 20,
-    };
+    let file_list = IntRect::new(client.x + 10, client.y + 10, width / 2, upper_height - 20);
+    let list_client = IntRect::new(
+        file_list.x + 3,
+        file_list.y + 3,
+        file_list.w - 6 - SCROLLBAR_WIDTH,
+        file_list.h - 6,
+    );
+    let preview = IntRect::new(
+        client.x + width / 2 + 20,
+        client.y + 10,
+        width - width / 2 - 30,
+        upper_height - 20,
+    );
     let button_group_x = client.x + (width - 280) / 2;
     DefinitionSelLayout {
-        bounds: IntRect {
-            x,
-            y,
-            w: width,
-            h: height,
-        },
-        caption: IntRect {
-            x,
-            y,
-            w: width,
-            h: title_height,
-        },
+        bounds: IntRect::new(x, y, width, height),
+        caption: IntRect::new(x, y, width, title_height),
         client,
-        close_button: IntRect {
-            x: x + width - 20,
-            y: y + 4,
-            w: 16,
-            h: 16,
-        },
+        close_button: IntRect::new(x + width - 20, y + 4, 16, 16),
         file_list,
         list_client,
-        list_scrollbar: IntRect {
-            x: list_client.x + list_client.w,
-            y: list_client.y,
-            w: 16,
-            h: list_client.h,
-        },
+        list_scrollbar: IntRect::new(
+            list_client.x + list_client.w,
+            list_client.y,
+            16,
+            list_client.h,
+        ),
         preview,
-        preview_client: IntRect {
-            x: preview.x + 10,
-            y: preview.y + 8,
-            w: preview.w - 15 - 16,
-            h: preview.h - 16,
-        },
-        ok_button: IntRect {
-            x: button_group_x + 10,
-            y: client.y + client.h - 36,
-            w: BUTTON_WIDTH,
-            h: BUTTON_HEIGHT,
-        },
-        cancel_button: IntRect {
-            x: button_group_x + 150,
-            y: client.y + client.h - 36,
-            w: BUTTON_WIDTH,
-            h: BUTTON_HEIGHT,
-        },
+        preview_client: IntRect::new(
+            preview.x + 10,
+            preview.y + 8,
+            preview.w - 15 - 16,
+            preview.h - 16,
+        ),
+        ok_button: IntRect::new(
+            button_group_x + 10,
+            client.y + client.h - 36,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+        ),
+        cancel_button: IntRect::new(
+            button_group_x + 150,
+            client.y + client.h - 36,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+        ),
         row_height: text_line_height,
         row_pitch: text_line_height + ROW_SPACING,
     }
@@ -1764,105 +1726,17 @@ mod tests {
         let fonts = endeavour_font_set();
         let controller = DefinitionSelController::new("/Definitions", Vec::new(), Vec::new());
         let layout = controller.layout(1280, 720, &fonts.text);
-        assert_eq!(
-            layout.bounds,
-            IntRect {
-                x: 340,
-                y: 115,
-                w: 600,
-                h: 490
-            }
-        );
-        assert_eq!(
-            layout.caption,
-            IntRect {
-                x: 340,
-                y: 115,
-                w: 600,
-                h: 23
-            }
-        );
-        assert_eq!(
-            layout.client,
-            IntRect {
-                x: 340,
-                y: 138,
-                w: 600,
-                h: 467
-            }
-        );
-        assert_eq!(
-            layout.close_button,
-            IntRect {
-                x: 920,
-                y: 119,
-                w: 16,
-                h: 16
-            }
-        );
-        assert_eq!(
-            layout.file_list,
-            IntRect {
-                x: 350,
-                y: 148,
-                w: 300,
-                h: 407
-            }
-        );
-        assert_eq!(
-            layout.list_client,
-            IntRect {
-                x: 353,
-                y: 151,
-                w: 278,
-                h: 401
-            }
-        );
-        assert_eq!(
-            layout.list_scrollbar,
-            IntRect {
-                x: 631,
-                y: 151,
-                w: 16,
-                h: 401
-            }
-        );
-        assert_eq!(
-            layout.preview,
-            IntRect {
-                x: 660,
-                y: 148,
-                w: 270,
-                h: 407
-            }
-        );
-        assert_eq!(
-            layout.preview_client,
-            IntRect {
-                x: 670,
-                y: 156,
-                w: 239,
-                h: 391
-            }
-        );
-        assert_eq!(
-            layout.ok_button,
-            IntRect {
-                x: 510,
-                y: 569,
-                w: 120,
-                h: 32
-            }
-        );
-        assert_eq!(
-            layout.cancel_button,
-            IntRect {
-                x: 650,
-                y: 569,
-                w: 120,
-                h: 32
-            }
-        );
+        assert_eq!(layout.bounds, IntRect::new(340, 115, 600, 490));
+        assert_eq!(layout.caption, IntRect::new(340, 115, 600, 23));
+        assert_eq!(layout.client, IntRect::new(340, 138, 600, 467));
+        assert_eq!(layout.close_button, IntRect::new(920, 119, 16, 16));
+        assert_eq!(layout.file_list, IntRect::new(350, 148, 300, 407));
+        assert_eq!(layout.list_client, IntRect::new(353, 151, 278, 401));
+        assert_eq!(layout.list_scrollbar, IntRect::new(631, 151, 16, 401));
+        assert_eq!(layout.preview, IntRect::new(660, 148, 270, 407));
+        assert_eq!(layout.preview_client, IntRect::new(670, 156, 239, 391));
+        assert_eq!(layout.ok_button, IntRect::new(510, 569, 120, 32));
+        assert_eq!(layout.cancel_button, IntRect::new(650, 569, 120, 32));
         assert_eq!((layout.row_height, layout.row_pitch), (22, 23));
     }
 

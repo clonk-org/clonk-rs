@@ -50,28 +50,16 @@
         let mut engine = solidmask_engine(31, Landscape::flat(120, 120));
         engine.register_test_definition(definition);
 
-        let id =
-            engine.spawn_test_object(SpawnConfig::new("Crate").with_position(Vector2::new(20, 20)));
+        let id = spawn_fixture!(engine, "Crate", with_position: Vector2::new(20, 20));
 
         let sectors = engine.sectors.as_ref().expect("sectors initialized");
-        assert_eq!(
-            sectors.object_ids(sector::SectorKey::Inside { x: 0, y: 0 }),
-            &[id]
-        );
-        assert_eq!(
-            sectors.shape_ids(sector::SectorKey::Inside { x: 0, y: 0 }),
-            &[id]
-        );
-        assert_eq!(
-            sectors.shape_ids(sector::SectorKey::Inside { x: 1, y: 0 }),
-            &[id]
-        );
-        assert!(sectors
-            .shape_ids(sector::SectorKey::Inside { x: 2, y: 0 })
-            .is_empty());
+        unit_assert_eq!(sectors.object_ids(sector::SectorKey::Inside { x: 0, y: 0 }) => &[id]);
+        unit_assert_eq!(sectors.shape_ids(sector::SectorKey::Inside { x: 0, y: 0 }) => &[id]);
+        unit_assert_eq!(sectors.shape_ids(sector::SectorKey::Inside { x: 1, y: 0 }) => &[id]);
+        unit_assert!(sectors.shape_ids(sector::SectorKey::Inside { x: 2, y: 0 }).is_empty());
         let area = sectors.area(DefinitionRect::new(0, 0, 100, 50));
-        assert_eq!(sectors.shape_ids_in_area(&area), vec![id]);
-        assert_eq!(sectors.shape_sum(), 2);
+        unit_assert_eq!(sectors.shape_ids_in_area(&area) => vec![id]);
+        unit_assert_eq!(sectors.shape_sum() => 2);
     }
 
     #[test]
@@ -79,20 +67,14 @@
         let mut engine = solidmask_engine(32, Landscape::flat(120, 120));
         engine.register_test_definition(simple_definition("Mover"));
 
-        let id =
-            engine.spawn_test_object(SpawnConfig::new("Mover").with_position(Vector2::new(10, 10)));
+        let id = spawn_fixture!(engine, "Mover", with_position: Vector2::new(10, 10));
         engine
             .apply_object_update(id, ObjectUpdate::new().with_position(Vector2::new(70, 10)))
             .expect("update succeeds");
 
         let sectors = engine.sectors.as_ref().expect("sectors initialized");
-        assert!(sectors
-            .object_ids(sector::SectorKey::Inside { x: 0, y: 0 })
-            .is_empty());
-        assert_eq!(
-            sectors.object_ids(sector::SectorKey::Inside { x: 1, y: 0 }),
-            &[id]
-        );
+        unit_assert!(sectors.object_ids(sector::SectorKey::Inside { x: 0, y: 0 }).is_empty());
+        unit_assert_eq!(sectors.object_ids(sector::SectorKey::Inside { x: 1, y: 0 }) => &[id]);
     }
 
     #[test]
@@ -100,19 +82,14 @@
         let mut engine = solidmask_engine(33, Landscape::flat(120, 120));
         engine.register_test_definition(simple_definition("Rock"));
 
-        let id =
-            engine.spawn_test_object(SpawnConfig::new("Rock").with_position(Vector2::new(10, 10)));
+        let id = spawn_fixture!(engine, "Rock", with_position: Vector2::new(10, 10));
         engine
             .apply_object_update(id, ObjectUpdate::new().with_status(ObjectStatus::Deleted))
             .expect("delete succeeds");
 
         let sectors = engine.sectors.as_ref().expect("sectors initialized");
-        assert!(sectors
-            .object_ids(sector::SectorKey::Inside { x: 0, y: 0 })
-            .is_empty());
-        assert!(sectors
-            .shape_ids(sector::SectorKey::Inside { x: 0, y: 0 })
-            .is_empty());
+        unit_assert!(sectors.object_ids(sector::SectorKey::Inside { x: 0, y: 0 }).is_empty());
+        unit_assert!(sectors.shape_ids(sector::SectorKey::Inside { x: 0, y: 0 }).is_empty());
     }
 
     #[test]
@@ -126,17 +103,14 @@
 
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 15 - (10 - 5)
         // puts the center at (40,10).
-        let id = engine
-            .spawn_test_object(SpawnConfig::new("Target").with_position(Vector2::new(40, 15)));
+        let id = spawn_fixture!(engine, "Target", with_position: Vector2::new(40, 15));
 
         let hit = engine
             .at_object(Vector2::new(31, 10), ocf::GRAB, None)
             .expect("object found at point");
-        assert_eq!(hit.1, id);
-        assert_ne!(hit.2 & ocf::GRAB, 0);
-        assert!(engine
-            .at_object(Vector2::new(29, 10), ocf::GRAB, None)
-            .is_none());
+        unit_assert_eq!(hit.1 => id);
+        unit_assert_ne!(hit.2 & ocf::GRAB => 0);
+        unit_assert!(engine.at_object(Vector2::new(29, 10), ocf::GRAB, None).is_none());
     }
 
     #[test]
@@ -150,14 +124,13 @@
 
         // Spawn y is the con-0 bottom: 60 - (40 - 20) puts the center at
         // y=40 (sector row 0), while the shape reaches y=59 (row 1).
-        let id = engine
-            .spawn_test_object(SpawnConfig::new("TallTarget").with_position(Vector2::new(40, 60)));
+        let id = spawn_fixture!(engine, "TallTarget", with_position: Vector2::new(40, 60));
         let hit = engine
             .at_object(Vector2::new(40, 55), ocf::GRAB, None)
             .expect("ObjectShapes finds a target whose center is in the adjacent sector");
 
-        assert_eq!(hit.1, id);
-        assert_ne!(hit.2 & ocf::GRAB, 0);
+        unit_assert_eq!(hit.1 => id);
+        unit_assert_ne!(hit.2 & ocf::GRAB => 0);
     }
 
     #[test]
@@ -168,24 +141,16 @@
 
         let mut engine = solidmask_engine(35, Landscape::flat(120, 120));
         engine.register_test_definition(definition);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("BuildSite")
-                .with_position(Vector2::new(40, 60))
-                .with_construction(1_000),
-        );
+        let id = spawn_fixture!(engine, "BuildSite", with_position: Vector2::new(40, 60), with_construction: 1_000);
         let site = engine.test_object_snapshot(id);
         let probe = Vector2::new(site.position.x, site.position.y - 15);
-        assert_ne!(
-            probe.y / sector::SECTOR_HEIGHT,
-            site.position.y / sector::SECTOR_HEIGHT,
-            "the regression probe must cross a sector boundary"
-        );
+        unit_assert_ne!(probe.y / sector::SECTOR_HEIGHT => site.position.y / sector::SECTOR_HEIGHT, "the regression probe must cross a sector boundary");
 
         let hit = engine
             .at_object(probe, ocf::CONSTRUCT, None)
             .expect("C4Object::addtop makes the low construction site buildable");
-        assert_eq!(hit.1, id);
-        assert_ne!(hit.2 & ocf::CONSTRUCT, 0);
+        unit_assert_eq!(hit.1 => id);
+        unit_assert_ne!(hit.2 & ocf::CONSTRUCT => 0);
     }
 
     #[test]
@@ -207,12 +172,10 @@
         // the existing different-ID object in the forward master list
         // (C4ObjectList.cpp:138-174). Sector ObjectShapes follows that
         // master order, so the second-spawned blocker must be visited first.
-        engine.spawn_test_object(SpawnConfig::new("Target").with_position(Vector2::new(20, 25)));
-        engine.spawn_test_object(SpawnConfig::new("Blocker").with_position(Vector2::new(20, 25)));
+        spawn_fixture!(engine, "Target", with_position: Vector2::new(20, 25));
+        spawn_fixture!(engine, "Blocker", with_position: Vector2::new(20, 25));
 
-        assert!(engine
-            .at_object(Vector2::new(20, 20), ocf::GRAB, None)
-            .is_none());
+        unit_assert!(engine.at_object(Vector2::new(20, 20), ocf::GRAB, None).is_none());
     }
 
     #[test]
@@ -233,16 +196,9 @@
         engine.register_test_definition(target);
         engine.register_test_definition(exclude);
         let foreign_layer = engine.spawn_test_object(SpawnConfig::new("LayerKey"));
-        let target = engine
-            .spawn_test_object(SpawnConfig::new("LayerTarget").with_position(Vector2::new(20, 25)));
-        let blocker = engine.spawn_test_object(
-            SpawnConfig::new("LayerBlocker")
-                .with_position(Vector2::new(20, 25))
-                .with_layer(foreign_layer),
-        );
-        let exclude = engine.spawn_test_object(
-            SpawnConfig::new("LayerExclude").with_position(Vector2::new(20, 25)),
-        );
+        let target = spawn_fixture!(engine, "LayerTarget", with_position: Vector2::new(20, 25));
+        let blocker = spawn_fixture!(engine, "LayerBlocker", with_position: Vector2::new(20, 25), with_layer: foreign_layer);
+        let exclude = spawn_fixture!(engine, "LayerExclude", with_position: Vector2::new(20, 25));
 
         let relevant_order = engine
             .sectors
@@ -253,18 +209,18 @@
             .copied()
             .filter(|id| [exclude, blocker, target].contains(id))
             .collect::<Vec<_>>();
-        assert_eq!(relevant_order, vec![exclude, blocker, target]);
-        assert_eq!(
+        unit_assert_eq!(relevant_order => vec![exclude, blocker, target]);
+        unit_assert_eq!(
             engine
                 .at_object(Vector2::new(20, 20), ocf::GRAB, None)
-                .map(|(_, id, _)| id),
+                .map(|(_, id, _)| id) =>
             Some(exclude),
             "without an exclude object no identity or layer filter applies"
         );
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .at_object(Vector2::new(20, 20), ocf::GRAB, Some(exclude))
-                .map(|(_, id, _)| id),
+                .map(|(_, id, _)| id) =>
             Some(target),
             "exclude layer filtering runs before Exclusive blocking"
         );
@@ -301,7 +257,7 @@
         }
 
         let item_snapshot = engine.test_object_snapshot(item);
-        assert_eq!(item_snapshot.container, Some(crew));
+        unit_assert_eq!(item_snapshot.container => Some(crew));
         Ok(())
     }
 
@@ -332,20 +288,16 @@
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(definition);
 
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("Crate")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(5, 8)),
-        );
+        let id = spawn_fixture!(engine, "Crate", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 8));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
         mobilize(&mut engine, id, C4Fixed::ZERO, itofix(4));
 
         let snapshot = engine.test_tick();
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(5, 9));
+        unit_assert_eq!(object.position => Vector2::new(5, 9));
         let idx = engine.test_object_index(id);
-        assert_eq!(engine.objects[idx].fixed_position.y, itofix(9));
-        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[idx].fixed_position.y => itofix(9));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.y => C4Fixed::ZERO);
     }
 
     #[test]
@@ -367,24 +319,17 @@
         engine.set_physics(horizontal_movement_physics());
         engine.register_test_definition(definition);
 
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("Crate")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(4, 10)),
-        );
+        let id = spawn_fixture!(engine, "Crate", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 10));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
         mobilize(&mut engine, id, itofix(4), C4Fixed::ZERO);
 
         let snapshot = engine.test_tick();
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(4, 10));
+        unit_assert_eq!(object.position => Vector2::new(4, 10));
         let idx = engine.test_object_index(id);
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(4));
-        assert_eq!(
-            engine.objects[idx].fixed_velocity.x,
-            itofix(4) - fixed100(50)
-        );
-        assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+        unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(4));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.x => itofix(4) - fixed100(50));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.y => -fixed100(50));
     }
 
     #[test]
@@ -407,19 +352,12 @@
         let mut engine = horizontal_movement_engine(53, Landscape::flat(8, 20));
         engine.register_test_definition(definition);
 
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("Probe")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(0, 5)),
-        );
+        let id = spawn_fixture!(engine, "Probe", with_category: CATEGORY_OBJECT, with_position: Vector2::new(0, 5));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
         mobilize(&mut engine, id, -itofix(1), C4Fixed::ZERO);
 
         let snapshot = engine.test_tick();
-        assert!(
-            snapshot.object(id).is_none(),
-            "the unbounded object is removed in the same tick after crossing x < 0"
-        );
+        unit_assert!(snapshot.object(id).is_none(), "the unbounded object is removed in the same tick after crossing x < 0");
     }
 
     #[test]
@@ -432,22 +370,18 @@
         let mut engine = horizontal_movement_engine(41, Landscape::flat(10, 20));
         engine.register_test_definition(definition);
 
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("Bounded")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(8, 5)),
-        );
+        let id = spawn_fixture!(engine, "Bounded", with_category: CATEGORY_OBJECT, with_position: Vector2::new(8, 5));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
         mobilize(&mut engine, id, itofix(5), C4Fixed::ZERO);
 
         let snapshot = engine.test_tick();
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position.x, 9);
+        unit_assert_eq!(object.position.x => 9);
         let idx = engine.test_object_index(id);
         // TargetBounds clamps the INT step target only (C4Movement.cpp:
         // 128-150) — fix_x keeps the momentum-advanced value.
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(13));
-        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(13));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.x => C4Fixed::ZERO);
     }
 
     #[test]
@@ -496,12 +430,7 @@ func Shove(victim) {
         engine.register_test_definition(definition);
 
         let spawn = |engine: &mut Engine, at: Vector2| -> ObjectId {
-            let id = engine.spawn_test_object(
-                SpawnConfig::new("BPOS")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_position(at)
-                    .with_construction(FULL_CON),
-            );
+            let id = spawn_fixture!(engine, "BPOS", with_category: CATEGORY_OBJECT, with_position: at, with_construction: FULL_CON);
             // Place exactly, so the spawn's own bottom-edge convention stays
             // out of the assertions below.
             engine
@@ -513,15 +442,15 @@ func Shove(victim) {
         let shooter = spawn(&mut engine, Vector2::new(30, 20));
 
         let idx = engine.test_object_index(shooter);
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(idx, "Shove", vec![Value::Object(victim.as_u64())])
-                .expect("the shove runs"),
+                .expect("the shove runs") =>
             Value::Int(0),
             "a sides-only BorderBound has no vertical term in BoundsCheck"
         );
         let object = engine.test_object_snapshot(victim);
-        assert_eq!(object.position, Vector2::new(17, 20));
+        unit_assert_eq!(object.position => Vector2::new(17, 20));
     }
 
     #[test]
@@ -551,53 +480,43 @@ protected func ContactRight() { right_calls = 1; return 0; }
         let mut engine = solidmask_engine(59, Landscape::flat(40, 60));
         engine.register_test_definition(definition);
 
-        let victim = engine.spawn_test_object(
-            SpawnConfig::new("BPSX")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(20, 20))
-                .with_construction(FULL_CON),
-        );
-        let shooter = engine.spawn_test_object(
-            SpawnConfig::new("BPSX")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(20, 20))
-                .with_construction(FULL_CON),
-        );
+        let victim = spawn_fixture!(engine, "BPSX", with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 20), with_construction: FULL_CON);
+        let shooter = spawn_fixture!(engine, "BPSX", with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 20), with_construction: FULL_CON);
         let victim_idx = engine.test_object_index(victim);
         engine.objects[victim_idx].set_fixed_velocity(FixedVec2::new(itofix(3), itofix(2)));
 
         let shooter_idx = engine.test_object_index(shooter);
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(
                     shooter_idx,
                     "Yank",
                     vec![Value::Object(victim.as_u64()), Value::Int(-50)],
                 )
-                .expect("the yank runs"),
+                .expect("the yank runs") =>
             Value::Int(8),
             "low limit is 0 - Shape.x"
         );
         let victim_idx = engine.test_object_index(victim);
         // Only the contacted axis stops (C4Movement.cpp:135-142).
-        assert_eq!(engine.objects[victim_idx].fixed_velocity.x, C4Fixed::ZERO);
-        assert_eq!(engine.objects[victim_idx].fixed_velocity.y, itofix(2));
+        unit_assert_eq!(engine.objects[victim_idx].fixed_velocity.x => C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[victim_idx].fixed_velocity.y => itofix(2));
 
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(
                     shooter_idx,
                     "Yank",
                     vec![Value::Object(victim.as_u64()), Value::Int(999)],
                 )
-                .expect("the yank runs"),
+                .expect("the yank runs") =>
             Value::Int(32),
             "high limit is GBackWdt + Shape.x"
         );
 
         let object = engine.test_object_snapshot(victim);
-        assert_eq!(object.local_vars.get("left_calls"), Some(&Value::Int(1)));
-        assert_eq!(object.local_vars.get("right_calls"), Some(&Value::Int(1)));
+        unit_assert_eq!(object.local_vars.get("left_calls") => Some(&Value::Int(1)));
+        unit_assert_eq!(object.local_vars.get("right_calls") => Some(&Value::Int(1)));
     }
 
     #[test]
@@ -645,30 +564,21 @@ protected func ContactRight() { right_calls = 1; return 0; }
         engine.register_test_definition(layer_definition);
         engine.register_test_definition(mover_definition);
 
-        let layer_id = engine.spawn_test_object(
-            SpawnConfig::new("Layer")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(20, 10)),
-        );
-        let mover_id = engine.spawn_test_object(
-            SpawnConfig::new("Mover")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(28, 10))
-                .with_layer(layer_id),
-        );
+        let layer_id = spawn_fixture!(engine, "Layer", with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 10));
+        let mover_id = spawn_fixture!(engine, "Mover", with_category: CATEGORY_OBJECT, with_position: Vector2::new(28, 10), with_layer: layer_id);
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
         mobilize(&mut engine, mover_id, itofix(5), C4Fixed::ZERO);
 
         let snapshot = engine.test_tick();
         let object = snapshot.object(mover_id).expect("object present");
-        assert_eq!(object.position.x, 29);
+        unit_assert_eq!(object.position.x => 29);
 
         let idx = engine.test_object_index(mover_id);
         // The fixed coordinate keeps the momentum-advanced value
         // (TargetBounds clamps the INT target only).
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(33));
-        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
-        assert_eq!(*call_log.lock().unwrap(), vec!["ContactRight".to_string()]);
+        unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(33));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.x => C4Fixed::ZERO);
+        unit_assert_eq!(*call_log.lock().unwrap() => vec!["ContactRight".to_string()]);
     }
 
     #[test]
@@ -690,34 +600,18 @@ protected func ContactRight() { right_calls = 1; return 0; }
         engine.register_test_definition(layer_definition);
         engine.register_test_definition(mover_definition);
 
-        let layer_id = engine.spawn_test_object(
-            SpawnConfig::new("HalfLayer")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(20, 10))
-                .with_construction(FULL_CON / 2),
-        );
-        assert_eq!(
-            engine.object_current_shape_rect(layer_id),
-            Some(DefinitionRect::new(-1, -1, 6, 6))
-        );
+        let layer_id = spawn_fixture!(engine, "HalfLayer", with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 10), with_construction: FULL_CON / 2);
+        unit_assert_eq!(engine.object_current_shape_rect(layer_id) => Some(DefinitionRect::new(-1, -1, 6, 6)));
 
-        let mover_id = engine.spawn_test_object(
-            SpawnConfig::new("HalfLayerMover")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(24, 10))
-                .with_layer(layer_id),
-        );
+        let mover_id = spawn_fixture!(engine, "HalfLayerMover", with_category: CATEGORY_OBJECT, with_position: Vector2::new(24, 10), with_layer: layer_id);
         mobilize(&mut engine, mover_id, itofix(5), C4Fixed::ZERO);
 
         let snapshot = engine.test_tick();
-        assert_eq!(
-            snapshot.object(mover_id).expect("mover present").position.x,
-            25
-        );
+        unit_assert_eq!(snapshot.object(mover_id).expect("mover present").position.x => 25);
 
         let idx = engine.test_object_index(mover_id);
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(29));
-        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(29));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.x => C4Fixed::ZERO);
     }
 
     #[test]
@@ -759,31 +653,19 @@ protected func ContactRight() { right_calls = 1; return 0; }
         engine.register_test_definition(layer_definition);
         engine.register_test_definition(mover_definition);
 
-        let layer_id = engine.spawn_test_object(
-            SpawnConfig::new("NarrowLayer")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(20, 10)),
-        );
-        let mover_id = engine.spawn_test_object(
-            SpawnConfig::new("WideMover")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(20, 10))
-                .with_layer(layer_id),
-        );
+        let layer_id = spawn_fixture!(engine, "NarrowLayer", with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 10));
+        let mover_id = spawn_fixture!(engine, "WideMover", with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 10), with_layer: layer_id);
         mobilize(&mut engine, mover_id, itofix(1), C4Fixed::ZERO);
 
         let snapshot = engine.test_tick();
         let object = snapshot.object(mover_id).expect("object present");
-        assert_eq!(object.position.x, 18);
+        unit_assert_eq!(object.position.x => 18);
         let idx = engine.test_object_index(mover_id);
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(21));
+        unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(21));
         // ContactLeft's SetXDir is erased by the second arm before
         // ContactRight, exactly like C++ TargetBounds.
-        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
-        assert_eq!(
-            *call_log.lock().unwrap(),
-            vec!["ContactLeft".to_string(), "ContactRight".to_string()]
-        );
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.x => C4Fixed::ZERO);
+        unit_assert_eq!(*call_log.lock().unwrap() => vec!["ContactLeft".to_string(), "ContactRight".to_string()]);
     }
 
     #[test]
@@ -810,29 +692,21 @@ protected func ContactRight() { right_calls = 1; return 0; }
         engine.register_test_definition(blocker_definition);
         engine.register_test_definition(mover_definition);
 
-        let mover_id = engine.spawn_test_object(
-            SpawnConfig::new("Mover")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(4, 5)),
-        );
+        let mover_id = spawn_fixture!(engine, "Mover", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 5));
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
         // keeps the blocker center — and its solid mask — at (5,5).
-        engine.spawn_test_object(
-            SpawnConfig::new("Blocker")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(5, 6)),
-        );
+        spawn_fixture!(engine, "Blocker", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 6));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
         mobilize(&mut engine, mover_id, itofix(1), C4Fixed::ZERO);
 
         let snapshot = engine.test_tick();
         let object = snapshot.object(mover_id).expect("object present");
-        assert_eq!(object.position, Vector2::new(5, 5));
+        unit_assert_eq!(object.position => Vector2::new(5, 5));
 
         let idx = engine.test_object_index(mover_id);
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
-        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
-        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(5));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.x => itofix(1));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.y => C4Fixed::ZERO);
     }
 
     #[test]
@@ -892,12 +766,12 @@ protected func ContactRight() { right_calls = 1; return 0; }
 
         let snapshot = engine.tick()?;
         let object = snapshot.object(mover_id).expect("object present");
-        assert_eq!(object.position, Vector2::new(5, 5));
+        unit_assert_eq!(object.position => Vector2::new(5, 5));
 
         let idx = engine.test_object_index(mover_id);
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
-        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
-        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(5));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.x => itofix(1));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.y => C4Fixed::ZERO);
         Ok(())
     }
 
@@ -959,24 +833,16 @@ protected func ContactRight() { right_calls = 1; return 0; }
         // transparent mask pixel there (C4Surface.cpp:723) and DoMotions.
         engine.tick_without_snapshot()?;
         let idx = engine.test_object_index(mover_id);
-        assert_eq!(
-            engine.objects[idx].state.position,
-            Vector2::new(5, 6),
-            "alpha 126 < 128 must not bake solid — the mover walks onto it"
-        );
-        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
-        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(5, 6), "alpha 126 < 128 must not bake solid — the mover walks onto it");
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.x => itofix(1));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.y => C4Fixed::ZERO);
 
         // Tick 2: the step onto the 128-alpha column contacts — 128 is the
         // lowest solid PNG alpha (255-128=127 < 128 is not transparent).
         engine.tick_without_snapshot()?;
         let idx = engine.test_object_index(mover_id);
-        assert_eq!(
-            engine.objects[idx].state.position,
-            Vector2::new(5, 6),
-            "alpha 128 bakes solid — the horizontal move aborts"
-        );
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
+        unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(5, 6), "alpha 128 bakes solid — the horizontal move aborts");
+        unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(5));
         Ok(())
     }
 
@@ -1002,16 +868,8 @@ protected func ContactRight() { right_calls = 1; return 0; }
         engine.register_test_definition(blocker_definition);
         engine.register_test_definition(mover_definition);
 
-        let mover_id = engine.spawn_test_object(
-            SpawnConfig::new("Mover")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(4, 5)),
-        );
-        engine.spawn_test_object(
-            SpawnConfig::new("Blocker")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(5, 6)),
-        );
+        let mover_id = spawn_fixture!(engine, "Mover", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 5));
+        spawn_fixture!(engine, "Blocker", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 6));
         mobilize(&mut engine, mover_id, itofix(1), C4Fixed::ZERO);
 
         engine
@@ -1034,7 +892,7 @@ protected func ContactRight() { right_calls = 1; return 0; }
         let group = clonk_resources::Group::open(&def_dir).expect("open definition group");
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
         let definition = Definition::from_resource(&resource)?;
-        assert!(definition.rotated_solid_masks());
+        unit_assert!(definition.rotated_solid_masks());
         Ok(())
     }
 
@@ -1060,11 +918,11 @@ protected func ContactRight() { right_calls = 1; return 0; }
         };
 
         let definition = Definition::from_resource(&resource)?;
-        assert_eq!(definition.picture(), Some(expected));
+        unit_assert_eq!(definition.picture() => Some(expected));
 
         let mut legacy_definition = test_definition("PICT", "Picture Default", "");
         Engine::apply_resource_core(&mut legacy_definition, &resource.core);
-        assert_eq!(legacy_definition.picture(), Some(expected));
+        unit_assert_eq!(legacy_definition.picture() => Some(expected));
         Ok(())
     }
 
@@ -1084,10 +942,7 @@ protected func ContactRight() { right_calls = 1; return 0; }
         let group = clonk_resources::Group::open(&def_dir).expect("open definition group");
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
         let definition = Definition::from_resource(&resource)?;
-        assert_eq!(
-            definition.top_face(),
-            Some(DefinitionTargetRect::new(0, 1, 24, 26, -12, -13))
-        );
+        unit_assert_eq!(definition.top_face() => Some(DefinitionTargetRect::new(0, 1, 24, 26, -12, -13)));
         Ok(())
     }
 
@@ -1107,7 +962,7 @@ protected func ContactRight() { right_calls = 1; return 0; }
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
         let definition = Definition::from_resource(&resource)?;
 
-        assert_eq!(definition.move_to_range(), -7);
+        unit_assert_eq!(definition.move_to_range() => -7);
         Ok(())
     }
 
@@ -1127,11 +982,11 @@ protected func ContactRight() { right_calls = 1; return 0; }
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
         let definition = Definition::from_resource(&resource)?;
 
-        assert_eq!(definition.version(), [4, 9, 1, 3, 27]);
+        unit_assert_eq!(definition.version() => [4, 9, 1, 3, 27]);
 
         let mut legacy_definition = test_definition("VERS", "Versioned", "");
         Engine::apply_resource_core(&mut legacy_definition, &resource.core);
-        assert_eq!(legacy_definition.version(), [4, 9, 1, 3, 27]);
+        unit_assert_eq!(legacy_definition.version() => [4, 9, 1, 3, 27]);
         Ok(())
     }
 
@@ -1158,11 +1013,11 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
 
         Engine::apply_resource_core(&mut definition, &resource.core);
 
-        assert_eq!(definition.vehicle_control(), 3);
-        assert!(definition.can_be_base());
-        assert!(definition.no_component_mass());
-        assert_eq!(
-            definition.components(),
+        unit_assert_eq!(definition.vehicle_control() => 3);
+        unit_assert!(definition.can_be_base());
+        unit_assert!(definition.no_component_mass());
+        unit_assert_eq!(
+            definition.components() =>
             &[
                 DefinitionComponent {
                     id: DefinitionId::from("WOOD"),
@@ -1174,7 +1029,7 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
                 },
             ]
         );
-        assert!(definition.is_exclusive());
+        unit_assert!(definition.is_exclusive());
 
         let mut engine = Engine::with_seed(1);
         engine.register_definition(definition)?;
@@ -1184,11 +1039,11 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
                 .with_alive(true),
         )?;
         let ocf = engine.test_object_snapshot(object).ocf;
-        assert_ne!(ocf & ocf::EXCLUSIVE, 0);
-        assert_ne!(ocf & ocf::EDIBLE, 0);
-        assert_ne!(ocf & ocf::PREY, 0);
-        assert_ne!(ocf & ocf::ATTRACT_LIGHTNING, 0);
-        assert_eq!(ocf & ocf::FIGHT_READY, 0);
+        unit_assert_ne!(ocf & ocf::EXCLUSIVE => 0);
+        unit_assert_ne!(ocf & ocf::EDIBLE => 0);
+        unit_assert_ne!(ocf & ocf::PREY => 0);
+        unit_assert_ne!(ocf & ocf::ATTRACT_LIGHTNING => 0);
+        unit_assert_eq!(ocf & ocf::FIGHT_READY => 0);
         Ok(())
     }
 
@@ -1213,16 +1068,16 @@ Basement=-18\nConSizeOff=-20\n",
         let group = clonk_resources::Group::open(&def_dir).expect("open definition group");
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
 
-        assert_eq!(resource.core.value, -11);
-        assert_eq!(resource.core.mass, 0, "Mass alone is clamped after load");
-        assert_eq!(resource.core.collection_limit, -12);
-        assert_eq!(resource.core.contact_incinerate, -13);
-        assert_eq!(resource.core.grab, -14);
-        assert_eq!(resource.core.rotateable, -15);
-        assert_eq!(resource.core.border_bound, -1);
-        assert_eq!(resource.core.upright_attach, -255);
-        assert_eq!(resource.core.basement, -18);
-        assert_eq!(resource.core.con_size_off, -20);
+        unit_assert_eq!(resource.core.value => -11);
+        unit_assert_eq!(resource.core.mass => 0, "Mass alone is clamped after load");
+        unit_assert_eq!(resource.core.collection_limit => -12);
+        unit_assert_eq!(resource.core.contact_incinerate => -13);
+        unit_assert_eq!(resource.core.grab => -14);
+        unit_assert_eq!(resource.core.rotateable => -15);
+        unit_assert_eq!(resource.core.border_bound => -1);
+        unit_assert_eq!(resource.core.upright_attach => -255);
+        unit_assert_eq!(resource.core.basement => -18);
+        unit_assert_eq!(resource.core.con_size_off => -20);
 
         let direct_definition = Definition::from_resource(&resource)?;
         let mut legacy_definition = test_definition(
@@ -1232,16 +1087,16 @@ Basement=-18\nConSizeOff=-20\n",
         );
         Engine::apply_resource_core(&mut legacy_definition, &resource.core);
         let assert_signed_fields = |definition: &Definition| {
-            assert_eq!(definition.value(), -11);
-            assert_eq!(definition.mass(), 0);
-            assert_eq!(definition.collection_limit(), -12);
-            assert_eq!(definition.contact_incinerate(), -13);
-            assert_eq!(definition.grab(), -14);
-            assert_eq!(definition.rotateable(), -15);
-            assert_eq!(definition.border_bound(), -1);
-            assert_eq!(definition.upright_attach(), -255);
-            assert_eq!(definition.basement(), -18);
-            assert_eq!(definition.construction_offset(), -20);
+            unit_assert_eq!(definition.value() => -11);
+            unit_assert_eq!(definition.mass() => 0);
+            unit_assert_eq!(definition.collection_limit() => -12);
+            unit_assert_eq!(definition.contact_incinerate() => -13);
+            unit_assert_eq!(definition.grab() => -14);
+            unit_assert_eq!(definition.rotateable() => -15);
+            unit_assert_eq!(definition.border_bound() => -1);
+            unit_assert_eq!(definition.upright_attach() => -255);
+            unit_assert_eq!(definition.basement() => -18);
+            unit_assert_eq!(definition.construction_offset() => -20);
         };
         assert_signed_fields(&direct_definition);
         assert_signed_fields(&legacy_definition);
@@ -1252,12 +1107,10 @@ Basement=-18\nConSizeOff=-20\n",
         upright_engine.set_physics(PhysicsSettings::new(0, 200, -200));
         let mut upright_definition = direct_definition.clone();
         upright_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_LEFT)]);
-        upright_definition.configure_actions(
-            Some("Float".to_string()),
-            HashMap::from([(
-                "Float".to_string(),
-                ActionSpec::default().with_procedure("FLOAT"),
-            )]),
+        set_test_actions(
+            &mut upright_definition,
+            Some("Float"),
+            [("Float", ActionSpec::default().with_procedure("FLOAT"))],
         );
         upright_engine.register_definition(upright_definition)?;
         let mut wall_pixels = vec![0_u8; 25];
@@ -1285,20 +1138,9 @@ Basement=-18\nConSizeOff=-20\n",
         )?;
         let upright_index = upright_engine.test_object_index(upright_id);
         upright_engine.tick_without_snapshot()?;
-        assert_eq!(
-            upright_engine.objects[upright_index].state.t_attach,
-            -255_i32 as u32
-        );
-        assert_eq!(
-            upright_engine.objects[upright_index].state.shape_attach.x, 1,
-            "C4Shape::Attach consumes the low-byte CNAT_Left mask"
-        );
-        assert!(
-            upright_engine.objects[upright_index]
-                .state
-                .shape_attach
-                .mat_valid
-        );
+        unit_assert_eq!(upright_engine.objects[upright_index].state.t_attach => -255_i32 as u32);
+        unit_assert_eq!(upright_engine.objects[upright_index].state.shape_attach.x => 1, "C4Shape::Attach consumes the low-byte CNAT_Left mask");
+        unit_assert!(upright_engine.objects[upright_index].state.shape_attach.mat_valid);
 
         // CollectionLimit compares the nonnegative content count directly to
         // the signed limit, so a negative limit is already full. Grab and
@@ -1315,16 +1157,16 @@ Basement=-18\nConSizeOff=-20\n",
                 .with_mobile(true),
         )?;
         let behavior = behavior_engine.test_object_snapshot(behavior_id);
-        assert_eq!(behavior.ocf & ocf::COLLECTION, 0);
-        assert_eq!(behavior.ocf & ocf::INFLAMMABLE, 0);
-        assert_ne!(behavior.ocf & ocf::GRAB, 0);
-        assert_ne!(behavior.ocf & ocf::ROTATE, 0);
+        unit_assert_eq!(behavior.ocf & ocf::COLLECTION => 0);
+        unit_assert_eq!(behavior.ocf & ocf::INFLAMMABLE => 0);
+        unit_assert_ne!(behavior.ocf & ocf::GRAB => 0);
+        unit_assert_ne!(behavior.ocf & ocf::ROTATE => 0);
         behavior_engine.tick_without_snapshot()?;
-        assert_ne!(
+        unit_assert_ne!(
             behavior_engine
                 .object_snapshot(behavior_id)
                 .expect("signed object survives")
-                .rotation,
+                .rotation =>
             0,
             "negative Rotate remains truthy and has no positive angle cap"
         );
@@ -1352,13 +1194,7 @@ Basement=-18\nConSizeOff=-20\n",
         )?;
         lava_engine.frame = 9;
         lava_engine.tick_without_snapshot()?;
-        assert!(
-            lava_engine
-                .object_snapshot(lava_id)
-                .expect("lava object survives")
-                .on_fire,
-            "negative ContactIncinerate remains nonzero for incendiary material"
-        );
+        unit_assert!(lava_engine.object_snapshot(lava_id).expect("lava object survives").on_fire, "negative ContactIncinerate remains nonzero for incendiary material");
 
         // BorderBound is a raw signed bit mask. -1 enables the top bit and
         // clamps the same fixed-motion target as the native engine.
@@ -1373,14 +1209,7 @@ Basement=-18\nConSizeOff=-20\n",
         )?;
         mobilize(&mut border_engine, border_id, C4Fixed::ZERO, -itofix(5));
         border_engine.tick_without_snapshot()?;
-        assert_eq!(
-            border_engine
-                .object_snapshot(border_id)
-                .expect("border object survives")
-                .position
-                .y,
-            1
-        );
+        unit_assert_eq!(border_engine.object_snapshot(border_id).expect("border object survives").position.y => 1);
 
         // ConstructionCheck subtracts ConSizeOff from the shape height.
         // The blocker is inside the expanded negative-offset rectangle but
@@ -1397,15 +1226,15 @@ Basement=-18\nConSizeOff=-20\n",
         blocker.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
         site_engine.register_definition(blocker)?;
         let site = Vector2::new(20, 30);
-        assert!(site_engine.construction_site_valid("SIGN", site));
-        assert!(site_engine.construction_site_valid("ZERO", site));
+        unit_assert!(site_engine.construction_site_valid("SIGN", site));
+        unit_assert!(site_engine.construction_site_valid("ZERO", site));
         site_engine.spawn_object(
             SpawnConfig::new("BLCK")
                 .with_category(CATEGORY_OBJECT)
                 .with_position(Vector2::new(20, 15)),
         )?;
-        assert!(!site_engine.construction_site_valid("SIGN", site));
-        assert!(site_engine.construction_site_valid("ZERO", site));
+        unit_assert!(!site_engine.construction_site_valid("SIGN", site));
+        unit_assert!(site_engine.construction_site_valid("ZERO", site));
         Ok(())
     }
 
@@ -1415,12 +1244,12 @@ Basement=-18\nConSizeOff=-20\n",
         // (src/C4Def.cpp:573-581). CompareVersion ignores the build slot
         // when the left build is non-positive (src/C4GameVersion.h:66-79).
         let mut definition = test_definition("VERS", "Versioned", "");
-        assert_eq!(definition.version(), DEFAULT_DEFINITION_VERSION);
+        unit_assert_eq!(definition.version() => DEFAULT_DEFINITION_VERSION);
         definition.set_version([3, 99, 99, 99, 99]);
-        assert_eq!(definition.version(), DEFAULT_DEFINITION_VERSION);
+        unit_assert_eq!(definition.version() => DEFAULT_DEFINITION_VERSION);
 
         definition.set_version([4, 0, 0, 0, -1]);
-        assert_eq!(definition.version(), [4, 0, 0, 0, -1]);
+        unit_assert_eq!(definition.version() => [4, 0, 0, 0, -1]);
         Ok(())
     }
 
@@ -1441,7 +1270,7 @@ Basement=-18\nConSizeOff=-20\n",
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
         let definition = Definition::from_resource(&resource)?;
 
-        assert!(definition.auto_context_menu());
+        unit_assert!(definition.auto_context_menu());
         Ok(())
     }
 
@@ -1462,12 +1291,12 @@ Basement=-18\nConSizeOff=-20\n",
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
 
         let definition = Definition::from_resource(&resource)?;
-        assert!(definition.no_get());
+        unit_assert!(definition.no_get());
 
         let mut legacy_definition = test_definition("LOCK", "Locked", "");
-        assert!(!legacy_definition.no_get(), "Definition default is false");
+        unit_assert!(!legacy_definition.no_get(), "Definition default is false");
         Engine::apply_resource_core(&mut legacy_definition, &resource.core);
-        assert!(legacy_definition.no_get());
+        unit_assert!(legacy_definition.no_get());
         Ok(())
     }
 
@@ -1498,11 +1327,7 @@ Basement=-18\nConSizeOff=-20\n",
                 .with_category(CATEGORY_STATIC_BACK)
                 .with_position(Vector2::new(40, 60)),
         )?;
-        assert_ne!(
-            engine.object_snapshot(tree).expect("tree exists").ocf & ocf::CHOP,
-            0,
-            "the legacy scenario Definition path must retain DefCore Chop=1"
-        );
+        unit_assert_ne!(engine.object_snapshot(tree).expect("tree exists").ocf & ocf::CHOP => 0, "the legacy scenario Definition path must retain DefCore Chop=1");
         Ok(())
     }
 
@@ -1549,7 +1374,7 @@ Basement=-18\nConSizeOff=-20\n",
     }
 
     fn solid_mask_sprite(width: u32, height: u32, alphas: &[u8]) -> DefinitionSpriteImage {
-        assert_eq!(alphas.len(), (width * height) as usize);
+        unit_assert_eq!(alphas.len() => (width * height) as usize);
         let pixels: Arc<[u8]> = alphas
             .iter()
             .flat_map(|&alpha| [0, 0, 0, alpha])
@@ -1602,9 +1427,10 @@ Basement=-18\nConSizeOff=-20\n",
         // The 2x1 DigFreeRect includes one unmasked Earth sentinel, proving
         // the dig ran while only the mask-covered first pixel was shielded.
         drill.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 1)));
-        drill.configure_actions(
-            Some("Drill".to_string()),
-            HashMap::from([("Drill".to_string(), ActionSpec::default().with_dig_free(1))]),
+        set_test_actions(
+            &mut drill,
+            Some("Drill"),
+            [("Drill", ActionSpec::default().with_dig_free(1))],
         );
 
         let mut engine = Engine::with_seed(61);
@@ -1612,59 +1438,22 @@ Basement=-18\nConSizeOff=-20\n",
         engine.set_landscape(landscape);
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(drill);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("DRIL")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(10, 10))
-                .with_fixed_position(FixedVec2::from_ints(10, 10))
-                .with_action(ActionState::new("Drill"))
-                .with_mobile(true)
-                .with_loaded(true),
-        );
+        let id = spawn_fixture!(engine, "DRIL", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_action: ActionState::new("Drill"), with_mobile: true, with_loaded: true);
         let index = engine.test_object_index(id);
         engine.update_solid_mask(index);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(id.as_u64()),
-            Some(vec![0x81])
-        );
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.grid_byte_at(10, 10)),
-            Some(2)
-        );
+        unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()) => Some(vec![0x81]));
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.grid_byte_at(10, 10)) => Some(2));
 
         engine
             .tick_without_snapshot()
             .expect("stationary dig frame succeeds");
 
         let index = engine.test_object_index(id);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(id.as_u64()),
-            Some(vec![0x81])
-        );
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.grid_byte_at(10, 10)),
-            Some(2),
-            "DigFree must see the put Vehicle pixel"
-        );
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.grid_byte_at(11, 10)),
-            Some(0),
-            "the same DigFreeRect clears adjacent unmasked Earth"
-        );
+        unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()) => Some(vec![0x81]));
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.grid_byte_at(10, 10)) => Some(2), "DigFree must see the put Vehicle pixel");
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.grid_byte_at(11, 10)) => Some(0), "the same DigFreeRect clears adjacent unmasked Earth");
         engine.remove_solid_mask(index);
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.grid_byte_at(10, 10)),
-            Some(0x81),
-            "mask removal restores the undug Earth byte with IFT"
-        );
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.grid_byte_at(10, 10)) => Some(0x81), "mask removal restores the undug Earth byte with IFT");
     }
 
     #[test]
@@ -1723,57 +1512,37 @@ Basement=-18\nConSizeOff=-20\n",
         engine.set_materials(materials);
         engine.set_landscape(world);
         engine.register_test_definition(case);
-        let id =
-            engine.spawn_test_object(SpawnConfig::new("ELEV").with_position(Vector2::new(10, 10)));
+        let id = spawn_fixture!(engine, "ELEV", with_position: Vector2::new(10, 10));
         let index = engine.test_object_index(id);
         // Park the case flush on the seam, the way an elevator sits at its
         // lowest position; spawn placement would otherwise lift it clear.
         engine.objects[index].state.position = Vector2::new(10, 10);
         engine.objects[index].fixed_position = FixedVec2::from_ints(10, 10);
         engine.update_solid_mask(index);
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10), (11, 10)]);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(id.as_u64()),
-            Some(vec![1; 2])
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10), (11, 10)]);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()) => Some(vec![1; 2]));
 
         let result = engine
             .blast_circle(Vector2::new(10, 10), 2, None)
             .expect("blast applies");
 
         let vehicle = engine.materials().id_of("Vehicle").expect("vehicle exists");
-        assert_eq!(result.pixel_count_by_material.get(&rock), Some(&2));
-        assert_eq!(
-            result.pixel_count_by_material.get(&vehicle),
-            Some(&2),
-            "BlastMatCount books the masked pixels as MVehic, not as Rock"
-        );
-        assert_eq!(result.removed_by_material.get(&rock), Some(&2));
+        unit_assert_eq!(result.pixel_count_by_material.get(&rock) => Some(&2));
+        unit_assert_eq!(result.pixel_count_by_material.get(&vehicle) => Some(&2), "BlastMatCount books the masked pixels as MVehic, not as Rock");
+        unit_assert_eq!(result.removed_by_material.get(&rock) => Some(&2));
 
         let landscape = engine.landscape().expect("landscape remains set");
         for x in [8, 9] {
-            assert_eq!(
-                landscape.material_at(x, 10),
-                None,
-                "exposed Rock inside the crater is blasted free at ({x}, 10)"
-            );
+            unit_assert_eq!(landscape.material_at(x, 10) => None, "exposed Rock inside the crater is blasted free at ({x}, 10)");
         }
-        assert_eq!(
-            vehicle_pixels(&engine),
-            vec![(10, 10), (11, 10)],
-            "BlastFreePix leaves MCVehic alone"
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10), (11, 10)], "BlastFreePix leaves MCVehic alone");
 
         engine.remove_solid_mask(index);
         let landscape = engine.landscape().expect("landscape remains set");
         for x in [10, 11] {
-            assert_eq!(
-                landscape.material_at(x, 10),
-                Some(rock),
-                "mask removal re-exposes the Rock the blast never saw at ({x}, 10)"
-            );
+            unit_assert_eq!(landscape.material_at(x, 10) => Some(rock), "mask removal re-exposes the Rock the blast never saw at ({x}, 10)");
         }
-        assert_eq!(landscape.material_at(12, 10), Some(rock));
+        unit_assert_eq!(landscape.material_at(12, 10) => Some(rock));
     }
 
     #[test]
@@ -1788,15 +1557,7 @@ Basement=-18\nConSizeOff=-20\n",
             engine.set_landscape(vehicle_grid_landscape(24, 20));
             engine.set_physics(PhysicsSettings::new(0, 20, -20));
             engine.register_test_definition(movement_mask_definition("MASK", 1, vertex_x));
-            let id = engine.spawn_test_object(
-                SpawnConfig::new("MASK")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_position(Vector2::new(10, 10))
-                    .with_fixed_position(FixedVec2::from_ints(10, 10))
-                    .with_fixed_velocity(FixedVec2::new(itofix(velocity), C4Fixed::ZERO))
-                    .with_mobile(true)
-                    .with_loaded(true),
-            );
+            let id = spawn_fixture!(engine, "MASK", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_fixed_velocity: FixedVec2::new(itofix(velocity), C4Fixed::ZERO), with_mobile: true, with_loaded: true);
             let index = engine.test_object_index(id);
             engine.update_solid_mask(index);
 
@@ -1805,13 +1566,9 @@ Basement=-18\nConSizeOff=-20\n",
                 .expect("movement frame succeeds");
 
             let index = engine.test_object_index(id);
-            assert_eq!(engine.objects[index].state.position.x, expected_x);
-            assert_eq!(engine.objects[index].fixed_position.x, itofix(expected_x));
-            assert_eq!(
-                engine.objects[index].frame_t_contact & CNAT_RIGHT,
-                expected_contact,
-                "vertex={vertex_x}, velocity={velocity}"
-            );
+            unit_assert_eq!(engine.objects[index].state.position.x => expected_x);
+            unit_assert_eq!(engine.objects[index].fixed_position.x => itofix(expected_x));
+            unit_assert_eq!(engine.objects[index].frame_t_contact & CNAT_RIGHT => expected_contact, "vertex={vertex_x}, velocity={velocity}");
         }
     }
 
@@ -1865,55 +1622,21 @@ Basement=-18\nConSizeOff=-20\n",
         engine.set_landscape(landscape);
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(mover);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("CBMS")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(10, 10))
-                .with_fixed_position(FixedVec2::from_ints(10, 10))
-                .with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO))
-                .with_mobile(true)
-                .with_loaded(true),
-        );
+        let id = spawn_fixture!(engine, "CBMS", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_fixed_velocity: FixedVec2::new(itofix(2), C4Fixed::ZERO), with_mobile: true, with_loaded: true);
         let index = engine.test_object_index(id);
         engine.update_solid_mask(index);
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.grid_byte_at(10, 10)),
-            Some(2),
-            "the old-position mask is baked before movement"
-        );
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.grid_byte_at(10, 10)) => Some(2), "the old-position mask is baked before movement");
 
         engine
             .tick_without_snapshot()
             .expect("two-step movement frame succeeds");
 
         let object = engine.test_object_snapshot(id);
-        assert_eq!(object.position, Vector2::new(11, 10));
-        assert_eq!(
-            object.local_vars.get("old_mask_solid"),
-            Some(&Value::Bool(false)),
-            "GBackSolid in the later contact callback sees restored sky"
-        );
-        assert_eq!(
-            object.local_vars.get("old_mask_material"),
-            Some(&Value::Int(-1)),
-            "GetMaterial in the later contact callback sees MNone, not Vehicle"
-        );
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.grid_byte_at(10, 10)),
-            Some(0),
-            "the tail re-put leaves the old mask cell restored"
-        );
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.grid_byte_at(11, 10)),
-            Some(2),
-            "the mask is re-put at the committed position"
-        );
+        unit_assert_eq!(object.position => Vector2::new(11, 10));
+        unit_assert_eq!(object.local_vars.get("old_mask_solid") => Some(&Value::Bool(false)), "GBackSolid in the later contact callback sees restored sky");
+        unit_assert_eq!(object.local_vars.get("old_mask_material") => Some(&Value::Int(-1)), "GetMaterial in the later contact callback sees MNone, not Vehicle");
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.grid_byte_at(10, 10)) => Some(0), "the tail re-put leaves the old mask cell restored");
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.grid_byte_at(11, 10)) => Some(2), "the mask is re-put at the committed position");
     }
 
     #[test]
@@ -1961,25 +1684,11 @@ Basement=-18\nConSizeOff=-20\n",
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(mover);
         engine.register_test_definition(rider);
-        let mover = engine.spawn_test_object(
-            SpawnConfig::new("RMSK")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(10, 10))
-                .with_fixed_position(FixedVec2::from_ints(10, 10))
-                .with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO))
-                .with_mobile(true)
-                .with_loaded(true),
-        );
+        let mover = spawn_fixture!(engine, "RMSK", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_fixed_velocity: FixedVec2::new(itofix(2), C4Fixed::ZERO), with_mobile: true, with_loaded: true);
         let mover_index = engine.test_object_index(mover);
         engine.update_solid_mask(mover_index);
-        let rider = engine.spawn_test_object(
-            SpawnConfig::new("RIDR")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(10, 9))
-                .with_fixed_position(FixedVec2::from_ints(10, 9))
-                .with_loaded(true),
-        );
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+        let rider = spawn_fixture!(engine, "RIDR", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 9), with_fixed_position: FixedVec2::from_ints(10, 9), with_loaded: true);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10)]);
 
         let definition_id = engine.objects[mover_index].definition_id.clone();
         let actions = engine
@@ -1992,22 +1701,14 @@ Basement=-18\nConSizeOff=-20\n",
             .expect("contacting movement succeeds");
 
         let mover = engine.test_object_snapshot(mover);
-        assert_eq!(mover.position, Vector2::new(11, 10));
-        assert_eq!(
-            mover.local_vars.get("contact_calls"),
-            Some(&Value::Int(1)),
-            "the second candidate invokes the mask-recreating callback"
-        );
-        assert_eq!(
-            vehicle_pixels(&engine),
-            vec![(11, 10)],
-            "the callback's replacement mask remains put at the committed position"
-        );
-        assert_eq!(
+        unit_assert_eq!(mover.position => Vector2::new(11, 10));
+        unit_assert_eq!(mover.local_vars.get("contact_calls") => Some(&Value::Int(1)), "the second candidate invokes the mask-recreating callback");
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(11, 10)], "the callback's replacement mask remains put at the committed position");
+        unit_assert_eq!(
             engine
                 .object_snapshot(rider)
                 .expect("rider remains")
-                .position,
+                .position =>
             Vector2::new(10, 9),
             "the replacement mask must not inherit the deleted instance's rider backup"
         );
@@ -2029,25 +1730,10 @@ Basement=-18\nConSizeOff=-20\n",
             engine.set_physics(PhysicsSettings::new(0, 20, -20));
             engine.register_test_definition(platform);
             engine.register_test_definition(rider);
-            let platform = engine.spawn_test_object(
-                SpawnConfig::new("PLAT")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_position(Vector2::new(10, 10))
-                    .with_fixed_position(FixedVec2::from_ints(10, 10))
-                    .with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO))
-                    .with_mobile(true)
-                    .with_loaded(true),
-            );
+            let platform = spawn_fixture!(engine, "PLAT", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_fixed_velocity: FixedVec2::new(itofix(2), C4Fixed::ZERO), with_mobile: true, with_loaded: true);
             let platform_index = engine.test_object_index(platform);
             engine.update_solid_mask(platform_index);
-            let rider = engine.spawn_test_object(
-                SpawnConfig::new("RIDE")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_position(Vector2::new(10, 9))
-                    .with_fixed_position(FixedVec2::from_ints(10, 9))
-                    .with_contact_density(contact_density)
-                    .with_loaded(true),
-            );
+            let rider = spawn_fixture!(engine, "RIDE", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 9), with_fixed_position: FixedVec2::from_ints(10, 9), with_contact_density: contact_density, with_loaded: true);
 
             engine
                 .tick_without_snapshot()
@@ -2063,8 +1749,8 @@ Basement=-18\nConSizeOff=-20\n",
             [(50, Vector2::new(12, 9)), (51, Vector2::new(10, 9))]
         {
             let (platform, rider) = move_platform(contact_density);
-            assert_eq!(platform, Vector2::new(12, 10));
-            assert_eq!(rider, expected_rider, "ContactDensity={contact_density}");
+            unit_assert_eq!(platform => Vector2::new(12, 10));
+            unit_assert_eq!(rider => expected_rider, "ContactDensity={contact_density}");
         }
     }
 
@@ -2101,85 +1787,47 @@ Basement=-18\nConSizeOff=-20\n",
         engine.register_test_definition(platform);
         engine.register_test_definition(rotated);
         engine.register_test_definition(rider);
-        let platform = engine.spawn_test_object(
-            SpawnConfig::new("EDGE")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(15, 10))
-                .with_fixed_position(FixedVec2::from_ints(15, 10))
-                .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
-                .with_mobile(true)
-                .with_loaded(true),
-        );
+        let platform = spawn_fixture!(engine, "EDGE", with_category: CATEGORY_OBJECT, with_position: Vector2::new(15, 10), with_fixed_position: FixedVec2::from_ints(15, 10), with_fixed_velocity: FixedVec2::new(itofix(1), C4Fixed::ZERO), with_mobile: true, with_loaded: true);
         let platform_index = engine.test_object_index(platform);
         engine.update_solid_mask(platform_index);
-        let rider = engine.spawn_test_object(
-            SpawnConfig::new("RIDE")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(15, 9))
-                .with_fixed_position(FixedVec2::from_ints(15, 9))
-                .with_loaded(true),
-        );
-        assert_eq!(vehicle_pixels(&engine), vec![(15, 10)]);
+        let rider = spawn_fixture!(engine, "RIDE", with_category: CATEGORY_OBJECT, with_position: Vector2::new(15, 9), with_fixed_position: FixedVec2::from_ints(15, 9), with_loaded: true);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(15, 10)]);
 
         engine
             .tick_without_snapshot()
             .expect("edge movement succeeds");
 
-        assert_eq!(
-            engine
-                .object_snapshot(platform)
-                .expect("platform remains on inclusive boundary")
-                .position,
-            Vector2::new(16, 10)
-        );
-        assert_eq!(
+        unit_assert_eq!(engine.object_snapshot(platform).expect("platform remains on inclusive boundary").position => Vector2::new(16, 10));
+        unit_assert_eq!(
             engine
                 .object_snapshot(rider)
                 .expect("rider remains")
-                .position,
+                .position =>
             Vector2::new(16, 9),
             "the empty put still restores the captured rider by the movement delta"
         );
         let platform_index = engine.test_object_index(platform);
-        assert_eq!(
-            engine.debug_solid_mask_is_put(platform.as_u64()),
-            Some(true),
-            "the fully clipped mask remains explicitly put without raster data"
-        );
-        assert_eq!(engine.debug_solid_mask_buffer(platform.as_u64()), None);
-        assert!(vehicle_pixels(&engine).is_empty());
+        unit_assert_eq!(engine.debug_solid_mask_is_put(platform.as_u64()) => Some(true), "the fully clipped mask remains explicitly put without raster data");
+        unit_assert_eq!(engine.debug_solid_mask_buffer(platform.as_u64()) => None);
+        unit_assert!(vehicle_pixels(&engine).is_empty());
 
         let plane_before_remove = plane_bytes(&engine);
         engine.remove_solid_mask(platform_index);
         let plane_after_remove = plane_bytes(&engine);
-        assert_eq!(
-            plane_after_remove, plane_before_remove,
-            "removing an empty put is a complete raster no-op"
-        );
-        assert_eq!(
-            engine.debug_solid_mask_is_put(platform.as_u64()),
-            Some(false)
-        );
-        assert_eq!(engine.debug_solid_mask_buffer(platform.as_u64()), None);
+        unit_assert_eq!(plane_after_remove => plane_before_remove, "removing an empty put is a complete raster no-op");
+        unit_assert_eq!(engine.debug_solid_mask_is_put(platform.as_u64()) => Some(false));
+        unit_assert_eq!(engine.debug_solid_mask_buffer(platform.as_u64()) => None);
 
         // Rotation has a separate clipping branch and must record the same
         // logical put without attempting a negative-sized allocation.
-        let rotated = engine.spawn_test_object(
-            SpawnConfig::new("ROFF")
-                .with_position(Vector2::new(30, 10))
-                .with_rotation(45)
-                .with_loaded(true),
-        );
-        assert_eq!(engine.debug_solid_mask_is_put(rotated.as_u64()), Some(true));
-        assert_eq!(engine.debug_solid_mask_buffer(rotated.as_u64()), None);
+        let rotated = spawn_fixture!(engine, "ROFF", with_position: Vector2::new(30, 10), with_rotation: 45, with_loaded: true);
+        unit_assert_eq!(engine.debug_solid_mask_is_put(rotated.as_u64()) => Some(true));
+        unit_assert_eq!(engine.debug_solid_mask_buffer(rotated.as_u64()) => None);
         let plane_before_remove = plane_bytes(&engine);
         let rotated_index = engine.test_object_index(rotated);
         engine.remove_solid_mask(rotated_index);
-        assert_eq!(plane_bytes(&engine), plane_before_remove);
-        assert_eq!(
-            engine.debug_solid_mask_is_put(rotated.as_u64()),
-            Some(false)
-        );
+        unit_assert_eq!(plane_bytes(&engine) => plane_before_remove);
+        unit_assert_eq!(engine.debug_solid_mask_is_put(rotated.as_u64()) => Some(false));
     }
 
     #[test]
@@ -2210,63 +1858,34 @@ Basement=-18\nConSizeOff=-20\n",
         engine.register_test_definition(rider_definition("RIDB", false));
         engine.register_test_definition(rider_definition("RIDA", true));
 
-        let platform = engine.spawn_test_object(
-            SpawnConfig::new("PLAT")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(45, 30))
-                .with_fixed_position(FixedVec2::from_ints(45, 30))
-                .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
-                .with_mobile(true)
-                .with_loaded(true),
-        );
+        let platform = spawn_fixture!(engine, "PLAT", with_category: CATEGORY_OBJECT, with_position: Vector2::new(45, 30), with_fixed_position: FixedVec2::from_ints(45, 30), with_fixed_velocity: FixedVec2::new(itofix(1), C4Fixed::ZERO), with_mobile: true, with_loaded: true);
         let platform_index = engine.test_object_index(platform);
         engine.update_solid_mask(platform_index);
-        let rider_b = engine.spawn_test_object(
-            SpawnConfig::new("RIDB")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(50, 29))
-                .with_fixed_position(FixedVec2::from_ints(50, 29))
-                .with_loaded(true),
-        );
+        let rider_b = spawn_fixture!(engine, "RIDB", with_category: CATEGORY_OBJECT, with_position: Vector2::new(50, 29), with_fixed_position: FixedVec2::from_ints(50, 29), with_loaded: true);
         let rider_b_index = engine.test_object_index(rider_b);
-        let rider_a = engine.spawn_test_object(
-            SpawnConfig::new("RIDA")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(49, 29))
-                .with_fixed_position(FixedVec2::from_ints(49, 29))
-                .with_loaded(true),
-        );
+        let rider_a = spawn_fixture!(engine, "RIDA", with_category: CATEGORY_OBJECT, with_position: Vector2::new(49, 29), with_fixed_position: FixedVec2::from_ints(49, 29), with_loaded: true);
         let rider_a_index = engine.test_object_index(rider_a);
         engine.update_solid_mask(rider_a_index);
-        assert!(
-            rider_b_index < rider_a_index,
-            "object-vector order is deliberately the reverse of sector order"
-        );
+        unit_assert!(rider_b_index < rider_a_index, "object-vector order is deliberately the reverse of sector order");
 
         engine
             .tick_without_snapshot()
             .expect("platform movement succeeds");
 
-        assert_eq!(
-            engine
-                .object_snapshot(platform)
-                .expect("platform remains")
-                .position,
-            Vector2::new(46, 30)
-        );
-        assert_eq!(
+        unit_assert_eq!(engine.object_snapshot(platform).expect("platform remains").position => Vector2::new(46, 30));
+        unit_assert_eq!(
             engine
                 .object_snapshot(rider_a)
                 .expect("masked rider remains")
-                .position,
+                .position =>
             Vector2::new(50, 29),
             "sector-0 rider moves first, taking its own mask away"
         );
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .object_snapshot(rider_b)
                 .expect("plain rider remains")
-                .position,
+                .position =>
             Vector2::new(51, 29),
             "sector-1 rider can then enter the vacated mask pixel"
         );
@@ -2278,36 +1897,16 @@ Basement=-18\nConSizeOff=-20\n",
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(movement_mask_definition("MSKA", 1, 0));
         engine.register_test_definition(movement_mask_definition("MSKB", 1, 0));
-        let first = engine.spawn_test_object(
-            SpawnConfig::new("MSKA")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(10, 10))
-                .with_fixed_position(FixedVec2::from_ints(10, 10))
-                .with_mobile(true)
-                .with_loaded(true),
-        );
-        let second = engine.spawn_test_object(
-            SpawnConfig::new("MSKB")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(10, 10))
-                .with_fixed_position(FixedVec2::from_ints(10, 10))
-                .with_mobile(false)
-                .with_loaded(true),
-        );
+        let first = spawn_fixture!(engine, "MSKA", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_mobile: true, with_loaded: true);
+        let second = spawn_fixture!(engine, "MSKB", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_mobile: false, with_loaded: true);
         let first_index = engine.test_object_index(first);
         let second_index = engine.test_object_index(second);
         engine.remove_solid_mask(first_index);
         engine.remove_solid_mask(second_index);
         engine.update_solid_mask(first_index);
         engine.update_solid_mask(second_index);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(first.as_u64()),
-            Some(vec![0])
-        );
-        assert_eq!(
-            engine.debug_solid_mask_buffer(second.as_u64()),
-            Some(vec![2])
-        );
+        unit_assert_eq!(engine.debug_solid_mask_buffer(first.as_u64()) => Some(vec![0]));
+        unit_assert_eq!(engine.debug_solid_mask_buffer(second.as_u64()) => Some(vec![2]));
 
         let definition_id = engine.objects[first_index].definition_id.clone();
         let actions = engine
@@ -2320,15 +1919,9 @@ Basement=-18\nConSizeOff=-20\n",
             .exec_object_movement(first_index, &actions, &definition_id, &solid_mask_indices)
             .expect("no-motion DoMovement succeeds");
 
-        assert_eq!(
-            engine.debug_solid_mask_buffer(first.as_u64()),
-            Some(vec![2])
-        );
-        assert_eq!(
-            engine.debug_solid_mask_buffer(second.as_u64()),
-            Some(vec![0])
-        );
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(first.as_u64()) => Some(vec![2]));
+        unit_assert_eq!(engine.debug_solid_mask_buffer(second.as_u64()) => Some(vec![0]));
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10)]);
     }
 
     fn switching_mask_definition() -> Definition {
@@ -2378,44 +1971,33 @@ Basement=-18\nConSizeOff=-20\n",
 
         let mut engine = solidmask_engine(27, landscape);
         engine.register_test_definition(persisted_mask_gate_definition());
-        let gate = engine.spawn_test_object(
-            SpawnConfig::new("SGAT")
-                .with_position(Vector2::new(10, 10))
-                .with_loaded(true),
-        );
+        let gate =
+            spawn_fixture!(engine, "SGAT", with_position: Vector2::new(10, 10), with_loaded: true);
         let gate_index = engine.test_object_index(gate);
         engine.update_solid_mask(gate_index);
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10)]);
 
         engine.call_test_object_function(gate_index, "ShiftMask", Vec::new());
-        assert_eq!(vehicle_pixels(&engine), vec![(11, 10)]);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(11, 10)]);
 
         let rng_before = engine.debug_rng_clone();
         let state = engine.capture_state();
         let saved_landscape = state.landscape.as_ref().expect("landscape captured");
-        assert_eq!(saved_landscape.grid_byte_at(10, 10), Some(1));
-        assert_eq!(saved_landscape.grid_byte_at(11, 10), Some(1));
-        assert_eq!(
-            vehicle_pixels(&engine),
-            vec![(11, 10)],
-            "capture must not remove the live mask"
-        );
-        assert_eq!(engine.debug_rng_clone(), rng_before);
+        unit_assert_eq!(saved_landscape.grid_byte_at(10, 10) => Some(1));
+        unit_assert_eq!(saved_landscape.grid_byte_at(11, 10) => Some(1));
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(11, 10)], "capture must not remove the live mask");
+        unit_assert_eq!(engine.debug_rng_clone() => rng_before);
 
         engine.restore_state(&state).expect("state restores");
-        assert_eq!(
-            vehicle_pixels(&engine),
-            vec![(11, 10)],
-            "restore must re-put the saved effective mask"
-        );
-        assert_eq!(engine.debug_rng_clone(), rng_before);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(11, 10)], "restore must re-put the saved effective mask");
+        unit_assert_eq!(engine.debug_rng_clone() => rng_before);
 
         let gate_index = engine.test_object_index(gate);
         engine.call_test_object_function(gate_index, "OpenMask", Vec::new());
         let restored = engine.landscape().expect("restored landscape");
-        assert_eq!(restored.grid_byte_at(10, 10), Some(1));
-        assert_eq!(restored.grid_byte_at(11, 10), Some(1));
-        assert!(vehicle_pixels(&engine).is_empty());
+        unit_assert_eq!(restored.grid_byte_at(10, 10) => Some(1));
+        unit_assert_eq!(restored.grid_byte_at(11, 10) => Some(1));
+        unit_assert!(vehicle_pixels(&engine).is_empty());
     }
 
     #[test]
@@ -2430,25 +2012,18 @@ Basement=-18\nConSizeOff=-20\n",
 
         let mut engine = solidmask_engine(28, landscape);
         engine.register_test_definition(persisted_mask_gate_definition());
-        let gate = engine.spawn_test_object(
-            SpawnConfig::new("SGAT")
-                .with_position(Vector2::new(10, 10))
-                .with_loaded(true),
-        );
+        let gate =
+            spawn_fixture!(engine, "SGAT", with_position: Vector2::new(10, 10), with_loaded: true);
         let gate_index = engine.test_object_index(gate);
         engine.update_solid_mask(gate_index);
         engine.call_test_object_function(gate_index, "ShiftMask", Vec::new());
-        assert_eq!(vehicle_pixels(&engine), vec![(11, 10)]);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(11, 10)]);
 
         let snapshot = engine.snapshot();
         engine
             .restore_snapshot(&snapshot)
             .expect("runtime snapshot restores");
-        assert_eq!(
-            vehicle_pixels(&engine),
-            vec![(11, 10)],
-            "restore_snapshot must not add the definition-default mask"
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(11, 10)], "restore_snapshot must not add the definition-default mask");
     }
 
     #[test]
@@ -2458,29 +2033,15 @@ Basement=-18\nConSizeOff=-20\n",
         // own restored object even though the persisted plane is clean.
         let mut engine = solidmask_engine(29, vehicle_grid_landscape(20, 20));
         engine.register_test_definition(persisted_mask_gate_definition());
-        let gate = engine.spawn_test_object(
-            SpawnConfig::new("SGAT")
-                .with_position(Vector2::new(10, 10))
-                .with_loaded(true),
-        );
+        let gate =
+            spawn_fixture!(engine, "SGAT", with_position: Vector2::new(10, 10), with_loaded: true);
         let gate_index = engine.test_object_index(gate);
         engine.update_solid_mask(gate_index);
 
         let state = engine.capture_state();
-        assert_eq!(
-            state
-                .landscape
-                .as_ref()
-                .expect("clean OCF landscape captured")
-                .grid_byte_at(10, 10),
-            Some(0)
-        );
+        unit_assert_eq!(state.landscape.as_ref().expect("clean OCF landscape captured").grid_byte_at(10, 10) => Some(0));
         engine.restore_state(&state).expect("OCF state restores");
-        assert_ne!(
-            engine.object_snapshot(gate).expect("OCF gate restores").ocf & ocf::IN_SOLID,
-            0,
-            "loaded SetOCF must see the re-put mask"
-        );
+        unit_assert_ne!(engine.object_snapshot(gate).expect("OCF gate restores").ocf & ocf::IN_SOLID => 0, "loaded SetOCF must see the re-put mask");
     }
 
     #[test]
@@ -2492,22 +2053,16 @@ Basement=-18\nConSizeOff=-20\n",
         // to an opaque one during game-start synchronization.
         let mut engine = solidmask_engine(7, vehicle_grid_landscape(20, 20));
         engine.register_test_definition(switching_mask_definition());
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("GATE")
-                .with_position(Vector2::new(10, 10))
-                .with_loaded(true),
-        );
-        assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
+        let id =
+            spawn_fixture!(engine, "GATE", with_position: Vector2::new(10, 10), with_loaded: true);
+        unit_assert_eq!(vehicle_pixels(&engine) => Vec::<(i32, i32)>::new());
 
         let idx = engine.test_object_index(id);
         let result = engine.call_test_object_function(idx, "SwitchMask", Vec::new());
-        assert_eq!(result, Value::Bool(true));
+        unit_assert_eq!(result => Value::Bool(true));
 
-        assert_eq!(
-            engine.debug_solid_mask_override(id.as_u64()),
-            Some(Some((1, 0, 1, 1)))
-        );
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+        unit_assert_eq!(engine.debug_solid_mask_override(id.as_u64()) => Some(Some((1, 0, 1, 1))));
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10)]);
     }
 
     #[test]
@@ -2521,10 +2076,10 @@ Basement=-18\nConSizeOff=-20\n",
         let def_dir = temp.path().join("ShapelessMask.ocd");
         std::fs::create_dir(&def_dir).expect("create definition directory");
         std::fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=ZMSK\nName=Shapeless mask\nCategory=C4D_Object\nSolidMask=1,0,2,1,-2,3\n",
-        )
-        .expect("write DefCore");
+        def_dir.join("DefCore.txt"),
+        b"[DefCore]\nid=ZMSK\nName=Shapeless mask\nCategory=C4D_Object\nSolidMask=1,0,2,1,-2,3\n",
+    )
+    .expect("write DefCore");
         std::fs::write(
             def_dir.join("Script.c"),
             b"#strict 2\npublic func Reput() { SetSolidMask(1, 0, 2, 1, -2, 3); return GBackSolid(-2, 3); }\n",
@@ -2537,38 +2092,24 @@ Basement=-18\nConSizeOff=-20\n",
         let group = clonk_resources::Group::open(&def_dir).expect("open definition group");
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
         let definition = Definition::from_resource(&resource)?;
-        assert_eq!(definition.shape_rect(), None, "Shape must remain omitted");
-        assert_eq!(
-            definition.solid_mask(),
-            Some(DefinitionTargetRect::new(1, 0, 2, 1, -2, 3)),
-            "the valid bitmap-bounded mask must survive loading"
-        );
+        unit_assert_eq!(definition.shape_rect() => None, "Shape must remain omitted");
+        unit_assert_eq!(definition.solid_mask() => Some(DefinitionTargetRect::new(1, 0, 2, 1, -2, 3)), "the valid bitmap-bounded mask must survive loading");
 
         let mut engine = solidmask_engine(70, vehicle_grid_landscape(30, 30));
         engine.register_definition(definition)?;
         let object =
             engine.spawn_object(SpawnConfig::new("ZMSK").with_position(Vector2::new(10, 10)))?;
-        assert_eq!(vehicle_pixels(&engine), vec![(8, 13), (9, 13)]);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(object.as_u64()),
-            Some(vec![0, 0])
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(8, 13), (9, 13)]);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(object.as_u64()) => Some(vec![0, 0]));
 
         let index = engine.test_object_index(object);
-        assert_eq!(
-            engine.call_object_function(index, "Reput", Vec::new())?,
+        unit_assert_eq!(
+            engine.call_object_function(index, "Reput", Vec::new())? =>
             Value::Bool(true),
             "Reput must see the callback-private zero-offset mask synchronously"
         );
-        assert_eq!(
-            vehicle_pixels(&engine),
-            vec![(8, 13), (9, 13)],
-            "callback-time SetSolidMask must use the same zero shape offset"
-        );
-        assert_eq!(
-            engine.debug_solid_mask_buffer(object.as_u64()),
-            Some(vec![0, 0])
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(8, 13), (9, 13)], "callback-time SetSolidMask must use the same zero shape offset");
+        unit_assert_eq!(engine.debug_solid_mask_buffer(object.as_u64()) => Some(vec![0, 0]));
 
         // A non-grid landscape cannot rasterize CreateObject's live mask.
         // Stuck must therefore consume pending_solid_mask's placement before
@@ -2590,16 +2131,10 @@ Basement=-18\nConSizeOff=-20\n",
         pending_engine.register_definition(caller)?;
         let caller_id = pending_engine
             .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(10, 8)))?;
-        assert!(
-            !pending_engine
-                .landscape()
-                .expect("landscape remains")
-                .is_solid_at(8, 11),
-            "the pending-mask probe starts in sky"
-        );
+        unit_assert!(!pending_engine.landscape().expect("landscape remains").is_solid_at(8, 11), "the pending-mask probe starts in sky");
         let caller_index = pending_engine.test_object_index(caller_id);
-        assert_eq!(
-            pending_engine.call_object_function(caller_index, "ProbePendingMask", Vec::new())?,
+        unit_assert_eq!(
+            pending_engine.call_object_function(caller_index, "ProbePendingMask", Vec::new())? =>
             Value::Bool(true),
             "Stuck must see CreateObject's pending zero-offset mask before materialization"
         );
@@ -2634,46 +2169,31 @@ Basement=-18\nConSizeOff=-20\n",
 
         let mut engine = solidmask_engine(40, vehicle_grid_landscape(30, 30));
         engine.register_test_definition(definition);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("CLMP")
-                .with_position(Vector2::new(10, 10))
-                .with_loaded(true),
-        );
+        let id =
+            spawn_fixture!(engine, "CLMP", with_position: Vector2::new(10, 10), with_loaded: true);
         let index = engine.test_object_index(id);
-        assert!(vehicle_pixels(&engine).is_empty());
+        unit_assert!(vehicle_pixels(&engine).is_empty());
 
         let result = engine.call_test_object_function(index, "ClipMask", Vec::new());
-        assert_eq!(result, Value::Bool(true));
-        assert_eq!(
-            engine.debug_solid_mask_override(id.as_u64()),
-            Some(Some((0, 0, 3, 3)))
-        );
+        unit_assert_eq!(result => Value::Bool(true));
+        unit_assert_eq!(engine.debug_solid_mask_override(id.as_u64()) => Some(Some((0, 0, 3, 3))));
         let clipped_pixels = vec![(15, 15), (16, 15), (16, 16), (14, 17), (15, 17), (16, 17)];
-        assert_eq!(vehicle_pixels(&engine), clipped_pixels);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(id.as_u64()),
-            Some(vec![2, 0, 0, 2, 2, 0, 0, 0, 0])
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => clipped_pixels);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()) => Some(vec![2, 0, 0, 2, 2, 0, 0, 0, 0]));
 
         // Callback preview already clamps; an authoritative rebuild proves
         // that the clamped rectangle, rather than the raw request, persisted.
         engine.update_solid_mask(index);
-        assert_eq!(vehicle_pixels(&engine), clipped_pixels);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(id.as_u64()),
-            Some(vec![2, 0, 0, 2, 2, 0, 0, 0, 0])
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => clipped_pixels);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()) => Some(vec![2, 0, 0, 2, 2, 0, 0, 0, 0]));
 
         engine.call_test_object_function(index, "DisableMask", Vec::new());
         // height=min(1, 2-3)=-1; CheckSolidMaskRect then forces width to 0
         // while retaining that negative height and both target offsets.
-        assert_eq!(
-            engine.debug_solid_mask_override(id.as_u64()),
-            Some(Some((0, 3, 0, -1)))
-        );
+        unit_assert_eq!(engine.debug_solid_mask_override(id.as_u64()) => Some(Some((0, 3, 0, -1))));
         engine.update_solid_mask(index);
-        assert!(vehicle_pixels(&engine).is_empty());
-        assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()), None);
+        unit_assert!(vehicle_pixels(&engine).is_empty());
+        unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()) => None);
     }
 
     #[test]
@@ -2683,17 +2203,11 @@ Basement=-18\nConSizeOff=-20\n",
         // returning (C4Script.cpp:271-278; C4Object.cpp:3809-3818).
         let mut engine = solidmask_engine(8, vehicle_grid_landscape(20, 20));
         engine.register_test_definition(switching_mask_definition());
-        let caller = engine.spawn_test_object(
-            SpawnConfig::new("GATE")
-                .with_position(Vector2::new(5, 5))
-                .with_loaded(true),
-        );
-        let target = engine.spawn_test_object(
-            SpawnConfig::new("GATE")
-                .with_position(Vector2::new(10, 10))
-                .with_loaded(true),
-        );
-        assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
+        let caller =
+            spawn_fixture!(engine, "GATE", with_position: Vector2::new(5, 5), with_loaded: true);
+        let target =
+            spawn_fixture!(engine, "GATE", with_position: Vector2::new(10, 10), with_loaded: true);
+        unit_assert_eq!(vehicle_pixels(&engine) => Vec::<(i32, i32)>::new());
 
         let idx = engine.test_object_index(caller);
         let result = engine.call_test_object_function(
@@ -2702,12 +2216,9 @@ Basement=-18\nConSizeOff=-20\n",
             vec![Value::Object(target.as_u64())],
         );
 
-        assert_eq!(result, Value::Bool(true));
-        assert_eq!(
-            engine.debug_solid_mask_override(target.as_u64()),
-            Some(Some((1, 0, 1, 1)))
-        );
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+        unit_assert_eq!(result => Value::Bool(true));
+        unit_assert_eq!(engine.debug_solid_mask_override(target.as_u64()) => Some(Some((1, 0, 1, 1))));
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10)]);
     }
 
     #[test]
@@ -2736,20 +2247,17 @@ Basement=-18\nConSizeOff=-20\n",
         let mut engine = solidmask_engine(7, vehicle_grid_landscape(20, 20));
         engine.register_test_definition(gate);
         engine.register_test_definition(skin);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("GATE")
-                .with_position(Vector2::new(10, 10))
-                .with_loaded(true),
-        );
-        assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
+        let id =
+            spawn_fixture!(engine, "GATE", with_position: Vector2::new(10, 10), with_loaded: true);
+        unit_assert_eq!(vehicle_pixels(&engine) => Vec::<(i32, i32)>::new());
 
         let idx = engine.test_object_index(id);
         engine.call_test_object_function(idx, "Switch", Vec::new());
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10)]);
 
         let idx = engine.test_object_index(id);
         engine.call_test_object_function(idx, "Reset", Vec::new());
-        assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
+        unit_assert_eq!(vehicle_pixels(&engine) => Vec::<(i32, i32)>::new());
     }
 
     const GRAPHICS_BOUNDS_REFLECTION_SCRIPT: &[u8] = br#"#strict 2
@@ -2796,24 +2304,21 @@ func ProbeGraphicsBounds() {
         let group = clonk_resources::Group::open(&def_dir).expect("open definition group");
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
         let definition = Definition::from_resource(&resource)?;
-        assert_eq!(definition.solid_mask(), None);
-        assert_eq!(definition.top_face(), None);
+        unit_assert_eq!(definition.solid_mask() => None);
+        unit_assert_eq!(definition.top_face() => None);
 
         let mut engine = solidmask_engine(41, vehicle_grid_landscape(128, 128));
         engine.register_definition(definition)?;
-        assert_eq!(engine.definition_top_face("BADS"), None);
+        unit_assert_eq!(engine.definition_top_face("BADS") => None);
         let object = engine.spawn_object(
             SpawnConfig::new("BADS")
                 .with_position(Vector2::new(64, 64))
                 .with_loaded(true),
         )?;
         let index = engine.test_object_index(object);
-        assert_eq!(
-            engine.call_object_function(index, "ProbeGraphicsBounds", Vec::new())?,
-            Value::Array(vec![Value::Int(0); 12])
-        );
-        assert!(vehicle_pixels(&engine).is_empty());
-        assert_eq!(engine.debug_solid_mask_buffer(object.as_u64()), None);
+        unit_assert_eq!(engine.call_object_function(index, "ProbeGraphicsBounds", Vec::new())? => Value::Array(vec![Value::Int(0); 12]));
+        unit_assert!(vehicle_pixels(&engine).is_empty());
+        unit_assert_eq!(engine.debug_solid_mask_buffer(object.as_u64()) => None);
         Ok(())
     }
 
@@ -2839,21 +2344,15 @@ func ProbeGraphicsBounds() {
         let group = clonk_resources::Group::open(&def_dir).expect("open definition group");
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
         let definition = Definition::from_resource(&resource)?;
-        assert_eq!(
-            definition.solid_mask(),
-            Some(DefinitionTargetRect::new(0, 0, 64, 64, 9, 10))
-        );
-        assert_eq!(
-            definition.top_face(),
-            Some(DefinitionTargetRect::new(0, 0, 32, 32, 7, 8))
-        );
+        unit_assert_eq!(definition.solid_mask() => Some(DefinitionTargetRect::new(0, 0, 64, 64, 9, 10)));
+        unit_assert_eq!(definition.top_face() => Some(DefinitionTargetRect::new(0, 0, 32, 32, 7, 8)));
 
         let mut engine = Engine::with_seed(42);
         engine.register_definition(definition)?;
         let object = engine.spawn_object(SpawnConfig::new("EDGE"))?;
         let index = engine.test_object_index(object);
-        assert_eq!(
-            engine.call_object_function(index, "ProbeGraphicsBounds", Vec::new())?,
+        unit_assert_eq!(
+            engine.call_object_function(index, "ProbeGraphicsBounds", Vec::new())? =>
             Value::Array(vec![
                 Value::Int(0),
                 Value::Int(0),
@@ -2887,21 +2386,14 @@ func ProbeGraphicsBounds() {
             let mut engine = Engine::with_seed(41);
             engine.set_landscape(vehicle_grid_landscape(30, 30));
             engine.register_test_definition(definition);
-            let id = engine
-                .spawn_test_object(SpawnConfig::new("ICLP").with_position(Vector2::new(10, 12)));
+            let id = spawn_fixture!(engine, "ICLP", with_position: Vector2::new(10, 12));
             let index = engine.test_object_index(id);
-            assert_eq!(
-                engine.debug_solid_mask_override(id.as_u64()),
-                Some(Some((0, 0, 3, 2)))
-            );
+            unit_assert_eq!(engine.debug_solid_mask_override(id.as_u64()) => Some(Some((0, 0, 3, 2))));
             let initial_pixels = vec![(10, 10), (11, 10), (12, 10), (10, 11), (11, 11), (12, 11)];
-            assert_eq!(vehicle_pixels(&engine), initial_pixels);
-            assert_eq!(
-                engine.debug_solid_mask_buffer(id.as_u64()),
-                Some(vec![0; 6])
-            );
+            unit_assert_eq!(vehicle_pixels(&engine) => initial_pixels);
+            unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()) => Some(vec![0; 6]));
             engine.update_solid_mask(index);
-            assert_eq!(vehicle_pixels(&engine), initial_pixels);
+            unit_assert_eq!(vehicle_pixels(&engine) => initial_pixels);
         }
 
         // Start this object with a fully valid 4x2 mask, shrink its active
@@ -2931,72 +2423,36 @@ func ProbeGraphicsBounds() {
         let mut engine = solidmask_engine(42, vehicle_grid_landscape(30, 30));
         engine.register_test_definition(gate);
         engine.register_test_definition(skin);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("GCLP")
-                .with_position(Vector2::new(10, 10))
-                .with_loaded(true),
-        );
+        let id =
+            spawn_fixture!(engine, "GCLP", with_position: Vector2::new(10, 10), with_loaded: true);
         let index = engine.test_object_index(id);
-        assert_eq!(
-            vehicle_pixels(&engine),
-            vec![
-                (10, 10),
-                (11, 10),
-                (12, 10),
-                (13, 10),
-                (10, 11),
-                (11, 11),
-                (12, 11),
-                (13, 11),
-            ]
-        );
-        assert_eq!(
-            engine.debug_solid_mask_buffer(id.as_u64()),
-            Some(vec![0; 8])
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10), (11, 10), (12, 10), (13, 10), (10, 11), (11, 11), (12, 11), (13, 11),]);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()) => Some(vec![0; 8]));
 
         engine.call_test_object_function(index, "Switch", Vec::new());
-        assert_eq!(
-            engine.debug_solid_mask_override(id.as_u64()),
-            Some(Some((0, 0, 2, 1)))
-        );
+        unit_assert_eq!(engine.debug_solid_mask_override(id.as_u64()) => Some(Some((0, 0, 2, 1))));
         let small_pixels = vec![(10, 10), (11, 10)];
-        assert_eq!(vehicle_pixels(&engine), small_pixels);
+        unit_assert_eq!(vehicle_pixels(&engine) => small_pixels);
         engine.update_solid_mask(index);
-        assert_eq!(vehicle_pixels(&engine), small_pixels);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(id.as_u64()),
-            Some(vec![0; 2])
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => small_pixels);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()) => Some(vec![0; 2]));
 
         engine.call_test_object_function(index, "Same", Vec::new());
         let base_graphics = engine
             .test_object_snapshot(id)
             .base_graphics
             .expect("named graphics remain selected");
-        assert_eq!(base_graphics.graphics_name.as_deref(), Some("small"));
-        assert_eq!(
-            base_graphics.blit_mode, 0,
-            "base SetGraphics ignores blit mode"
-        );
-        assert_eq!(
-            engine.debug_solid_mask_override(id.as_u64()),
-            Some(Some((0, 0, 2, 1)))
-        );
+        unit_assert_eq!(base_graphics.graphics_name.as_deref() => Some("small"));
+        unit_assert_eq!(base_graphics.blit_mode => 0, "base SetGraphics ignores blit mode");
+        unit_assert_eq!(engine.debug_solid_mask_override(id.as_u64()) => Some(Some((0, 0, 2, 1))));
         engine.update_solid_mask(index);
-        assert_eq!(vehicle_pixels(&engine), small_pixels);
+        unit_assert_eq!(vehicle_pixels(&engine) => small_pixels);
 
         engine.call_test_object_function(index, "Reset", Vec::new());
-        assert_eq!(
-            engine.debug_solid_mask_override(id.as_u64()),
-            Some(Some((0, 0, 2, 1)))
-        );
+        unit_assert_eq!(engine.debug_solid_mask_override(id.as_u64()) => Some(Some((0, 0, 2, 1))));
         engine.update_solid_mask(index);
-        assert_eq!(vehicle_pixels(&engine), small_pixels);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(id.as_u64()),
-            Some(vec![0; 2])
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => small_pixels);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()) => Some(vec![0; 2]));
     }
 
     #[test]
@@ -3006,19 +2462,8 @@ func ProbeGraphicsBounds() {
         // water freed from under a vehicle mask immediately re-arms its
         // mass mover. All rust removal paths mirror C++ Remove(true, ...)
         // callers (C4Object.cpp:5652/5667, C4Movement.cpp:123/545).
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-
-            [Material Water]
-            Name=Water
-            Density=25
-            Instable=1
-        "#,
-        )
-        .expect("material library parses");
+        let library = MaterialLibrary::parse(EARTH_AND_WATER_MATERIAL_SOURCE)
+            .expect("material library parses");
         let materials = MaterialSet::from_resource_library(&library);
         let water = materials.id_of("Water").expect("water exists");
 
@@ -3043,30 +2488,19 @@ func ProbeGraphicsBounds() {
         engine.set_materials(materials);
         engine.set_landscape(landscape);
         engine.register_test_definition(definition);
-        let id =
-            engine.spawn_test_object(SpawnConfig::new("Bar").with_position(Vector2::new(10, 10)));
+        let id = spawn_fixture!(engine, "Bar", with_position: Vector2::new(10, 10));
         let idx = engine.test_object_index(id);
         engine.objects[idx].state.position = Vector2::new(10, 10);
         engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
         engine.update_solid_mask(idx);
-        assert!(
-            vehicle_pixels(&engine).contains(&(10, 10)),
-            "the mask covers the water pixel"
-        );
-        assert_eq!(engine.mass_movers.live_movers(), 0);
+        unit_assert!(vehicle_pixels(&engine).contains(&(10, 10)), "the mask covers the water pixel");
+        unit_assert_eq!(engine.mass_movers.live_movers() => 0);
 
         engine.remove_solid_mask(idx);
 
         let landscape = engine.landscape().expect("landscape set");
-        assert_eq!(
-            landscape.material_at(10, 10),
-            Some(water),
-            "the water pixel restored from the mask buffer"
-        );
-        assert!(
-            engine.mass_movers.live_movers() >= 1,
-            "the restored water pixel re-armed a mass mover"
-        );
+        unit_assert_eq!(landscape.material_at(10, 10) => Some(water), "the water pixel restored from the mask buffer");
+        unit_assert!(engine.mass_movers.live_movers() >= 1, "the restored water pixel re-armed a mass mover");
     }
 
     #[test]
@@ -3075,19 +2509,8 @@ func ProbeGraphicsBounds() {
         // Remove(false, false), then re-puts them in that same order. Rust's
         // exec list is the reverse master list, so spawning loaded B then A
         // makes A the canonical owner even though the masks start put B->A.
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-
-            [Material Water]
-            Name=Water
-            Density=25
-            Instable=1
-        "#,
-        )
-        .expect("material library parses");
+        let library = MaterialLibrary::parse(EARTH_AND_WATER_MATERIAL_SOURCE)
+            .expect("material library parses");
         let materials = MaterialSet::from_resource_library(&library);
 
         let mut bytes = vec![0u8; 400];
@@ -3116,51 +2539,27 @@ func ProbeGraphicsBounds() {
         engine.set_materials(materials);
         engine.set_landscape(landscape);
         engine.register_test_definition(mask);
-        let b = engine.spawn_test_object(
-            SpawnConfig::new("Mask")
-                .with_position(Vector2::new(10, 10))
-                .with_loaded(true),
-        );
-        let a = engine.spawn_test_object(
-            SpawnConfig::new("Mask")
-                .with_position(Vector2::new(10, 10))
-                .with_loaded(true),
-        );
-        assert_eq!(engine.debug_exec_order(), vec![b, a]);
+        let b =
+            spawn_fixture!(engine, "Mask", with_position: Vector2::new(10, 10), with_loaded: true);
+        let a =
+            spawn_fixture!(engine, "Mask", with_position: Vector2::new(10, 10), with_loaded: true);
+        unit_assert_eq!(engine.debug_exec_order() => vec![b, a]);
 
         // Loaded object face setup puts masks as each object joins the list,
         // so the initial ownership order is already B then A.
-        assert_eq!(engine.debug_solid_mask_buffer(b.as_u64()), Some(vec![3]));
-        assert_eq!(engine.debug_solid_mask_buffer(a.as_u64()), Some(vec![2]));
-        assert_eq!(engine.mass_movers.live_movers(), 0);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(b.as_u64()) => Some(vec![3]));
+        unit_assert_eq!(engine.debug_solid_mask_buffer(a.as_u64()) => Some(vec![2]));
+        unit_assert_eq!(engine.mass_movers.live_movers() => 0);
 
         engine
             .execute_synchronize_control(false, false)
             .expect("game synchronization succeeds");
 
-        assert_eq!(engine.debug_exec_order(), vec![b, a]);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(a.as_u64()),
-            Some(vec![3]),
-            "master-list-first A must own the saved Water background"
-        );
-        assert_eq!(
-            engine.debug_solid_mask_buffer(b.as_u64()),
-            Some(vec![2]),
-            "later B must record the Vehicle sentinel at the overlap"
-        );
-        assert_eq!(
-            engine
-                .landscape()
-                .expect("landscape set")
-                .grid_byte_at(10, 10),
-            Some(2)
-        );
-        assert_eq!(
-            engine.mass_movers.live_movers(),
-            0,
-            "Remove(false, false) must not probe restored instable pixels"
-        );
+        unit_assert_eq!(engine.debug_exec_order() => vec![b, a]);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(a.as_u64()) => Some(vec![3]), "master-list-first A must own the saved Water background");
+        unit_assert_eq!(engine.debug_solid_mask_buffer(b.as_u64()) => Some(vec![2]), "later B must record the Vehicle sentinel at the overlap");
+        unit_assert_eq!(engine.landscape().expect("landscape set").grid_byte_at(10, 10) => Some(2));
+        unit_assert_eq!(engine.mass_movers.live_movers() => 0, "Remove(false, false) must not probe restored instable pixels");
     }
 
     #[test]
@@ -3186,8 +2585,7 @@ func ProbeGraphicsBounds() {
 
         let mut engine = solidmask_engine(7, vehicle_grid_landscape(20, 20));
         engine.register_test_definition(definition);
-        let id =
-            engine.spawn_test_object(SpawnConfig::new("Bar").with_position(Vector2::new(10, 10)));
+        let id = spawn_fixture!(engine, "Bar", with_position: Vector2::new(10, 10));
         let idx = engine.test_object_index(id);
         engine.objects[idx].state.position = Vector2::new(10, 10);
         engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
@@ -3195,7 +2593,7 @@ func ProbeGraphicsBounds() {
         engine.objects[idx].fixed_rotation = itofix(90);
         engine.update_solid_mask(idx);
 
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 9), (10, 10), (10, 11)]);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 9), (10, 10), (10, 11)]);
     }
 
     #[test]
@@ -3218,33 +2616,25 @@ func ProbeGraphicsBounds() {
 
         let mut engine = solidmask_engine(9, vehicle_grid_landscape(20, 20));
         engine.register_test_definition(definition);
-        let id =
-            engine.spawn_test_object(SpawnConfig::new("Bar").with_position(Vector2::new(10, 10)));
+        let id = spawn_fixture!(engine, "Bar", with_position: Vector2::new(10, 10));
         let idx = engine.test_object_index(id);
         engine.objects[idx].state.position = Vector2::new(10, 10);
         engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
         engine.update_solid_mask(idx);
-        assert_eq!(vehicle_pixels(&engine), vec![(9, 10), (10, 10), (11, 10)]);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(9, 10), (10, 10), (11, 10)]);
 
         let result = engine.call_test_object_function(idx, "Rotate90", Vec::new());
-        assert_eq!(result, Value::Bool(true));
-        assert_eq!(
-            engine.object_snapshot(id).expect("bar survives").rotation,
-            90
-        );
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 9), (10, 10), (10, 11)]);
+        unit_assert_eq!(result => Value::Bool(true));
+        unit_assert_eq!(engine.object_snapshot(id).expect("bar survives").rotation => 90);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 9), (10, 10), (10, 11)]);
 
         let idx = engine.test_object_index(id);
         engine.remove_solid_mask(idx);
-        assert!(vehicle_pixels(&engine).is_empty());
+        unit_assert!(vehicle_pixels(&engine).is_empty());
 
         let result = engine.call_test_object_function(idx, "Rotate90", Vec::new());
-        assert_eq!(result, Value::Bool(true));
-        assert_eq!(
-            vehicle_pixels(&engine),
-            vec![(10, 9), (10, 10), (10, 11)],
-            "same-angle SetR must still rebuild and put the solid mask"
-        );
+        unit_assert_eq!(result => Value::Bool(true));
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 9), (10, 10), (10, 11)], "same-angle SetR must still rebuild and put the solid mask");
     }
 
     #[test]
@@ -3268,8 +2658,7 @@ func ProbeGraphicsBounds() {
 
         let mut engine = solidmask_engine(7, vehicle_grid_landscape(20, 20));
         engine.register_test_definition(definition);
-        let id =
-            engine.spawn_test_object(SpawnConfig::new("Sqr").with_position(Vector2::new(10, 10)));
+        let id = spawn_fixture!(engine, "Sqr", with_position: Vector2::new(10, 10));
         let idx = engine.test_object_index(id);
         engine.objects[idx].state.position = Vector2::new(10, 10);
         engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
@@ -3277,8 +2666,8 @@ func ProbeGraphicsBounds() {
         engine.objects[idx].fixed_rotation = itofix(45);
         engine.update_solid_mask(idx);
 
-        assert_eq!(
-            vehicle_pixels(&engine),
+        unit_assert_eq!(
+            vehicle_pixels(&engine) =>
             vec![
                 (10, 8),
                 (9, 9),
@@ -3319,18 +2708,14 @@ func ProbeGraphicsBounds() {
         let original = landscape.pixel_grid().expect("grid set").bytes().to_vec();
         engine.set_landscape(landscape);
         engine.register_test_definition(definition);
-        let id =
-            engine.spawn_test_object(SpawnConfig::new("Sqr").with_position(Vector2::new(10, 10)));
+        let id = spawn_fixture!(engine, "Sqr", with_position: Vector2::new(10, 10));
         let idx = engine.test_object_index(id);
         engine.objects[idx].state.position = Vector2::new(10, 10);
         engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
         engine.objects[idx].state.rotation = 45;
         engine.objects[idx].fixed_rotation = itofix(45);
         engine.update_solid_mask(idx);
-        assert!(
-            vehicle_pixels(&engine).contains(&(10, 8)),
-            "rotated mask must be baked before the removal is meaningful"
-        );
+        unit_assert!(vehicle_pixels(&engine).contains(&(10, 8)), "rotated mask must be baked before the removal is meaningful");
 
         engine.remove_solid_mask(idx);
 
@@ -3341,7 +2726,7 @@ func ProbeGraphicsBounds() {
             .expect("grid set")
             .bytes()
             .to_vec();
-        assert_eq!(restored, original);
+        unit_assert_eq!(restored => original);
     }
 
     #[test]
@@ -3355,23 +2740,19 @@ func ProbeGraphicsBounds() {
 
         let mut engine = solidmask_engine(7, vehicle_grid_landscape(20, 20));
         engine.register_test_definition(definition);
-        let id =
-            engine.spawn_test_object(SpawnConfig::new("Sqr").with_position(Vector2::new(10, 10)));
+        let id = spawn_fixture!(engine, "Sqr", with_position: Vector2::new(10, 10));
         let idx = engine.test_object_index(id);
         engine.objects[idx].state.position = Vector2::new(10, 10);
         engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
         engine.update_solid_mask(idx);
-        assert!(
-            !vehicle_pixels(&engine).is_empty(),
-            "the unrotated mask must bake first"
-        );
+        unit_assert!(!vehicle_pixels(&engine).is_empty(), "the unrotated mask must bake first");
 
         engine.objects[idx].state.rotation = 45;
         engine.objects[idx].fixed_rotation = itofix(45);
         engine.update_solid_mask(idx);
 
-        assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
-        assert!(engine.objects[idx].solid_mask_bake.is_none());
+        unit_assert_eq!(vehicle_pixels(&engine) => Vec::<(i32, i32)>::new());
+        unit_assert!(engine.objects[idx].solid_mask_bake.is_none());
     }
 
     #[test]
@@ -3403,36 +2784,26 @@ func ProbeGraphicsBounds() {
         engine.register_test_definition(blocker);
 
         // Blocker puts first: its 1x1 mask owns the Earth backup at (10,10).
-        let blocker_id =
-            engine.spawn_test_object(SpawnConfig::new("Blk").with_position(Vector2::new(10, 10)));
+        let blocker_id = spawn_fixture!(engine, "Blk", with_position: Vector2::new(10, 10));
         let blocker_idx = engine.test_object_index(blocker_id);
         engine.objects[blocker_idx].state.position = Vector2::new(10, 10);
         engine.objects[blocker_idx].fixed_position = FixedVec2::from_ints(10, 10);
         engine.update_solid_mask(blocker_idx);
 
         // Rotated bar puts second: vertical bar (10,9),(10,10),(10,11).
-        let bar_id =
-            engine.spawn_test_object(SpawnConfig::new("Bar").with_position(Vector2::new(10, 10)));
+        let bar_id = spawn_fixture!(engine, "Bar", with_position: Vector2::new(10, 10));
         let bar_idx = engine.test_object_index(bar_id);
         engine.objects[bar_idx].state.position = Vector2::new(10, 10);
         engine.objects[bar_idx].fixed_position = FixedVec2::from_ints(10, 10);
         engine.objects[bar_idx].state.rotation = 90;
         engine.objects[bar_idx].fixed_rotation = itofix(90);
         engine.update_solid_mask(bar_idx);
-        assert_eq!(
-            vehicle_pixels(&engine),
-            vec![(10, 9), (10, 10), (10, 11)],
-            "both masks put; the shared pixel is baked once"
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 9), (10, 10), (10, 11)], "both masks put; the shared pixel is baked once");
 
         // Removing the blocker restores Earth at (10,10) and then the
         // re-put of the rotated bar must write MCVehic back.
         engine.remove_solid_mask(blocker_idx);
-        assert_eq!(
-            vehicle_pixels(&engine),
-            vec![(10, 9), (10, 10), (10, 11)],
-            "the rotated mask re-put reclaims the freed shared pixel"
-        );
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 9), (10, 10), (10, 11)], "the rotated mask re-put reclaims the freed shared pixel");
 
         // Removing the bar restores the original landscape, including
         // the Earth byte the re-put refreshed into the bar's buffer.
@@ -3444,7 +2815,7 @@ func ProbeGraphicsBounds() {
             .expect("grid set")
             .bytes()
             .to_vec();
-        assert_eq!(restored, original);
+        unit_assert_eq!(restored => original);
     }
 
     #[test]
@@ -3472,15 +2843,12 @@ func ProbeGraphicsBounds() {
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
         let definition = Definition::from_resource(&resource)?;
 
-        assert_eq!(definition.description(), Some("A safe home base."));
+        unit_assert_eq!(definition.description() => Some("A safe home base."));
         let mut engine = Engine::with_seed(0);
         engine.register_definition(definition)?;
         let hut = engine.spawn_object(SpawnConfig::new("HUT3"))?;
         let hut_index = engine.test_object_index(hut);
-        assert_eq!(
-            engine.call_object_function(hut_index, "ReadDesc", Vec::new())?,
-            Value::String("A safe home base.".into())
-        );
+        unit_assert_eq!(engine.call_object_function(hut_index, "ReadDesc", Vec::new())? => Value::String("A safe home base.".into()));
         Ok(())
     }
 
@@ -3521,28 +2889,20 @@ func ProbeGraphicsBounds() {
         let raw_portrait = engine
             .definition_portrait_image("CRWT")
             .expect("HUD portrait exposed");
-        assert_eq!(
-            raw_portrait.pixels().as_ref(),
-            [0_u8, 0, 0, 0].repeat(4).as_slice(),
-            "C4Surface loading canonicalizes fully-transparent portrait pixels"
-        );
+        unit_assert_eq!(raw_portrait.pixels().as_ref() => [0_u8, 0, 0, 0].repeat(4).as_slice(), "C4Surface loading canonicalizes fully-transparent portrait pixels");
         let portrait = engine
             .definition_portrait_graphics_image("CRWT")
             .expect("color-aware portrait exposed");
-        assert_eq!((portrait.width(), portrait.height()), (2, 2));
-        assert_eq!(
-            portrait.color_mask().as_deref(),
-            Some([136, 136, 136, 255].repeat(4).as_slice()),
-            "Portrait1's full Overlay1 RGBA reaches presentation"
-        );
+        unit_assert_eq!((portrait.width(), portrait.height()) => (2, 2));
+        unit_assert_eq!(portrait.color_mask().as_deref() => Some([136, 136, 136, 255].repeat(4).as_slice()), "Portrait1's full Overlay1 RGBA reaches presentation");
         let named = engine
             .definition_named_portrait_graphics_image("CRWT", "captain1")
             .expect("named portrait exposed case-insensitively");
-        assert_eq!((named.width(), named.height()), (3, 1));
+        unit_assert_eq!((named.width(), named.height()) => (3, 1));
         let rank = engine
             .definition_rank_symbols_image("CRWT")
             .expect("rank symbols exposed");
-        assert_eq!((rank.width(), rank.height()), (4, 2));
+        unit_assert_eq!((rank.width(), rank.height()) => (4, 2));
         Ok(())
     }
 
@@ -3584,30 +2944,22 @@ func ProbeGraphicsBounds() {
         engine.register_test_definition(blocker_definition);
         engine.register_test_definition(mover_definition);
 
-        let mover_id = engine.spawn_test_object(
-            SpawnConfig::new("Mover")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(4, 5)),
-        );
+        let mover_id = spawn_fixture!(engine, "Mover", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 5));
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
         // keeps the blocker center — and its solid mask — at (5,5).
-        engine.spawn_test_object(
-            SpawnConfig::new("Blocker")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(5, 6)),
-        );
+        spawn_fixture!(engine, "Blocker", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 6));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
         mobilize(&mut engine, mover_id, itofix(1), C4Fixed::ZERO);
 
         let snapshot = engine.test_tick();
         let object = snapshot.object(mover_id).expect("object present");
-        assert_eq!(object.position, Vector2::new(5, 5));
-        assert_eq!(object.energy, 22513);
+        unit_assert_eq!(object.position => Vector2::new(5, 5));
+        unit_assert_eq!(object.energy => 22513);
 
         let idx = engine.test_object_index(mover_id);
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
-        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
-        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(5));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.x => itofix(1));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.y => C4Fixed::ZERO);
     }
 
     #[test]
@@ -3642,22 +2994,14 @@ func ProbeGraphicsBounds() {
             engine.set_landscape(landscape);
             engine.set_physics(PhysicsSettings::new(0, 20, -20));
             engine.register_test_definition(definition);
-            let object_id = engine.spawn_test_object(
-                SpawnConfig::new("L217")
-                    .with_loaded(true)
-                    .with_category(CATEGORY_OBJECT)
-                    .with_position(Vector2::new(5, 5))
-                    .with_fixed_position(FixedVec2::from_ints(5, 5))
-                    .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
-                    .with_mobile(true),
-            );
+            let object_id = spawn_fixture!(engine, "L217", with_loaded: true, with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 5), with_fixed_position: FixedVec2::from_ints(5, 5), with_fixed_velocity: FixedVec2::new(itofix(1), C4Fixed::ZERO), with_mobile: true);
 
             engine
                 .tick_without_snapshot()
                 .expect("density movement succeeds");
             let object = engine.test_object_snapshot(object_id);
-            assert_eq!(object.position, Vector2::new(5, 7));
-            assert_eq!(object.contact_density, 101);
+            unit_assert_eq!(object.position => Vector2::new(5, 7));
+            unit_assert_eq!(object.contact_density => 101);
         }
 
         // Rotation follows translation in the same DoMovement. ChangeDef's
@@ -3692,28 +3036,16 @@ func ProbeGraphicsBounds() {
             engine.set_physics(PhysicsSettings::new(0, 20, -20));
             engine.register_test_definition(old);
             engine.register_test_definition(new);
-            let object_id = engine.spawn_test_object(
-                SpawnConfig::new("LOLD")
-                    .with_loaded(true)
-                    .with_category(CATEGORY_OBJECT)
-                    .with_position(Vector2::new(5, 5))
-                    .with_fixed_position(FixedVec2::from_ints(5, 5))
-                    .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
-                    .with_mobile(true),
-            );
+            let object_id = spawn_fixture!(engine, "LOLD", with_loaded: true, with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 5), with_fixed_position: FixedVec2::from_ints(5, 5), with_fixed_velocity: FixedVec2::new(itofix(1), C4Fixed::ZERO), with_mobile: true);
 
             engine
                 .tick_without_snapshot()
                 .expect("rotation movement succeeds");
             let object = engine.test_object_snapshot(object_id);
-            assert_eq!(object.definition_id, "LNEW");
-            assert_eq!(object.position, Vector2::new(6, 5));
+            unit_assert_eq!(object.definition_id => "LNEW");
+            unit_assert_eq!(object.position => Vector2::new(6, 5));
             let index = engine.test_object_index(object_id);
-            assert_eq!(
-                object.rotation, 20,
-                "rdir={:?} ocf={}",
-                engine.objects[index].rotation_velocity, object.ocf
-            );
+            unit_assert_eq!(object.rotation => 20, "rdir={:?} ocf={}", engine.objects[index].rotation_velocity, object.ocf);
         }
     }
 
@@ -3802,28 +3134,12 @@ func ProbeGraphicsBounds() {
             engine.set_physics(PhysicsSettings::new(0, 20, -20));
             engine.register_test_definition(definition);
 
-            let mover = engine.spawn_test_object(
-                SpawnConfig::new("L125")
-                    .with_loaded(true)
-                    .with_category(CATEGORY_OBJECT)
-                    .with_position(Vector2::new(20, 5))
-                    .with_fixed_position(FixedVec2::from_ints(20, 5))
-                    .with_construction(construction)
-                    .with_rotation(rotation),
-            );
-            assert_eq!(
-                engine.object_current_shape_rect(mover),
-                Some(expected_rect),
-                "{label}"
-            );
+            let mover = spawn_fixture!(engine, "L125", with_loaded: true, with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 5), with_fixed_position: FixedVec2::from_ints(20, 5), with_construction: construction, with_rotation: rotation);
+            unit_assert_eq!(engine.object_current_shape_rect(mover) => Some(expected_rect), "{label}");
             let mover_idx = engine.test_object_index(mover);
             engine.objects[mover_idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(18)));
             engine.refresh_object_ocf(mover_idx);
-            assert_ne!(
-                engine.objects[mover_idx].state.ocf & clonk_engine::ocf::HIT_SPEED2,
-                0,
-                "{label}"
-            );
+            unit_assert_ne!(engine.objects[mover_idx].state.ocf & clonk_engine::ocf::HIT_SPEED2 => 0, "{label}");
             let definition_id = engine.objects[mover_idx].definition_id.clone();
             let actions = engine
                 .definition(&definition_id)
@@ -3833,31 +3149,13 @@ func ProbeGraphicsBounds() {
             let rng_before = engine.rng.count;
             let pxs_before = engine.pxs_system.count();
 
-            assert!(
-                engine
-                    .exec_object_movement(mover_idx, &actions, &definition_id, &[])
-                    .expect("movement succeeds")
-                    .alive,
-                "{label}"
-            );
+            unit_assert!(engine.exec_object_movement(mover_idx, &actions, &definition_id, &[]).expect("movement succeeds").alive, "{label}");
 
             let mover_idx = engine.test_object_index(mover);
-            assert_eq!(
-                engine.objects[mover_idx].state.position,
-                Vector2::new(20, 23),
-                "{label}"
-            );
-            assert!(engine.objects[mover_idx].state.in_liquid, "{label}");
-            assert_eq!(
-                engine.rng.count - rng_before,
-                expected_amount * 2,
-                "two synced BubbleOut draws per splash iteration: {label}"
-            );
-            assert_eq!(
-                engine.pxs_system.count() - pxs_before,
-                0,
-                "the solid surface cap disables liquid extraction: {label}"
-            );
+            unit_assert_eq!(engine.objects[mover_idx].state.position => Vector2::new(20, 23), "{label}");
+            unit_assert!(engine.objects[mover_idx].state.in_liquid, "{label}");
+            unit_assert_eq!(engine.rng.count - rng_before => expected_amount * 2, "two synced BubbleOut draws per splash iteration: {label}");
+            unit_assert_eq!(engine.pxs_system.count() - pxs_before => 0, "the solid surface cap disables liquid extraction: {label}");
         }
     }
 
@@ -3872,19 +3170,8 @@ func ProbeGraphicsBounds() {
         // liquid-entry Splash therefore still reads the pre-collision
         // OCF_HitSpeed2 bit (src/C4Movement.cpp:449-456). Goldrush's WIPF
         // #564 freezes this sequence at frame 403.
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-
-            [Material Water]
-            Name=Water
-            Density=25
-            Instable=1
-        "#,
-        )
-        .expect("material library parses");
+        let library = MaterialLibrary::parse(EARTH_AND_WATER_MATERIAL_SOURCE)
+            .expect("material library parses");
         let materials = MaterialSet::from_resource_library(&library);
 
         let mut mover_definition = test_definition("Mover", "Mover", script);
@@ -3920,29 +3207,19 @@ func ProbeGraphicsBounds() {
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(simple_definition("FXU1"));
         engine.register_test_definition(mover_definition);
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .definition("Mover")
                 .expect("mover definition exists")
-                .has_function("ContactBottom"),
+                .has_function("ContactBottom") =>
             callback_present,
             "the fixture must exercise the requested callback path"
         );
 
-        let mover_id = engine.spawn_test_object(
-            SpawnConfig::new("Mover")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(20, 18))
-                .with_fixed_position(FixedVec2::from_ints(20, 18))
-                .with_loaded(true),
-        );
+        let mover_id = spawn_fixture!(engine, "Mover", with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 18), with_fixed_position: FixedVec2::from_ints(20, 18), with_loaded: true);
         let idx = mobilize(&mut engine, mover_id, C4Fixed::ZERO, itofix(3));
         engine.refresh_object_ocf(idx);
-        assert_ne!(
-            engine.objects[idx].state.ocf & clonk_engine::ocf::HIT_SPEED2,
-            0,
-            "the pre-movement OCF carries HitSpeed2"
-        );
+        unit_assert_ne!(engine.objects[idx].state.ocf & clonk_engine::ocf::HIT_SPEED2 => 0, "the pre-movement OCF carries HitSpeed2");
         let definition_id = engine.objects[idx].definition_id.clone();
         let actions = engine
             .definition(&definition_id)
@@ -3951,33 +3228,19 @@ func ProbeGraphicsBounds() {
             .clone();
         let rng_before = engine.rng.count;
 
-        assert!(
-            engine
-                .exec_object_movement(idx, &actions, &definition_id, &[])
-                .expect("movement succeeds")
-                .alive
-        );
+        unit_assert!(engine.exec_object_movement(idx, &actions, &definition_id, &[]).expect("movement succeeds").alive);
 
         let idx = engine.test_object_index(mover_id);
-        assert_eq!(engine.objects[idx].state.position, Vector2::new(20, 20));
-        assert_eq!(
+        unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(20, 20));
+        unit_assert_eq!(
             movement_hit_speed_flags(engine.objects[idx].fixed_velocity)
-                & clonk_engine::ocf::HIT_SPEED2,
+                & clonk_engine::ocf::HIT_SPEED2 =>
             0,
             "the collision must first reduce the live velocity below HitSpeed2"
         );
-        assert!(engine.objects[idx].state.in_liquid);
-        assert!(
-            engine.rng.count - rng_before >= 20,
-            "Splash amount 10 must consume at least its 10 pairs of BubbleOut draws"
-        );
-        assert!(
-            engine
-                .objects
-                .iter()
-                .any(|object| object.definition_id == "FXU1"),
-            "the cached HitSpeed2 gate must create submerged FXU1 bubbles"
-        );
+        unit_assert!(engine.objects[idx].state.in_liquid);
+        unit_assert!(engine.rng.count - rng_before >= 20, "Splash amount 10 must consume at least its 10 pairs of BubbleOut draws");
+        unit_assert!(engine.objects.iter().any(|object| object.definition_id == "FXU1"), "the cached HitSpeed2 gate must create submerged FXU1 bubbles");
     }
 
     #[test]
@@ -4019,18 +3282,13 @@ func ProbeGraphicsBounds() {
         fish.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_TOP)]);
         fish.set_contact_density(50);
         fish.set_contact_function_calls(true);
-        fish.configure_actions(
-            Some("Swim".to_string()),
-            HashMap::from([
-                (
-                    "Swim".to_string(),
-                    ActionSpec::default().with_procedure("SWIM"),
-                ),
-                (
-                    "Walk".to_string(),
-                    ActionSpec::default().with_procedure("WALK"),
-                ),
-            ]),
+        set_test_actions(
+            &mut fish,
+            Some("Swim"),
+            [
+                ("Swim", ActionSpec::default().with_procedure("SWIM")),
+                ("Walk", ActionSpec::default().with_procedure("WALK")),
+            ],
         );
 
         let mut landscape = vehicle_grid_landscape(24, 24);
@@ -4041,43 +3299,22 @@ func ProbeGraphicsBounds() {
 
         let mut engine = solidmask_engine(0, landscape);
         engine.register_test_definition(fish);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("FISH")
-                .with_position(Vector2::new(10, 10))
-                .with_action(ActionState::new("Swim"))
-                .with_direction(Direction::Right)
-                .with_command_direction(CommandDirection::Right)
-                .with_fixed_position(FixedVec2::from_ints(10, 10))
-                .with_loaded(true),
-        );
+        let id = spawn_fixture!(engine, "FISH", with_position: Vector2::new(10, 10), with_action: ActionState::new("Swim"), with_direction: Direction::Right, with_command_direction: CommandDirection::Right, with_fixed_position: FixedVec2::from_ints(10, 10), with_loaded: true);
         let idx = engine.test_object_index(id);
         let definition_id = engine.objects[idx].definition_id.clone();
-        assert_eq!(engine.objects[idx].state.position, Vector2::new(10, 10));
-        assert_eq!(
-            engine.objects[idx].state.vertices,
-            vec![ObjectVertex::new(0, 0).with_cnat(CNAT_TOP)]
-        );
+        unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(10, 10));
+        unit_assert_eq!(engine.objects[idx].state.vertices => vec![ObjectVertex::new(0, 0).with_cnat(CNAT_TOP)]);
         let landscape = engine.landscape.as_ref().expect("landscape set");
-        assert_eq!(landscape.density_at(12, 8, &engine.materials), 100);
-        assert_eq!(landscape.density_at(16, 4, &engine.materials), 0);
+        unit_assert_eq!(landscape.density_at(12, 8, &engine.materials) => 100);
+        unit_assert_eq!(landscape.density_at(16, 4, &engine.materials) => 0);
 
-        assert!(engine
-            .object_action_corner_scale(idx, &definition_id, ActionProcedure::Swim,)
-            .expect("corner scale action applies"));
+        unit_assert!(engine.object_action_corner_scale(idx, &definition_id, ActionProcedure::Swim,).expect("corner scale action applies"));
         let object = &engine.objects[idx];
-        assert_eq!(object.state.position, Vector2::new(16, 4));
-        assert_eq!(object.state.action.name, "Walk");
-        assert_eq!(object.state.direction, Direction::Right);
-        assert_eq!(
-            object.state.local_vars.get("probeCount"),
-            Some(&Value::Int(4)),
-            "ranges 2 through 5 each perform a full ContactCheck"
-        );
-        assert_eq!(
-            object.state.command_direction,
-            CommandDirection::Down,
-            "failed corner probes must run Fish ContactTop before the free range-6 probe"
-        );
+        unit_assert_eq!(object.state.position => Vector2::new(16, 4));
+        unit_assert_eq!(object.state.action.name => "Walk");
+        unit_assert_eq!(object.state.direction => Direction::Right);
+        unit_assert_eq!(object.state.local_vars.get("probeCount") => Some(&Value::Int(4)), "ranges 2 through 5 each perform a full ContactCheck");
+        unit_assert_eq!(object.state.command_direction => CommandDirection::Down, "failed corner probes must run Fish ContactTop before the free range-6 probe");
     }
 
     #[test]
@@ -4086,23 +3323,15 @@ func ProbeGraphicsBounds() {
         fn jump_definition(id: &str, script: &str) -> Result<Definition, EngineError> {
             let mut definition = test_definition(id, id, script);
             definition.set_c4_callback_convention(true);
-            definition.configure_actions(
-                Some("Idle".to_owned()),
-                HashMap::from([
-                    ("Idle".to_owned(), ActionSpec::default()),
-                    (
-                        "Walk".to_owned(),
-                        ActionSpec::default().with_procedure("WALK"),
-                    ),
-                    (
-                        "Scale".to_owned(),
-                        ActionSpec::default().with_procedure("SCALE"),
-                    ),
-                    (
-                        "Jump".to_owned(),
-                        ActionSpec::default().with_procedure("FLIGHT"),
-                    ),
-                ]),
+            set_test_actions(
+                &mut definition,
+                Some("Idle"),
+                [
+                    ("Idle", ActionSpec::default()),
+                    ("Walk", ActionSpec::default().with_procedure("WALK")),
+                    ("Scale", ActionSpec::default().with_procedure("SCALE")),
+                    ("Jump", ActionSpec::default().with_procedure("FLIGHT")),
+                ],
             );
             Ok(definition)
         }
@@ -4135,31 +3364,15 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
         engine.objects[hooked_wall_idx].frame_t_attach = CNAT_BOTTOM | CNAT_LEFT;
         engine.exec_contact_action(hooked_wall_idx, CNAT_LEFT, &hook_definition_id)?;
 
-        let hooked_wall_idx = engine.test_object_index(hooked_wall);
-        let hooked_wall = &engine.objects[hooked_wall_idx];
-        assert_eq!(hooked_wall.state.action.name, "Walk");
-        assert_eq!(
-            hooked_wall.fixed_velocity,
-            FixedVec2::new(itofix(6), itofix(-2))
-        );
-        assert_eq!(hooked_wall.state.t_attach, CNAT_BOTTOM | CNAT_LEFT);
-        assert_eq!(hooked_wall.frame_t_attach, CNAT_BOTTOM | CNAT_LEFT);
-        assert_eq!(
-            hooked_wall.state.local_vars.get("jump_calls"),
-            Some(&Value::Int(1))
-        );
-        assert_eq!(
-            hooked_wall.state.local_vars.get("jump_xdir"),
-            Some(&Value::Int(300))
-        );
-        assert_eq!(
-            hooked_wall.state.local_vars.get("jump_ydir"),
-            Some(&Value::Int(-200))
-        );
-        assert_eq!(
-            hooked_wall.state.local_vars.get("jump_by_com"),
-            Some(&Value::Nil)
-        );
+        let hooked_wall = test_object(&engine, hooked_wall);
+        unit_assert_eq!(hooked_wall.state.action.name => "Walk");
+        unit_assert_eq!(hooked_wall.fixed_velocity => FixedVec2::new(itofix(6), itofix(-2)));
+        unit_assert_eq!(hooked_wall.state.t_attach => CNAT_BOTTOM | CNAT_LEFT);
+        unit_assert_eq!(hooked_wall.frame_t_attach => CNAT_BOTTOM | CNAT_LEFT);
+        unit_assert_eq!(hooked_wall.state.local_vars.get("jump_calls") => Some(&Value::Int(1)));
+        unit_assert_eq!(hooked_wall.state.local_vars.get("jump_xdir") => Some(&Value::Int(300)));
+        unit_assert_eq!(hooked_wall.state.local_vars.get("jump_ydir") => Some(&Value::Int(-200)));
+        unit_assert_eq!(hooked_wall.state.local_vars.get("jump_by_com") => Some(&Value::Nil));
 
         let hooked_no_attach = engine.spawn_object(
             SpawnConfig::new("HOOK")
@@ -4176,31 +3389,15 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
             .clone();
         engine.apply_no_attach_action(hooked_no_attach_idx, &hook_definition_id, &hook_actions)?;
 
-        let hooked_no_attach_idx = engine.test_object_index(hooked_no_attach);
-        let hooked_no_attach = &engine.objects[hooked_no_attach_idx];
-        assert_eq!(hooked_no_attach.state.action.name, "Walk");
-        assert_eq!(
-            hooked_no_attach.fixed_velocity,
-            FixedVec2::new(itofix(-4), itofix(-5))
-        );
-        assert_eq!(hooked_no_attach.state.t_attach, CNAT_BOTTOM | CNAT_RIGHT);
-        assert_eq!(hooked_no_attach.frame_t_attach, CNAT_BOTTOM | CNAT_RIGHT);
-        assert_eq!(
-            hooked_no_attach.state.local_vars.get("jump_calls"),
-            Some(&Value::Int(1))
-        );
-        assert_eq!(
-            hooked_no_attach.state.local_vars.get("jump_xdir"),
-            Some(&Value::Int(-400))
-        );
-        assert_eq!(
-            hooked_no_attach.state.local_vars.get("jump_ydir"),
-            Some(&Value::Int(-500))
-        );
-        assert_eq!(
-            hooked_no_attach.state.local_vars.get("jump_by_com"),
-            Some(&Value::Nil)
-        );
+        let hooked_no_attach = test_object(&engine, hooked_no_attach);
+        unit_assert_eq!(hooked_no_attach.state.action.name => "Walk");
+        unit_assert_eq!(hooked_no_attach.fixed_velocity => FixedVec2::new(itofix(-4), itofix(-5)));
+        unit_assert_eq!(hooked_no_attach.state.t_attach => CNAT_BOTTOM | CNAT_RIGHT);
+        unit_assert_eq!(hooked_no_attach.frame_t_attach => CNAT_BOTTOM | CNAT_RIGHT);
+        unit_assert_eq!(hooked_no_attach.state.local_vars.get("jump_calls") => Some(&Value::Int(1)));
+        unit_assert_eq!(hooked_no_attach.state.local_vars.get("jump_xdir") => Some(&Value::Int(-400)));
+        unit_assert_eq!(hooked_no_attach.state.local_vars.get("jump_ydir") => Some(&Value::Int(-500)));
+        unit_assert_eq!(hooked_no_attach.state.local_vars.get("jump_by_com") => Some(&Value::Nil));
 
         let hooked_scale = engine.spawn_object(
             SpawnConfig::new("HOOK")
@@ -4212,27 +3409,12 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
         let hooked_scale_idx = engine.test_object_index(hooked_scale);
         engine.apply_no_attach_action(hooked_scale_idx, &hook_definition_id, &hook_actions)?;
         let hooked_scale = &engine.objects[hooked_scale_idx];
-        assert_eq!(hooked_scale.state.action.name, "Scale");
-        assert_eq!(
-            hooked_scale.fixed_velocity,
-            FixedVec2::new(itofix(7), itofix(-3))
-        );
-        assert_eq!(
-            hooked_scale.state.local_vars.get("jump_calls"),
-            Some(&Value::Int(1))
-        );
-        assert_eq!(
-            hooked_scale.state.local_vars.get("jump_xdir"),
-            Some(&Value::Int(100))
-        );
-        assert_eq!(
-            hooked_scale.state.local_vars.get("jump_ydir"),
-            Some(&Value::Nil)
-        );
-        assert_eq!(
-            hooked_scale.state.local_vars.get("jump_by_com"),
-            Some(&Value::Nil)
-        );
+        unit_assert_eq!(hooked_scale.state.action.name => "Scale");
+        unit_assert_eq!(hooked_scale.fixed_velocity => FixedVec2::new(itofix(7), itofix(-3)));
+        unit_assert_eq!(hooked_scale.state.local_vars.get("jump_calls") => Some(&Value::Int(1)));
+        unit_assert_eq!(hooked_scale.state.local_vars.get("jump_xdir") => Some(&Value::Int(100)));
+        unit_assert_eq!(hooked_scale.state.local_vars.get("jump_ydir") => Some(&Value::Nil));
+        unit_assert_eq!(hooked_scale.state.local_vars.get("jump_by_com") => Some(&Value::Nil));
 
         let fallback_wall = engine.spawn_object(
             SpawnConfig::new("FALL")
@@ -4245,14 +3427,11 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
         engine.objects[fallback_wall_idx].frame_t_attach = CNAT_BOTTOM | CNAT_LEFT;
         engine.exec_contact_action(fallback_wall_idx, CNAT_LEFT, &fallback_definition_id)?;
         let fallback_wall = &engine.objects[fallback_wall_idx];
-        assert_eq!(fallback_wall.state.action.name, "Jump");
-        assert_eq!(
-            fallback_wall.fixed_velocity,
-            FixedVec2::new(itofix(3), itofix(-2))
-        );
-        assert!(fallback_wall.state.mobile);
-        assert_eq!(fallback_wall.state.t_attach, CNAT_LEFT);
-        assert_eq!(fallback_wall.frame_t_attach, CNAT_LEFT);
+        unit_assert_eq!(fallback_wall.state.action.name => "Jump");
+        unit_assert_eq!(fallback_wall.fixed_velocity => FixedVec2::new(itofix(3), itofix(-2)));
+        unit_assert!(fallback_wall.state.mobile);
+        unit_assert_eq!(fallback_wall.state.t_attach => CNAT_LEFT);
+        unit_assert_eq!(fallback_wall.frame_t_attach => CNAT_LEFT);
 
         Ok(())
     }
@@ -4280,24 +3459,22 @@ protected func OnTumbleStart()
         let mut definition = test_definition("CAOC", "ContactAction live OCF", script);
         definition.set_c4_callback_convention(true);
         definition.set_category(CATEGORY_OBJECT);
-        definition.configure_actions(
-            Some("Idle".to_owned()),
-            HashMap::from([
-                ("Idle".to_owned(), ActionSpec::default()),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Flight", ActionSpec::default().with_procedure("FLIGHT")),
                 (
-                    "Flight".to_owned(),
-                    ActionSpec::default().with_procedure("FLIGHT"),
-                ),
-                (
-                    "Tumble".to_owned(),
+                    "Tumble",
                     ActionSpec::default().with_start_call("OnTumbleStart"),
                 ),
-            ]),
+            ],
         );
 
-        let mut engine = Engine::with_seed(0);
-        engine.register_test_definition(definition);
-        let object_id = engine.spawn_test_object(
+        let (mut engine, object_id) = definition_fixture(
+            0,
+            definition,
             SpawnConfig::new("CAOC")
                 .with_category(CATEGORY_OBJECT)
                 .with_action(ActionState::new("Flight"))
@@ -4306,11 +3483,7 @@ protected func OnTumbleStart()
         );
         let index = engine.test_object_index(object_id);
         engine.refresh_object_ocf(index);
-        assert_ne!(
-            engine.objects[index].state.ocf & ocf::HIT_SPEED3,
-            0,
-            "the ceiling arm must enter its high-speed tumble"
-        );
+        unit_assert_ne!(engine.objects[index].state.ocf & ocf::HIT_SPEED3 => 0, "the ceiling arm must enter its high-speed tumble");
         let definition_id = engine.objects[index].definition_id.clone();
 
         engine
@@ -4318,38 +3491,24 @@ protected func OnTumbleStart()
             .expect("contact action executes");
 
         let object = &engine.objects[engine.test_object_index(object_id)];
-        assert_eq!(
-            object.state.local_vars.get("tumble_starts"),
-            Some(&Value::Int(1)),
-            "the callback-cleared live OCF prevents a second wall tumble"
-        );
-        assert_eq!(
-            object.state.ocf & ocf::HIT_SPEED3,
-            0,
-            "SetCategory's callback-time SetOCF observes the zeroed dirs"
-        );
+        unit_assert_eq!(object.state.local_vars.get("tumble_starts") => Some(&Value::Int(1)), "the callback-cleared live OCF prevents a second wall tumble");
+        unit_assert_eq!(object.state.ocf & ocf::HIT_SPEED3 => 0, "SetCategory's callback-time SetOCF observes the zeroed dirs");
     }
 
     #[test]
     fn stopped_scaler_no_attach_jumps_away_from_each_wall() {
         let mut scaler = simple_definition("STSC");
-        scaler.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
-                (
-                    "Scale".to_string(),
-                    ActionSpec::default().with_procedure("SCALE"),
-                ),
-                (
-                    "Jump".to_string(),
-                    ActionSpec::default().with_procedure("FLIGHT"),
-                ),
-            ]),
+        set_test_actions(
+            &mut scaler,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Scale", ActionSpec::default().with_procedure("SCALE")),
+                ("Jump", ActionSpec::default().with_procedure("FLIGHT")),
+            ],
         );
 
-        let mut engine = Engine::with_seed(0);
-        engine.register_test_definition(scaler);
+        let mut engine = definition_engine(0, scaler);
         let actions = engine
             .definition("STSC")
             .expect("scaler definition exists")
@@ -4357,12 +3516,7 @@ protected func OnTumbleStart()
             .clone();
 
         for (direction, expected_x) in [(Direction::Left, 1), (Direction::Right, -1)] {
-            let id = engine.spawn_test_object(
-                SpawnConfig::new("STSC")
-                    .with_action(ActionState::new("Scale"))
-                    .with_direction(direction)
-                    .with_command_direction(CommandDirection::Stop),
-            );
+            let id = spawn_fixture!(engine, "STSC", with_action: ActionState::new("Scale"), with_direction: direction, with_command_direction: CommandDirection::Stop);
             let idx = engine.test_object_index(id);
             engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(7), itofix(-3)));
             let definition_id = engine.objects[idx].definition_id.clone();
@@ -4372,13 +3526,9 @@ protected func OnTumbleStart()
                 .expect("no-attach transition succeeds");
 
             let object = &engine.objects[idx];
-            assert_eq!(object.state.action.name, "Jump");
-            assert_eq!(
-                object.fixed_velocity,
-                FixedVec2::new(itofix(expected_x), C4Fixed::ZERO),
-                "a stopped {direction:?} scaler jumps away from its wall"
-            );
-            assert_eq!(object.state.velocity, Vector2::new(expected_x, 0));
+            unit_assert_eq!(object.state.action.name => "Jump");
+            unit_assert_eq!(object.fixed_velocity => FixedVec2::new(itofix(expected_x), C4Fixed::ZERO), "a stopped {direction:?} scaler jumps away from its wall");
+            unit_assert_eq!(object.state.velocity => Vector2::new(expected_x, 0));
         }
     }
 
@@ -4391,37 +3541,21 @@ protected func OnTumbleStart()
         let mut scaler = test_definition("SCLR", "Scaler", "#strict\n");
         scaler.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_LEFT)]);
         scaler.set_contact_density(50);
-        scaler.configure_actions(
-            Some("Walk".to_string()),
-            HashMap::from([
-                (
-                    "Walk".to_string(),
-                    ActionSpec::default().with_procedure("WALK"),
-                ),
-                (
-                    "Scale".to_string(),
-                    ActionSpec::default().with_procedure("SCALE"),
-                ),
-                (
-                    "Jump".to_string(),
-                    ActionSpec::default().with_procedure("FLIGHT"),
-                ),
-            ]),
+        set_test_actions(
+            &mut scaler,
+            Some("Walk"),
+            [
+                ("Walk", ActionSpec::default().with_procedure("WALK")),
+                ("Scale", ActionSpec::default().with_procedure("SCALE")),
+                ("Jump", ActionSpec::default().with_procedure("FLIGHT")),
+            ],
         );
 
         let mut landscape = vehicle_grid_landscape(24, 24);
         landscape.set_world_height(24);
         let mut engine = solidmask_engine(0, landscape);
         engine.register_test_definition(scaler);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("SCLR")
-                .with_position(Vector2::new(10, 10))
-                .with_action(ActionState::new("Scale"))
-                .with_direction(Direction::Left)
-                .with_command_direction(CommandDirection::Up)
-                .with_fixed_position(FixedVec2::from_ints(10, 10))
-                .with_loaded(true),
-        );
+        let id = spawn_fixture!(engine, "SCLR", with_position: Vector2::new(10, 10), with_action: ActionState::new("Scale"), with_direction: Direction::Left, with_command_direction: CommandDirection::Up, with_fixed_position: FixedVec2::from_ints(10, 10), with_loaded: true);
         let idx = engine.test_object_index(id);
         let actions = engine
             .definition("SCLR")
@@ -4429,18 +3563,15 @@ protected func OnTumbleStart()
             .action_library()
             .clone();
         let definition_id = engine.objects[idx].definition_id.clone();
-        assert_eq!(
-            actions.procedure_for_action("Scale"),
-            ActionProcedure::Scale
-        );
+        unit_assert_eq!(actions.procedure_for_action("Scale") => ActionProcedure::Scale);
         engine
             .apply_no_attach_action(idx, &definition_id, &actions)
             .expect("no-attach transition succeeds");
 
         let object = &engine.objects[idx];
-        assert_eq!(object.state.action.name, "Walk");
-        assert_eq!(object.state.position, Vector2::new(3, 3));
-        assert_eq!(object.state.velocity, Vector2::ZERO);
+        unit_assert_eq!(object.state.action.name => "Walk");
+        unit_assert_eq!(object.state.position => Vector2::new(3, 3));
+        unit_assert_eq!(object.state.velocity => Vector2::ZERO);
     }
 
     type HitCallLog = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<clonk_script::Value>)>>>;
@@ -4526,15 +3657,13 @@ protected func ContactBottom()
             energy: 10_000,
             ..PhysicalInfo::default()
         });
-        definition.configure_actions(
-            Some("Flight".to_owned()),
-            HashMap::from([
-                (
-                    "Flight".to_owned(),
-                    ActionSpec::default().with_procedure("FLIGHT"),
-                ),
-                ("Dead".to_owned(), ActionSpec::default()),
-            ]),
+        set_test_actions(
+            &mut definition,
+            Some("Flight"),
+            [
+                ("Flight", ActionSpec::default().with_procedure("FLIGHT")),
+                ("Dead", ActionSpec::default()),
+            ],
         );
 
         let mut engine = Engine::with_seed(0);
@@ -4542,15 +3671,7 @@ protected func ContactBottom()
         engine.set_landscape(Landscape::flat_with_material(20, 7, Some(earth)));
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(definition);
-        let object_id = engine.spawn_test_object(
-            SpawnConfig::new("DCNT")
-                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-                .with_position(Vector2::new(5, 5))
-                .with_energy(1_000)
-                .with_alive(true)
-                .with_action(ActionState::new("Flight"))
-                .with_mobile(true),
-        );
+        let object_id = spawn_fixture!(engine, "DCNT", with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_position: Vector2::new(5, 5), with_energy: 1_000, with_alive: true, with_action: ActionState::new("Flight"), with_mobile: true);
         let index = engine.test_object_index(object_id);
         engine.objects[index].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(1)));
         engine.refresh_object_ocf(index);
@@ -4566,39 +3687,19 @@ protected func ContactBottom()
             .expect("lethal contact movement executes");
 
         let object = engine.test_object_snapshot(object_id);
-        assert_eq!(object.energy, 0);
-        assert!(!object.alive);
-        assert_eq!(object.action.name, "Dead");
-        assert_eq!(
-            object.local_vars.get("contact_order"),
-            Some(&Value::Int(1234)),
-            "Death completes between the first and second Contact* callbacks"
-        );
-        assert_eq!(
-            object.local_vars.get("right_alive"),
-            Some(&Value::Bool(false)),
-            "the later ContactRight observes AssignDeath's Alive=false"
-        );
-        assert_eq!(
-            object.local_vars.get("right_action"),
+        unit_assert_eq!(object.energy => 0);
+        unit_assert!(!object.alive);
+        unit_assert_eq!(object.action.name => "Dead");
+        unit_assert_eq!(object.local_vars.get("contact_order") => Some(&Value::Int(1234)), "Death completes between the first and second Contact* callbacks");
+        unit_assert_eq!(object.local_vars.get("right_alive") => Some(&Value::Bool(false)), "the later ContactRight observes AssignDeath's Alive=false");
+        unit_assert_eq!(
+            object.local_vars.get("right_action") =>
             Some(&Value::String("Dead".to_owned().into())),
             "the later ContactRight observes AssignDeath's Dead action"
         );
-        assert_eq!(
-            object.local_vars.get("death_rdir"),
-            Some(&Value::Int(0)),
-            "Death runs before vertical contact redirects ydir into rdir"
-        );
-        assert_eq!(
-            object.local_vars.get("right_rdir"),
-            Some(&Value::Int(0)),
-            "all Contact* callbacks finish before vertical redirection"
-        );
-        assert_eq!(
-            object.rotation_velocity,
-            Some(fixed100(-50)),
-            "the post-callback !Alive branch redirects 0.5 ydir into -0.5 rdir"
-        );
+        unit_assert_eq!(object.local_vars.get("death_rdir") => Some(&Value::Int(0)), "Death runs before vertical contact redirects ydir into rdir");
+        unit_assert_eq!(object.local_vars.get("right_rdir") => Some(&Value::Int(0)), "all Contact* callbacks finish before vertical redirection");
+        unit_assert_eq!(object.rotation_velocity => Some(fixed100(-50)), "the post-callback !Alive branch redirects 0.5 ydir into -0.5 rdir");
     }
 
     #[test]
@@ -4615,12 +3716,10 @@ protected func ContactBottom()
             ObjectVertex::new(1, 1).with_cnat(CNAT_RIGHT | CNAT_BOTTOM),
         ]);
         definition.set_contact_density(50);
-        definition.configure_actions(
-            Some("Flight".to_string()),
-            HashMap::from([(
-                "Flight".to_string(),
-                ActionSpec::default().with_procedure("FLIGHT"),
-            )]),
+        set_test_actions(
+            &mut definition,
+            Some("Flight"),
+            [("Flight", ActionSpec::default().with_procedure("FLIGHT"))],
         );
 
         let mut engine = Engine::with_seed(0);
@@ -4628,24 +3727,19 @@ protected func ContactBottom()
         engine.set_landscape(Landscape::flat_with_material(20, 7, Some(earth)));
         engine.set_physics(PhysicsSettings::new(100, 20, -20));
         engine.register_test_definition(definition);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("GravityHitProbe")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(5, 5))
-                .with_action(ActionState::new("Flight")),
-        );
+        let id = spawn_fixture!(engine, "GravityHitProbe", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 5), with_action: ActionState::new("Flight"));
         let idx = mobilize(&mut engine, id, C4Fixed::ZERO, fixed100(190));
         engine.refresh_object_ocf(idx);
-        assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED1, 0);
-        assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED2, 0);
+        unit_assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED1 => 0);
+        unit_assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED2 => 0);
 
         let snapshot = engine.test_tick();
 
-        assert_eq!(snapshot.object(id).expect("probe survives").position.y, 5);
+        unit_assert_eq!(snapshot.object(id).expect("probe survives").position.y => 5);
         // The script parameter frame canonicalizes a raw integer zero to Nil;
         // both expose the same C4 integer payload through `_getInt()`.
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
+        unit_assert_eq!(
+            calls.lock().unwrap().as_slice() =>
             [(
                 "Hit".to_string(),
                 vec![clonk_script::Value::Nil, clonk_script::Value::Int(210)],
@@ -4677,9 +3771,10 @@ protected func ContactRight()
         definition.set_contact_density(50);
         definition.set_rotateable(360);
         definition.set_shape_vertices(vec![ObjectVertex::new(2, 0).with_cnat(CNAT_RIGHT)]);
-        definition.configure_actions(
-            Some("Idle".to_owned()),
-            HashMap::from([("Idle".to_owned(), ActionSpec::default())]),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [("Idle", ActionSpec::default())],
         );
 
         let mut engine = Engine::with_seed(0);
@@ -4690,28 +3785,9 @@ protected func ContactRight()
             Landscape::new_with_material(12, surface, Some(earth)).expect("landscape constructs"),
         );
         engine.register_test_definition(definition);
-        assert!(
-            engine
-                .definition("RPOS")
-                .expect("rotation probe definition exists")
-                .has_function("ContactRight"),
-            "the fixture exposes its contact callback"
-        );
-        assert!(
-            engine
-                .definition("RPOS")
-                .expect("rotation probe definition exists")
-                .contact_function_calls(),
-            "the fixture enables Contact* dispatch"
-        );
-        let object_id = engine.spawn_test_object(
-            SpawnConfig::new("RPOS")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(4, 10))
-                .with_fixed_position(FixedVec2::from_ints(4, 10))
-                .with_action(ActionState::new("Idle"))
-                .with_mobile(true),
-        );
+        unit_assert!(engine.definition("RPOS").expect("rotation probe definition exists").has_function("ContactRight"), "the fixture exposes its contact callback");
+        unit_assert!(engine.definition("RPOS").expect("rotation probe definition exists").contact_function_calls(), "the fixture enables Contact* dispatch");
+        let object_id = spawn_fixture!(engine, "RPOS", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 10), with_fixed_position: FixedVec2::from_ints(4, 10), with_action: ActionState::new("Idle"), with_mobile: true);
         let index = engine.test_object_index(object_id);
         engine.objects[index].rotation_velocity = itofix(1);
         engine.refresh_object_ocf(index);
@@ -4726,10 +3802,9 @@ protected func ContactRight()
             .exec_object_movement(index, &actions, &definition_id, &[])
             .expect("rotation contact movement executes");
 
-        let index = engine.test_object_index(object_id);
-        let object = &engine.objects[index];
-        assert_eq!(
-            object.state.local_vars.get("contact_calls"),
+        let object = test_object(&engine, object_id);
+        unit_assert_eq!(
+            object.state.local_vars.get("contact_calls") =>
             Some(&Value::Int(1)),
             "the attempted rotation reaches ContactRight exactly once: \
              rotation={} rdir={:?} ocf={} vertices={:?} position={:?}",
@@ -4739,19 +3814,11 @@ protected func ContactRight()
             object.state.vertices,
             object.state.position
         );
-        assert_eq!(
-            object.state.position,
-            Vector2::new(8, 3),
-            "the rejected rotation must preserve ContactRight's SetPosition"
-        );
-        assert_eq!(object.fixed_position, FixedVec2::from_ints(8, 3));
-        assert_eq!(object.state.rotation, 0);
-        assert_eq!(object.fixed_rotation, C4Fixed::ZERO);
-        assert_eq!(
-            object.state.vertices,
-            vec![ObjectVertex::new(2, 0).with_cnat(CNAT_RIGHT)],
-            "the rejected trial still restores the pre-rotation Shape"
-        );
+        unit_assert_eq!(object.state.position => Vector2::new(8, 3), "the rejected rotation must preserve ContactRight's SetPosition");
+        unit_assert_eq!(object.fixed_position => FixedVec2::from_ints(8, 3));
+        unit_assert_eq!(object.state.rotation => 0);
+        unit_assert_eq!(object.fixed_rotation => C4Fixed::ZERO);
+        unit_assert_eq!(object.state.vertices => vec![ObjectVertex::new(2, 0).with_cnat(CNAT_RIGHT)], "the rejected trial still restores the pre-rotation Shape");
     }
 
     #[test]
@@ -4772,13 +3839,7 @@ protected func ContactRight()
         engine.set_materials(materials);
         engine.set_landscape(Landscape::flat_with_material(20, 10, Some(earth)));
         engine.register_test_definition(definition);
-        let object_id = engine.spawn_test_object(
-            SpawnConfig::new("RATT")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(10, 8))
-                .with_fixed_position(FixedVec2::from_ints(10, 8))
-                .with_mobile(true),
-        );
+        let object_id = spawn_fixture!(engine, "RATT", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 8), with_fixed_position: FixedVec2::from_ints(10, 8), with_mobile: true);
         let index = engine.test_object_index(object_id);
         engine.objects[index].frame_t_attach = CNAT_BOTTOM;
         engine.objects[index].state.t_attach = CNAT_BOTTOM;
@@ -4796,16 +3857,9 @@ protected func ContactRight()
             .expect("attached rotation executes");
 
         let object = &engine.objects[engine.test_object_index(object_id)];
-        assert_eq!(object.state.rotation, 5, "the rotation must be accepted");
-        assert_eq!(
-            (object.state.shape_attach.x, object.state.shape_attach.y),
-            (10, 10),
-            "the successful Shape.Attach coordinates remain cached"
-        );
-        assert!(
-            !object.state.shape_attach.mat_valid,
-            "the trailing UpdateFace(true) resets AttachMat to MNone"
-        );
+        unit_assert_eq!(object.state.rotation => 5, "the rotation must be accepted");
+        unit_assert_eq!((object.state.shape_attach.x, object.state.shape_attach.y) => (10, 10), "the successful Shape.Attach coordinates remain cached");
+        unit_assert!(!object.state.shape_attach.mat_valid, "the trailing UpdateFace(true) resets AttachMat to MNone");
     }
 
     #[test]
@@ -4833,9 +3887,10 @@ protected func Hit()
         definition.set_rotateable(360);
         definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_RIGHT)]);
-        definition.configure_actions(
-            Some("Idle".to_owned()),
-            HashMap::from([("Idle".to_owned(), ActionSpec::default())]),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [("Idle", ActionSpec::default())],
         );
 
         let mut engine = Engine::with_seed(0);
@@ -4846,23 +3901,12 @@ protected func Hit()
             Landscape::new_with_material(12, surface, Some(earth)).expect("landscape constructs"),
         );
         engine.register_test_definition(definition);
-        let object_id = engine.spawn_test_object(
-            SpawnConfig::new("RHIT")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(4, 5))
-                .with_fixed_position(FixedVec2::from_ints(4, 5))
-                .with_action(ActionState::new("Idle"))
-                .with_mobile(true),
-        );
+        let object_id = spawn_fixture!(engine, "RHIT", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 5), with_fixed_position: FixedVec2::from_ints(4, 5), with_action: ActionState::new("Idle"), with_mobile: true);
         let index = engine.test_object_index(object_id);
         engine.objects[index].set_fixed_velocity(FixedVec2::new(fixed100(190), C4Fixed::ZERO));
         engine.objects[index].rotation_velocity = itofix(1);
         engine.refresh_object_ocf(index);
-        assert_ne!(
-            engine.objects[index].state.ocf & ocf::HIT_SPEED1,
-            0,
-            "the entry OCF must gate Hit"
-        );
+        unit_assert_ne!(engine.objects[index].state.ocf & ocf::HIT_SPEED1 => 0, "the entry OCF must gate Hit");
         let definition_id = engine.objects[index].definition_id.clone();
         let actions = engine
             .definition(&definition_id)
@@ -4875,27 +3919,12 @@ protected func Hit()
             .expect("contacting rotation executes");
 
         let object = &engine.objects[engine.test_object_index(object_id)];
-        assert_eq!(object.state.position, Vector2::new(4, 5));
-        assert_eq!(object.state.rotation, 5, "the free rotation is accepted");
-        assert_eq!(
-            object.state.local_vars.get("hit_calls"),
-            Some(&Value::Int(1)),
-            "the horizontal collision dispatches Hit once"
-        );
-        assert_eq!(
-            object.state.local_vars.get("hit_rotation"),
-            Some(&Value::Int(5)),
-            "Hit observes the accepted rotation before the final UpdateFace"
-        );
-        assert_eq!(
-            object.state.shape_override, None,
-            "the final UpdateFace(true) discards Hit's SetShape override"
-        );
-        assert_ne!(
-            object.current_shape_rect(),
-            Some(DefinitionRect::new(-7, -8, 14, 16)),
-            "the final shape no longer exposes Hit's SetShape geometry"
-        );
+        unit_assert_eq!(object.state.position => Vector2::new(4, 5));
+        unit_assert_eq!(object.state.rotation => 5, "the free rotation is accepted");
+        unit_assert_eq!(object.state.local_vars.get("hit_calls") => Some(&Value::Int(1)), "the horizontal collision dispatches Hit once");
+        unit_assert_eq!(object.state.local_vars.get("hit_rotation") => Some(&Value::Int(5)), "Hit observes the accepted rotation before the final UpdateFace");
+        unit_assert_eq!(object.state.shape_override => None, "the final UpdateFace(true) discards Hit's SetShape override");
+        unit_assert_ne!(object.current_shape_rect() => Some(DefinitionRect::new(-7, -8, 14, 16)), "the final shape no longer exposes Hit's SetShape geometry");
     }
 
     #[test]
@@ -4908,12 +3937,10 @@ protected func Hit()
         definition.set_rotateable(360);
         definition.set_shape_vertices(vec![ObjectVertex::new(2, 0).with_cnat(CNAT_RIGHT)]);
         definition.set_contact_density(50);
-        definition.configure_actions(
-            Some("Kneel".to_string()),
-            HashMap::from([(
-                "Kneel".to_string(),
-                ActionSpec::default().with_procedure("KNEEL"),
-            )]),
+        set_test_actions(
+            &mut definition,
+            Some("Kneel"),
+            [("Kneel", ActionSpec::default().with_procedure("KNEEL"))],
         );
 
         let mut engine = Engine::with_seed(0);
@@ -4926,27 +3953,22 @@ protected func Hit()
         engine.set_landscape(landscape);
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(definition);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("KneelHitProbe")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(4, 10))
-                .with_action(ActionState::new("Kneel")),
-        );
+        let id = spawn_fixture!(engine, "KneelHitProbe", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 10), with_action: ActionState::new("Kneel"));
         let idx = engine.test_object_index(id);
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, fixed100(210)));
         engine.objects[idx].rotation_velocity = itofix(1);
         engine.objects[idx].state.mobile = true;
         engine.refresh_object_ocf(idx);
-        assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED1, 0);
-        assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED2, 0);
-        assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED3, 0);
+        unit_assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED1 => 0);
+        unit_assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED2 => 0);
+        unit_assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED3 => 0);
 
         let snapshot = engine.test_tick();
 
-        assert_eq!(snapshot.object(id).expect("probe survives").rotation, 0);
+        unit_assert_eq!(snapshot.object(id).expect("probe survives").rotation => 0);
         // Zero-valued C4 parameters are represented as Nil at this hook.
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
+        unit_assert_eq!(
+            calls.lock().unwrap().as_slice() =>
             [
                 (
                     "Hit".to_string(),
@@ -5017,31 +4039,22 @@ protected func Hit()
         engine.register_test_definition(blocker_definition);
         engine.register_test_definition(mover_definition);
 
-        let mover_id = engine.spawn_test_object(
-            SpawnConfig::new("Mover")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(4, 5))
-                .with_energy(1000000),
-        );
+        let mover_id = spawn_fixture!(engine, "Mover", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 5), with_energy: 1000000);
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
         // keeps the blocker center — and its solid mask — at (5,5).
-        engine.spawn_test_object(
-            SpawnConfig::new("Blocker")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(5, 6)),
-        );
+        spawn_fixture!(engine, "Blocker", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 6));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
         mobilize(&mut engine, mover_id, itofix(2), C4Fixed::ZERO);
 
         let snapshot = engine.test_tick();
         let object = snapshot.object(mover_id).expect("object present");
-        assert_eq!(object.position, Vector2::new(6, 5));
-        assert_eq!(object.energy, 36328);
+        unit_assert_eq!(object.position => Vector2::new(6, 5));
+        unit_assert_eq!(object.energy => 36328);
 
         let idx = engine.test_object_index(mover_id);
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(6));
-        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(2));
-        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(6));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.x => itofix(2));
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.y => C4Fixed::ZERO);
     }
 
     #[test]
@@ -5073,10 +4086,10 @@ protected func Hit()
         engine.apply_object_update(id, ObjectUpdate::new().with_construction(FULL_CON / 2))?;
 
         let object = engine.test_object_snapshot(id);
-        assert_eq!(object.construction, FULL_CON / 2);
-        assert_eq!(object.position, Vector2::new(3, 6));
-        assert_eq!(object.vertices[0].y, 2);
-        assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
+        unit_assert_eq!(object.construction => FULL_CON / 2);
+        unit_assert_eq!(object.position => Vector2::new(3, 6));
+        unit_assert_eq!(object.vertices[0].y => 2);
+        unit_assert_eq!(object.vertices[0].cnat => CNAT_BOTTOM);
         Ok(())
     }
 
@@ -5125,17 +4138,13 @@ func Decaying() {
         engine.call_object_function(idx, "Decaying", Vec::new())?;
 
         let object = engine.test_object_snapshot(id);
-        assert_eq!(object.construction, 96_000);
-        assert_eq!(object.position.y, 101, "DoCon keeps the old shape bottom");
-        assert_eq!(object.components.get("SKIN"), Some(1));
-        assert_eq!(object.components.get("BBON"), Some(1));
-        assert_eq!(object.components.get("RMET"), Some(2));
+        unit_assert_eq!(object.construction => 96_000);
+        unit_assert_eq!(object.position.y => 101, "DoCon keeps the old shape bottom");
+        unit_assert_eq!(object.components.get("SKIN") => Some(1));
+        unit_assert_eq!(object.components.get("BBON") => Some(1));
+        unit_assert_eq!(object.components.get("RMET") => Some(2));
         let idx = engine.test_object_index(id);
-        assert_eq!(
-            engine.objects[idx].fixed_position.y,
-            itofix(100),
-            "UpdatePos leaves fix_y stale"
-        );
+        unit_assert_eq!(engine.objects[idx].fixed_position.y => itofix(100), "UpdatePos leaves fix_y stale");
         Ok(())
     }
 
@@ -5156,12 +4165,13 @@ func DecayThenExist() {
         let mut definition = test_definition("DHRS", "Dead Horse", script);
         definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 10, 25)));
         definition.set_stretch_growth(true);
-        definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
-                ("Exist".to_string(), ActionSpec::default()),
-            ]),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Exist", ActionSpec::default()),
+            ],
         );
 
         let mut engine = Engine::with_seed(73);
@@ -5174,18 +4184,18 @@ func DecayThenExist() {
         engine.apply_object_update(id, ObjectUpdate::new().with_position(Vector2::new(20, 100)))?;
         let idx = engine.test_object_index(id);
 
-        assert_eq!(
-            engine.call_object_function(idx, "DecayThenExist", Vec::new())?,
+        unit_assert_eq!(
+            engine.call_object_function(idx, "DecayThenExist", Vec::new())? =>
             Value::Bool(true),
             "the requested slot is valid even though SetAction coerces it to ActIdle"
         );
 
         let object = engine.test_object_snapshot(id);
-        assert_eq!(object.construction, 96_000);
-        assert_eq!(object.position.y, 101);
-        assert_eq!(object.action.name, "Idle");
+        unit_assert_eq!(object.construction => 96_000);
+        unit_assert_eq!(object.position.y => 101);
+        unit_assert_eq!(object.action.name => "Idle");
         let idx = engine.test_object_index(id);
-        assert_eq!(engine.objects[idx].fixed_position.y, itofix(101));
+        unit_assert_eq!(engine.objects[idx].fixed_position.y => itofix(101));
         Ok(())
     }
 
@@ -5234,41 +4244,29 @@ func Sequence() {
 
         let twice = spawn_at_100(&mut engine)?;
         let idx = engine.test_object_index(twice);
-        assert_eq!(
-            engine.call_object_function(idx, "Twice", Vec::new())?,
-            Value::Int(102)
-        );
+        unit_assert_eq!(engine.call_object_function(idx, "Twice", Vec::new())? => Value::Int(102));
         let object = engine.test_object_snapshot(twice);
-        assert_eq!(object.construction, 92_000);
-        assert_eq!(object.position.y, 102);
-        assert_eq!(object.local_vars.get("first_y"), Some(&Value::Int(101)));
-        assert_eq!(object.local_vars.get("second_y"), Some(&Value::Int(102)));
+        unit_assert_eq!(object.construction => 92_000);
+        unit_assert_eq!(object.position.y => 102);
+        unit_assert_eq!(object.local_vars.get("first_y") => Some(&Value::Int(101)));
+        unit_assert_eq!(object.local_vars.get("second_y") => Some(&Value::Int(102)));
         let idx = engine.test_object_index(twice);
-        assert_eq!(engine.objects[idx].fixed_position.y, itofix(100));
+        unit_assert_eq!(engine.objects[idx].fixed_position.y => itofix(100));
 
         let snap = spawn_at_100(&mut engine)?;
         let idx = engine.test_object_index(snap);
-        assert_eq!(
-            engine.call_object_function(idx, "Snap", Vec::new())?,
-            Value::Int(101)
-        );
+        unit_assert_eq!(engine.call_object_function(idx, "Snap", Vec::new())? => Value::Int(101));
         let idx = engine.test_object_index(snap);
-        assert_eq!(engine.objects[idx].state.position.y, 101);
-        assert_eq!(engine.objects[idx].fixed_position.y, itofix(101));
+        unit_assert_eq!(engine.objects[idx].state.position.y => 101);
+        unit_assert_eq!(engine.objects[idx].fixed_position.y => itofix(101));
 
         let sequence = spawn_at_100(&mut engine)?;
         let idx = engine.test_object_index(sequence);
-        assert_eq!(
-            engine.call_object_function(idx, "Sequence", Vec::new())?,
-            Value::Int(81)
-        );
+        unit_assert_eq!(engine.call_object_function(idx, "Sequence", Vec::new())? => Value::Int(81));
         let idx = engine.test_object_index(sequence);
-        assert_eq!(engine.objects[idx].state.construction, 92_000);
-        assert_eq!(engine.objects[idx].state.position, Vector2::new(70, 81));
-        assert_eq!(
-            engine.objects[idx].fixed_position,
-            FixedVec2::from_ints(70, 80)
-        );
+        unit_assert_eq!(engine.objects[idx].state.construction => 92_000);
+        unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(70, 81));
+        unit_assert_eq!(engine.objects[idx].fixed_position => FixedVec2::from_ints(70, 80));
         Ok(())
     }
 
@@ -5318,14 +4316,14 @@ func Reproduce() {
             .iter()
             .find(|object| object.definition_id == "CHLD")
             .expect("child exists");
-        assert_eq!(child.state.container, Some(parent_id));
-        assert_eq!(child.state.construction, 60_000);
-        assert_eq!(child.state.position.y, 104);
-        assert_eq!(child.fixed_position.y, itofix(100));
-        assert_eq!(child.state.local_vars.get("intercepted"), None);
+        unit_assert_eq!(child.state.container => Some(parent_id));
+        unit_assert_eq!(child.state.construction => 60_000);
+        unit_assert_eq!(child.state.position.y => 104);
+        unit_assert_eq!(child.fixed_position.y => itofix(100));
+        unit_assert_eq!(child.state.local_vars.get("intercepted") => None);
         let parent = engine.test_object_snapshot(parent_id);
-        assert_eq!(parent.local_vars.get("observed_con"), Some(&Value::Int(60)));
-        assert_eq!(parent.local_vars.get("observed_mass"), Some(&Value::Int(6)));
+        unit_assert_eq!(parent.local_vars.get("observed_con") => Some(&Value::Int(60)));
+        unit_assert_eq!(parent.local_vars.get("observed_mass") => Some(&Value::Int(6)));
         Ok(())
     }
 
@@ -5375,17 +4373,10 @@ func Reproduce() {
         )?;
 
         let index = engine.test_object_index(caller);
-        assert_eq!(
-            engine.call_object_function(
-                index,
-                "ShrinkAndSort",
-                vec![Value::Object(target.as_u64())],
-            )?,
-            Value::Int(100_100)
-        );
+        unit_assert_eq!(engine.call_object_function(index, "ShrinkAndSort", vec![Value::Object(target.as_u64())],)? => Value::Int(100_100));
         let caller = engine.test_object_snapshot(caller);
-        assert_eq!(caller.local_vars.get("mass_first"), Some(&Value::Int(100)));
-        assert_eq!(caller.local_vars.get("value_first"), Some(&Value::Int(100)));
+        unit_assert_eq!(caller.local_vars.get("mass_first") => Some(&Value::Int(100)));
+        unit_assert_eq!(caller.local_vars.get("value_first") => Some(&Value::Int(100)));
         Ok(())
     }
 
@@ -5411,17 +4402,18 @@ func Completion() { completion_ocf = GetOCF(); return true; }
         definition.set_collection_rect(Some(DefinitionRect::new(0, 0, 4, 4)));
         definition.set_attract_lightning(true);
         definition.set_line_connect(LINE_CONNECT_POWER_CONSUMER | LINE_CONNECT_POWER_GENERATOR);
-        definition.configure_actions(
-            Some("Work".to_string()),
-            HashMap::from([
+        set_test_actions(
+            &mut definition,
+            Some("Work"),
+            [
                 (
-                    "Work".to_string(),
+                    "Work",
                     ActionSpec::default()
                         .with_procedure("ATTACH")
                         .with_disabled(true),
                 ),
-                ("Idle".to_string(), ActionSpec::default()),
-            ]),
+                ("Idle", ActionSpec::default()),
+            ],
         );
 
         let mut engine = Engine::with_seed(83);
@@ -5445,20 +4437,13 @@ func Completion() { completion_ocf = GetOCF(); return true; }
             | ocf::POWER_CONSUMER
             | ocf::POWER_SUPPLY
             | ocf::CONTAINER;
-        assert_eq!(decayed_ocf & full_only, 0);
-        assert_ne!(decayed_ocf & ocf::CONSTRUCT, 0);
-        assert_ne!(decayed_ocf & ocf::ROTATE, 0);
-        assert_ne!(
-            decayed_ocf & ocf::FIGHT_READY,
-            0,
-            "forced Idle runs SetOCF again and restores FightReady"
-        );
+        unit_assert_eq!(decayed_ocf & full_only => 0);
+        unit_assert_ne!(decayed_ocf & ocf::CONSTRUCT => 0);
+        unit_assert_ne!(decayed_ocf & ocf::ROTATE => 0);
+        unit_assert_ne!(decayed_ocf & ocf::FIGHT_READY => 0, "forced Idle runs SetOCF again and restores FightReady");
         let decaying = engine.test_object_snapshot(decaying);
-        assert_eq!(decaying.action.name, "Idle");
-        assert_eq!(
-            decaying.local_vars.get("observed_procedure"),
-            Some(&Value::Nil)
-        );
+        unit_assert_eq!(decaying.action.name => "Idle");
+        unit_assert_eq!(decaying.local_vars.get("observed_procedure") => Some(&Value::Nil));
 
         let growing = engine.spawn_object(
             SpawnConfig::new("OCFP")
@@ -5471,15 +4456,11 @@ func Completion() { completion_ocf = GetOCF(); return true; }
             .call_object_function(index, "Grow", Vec::new())?
             .as_c4_int()
             .expect("GetOCF returns int") as u32;
-        assert_eq!(grown_ocf & full_only, full_only);
-        assert_eq!(grown_ocf & ocf::CONSTRUCT, 0);
-        assert_ne!(grown_ocf & ocf::ROTATE, 0);
+        unit_assert_eq!(grown_ocf & full_only => full_only);
+        unit_assert_eq!(grown_ocf & ocf::CONSTRUCT => 0);
+        unit_assert_ne!(grown_ocf & ocf::ROTATE => 0);
         let growing = engine.test_object_snapshot(growing);
-        assert_eq!(
-            growing.local_vars.get("completion_ocf"),
-            Some(&Value::Int(grown_ocf as i32)),
-            "Completion observes the SetOCF result before DoCon returns"
-        );
+        unit_assert_eq!(growing.local_vars.get("completion_ocf") => Some(&Value::Int(grown_ocf as i32)), "Completion observes the SetOCF result before DoCon returns");
         Ok(())
     }
 
@@ -5506,15 +4487,13 @@ func DecayAndCollect(object item) {
 "#;
         let mut collector = test_definition("SITE", "Site", collector_script);
         collector.set_collection_rect(Some(DefinitionRect::new(0, 0, 4, 4)));
-        collector.configure_actions(
-            Some("Work".to_string()),
-            HashMap::from([
-                (
-                    "Work".to_string(),
-                    ActionSpec::default().with_procedure("ATTACH"),
-                ),
-                ("Idle".to_string(), ActionSpec::default()),
-            ]),
+        set_test_actions(
+            &mut collector,
+            Some("Work"),
+            [
+                ("Work", ActionSpec::default().with_procedure("ATTACH")),
+                ("Idle", ActionSpec::default()),
+            ],
         );
         let mut engine = Engine::with_seed(85);
         engine.register_definition(caller)?;
@@ -5524,40 +4503,24 @@ func DecayAndCollect(object item) {
         let foreign =
             engine.spawn_object(SpawnConfig::new("SITE").with_action(ActionState::new("Work")))?;
         let index = engine.test_object_index(caller);
-        assert_eq!(
-            engine.call_object_function(
-                index,
-                "DecayForeign",
-                vec![Value::Object(foreign.as_u64())],
-            )?,
-            Value::Nil
-        );
+        unit_assert_eq!(engine.call_object_function(index, "DecayForeign", vec![Value::Object(foreign.as_u64())],)? => Value::Nil);
         let caller = engine.test_object_snapshot(caller);
-        assert_eq!(
-            caller.local_vars.get("foreign_action"),
-            Some(&Value::String("Idle".into()))
-        );
+        unit_assert_eq!(caller.local_vars.get("foreign_action") => Some(&Value::String("Idle".into())));
 
         let collector =
             engine.spawn_object(SpawnConfig::new("SITE").with_action(ActionState::new("Work")))?;
         let item = engine.spawn_object(SpawnConfig::new("ITEM"))?;
         let index = engine.test_object_index(collector);
-        assert_eq!(
+        unit_assert_eq!(
             engine.call_object_function(
                 index,
                 "DecayAndCollect",
                 vec![Value::Object(item.as_u64())],
-            )?,
+            )? =>
             Value::Bool(false),
             "partial non-IncompleteActivity objects lose Collection immediately"
         );
-        assert_eq!(
-            engine
-                .object_snapshot(item)
-                .expect("item survives")
-                .container,
-            None
-        );
+        unit_assert_eq!(engine.object_snapshot(item).expect("item survives").container => None);
         Ok(())
     }
 
@@ -5601,34 +4564,28 @@ func DecayAndCollect(object item) {
             ObjectUpdate::new().with_status(ObjectStatus::Inactive),
         )?;
         let index = engine.test_object_index(caller);
-        assert_eq!(
+        unit_assert_eq!(
             engine.call_object_function(
                 index,
                 "RemoveInactive",
                 vec![Value::Object(inactive.as_u64())],
-            )?,
+            )? =>
             Value::Int(1),
             "raw Status-zero counting excludes the removed inactive target"
         );
-        assert_eq!(
-            engine.object_snapshot(inactive).map(|object| object.status),
-            Some(ObjectStatus::Deleted)
-        );
+        unit_assert_eq!(engine.object_snapshot(inactive).map(|object| object.status) => Some(ObjectStatus::Deleted));
 
         let parent = engine.spawn_object(SpawnConfig::new("HOLD"))?;
         let child = engine.spawn_object(SpawnConfig::new("CHLD").with_container(parent))?;
         let parent_before = engine.test_object_snapshot(parent);
-        assert_eq!(parent_before.ocf & ocf::COLLECTION, 0, "limit is full");
+        unit_assert_eq!(parent_before.ocf & ocf::COLLECTION => 0, "limit is full");
         let index = engine.test_object_index(child);
         let parent_ocf = engine
             .call_object_function(index, "Vanish", vec![Value::Object(parent.as_u64())])?
             .as_c4_int()
             .expect("GetOCF returns int") as u32;
-        assert_ne!(parent_ocf & ocf::COLLECTION, 0);
-        assert_eq!(
-            engine.object_snapshot(child).map(|object| object.status),
-            Some(ObjectStatus::Deleted)
-        );
+        unit_assert_ne!(parent_ocf & ocf::COLLECTION => 0);
+        unit_assert_eq!(engine.object_snapshot(child).map(|object| object.status) => Some(ObjectStatus::Deleted));
         Ok(())
     }
 
@@ -5656,17 +4613,9 @@ func Initialize() { lifecycle = lifecycle * 10 + 2; return true; }
             .spawn_object(SpawnConfig::new("SYNC").with_construction(FULL_CON - FULL_CON / 100))?;
 
         let idx = engine.test_object_index(id);
-        assert_eq!(
-            engine.call_object_function(idx, "Finish", Vec::new())?,
-            Value::Int(123),
-            "Completion and Initialize precede the caller's next instruction"
-        );
+        unit_assert_eq!(engine.call_object_function(idx, "Finish", Vec::new())? => Value::Int(123), "Completion and Initialize precede the caller's next instruction");
         let idx = engine.test_object_index(id);
-        assert_eq!(
-            engine.call_object_function(idx, "Finish", Vec::new())?,
-            Value::Int(1233),
-            "an already-full object does not repeat either callback"
-        );
+        unit_assert_eq!(engine.call_object_function(idx, "Finish", Vec::new())? => Value::Int(1233), "an already-full object does not repeat either callback");
         Ok(())
     }
 
@@ -5691,11 +4640,8 @@ func Initialize() { Random(100); return true; }
         let idx = engine.test_object_index(id);
         engine.call_object_function(idx, "Finish", Vec::new())?;
 
-        assert_eq!(
-            engine.object_snapshot(id).map(|object| object.status),
-            Some(ObjectStatus::Deleted)
-        );
-        assert_eq!(engine.rng, rng_before, "Initialize was suppressed");
+        unit_assert_eq!(engine.object_snapshot(id).map(|object| object.status) => Some(ObjectStatus::Deleted));
+        unit_assert_eq!(engine.rng => rng_before, "Initialize was suppressed");
         Ok(())
     }
 
@@ -5719,13 +4665,15 @@ func Ejection(object child) { ++ejections; return true; }
 local departures;
 func Departure(object old_container) { ++departures; return true; }
 "#;
-        let mut site = test_definition("SITE", "Site", site_script);
-        site.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
-                ("Work".to_string(), ActionSpec::default()),
-            ]),
+        let site = action_definition(
+            "SITE",
+            "Site",
+            site_script,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Work", ActionSpec::default()),
+            ],
         );
         let item = test_definition("ITEM", "Item", item_script);
         let mut engine = Engine::with_seed(107);
@@ -5748,20 +4696,17 @@ func Departure(object old_container) { ++departures; return true; }
         engine.call_object_function(idx, "Decay", Vec::new())?;
 
         let site = engine.test_object_snapshot(site_id);
-        assert_eq!(site.construction, FULL_CON - FULL_CON / 100);
-        assert!(!site.need_energy);
-        assert_eq!(site.action.name, "Idle");
-        assert_eq!(
-            site.local_vars.get("action_after"),
-            Some(&Value::String("Idle".into()))
-        );
-        assert_eq!(site.local_vars.get("content_after"), Some(&Value::Nil));
-        assert_eq!(site.local_vars.get("ejections"), Some(&Value::Int(1)));
+        unit_assert_eq!(site.construction => FULL_CON - FULL_CON / 100);
+        unit_assert!(!site.need_energy);
+        unit_assert_eq!(site.action.name => "Idle");
+        unit_assert_eq!(site.local_vars.get("action_after") => Some(&Value::String("Idle".into())));
+        unit_assert_eq!(site.local_vars.get("content_after") => Some(&Value::Nil));
+        unit_assert_eq!(site.local_vars.get("ejections") => Some(&Value::Int(1)));
         let item = engine.test_object_snapshot(item_id);
-        assert_eq!(item.container, None);
-        assert_eq!(item.velocity, Vector2::ZERO);
-        assert_eq!(item.rotation, 0);
-        assert_eq!(item.local_vars.get("departures"), Some(&Value::Int(1)));
+        unit_assert_eq!(item.container => None);
+        unit_assert_eq!(item.velocity => Vector2::ZERO);
+        unit_assert_eq!(item.rotation => 0);
+        unit_assert_eq!(item.local_vars.get("departures") => Some(&Value::Int(1)));
         Ok(())
     }
 
@@ -5789,18 +4734,15 @@ func Ejection(object child) { during = GBackSolid(0, 0); return true; }
                 .with_position(Vector2::new(10, 10)),
         )?;
         engine.spawn_object(SpawnConfig::new("ITEM").with_container(gate_id))?;
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10)]);
 
         let index = engine.test_object_index(gate_id);
-        assert_eq!(
-            engine.call_object_function(index, "Decay", Vec::new())?,
-            Value::Bool(false)
-        );
+        unit_assert_eq!(engine.call_object_function(index, "Decay", Vec::new())? => Value::Bool(false));
 
         let gate = engine.test_object_snapshot(gate_id);
-        assert_eq!(gate.local_vars.get("during"), Some(&Value::Bool(false)));
-        assert_eq!(gate.local_vars.get("after"), Some(&Value::Bool(false)));
-        assert!(vehicle_pixels(&engine).is_empty());
+        unit_assert_eq!(gate.local_vars.get("during") => Some(&Value::Bool(false)));
+        unit_assert_eq!(gate.local_vars.get("after") => Some(&Value::Bool(false)));
+        unit_assert!(vehicle_pixels(&engine).is_empty());
         Ok(())
     }
 
@@ -5826,19 +4768,16 @@ func Completion() { during = GBackSolid(0, 0); return true; }
                 .with_position(Vector2::new(10, 10))
                 .with_construction(FULL_CON - FULL_CON / 100),
         )?;
-        assert!(vehicle_pixels(&engine).is_empty());
+        unit_assert!(vehicle_pixels(&engine).is_empty());
 
         let index = engine.test_object_index(gate_id);
-        assert_eq!(
-            engine.call_object_function(index, "Grow", Vec::new())?,
-            Value::Bool(true)
-        );
+        unit_assert_eq!(engine.call_object_function(index, "Grow", Vec::new())? => Value::Bool(true));
 
         let gate = engine.test_object_snapshot(gate_id);
-        assert_eq!(gate.position, Vector2::new(10, 9));
-        assert_eq!(gate.local_vars.get("during"), Some(&Value::Bool(true)));
-        assert_eq!(gate.local_vars.get("after"), Some(&Value::Bool(true)));
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 9)]);
+        unit_assert_eq!(gate.position => Vector2::new(10, 9));
+        unit_assert_eq!(gate.local_vars.get("during") => Some(&Value::Bool(true)));
+        unit_assert_eq!(gate.local_vars.get("after") => Some(&Value::Bool(true)));
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 9)]);
         Ok(())
     }
 
@@ -5865,15 +4804,9 @@ func Completion() { RemoveObject(); return true; }
         )?;
 
         let index = engine.test_object_index(gate_id);
-        assert_eq!(
-            engine.call_object_function(index, "Grow", Vec::new())?,
-            Value::Bool(false)
-        );
-        assert_eq!(
-            engine.object_snapshot(gate_id).map(|object| object.status),
-            Some(ObjectStatus::Deleted)
-        );
-        assert!(vehicle_pixels(&engine).is_empty());
+        unit_assert_eq!(engine.call_object_function(index, "Grow", Vec::new())? => Value::Bool(false));
+        unit_assert_eq!(engine.object_snapshot(gate_id).map(|object| object.status) => Some(ObjectStatus::Deleted));
+        unit_assert!(vehicle_pixels(&engine).is_empty());
         Ok(())
     }
 
@@ -5915,14 +4848,14 @@ func Record(bool solid) { saw_mask = solid; return true; }
         let watcher = engine.spawn_object(SpawnConfig::new("WATCH"))?;
         let child_index = engine.test_object_index(child);
         engine.call_object_function(child_index, "Arm", vec![Value::Object(watcher.as_u64())])?;
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10)]);
 
         let parent_index = engine.test_object_index(parent);
         engine.call_object_function(parent_index, "Vanish", Vec::new())?;
 
         let watcher = engine.test_object_snapshot(watcher);
-        assert_eq!(watcher.local_vars.get("saw_mask"), Some(&Value::Bool(true)));
-        assert!(vehicle_pixels(&engine).is_empty());
+        unit_assert_eq!(watcher.local_vars.get("saw_mask") => Some(&Value::Bool(true)));
+        unit_assert!(vehicle_pixels(&engine).is_empty());
         Ok(())
     }
 
@@ -5951,14 +4884,11 @@ func Decay() { DoCon(-1); return GBackSolid(0, 0); }
                 .with_loaded(true)
                 .with_position(Vector2::new(10, 10)),
         )?;
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10)]);
 
         let index = engine.test_object_index(decaying);
-        assert_eq!(
-            engine.call_object_function(index, "Decay", Vec::new())?,
-            Value::Bool(true)
-        );
-        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+        unit_assert_eq!(engine.call_object_function(index, "Decay", Vec::new())? => Value::Bool(true));
+        unit_assert_eq!(vehicle_pixels(&engine) => vec![(10, 10)]);
         Ok(())
     }
 
@@ -6027,24 +4957,24 @@ func FxChildWitnessStop(object target, int number, int reason) {
         let idx = engine.test_object_index(burning);
         engine.call_object_function(idx, "Arm", Vec::new())?;
         let idx = engine.test_object_index(burning);
-        assert!(engine.incinerate_object(idx, 0, false, None)?);
-        assert_eq!(
+        unit_assert!(engine.incinerate_object(idx, 0, false, None)?);
+        unit_assert_eq!(
             engine
                 .object_snapshot(holder)
                 .expect("holder survives ignition")
                 .local_vars
-                .get("order"),
+                .get("order") =>
             Some(&Value::Int(3)),
             "Fire Start temporarily removes the higher-priority Witness effect"
         );
 
         engine.tick_without_snapshot()?;
 
-        assert!(engine.object_snapshot(burning).is_none());
-        assert!(engine.object_snapshot(child).is_none());
+        unit_assert!(engine.object_snapshot(burning).is_none());
+        unit_assert!(engine.object_snapshot(child).is_none());
         let holder = engine.test_object_snapshot(holder);
-        assert_eq!(holder.local_vars.get("order"), Some(&Value::Int(312345)));
-        assert_eq!(holder.local_vars.get("stop_reason"), Some(&Value::Int(3)));
+        unit_assert_eq!(holder.local_vars.get("order") => Some(&Value::Int(312345)));
+        unit_assert_eq!(holder.local_vars.get("stop_reason") => Some(&Value::Int(3)));
         Ok(())
     }
 
@@ -6067,7 +4997,7 @@ func FxChildWitnessStop(object target, int number, int reason) {
                 .with_energy(5_000),
         )?;
         let idx = engine.test_object_index(id);
-        assert!(engine.incinerate_object(idx, 0, false, None)?);
+        unit_assert!(engine.incinerate_object(idx, 0, false, None)?);
         let fire_number = engine.objects[idx]
             .state
             .effects
@@ -6078,10 +5008,10 @@ func FxChildWitnessStop(object target, int number, int reason) {
 
         engine.exec_object_fire(idx, 10, fire_number);
 
-        assert!(engine.objects[idx].destroyed);
-        assert_eq!(engine.objects[idx].state.status, ObjectStatus::Deleted);
-        assert_eq!(engine.objects[idx].state.damage, 2);
-        assert_eq!(engine.objects[idx].state.energy, 4_000);
+        unit_assert!(engine.objects[idx].destroyed);
+        unit_assert_eq!(engine.objects[idx].state.status => ObjectStatus::Deleted);
+        unit_assert_eq!(engine.objects[idx].state.damage => 2);
+        unit_assert_eq!(engine.objects[idx].state.energy => 4_000);
         Ok(())
     }
 
@@ -6114,11 +5044,11 @@ func RepositionAndGrow() { SetPosition(40, 300); DoCon(1); return GetY(); }
 
         let object = engine.test_object_snapshot(id);
         // floor(50*250/100) - floor(49*250/100) = 3.
-        assert_eq!(callback_y, Value::Int(y_before - 3));
-        assert_eq!(object.position.y, y_before - 3);
-        assert_eq!(object.construction, 50_500);
+        unit_assert_eq!(callback_y => Value::Int(y_before - 3));
+        unit_assert_eq!(object.position.y => y_before - 3);
+        unit_assert_eq!(object.construction => 50_500);
         let idx = engine.test_object_index(id);
-        assert_eq!(engine.objects[idx].fixed_position.y, fixed_before);
+        unit_assert_eq!(engine.objects[idx].fixed_position.y => fixed_before);
 
         let round_trip = engine.spawn_object(
             SpawnConfig::new("ROTA")
@@ -6130,14 +5060,11 @@ func RepositionAndGrow() { SetPosition(40, 300); DoCon(1); return GetY(); }
         let idx = engine.test_object_index(round_trip);
         let y_before = engine.objects[idx].state.position.y;
         let fixed_before = engine.objects[idx].fixed_position.y;
-        assert_eq!(
-            engine.call_object_function(idx, "RoundTrip", Vec::new())?,
-            Value::Int(y_before - 3)
-        );
+        unit_assert_eq!(engine.call_object_function(idx, "RoundTrip", Vec::new())? => Value::Int(y_before - 3));
         let idx = engine.test_object_index(round_trip);
-        assert_eq!(engine.objects[idx].state.construction, 49_500);
-        assert_eq!(engine.objects[idx].state.position.y, y_before - 3);
-        assert_eq!(engine.objects[idx].fixed_position.y, fixed_before);
+        unit_assert_eq!(engine.objects[idx].state.construction => 49_500);
+        unit_assert_eq!(engine.objects[idx].state.position.y => y_before - 3);
+        unit_assert_eq!(engine.objects[idx].fixed_position.y => fixed_before);
 
         let repositioned = engine.spawn_object(
             SpawnConfig::new("ROTA")
@@ -6147,13 +5074,10 @@ func RepositionAndGrow() { SetPosition(40, 300); DoCon(1); return GetY(); }
                 .with_construction(49_500),
         )?;
         let idx = engine.test_object_index(repositioned);
-        assert_eq!(
-            engine.call_object_function(idx, "RepositionAndGrow", Vec::new())?,
-            Value::Int(297)
-        );
+        unit_assert_eq!(engine.call_object_function(idx, "RepositionAndGrow", Vec::new())? => Value::Int(297));
         let idx = engine.test_object_index(repositioned);
-        assert_eq!(engine.objects[idx].state.position.y, 297);
-        assert_eq!(engine.objects[idx].fixed_position.y, itofix(300));
+        unit_assert_eq!(engine.objects[idx].state.position.y => 297);
+        unit_assert_eq!(engine.objects[idx].fixed_position.y => itofix(300));
 
         let loaded_turn = engine.spawn_object(
             SpawnConfig::new("ROTA")
@@ -6164,11 +5088,7 @@ func RepositionAndGrow() { SetPosition(40, 300); DoCon(1); return GetY(); }
                 .with_construction(49_500),
         )?;
         let idx = engine.test_object_index(loaded_turn);
-        assert_eq!(
-            engine.call_object_function(idx, "Grow", Vec::new())?,
-            Value::Int(297),
-            "C++ tests raw r, so loaded r=360 takes the rotated lift branch"
-        );
+        unit_assert_eq!(engine.call_object_function(idx, "Grow", Vec::new())? => Value::Int(297), "C++ tests raw r, so loaded r=360 takes the rotated lift branch");
         Ok(())
     }
 
@@ -6195,38 +5115,22 @@ func Reshape(object target) {
         let target_id =
             engine.spawn_object(SpawnConfig::new("TARG").with_position(Vector2::new(20, 20)))?;
         let caller_idx = engine.test_object_index(caller_id);
-        assert!(!engine
-            .sectors
-            .as_ref()
-            .expect("sectors initialized")
-            .shape_ids(SectorKey::Inside { x: 1, y: 0 })
-            .contains(&target_id));
+        unit_assert!(!engine.sectors.as_ref().expect("sectors initialized").shape_ids(SectorKey::Inside { x: 1, y: 0 }).contains(&target_id));
 
-        assert_eq!(
+        unit_assert_eq!(
             engine.call_object_function(
                 caller_idx,
                 "Reshape",
                 vec![Value::Object(target_id.as_u64())],
-            )?,
+            )? =>
             Value::Array(vec![Value::Bool(true), Value::Bool(true)])
         );
 
         let caller_idx = engine.test_object_index(caller_id);
-        assert_eq!(
-            engine.objects[caller_idx].current_shape_rect(),
-            Some(DefinitionRect::new(-2, -3, 4, 6))
-        );
+        unit_assert_eq!(engine.objects[caller_idx].current_shape_rect() => Some(DefinitionRect::new(-2, -3, 4, 6)));
         let target_idx = engine.test_object_index(target_id);
-        assert_eq!(
-            engine.objects[target_idx].current_shape_rect(),
-            Some(DefinitionRect::new(-7, -8, 70, 16))
-        );
-        assert!(engine
-            .sectors
-            .as_ref()
-            .expect("sectors initialized")
-            .shape_ids(SectorKey::Inside { x: 1, y: 0 })
-            .contains(&target_id));
+        unit_assert_eq!(engine.objects[target_idx].current_shape_rect() => Some(DefinitionRect::new(-7, -8, 70, 16)));
+        unit_assert!(engine.sectors.as_ref().expect("sectors initialized").shape_ids(SectorKey::Inside { x: 1, y: 0 }).contains(&target_id));
         Ok(())
     }
 
@@ -6247,16 +5151,10 @@ func ResetShape() {
         let id = engine.spawn_object(SpawnConfig::new("SHAP"))?;
         let idx = engine.test_object_index(id);
 
-        assert_eq!(
-            engine.call_object_function(idx, "ResetShape", Vec::new())?,
-            Value::Int(9)
-        );
+        unit_assert_eq!(engine.call_object_function(idx, "ResetShape", Vec::new())? => Value::Int(9));
         let idx = engine.test_object_index(id);
-        assert_eq!(engine.objects[idx].state.shape_override, None);
-        assert_eq!(
-            engine.objects[idx].current_shape_rect(),
-            Some(DefinitionRect::new(0, 0, 9, 19))
-        );
+        unit_assert_eq!(engine.objects[idx].state.shape_override => None);
+        unit_assert_eq!(engine.objects[idx].current_shape_rect() => Some(DefinitionRect::new(0, 0, 9, 19)));
         Ok(())
     }
 
@@ -6283,20 +5181,17 @@ func Grow() { DoCon(50); return GetCon(); }
             .map(|shape| engine.objects[idx].state.position.y + shape.y + shape.height)
             .expect("shape exists");
 
-        assert_eq!(
-            engine.call_object_function(idx, "Grow", Vec::new())?,
-            Value::Int(150)
-        );
+        unit_assert_eq!(engine.call_object_function(idx, "Grow", Vec::new())? => Value::Int(150));
 
         let object = engine.test_object_snapshot(id);
-        assert_eq!(object.construction, 150_000);
-        assert_eq!(object.vertices[0], ObjectVertex::new(6, 30));
+        unit_assert_eq!(object.construction => 150_000);
+        unit_assert_eq!(object.vertices[0] => ObjectVertex::new(6, 30));
         let idx = engine.test_object_index(id);
         let shape = engine.objects[idx]
             .current_shape_rect()
             .expect("shape exists");
-        assert_eq!(shape, DefinitionRect::new(0, 0, 15, 30));
-        assert_eq!(object.position.y + shape.y + shape.height, bottom_before);
+        unit_assert_eq!(shape => DefinitionRect::new(0, 0, 15, 30));
+        unit_assert_eq!(object.position.y + shape.y + shape.height => bottom_before);
 
         let loaded = engine.spawn_object(
             SpawnConfig::new("OVSZ")
@@ -6305,8 +5200,8 @@ func Grow() { DoCon(50); return GetCon(); }
                 .with_construction(150_000),
         )?;
         let loaded = engine.test_object_snapshot(loaded);
-        assert_eq!(loaded.construction, 150_000);
-        assert_eq!(loaded.vertices[0], ObjectVertex::new(6, 30));
+        unit_assert_eq!(loaded.construction => 150_000);
+        unit_assert_eq!(loaded.vertices[0] => ObjectVertex::new(6, 30));
         Ok(())
     }
 
@@ -6350,12 +5245,13 @@ func Grow() { DoCon(50); return GetCon(); }
         child.set_shape_rect(Some(DefinitionRect::new(-4, -4, 8, 8)));
         child.set_stretch_growth(true);
         child.set_incomplete_activity(true);
-        child.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
-                ("Exist".to_string(), ActionSpec::default()),
-            ]),
+        set_test_actions(
+            &mut child,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Exist", ActionSpec::default()),
+            ],
         );
 
         let mut engine = Engine::with_seed(83);
@@ -6372,19 +5268,12 @@ func Grow() { DoCon(50); return GetCon(); }
             .iter()
             .find(|object| object.definition_id == "CHLD")
             .expect("placed child exists");
-        assert_eq!(child.state.construction, 10_000);
-        assert_eq!(child.state.action.name, "Exist");
-        assert_eq!(child.state.action.target, Some(parent_id));
-        assert_eq!(
-            child.state.category & CATEGORY_STATIC_BACK,
-            CATEGORY_STATIC_BACK
-        );
-        assert_eq!(child.state.position.y, 516);
-        assert_eq!(
-            child.fixed_position.y,
-            itofix(516),
-            "Construction SetAction snapped the raw pre-growth position"
-        );
+        unit_assert_eq!(child.state.construction => 10_000);
+        unit_assert_eq!(child.state.action.name => "Exist");
+        unit_assert_eq!(child.state.action.target => Some(parent_id));
+        unit_assert_eq!(child.state.category & CATEGORY_STATIC_BACK => CATEGORY_STATIC_BACK);
+        unit_assert_eq!(child.state.position.y => 516);
+        unit_assert_eq!(child.fixed_position.y => itofix(516), "Construction SetAction snapped the raw pre-growth position");
         Ok(())
     }
 
@@ -6392,19 +5281,20 @@ func Grow() { DoCon(50); return GetCon(); }
     fn build_full_con_crossing_runs_completion_then_initialize() -> Result<(), EngineError> {
         let mut builder = simple_definition("Builder");
         builder.set_category(CATEGORY_OBJECT);
-        builder.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
+        set_test_actions(
+            &mut builder,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
                 (
-                    "Walk".to_string(),
+                    "Walk",
                     ActionSpec::default().with_procedure("Walk").with_length(1),
                 ),
                 (
-                    "Build".to_string(),
+                    "Build",
                     ActionSpec::default().with_procedure("Build").with_length(1),
                 ),
-            ]),
+            ],
         );
         builder.set_physical(PhysicalInfo {
             can_construct: 1,
@@ -6452,40 +5342,27 @@ func Grow() { DoCon(50); return GetCon(); }
         engine.tick_without_snapshot()?;
 
         let target = engine.test_object_snapshot(target_id);
-        assert_eq!(target.construction, FULL_CON);
-        assert_eq!(target.local_vars.get("lifecycle"), Some(&Value::Int(12)));
-        assert_eq!(
+        unit_assert_eq!(target.construction => FULL_CON);
+        unit_assert_eq!(target.local_vars.get("lifecycle") => Some(&Value::Int(12)));
+        unit_assert_eq!(
             engine
                 .snapshot()
                 .objects
                 .iter()
                 .filter(|object| object.definition_id == "CHLD")
-                .count(),
+                .count() =>
             1,
             "ELEV-style Initialize creates its child on live completion"
         );
         let builder = engine.test_object_snapshot(builder_id);
-        assert_eq!(
-            builder.action.name, "Build",
-            "the crossing tick still sees Target::Build succeed"
-        );
-        assert_eq!(
-            builder.action.time, 1,
-            "pre-switch Action.Time increment must not repeat in the phase tail"
-        );
+        unit_assert_eq!(builder.action.name => "Build", "the crossing tick still sees Target::Build succeed");
+        unit_assert_eq!(builder.action.time => 1, "pre-switch Action.Time increment must not repeat in the phase tail");
 
         // The next Build frame sees an already-complete target and stops;
         // the following frame executes the resulting Walk action.
         engine.tick_without_snapshot()?;
         engine.tick_without_snapshot()?;
-        assert_eq!(
-            engine
-                .object_snapshot(builder_id)
-                .expect("builder survives recovery")
-                .action
-                .name,
-            "Walk"
-        );
+        unit_assert_eq!(engine.object_snapshot(builder_id).expect("builder survives recovery").action.name => "Walk");
         Ok(())
     }
 
@@ -6524,10 +5401,10 @@ func Grow() { DoCon(50); return GetCon(); }
         restored.apply_object_update(id, ObjectUpdate::new().with_construction(FULL_CON / 2))?;
 
         let object = restored.test_object_snapshot(id);
-        assert_eq!(object.construction, FULL_CON / 2);
-        assert_eq!(object.position, Vector2::new(3, 10));
-        assert_eq!(object.vertices[0].y, 4);
-        assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
+        unit_assert_eq!(object.construction => FULL_CON / 2);
+        unit_assert_eq!(object.position => Vector2::new(3, 10));
+        unit_assert_eq!(object.vertices[0].y => 4);
+        unit_assert_eq!(object.vertices[0].cnat => CNAT_BOTTOM);
         Ok(())
     }
 
@@ -6568,11 +5445,11 @@ func Grow() { DoCon(50); return GetCon(); }
         engine.apply_object_update(id, ObjectUpdate::new().with_construction(FULL_CON / 2))?;
 
         let object = engine.test_object_snapshot(id);
-        assert_eq!(object.construction, FULL_CON / 2);
-        assert_eq!(object.position, Vector2::new(3, 6));
-        assert_eq!(object.vertices[0].x, 4);
-        assert_eq!(object.vertices[0].y, 2);
-        assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
+        unit_assert_eq!(object.construction => FULL_CON / 2);
+        unit_assert_eq!(object.position => Vector2::new(3, 6));
+        unit_assert_eq!(object.vertices[0].x => 4);
+        unit_assert_eq!(object.vertices[0].y => 2);
+        unit_assert_eq!(object.vertices[0].cnat => CNAT_BOTTOM);
         Ok(())
     }
 
@@ -6587,9 +5464,9 @@ func Grow() { DoCon(50); return GetCon(); }
         let mut engine = Engine::with_seed(1);
         engine.register_definition(stretch)?;
         engine.register_definition(simple_definition("JOLT"))?;
-        assert!(engine.definition_stretch_growth("STRG"));
-        assert!(!engine.definition_stretch_growth("JOLT"));
-        assert!(!engine.definition_stretch_growth("NONE"));
+        unit_assert!(engine.definition_stretch_growth("STRG"));
+        unit_assert!(!engine.definition_stretch_growth("JOLT"));
+        unit_assert!(!engine.definition_stretch_growth("NONE"));
         Ok(())
     }
 
@@ -6604,36 +5481,28 @@ func Grow() { DoCon(50); return GetCon(); }
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(definition);
 
-        let top_id = engine.spawn_test_object(
-            SpawnConfig::new("Bounded")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(5, 2)),
-        );
+        let top_id = spawn_fixture!(engine, "Bounded", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 2));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
         mobilize(&mut engine, top_id, C4Fixed::ZERO, -itofix(5));
 
-        let bottom_id = engine.spawn_test_object(
-            SpawnConfig::new("Bounded")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(6, 18)),
-        );
+        let bottom_id = spawn_fixture!(engine, "Bounded", with_category: CATEGORY_OBJECT, with_position: Vector2::new(6, 18));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
         mobilize(&mut engine, bottom_id, C4Fixed::ZERO, itofix(5));
 
         let snapshot = engine.test_tick();
         let top = snapshot.object(top_id).expect("top object present");
         let bottom = snapshot.object(bottom_id).expect("bottom object present");
-        assert_eq!(top.position.y, 1);
-        assert_eq!(bottom.position.y, 19);
+        unit_assert_eq!(top.position.y => 1);
+        unit_assert_eq!(bottom.position.y => 19);
 
         let top_idx = engine.test_object_index(top_id);
         // TargetBounds clamps the INT step target only — both fixed
         // coordinates keep their momentum-advanced values.
-        assert_eq!(engine.objects[top_idx].fixed_position.y, itofix(-3));
-        assert_eq!(engine.objects[top_idx].fixed_velocity.y, C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[top_idx].fixed_position.y => itofix(-3));
+        unit_assert_eq!(engine.objects[top_idx].fixed_velocity.y => C4Fixed::ZERO);
         let bottom_idx = engine.test_object_index(bottom_id);
-        assert_eq!(engine.objects[bottom_idx].fixed_position.y, itofix(23));
-        assert_eq!(engine.objects[bottom_idx].fixed_velocity.y, C4Fixed::ZERO);
+        unit_assert_eq!(engine.objects[bottom_idx].fixed_position.y => itofix(23));
+        unit_assert_eq!(engine.objects[bottom_idx].fixed_velocity.y => C4Fixed::ZERO);
     }
 
     #[test]
@@ -6661,42 +5530,35 @@ func Grow() { DoCon(50); return GetCon(); }
         definition.set_debugger_hooks(hooks);
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
         definition.set_contact_density(50);
-        let mut actions = HashMap::new();
-        actions.insert("Idle".to_string(), ActionSpec::default());
-        actions.insert(
-            "Slide".to_string(),
-            ActionSpec::default()
-                .with_attach(CNAT_BOTTOM)
-                .with_abort_call("OnSlideAbort"),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                (
+                    "Slide",
+                    ActionSpec::default()
+                        .with_attach(CNAT_BOTTOM)
+                        .with_abort_call("OnSlideAbort"),
+                ),
+                ("Jump", ActionSpec::default().with_start_call("OnJumpStart")),
+            ],
         );
-        actions.insert(
-            "Jump".to_string(),
-            ActionSpec::default().with_start_call("OnJumpStart"),
-        );
-        definition.configure_actions(Some("Idle".to_string()), actions);
 
         let mut engine = solidmask_engine(47, Landscape::flat(20, 20));
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(definition);
 
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("Climber")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(5, 5))
-                .with_action(ActionState::new("Slide")),
-        );
+        let id = spawn_fixture!(engine, "Climber", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 5), with_action: ActionState::new("Slide"));
         let snapshot = engine.test_tick();
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.action.name, "Jump");
-        assert_eq!(object.velocity, Vector2::ZERO);
+        unit_assert_eq!(object.action.name => "Jump");
+        unit_assert_eq!(object.velocity => Vector2::ZERO);
 
         let calls = call_log.lock().unwrap().clone();
         // SetActionByName("Jump") fires the new StartCall before the old
         // AbortCall (C4Object.cpp:4172-4208).
-        assert_eq!(
-            calls,
-            vec!["OnJumpStart".to_string(), "OnSlideAbort".to_string()]
-        );
+        unit_assert_eq!(calls => vec!["OnJumpStart".to_string(), "OnSlideAbort".to_string()]);
     }
 
     #[test]
@@ -6706,14 +5568,15 @@ func Grow() { DoCon(50); return GetCon(); }
         let mut definition = simple_definition("Climber");
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
         definition.set_contact_density(50);
-        let mut actions = HashMap::new();
-        actions.insert("Idle".to_string(), ActionSpec::default());
-        actions.insert(
-            "Slide".to_string(),
-            ActionSpec::default().with_attach(CNAT_BOTTOM),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Slide", ActionSpec::default().with_attach(CNAT_BOTTOM)),
+                ("Jump", ActionSpec::default()),
+            ],
         );
-        actions.insert("Jump".to_string(), ActionSpec::default());
-        definition.configure_actions(Some("Idle".to_string()), actions);
 
         let mut engine = Engine::with_seed(49);
         engine.set_materials(materials);
@@ -6721,13 +5584,9 @@ func Grow() { DoCon(50); return GetCon(); }
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine.register_test_definition(definition);
 
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("Climber")
-                .with_position(Vector2::new(5, 5))
-                .with_action(ActionState::new("Slide")),
-        );
+        let id = spawn_fixture!(engine, "Climber", with_position: Vector2::new(5, 5), with_action: ActionState::new("Slide"));
         let snapshot = engine.test_tick();
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.action.name, "Slide");
-        assert_eq!(object.position, Vector2::new(5, 5));
+        unit_assert_eq!(object.action.name => "Slide");
+        unit_assert_eq!(object.position => Vector2::new(5, 5));
     }

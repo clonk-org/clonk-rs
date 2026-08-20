@@ -1,95 +1,17 @@
-//! Manual probe: where a scenario activation's wall time goes.
+//! Manual activation-stage probe for clonk-org/clonk-rs#293.
 //!
-//! clonk-org/clonk-rs#293 exists because activation is a major user-visible
-//! cost with no stage-level tracker. The evidence it was opened on is a
-//! sampled profile in which `Scenario::apply` was 51% of samples and 99% of
-//! *that subtree* was object-placement callbacks — a share of a subtree, with
-//! no denominator, which is why the issue says outright that it "does not
-//! establish that callbacks are 99% of every activation stage".
-//!
-//! `ActivationTimings` records six stages inside the apply interval. This
-//! reports them against the interval they sit in, so each one becomes a share
-//! and the remainder no stage claims becomes visible.
-//!
-//! It reports numbers and asserts nothing about them, so it is `#[ignore]`d
-//! like the tree's other manual timing probes. Run it with:
+//! It reports scenario load and apply stages for a large and a small workload
+//! without asserting host-dependent timing thresholds. Run:
 //!
 //! ```sh
 //! cargo nextest run -p clonk-engine-integration-tests --test engine_it \
-//!     --run-ignored all --no-capture -E 'test(scenario_activation_profile::)'
+//!   --run-ignored all --no-capture -E 'test(scenario_activation_profile::)'
 //! ```
 //!
-//! # Recorded measurement
-//!
-//! Warm process and warm filesystem cache, seed 0, one aarch64 host at commit
-//! `8a6408b33`. Cold-cache numbers are a separate acceptance criterion and are
-//! not claimed here.
-//!
-//! ## ClonkMars `03_Chaos` — the scenario the issue names
-//!
-//! User-visible interval **12.90 s**, of which `apply` is **12.26 s** (95%).
-//!
-//! | stage | span | share of apply |
-//! |---|---|---|
-//! | `environment_placement` | 12.097 s | **98%** |
-//! | `definition_registration` | 56.7 ms | 0% |
-//! | `scenario_script` | 18.9 ms | 0% |
-//! | `landscape` | 2.8 ms | 0% |
-//! | `materials` | 172 µs | 0% |
-//! | `definition_scripts` | 28.8 µs | 0% |
-//! | `object_placement` | 27.4 µs | 0% |
-//! | `post_init_map_callbacks` | 84 ns | 0% |
-//! | unattributed | 89.6 ms | 0% |
-//!
-//! **Activation is `run_legacy_init_placements`.** InitVegetation, InitInEarth,
-//! InitAnimals, InitEnvironment, InitRules and InitGoals — and every
-//! `Initialize` the objects they place run — are 98% of the apply interval
-//! (C4Game.cpp:2493-2503).
-//!
-//! This confirms the *shape* of the sampled profile the issue was opened on
-//! and corrects what it names. Placement callbacks do dominate, but not the
-//! ones `ObjectPlacement` covers: `Objects.txt` placement is **27 µs**, five
-//! orders of magnitude below the environment placers. An optimization aimed at
-//! the stage the old reading named would have moved nothing.
-//!
-//! Before `environment_placement` existed, the six recorded stages accounted
-//! for 0.18% of this interval and 99% was unattributed — which is exactly what
-//! the remainder is for.
-//!
-//! ## Tutorial 1 — the contrast
-//!
-//! User-visible interval **424 ms**, of which `apply` is **81 ms (19%)**.
-//! Inside apply the split is `scenario_script` 33.9 ms (41%) and
-//! `definition_registration` 30.1 ms (37%); `environment_placement` is 3.5 µs.
-//!
-//! **The stage that dominates a large scenario does not dominate a small one,
-//! and neither is where a small scenario's time goes at all**: 80% of
-//! Tutorial 1's activation is in *load*, before `apply` begins.
-//!
-//! ## The load half
-//!
-//! Timed where this harness already makes the calls, rather than by
-//! instrumenting the engine:
-//!
-//! | | Tutorial 1 | 03_Chaos |
-//! |---|---|---|
-//! | load total | 335.5 ms (**80%** of the interval) | 577.7 ms (4.6%) |
-//! | `Scenario::load_from_path_with_seed` | 333.4 ms (**99%** of load) | 575.5 ms (**99%**) |
-//! | `Material.c4g` | 311 µs (0%) | 377 µs (0%) |
-//! | `planet/System.c4g` | 1.8 ms (0%) | 1.8 ms (0%) |
-//!
-//! **Load is one call.** Group I/O, the scenario core and every definition it
-//! resolves are 99% of it on both scenarios, and the two pieces that are
-//! separate calls today are noise: materials/texmap — which
-//! clonk-org/clonk-rs#293's criteria list as a stage worth reporting — is
-//! **0.08% of load**, and the global script hosts are 0.5%. Splitting those out
-//! would report two numbers nobody can act on.
-//!
-//! So the next split belongs *inside* `Scenario::load_from_path_*`, between
-//! group decode, definition traversal and script parse/link, and it needs
-//! engine instrumentation rather than harness timing. The two scenarios also
-//! disagree about whether load matters at all — 80% against 4.6% — so a
-//! threshold taken from either alone would be wrong.
+//! Current conclusion: ClonkMars apply time is dominated by environment
+//! placement, while Tutorial 1 is dominated by pre-apply scenario loading.
+//! The next useful split belongs inside scenario loading, not materials or
+//! system-script setup.
 
 use std::time::Duration;
 

@@ -765,19 +765,10 @@ pub(crate) fn death_announce(args: &[Value]) -> Result<Value, RuntimeError> {
     try_with_host_context_mut(
         "DeathAnnounce requires an active engine context",
         |context| {
-            context.register_message(MessageCommand::Add(MessageSpec {
-                kind: MessageKind::Target,
-                text,
-                target: Some(target),
-                player: None,
-                offset: Vector2::ZERO,
-                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                flags: 0,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            }));
+            context.register_message(MessageCommand::Add(
+                MessageSpec::target(text, target)
+                    .with_color(invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR)),
+            ));
             Ok(Value::Bool(true))
         },
     )

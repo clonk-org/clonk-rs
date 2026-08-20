@@ -3192,18 +3192,18 @@ impl Definition {
             || !outcome.audio.events.is_empty()
             || outcome.trigger_game_over
         {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: self.id.clone(),
-                function: "MenuEntries".to_string(),
-                detail: "callback must not modify game state".to_string(),
-            });
+            return Err(EngineError::invalid_script_output(
+                self.id.clone(),
+                "MenuEntries".to_string(),
+                "callback must not modify game state".to_string(),
+            ));
         }
         if !environment_delta.is_empty() || !physics_delta.is_empty() {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: self.id.clone(),
-                function: "MenuEntries".to_string(),
-                detail: "callback must not modify global state".to_string(),
-            });
+            return Err(EngineError::invalid_script_output(
+                self.id.clone(),
+                "MenuEntries".to_string(),
+                "callback must not modify global state".to_string(),
+            ));
         }
 
         let audio_state = audio_guard.finish();
@@ -4073,65 +4073,65 @@ impl Definition {
         value: Value,
     ) -> Result<Vec<ContextMenuEntry>, EngineError> {
         let Value::Array(entries) = value else {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: self.id.clone(),
-                function: "MenuEntries".to_string(),
-                detail: format!("expected array (got {})", value.type_name()),
-            });
+            return Err(EngineError::invalid_script_output(
+                self.id.clone(),
+                "MenuEntries".to_string(),
+                format!("expected array (got {})", value.type_name()),
+            ));
         };
 
         let mut result = Vec::with_capacity(entries.len());
         for (index, entry) in entries.into_iter().enumerate() {
             let Value::Proplist(props) = entry else {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: self.id.clone(),
-                    function: "MenuEntries".to_string(),
-                    detail: format!(
+                return Err(EngineError::invalid_script_output(
+                    self.id.clone(),
+                    "MenuEntries".to_string(),
+                    format!(
                         "entry {index} must be a proplist (got {})",
                         entry.type_name()
                     ),
-                });
+                ));
             };
 
             let label = match props.get("label") {
                 Some(Value::String(text)) if !text.is_empty() => text.to_string(),
                 Some(other) => {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: self.id.clone(),
-                        function: "MenuEntries".to_string(),
-                        detail: format!(
+                    return Err(EngineError::invalid_script_output(
+                        self.id.clone(),
+                        "MenuEntries".to_string(),
+                        format!(
                             "entry {index} field `label` must be non-empty string (got {})",
                             other.type_name()
                         ),
-                    });
+                    ));
                 }
                 None => {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: self.id.clone(),
-                        function: "MenuEntries".to_string(),
-                        detail: format!("entry {index} missing required field `label`"),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        self.id.clone(),
+                        "MenuEntries".to_string(),
+                        format!("entry {index} missing required field `label`"),
+                    ));
                 }
             };
 
             let function = match props.get("callback") {
                 Some(Value::String(name)) if !name.is_empty() => name.to_string(),
                 Some(other) => {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: self.id.clone(),
-                        function: "MenuEntries".to_string(),
-                        detail: format!(
+                    return Err(EngineError::invalid_script_output(
+                        self.id.clone(),
+                        "MenuEntries".to_string(),
+                        format!(
                             "entry {index} field `callback` must be non-empty string (got {})",
                             other.type_name()
                         ),
-                    });
+                    ));
                 }
                 None => {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: self.id.clone(),
-                        function: "MenuEntries".to_string(),
-                        detail: format!("entry {index} missing required field `callback`"),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        self.id.clone(),
+                        "MenuEntries".to_string(),
+                        format!("entry {index} missing required field `callback`"),
+                    ));
                 }
             };
 
@@ -4139,14 +4139,14 @@ impl Definition {
                 Some(Value::String(text)) if text.is_empty() => None,
                 Some(Value::String(text)) => Some(text.to_string()),
                 Some(other) => {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: self.id.clone(),
-                        function: "MenuEntries".to_string(),
-                        detail: format!(
+                    return Err(EngineError::invalid_script_output(
+                        self.id.clone(),
+                        "MenuEntries".to_string(),
+                        format!(
                             "entry {index} field `description` must be string (got {})",
                             other.type_name()
                         ),
-                    });
+                    ));
                 }
                 None => None,
             };

@@ -17,7 +17,7 @@ use clonk_audio::decode_audio;
 use clonk_engine::command::CommandData;
 use clonk_engine::ComponentList;
 use clonk_engine::{
-    ActionState, CommandDirection, CommandStackSnapshot, Direction, EnvironmentFrame, FloatVector2,
+    ActionState, CommandDirection, CommandStackSnapshot, Direction, FloatVector2,
     HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot, ObjectStatus, PlayerState,
     PlayerStatus, ScriptError, SimulationSnapshot, Vector2, DEFAULT_CATEGORY,
 };
@@ -35,6 +35,33 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
+
+macro_rules! main_assert_eq {
+    ($actual:expr => $expected:expr, $($message:tt)+) => {
+        assert_eq!($actual, $expected, $($message)+)
+    };
+    ($actual:expr => $expected:expr $(,)?) => {
+        assert_eq!($actual, $expected)
+    };
+}
+
+macro_rules! main_assert {
+    ($condition:expr, $($message:tt)+) => {
+        assert!($condition, $($message)+)
+    };
+    ($condition:expr $(,)?) => {
+        assert!($condition)
+    };
+}
+
+macro_rules! main_assert_ne {
+    ($actual:expr => $unexpected:expr, $($message:tt)+) => {
+        assert_ne!($actual, $unexpected, $($message)+)
+    };
+    ($actual:expr => $unexpected:expr $(,)?) => {
+        assert_ne!($actual, $unexpected)
+    };
+}
 
 #[track_caller]
 fn tempdir() -> tempfile::TempDir {
@@ -1251,47 +1278,14 @@ fn make_snapshot(
     known_crew_owners.dedup();
 
     SimulationSnapshot {
-        frame: 0,
-        game_time: 0,
-        game_over: false,
-        round_results: Default::default(),
-        league_name: Vec::new(),
-        player_info_league_progress_data: Default::default(),
-        player_info_league_scores: Default::default(),
-        physics: None,
         objects,
-        render_order: Vec::new(),
-        environment: EnvironmentFrame::default(),
-        sky: None,
-        weather_events: Vec::new(),
-        global_effects: Vec::new(),
-        script_globals: Default::default(),
-        particles: Vec::new(),
-        players: Vec::new(),
-        fow_players: Default::default(),
-        crew_selection: HashMap::new(),
-        crew_roles: HashMap::new(),
         known_crew_owners,
-        eliminated_crew_owners: Vec::new(),
-        landscape: None,
         rng: clonk_engine::LcgRng::seed_from_u64(1),
-        surfaces: Vec::new(),
         hud: HudSnapshot {
             players: hud_players,
-            messages: Vec::new(),
-            scoreboard: Default::default(),
-            scoreboard_presentations: Vec::new(),
-            local_players: Vec::new(),
+            ..Default::default()
         },
-        controls: Vec::new(),
-        network_packets: Vec::new(),
-        definition_categories: HashMap::new(),
-        definition_closed_containers: Default::default(),
-        definition_lines: HashMap::new(),
-        transfer_zones: Vec::new(),
-        pathfinder_debug: Default::default(),
-        menu_requests: Vec::new(),
-        audio: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -1380,6 +1374,46 @@ impl Drop for EnvGuard {
         }
         super::reset_cached_app_paths();
     }
+}
+
+fn guarded_test_app_paths(
+    install_root: Option<&Path>,
+    user_data_dir: &Path,
+) -> (EnvGuard, AppPaths) {
+    let guard = test_env_guard(
+        install_root.unwrap_or_else(|| test_repository_root()),
+        user_data_dir,
+    );
+    let paths = test_app_paths();
+    (guard, paths)
+}
+
+fn test_env_guard(install_root: &Path, user_data_dir: &Path) -> EnvGuard {
+    EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(install_root)),
+        ("LC_USER_DATA_DIR", Some(user_data_dir)),
+    ])
+}
+
+fn isolated_test_app_paths(install_root: &Path, user_data_dir: &Path) -> (EnvGuard, AppPaths) {
+    let guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(install_root)),
+        ("LC_CONTENT_DIR", None),
+        ("LC_USER_DATA_DIR", Some(user_data_dir)),
+    ]);
+    let paths = test_app_paths();
+    (guard, paths)
+}
+
+fn test_repository_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .test_value()
+}
+
+fn legacy_cstring(bytes: impl AsRef<[u8]>) -> clonk_engine::LegacyCString {
+    clonk_engine::LegacyCString::from_bytes(bytes.as_ref().to_vec()).test_value()
 }
 
 pub(super) fn env_lock() -> &'static ReentrantMutex<()> {
@@ -1991,12 +2025,6 @@ fn apply_test_post_migration_renderer_config(app: &mut GameApp) {
 
 fn new_state_only_menu_app(width: u32, height: u32) -> GameApp {
     new_menu_app_with_frontend_scenarios(width, height, Some(Vec::new()))
-}
-
-fn new_discovered_menu_app(width: u32, height: u32) -> GameApp {
-    let mut app = new_menu_app_with_frontend_scenarios(width, height, None);
-    install_classic_test_assets(&mut app);
-    app
 }
 
 fn new_menu_app_with_frontend_scenarios(
@@ -2811,12 +2839,12 @@ fn install_test_recording_template(app: &mut GameApp, output_path: PathBuf) {
 }
 
 fn recorded_right_control(player: i32) -> clonk_engine::ControlPacket {
-    clonk_engine::ControlPacket::PlayerControl(clonk_engine::PlayerControlData {
+    clonk_engine::ControlPacket::PlayerControl(clonk_engine::PlayerControlData::new(
         player,
-        command: i32::from(clonk_engine::COM_RIGHT),
-        data: 0,
-        by_client: 0,
-    })
+        i32::from(clonk_engine::COM_RIGHT),
+        0,
+        0,
+    ))
 }
 
 fn install_running_network_stub(
@@ -2957,6 +2985,92 @@ fn test_runtime_config() -> RuntimeConfig {
         network: None,
         record_enabled: false,
     }
+}
+
+fn test_runtime_config_with(player_name: impl Into<String>, record_enabled: bool) -> RuntimeConfig {
+    RuntimeConfig {
+        player_name: player_name.into(),
+        record_enabled,
+        ..test_runtime_config()
+    }
+}
+
+fn disabled_audio_options() -> AudioOptions {
+    AudioOptions {
+        sound_enabled: false,
+        music_enabled: false,
+        menu_music_enabled: false,
+        menu_sound_enabled: false,
+        ..AudioOptions::default()
+    }
+}
+
+fn test_local_control_init(
+    owner: i32,
+    preferred_set: i32,
+    prefers_mouse: bool,
+    disable_mouse: bool,
+) -> LocalControlInit {
+    LocalControlInit {
+        owner,
+        preferred_set,
+        prefers_mouse,
+        gamepads_enabled: true,
+        replay: false,
+        disable_mouse,
+    }
+}
+
+fn gamepad_direction_event(
+    slot: GamepadSlot,
+    button: ControlButton,
+    state: ElementState,
+) -> GamepadEvent {
+    GamepadEvent::Direction {
+        slot,
+        button,
+        state,
+    }
+}
+
+fn gamepad_gui_button_event(
+    slot: GamepadSlot,
+    class: GuiButtonClass,
+    state: ElementState,
+) -> GamepadEvent {
+    GamepadEvent::GuiButton { slot, class, state }
+}
+
+fn gamepad_action_event(
+    slot: GamepadSlot,
+    action: GamepadActionType,
+    state: ElementState,
+) -> GamepadEvent {
+    GamepadEvent::Action {
+        slot,
+        action,
+        state,
+    }
+}
+
+fn gamepad_button_event(
+    slot: GamepadSlot,
+    button: LegacyGamepadButton,
+    state: ElementState,
+) -> GamepadEvent {
+    GamepadEvent::Button {
+        slot,
+        button,
+        state,
+    }
+}
+
+fn gamepad_axis_event(
+    slot: GamepadSlot,
+    axis: LegacyGamepadAxis,
+    state: ElementState,
+) -> GamepadEvent {
+    GamepadEvent::Axis { slot, axis, state }
 }
 
 /// A `GameApp` on that config. Sites keep their own error handling.
@@ -4344,28 +4458,6 @@ fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
         pressed_engine_keys: app.pressed_engine_keys.clone(),
         message_dialog_consumed_keys: app.message_dialog_consumed_keys.clone(),
     }
-}
-
-fn expect_runtime_global_boundary_unchanged(
-    app: &mut GameApp,
-    key: VirtualKeyCode,
-    expected: ClassicParityBoundary,
-) {
-    let before = runtime_global_ui_snapshot(app);
-    let expected = expected.to_string();
-    let error = app
-        .handle_key(key, ElementState::Pressed)
-        .expect_err("unported runtime-global route must fail typed");
-    let detail = match error {
-        EngineError::ClassicMenuParityBoundary { detail } => detail,
-        other => panic!("runtime-global route returned the wrong error: {other}"),
-    };
-    assert_eq!(detail, expected);
-    assert_eq!(
-        runtime_global_ui_snapshot(app),
-        before,
-        "runtime-global boundary must precede all app/UI mutation"
-    );
 }
 
 fn new_scoreboard_test_app(script: &str) -> GameApp {

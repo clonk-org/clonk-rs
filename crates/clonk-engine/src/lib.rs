@@ -223,6 +223,10 @@ pub enum MenuCommandKind {
 mod command_definition_snapshot_cache_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/support.rs"]
+mod lib_test_support;
+
+#[cfg(test)]
 #[path = "lib_tests/snapshot_stability_regression.rs"]
 mod snapshot_stability_regression;
 
@@ -4476,30 +4480,9 @@ fn movement_circle_wrap_retains_pre_wrap_live_shape() {
         )
         .expect("object spawns");
     let index = engine.find_object_index(id).expect("object index");
-    let materials = MaterialSet::new();
-    let live = Cell::new(MovementLiveConfig {
-        border_bound: 0,
-        rotateable: 1,
-        action_procedure: ActionProcedure::Undefined,
-        action_is_idle: true,
-        layer_bounds: None,
-    });
-    let movement = MovementContactConfig {
-        live: &live,
-        solid_masks: &[],
-        object_id: id,
-    };
     engine.objects[index].state.ocf |= ocf::ROTATE;
-    engine.objects[index]
-        .advance_fixed_rotation(
-            None,
-            &materials,
-            movement,
-            false,
-            false,
-            false,
-            |_, _, _| Ok(()),
-        )
+    engine
+        .advance_live_rotation(id, &mut Vec::new(), false, false, false)
         .expect("rotation step succeeds");
 
     let object = &engine.objects[engine.find_object_index(id).expect("object remains")];
@@ -4529,7 +4512,15 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
     }
 
     let mut engine = Engine::new();
-    let mut definition = test_definition("VBND", "Vertical bounds fixture", "");
+    // C4Object::TargetBounds stops the direction before dispatching Contact*
+    // (C4Movement.cpp:135-145).
+    let mut definition = test_definition(
+        "VBND",
+        "Vertical bounds fixture",
+        "#strict\nlocal contact; protected func ContactTop() { contact = 1; } protected func ContactBottom() { contact = 2; }",
+    );
+    definition.set_c4_callback_convention(true);
+    definition.set_contact_function_calls(true);
     definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
     engine
         .register_definition(definition)
@@ -4538,19 +4529,7 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
         .spawn_object(SpawnConfig::new("VBND"))
         .expect("object spawns");
     let object_index = engine.find_object_index(object_id).expect("object index");
-    let landscape = Landscape::flat(8, 20);
-    let live = Cell::new(MovementLiveConfig {
-        border_bound: 0,
-        rotateable: 0,
-        action_procedure: ActionProcedure::Undefined,
-        action_is_idle: true,
-        layer_bounds: None,
-    });
-    let movement = MovementContactConfig {
-        live: &live,
-        solid_masks: &[],
-        object_id,
-    };
+    engine.set_landscape(Landscape::flat(8, 20));
     // A raw fix_y projects only to about +/-32K, but the preceding layer
     // TargetBounds arm can replace that target with any i32. Exercise the
     // shared vertical helper directly instead of walking a million pixels.
@@ -4607,54 +4586,38 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
         },
     ];
 
+    let mut solid_masks = Vec::new();
     for case in cases {
-        live.set(MovementLiveConfig {
-            border_bound: case.border_bound,
-            rotateable: 0,
-            action_procedure: ActionProcedure::Undefined,
-            action_is_idle: true,
-            layer_bounds: None,
-        });
-        let object = &mut engine.objects[object_index];
-        object.fixed_position = original_fixed_position;
-        object.fixed_velocity = FixedVec2::new(itofix(2), itofix(case.initial_ydir));
-        object.state.velocity = object.velocity_pixels();
-        object.frame_t_contact = CNAT_LEFT;
-        object.frame_shape_contact_cnat = CNAT_RIGHT;
-        object.frame_shape_contact_count = 7;
+        engine
+            .definitions
+            .get_mut("VBND")
+            .expect("definition remains registered")
+            .set_border_bound(case.border_bound);
+        {
+            let object = &mut engine.objects[object_index];
+            object.fixed_position = original_fixed_position;
+            object.fixed_velocity = FixedVec2::new(itofix(2), itofix(case.initial_ydir));
+            object.state.velocity = object.velocity_pixels();
+            object.frame_t_contact = CNAT_LEFT;
+            object.frame_shape_contact_cnat = CNAT_RIGHT;
+            object.frame_shape_contact_count = 7;
+            object
+                .state
+                .local_vars
+                .insert("contact".to_owned(), Value::Int(0));
+        }
 
         let mut target = case.target;
-        let mut contacts = Vec::new();
-        {
-            let mut on_contact =
-                |object: &mut Object, _: &Landscape, dispatch: MovementContactDispatch| {
-                    let MovementContactDispatch::Direct(cnat) = dispatch else {
-                        panic!("TargetBounds must dispatch a direct contact");
-                    };
-                    contacts.push((
-                        cnat,
-                        object.fixed_velocity.x.val(),
-                        object.fixed_velocity.y.val(),
-                        object.state.velocity.x,
-                        object.state.velocity.y,
-                    ));
-                    Ok(())
-                };
-            object
-                .apply_vertical_bounds(&mut target, &landscape, movement, &mut on_contact)
-                .expect(case.name);
-        }
+        engine
+            .apply_live_movement_vertical_bounds(object_id, &mut target, &mut solid_masks)
+            .expect(case.name);
 
         let expected_ydir = if case.expected_contact.is_some() {
             C4Fixed::ZERO
         } else {
             itofix(case.initial_ydir)
         };
-        let expected_contacts = case
-            .expected_contact
-            .into_iter()
-            .map(|cnat| (cnat, itofix(2).val(), 0, 2, 0))
-            .collect::<Vec<_>>();
+        let object = &engine.objects[object_index];
         assert_eq!(target, case.expected_target, "{} target", case.name);
         assert_eq!(object.fixed_velocity.y, expected_ydir, "{} ydir", case.name);
         assert_eq!(
@@ -4665,7 +4628,17 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
         );
         assert_eq!(object.fixed_velocity.x, itofix(2), "{} xdir", case.name);
         assert_eq!(object.state.velocity.x, 2, "{} integer xdir", case.name);
-        assert_eq!(contacts, expected_contacts, "{} contacts", case.name);
+        let expected_contact = match case.expected_contact {
+            Some(CNAT_TOP) => 1,
+            Some(CNAT_BOTTOM) => 2,
+            _ => 0,
+        };
+        assert_eq!(
+            object.state.local_vars.get("contact"),
+            Some(&Value::Int(expected_contact)),
+            "{} contact callback",
+            case.name
+        );
         assert_eq!(
             object.fixed_position, original_fixed_position,
             "{} must not resynchronize fix_y",
@@ -5096,7 +5069,7 @@ pub struct TickPresentation {
     pub audio: Vec<AudioCommand>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u64,
     /// `C4Game::Time`, deliberately independent from FrameCounter
@@ -6632,11 +6605,11 @@ impl ScenarioScript {
             || !command_operations.is_empty()
             || destroy_object
         {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: self.name.clone(),
-                function: function.to_string(),
-                detail: "scenario scripts may not enqueue object commands".into(),
-            });
+            return Err(EngineError::invalid_script_output(
+                self.name.clone(),
+                function.to_string(),
+                "scenario scripts may not enqueue object commands".into(),
+            ));
         }
 
         let mut batch = parse_scenario_command(&self.name, function, result)?;
@@ -8752,16 +8725,6 @@ struct MovementStepOutcome {
 pub struct ExecMovementOutcome {
     #[doc(hidden)]
     pub alive: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct MovementContactConfig<'a> {
-    live: &'a Cell<MovementLiveConfig>,
-    /// Solid-mask raster/overlay visibility has its own synchronous callback
-    /// fold. Keep this slice tied to that lifecycle rather than treating it as
-    /// definition configuration.
-    solid_masks: &'a [SolidMaskRect],
-    object_id: ObjectId,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -11485,11 +11448,11 @@ fn parse_scenario_command(
             let mut batch = ScenarioBatch::default();
             for (key, value) in map.into_iter() {
                 let Value::String(key) = key else {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("unexpected key `{key}`"),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("unexpected key `{key}`"),
+                    ));
                 };
                 match key.as_ref() {
                     "spawn" => {
@@ -11518,11 +11481,11 @@ fn parse_scenario_command(
                             .extend(value_to_landscape_commands(definition, function, value)?);
                     }
                     other => {
-                        return Err(EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: format!("unexpected key `{other}`"),
-                        });
+                        return Err(EngineError::invalid_script_output(
+                            definition,
+                            function,
+                            format!("unexpected key `{other}`"),
+                        ));
                     }
                 }
             }
@@ -12256,11 +12219,11 @@ fn parse_command_from_proplist(
     let mut batch = CommandBatch::default();
     for (key, value) in map.into_iter() {
         let Value::String(key) = key else {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: definition.to_string(),
-                function: function.to_string(),
-                detail: format!("unexpected key `{key}`"),
-            });
+            return Err(EngineError::invalid_script_output(
+                definition,
+                function,
+                format!("unexpected key `{key}`"),
+            ));
         };
         match key.as_ref() {
             "position" => {
@@ -12326,11 +12289,11 @@ fn parse_command_from_proplist(
                 }
             }
             other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!("unexpected key `{other}`"),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!("unexpected key `{other}`"),
+                ));
             }
         }
     }
@@ -12354,14 +12317,14 @@ fn value_to_action(
         Value::Nil => Ok(None),
         Value::String(name) => Ok(Some(ActionUpdate::default().with_name(name))),
         Value::Proplist(map) => parse_action_update(definition, function, map).map(Some),
-        other => Err(EngineError::InvalidScriptOutput {
-            definition: definition.to_string(),
-            function: function.to_string(),
-            detail: format!(
+        other => Err(EngineError::invalid_script_output(
+            definition,
+            function,
+            format!(
                 "expected string, proplist, or nil for action, got {}",
                 other.type_name()
             ),
-        }),
+        )),
     }
 }
 
@@ -12373,24 +12336,21 @@ fn parse_action_update(
     let mut update = ActionUpdate::default();
     for (key, value) in map.into_iter() {
         let Value::String(key) = key else {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: definition.to_string(),
-                function: function.to_string(),
-                detail: format!("unexpected key `{key}` in action proplist"),
-            });
+            return Err(EngineError::invalid_script_output(
+                definition,
+                function,
+                format!("unexpected key `{key}` in action proplist"),
+            ));
         };
         match key.as_ref() {
             "name" => match value {
                 Value::String(name) => update.set_name(name),
                 other => {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!(
-                            "expected string for action.name, got {}",
-                            other.type_name()
-                        ),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("expected string for action.name, got {}", other.type_name()),
+                    ));
                 }
             },
             "phase" => {
@@ -12414,11 +12374,11 @@ fn parse_action_update(
                 update.set_target2(target);
             }
             other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!("unexpected key `{other}` in action proplist"),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!("unexpected key `{other}` in action proplist"),
+                ));
             }
         }
     }
@@ -12434,31 +12394,31 @@ fn value_to_vector(definition: &str, function: &str, value: Value) -> Result<Vec
                 // command-delta field consumes them through C4Value::getInt.
                 Value::Nil => 0,
                 other => {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("expected int for x component, got {}", other.type_name()),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("expected int for x component, got {}", other.type_name()),
+                    ));
                 }
             };
             let y = match &values[1] {
                 Value::Int(v) => *v,
                 Value::Nil => 0,
                 other => {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("expected int for y component, got {}", other.type_name()),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("expected int for y component, got {}", other.type_name()),
+                    ));
                 }
             };
             Ok(Vector2::new(x, y))
         }
-        other => Err(EngineError::InvalidScriptOutput {
-            definition: definition.to_string(),
-            function: function.to_string(),
-            detail: format!("expected array of two ints, got {}", other.type_name()),
-        }),
+        other => Err(EngineError::invalid_script_output(
+            definition,
+            function,
+            format!("expected array of two ints, got {}", other.type_name()),
+        )),
     }
 }
 
@@ -12473,46 +12433,46 @@ fn value_to_physics_delta(
             let mut delta = PhysicsDelta::default();
             for (key, entry) in map.into_iter() {
                 let Value::String(key) = key else {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("unexpected physics key `{key}`"),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("unexpected physics key `{key}`"),
+                    ));
                 };
                 match key.as_ref() {
                     "gravity" => match entry {
                         Value::Int(val) => delta.gravity = Some(val),
                         Value::Nil => delta.gravity = Some(0),
                         other => {
-                            return Err(EngineError::InvalidScriptOutput {
-                                definition: definition.to_string(),
-                                function: function.to_string(),
-                                detail: format!(
+                            return Err(EngineError::invalid_script_output(
+                                definition,
+                                function,
+                                format!(
                                     "physics.gravity expects int or nil, got {}",
                                     other.type_name()
                                 ),
-                            });
+                            ));
                         }
                     },
                     other => {
-                        return Err(EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: format!("unexpected physics key `{other}`"),
-                        });
+                        return Err(EngineError::invalid_script_output(
+                            definition,
+                            function,
+                            format!("unexpected physics key `{other}`"),
+                        ));
                     }
                 }
             }
             Ok(delta)
         }
-        other => Err(EngineError::InvalidScriptOutput {
-            definition: definition.to_string(),
-            function: function.to_string(),
-            detail: format!(
+        other => Err(EngineError::invalid_script_output(
+            definition,
+            function,
+            format!(
                 "expected proplist or nil for physics, got {}",
                 other.type_name()
             ),
-        }),
+        )),
     }
 }
 
@@ -12522,11 +12482,11 @@ fn value_to_int(definition: &str, function: &str, value: Value) -> Result<i32, E
         // Numeric consumers use the C4Value integer conversion: a legacy
         // zero literal was emitted as nil, then converts back to integer 0.
         Value::Nil => Ok(0),
-        other => Err(EngineError::InvalidScriptOutput {
-            definition: definition.to_string(),
-            function: function.to_string(),
-            detail: format!("expected int, got {}", other.type_name()),
-        }),
+        other => Err(EngineError::invalid_script_output(
+            definition,
+            function,
+            format!("expected int, got {}", other.type_name()),
+        )),
     }
 }
 
@@ -12573,25 +12533,25 @@ fn value_to_object_reference(
         }
         Value::Proplist(map) => match map.get("id") {
             Some(Value::Int(id)) if *id >= 0 => Ok(Some(ObjectId::new(*id as u64))),
-            Some(other) => Err(EngineError::InvalidScriptOutput {
-                definition: definition.to_string(),
-                function: function.to_string(),
-                detail: format!(
+            Some(other) => Err(EngineError::invalid_script_output(
+                definition,
+                function,
+                format!(
                     "expected int for action.{} proplist id, got {}",
                     field,
                     other.type_name()
                 ),
-            }),
+            )),
             None => Ok(None),
         },
-        other => Err(EngineError::InvalidScriptOutput {
-            definition: definition.to_string(),
-            function: function.to_string(),
-            detail: format!(
+        other => Err(EngineError::invalid_script_output(
+            definition,
+            function,
+            format!(
                 "expected object, int, proplist, or nil for action.{field}, got {}",
                 other.type_name()
             ),
-        }),
+        )),
     }
 }
 
@@ -12601,11 +12561,11 @@ fn value_to_bool(definition: &str, function: &str, value: Value) -> Result<bool,
         // A false literal below strict 3 is nil before this explicitly
         // boolean command-delta field consumes it.
         Value::Nil => Ok(false),
-        other => Err(EngineError::InvalidScriptOutput {
-            definition: definition.to_string(),
-            function: function.to_string(),
-            detail: format!("expected bool, got {}", other.type_name()),
-        }),
+        other => Err(EngineError::invalid_script_output(
+            definition,
+            function,
+            format!("expected bool, got {}", other.type_name()),
+        )),
     }
 }
 
@@ -12618,11 +12578,11 @@ fn value_to_spawns(
         Value::Array(values) => values,
         Value::Nil => return Ok(Vec::new()),
         other => {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: definition.to_string(),
-                function: function.to_string(),
-                detail: format!("expected array for spawn list, got {}", other.type_name()),
-            });
+            return Err(EngineError::invalid_script_output(
+                definition,
+                function,
+                format!("expected array for spawn list, got {}", other.type_name()),
+            ));
         }
     };
 
@@ -12631,29 +12591,29 @@ fn value_to_spawns(
         let map = match entry {
             Value::Proplist(map) => map,
             other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!("spawn entry must be proplist, got {}", other.type_name()),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!("spawn entry must be proplist, got {}", other.type_name()),
+                ));
             }
         };
 
         let definition_id = match map.get("definition") {
             Some(Value::String(id)) => id.clone(),
             Some(other) => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!("spawn definition must be string, got {}", other.type_name()),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!("spawn definition must be string, got {}", other.type_name()),
+                ));
             }
             None => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: "spawn entry missing `definition`".into(),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    "spawn entry missing `definition`".into(),
+                ));
             }
         };
 
@@ -12738,11 +12698,11 @@ fn value_to_commands(
     let array = match value {
         Value::Array(values) => values,
         other => {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: definition.to_string(),
-                function: function.to_string(),
-                detail: format!("expected array for commands, got {}", other.type_name()),
-            });
+            return Err(EngineError::invalid_script_output(
+                definition,
+                function,
+                format!("expected array for commands, got {}", other.type_name()),
+            ));
         }
     };
 
@@ -12751,14 +12711,14 @@ fn value_to_commands(
         let map = match value {
             Value::Proplist(map) => map,
             other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!(
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!(
                         "expected proplist for command entry, got {}",
                         other.type_name()
                     ),
-                });
+                ));
             }
         };
 
@@ -12771,21 +12731,21 @@ fn value_to_commands(
 
         for (key, value) in map.into_iter() {
             let Value::String(key) = key else {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!("unexpected key `{key}` in command entry"),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!("unexpected key `{key}` in command entry"),
+                ));
             };
             match key.as_ref() {
                 "delay" => {
                     let raw_delay = value_to_int(definition, function, value)?;
                     if raw_delay < 0 {
-                        return Err(EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: "delay must be >= 0".into(),
-                        });
+                        return Err(EngineError::invalid_script_output(
+                            definition,
+                            function,
+                            "delay must be >= 0".into(),
+                        ));
                     }
                     delay = Some(raw_delay as u32);
                 }
@@ -12830,11 +12790,11 @@ fn value_to_commands(
                     landscape_ops.extend(value_to_landscape_commands(definition, function, value)?);
                 }
                 other => {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("unexpected key `{other}` in command entry"),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("unexpected key `{other}` in command entry"),
+                    ));
                 }
             }
         }
@@ -12860,11 +12820,11 @@ fn value_to_effect_commands(
         Value::Array(values) => values,
         Value::Nil => return Ok(Vec::new()),
         other => {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: definition.to_string(),
-                function: function.to_string(),
-                detail: format!("expected array for effects, got {}", other.type_name()),
-            });
+            return Err(EngineError::invalid_script_output(
+                definition,
+                function,
+                format!("expected array for effects, got {}", other.type_name()),
+            ));
         }
     };
 
@@ -12873,52 +12833,49 @@ fn value_to_effect_commands(
         let mut map = match entry {
             Value::Proplist(map) => map,
             other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!("effect entry must be proplist, got {}", other.type_name()),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!("effect entry must be proplist, got {}", other.type_name()),
+                ));
             }
         };
 
         let op = match map.shift_remove("op") {
             Some(Value::String(op)) => op,
             Some(other) => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!("effects.op must be string, got {}", other.type_name()),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!("effects.op must be string, got {}", other.type_name()),
+                ));
             }
             None => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: "effect entry missing `op`".into(),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    "effect entry missing `op`".into(),
+                ));
             }
         };
 
         match op.as_ref() {
             "add" => {
-                let name_value =
-                    map.shift_remove("name")
-                        .ok_or_else(|| EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: "effect add entry missing `name`".into(),
-                        })?;
+                let name_value = map.shift_remove("name").ok_or_else(|| {
+                    EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        "effect add entry missing `name`".into(),
+                    )
+                })?;
                 let name = match name_value {
                     Value::String(name) => name,
                     other => {
-                        return Err(EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: format!(
-                                "effect name must be string, got {}",
-                                other.type_name()
-                            ),
-                        });
+                        return Err(EngineError::invalid_script_output(
+                            definition,
+                            function,
+                            format!("effect name must be string, got {}", other.type_name()),
+                        ));
                     }
                 };
 
@@ -12938,11 +12895,11 @@ fn value_to_effect_commands(
                     Some(value) => {
                         let timer = value_to_int(definition, function, value)?;
                         if timer < 0 {
-                            return Err(EngineError::InvalidScriptOutput {
-                                definition: definition.to_string(),
-                                function: function.to_string(),
-                                detail: "effect timer must be >= 0".into(),
-                            });
+                            return Err(EngineError::invalid_script_output(
+                                definition,
+                                function,
+                                "effect timer must be >= 0".into(),
+                            ));
                         }
                         timer
                     }
@@ -12953,14 +12910,14 @@ fn value_to_effect_commands(
                     Some(Value::Int(value)) => Some(value),
                     Some(Value::Nil) | None => None,
                     Some(other) => {
-                        return Err(EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: format!(
+                        return Err(EngineError::invalid_script_output(
+                            definition,
+                            function,
+                            format!(
                                 "effect command_target must be int or nil, got {}",
                                 other.type_name()
                             ),
-                        });
+                        ));
                     }
                 };
 
@@ -12968,23 +12925,23 @@ fn value_to_effect_commands(
                     Some(Value::String(value)) if !value.is_empty() => Some(value),
                     Some(Value::String(_)) | Some(Value::Nil) | None => None,
                     Some(other) => {
-                        return Err(EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: format!(
+                        return Err(EngineError::invalid_script_output(
+                            definition,
+                            function,
+                            format!(
                                 "effect command_target_id must be string or nil, got {}",
                                 other.type_name()
                             ),
-                        });
+                        ));
                     }
                 };
 
                 if let Some((key, _)) = map.into_iter().next() {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("unexpected key `{}` in effect add entry", key),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("unexpected key `{}` in effect add entry", key),
+                    ));
                 }
 
                 let effect = EffectState::new(name)
@@ -12996,51 +12953,48 @@ fn value_to_effect_commands(
                 commands.push(EffectCommand::add(effect));
             }
             "remove" => {
-                let name_value =
-                    map.shift_remove("name")
-                        .ok_or_else(|| EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: "effect remove entry missing `name`".into(),
-                        })?;
+                let name_value = map.shift_remove("name").ok_or_else(|| {
+                    EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        "effect remove entry missing `name`".into(),
+                    )
+                })?;
                 let name = match name_value {
                     Value::String(name) => name,
                     other => {
-                        return Err(EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: format!(
-                                "effect name must be string, got {}",
-                                other.type_name()
-                            ),
-                        });
+                        return Err(EngineError::invalid_script_output(
+                            definition,
+                            function,
+                            format!("effect name must be string, got {}", other.type_name()),
+                        ));
                     }
                 };
                 if let Some((key, _)) = map.into_iter().next() {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("unexpected key `{}` in effect remove entry", key),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("unexpected key `{}` in effect remove entry", key),
+                    ));
                 }
                 commands.push(EffectCommand::remove(name));
             }
             "clear" => {
                 if let Some((key, _)) = map.into_iter().next() {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("unexpected key `{}` in effect clear entry", key),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("unexpected key `{}` in effect clear entry", key),
+                    ));
                 }
                 commands.push(EffectCommand::Clear);
             }
             other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!("unsupported effect op `{}`", other),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!("unsupported effect op `{}`", other),
+                ));
             }
         }
     }
@@ -13057,14 +13011,14 @@ fn value_to_landscape_commands(
         Value::Array(values) => values,
         Value::Nil => return Ok(Vec::new()),
         other => {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: definition.to_string(),
-                function: function.to_string(),
-                detail: format!(
+            return Err(EngineError::invalid_script_output(
+                definition,
+                function,
+                format!(
                     "expected array for landscape commands, got {}",
                     other.type_name()
                 ),
-            });
+            ));
         }
     };
 
@@ -13073,32 +13027,32 @@ fn value_to_landscape_commands(
         let mut map = match entry {
             Value::Proplist(map) => map,
             other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!(
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!(
                         "landscape entry must be proplist, got {}",
                         other.type_name()
                     ),
-                });
+                ));
             }
         };
 
         let op = match map.shift_remove("op") {
             Some(Value::String(op)) => op,
             Some(other) => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!("landscape.op must be string, got {}", other.type_name()),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!("landscape.op must be string, got {}", other.type_name()),
+                ));
             }
             None => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: "landscape entry missing `op`".into(),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    "landscape entry missing `op`".into(),
+                ));
             }
         };
 
@@ -13107,22 +13061,22 @@ fn value_to_landscape_commands(
                 let start = match map.shift_remove("start") {
                     Some(value) => value_to_int(definition, function, value)?,
                     None => {
-                        return Err(EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: "landscape lower entry missing `start`".into(),
-                        });
+                        return Err(EngineError::invalid_script_output(
+                            definition,
+                            function,
+                            "landscape lower entry missing `start`".into(),
+                        ));
                     }
                 };
 
                 let height = match map.shift_remove("height") {
                     Some(value) => value_to_int(definition, function, value)?,
                     None => {
-                        return Err(EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: "landscape lower entry missing `height`".into(),
-                        });
+                        return Err(EngineError::invalid_script_output(
+                            definition,
+                            function,
+                            "landscape lower entry missing `height`".into(),
+                        ));
                     }
                 };
 
@@ -13131,11 +13085,11 @@ fn value_to_landscape_commands(
                 } else if let Some(value) = map.shift_remove("width") {
                     let width = value_to_int(definition, function, value)?;
                     if width <= 0 {
-                        return Err(EngineError::InvalidScriptOutput {
-                            definition: definition.to_string(),
-                            function: function.to_string(),
-                            detail: "landscape lower width must be > 0".into(),
-                        });
+                        return Err(EngineError::invalid_script_output(
+                            definition,
+                            function,
+                            "landscape lower width must be > 0".into(),
+                        ));
                     }
                     start + width
                 } else {
@@ -13143,19 +13097,19 @@ fn value_to_landscape_commands(
                 };
 
                 if end <= start {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: "landscape lower end must be greater than start".into(),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        "landscape lower end must be greater than start".into(),
+                    ));
                 }
 
                 if let Some((key, _)) = map.into_iter().next() {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("unexpected key `{}` in landscape lower entry", key),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("unexpected key `{}` in landscape lower entry", key),
+                    ));
                 }
 
                 commands.push(LandscapeCommand::LowerRange { start, end, height });
@@ -13165,11 +13119,11 @@ fn value_to_landscape_commands(
                     match map.shift_remove("column").or_else(|| map.shift_remove("x")) {
                         Some(value) => value,
                         None => {
-                            return Err(EngineError::InvalidScriptOutput {
-                                definition: definition.to_string(),
-                                function: function.to_string(),
-                                detail: "landscape set_liquid entry missing `column`".into(),
-                            });
+                            return Err(EngineError::invalid_script_output(
+                                definition,
+                                function,
+                                "landscape set_liquid entry missing `column`".into(),
+                            ));
                         }
                     };
 
@@ -13179,11 +13133,11 @@ fn value_to_landscape_commands(
                 let segments = value_to_liquid_segments(definition, function, segments_value)?;
 
                 if let Some((key, _)) = map.into_iter().next() {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("unexpected key `{}` in landscape set_liquid entry", key),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("unexpected key `{}` in landscape set_liquid entry", key),
+                    ));
                 }
 
                 commands.push(LandscapeCommand::SetLiquidColumn { column, segments });
@@ -13193,32 +13147,32 @@ fn value_to_landscape_commands(
                     match map.shift_remove("column").or_else(|| map.shift_remove("x")) {
                         Some(value) => value,
                         None => {
-                            return Err(EngineError::InvalidScriptOutput {
-                                definition: definition.to_string(),
-                                function: function.to_string(),
-                                detail: "landscape clear_liquid entry missing `column`".into(),
-                            });
+                            return Err(EngineError::invalid_script_output(
+                                definition,
+                                function,
+                                "landscape clear_liquid entry missing `column`".into(),
+                            ));
                         }
                     };
 
                 let column = value_to_int(definition, function, column_value)?;
 
                 if let Some((key, _)) = map.into_iter().next() {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: format!("unexpected key `{}` in landscape clear_liquid entry", key),
-                    });
+                    return Err(EngineError::invalid_script_output(
+                        definition,
+                        function,
+                        format!("unexpected key `{}` in landscape clear_liquid entry", key),
+                    ));
                 }
 
                 commands.push(LandscapeCommand::ClearLiquidColumn { column });
             }
             other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!("unsupported landscape op `{other}`"),
-                });
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!("unsupported landscape op `{other}`"),
+                ));
             }
         }
     }
@@ -13235,14 +13189,14 @@ fn value_to_liquid_segments(
         Value::Array(values) => values,
         Value::Nil => return Ok(Vec::new()),
         other => {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: definition.to_string(),
-                function: function.to_string(),
-                detail: format!(
+            return Err(EngineError::invalid_script_output(
+                definition,
+                function,
+                format!(
                     "landscape segments must be array or nil, got {}",
                     other.type_name()
                 ),
-            });
+            ));
         }
     };
 
@@ -13251,44 +13205,42 @@ fn value_to_liquid_segments(
         let mut segment_map = match entry {
             Value::Proplist(map) => map,
             other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: format!(
+                return Err(EngineError::invalid_script_output(
+                    definition,
+                    function,
+                    format!(
                         "landscape segment must be proplist, got {}",
                         other.type_name()
                     ),
-                });
+                ));
             }
         };
 
-        let top_value =
-            segment_map
-                .shift_remove("top")
-                .ok_or_else(|| EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: "landscape segment missing `top`".into(),
-                })?;
+        let top_value = segment_map.shift_remove("top").ok_or_else(|| {
+            EngineError::invalid_script_output(
+                definition,
+                function,
+                "landscape segment missing `top`".into(),
+            )
+        })?;
 
-        let bottom_value =
-            segment_map
-                .shift_remove("bottom")
-                .ok_or_else(|| EngineError::InvalidScriptOutput {
-                    definition: definition.to_string(),
-                    function: function.to_string(),
-                    detail: "landscape segment missing `bottom`".into(),
-                })?;
+        let bottom_value = segment_map.shift_remove("bottom").ok_or_else(|| {
+            EngineError::invalid_script_output(
+                definition,
+                function,
+                "landscape segment missing `bottom`".into(),
+            )
+        })?;
 
         let top = value_to_int(definition, function, top_value)?;
         let bottom = value_to_int(definition, function, bottom_value)?;
 
         if let Some((key, _)) = segment_map.into_iter().next() {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: definition.to_string(),
-                function: function.to_string(),
-                detail: format!("unexpected key `{}` in landscape segment entry", key),
-            });
+            return Err(EngineError::invalid_script_output(
+                definition,
+                function,
+                format!("unexpected key `{}` in landscape segment entry", key),
+            ));
         }
 
         segments.push(LiquidSegment::new(top, bottom));

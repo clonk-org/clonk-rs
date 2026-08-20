@@ -2342,24 +2342,6 @@ pub(crate) struct ClassicNativeFontSource {
     pub(crate) snap_to_pixels: bool,
 }
 
-impl ClassicNativeFontSource {
-    fn recipe(&self) -> clonk_frontend::clonk_fonts::NativeFontRecipe {
-        clonk_frontend::clonk_fonts::NativeFontRecipe::new(self.sizes)
-            .with_face_index(self.face_index)
-            .with_snap_to_pixels(self.snap_to_pixels)
-    }
-
-    /// Rasterizes this bundle's GUI fonts at the application scale. Callers
-    /// must use this rather than `build_native_font_set_face`, which silently
-    /// assumes the RXFontSize=14 recipe.
-    pub(crate) fn build_native_fonts(
-        &self,
-        scale: f32,
-    ) -> Result<clonk_frontend::clonk_fonts::NativeClonkFontSet> {
-        clonk_frontend::clonk_fonts::build_native_font_set_recipe(&self.bytes, self.recipe(), scale)
-    }
-}
-
 fn classic_font_request(paths: &AppPaths, scenario_font: Option<&str>) -> Result<(String, i32)> {
     let config = load_classic_loader_config(paths)?;
     let configured_name = config
@@ -3721,9 +3703,7 @@ pub(crate) fn load_classic_loader_config(paths: &AppPaths) -> Result<Option<Conf
     // C4Config retains the source file's legacy bytes, while the INI reader
     // projects them to Unicode for field parsing. Keep that conversion local
     // to the loader view so merely reading configuration never rewrites it.
-    let mut projected = clonk_core::std_buf::StdStrBuf::new();
-    projected.copy_bytes(&bytes);
-    projected.ensure_unicode();
+    let projected = clonk_core::legacy_text::ensure_utf8(&bytes);
     let mut reader = io::Cursor::new(projected.as_bytes());
     let mut config = Config::from_reader(&mut reader).with_context(|| {
         format!(

@@ -182,12 +182,12 @@ impl Aligner {
     /// GetFromTop with optional horizontal centering (C4Gui.cpp:975-990).
     fn get_from_top(&mut self, hgt: i32, wdt: Option<i32>) -> IntRect {
         let full_w = self.area.w - self.mx * 2;
-        let out = IntRect {
-            x: self.area.x + self.mx + wdt.map_or(0, |w| (full_w - w) / 2),
-            y: self.area.y + self.my,
-            w: wdt.unwrap_or(full_w),
-            h: hgt,
-        };
+        let out = IntRect::new(
+            self.area.x + self.mx + wdt.map_or(0, |w| (full_w - w) / 2),
+            self.area.y + self.my,
+            wdt.unwrap_or(full_w),
+            hgt,
+        );
         let d = hgt + self.my * 2;
         self.area.y += d;
         self.area.h -= d;
@@ -196,12 +196,12 @@ impl Aligner {
 
     /// GetFromLeft, full height (C4Gui.cpp:992-1008).
     fn get_from_left(&mut self, wdt: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.mx,
-            y: self.area.y + self.my,
-            w: wdt,
-            h: self.area.h - self.my * 2,
-        };
+        let out = IntRect::new(
+            self.area.x + self.mx,
+            self.area.y + self.my,
+            wdt,
+            self.area.h - self.my * 2,
+        );
         let d = wdt + self.mx * 2;
         self.area.x += d;
         self.area.w -= d;
@@ -210,46 +210,46 @@ impl Aligner {
 
     /// GetFromRight, full height (C4Gui.cpp:1010-1024).
     fn get_from_right(&mut self, wdt: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.area.w - wdt - self.mx,
-            y: self.area.y + self.my,
-            w: wdt,
-            h: self.area.h - self.my * 2,
-        };
+        let out = IntRect::new(
+            self.area.x + self.area.w - wdt - self.mx,
+            self.area.y + self.my,
+            wdt,
+            self.area.h - self.my * 2,
+        );
         self.area.w -= wdt + self.mx * 2;
         out
     }
 
     /// GetFromBottom, full width (C4Gui.cpp:1026-1041).
     fn get_from_bottom(&mut self, hgt: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.mx,
-            y: self.area.y + self.area.h - hgt - self.my,
-            w: self.area.w - self.mx * 2,
-            h: hgt,
-        };
+        let out = IntRect::new(
+            self.area.x + self.mx,
+            self.area.y + self.area.h - hgt - self.my,
+            self.area.w - self.mx * 2,
+            hgt,
+        );
         self.area.h -= hgt + self.my * 2;
         out
     }
 
     /// GetAll (C4Gui.cpp:1043-1049).
     fn all(&self) -> IntRect {
-        IntRect {
-            x: self.area.x + self.mx,
-            y: self.area.y + self.my,
-            w: self.area.w - self.mx * 2,
-            h: self.area.h - self.my * 2,
-        }
+        IntRect::new(
+            self.area.x + self.mx,
+            self.area.y + self.my,
+            self.area.w - self.mx * 2,
+            self.area.h - self.my * 2,
+        )
     }
 
     /// GetCentered (C4Gui.cpp:1051-1060; GetMiddleX/Y are x + Wdt/2).
     fn centered(&self, wdt: i32, hgt: i32) -> IntRect {
-        IntRect {
-            x: self.area.x + self.area.w / 2 - wdt / 2,
-            y: self.area.y + self.area.h / 2 - hgt / 2,
-            w: wdt,
-            h: hgt,
-        }
+        IntRect::new(
+            self.area.x + self.area.w / 2 - wdt / 2,
+            self.area.y + self.area.h / 2 - hgt / 2,
+            wdt,
+            hgt,
+        )
     }
 
     /// `ComponentAligner::ExpandTop`; negative values deliberately consume
@@ -263,11 +263,7 @@ impl Aligner {
 
 /// Offsets `rect` by `(dx, dy)`.
 fn offset(rect: IntRect, dx: i32, dy: i32) -> IntRect {
-    IntRect {
-        x: rect.x + dx,
-        y: rect.y + dy,
-        ..rect
-    }
+    rect.with_position(rect.x + dx, rect.y + dy)
 }
 
 /// Computes the `C4StartupNetDlg` layout for a `w`x`h` screen, mirroring
@@ -279,12 +275,12 @@ pub fn net_dlg_layout(w: i32, h: i32, metrics: &NetDlgFontMetrics) -> NetDlgLayo
     let margin_x = if w < 500 { 2 } else { w / 50 };
     let margin_y = if h < 320 { 2 } else { h * 2 / 75 };
     let margin_top = 50 + margin_y;
-    let client = IntRect {
-        x: margin_x,
-        y: margin_top,
-        w: w - 2 * margin_x,
-        h: h - margin_top - margin_y,
-    };
+    let client = IntRect::new(
+        margin_x,
+        margin_top,
+        w - 2 * margin_x,
+        h - margin_top - margin_y,
+    );
     let at_client = |rect: IntRect| offset(rect, client.x, client.y);
 
     // Constructor constants (C4StartupNetDlg.cpp:633-637).
@@ -296,16 +292,7 @@ pub fn net_dlg_layout(w: i32, h: i32, metrics: &NetDlgFontMetrics) -> NetDlgLayo
 
     // Aligner stacking (C4StartupNetDlg.cpp:638-645); caMain is zero-based
     // over the client rect (fZeroAreaXY = true).
-    let mut ca_main = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: client.w,
-            h: client.h,
-        },
-        0,
-        0,
-    );
+    let mut ca_main = Aligner::new(IntRect::new(0, 0, client.w, client.h), 0, 0);
     let ca_button_area_rect = ca_main.get_from_bottom(ca_main.height() / 7);
     let ca_button_area = Aligner::new(ca_button_area_rect, 0, 0);
     let button_area_wdt = ca_button_area.width() * 7 / 8;
@@ -337,16 +324,7 @@ pub fn net_dlg_layout(w: i32, h: i32, metrics: &NetDlgFontMetrics) -> NetDlgLayo
     // Tabular sheet content (zero chrome; C4StartupNetDlg.cpp:663-690).
     let tabular = ca_main.all();
     let at_sheet = |rect: IntRect| at_client(offset(rect, tabular.x, tabular.y));
-    let mut ca_game_list = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: tabular.w,
-            h: tabular.h,
-        },
-        0,
-        0,
-    );
+    let mut ca_game_list = Aligner::new(IntRect::new(0, 0, tabular.w, tabular.h), 0, 0);
     // iCaptHgt = max(TextFont line height, C4GUI_MinWoodBarHgt = 23)
     // (C4GuiLabels.cpp:211-215).
     let capt_hgt = metrics.text_line_height.max(23);
@@ -358,59 +336,49 @@ pub fn net_dlg_layout(w: i32, h: i32, metrics: &NetDlgFontMetrics) -> NetDlgLayo
 
     // List box internals: margins 3 (C4GuiListBox.h:120-123); the scroll
     // window reserves C4GUI_ScrollBarWdt = 16 (C4GuiContainers.cpp:477-491).
-    let list_client = IntRect {
-        x: game_list.x + 3,
-        y: game_list.y + 3,
-        w: game_list.w - 6,
-        h: game_list.h - 6,
-    };
+    let list_client = IntRect::new(
+        game_list.x + 3,
+        game_list.y + 3,
+        game_list.w - 6,
+        game_list.h - 6,
+    );
     // Entry: iHeight = 2*22 + 4 = 48 after label restack
     // (C4StartupNetDlg.cpp:42-44,372-388).
     let entry_h = metrics.text_line_height * 2 + 4;
-    let list_viewport = IntRect {
-        x: list_client.x,
-        y: list_client.y,
-        w: list_client.w - SCROLLBAR_WIDTH,
-        h: list_client.h,
-    };
-    let list_scrollbar = IntRect {
-        x: list_viewport.x + list_viewport.w,
-        y: list_viewport.y,
-        w: SCROLLBAR_WIDTH,
-        h: list_viewport.h,
-    };
-    let list_entry = IntRect {
-        x: list_viewport.x,
-        y: list_viewport.y,
-        w: list_viewport.w,
-        h: entry_h,
-    };
+    let list_viewport = IntRect::new(
+        list_client.x,
+        list_client.y,
+        list_client.w - SCROLLBAR_WIDTH,
+        list_client.h,
+    );
+    let list_scrollbar = IntRect::new(
+        list_viewport.x + list_viewport.w,
+        list_viewport.y,
+        SCROLLBAR_WIDTH,
+        list_viewport.h,
+    );
+    let list_entry = IntRect::new(list_viewport.x, list_viewport.y, list_viewport.w, entry_h);
     // Aspect-fit of the 40x32 query-icon facet into the 48x48 icon bounds
     // (C4Facet.cpp:100-127): Hgt = 32*48/40, centered vertically.
     let icon_fit_h = 32 * entry_h / 40;
-    let entry_icon = IntRect {
-        x: list_entry.x,
-        y: list_entry.y + (entry_h - icon_fit_h) / 2,
-        w: entry_h,
-        h: icon_fit_h,
-    };
+    let entry_icon = IntRect::new(
+        list_entry.x,
+        list_entry.y + (entry_h - icon_fit_h) / 2,
+        entry_h,
+        icon_fit_h,
+    );
     // Labels at x = 48+3, y = 1/25, width = entryW - 51 - 1
     // (C4StartupNetDlg.cpp:64-76, UpdateText C4StartupNetDlg.cpp:400-410).
     let label_x = list_entry.x + entry_h + 3;
     let label_w = list_entry.w - (entry_h + 3) - 1;
     let entry_labels = [
-        IntRect {
-            x: label_x,
-            y: list_entry.y + 1,
-            w: label_w,
-            h: metrics.text_line_height,
-        },
-        IntRect {
-            x: label_x,
-            y: list_entry.y + 1 + metrics.text_line_height + 2,
-            w: label_w,
-            h: metrics.text_line_height,
-        },
+        IntRect::new(label_x, list_entry.y + 1, label_w, metrics.text_line_height),
+        IntRect::new(
+            label_x,
+            list_entry.y + 1 + metrics.text_line_height + 2,
+            label_w,
+            metrics.text_line_height,
+        ),
     ];
 
     // Bottom buttons (C4StartupNetDlg.cpp:719-728).
@@ -464,12 +432,12 @@ fn gui_rect(rect: IntRect) -> GuiRect {
 }
 
 fn edit_client(rect: IntRect) -> IntRect {
-    IntRect {
-        x: rect.x + 4,
-        y: rect.y + 2,
-        w: (rect.w - 8).max(0),
-        h: (rect.h - 4).max(0),
-    }
+    IntRect::new(
+        rect.x + 4,
+        rect.y + 2,
+        (rect.w - 8).max(0),
+        (rect.h - 4).max(0),
+    )
 }
 
 /// Config-driven state of the two right icon buttons
@@ -1565,12 +1533,8 @@ impl NetDlgController {
     /// bounds and all pointer hit testing follows the same geometry.
     pub fn set_chat_bounds_override(&mut self, bounds: Option<IntRect>) {
         self.chat_dialog_drag = None;
-        self.chat_bounds_override = bounds.map(|bounds| IntRect {
-            x: bounds.x,
-            y: bounds.y,
-            w: bounds.w.max(1),
-            h: bounds.h.max(1),
-        });
+        self.chat_bounds_override =
+            bounds.map(|bounds| IntRect::new(bounds.x, bounds.y, bounds.w.max(1), bounds.h.max(1)));
         self.clamp_active_chat_scroll();
     }
 
@@ -1585,12 +1549,7 @@ impl NetDlgController {
 
     /// Native standalone placement: ten percent inset on every edge.
     pub const fn standalone_chat_bounds(width: i32, height: i32) -> IntRect {
-        IntRect {
-            x: width / 10,
-            y: height / 10,
-            w: width * 4 / 5,
-            h: height * 4 / 5,
-        }
+        IntRect::new(width / 10, height / 10, width * 4 / 5, height * 4 / 5)
     }
 
     /// Makes this controller immediately usable as a standalone chat dialog,
@@ -3428,30 +3387,25 @@ impl NetDlgController {
 
     fn embedded_chat_group(&self) -> IntRect {
         let layout = self.layout();
-        IntRect {
-            x: layout.game_list.x,
-            y: layout.game_list.y,
-            w: layout.game_list.w,
-            h: layout.join_edit.y + layout.join_edit.h - layout.game_list.y,
-        }
+        IntRect::new(
+            layout.game_list.x,
+            layout.game_list.y,
+            layout.game_list.w,
+            layout.join_edit.y + layout.join_edit.h - layout.game_list.y,
+        )
     }
 
     fn chat_caption_and_group(&self) -> (IntRect, IntRect) {
         if let Some(dialog) = self.chat_bounds_override {
             let caption_h = self.metrics.text_line_height.max(23).min(dialog.h);
             return (
-                IntRect {
-                    x: dialog.x,
-                    y: dialog.y,
-                    w: dialog.w,
-                    h: caption_h,
-                },
-                IntRect {
-                    x: dialog.x,
-                    y: dialog.y + caption_h,
-                    w: dialog.w,
-                    h: (dialog.h - caption_h).max(0),
-                },
+                IntRect::new(dialog.x, dialog.y, dialog.w, caption_h),
+                IntRect::new(
+                    dialog.x,
+                    dialog.y + caption_h,
+                    dialog.w,
+                    (dialog.h - caption_h).max(0),
+                ),
             );
         }
         (self.layout().game_list_caption, self.embedded_chat_group())
@@ -3462,21 +3416,16 @@ impl NetDlgController {
     }
 
     fn chat_dialog_close_rect(caption: IntRect) -> IntRect {
-        IntRect {
-            x: caption.x + caption.w - 20,
-            y: caption.y + 4,
-            w: 16,
-            h: 16,
-        }
+        IntRect::new(caption.x + caption.w - 20, caption.y + 4, 16, 16)
     }
 
     fn chat_layout_in(&self, group: IntRect) -> NetDlgChatLayout {
-        let inner = IntRect {
-            x: group.x + 2,
-            y: group.y + 2,
-            w: (group.w - 4).max(0),
-            h: (group.h - 4).max(0),
-        };
+        let inner = IntRect::new(
+            group.x + 2,
+            group.y + 2,
+            (group.w - 4).max(0),
+            (group.h - 4).max(0),
+        );
         let label_h = self.metrics.text_line_height;
         let edit_h = (self.metrics.text_line_height + 3).max(23);
         let login_h = (label_h * 8 + 2 * 10 + 5 * 10 + 32 + 20).min(inner.h);
@@ -3518,56 +3467,42 @@ impl NetDlgController {
             .into_iter()
             .map(|natural| {
                 let width = squeezed.unwrap_or(natural);
-                let rect = IntRect {
-                    x: tab_x,
-                    y: inner.y,
-                    w: width,
-                    h: tab_h,
-                };
+                let rect = IntRect::new(tab_x, inner.y, width, tab_h);
                 tab_x = tab_x.saturating_add(width);
                 NetDlgChatTabLayout {
                     rect,
-                    close: IntRect {
-                        x: rect.x + rect.w - tab_caption_h - 4,
-                        y: rect.y + 1,
-                        w: tab_close_size,
-                        h: tab_close_size,
-                    },
+                    close: IntRect::new(
+                        rect.x + rect.w - tab_caption_h - 4,
+                        rect.y + 1,
+                        tab_close_size,
+                        tab_close_size,
+                    ),
                 }
             })
             .collect();
         let input_h = edit_h;
-        let input_row = IntRect {
-            x: inner.x,
-            y: inner.y + inner.h - input_h,
-            w: inner.w,
-            h: input_h,
-        };
+        let input_row = IntRect::new(inner.x, inner.y + inner.h - input_h, inner.w, input_h);
         let active_kind = self.active_chat_sheet().map(|sheet| sheet.kind);
         let users_w = if active_kind == Some(NetDlgChatSheetKind::Channel) {
             (inner.w / 5).max(100).min(inner.w)
         } else {
             0
         };
-        let users = (users_w > 0).then_some(IntRect {
-            x: inner.x + inner.w - users_w,
-            y: inner.y + tab_h,
-            w: users_w,
-            h: (inner.h - tab_h - input_h).max(0),
-        });
-        let input_label = (active_kind != Some(NetDlgChatSheetKind::Server)).then_some(IntRect {
-            x: input_row.x,
-            y: input_row.y,
-            w: 40,
-            h: input_row.h,
-        });
+        let users = (users_w > 0).then_some(IntRect::new(
+            inner.x + inner.w - users_w,
+            inner.y + tab_h,
+            users_w,
+            (inner.h - tab_h - input_h).max(0),
+        ));
+        let input_label = (active_kind != Some(NetDlgChatSheetKind::Server))
+            .then_some(IntRect::new(input_row.x, input_row.y, 40, input_row.h));
         let label_w = input_label.map_or(0, |label| label.w);
-        let transcript = IntRect {
-            x: inner.x,
-            y: inner.y + tab_h,
-            w: (inner.w - users_w).max(0),
-            h: (inner.h - tab_h - input_h).max(0),
-        };
+        let transcript = IntRect::new(
+            inner.x,
+            inner.y + tab_h,
+            (inner.w - users_w).max(0),
+            (inner.h - tab_h - input_h).max(0),
+        );
         let scrollbar_w = SCROLLBAR_WIDTH.min(transcript.w.max(0));
         NetDlgChatLayout {
             group,
@@ -3576,26 +3511,26 @@ impl NetDlgController {
             connect,
             tabs,
             transcript,
-            transcript_viewport: IntRect {
-                x: transcript.x,
-                y: transcript.y,
-                w: (transcript.w - scrollbar_w).max(0),
-                h: transcript.h,
-            },
-            transcript_scrollbar: IntRect {
-                x: transcript.x + transcript.w - scrollbar_w,
-                y: transcript.y,
-                w: scrollbar_w,
-                h: transcript.h,
-            },
+            transcript_viewport: IntRect::new(
+                transcript.x,
+                transcript.y,
+                (transcript.w - scrollbar_w).max(0),
+                transcript.h,
+            ),
+            transcript_scrollbar: IntRect::new(
+                transcript.x + transcript.w - scrollbar_w,
+                transcript.y,
+                scrollbar_w,
+                transcript.h,
+            ),
             users,
             input_label,
-            input: IntRect {
-                x: input_row.x + label_w,
-                y: input_row.y,
-                w: (input_row.w - label_w).max(0),
-                h: input_row.h,
-            },
+            input: IntRect::new(
+                input_row.x + label_w,
+                input_row.y,
+                (input_row.w - label_w).max(0),
+                input_row.h,
+            ),
         }
     }
 
@@ -3760,12 +3695,7 @@ impl NetDlgController {
         } else {
             0
         };
-        IntRect {
-            x: bar.x,
-            y: bar.y + arrow + offset,
-            w: bar.w,
-            h: arrow,
-        }
+        IntRect::new(bar.x, bar.y + arrow + offset, bar.w, arrow)
     }
 
     /// `ScrollBar::MouseInput`'s drag/page: centre the pin under the pointer
@@ -4701,12 +4631,7 @@ impl NetDlgController {
                 .unwrap_or(self.metrics.text_line_height)
                 .max(self.metrics.text_line_height);
             line_layouts.push(NetDlgLineLayout {
-                rect: IntRect {
-                    x: label_x,
-                    y: line_y,
-                    w: width,
-                    h: text_height,
-                },
+                rect: IntRect::new(label_x, line_y, width, text_height),
                 text,
                 hyperlink: line.hyperlink().map(ToOwned::to_owned),
             });
@@ -4718,12 +4643,7 @@ impl NetDlgController {
             .max(layout.list_entry.h);
         NetDlgRowLayout {
             selection,
-            rect: IntRect {
-                x: layout.list_entry.x,
-                y,
-                w: layout.list_entry.w,
-                h: row_height,
-            },
+            rect: IntRect::new(layout.list_entry.x, y, layout.list_entry.w, row_height),
             lines: line_layouts,
             status_icons,
             row_icon,
@@ -5010,18 +4930,13 @@ impl NetDlgScreen {
             .chat_bounds_override
             .unwrap_or_else(|| NetDlgController::standalone_chat_bounds(width, height));
         let caption_h = controller.metrics.text_line_height.max(23).min(outer.h);
-        let caption = IntRect {
-            x: outer.x,
-            y: outer.y,
-            w: outer.w,
-            h: caption_h,
-        };
-        let group = IntRect {
-            x: outer.x,
-            y: outer.y + caption_h,
-            w: outer.w,
-            h: (outer.h - caption_h).max(0),
-        };
+        let caption = IntRect::new(outer.x, outer.y, outer.w, caption_h);
+        let group = IntRect::new(
+            outer.x,
+            outer.y + caption_h,
+            outer.w,
+            (outer.h - caption_h).max(0),
+        );
         let highlight = blacken_transparent_pixels(&assets.gui_button_highlight);
         let skin = ClassicGuiSkin::new(
             &assets.gui_caption,
@@ -5226,13 +5141,13 @@ impl NetDlgScreen {
                 );
                 for (index, icon) in row.status_icons.iter().copied().enumerate() {
                     let size = metrics.text_line_height;
-                    let icon_rect = IntRect {
-                        x: row_rect.x + row_rect.w
+                    let icon_rect = IntRect::new(
+                        row_rect.x + row_rect.w
                             - size * (i32::try_from(index).unwrap_or(i32::MAX) + 1),
-                        y: row_rect.y,
-                        w: size,
-                        h: size,
-                    };
+                        row_rect.y,
+                        size,
+                        size,
+                    );
                     Self::draw_status_icon(surface, assets, icon_rect, icon, gamma);
                 }
 
@@ -5319,12 +5234,7 @@ impl NetDlgScreen {
                         fonts.text.line_height - 2,
                     )
                 };
-                let clip = IntRect {
-                    x: client.x - 2,
-                    y: client.y,
-                    w: client.w + 4,
-                    h: client.h + 1,
-                };
+                let clip = IntRect::new(client.x - 2, client.y, client.w + 4, client.h + 1);
                 if let Some((start, end)) = state.selected_range() {
                     let x1 = client.x + fonts.text.measure(&state.text[..start], false).0
                         - state.horizontal_scroll;
@@ -5470,12 +5380,12 @@ impl NetDlgScreen {
                 let fitted_height = 32 * large_size / 40;
                 crate::draw_image_bilinear(
                     surface,
-                    &gui_rect(IntRect {
-                        x: row.x,
-                        y: row.y + (large_size - fitted_height) / 2,
-                        w: large_size,
-                        h: fitted_height,
-                    }),
+                    &gui_rect(IntRect::new(
+                        row.x,
+                        row.y + (large_size - fitted_height) / 2,
+                        large_size,
+                        fitted_height,
+                    )),
                     &phase,
                     gamma,
                 );
@@ -5485,12 +5395,12 @@ impl NetDlgScreen {
                 let fitted_height = 32 * large_size / 40;
                 crate::draw_image_bilinear(
                     surface,
-                    &gui_rect(IntRect {
-                        x: row.x,
-                        y: row.y + (large_size - fitted_height) / 2,
-                        w: large_size,
-                        h: fitted_height,
-                    }),
+                    &gui_rect(IntRect::new(
+                        row.x,
+                        row.y + (large_size - fitted_height) / 2,
+                        large_size,
+                        fitted_height,
+                    )),
                     &phase,
                     gamma,
                 );
@@ -5502,12 +5412,12 @@ impl NetDlgScreen {
                     &assets.gui_icons,
                     40,
                     34,
-                    IntRect {
-                        x: row.x + (large_size - small_size) / 2,
-                        y: row.y + (large_size - small_size) / 2,
-                        w: small_size,
-                        h: small_size,
-                    },
+                    IntRect::new(
+                        row.x + (large_size - small_size) / 2,
+                        row.y + (large_size - small_size) / 2,
+                        small_size,
+                        small_size,
+                    ),
                     gamma,
                 );
             }
@@ -5527,12 +5437,12 @@ impl NetDlgScreen {
                     &assets.scen_icons,
                     assets.scen_icons.height().max(1),
                     phase as u32,
-                    IntRect {
-                        x: row.x + (large_size - small_size) / 2,
-                        y: row.y + (large_size - small_size) / 2,
-                        w: small_size,
-                        h: small_size,
-                    },
+                    IntRect::new(
+                        row.x + (large_size - small_size) / 2,
+                        row.y + (large_size - small_size) / 2,
+                        small_size,
+                        small_size,
+                    ),
                     gamma,
                 );
             }
@@ -5885,12 +5795,12 @@ impl NetDlgScreen {
                 TextAlign::Center,
                 gamma,
             );
-            let title_rect = IntRect {
-                x: tab.rect.x + 4,
-                y: tab.rect.y,
-                w: (tab.close.x - tab.rect.x - 6).max(0),
-                h: tab.rect.h,
-            };
+            let title_rect = IntRect::new(
+                tab.rect.x + 4,
+                tab.rect.y,
+                (tab.close.x - tab.rect.x - 6).max(0),
+                tab.rect.h,
+            );
             draw_clipped_text(
                 surface,
                 &fonts.text,
@@ -5959,12 +5869,12 @@ impl NetDlgScreen {
                 if index > 0 && line.new_paragraph {
                     y += line_h / 3;
                 }
-                let row = IntRect {
-                    x: chat_layout.transcript_viewport.x + 3,
+                let row = IntRect::new(
+                    chat_layout.transcript_viewport.x + 3,
                     y,
-                    w: (chat_layout.transcript_viewport.w - 6).max(0),
-                    h: line_h,
-                };
+                    (chat_layout.transcript_viewport.w - 6).max(0),
+                    line_h,
+                );
                 if row.y + row.h > chat_layout.transcript_viewport.y
                     && row.y < chat_layout.transcript_viewport.y + chat_layout.transcript_viewport.h
                 {
@@ -6029,12 +5939,7 @@ impl NetDlgScreen {
                         &assets.gui_icons,
                         40,
                         icon,
-                        IntRect {
-                            x: users.x + 1,
-                            y: row_y,
-                            w: line_h,
-                            h: line_h,
-                        },
+                        IntRect::new(users.x + 1, row_y, line_h, line_h),
                         gamma,
                     );
                     fonts.text.draw_with_gamma(
@@ -6290,7 +6195,7 @@ mod tests {
         };
         let layout = net_dlg_layout(1280, 720, &metrics);
 
-        let rect = |x, y, w, h| IntRect { x, y, w, h };
+        let rect = |x, y, w, h| IntRect::new(x, y, w, h);
         assert_eq!(layout.client, rect(25, 69, 1230, 632));
         assert_eq!(layout.title_anchor, (640, 8));
         assert_eq!(layout.btn_game_list, rect(99, 82, 64, 64));
@@ -6821,12 +6726,7 @@ mod tests {
         assert_same!(icon_pixels(&scenario_default) => icon_pixels(&scenario_negative));
         assert_same!(icon_pixels(&scenario_default) => icon_pixels(&scenario_too_large));
 
-        let small_icon = IntRect {
-            x: icon.x + 8,
-            y: icon.y + 8,
-            w: 32,
-            h: 32,
-        };
+        let small_icon = IntRect::new(icon.x + 8, icon.y + 8, 32, 32);
         let changed = no_icon
             .pixels()
             .chunks_exact(4)
@@ -7755,12 +7655,7 @@ mod tests {
         let with_caret = render(&controller, true);
 
         let client = edit_client(controller.layout().join_edit);
-        let clip = IntRect {
-            x: client.x - 2,
-            y: client.y,
-            w: client.w + 4,
-            h: client.h + 1,
-        };
+        let clip = IntRect::new(client.x - 2, client.y, client.w + 4, client.h + 1);
         let changed_inside_clip = |before: &Surface, after: &Surface| {
             let changed = before
                 .pixels()
@@ -8312,12 +8207,12 @@ mod tests {
         });
 
         let layout = controller.chat_layout();
-        let inner = IntRect {
-            x: layout.group.x + 2,
-            y: layout.group.y + 2,
-            w: layout.group.w - 4,
-            h: layout.group.h - 4,
-        };
+        let inner = IntRect::new(
+            layout.group.x + 2,
+            layout.group.y + 2,
+            layout.group.w - 4,
+            layout.group.h - 4,
+        );
         let login_h = (metrics().text_line_height * 8 + 2 * 10 + 5 * 10 + 32 + 20).min(inner.h);
         let login_w = (login_h * 2 / 3).min(inner.w);
         let login = Aligner::new(inner, 0, 0).centered(login_w, login_h);
@@ -8753,7 +8648,7 @@ mod tests {
         let mut controller = controller();
         controller.resize(1000, 800);
         let bounds = NetDlgController::standalone_chat_bounds(1000, 800);
-        assert_same!(bounds => IntRect {x: 100, y: 80, w: 800, h: 640 });
+        assert_same!(bounds => IntRect::new(100, 80, 800, 640));
         controller.set_chat_bounds_override(Some(bounds));
         controller.force_chat_mode_and_focus();
         controller.set_chat_strings(NetDlgChatStrings {
@@ -8849,11 +8744,11 @@ mod tests {
         assert!(controller.chat_dialog_drag_active());
         let moved = GuiPoint::new(start.x - 325.0, start.y + 41.0);
         assert_no_actions!(controller.handle_pointer_move(moved, text_font()));
-        assert_same!(controller.chat_bounds_override() => Some(IntRect {x: initial.x - 325, y: initial.y + 41, ..initial }));
+        assert_same!(controller.chat_bounds_override() => Some(initial.with_position(initial.x - 325, initial.y + 41)));
 
         let released = GuiPoint::new(moved.x - 7.0, moved.y + 3.0);
         assert_no_actions!(controller.handle_pointer_up(released, text_font()));
-        assert_same!(controller.chat_bounds_override() => Some(IntRect {x: initial.x - 332, y: initial.y + 44, ..initial }));
+        assert_same!(controller.chat_bounds_override() => Some(initial.with_position(initial.x - 332, initial.y + 44)));
         assert!(!controller.chat_dialog_drag_active());
         let retained = controller.chat_bounds_override();
         controller.handle_pointer_move(GuiPoint::new(900.0, 700.0), text_font());
@@ -8871,12 +8766,7 @@ mod tests {
     fn standalone_chat_drag_capture_is_cleared_by_leave_resize_and_cancel() {
         let mut controller = controller();
         controller.resize(1000, 800);
-        controller.set_chat_bounds_override(Some(IntRect {
-            x: 100,
-            y: 80,
-            w: 800,
-            h: 640,
-        }));
+        controller.set_chat_bounds_override(Some(IntRect::new(100, 80, 800, 640)));
         controller.force_chat_mode_and_default_focus();
 
         let start_drag = |controller: &mut NetDlgController| {

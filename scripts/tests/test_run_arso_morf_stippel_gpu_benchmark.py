@@ -464,16 +464,6 @@ class NativeCadenceTests(unittest.TestCase):
         ):
             MODULE.validate_native_presentation_cadence(report)
 
-    def test_requires_the_apps_presentation_budget_result(self):
-        with self.assertRaisesRegex(
-            MODULE.BenchmarkFailure,
-            "native presentation budget did not report pass",
-        ):
-            MODULE.require_single_result(
-                [self.BENCHMARK_LINE],
-                "LC_APP_PRESENTATION_BENCHMARK result=pass native_tick_budget_ms=28",
-            )
-
     def test_paired_evidence_rejects_a_headless_zero_sample_baseline(self):
         headless = (
             self.BENCHMARK_LINE.replace(

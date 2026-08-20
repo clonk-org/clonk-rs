@@ -1,83 +1,6 @@
 use super::*;
 use crate::landscape::PixelGrid;
-
-trait TestEngineExt {
-    fn call_test_object_function(
-        &mut self,
-        index: usize,
-        function: &str,
-        args: Vec<Value>,
-    ) -> Value;
-    fn execute_test_object_command(&mut self, object: ObjectId);
-    fn queue_test_command(&mut self, index: usize, command: CommandRequest);
-    fn register_test_definition(&mut self, definition: Definition);
-    fn register_test_script_definition(&mut self, id: &str, name: &str, script: &str);
-    fn set_test_transfer_zone(&mut self, object: ObjectId, x: i32, y: i32, width: i32, height: i32);
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
-    fn test_object_index(&self, object: ObjectId) -> usize;
-}
-
-impl TestEngineExt for Engine {
-    #[track_caller]
-    fn call_test_object_function(
-        &mut self,
-        index: usize,
-        function: &str,
-        args: Vec<Value>,
-    ) -> Value {
-        crate::TestValueExt::test_value(self.call_object_function(index, function, args))
-    }
-
-    #[track_caller]
-    fn execute_test_object_command(&mut self, object: ObjectId) {
-        crate::TestValueExt::test_value(self.execute_object_command_now(object));
-    }
-
-    #[track_caller]
-    fn queue_test_command(&mut self, index: usize, command: CommandRequest) {
-        crate::TestValueExt::test_value(self.objects[index].commands.push_front(command));
-    }
-
-    #[track_caller]
-    fn register_test_definition(&mut self, definition: Definition) {
-        crate::TestValueExt::test_value(self.register_definition(definition));
-    }
-
-    #[track_caller]
-    fn register_test_script_definition(&mut self, id: &str, name: &str, script: &str) {
-        crate::TestValueExt::test_value(self.register_script_definition(id, name, script));
-    }
-
-    #[track_caller]
-    fn set_test_transfer_zone(
-        &mut self,
-        object: ObjectId,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-    ) {
-        crate::TestValueExt::test_value(self.set_transfer_zone(
-            object,
-            TransferZoneRect {
-                x,
-                y,
-                width,
-                height,
-            },
-        ));
-    }
-
-    #[track_caller]
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
-        crate::TestValueExt::test_value(self.spawn_object(config))
-    }
-
-    #[track_caller]
-    fn test_object_index(&self, object: ObjectId) -> usize {
-        crate::TestValueExt::test_value(self.find_object_index(object))
-    }
-}
+use crate::lib_test_support::{register_fixture, spawn_fixture, EngineTestExt};
 
 fn pixel_landscape(width: u32, height: u32, pixels: Vec<u8>) -> Landscape {
     let mut landscape = crate::TestValueExt::test_value(Landscape::with_default_material(
@@ -179,10 +102,8 @@ fn get_path_reuses_last_move_to_pathfinder_level_like_cpp() {
     let mut engine = Engine::with_seed(1);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
 
-    let mut definition = test_definition("PF05", "Level five mover", "");
-    definition.set_pathfinder(5);
-    engine.register_test_definition(definition);
-    let mover = engine.spawn_test_object(SpawnConfig::new("PF05").with_position(from));
+    register_fixture!(engine, "PF05", "Level five mover", "", set_pathfinder(5));
+    let mover = spawn_fixture!(engine, "PF05", with_position: from);
 
     assert!(engine.find_path(from, to, 1, true).is_none());
     assert!(engine.find_path(from, to, 5, true).is_some());
@@ -220,15 +141,17 @@ fn get_path_reuses_last_move_to_transfer_zone_toggle_like_cpp() {
     let mut engine = Engine::with_seed(1);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
 
-    let mut enabled = test_definition("PFTZ", "Zone mover", "");
-    enabled.set_pathfinder(1);
-    engine.register_test_definition(enabled);
-    let mut disabled = test_definition("PFNZ", "No-zone mover", "");
-    disabled.set_pathfinder(1);
-    disabled.set_no_transfer_zones(1);
-    engine.register_test_definition(disabled);
-    let zone_owner = engine.spawn_test_object(SpawnConfig::new("PFTZ").with_position(from));
-    let no_zone_mover = engine.spawn_test_object(SpawnConfig::new("PFNZ").with_position(from));
+    register_fixture!(engine, "PFTZ", "Zone mover", "", set_pathfinder(1));
+    register_fixture!(
+        engine,
+        "PFNZ",
+        "No-zone mover",
+        "",
+        set_pathfinder(1),
+        set_no_transfer_zones(1)
+    );
+    let zone_owner = spawn_fixture!(engine, "PFTZ", with_position: from);
+    let no_zone_mover = spawn_fixture!(engine, "PFNZ", with_position: from);
     engine.set_test_transfer_zone(zone_owner, 45, 40, 10, 20);
 
     assert!(engine.find_path(from, to, 1, false).is_none());
@@ -279,7 +202,8 @@ fn execute_command_updates_get_path_settings_within_the_same_script_call() {
     let mut engine = Engine::with_seed(1);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
 
-    let mut definition = test_definition(
+    register_fixture!(
+        engine,
         "PFSY",
         "Synchronous no-zone mover",
         r#"
@@ -292,11 +216,10 @@ fn execute_command_updates_get_path_settings_within_the_same_script_call() {
                 return GetPath(11, 49, 89, 51);
             }
         "#,
+        set_pathfinder(1),
+        set_no_transfer_zones(1)
     );
-    definition.set_pathfinder(1);
-    definition.set_no_transfer_zones(1);
-    engine.register_test_definition(definition);
-    let mover = engine.spawn_test_object(SpawnConfig::new("PFSY").with_position(from));
+    let mover = spawn_fixture!(engine, "PFSY", with_position: from);
     engine.set_test_transfer_zone(mover, 45, 40, 10, 20);
     assert!(engine.find_path(from, to, 1, true).is_some());
     assert!(engine.find_path(from, to, 1, false).is_none());
@@ -333,10 +256,8 @@ fn transfer_direct_callback_runs_on_status_zero_and_keeps_replacement_command() 
     ));
     engine.register_test_script_definition("ACTR", "Transfer actor", "");
 
-    let gate =
-        engine.spawn_test_object(SpawnConfig::new("GATE").with_position(Vector2::new(100, 0)));
-    let actor =
-        engine.spawn_test_object(SpawnConfig::new("ACTR").with_position(Vector2::new(95, 0)));
+    let gate = spawn_fixture!(engine, "GATE", with_position: Vector2::new(100, 0));
+    let actor = spawn_fixture!(engine, "ACTR", with_position: Vector2::new(95, 0));
     engine.set_test_transfer_zone(gate, 90, -10, 20, 40);
     let actor_index = engine.test_object_index(actor);
     engine.queue_test_command(
@@ -398,8 +319,8 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
     ));
     engine.register_test_script_definition("ZTRA", "Restored transfer actor", "");
 
-    let gate = engine.spawn_test_object(SpawnConfig::new("ZTRG"));
-    let actor = engine.spawn_test_object(SpawnConfig::new("ZTRA"));
+    let gate = spawn_fixture!(engine, "ZTRG");
+    let actor = spawn_fixture!(engine, "ZTRA");
     let actor_index = engine.test_object_index(actor);
     engine.queue_test_command(
         actor_index,
@@ -531,11 +452,8 @@ fn transfer_direct_callback_uses_the_c4_bool_low_word() {
     // 32-bit payload. On a 64-bit host this value is truthy to Rust's
     // generic Value::as_bool while its native C4 bool word is zero.
     let raw = 1usize.checked_shl(32).unwrap_or(0);
-    let gate = engine.spawn_test_object(
-        SpawnConfig::new("GBOL")
-            .with_local_vars(HashMap::from([("answer".to_string(), Value::RawBool(raw))])),
-    );
-    let actor = engine.spawn_test_object(SpawnConfig::new("ABOL"));
+    let gate = spawn_fixture!(engine, "GBOL", with_local_vars: HashMap::from([("answer".to_string(), Value::RawBool(raw))]));
+    let actor = spawn_fixture!(engine, "ABOL");
     let gate_index = engine.test_object_index(gate);
 
     assert_eq!(Value::RawBool(raw).c4_bool_raw(), Some(0));
@@ -565,11 +483,8 @@ fn activate_entrance_uses_full_c4_value_truthiness() {
     engine.register_test_script_definition("ACBE", "Entrance caller", "");
 
     let raw = 1usize.checked_shl(32).unwrap_or(0);
-    let entrance = engine.spawn_test_object(
-        SpawnConfig::new("EBOL")
-            .with_local_vars(HashMap::from([("answer".to_string(), Value::RawBool(raw))])),
-    );
-    let caller = engine.spawn_test_object(SpawnConfig::new("ACBE"));
+    let entrance = spawn_fixture!(engine, "EBOL", with_local_vars: HashMap::from([("answer".to_string(), Value::RawBool(raw))]));
+    let caller = spawn_fixture!(engine, "ACBE");
     let entrance_index = engine.test_object_index(entrance);
     engine.objects[entrance_index].state.ocf |= ocf::ENTRANCE;
 
@@ -600,8 +515,8 @@ fn restored_legacy_entrance_result_does_not_fail_callback_replacement() {
     ));
     engine.register_test_script_definition("ZENA", "Restored entrance caller", "");
 
-    let entrance = engine.spawn_test_object(SpawnConfig::new("ZENT"));
-    let caller = engine.spawn_test_object(SpawnConfig::new("ZENA"));
+    let entrance = spawn_fixture!(engine, "ZENT");
+    let caller = spawn_fixture!(engine, "ZENA");
     let entrance_index = engine.test_object_index(entrance);
     engine.objects[entrance_index].state.ocf |= ocf::ENTRANCE;
     let caller_index = engine.test_object_index(caller);
@@ -669,10 +584,8 @@ fn script_execute_command_runs_direct_transfer_before_returning() {
                 "#,
     ));
 
-    let gate =
-        engine.spawn_test_object(SpawnConfig::new("GAT2").with_position(Vector2::new(100, 0)));
-    let actor =
-        engine.spawn_test_object(SpawnConfig::new("ACR2").with_position(Vector2::new(95, 0)));
+    let gate = spawn_fixture!(engine, "GAT2", with_position: Vector2::new(100, 0));
+    let actor = spawn_fixture!(engine, "ACR2", with_position: Vector2::new(95, 0));
     engine.set_test_transfer_zone(gate, 90, -10, 20, 40);
     let gate_index = engine.test_object_index(gate);
     let _ = engine.objects[gate_index].mark_destroyed();
@@ -715,7 +628,8 @@ fn script_execute_command_runs_direct_transfer_before_returning() {
 fn exit_command_runs_live_callbacks_before_finishing_in_both_execution_paths() {
     fn setup() -> (Engine, ObjectId, ObjectId) {
         let mut engine = Engine::with_seed(1);
-        let mut container = test_definition(
+        register_fixture!(
+            engine,
             "XCTR",
             "Exit callback container",
             r#"
@@ -726,10 +640,10 @@ fn exit_command_runs_live_callbacks_before_finishing_in_both_execution_paths() {
                     return true;
                 }
             "#,
+            set_c4_callback_convention(true)
         );
-        container.set_c4_callback_convention(true);
-        engine.register_test_definition(container);
-        let mut actor = test_definition(
+        register_fixture!(
+            engine,
             "XACT",
             "Exit callback actor",
             r#"
@@ -755,13 +669,11 @@ fn exit_command_runs_live_callbacks_before_finishing_in_both_execution_paths() {
                     return true;
                 }
             "#,
+            set_c4_callback_convention(true)
         );
-        actor.set_c4_callback_convention(true);
-        engine.register_test_definition(actor);
 
-        let container =
-            engine.spawn_test_object(SpawnConfig::new("XCTR").with_position(Vector2::new(80, 90)));
-        let actor = engine.spawn_test_object(SpawnConfig::new("XACT").with_container(container));
+        let container = spawn_fixture!(engine, "XCTR", with_position: Vector2::new(80, 90));
+        let actor = spawn_fixture!(engine, "XACT", with_container: container);
         let container_index = engine.test_object_index(container);
         engine.objects[container_index].state.entrance_status = true;
         crate::TestValueExt::test_value(
@@ -841,7 +753,8 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
 
     engine.register_test_script_definition("GATE", "Transfer gate", "");
-    let mut mover_definition = test_definition(
+    register_fixture!(
+        engine,
         "PFMR",
         "Pathfinder mover",
         r#"
@@ -852,15 +765,12 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
                 return GetPath(10, 50, 90, 50);
             }
         "#,
+        set_pathfinder(1)
     );
-    mover_definition.set_pathfinder(1);
-    engine.register_test_definition(mover_definition);
 
-    let gate =
-        engine.spawn_test_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)));
-    let path_actor = engine.spawn_test_object(SpawnConfig::new("PFMR").with_position(from));
-    let transfer_actor =
-        engine.spawn_test_object(SpawnConfig::new("PFMR").with_position(Vector2::new(45, 50)));
+    let gate = spawn_fixture!(engine, "GATE", with_position: Vector2::new(50, 50));
+    let path_actor = spawn_fixture!(engine, "PFMR", with_position: from);
+    let transfer_actor = spawn_fixture!(engine, "PFMR", with_position: Vector2::new(45, 50));
     engine.set_test_transfer_zone(gate, 45, 40, 10, 20);
     assert!(
         engine.find_path(from, to, 1, true).is_some(),
@@ -971,22 +881,22 @@ fn script_removal_materializes_only_objects_that_can_reference_the_target() {
             "#,
     );
 
-    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let target = spawn_fixture!(engine, "TARG");
     for _ in 0..128 {
-        engine.spawn_test_object(SpawnConfig::new("FILL"));
+        spawn_fixture!(engine, "FILL");
     }
-    let action_referrer = engine.spawn_test_object(SpawnConfig::new("FILL"));
+    let action_referrer = spawn_fixture!(engine, "FILL");
     let action_referrer_index = engine.test_object_index(action_referrer);
     engine.objects[action_referrer_index].state.action.target = Some(target);
 
-    let command_referrer = engine.spawn_test_object(SpawnConfig::new("FILL"));
+    let command_referrer = spawn_fixture!(engine, "FILL");
     let command_referrer_index = engine.test_object_index(command_referrer);
     engine.queue_test_command(
         command_referrer_index,
         CommandRequest::new(CommandId::Transfer).with_target(Some(target)),
     );
 
-    let effect_referrer = engine.spawn_test_object(SpawnConfig::new("FILL"));
+    let effect_referrer = spawn_fixture!(engine, "FILL");
     let effect_referrer_index = engine.test_object_index(effect_referrer);
     engine.objects[effect_referrer_index].state.effects.push(
         EffectState::new("Pointer").with_command_target(Some(crate::TestValueExt::test_value(
@@ -994,10 +904,10 @@ fn script_removal_materializes_only_objects_that_can_reference_the_target() {
         ))),
     );
 
-    let layer_referrer = engine.spawn_test_object(SpawnConfig::new("FILL"));
+    let layer_referrer = spawn_fixture!(engine, "FILL");
     let layer_referrer_index = engine.test_object_index(layer_referrer);
     engine.objects[layer_referrer_index].state.layer = Some(target);
-    let remover = engine.spawn_test_object(SpawnConfig::new("RMVR"));
+    let remover = spawn_fixture!(engine, "RMVR");
     let remover_index = engine.test_object_index(remover);
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -1048,7 +958,8 @@ fn effect_batch_threads_and_folds_immediate_transfer_zone_clear() {
     let mut engine = Engine::with_seed(2);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
     engine.register_test_script_definition("GATE", "Transfer gate", "");
-    let mut effect_definition = test_definition(
+    register_fixture!(
+        engine,
         "FXRM",
         "Effect remover",
         r#"
@@ -1073,18 +984,12 @@ fn effect_batch_threads_and_folds_immediate_transfer_zone_clear() {
                 return 0;
             }
         "#,
+        set_c4_callback_convention(true),
+        set_pathfinder(1)
     );
-    effect_definition.set_c4_callback_convention(true);
-    effect_definition.set_pathfinder(1);
-    engine.register_test_definition(effect_definition);
 
-    let gate =
-        engine.spawn_test_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)));
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("FXRM")
-            .with_position(from)
-            .with_rotation(5),
-    );
+    let gate = spawn_fixture!(engine, "GATE", with_position: Vector2::new(50, 50));
+    let actor = spawn_fixture!(engine, "FXRM", with_position: from, with_rotation: 5);
     engine.set_test_transfer_zone(gate, 45, 40, 10, 20);
     assert!(engine.find_path(from, to, 1, true).is_some());
     assert_ne!(
@@ -1141,7 +1046,8 @@ fn effect_batch_threads_callback_final_contents_order() {
     for id in ["BOX_", "HOLD", "ROCK", "GOLD", "PSTL"] {
         engine.register_test_script_definition(id, id, "#strict\n");
     }
-    let mut actor_definition = test_definition(
+    register_fixture!(
+        engine,
         "FXCO",
         "Contents-order observer",
         r#"
@@ -1170,32 +1076,18 @@ fn effect_batch_threads_callback_final_contents_order() {
                 return(0);
             }
         "#,
+        set_c4_callback_convention(true)
     );
-    actor_definition.set_c4_callback_convention(true);
-    engine.register_test_definition(actor_definition);
 
-    let box_id = engine.spawn_test_object(SpawnConfig::new("BOX_").with_category(CATEGORY_OBJECT));
-    let gold = engine.spawn_test_object(
-        SpawnConfig::new("GOLD")
-            .with_category(CATEGORY_OBJECT)
-            .with_container(box_id),
-    );
-    let rock = engine.spawn_test_object(
-        SpawnConfig::new("ROCK")
-            .with_category(CATEGORY_OBJECT)
-            .with_container(box_id),
-    );
-    let holder = engine.spawn_test_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT));
-    let pistol = engine.spawn_test_object(
-        SpawnConfig::new("PSTL")
-            .with_category(CATEGORY_STATIC_BACK)
-            .with_container(holder),
-    );
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("FXCO")
-            .with_category(CATEGORY_OBJECT)
-            .with_rotation(5),
-    );
+    let box_id = spawn_fixture!(engine, "BOX_", with_category: CATEGORY_OBJECT);
+    let gold =
+        spawn_fixture!(engine, "GOLD", with_category: CATEGORY_OBJECT, with_container: box_id);
+    let rock =
+        spawn_fixture!(engine, "ROCK", with_category: CATEGORY_OBJECT, with_container: box_id);
+    let holder = spawn_fixture!(engine, "HOLD", with_category: CATEGORY_OBJECT);
+    let pistol =
+        spawn_fixture!(engine, "PSTL", with_category: CATEGORY_STATIC_BACK, with_container: holder);
+    let actor = spawn_fixture!(engine, "FXCO", with_category: CATEGORY_OBJECT, with_rotation: 5);
     let actor_index = engine.test_object_index(actor);
     engine.call_test_object_function(actor_index, "Arm", vec![object_reference_value(box_id)]);
     let actor_index = engine.test_object_index(actor);
@@ -1264,7 +1156,8 @@ fn effect_batch_threads_dig_contents_shape_and_layer() {
 
     engine.register_test_script_definition("LAYR", "Layer", "");
     engine.register_test_script_definition("GEM_", "Gem", "");
-    let mut digger = test_definition(
+    register_fixture!(
+        engine,
         "FXDG",
         "Effect digger",
         r#"
@@ -1290,13 +1183,12 @@ fn effect_batch_threads_dig_contents_shape_and_layer() {
                 return 0;
             }
         "#,
+        set_c4_callback_convention(true),
+        set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 2)))
     );
-    digger.set_c4_callback_convention(true);
-    digger.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 2)));
-    engine.register_test_definition(digger);
 
-    let layer = engine.spawn_test_object(SpawnConfig::new("LAYR"));
-    let actor = engine.spawn_test_object(SpawnConfig::new("FXDG"));
+    let layer = spawn_fixture!(engine, "LAYR");
+    let actor = spawn_fixture!(engine, "FXDG");
     let actor_index = engine.test_object_index(actor);
     engine.call_test_object_function(actor_index, "Arm", Vec::new());
     let actor_index = engine.test_object_index(actor);
@@ -1356,7 +1248,8 @@ fn construction_zone_clear_is_visible_to_immediate_initialize() {
     let mut engine = Engine::with_seed(3);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
     engine.register_test_script_definition("GATE", "Transfer gate", "");
-    let mut lifecycle_definition = test_definition(
+    register_fixture!(
+        engine,
         "PFLC",
         "Lifecycle remover",
         r#"
@@ -1374,21 +1267,15 @@ fn construction_zone_clear_is_visible_to_immediate_initialize() {
                 return true;
             }
         "#,
+        set_c4_callback_convention(true),
+        set_pathfinder(1)
     );
-    lifecycle_definition.set_c4_callback_convention(true);
-    lifecycle_definition.set_pathfinder(1);
-    engine.register_test_definition(lifecycle_definition);
 
-    let gate =
-        engine.spawn_test_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)));
+    let gate = spawn_fixture!(engine, "GATE", with_position: Vector2::new(50, 50));
     engine.set_test_transfer_zone(gate, 45, 40, 10, 20);
     assert_ne!(script_get_path(&mut engine, from, to), Value::Nil);
 
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("PFLC")
-            .with_position(from)
-            .with_rotation(5),
-    );
+    let actor = spawn_fixture!(engine, "PFLC", with_position: from, with_rotation: 5);
     let actor_index = engine.test_object_index(actor);
 
     assert_eq!(engine.frame(), 0, "no frame cleanup has run");

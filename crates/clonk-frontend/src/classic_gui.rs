@@ -124,10 +124,7 @@ impl<'a> ClassicGuiSkin<'a> {
         gamma: Option<&GammaRamp>,
     ) {
         draw_bar(surface, rect, self.caption, 32, gamma);
-        let text_rect = IntRect {
-            w: (rect.w - right_indent.max(0)).max(1),
-            ..rect
-        };
+        let text_rect = rect.with_width((rect.w - right_indent.max(0)).max(1));
         let x = match align {
             TextAlign::Left => text_rect.x + 5,
             TextAlign::Center => text_rect.x + text_rect.w / 2,
@@ -1024,12 +1021,7 @@ fn draw_engine_line_box(
 }
 
 const fn inclusive_clip(rect: IntRect) -> IntRect {
-    IntRect {
-        x: rect.x,
-        y: rect.y,
-        w: rect.w + 1,
-        h: rect.h + 1,
-    }
+    IntRect::new(rect.x, rect.y, rect.w + 1, rect.h + 1)
 }
 
 #[cfg(test)]
@@ -1059,18 +1051,7 @@ mod tests {
     fn bar_tiles_middle_and_right_aligns_end() {
         let image = column_coded_image(8, 1);
         let mut surface = Surface::new(9, 1, PixelFormat::Rgba8888);
-        draw_bar(
-            &mut surface,
-            IntRect {
-                x: 0,
-                y: 0,
-                w: 9,
-                h: 1,
-            },
-            &image,
-            2,
-            None,
-        );
+        draw_bar(&mut surface, IntRect::new(0, 0, 9, 1), &image, 2, None);
         assert_eq!(
             column_values(&surface, 0, 9),
             vec![10, 20, 30, 40, 50, 60, 30, 70, 80]
@@ -1083,18 +1064,7 @@ mod tests {
     fn narrow_bar_lets_end_overdraw_begin() {
         let image = column_coded_image(8, 1);
         let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
-        draw_bar(
-            &mut surface,
-            IntRect {
-                x: 0,
-                y: 0,
-                w: 1,
-                h: 1,
-            },
-            &image,
-            2,
-            None,
-        );
+        draw_bar(&mut surface, IntRect::new(0, 0, 1, 1), &image, 2, None);
         assert_eq!(column_values(&surface, 0, 1), vec![80]);
     }
 
@@ -1107,18 +1077,7 @@ mod tests {
         let background = Color::opaque(11, 22, 33);
         let mut surface = Surface::new(120, 50, PixelFormat::Rgba8888);
         surface.fill(background);
-        draw_bar(
-            &mut surface,
-            IntRect {
-                x: 4,
-                y: 3,
-                w: 100,
-                h: 44,
-            },
-            &image,
-            32,
-            None,
-        );
+        draw_bar(&mut surface, IntRect::new(4, 3, 100, 44), &image, 32, None);
 
         assert_eq!(surface.get_pixel(50, 46), Some(Color::opaque(0, 120, 0)));
     }
@@ -1401,16 +1360,7 @@ mod tests {
     fn frame_preserves_line_endpoint_and_corner_coverage() {
         let mut surface = Surface::new(8, 8, PixelFormat::Rgba8888);
         surface.fill(Color::opaque(200, 200, 200));
-        draw_3d_frame(
-            &mut surface,
-            IntRect {
-                x: 1,
-                y: 1,
-                w: 6,
-                h: 6,
-            },
-            None,
-        );
+        draw_3d_frame(&mut surface, IntRect::new(1, 1, 6, 6), None);
 
         assert_ne!(surface.get_pixel(1, 1), surface.get_pixel(6, 1));
         assert_ne!(surface.get_pixel(1, 6), surface.get_pixel(6, 6));
@@ -1422,12 +1372,7 @@ mod tests {
         let fonts = endeavour_font_set();
         let font = &fonts.text;
         let height = (font.line_height * 2).max(1) as u32;
-        let clip = IntRect {
-            x: 0,
-            y: 0,
-            w: 160,
-            h: height as i32,
-        };
+        let clip = IntRect::new(0, 0, 160, height as i32);
         let mut literal = Surface::new(160, height, PixelFormat::Rgba8888);
         draw_clipped_text_with_markup(
             &mut literal,
@@ -1479,12 +1424,7 @@ mod tests {
             [255, 255, 255, 255],
             TextAlign::Left,
             None,
-            IntRect {
-                x: 11,
-                y: 13,
-                w: 31,
-                h: 23,
-            },
+            IntRect::new(11, 13, 31, 23),
             true,
         );
 
@@ -1513,12 +1453,7 @@ mod tests {
         );
         let caption = load_graphics_png("GUICaption.png");
         let fonts = endeavour_font_set();
-        let rect = IntRect {
-            x: 11,
-            y: 9,
-            w: 153,
-            h: 32,
-        };
+        let rect = IntRect::new(11, 9, 153, 32);
         let mut previous = Surface::new(176, 52, PixelFormat::Rgba8888);
         let mut extracted = Surface::new(176, 52, PixelFormat::Rgba8888);
         previous.fill(Color::opaque(32, 64, 96));

@@ -498,6 +498,24 @@ pub enum SearchCommand {
     },
 }
 
+impl SearchCommand {
+    fn lan_probe(discovery_port: u16, trigger: LanProbeTrigger) -> Self {
+        Self::SendLanProbe {
+            target: SocketAddrV6::new(DISCOVERY_MULTICAST, discovery_port, 0, 0),
+            payload: vec![DISCOVERY_PROBE],
+            trigger,
+        }
+    }
+
+    fn query_references(endpoint: ReferenceEndpoint, source: ReferenceQuerySource) -> Self {
+        Self::QueryReferences {
+            endpoint,
+            source,
+            timeout: REFERENCE_QUERY_TIMEOUT,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NetworkGameSearch {
     config: NetworkGameSearchConfig,
@@ -529,17 +547,12 @@ impl NetworkGameSearch {
         self.lan_discover_count = 0;
         self.references.clear();
         self.reference_expirations.clear();
-        let mut commands = vec![SearchCommand::SendLanProbe {
-            target: SocketAddrV6::new(DISCOVERY_MULTICAST, self.config.discovery_port, 0, 0),
-            payload: vec![DISCOVERY_PROBE],
+        let mut commands = vec![SearchCommand::lan_probe(
+            self.config.discovery_port,
             trigger,
-        }];
+        )];
         if self.config.internet_enabled {
-            commands.push(SearchCommand::QueryReferences {
-                endpoint: ReferenceEndpoint::Url(self.config.master_server_url.clone()),
-                source: ReferenceQuerySource::Masterserver,
-                timeout: REFERENCE_QUERY_TIMEOUT,
-            });
+            commands.push(self.masterserver_query());
         }
         commands
     }
@@ -559,22 +572,13 @@ impl NetworkGameSearch {
             return None;
         }
         let port = u16::from_ne_bytes([payload[2], payload[3]]);
-        let endpoint = match source {
-            SocketAddr::V4(mut address) => {
-                address.set_port(port);
-                SocketAddr::V4(address)
-            }
-            SocketAddr::V6(mut address) => {
-                address.set_port(port);
-                SocketAddr::V6(address)
-            }
-        };
+        let mut endpoint = source;
+        endpoint.set_port(port);
         self.lan_discover_count += 1;
-        Some(SearchCommand::QueryReferences {
-            endpoint: ReferenceEndpoint::Address(endpoint),
-            source: ReferenceQuerySource::GameDiscovery,
-            timeout: REFERENCE_QUERY_TIMEOUT,
-        })
+        Some(SearchCommand::query_references(
+            ReferenceEndpoint::Address(endpoint),
+            ReferenceQuerySource::GameDiscovery,
+        ))
     }
 
     pub fn references(&self) -> &[NetworkGameReference] {
@@ -599,19 +603,14 @@ impl NetworkGameSearch {
 
     fn periodic_lan_command(&mut self) -> SearchCommand {
         self.lan_discover_count = 0;
-        SearchCommand::SendLanProbe {
-            target: SocketAddrV6::new(DISCOVERY_MULTICAST, self.config.discovery_port, 0, 0),
-            payload: vec![DISCOVERY_PROBE],
-            trigger: LanProbeTrigger::Periodic,
-        }
+        SearchCommand::lan_probe(self.config.discovery_port, LanProbeTrigger::Periodic)
     }
 
     fn masterserver_query(&self) -> SearchCommand {
-        SearchCommand::QueryReferences {
-            endpoint: ReferenceEndpoint::Url(self.config.master_server_url.clone()),
-            source: ReferenceQuerySource::Masterserver,
-            timeout: REFERENCE_QUERY_TIMEOUT,
-        }
+        SearchCommand::query_references(
+            ReferenceEndpoint::Url(self.config.master_server_url.clone()),
+            ReferenceQuerySource::Masterserver,
+        )
     }
 
     pub fn merge_references(&mut self, references: impl IntoIterator<Item = NetworkGameReference>) {
@@ -1057,11 +1056,10 @@ async fn run_game_search(
                 } => match direct_reference_endpoint(&address, default_port) {
                     Ok(endpoint) => {
                         execute_search_command(
-                            SearchCommand::QueryReferences {
+                            SearchCommand::query_references(
                                 endpoint,
-                                source: ReferenceQuerySource::DirectJoin,
-                                timeout: REFERENCE_QUERY_TIMEOUT,
-                            },
+                                ReferenceQuerySource::DirectJoin,
+                            ),
                             (generation, masterserver_generation),
                             Some(request_id),
                             &mut masterserver_query,
@@ -1966,16 +1964,9 @@ fn fill_reference_source_addresses(references: &mut [NetworkGameReference], sour
         reference.source_address = source;
         for address in &mut reference.addresses {
             if address.endpoint.ip().is_unspecified() {
-                let port = address.endpoint.port();
-                address.endpoint = match source {
-                    SocketAddr::V4(source) => SocketAddr::new((*source.ip()).into(), port),
-                    SocketAddr::V6(source) => SocketAddr::V6(SocketAddrV6::new(
-                        *source.ip(),
-                        port,
-                        source.flowinfo(),
-                        source.scope_id(),
-                    )),
-                };
+                let mut endpoint = source;
+                endpoint.set_port(address.endpoint.port());
+                address.endpoint = endpoint;
             }
         }
         reference.tcp_addresses = reference
@@ -2015,9 +2006,9 @@ fn parse_reference_chunk(
     let mut direct_client_nick = None;
 
     for line in lines {
-        let trimmed_start = trim_reference_ascii_start(line);
+        let trimmed_start = line.trim_ascii_start();
         let indent = line.len() - trimmed_start.len();
-        let trimmed = trim_reference_ascii_end(trimmed_start);
+        let trimmed = trimmed_start.trim_ascii_end();
         if trimmed.starts_with(b"[") && trimmed.ends_with(b"]") {
             if in_player {
                 player.finish(&mut reference.player_names);
@@ -2047,7 +2038,7 @@ fn parse_reference_chunk(
         let Ok(key) = std::str::from_utf8(&trimmed[..equal]) else {
             continue;
         };
-        let raw_value = trim_reference_ascii(&trimmed[equal + 1..]);
+        let raw_value = trimmed[equal + 1..].trim_ascii();
         let value = decode_reference_value(raw_value, config)?;
         if in_player && indent == 6 {
             match key {
@@ -2062,7 +2053,7 @@ fn parse_reference_chunk(
         }
         if direct_client && indent == 2 {
             match key {
-                "ID" => direct_client_id = Some(parse_i32(key, &value)?),
+                "ID" => direct_client_id = Some(parse_integer(key, &value)?),
                 "Name" => direct_client_name = Some(value),
                 "Nick" => direct_client_nick = Some(value),
                 _ => {}
@@ -2071,8 +2062,8 @@ fn parse_reference_chunk(
         }
         if netpuncher_id && indent == 2 {
             match key {
-                "IPv4" => reference.netpuncher_ipv4 = parse_u32(key, &value)?,
-                "IPv6" => reference.netpuncher_ipv6 = parse_u32(key, &value)?,
+                "IPv4" => reference.netpuncher_ipv4 = parse_integer(key, &value)?,
+                "IPv6" => reference.netpuncher_ipv6 = parse_integer(key, &value)?,
                 _ => {}
             }
             continue;
@@ -2081,11 +2072,11 @@ fn parse_reference_chunk(
             continue;
         }
         match key {
-            "Icon" => reference.icon = parse_i32(key, &value)?,
+            "Icon" => reference.icon = parse_integer(key, &value)?,
             "State" => reference.state = value,
-            "CtrlMode" => reference.control_mode = parse_i32(key, &value)?,
-            "Time" => reference.time = parse_i32(key, &value)?,
-            "StartTime" => reference.start_time = parse_i64(key, &value)?,
+            "CtrlMode" => reference.control_mode = parse_integer(key, &value)?,
+            "Time" => reference.time = parse_integer(key, &value)?,
+            "StartTime" => reference.start_time = parse_integer(key, &value)?,
             "Comment" => reference.comment = value,
             "JoinAllowed" => reference.join_allowed = parse_bool(&value),
             "PasswordNeeded" => reference.password_needed = parse_bool(&value),
@@ -2094,7 +2085,7 @@ fn parse_reference_chunk(
             "Goals" => reference.goals = parse_reference_goal_ids(&value),
             "League" => reference.league = value,
             "LeagueAddress" => reference.league_address = value,
-            "MaxPlayers" => reference.max_players = parse_i32(key, &value)?,
+            "MaxPlayers" => reference.max_players = parse_integer(key, &value)?,
             "Address" => {
                 let addresses = parse_reference_addresses(&value);
                 reference.tcp_addresses = addresses
@@ -2107,10 +2098,10 @@ fn parse_reference_chunk(
             "Game" => reference.game = value,
             "Version" => {
                 for (index, part) in value.split(',').take(4).enumerate() {
-                    reference.version[index] = parse_i32(key, part.trim())?;
+                    reference.version[index] = parse_integer(key, part.trim())?;
                 }
             }
-            "Build" => reference.build = parse_i32(key, &value)?,
+            "Build" => reference.build = parse_integer(key, &value)?,
             "Title" => reference.title = value,
             "NetpuncherAddr" => reference.netpuncher_address = value,
             _ => {}
@@ -2177,24 +2168,6 @@ fn parse_reference_goal_ids(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn trim_reference_ascii_start(mut bytes: &[u8]) -> &[u8] {
-    while bytes.first().is_some_and(|byte| byte.is_ascii_whitespace()) {
-        bytes = &bytes[1..];
-    }
-    bytes
-}
-
-fn trim_reference_ascii_end(mut bytes: &[u8]) -> &[u8] {
-    while bytes.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
-        bytes = &bytes[..bytes.len() - 1];
-    }
-    bytes
-}
-
-fn trim_reference_ascii(bytes: &[u8]) -> &[u8] {
-    trim_reference_ascii_end(trim_reference_ascii_start(bytes))
-}
-
 fn decode_reference_value(
     value: &[u8],
     config: &ReferenceQueryConfig,
@@ -2236,15 +2209,7 @@ fn unquote(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-fn parse_i32(key: &str, value: &str) -> Result<i32, ReferenceParseError> {
-    value.parse().map_err(|_| invalid_integer(key, value))
-}
-
-fn parse_i64(key: &str, value: &str) -> Result<i64, ReferenceParseError> {
-    value.parse().map_err(|_| invalid_integer(key, value))
-}
-
-fn parse_u32(key: &str, value: &str) -> Result<u32, ReferenceParseError> {
+fn parse_integer<T: std::str::FromStr>(key: &str, value: &str) -> Result<T, ReferenceParseError> {
     value.parse().map_err(|_| invalid_integer(key, value))
 }
 
@@ -2279,7 +2244,99 @@ fn parse_reference_addresses(value: &str) -> Vec<NetworkAddress> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Write as _};
+
     use super::*;
+
+    const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn network_address(protocol: NetworkProtocol, address: &str) -> NetworkAddress {
+        NetworkAddress::new(protocol, address.parse().unwrap())
+    }
+
+    fn ipv6_address(address: &str, port: u16, flowinfo: u32, scope_id: u32) -> SocketAddr {
+        SocketAddrV6::new(address.parse().unwrap(), port, flowinfo, scope_id).into()
+    }
+
+    fn udp_ipv6(address: &str, port: u16, flowinfo: u32, scope_id: u32) -> NetworkAddress {
+        NetworkAddress::new(
+            NetworkProtocol::Udp,
+            ipv6_address(address, port, flowinfo, scope_id),
+        )
+    }
+
+    fn multicast_target(scope_id: u32) -> SocketAddrV6 {
+        SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, scope_id)
+    }
+
+    fn reference_config(language_charset: &str) -> ReferenceQueryConfig {
+        ReferenceQueryConfig {
+            language_charset: language_charset.to_string(),
+            ..ReferenceQueryConfig::default()
+        }
+    }
+
+    fn local_search(discovery_port: u16) -> StartupGameSearch {
+        StartupGameSearch::start(NetworkGameSearchConfig {
+            internet_enabled: false,
+            discovery_port,
+            ..NetworkGameSearchConfig::default()
+        })
+        .unwrap()
+    }
+
+    fn recv_event(search: &StartupGameSearch) -> StartupGameSearchEvent {
+        search.events().recv_timeout(EVENT_TIMEOUT).unwrap()
+    }
+
+    fn wait_for_clear(search: &StartupGameSearch) {
+        while !matches!(recv_event(search), StartupGameSearchEvent::Cleared) {}
+    }
+
+    fn query_direct(search: &StartupGameSearch, request_id: u64, address: impl Into<String>) {
+        search
+            .query_direct(request_id, address.into(), DEFAULT_REFERENCE_PORT)
+            .unwrap();
+    }
+
+    type DiscoveryQueryFixture = (GameDiscoveryQueryGate, SearchCommand, SocketAddr, Instant);
+
+    fn discovery_query_fixture(port: u16) -> DiscoveryQueryFixture {
+        let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let command = SearchCommand::query_references(
+            ReferenceEndpoint::Address(address),
+            ReferenceQuerySource::GameDiscovery,
+        );
+        (Default::default(), command, address, Instant::now())
+    }
+
+    fn assert_discovery_error(event: StartupGameSearchEvent, message: &str) {
+        let StartupGameSearchEvent::SearchError {
+            source,
+            message: actual,
+        } = event
+        else {
+            panic!("expected LAN discovery error");
+        };
+        assert_eq!(source, Some(ReferenceQuerySource::GameDiscovery));
+        assert_eq!(actual, message);
+    }
+
+    fn write_http_response(stream: &mut std::net::TcpStream, status: u16, body: &[u8]) {
+        let reason = if status == 200 {
+            "OK"
+        } else {
+            "Service Unavailable"
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+        stream.flush().unwrap();
+    }
 
     fn spawn_reference_server(responses: Vec<Vec<u8>>) -> (SocketAddr, thread::JoinHandle<()>) {
         spawn_reference_status_server(responses.into_iter().map(|body| (200, body)).collect())
@@ -2288,8 +2345,6 @@ mod tests {
     fn spawn_reference_status_server(
         responses: Vec<(u16, Vec<u8>)>,
     ) -> (SocketAddr, thread::JoinHandle<()>) {
-        use std::io::{Read as _, Write as _};
-
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let worker = thread::spawn(move || {
@@ -2300,19 +2355,7 @@ mod tests {
                     .unwrap();
                 let mut request = [0_u8; 4096];
                 let _ = stream.read(&mut request).unwrap();
-                let reason = if status == 200 {
-                    "OK"
-                } else {
-                    "Service Unavailable"
-                };
-                write!(
-                    stream,
-                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                )
-                .unwrap();
-                stream.write_all(&body).unwrap();
-                stream.flush().unwrap();
+                write_http_response(&mut stream, status, &body);
             }
         });
         (address, worker)
@@ -2391,42 +2434,17 @@ Title=Recovered game\n"
         // src/C4Network2.cpp:296-303;
         // src/C4Network2Address.cpp:123-128;
         // src/C4NetIO.cpp:232-275, 382-386).
-        let global_v6 =
-            NetworkAddress::new(NetworkProtocol::Tcp, "[2001:db8::1]:11112".parse().unwrap());
-        let private_v4 =
-            NetworkAddress::new(NetworkProtocol::Udp, "10.0.0.1:11113".parse().unwrap());
-        let global_v4 =
-            NetworkAddress::new(NetworkProtocol::Tcp, "203.0.113.1:11112".parse().unwrap());
-        let link_local_v6 = NetworkAddress::new(
-            NetworkProtocol::Udp,
-            SocketAddr::V6(SocketAddrV6::new(
-                "fe80::beef".parse().unwrap(),
-                11_113,
-                4,
-                0,
-            )),
-        );
-        let private_v6 =
-            NetworkAddress::new(NetworkProtocol::Tcp, "[fd00::1]:11112".parse().unwrap());
+        let global_v6 = network_address(NetworkProtocol::Tcp, "[2001:db8::1]:11112");
+        let private_v4 = network_address(NetworkProtocol::Udp, "10.0.0.1:11113");
+        let global_v4 = network_address(NetworkProtocol::Tcp, "203.0.113.1:11112");
+        let link_local_v6 = udp_ipv6("fe80::beef", 11_113, 4, 0);
+        let private_v6 = network_address(NetworkProtocol::Tcp, "[fd00::1]:11112");
         let reference = NetworkGameReference {
             addresses: vec![global_v6, private_v4, global_v4, link_local_v6, private_v6],
-            source_address: SocketAddr::V6(SocketAddrV6::new(
-                "fe80::1234".parse().unwrap(),
-                11_111,
-                0,
-                9,
-            )),
+            source_address: ipv6_address("fe80::1234", 11_111, 0, 9),
             ..NetworkGameReference::default()
         };
-        let scoped_link_local_v6 = NetworkAddress::new(
-            NetworkProtocol::Udp,
-            SocketAddr::V6(SocketAddrV6::new(
-                "fe80::beef".parse().unwrap(),
-                11_113,
-                4,
-                9,
-            )),
-        );
+        let scoped_link_local_v6 = udp_ipv6("fe80::beef", 11_113, 4, 9);
 
         let without_global_ipv6 = reference.join_addresses(false);
         assert_eq!(
@@ -2441,12 +2459,7 @@ Title=Recovered game\n"
         );
         assert_eq!(
             without_global_ipv6[3].endpoint,
-            SocketAddr::V6(SocketAddrV6::new(
-                "fe80::beef".parse().unwrap(),
-                11_113,
-                4,
-                9,
-            ))
+            ipv6_address("fe80::beef", 11_113, 4, 9)
         );
         assert_eq!(
             reference.join_addresses(true),
@@ -2466,48 +2479,24 @@ Title=Recovered game\n"
         // once, and expands every local address across the local interface ID
         // list in order (pristine 9ffa0a5d src/C4Network2.cpp:375-405;
         // src/C4Network2Address.cpp:92-101, 123-128).
-        let global_v4 =
-            NetworkAddress::new(NetworkProtocol::Tcp, "203.0.113.1:11112".parse().unwrap());
-        let link_local_v6 =
-            NetworkAddress::new(NetworkProtocol::Udp, "[fe80::beef]:11113".parse().unwrap());
-        let link_local_v4 =
-            NetworkAddress::new(NetworkProtocol::Tcp, "169.254.1.2:11112".parse().unwrap());
+        let global_v4 = network_address(NetworkProtocol::Tcp, "203.0.113.1:11112");
+        let link_local_v6 = network_address(NetworkProtocol::Udp, "[fe80::beef]:11113");
+        let link_local_v4 = network_address(NetworkProtocol::Tcp, "169.254.1.2:11112");
         let reference = NetworkGameReference {
             addresses: vec![
-                NetworkAddress::new(NetworkProtocol::Tcp, "[::]:0".parse().unwrap()),
+                network_address(NetworkProtocol::Tcp, "[::]:0"),
                 link_local_v6,
                 global_v4,
                 link_local_v4,
             ],
-            source_address: SocketAddr::V6(SocketAddrV6::new(
-                "fe80::1234".parse().unwrap(),
-                11_111,
-                0,
-                9,
-            )),
+            source_address: ipv6_address("fe80::1234", 11_111, 0, 9),
             ..NetworkGameReference::default()
         };
 
         let expected_attempts = [
             global_v4,
-            NetworkAddress::new(
-                NetworkProtocol::Udp,
-                SocketAddr::V6(SocketAddrV6::new(
-                    "fe80::beef".parse().unwrap(),
-                    11_113,
-                    0,
-                    3,
-                )),
-            ),
-            NetworkAddress::new(
-                NetworkProtocol::Udp,
-                SocketAddr::V6(SocketAddrV6::new(
-                    "fe80::beef".parse().unwrap(),
-                    11_113,
-                    0,
-                    7,
-                )),
-            ),
+            udp_ipv6("fe80::beef", 11_113, 0, 3),
+            udp_ipv6("fe80::beef", 11_113, 0, 7),
             link_local_v4,
             link_local_v4,
         ];
@@ -2516,15 +2505,7 @@ Title=Recovered game\n"
             route_plan.logical_addresses,
             [
                 global_v4,
-                NetworkAddress::new(
-                    NetworkProtocol::Udp,
-                    SocketAddr::V6(SocketAddrV6::new(
-                        "fe80::beef".parse().unwrap(),
-                        11_113,
-                        0,
-                        9,
-                    )),
-                ),
+                udp_ipv6("fe80::beef", 11_113, 0, 9),
                 link_local_v4,
             ],
             "the progress routes retain one source-scoped logical address"
@@ -2539,19 +2520,9 @@ Title=Recovered game\n"
         // flowinfo, and scope into only advertised null hosts while preserving
         // their ports (pristine 9ffa0a5d src/C4Network2Reference.cpp:37-47;
         // src/C4Network2Address.cpp:187-205).
-        let source = SocketAddr::V6(SocketAddrV6::new(
-            "fe80::1234".parse().unwrap(),
-            11_111,
-            0x55,
-            7,
-        ));
-        let null_tcp = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 11_112, 0, 0));
-        let advertised_udp = SocketAddr::V6(SocketAddrV6::new(
-            "fe80::beef".parse().unwrap(),
-            11_113,
-            0,
-            0,
-        ));
+        let source = ipv6_address("fe80::1234", 11_111, 0x55, 7);
+        let null_tcp = ipv6_address("::", 11_112, 0, 0);
+        let advertised_udp = ipv6_address("fe80::beef", 11_113, 0, 0);
         let mut references = [NetworkGameReference {
             addresses: vec![
                 NetworkAddress::new(NetworkProtocol::Tcp, null_tcp),
@@ -2566,12 +2537,7 @@ Title=Recovered game\n"
         assert_eq!(references[0].source_address, source);
         assert_eq!(
             references[0].addresses[0].endpoint,
-            SocketAddr::V6(SocketAddrV6::new(
-                "fe80::1234".parse().unwrap(),
-                11_112,
-                0x55,
-                7,
-            ))
+            ipv6_address("fe80::1234", 11_112, 0x55, 7)
         );
         assert_eq!(references[0].addresses[1].endpoint, advertised_udp);
         assert_eq!(
@@ -2618,24 +2584,15 @@ Address=TCP:"192.0.2.8:41112"
         );
         assert!(references[0].addresses[0].endpoint.ip().is_loopback());
         assert_eq!(references[0].addresses[0].endpoint.port(), 31_113);
-        assert_eq!(
-            references[0].addresses[1].endpoint,
-            "127.0.0.1:31112".parse().unwrap()
-        );
-        assert_eq!(
-            references[0].addresses[2].endpoint,
-            "[::1]:31114".parse().unwrap()
-        );
-        assert_eq!(
-            references[0].addresses[3].endpoint,
-            "[::]:0".parse().unwrap()
-        );
+        for (index, expected) in [(1, "127.0.0.1:31112"), (2, "[::1]:31114"), (3, "[::]:0")] {
+            assert_eq!(
+                references[0].addresses[index].endpoint,
+                expected.parse().unwrap()
+            );
+        }
         assert_eq!(
             references[1].addresses,
-            [NetworkAddress::new(
-                NetworkProtocol::Tcp,
-                "192.0.2.8:41112".parse().unwrap(),
-            )]
+            [network_address(NetworkProtocol::Tcp, "192.0.2.8:41112")]
         );
 
         let source = "203.0.113.9:51111".parse().unwrap();
@@ -2666,12 +2623,7 @@ Address=TCP:"192.0.2.8:41112"
         // src/C4Network2Discover.cpp:76-87;
         // src/C4StartupNetDlg.cpp:903-908;
         // src/C4Network2Reference.cpp:532-537).
-        let address = SocketAddr::V6(SocketAddrV6::new(
-            "fe80::1234".parse().unwrap(),
-            DEFAULT_REFERENCE_PORT,
-            0,
-            7,
-        ));
+        let address = ipv6_address("fe80::1234", DEFAULT_REFERENCE_PORT, 0, 7);
 
         let plan = ReferenceRequestPlan::for_endpoint(ReferenceEndpoint::Address(address));
         assert_eq!(
@@ -2703,33 +2655,41 @@ Address=TCP:"192.0.2.8:41112"
     fn direct_reference_endpoints_apply_the_configured_default_port() {
         let default_port = 12_345;
 
-        assert_eq!(
-            direct_reference_endpoint(" 127.0.0.1:23456 ", default_port).unwrap(),
-            ReferenceEndpoint::Address("127.0.0.1:23456".parse().unwrap())
-        );
-        assert_eq!(
-            direct_reference_endpoint("2001:db8::1", default_port).unwrap(),
-            ReferenceEndpoint::Address("[2001:db8::1]:12345".parse().unwrap())
-        );
-        assert_eq!(
-            direct_reference_endpoint("games.example.test", default_port).unwrap(),
-            ReferenceEndpoint::Url("http://games.example.test:12345/".to_string())
-        );
-        assert_eq!(
-            direct_reference_endpoint("games.example.test:23456", default_port).unwrap(),
-            ReferenceEndpoint::Url("http://games.example.test:23456/".to_string())
-        );
-        assert_eq!(
-            direct_reference_endpoint("http://games.example.test/reference", default_port).unwrap(),
-            ReferenceEndpoint::Url("http://games.example.test:12345/reference".to_string())
-        );
-        assert_eq!(
-            direct_reference_endpoint("https://games.example.test:23456", default_port).unwrap(),
-            ReferenceEndpoint::Url("https://games.example.test:23456/".to_string())
-        );
-
-        assert!(direct_reference_endpoint("  ", default_port).is_err());
-        assert!(direct_reference_endpoint("ftp://games.example.test", default_port).is_err());
+        for (input, expected) in [
+            (" 127.0.0.1:23456 ", "127.0.0.1:23456"),
+            ("2001:db8::1", "[2001:db8::1]:12345"),
+        ] {
+            assert_eq!(
+                direct_reference_endpoint(input, default_port),
+                Ok(ReferenceEndpoint::Address(expected.parse().unwrap()))
+            );
+        }
+        for (input, expected) in [
+            ("games.example.test", "http://games.example.test:12345/"),
+            (
+                "games.example.test:23456",
+                "http://games.example.test:23456/",
+            ),
+            (
+                "http://games.example.test/reference",
+                "http://games.example.test:12345/reference",
+            ),
+            (
+                "https://games.example.test:23456",
+                "https://games.example.test:23456/",
+            ),
+        ] {
+            assert_eq!(
+                direct_reference_endpoint(input, default_port),
+                Ok(ReferenceEndpoint::Url(expected.to_string()))
+            );
+        }
+        for input in ["  ", "ftp://games.example.test"] {
+            assert!(
+                direct_reference_endpoint(input, default_port).is_err(),
+                "{input}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2866,11 +2826,7 @@ Title=Empty\n",
             ("", "CP1252"),
             ("CP1252", "CP1252"),
         ] {
-            let config = ReferenceQueryConfig {
-                language_charset: configured.to_string(),
-                language_sequence: String::new(),
-                http_backend: Default::default(),
-            };
+            let config = reference_config(configured);
             assert_eq!(config.charset_code_name(), expected, "{configured}");
         }
     }
@@ -2898,11 +2854,7 @@ Title=Empty\n",
             ("UTF-8", &[0xe2, 0x82, 0xac][..], "€"),
             ("", &[0x80][..], "€"),
         ] {
-            let config = ReferenceQueryConfig {
-                language_charset: configured.to_string(),
-                language_sequence: String::new(),
-                http_backend: Default::default(),
-            };
+            let config = reference_config(configured);
             let mut body = b"[Reference]\nTitle=\"".to_vec();
             body.extend_from_slice(encoded);
             body.extend_from_slice(b"\"\n");
@@ -2929,7 +2881,7 @@ Title=Empty\n",
         // in both directions (clonk-org/clonk-rs#107). Enumerating cannot
         // desync: discovery only selects which game to join, before any
         // control is exchanged.
-        let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
+        let target = multicast_target(DEFAULT_MULTICAST_INTERFACE);
 
         assert_eq!(
             multicast_targets(target, &[DEFAULT_MULTICAST_INTERFACE]),
@@ -2970,14 +2922,11 @@ Title=Empty\n",
         // by default. Once that interface has refused the join there is nothing
         // left to reach it through, so each joined interface gets its own
         // destination scope.
-        let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
+        let target = multicast_target(DEFAULT_MULTICAST_INTERFACE);
 
         assert_eq!(
             multicast_targets(target, &[3, 11]),
-            vec![
-                SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 3),
-                SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 11),
-            ]
+            vec![multicast_target(3), multicast_target(11)]
         );
     }
 
@@ -2986,7 +2935,7 @@ Title=Empty\n",
         // C4NetIOSimpleUDP::Send keeps sending to the unscoped group after a
         // refused join, because InitBroadcast leaves the socket usable
         // (pinned oracle src/C4NetIO.cpp:1626-1632, :1773-1791).
-        let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
+        let target = multicast_target(DEFAULT_MULTICAST_INTERFACE);
 
         assert_eq!(multicast_targets(target, &[]), vec![target]);
     }
@@ -2998,8 +2947,8 @@ Title=Empty\n",
         // appears nowhere in the oracle tree (pinned oracle
         // src/C4NetIO.cpp:1614, :1627, :1886). macOS rejects a request for
         // interface 0 outright, so only the scoped fan-out may ask for one.
-        let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
-        let scoped = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 7);
+        let target = multicast_target(DEFAULT_MULTICAST_INTERFACE);
+        let scoped = multicast_target(7);
 
         assert_eq!(multicast_send_interface(&target), None);
         assert_eq!(multicast_send_interface(&scoped), Some(7));
@@ -3059,14 +3008,7 @@ Title=Empty\n",
 
     #[test]
     fn duplicate_live_lan_reference_queries_are_suppressed_by_address() {
-        let address: SocketAddr = "127.0.0.1:31112".parse().unwrap();
-        let command = SearchCommand::QueryReferences {
-            endpoint: ReferenceEndpoint::Address(address),
-            source: ReferenceQuerySource::GameDiscovery,
-            timeout: REFERENCE_QUERY_TIMEOUT,
-        };
-        let mut gate = GameDiscoveryQueryGate::default();
-        let now = Instant::now();
+        let (mut gate, command, address, now) = discovery_query_fixture(31_112);
 
         assert!(gate.begin_at(now, &command));
         assert!(!gate.begin_at(now, &command));
@@ -3128,14 +3070,7 @@ Title=Empty\n",
         // once per C4NetGameDiscoveryInterval (:1116-1131; C4StartupNetDlg.h:31).
         // This port probes far more often than that, so it holds the per-host
         // interval here instead of inheriting it from the probe cadence.
-        let address: SocketAddr = "127.0.0.1:31113".parse().unwrap();
-        let command = SearchCommand::QueryReferences {
-            endpoint: ReferenceEndpoint::Address(address),
-            source: ReferenceQuerySource::GameDiscovery,
-            timeout: REFERENCE_QUERY_TIMEOUT,
-        };
-        let mut gate = GameDiscoveryQueryGate::default();
-        let now = Instant::now();
+        let (mut gate, command, address, now) = discovery_query_fixture(31_113);
 
         assert!(gate.begin_at(now, &command));
         gate.finish_at(now, address, GameDiscoveryQueryOutcome::References);
@@ -3161,14 +3096,7 @@ Title=Empty\n",
         // row is displayed, so the retry waits out C4NetErrorRefTimeout
         // (src/C4StartupNetDlg.h:30), the lifetime C++ gives the row itself
         // (:506-531).
-        let address: SocketAddr = "127.0.0.1:31114".parse().unwrap();
-        let command = SearchCommand::QueryReferences {
-            endpoint: ReferenceEndpoint::Address(address),
-            source: ReferenceQuerySource::GameDiscovery,
-            timeout: REFERENCE_QUERY_TIMEOUT,
-        };
-        let mut gate = GameDiscoveryQueryGate::default();
-        let now = Instant::now();
+        let (mut gate, command, address, now) = discovery_query_fixture(31_114);
 
         assert!(gate.begin_at(now, &command));
         gate.finish_at(now, address, GameDiscoveryQueryOutcome::Failed);
@@ -3188,14 +3116,7 @@ Title=Empty\n",
         // DoRefresh deletes every row and restarts discovery from nothing
         // (pinned oracle src/C4StartupNetDlg.cpp:1078-1109), so no backoff this
         // gate is holding may outlive it - the button has to mean now.
-        let address: SocketAddr = "127.0.0.1:31115".parse().unwrap();
-        let command = SearchCommand::QueryReferences {
-            endpoint: ReferenceEndpoint::Address(address),
-            source: ReferenceQuerySource::GameDiscovery,
-            timeout: REFERENCE_QUERY_TIMEOUT,
-        };
-        let mut gate = GameDiscoveryQueryGate::default();
-        let now = Instant::now();
+        let (mut gate, command, address, now) = discovery_query_fixture(31_115);
 
         assert!(gate.begin_at(now, &command));
         gate.finish_at(now, address, GameDiscoveryQueryOutcome::References);
@@ -3220,13 +3141,7 @@ Title=Empty\n",
 
         let event = lan_probe_error_event(LanProbeTrigger::ExplicitRefresh, send, failure())
             .expect("explicit refresh reports the discovery send failure");
-        match event {
-            StartupGameSearchEvent::SearchError { source, message } => {
-                assert_eq!(source, Some(ReferenceQuerySource::GameDiscovery));
-                assert_eq!(message, "unable to send LAN discovery probe: no route");
-            }
-            _ => panic!("expected LAN discovery error"),
-        }
+        assert_discovery_error(event, "unable to send LAN discovery probe: no route");
     }
 
     #[test]
@@ -3244,16 +3159,10 @@ Title=Empty\n",
             error(),
         )
         .expect("explicit refresh reports the unusable socket");
-        match event {
-            StartupGameSearchEvent::SearchError { source, message } => {
-                assert_eq!(source, Some(ReferenceQuerySource::GameDiscovery));
-                assert_eq!(
-                    message,
-                    "LAN discovery is unavailable: no multicast interface"
-                );
-            }
-            _ => panic!("expected LAN discovery error"),
-        }
+        assert_discovery_error(
+            event,
+            "LAN discovery is unavailable: no multicast interface",
+        );
     }
 
     #[test]
@@ -3278,21 +3187,10 @@ Version=4,9,11,0\n\
 Build=362\n"
             .to_vec();
         let (address, server) = spawn_reference_server(vec![body, Vec::new()]);
-        let search = StartupGameSearch::start(NetworkGameSearchConfig {
-            internet_enabled: false,
-            discovery_port: 0,
-            ..NetworkGameSearchConfig::default()
-        })
-        .unwrap();
+        let search = local_search(0);
 
-        search
-            .query_direct(41, format!("  {address}  "), DEFAULT_REFERENCE_PORT)
-            .unwrap();
-        let first_references = match search
-            .events()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-        {
+        query_direct(&search, 41, format!("  {address}  "));
+        let first_references = match recv_event(&search) {
             StartupGameSearchEvent::DirectQueryResolved {
                 request_id,
                 references,
@@ -3308,14 +3206,8 @@ Build=362\n"
             event => panic!("expected tagged direct-query result, got {event:?}"),
         };
 
-        search
-            .query_direct(42, address.to_string(), DEFAULT_REFERENCE_PORT)
-            .unwrap();
-        match search
-            .events()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-        {
+        query_direct(&search, 42, address.to_string());
+        match recv_event(&search) {
             StartupGameSearchEvent::DirectQueryResolved {
                 request_id,
                 references,
@@ -3343,24 +3235,9 @@ Build=362\n"
             .local_addr()
             .unwrap()
             .port();
-        let search = StartupGameSearch::start(NetworkGameSearchConfig {
-            internet_enabled: false,
-            discovery_port,
-            ..NetworkGameSearchConfig::default()
-        })
-        .unwrap();
+        let search = local_search(discovery_port);
         search.initial_refresh().unwrap();
-        loop {
-            if matches!(
-                search
-                    .events()
-                    .recv_timeout(Duration::from_secs(5))
-                    .unwrap(),
-                StartupGameSearchEvent::Cleared
-            ) {
-                break;
-            }
-        }
+        wait_for_clear(&search);
 
         let sender = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
         let port = unavailable_reference_port.to_ne_bytes();
@@ -3370,23 +3247,14 @@ Build=362\n"
                 (Ipv6Addr::LOCALHOST, discovery_port),
             )
             .unwrap();
-        let expected = SocketAddr::V6(SocketAddrV6::new(
-            Ipv6Addr::LOCALHOST,
-            unavailable_reference_port,
-            0,
-            0,
-        ));
+        let expected = ipv6_address("::1", unavailable_reference_port, 0, 0);
 
         assert!(matches!(
-            search.events().recv_timeout(Duration::from_secs(5)).unwrap(),
+            recv_event(&search),
             StartupGameSearchEvent::GameDiscoveryQueryStarted { address }
                 if address == expected
         ));
-        match search
-            .events()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-        {
+        match recv_event(&search) {
             StartupGameSearchEvent::GameDiscoveryQueryFailed { address, message } => {
                 assert_eq!(address, expected);
                 assert!(!message.is_empty());
@@ -3397,8 +3265,6 @@ Build=362\n"
 
     #[test]
     fn startup_refresh_discards_inflight_direct_query_with_deleted_row() {
-        use std::io::{Read as _, Write as _};
-
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let (request_started_tx, request_started_rx) = mpsc::channel();
@@ -3418,40 +3284,16 @@ Address=TCP:127.0.0.1:31112\n\
 Game=LegacyClonk\n\
 Version=4,9,11,0\n\
 Build=362\n";
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(body).unwrap();
-            stream.flush().unwrap();
+            write_http_response(&mut stream, 200, body);
         });
-        let search = StartupGameSearch::start(NetworkGameSearchConfig {
-            internet_enabled: false,
-            discovery_port: 0,
-            ..NetworkGameSearchConfig::default()
-        })
-        .unwrap();
+        let search = local_search(0);
 
-        search
-            .query_direct(59, address.to_string(), DEFAULT_REFERENCE_PORT)
-            .unwrap();
+        query_direct(&search, 59, address.to_string());
         request_started_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("direct request reached the delayed server");
         search.refresh().unwrap();
-        loop {
-            if matches!(
-                search
-                    .events()
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("refresh emits its cleared event"),
-                StartupGameSearchEvent::Cleared
-            ) {
-                break;
-            }
-        }
+        wait_for_clear(&search);
         release_response_tx.send(()).unwrap();
         server.join().unwrap();
 
@@ -3470,25 +3312,10 @@ Build=362\n";
 
     #[test]
     fn startup_direct_query_reports_tagged_endpoint_failures() {
-        let search = StartupGameSearch::start(NetworkGameSearchConfig {
-            internet_enabled: false,
-            discovery_port: 0,
-            ..NetworkGameSearchConfig::default()
-        })
-        .unwrap();
+        let search = local_search(0);
 
-        search
-            .query_direct(
-                73,
-                "ftp://games.example.test".to_string(),
-                DEFAULT_REFERENCE_PORT,
-            )
-            .unwrap();
-        match search
-            .events()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-        {
+        query_direct(&search, 73, "ftp://games.example.test");
+        match recv_event(&search) {
             StartupGameSearchEvent::DirectQueryFailed {
                 request_id,
                 message,
@@ -3512,11 +3339,7 @@ Build=362\n";
         let (query_tx, _query_rx) = tokio::sync::mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
         let mut masterserver_query = None;
-        let command = |trigger| SearchCommand::SendLanProbe {
-            target: SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0),
-            payload: vec![DISCOVERY_PROBE],
-            trigger,
-        };
+        let command = |trigger| SearchCommand::lan_probe(DEFAULT_DISCOVERY_PORT, trigger);
 
         for trigger in [LanProbeTrigger::Initial, LanProbeTrigger::Periodic] {
             execute_search_command(
@@ -3547,18 +3370,11 @@ Build=362\n";
             &ReferenceQueryConfig::default(),
         )
         .await;
-        match event_rx
-            .try_recv()
-            .expect("explicit refresh reports failure")
-        {
-            StartupGameSearchEvent::SearchError { source, message } => {
-                assert_eq!(source, Some(ReferenceQuerySource::GameDiscovery));
-                assert_eq!(
-                    message,
-                    "LAN discovery is unavailable: no multicast interface"
-                );
-            }
-            _ => panic!("expected LAN discovery error"),
-        }
+        assert_discovery_error(
+            event_rx
+                .try_recv()
+                .expect("explicit refresh reports failure"),
+            "LAN discovery is unavailable: no multicast interface",
+        );
     }
 }

@@ -1905,21 +1905,8 @@ func RenameInfo(object target, string name, bool make_valid)
         };
         engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Name owner".to_string(),
-                player_info_id: 1,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
                 crew: vec![info("Target", 30), info("Ada", 20), info("Ada2", 10)],
-                control_style: false,
-                auto_context_menu: false,
-                startup_player_count: 1,
+                ..compat_join_player_config("Name owner")
             }).test_value();
 
         let target = engine.player(0).test_value().crew()[0];
@@ -2327,17 +2314,6 @@ func Announce()
         engine.set_player_starts(vec![start]);
         engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Death message owner".to_string(),
-                player_info_id: 1,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
                 crew: vec![crate::player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
@@ -2345,9 +2321,7 @@ func Announce()
                     physical: crate::PhysicalInfo::default(),
                     ..Default::default()
                 }],
-                control_style: false,
-                auto_context_menu: false,
-                startup_player_count: 1,
+                ..compat_join_player_config("Death message owner")
             }).test_value();
         let crew = engine.player(0).test_value().crew()[0];
         let crew_index = engine.find_object_index(crew).test_value();

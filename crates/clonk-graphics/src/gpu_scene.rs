@@ -1022,6 +1022,26 @@ pub struct GpuScene {
     pub commands: Vec<GpuCommand>,
 }
 
+impl GpuScene {
+    pub fn new(
+        logical_extent: [u32; 2],
+        clear: Color,
+        gamma: GpuGammaLut,
+        gamma_mode: GpuGammaMode,
+        textures: Vec<GpuTextureResource>,
+        commands: Vec<GpuCommand>,
+    ) -> Self {
+        Self {
+            logical_extent,
+            clear,
+            gamma,
+            gamma_mode,
+            textures,
+            commands,
+        }
+    }
+}
+
 /// State that makes two compact object batches one adjacent resource run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ObjectBatchKey {
@@ -1770,14 +1790,14 @@ impl GpuSceneRecorder {
         textures.retain(|id, _| referenced.contains(id));
         let mut textures = textures.into_values().collect::<Vec<_>>();
         textures.sort_by_key(|resource| resource.id);
-        GpuScene {
+        GpuScene::new(
             logical_extent,
             clear,
-            gamma: GpuGammaLut::from_ramp(gamma),
-            gamma_mode: GpuGammaMode::Fragment,
+            GpuGammaLut::from_ramp(gamma),
+            GpuGammaMode::Fragment,
             textures,
             commands,
-        }
+        )
     }
 
     pub fn is_empty(&self) -> bool {

@@ -2450,23 +2450,7 @@ global func Step(state, frame, random)
             .map(|object| object.id)
             .collect();
         engine
-            .join_player(crate::JoinPlayerConfig {
-                name: "Tester".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
-            }).test_value();
+            .join_player(scenario_join_player_config("Tester")).test_value();
         engine
             .snapshot()
             .objects
@@ -2502,17 +2486,6 @@ global func Step(state, frame, random)
 
         engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Tester".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
                 crew: vec![crate::player_file::CrewInfo {
                     id: "CLNK".to_string(),
                     name: "Henry".to_string(),
@@ -2547,9 +2520,7 @@ global func Step(state, frame, random)
                     extra_data: Vec::new(),
                     portraits: Default::default(),
                 }],
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
+                ..scenario_join_player_config("Tester")
             }).test_value();
 
         let crew = engine

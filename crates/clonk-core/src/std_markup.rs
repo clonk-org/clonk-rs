@@ -1,5 +1,3 @@
-use crate::std_buf::StdStrBuf;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarkupTag {
     Italic,
@@ -143,20 +141,6 @@ impl Markup {
         *text = output;
         changed
     }
-
-    pub fn strip_markup_buf(buf: &mut StdStrBuf) -> bool {
-        match std::str::from_utf8(buf.as_bytes()) {
-            Ok(data) => {
-                let mut owned = data.to_string();
-                let changed = Self::strip_markup(&mut owned);
-                if changed {
-                    buf.copy(&owned);
-                }
-                changed
-            }
-            Err(_) => false,
-        }
-    }
 }
 
 fn tag_name(tag: &MarkupTag) -> &'static str {
@@ -200,13 +184,6 @@ mod tests {
         let mut text = "<i>Test</i>".to_string();
         assert!(Markup::strip_markup(&mut text));
         assert_eq!(text, "Test");
-    }
-
-    #[test]
-    fn strip_markup_std_str_buf() {
-        let mut buf = StdStrBuf::from_str("<c ff0000>colored</c>", true);
-        assert!(Markup::strip_markup_buf(&mut buf));
-        assert_eq!(std::str::from_utf8(buf.as_bytes()).unwrap(), "colored");
     }
 
     #[test]

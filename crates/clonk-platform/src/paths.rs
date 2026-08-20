@@ -649,9 +649,7 @@ fn configured_general_value(config_file: &Path, key: &str) -> Option<String> {
     if bytes.contains(&0) {
         return None;
     }
-    let mut projected = clonk_core::std_buf::StdStrBuf::new();
-    projected.copy_bytes(&bytes);
-    projected.ensure_unicode();
+    let projected = clonk_core::legacy_text::ensure_utf8(&bytes);
     let mut reader = Cursor::new(projected.as_bytes());
     let config = clonk_core::std_config::Config::from_reader(&mut reader).ok()?;
     config

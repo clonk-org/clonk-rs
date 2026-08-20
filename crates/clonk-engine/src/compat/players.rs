@@ -1589,19 +1589,10 @@ pub(crate) fn apply_host_crew_experience(
         let object_name = context
             .object_custom_name(target)
             .unwrap_or_else(|| info.name.clone());
-        context.register_message(MessageCommand::Add(MessageSpec {
-            kind: MessageKind::Target,
-            text: format!("{object_name} is promoted|to {rank_name}!"),
-            target: Some(target),
-            player: None,
-            offset: Vector2::ZERO,
-            color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-            flags: 0,
-            width: None,
-            decoration: None,
-            frame_decoration: None,
-            portrait: None,
-        }));
+        context.register_message(MessageCommand::Add(
+            MessageSpec::target(format!("{object_name} is promoted|to {rank_name}!"), target)
+                .with_color(invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR)),
+        ));
         context
             .audio_mut()
             .play_sound("Trumpet", Some(target), 100, false, false, None);

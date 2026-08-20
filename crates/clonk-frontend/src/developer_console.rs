@@ -1580,23 +1580,18 @@ impl DeveloperConsole {
     pub fn layout(&self, width: u32, height: u32) -> DeveloperConsoleLayout {
         let width = i32::try_from(width).unwrap_or(i32::MAX).max(1);
         let height = i32::try_from(height).unwrap_or(i32::MAX).max(1);
-        let menu_bar = IntRect {
-            x: 0,
-            y: 0,
-            w: width,
-            h: MENU_BAR_HEIGHT.min(height),
-        };
+        let menu_bar = IntRect::new(0, 0, width, MENU_BAR_HEIGHT.min(height));
         let mut x = 2;
         let menu_tabs = self
             .menu_order()
             .into_iter()
             .map(|menu| {
-                let rect = IntRect {
+                let rect = IntRect::new(
                     x,
-                    y: 1,
-                    w: menu.tab_width(&self.view.strings),
-                    h: MENU_BAR_HEIGHT - 2,
-                };
+                    1,
+                    menu.tab_width(&self.view.strings),
+                    MENU_BAR_HEIGHT - 2,
+                );
                 x += rect.w;
                 ConsoleMenuTabLayout { menu, rect }
             })
@@ -1606,18 +1601,18 @@ impl DeveloperConsole {
         let toolbar_y = (status_y - TOOLBAR_HEIGHT).max(MENU_BAR_HEIGHT);
         let input_y = (toolbar_y - INPUT_HEIGHT).max(MENU_BAR_HEIGHT);
         let log_y = MENU_BAR_HEIGHT + WINDOW_PADDING;
-        let log = IntRect {
-            x: WINDOW_PADDING,
-            y: log_y,
-            w: (width - WINDOW_PADDING * 2).max(1),
-            h: (input_y - log_y - WINDOW_PADDING).max(1),
-        };
-        let input = IntRect {
-            x: WINDOW_PADDING,
-            y: input_y + 2,
-            w: (width - WINDOW_PADDING * 2).max(1),
-            h: (INPUT_HEIGHT - 4).max(1),
-        };
+        let log = IntRect::new(
+            WINDOW_PADDING,
+            log_y,
+            (width - WINDOW_PADDING * 2).max(1),
+            (input_y - log_y - WINDOW_PADDING).max(1),
+        );
+        let input = IntRect::new(
+            WINDOW_PADDING,
+            input_y + 2,
+            (width - WINDOW_PADDING * 2).max(1),
+            (INPUT_HEIGHT - 4).max(1),
+        );
 
         let button_gap = 3;
         let button_width = ((width - 2 * WINDOW_PADDING - 4 * button_gap) / 6).clamp(34, 54);
@@ -1625,38 +1620,30 @@ impl DeveloperConsole {
         let buttons_x = (width - WINDOW_PADDING - total_buttons).max(WINDOW_PADDING);
         let button_y = toolbar_y + 4;
         let button_height = (TOOLBAR_HEIGHT - 8).max(1);
-        let button = |index: i32| IntRect {
-            x: buttons_x + index * (button_width + button_gap),
-            y: button_y,
-            w: button_width,
-            h: button_height,
+        let button = |index: i32| {
+            IntRect::new(
+                buttons_x + index * (button_width + button_gap),
+                button_y,
+                button_width,
+                button_height,
+            )
         };
-        let cursor = IntRect {
-            x: WINDOW_PADDING,
-            y: button_y,
-            w: (buttons_x - WINDOW_PADDING * 2).max(1),
-            h: button_height,
-        };
+        let cursor = IntRect::new(
+            WINDOW_PADDING,
+            button_y,
+            (buttons_x - WINDOW_PADDING * 2).max(1),
+            button_height,
+        );
 
         let status_width = width / 3;
-        let status_frame = IntRect {
-            x: 0,
-            y: status_y,
-            w: status_width,
-            h: height - status_y,
-        };
-        let status_script = IntRect {
-            x: status_width,
-            y: status_y,
-            w: status_width,
-            h: height - status_y,
-        };
-        let status_time = IntRect {
-            x: status_width * 2,
-            y: status_y,
-            w: width - status_width * 2,
-            h: height - status_y,
-        };
+        let status_frame = IntRect::new(0, status_y, status_width, height - status_y);
+        let status_script = IntRect::new(status_width, status_y, status_width, height - status_y);
+        let status_time = IntRect::new(
+            status_width * 2,
+            status_y,
+            width - status_width * 2,
+            height - status_y,
+        );
 
         let mut dropdown = Vec::new();
         if let Some(menu) = self.open_menu {
@@ -1682,12 +1669,7 @@ impl DeveloperConsole {
                 };
                 dropdown.push(ConsoleMenuEntryLayout {
                     index,
-                    rect: IntRect {
-                        x: dropdown_x,
-                        y,
-                        w: dropdown_width,
-                        h,
-                    },
+                    rect: IntRect::new(dropdown_x, y, dropdown_width, h),
                 });
                 y += h;
             }
@@ -1701,30 +1683,25 @@ impl DeveloperConsole {
             .enumerate()
             .map(|(row, model_index)| ConsoleCompletionEntryLayout {
                 model_index,
-                rect: IntRect {
-                    x: input.x,
-                    y: completion_y + row as i32 * MENU_ITEM_HEIGHT,
-                    w: input.w,
-                    h: MENU_ITEM_HEIGHT,
-                },
+                rect: IntRect::new(
+                    input.x,
+                    completion_y + row as i32 * MENU_ITEM_HEIGHT,
+                    input.w,
+                    MENU_ITEM_HEIGHT,
+                ),
             })
             .collect();
 
         let (path_dialog, path_input) = if self.path_entry.is_some() {
             let dialog_width = (width - 24).clamp(220, 520).min(width);
             let dialog_height = 118.min(height);
-            let dialog = IntRect {
-                x: (width - dialog_width) / 2,
-                y: (height - dialog_height) / 2,
-                w: dialog_width,
-                h: dialog_height,
-            };
-            let input = IntRect {
-                x: dialog.x + 12,
-                y: dialog.y + 51,
-                w: (dialog.w - 24).max(1),
-                h: 25,
-            };
+            let dialog = IntRect::new(
+                (width - dialog_width) / 2,
+                (height - dialog_height) / 2,
+                dialog_width,
+                dialog_height,
+            );
+            let input = IntRect::new(dialog.x + 12, dialog.y + 51, (dialog.w - 24).max(1), 25);
             (Some(dialog), Some(input))
         } else {
             (None, None)
@@ -1733,12 +1710,12 @@ impl DeveloperConsole {
         let about_dialog = self.about_modal.as_ref().map(|_| {
             let dialog_width = (width - 24).clamp(220, 420).min(width);
             let dialog_height = 96.min(height);
-            IntRect {
-                x: (width - dialog_width) / 2,
-                y: (height - dialog_height) / 2,
-                w: dialog_width,
-                h: dialog_height,
-            }
+            IntRect::new(
+                (width - dialog_width) / 2,
+                (height - dialog_height) / 2,
+                dialog_width,
+                dialog_height,
+            )
         });
 
         DeveloperConsoleLayout {
@@ -2039,12 +2016,12 @@ impl DeveloperConsole {
                 draw_fitted_text(
                     surface,
                     font,
-                    IntRect {
-                        x: dialog.x + 10,
-                        y: dialog.y + 12 + (index as i32) * 28,
-                        w: dialog.w - 20,
-                        h: 20,
-                    },
+                    IntRect::new(
+                        dialog.x + 10,
+                        dialog.y + 12 + (index as i32) * 28,
+                        dialog.w - 20,
+                        20,
+                    ),
                     line,
                     CONTROL_TEXT,
                     FONT_SIZE,
@@ -2061,12 +2038,7 @@ impl DeveloperConsole {
             draw_fitted_text(
                 surface,
                 font,
-                IntRect {
-                    x: dialog.x + 10,
-                    y: dialog.y + 8,
-                    w: dialog.w - 20,
-                    h: 20,
-                },
+                IntRect::new(dialog.x + 10, dialog.y + 8, dialog.w - 20, 20),
                 &entry.request.title,
                 CONTROL_TEXT,
                 FONT_SIZE,
@@ -2075,12 +2047,7 @@ impl DeveloperConsole {
             draw_fitted_text(
                 surface,
                 font,
-                IntRect {
-                    x: dialog.x + 10,
-                    y: dialog.y + 29,
-                    w: dialog.w - 20,
-                    h: 18,
-                },
+                IntRect::new(dialog.x + 10, dialog.y + 29, dialog.w - 20, 18),
                 &entry.request.prompt,
                 CONTROL_TEXT,
                 SMALL_FONT_SIZE,
@@ -2091,12 +2058,7 @@ impl DeveloperConsole {
             draw_fitted_text(
                 surface,
                 font,
-                IntRect {
-                    x: dialog.x + 10,
-                    y: dialog.y + 82,
-                    w: dialog.w - 20,
-                    h: 24,
-                },
+                IntRect::new(dialog.x + 10, dialog.y + 82, dialog.w - 20, 24),
                 &self.view.strings.path_entry_hint,
                 DISABLED_TEXT,
                 SMALL_FONT_SIZE,
@@ -2120,12 +2082,12 @@ impl DeveloperConsole {
             draw_fitted_text(
                 surface,
                 font,
-                IntRect {
-                    x: rect.x + 3,
-                    y: rect.y + 3 + row as i32 * line_height,
-                    w: rect.w - 6,
-                    h: line_height,
-                },
+                IntRect::new(
+                    rect.x + 3,
+                    rect.y + 3 + row as i32 * line_height,
+                    rect.w - 6,
+                    line_height,
+                ),
                 line,
                 CONTROL_TEXT,
                 SMALL_FONT_SIZE,
@@ -2146,12 +2108,7 @@ impl DeveloperConsole {
         if edit.select_all && focused {
             fill(
                 surface,
-                IntRect {
-                    x: rect.x + 2,
-                    y: rect.y + 2,
-                    w: rect.w - 4,
-                    h: rect.h - 4,
-                },
+                IntRect::new(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4),
                 SELECTED_BACKGROUND,
             );
         }
@@ -2175,12 +2132,12 @@ impl DeveloperConsole {
             let caret_x = rect.x + 4 + font.measure_text(&prefix, FONT_SIZE).width.round() as i32;
             fill(
                 surface,
-                IntRect {
-                    x: caret_x.min(rect.x + rect.w - 3),
-                    y: rect.y + 4,
-                    w: 1,
-                    h: (rect.h - 8).max(1),
-                },
+                IntRect::new(
+                    caret_x.min(rect.x + rect.w - 3),
+                    rect.y + 4,
+                    1,
+                    (rect.h - 8).max(1),
+                ),
                 CONTROL_TEXT,
             );
         }
@@ -2206,12 +2163,7 @@ impl DeveloperConsole {
         if self.hovered(target, surface) && enabled && !pressed {
             fill(
                 surface,
-                IntRect {
-                    x: rect.x + 2,
-                    y: rect.y + 2,
-                    w: rect.w - 4,
-                    h: rect.h - 4,
-                },
+                IntRect::new(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4),
                 LIGHT_EDGE,
             );
         }
@@ -2237,12 +2189,12 @@ impl DeveloperConsole {
         if let (Some(first), Some(last)) = (layout.first(), layout.last()) {
             draw_raised(
                 surface,
-                IntRect {
-                    x: first.rect.x,
-                    y: first.rect.y,
-                    w: first.rect.w,
-                    h: last.rect.y + last.rect.h - first.rect.y,
-                },
+                IntRect::new(
+                    first.rect.x,
+                    first.rect.y,
+                    first.rect.w,
+                    last.rect.y + last.rect.h - first.rect.y,
+                ),
                 WINDOW_BACKGROUND,
             );
         }
@@ -2251,12 +2203,12 @@ impl DeveloperConsole {
                 ConsoleMenuEntry::Separator => {
                     fill(
                         surface,
-                        IntRect {
-                            x: row.rect.x + 4,
-                            y: row.rect.y + row.rect.h / 2,
-                            w: row.rect.w - 8,
-                            h: 1,
-                        },
+                        IntRect::new(
+                            row.rect.x + 4,
+                            row.rect.y + row.rect.h / 2,
+                            row.rect.w - 8,
+                            1,
+                        ),
                         MID_EDGE,
                     );
                 }
@@ -2302,12 +2254,12 @@ impl DeveloperConsole {
         };
         draw_raised(
             surface,
-            IntRect {
-                x: first.rect.x,
-                y: first.rect.y,
-                w: first.rect.w,
-                h: last.rect.y + last.rect.h - first.rect.y,
-            },
+            IntRect::new(
+                first.rect.x,
+                first.rect.y,
+                first.rect.w,
+                last.rect.y + last.rect.h - first.rect.y,
+            ),
             CONTROL_BACKGROUND,
         );
         for row in layout {

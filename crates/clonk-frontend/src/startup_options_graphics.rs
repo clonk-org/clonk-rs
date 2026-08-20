@@ -541,18 +541,13 @@ pub fn graphics_sheet_layout_with_metrics(
     let spin_width = 13.min(scale_edit.w.max(0));
     let spin_x = scale_edit.x + scale_edit.w - spin_width - 1;
     let spin_height = 8.min((scale_edit.h - 4).max(0));
-    let scale_spin_increment = IntRect {
-        x: spin_x,
-        y: scale_edit.y + 2,
-        w: spin_width,
-        h: spin_height,
-    };
-    let scale_spin_decrement = IntRect {
-        x: spin_x,
-        y: scale_edit.y + scale_edit.h - 2 - spin_height,
-        w: spin_width,
-        h: spin_height,
-    };
+    let scale_spin_increment = IntRect::new(spin_x, scale_edit.y + 2, spin_width, spin_height);
+    let scale_spin_decrement = IntRect::new(
+        spin_x,
+        scale_edit.y + scale_edit.h - 2 - spin_height,
+        spin_width,
+        spin_height,
+    );
 
     let options_client = titled_group_client(options_group, metrics.group_title_line_height);
     let mut checkboxes = [IntRect::default(); 6];
@@ -652,10 +647,7 @@ pub fn graphics_hit_test(
     }
     for id in GraphicsCheckboxId::ALL {
         let bounds = layout.checkbox(id);
-        let square = IntRect {
-            w: bounds.h + 1,
-            ..bounds
-        };
+        let square = bounds.with_width(bounds.h + 1);
         if rect_contains(square, point) {
             return Some(GraphicsHitTarget::Checkbox(id));
         }
@@ -710,12 +702,12 @@ fn grid_cell(
     } else {
         requested_height.min(max_height)
     };
-    let mut rect = IntRect {
-        x: area.x + section_x * (cell_width + margin_x) + margin_x,
-        y: area.y + section_y * (cell_height + margin_y) + margin_y,
-        w: cell_width * span_x + margin_x * (span_x - 1),
-        h: cell_height * span_y + margin_y * (span_y - 1),
-    };
+    let mut rect = IntRect::new(
+        area.x + section_x * (cell_width + margin_x) + margin_x,
+        area.y + section_y * (cell_height + margin_y) + margin_y,
+        cell_width * span_x + margin_x * (span_x - 1),
+        cell_height * span_y + margin_y * (span_y - 1),
+    );
     if requested_width >= 0 && center {
         rect.x += (cell_width - requested_width) / 2;
         rect.w = requested_width;
@@ -741,46 +733,35 @@ fn centered_grid_row_with_margins(
 }
 
 fn titled_group_client(group: IntRect, title_line_height: i32) -> IntRect {
-    IntRect {
-        x: group.x + 4,
-        y: group.y + 4 + title_line_height,
-        w: (group.w - 8).max(0),
-        h: (group.h - 8 - title_line_height).max(0),
-    }
+    IntRect::new(
+        group.x + 4,
+        group.y + 4 + title_line_height,
+        (group.w - 8).max(0),
+        (group.h - 8 - title_line_height).max(0),
+    )
 }
 
 fn split_left(rect: IntRect, width: i32) -> (IntRect, IntRect) {
     let width = width.clamp(0, rect.w);
-    let left = IntRect { w: width, ..rect };
-    let remainder = IntRect {
-        x: rect.x + width,
-        w: rect.w - width,
-        ..rect
-    };
+    let left = rect.with_width(width);
+    let remainder = rect.with_horizontal(rect.x + width, rect.w - width);
     (left, remainder)
 }
 
 fn split_right(rect: IntRect, width: i32) -> (IntRect, IntRect) {
     let width = width.clamp(0, rect.w);
-    let right = IntRect {
-        x: rect.x + rect.w - width,
-        w: width,
-        ..rect
-    };
-    let remainder = IntRect {
-        w: rect.w - width,
-        ..rect
-    };
+    let right = rect.with_horizontal(rect.x + rect.w - width, width);
+    let remainder = rect.with_width(rect.w - width);
     (remainder, right)
 }
 
 fn centered_rect(area: IntRect, width: i32, height: i32) -> IntRect {
-    IntRect {
-        x: area.x + (area.w - width) / 2,
-        y: area.y + (area.h - height) / 2,
-        w: width,
-        h: height,
-    }
+    IntRect::new(
+        area.x + (area.w - width) / 2,
+        area.y + (area.h - height) / 2,
+        width,
+        height,
+    )
 }
 
 #[cfg(test)]
@@ -976,41 +957,12 @@ mod tests {
 
     #[test]
     fn standard_sheet_layout_matches_cpp_group_grid_and_translates_with_origin() {
-        let sheet = IntRect {
-            x: 356,
-            y: 108,
-            w: 644,
-            h: 462,
-        };
+        let sheet = IntRect::new(356, 108, 644, 462);
         let layout =
             graphics_sheet_layout_with_metrics(sheet, GraphicsSheetLayoutMetrics::default());
-        assert_eq!(
-            layout.display_group,
-            IntRect {
-                x: 386,
-                y: 111,
-                w: 584,
-                h: 150
-            }
-        );
-        assert_eq!(
-            layout.options_group,
-            IntRect {
-                x: 386,
-                y: 264,
-                w: 277,
-                h: 150
-            }
-        );
-        assert_eq!(
-            layout.effects_group,
-            IntRect {
-                x: 693,
-                y: 264,
-                w: 277,
-                h: 150
-            }
-        );
+        assert_eq!(layout.display_group, IntRect::new(386, 111, 584, 150));
+        assert_eq!(layout.options_group, IntRect::new(386, 264, 277, 150));
+        assert_eq!(layout.effects_group, IntRect::new(693, 264, 277, 150));
         assert_eq!(layout.scale_slider.h, 16);
         assert_eq!(layout.smoke_slider.h, 16);
         assert_eq!(
@@ -1021,11 +973,7 @@ mod tests {
         assert_eq!(layout.checkbox(GraphicsCheckboxId::FireParticles).y, 369);
 
         let moved = graphics_sheet_layout_with_metrics(
-            IntRect {
-                x: 10,
-                y: 20,
-                ..sheet
-            },
+            sheet.with_position(10, 20),
             GraphicsSheetLayoutMetrics::default(),
         );
         assert_eq!(moved.display_group.x - 10, layout.display_group.x - sheet.x);
@@ -1035,12 +983,7 @@ mod tests {
     #[test]
     fn hit_test_distinguishes_spin_arrows_slider_parts_and_checkbox_square() {
         let layout = graphics_sheet_layout_with_metrics(
-            IntRect {
-                x: 356,
-                y: 108,
-                w: 644,
-                h: 462,
-            },
+            IntRect::new(356, 108, 644, 462),
             GraphicsSheetLayoutMetrics::default(),
         );
         assert_eq!(
@@ -1077,13 +1020,7 @@ mod tests {
 
         let checkbox = layout.checkbox(GraphicsCheckboxId::ShowFolderMaps);
         assert_eq!(
-            graphics_hit_test(
-                &layout,
-                center(IntRect {
-                    w: checkbox.h,
-                    ..checkbox
-                })
-            ),
+            graphics_hit_test(&layout, center(checkbox.with_width(checkbox.h))),
             Some(GraphicsHitTarget::Checkbox(
                 GraphicsCheckboxId::ShowFolderMaps
             ))

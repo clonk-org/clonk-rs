@@ -676,10 +676,7 @@ fn complete_parameters() -> JoinGameParametersEnvelope {
         game_join_frame: 0,
         ..ControlPlayerInfoEntry::default()
     };
-    let empty_players = PlayerInfoListSnapshot {
-        last_player_id: 0,
-        clients: Vec::new(),
-    };
+    let empty_players = PlayerInfoListSnapshot::default();
     JoinGameParametersEnvelope {
         random_seed: 7,
         startup_player_count: 1,
@@ -762,7 +759,7 @@ fn complete_parameters() -> JoinGameParametersEnvelope {
 }
 
 fn legacy(value: &[u8]) -> LegacyCString {
-    LegacyCString::from_bytes(value.to_vec()).unwrap()
+    crate::c4(value)
 }
 
 fn checksum_value(request: &[u8]) -> &[u8] {

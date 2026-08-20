@@ -139,33 +139,46 @@ fn record_call_arg_heap_spill(spilled: bool) {
 }
 
 #[cfg(test)]
-fn reset_compiled_function_execution_count() {
-    COMPILED_FUNCTION_EXECUTIONS.with(|count| count.set(0));
+macro_rules! test_counter_accessors {
+    ($(fn $reset:ident, $get:ident => $counter:ident;)+) => {
+        $(
+            fn $reset() {
+                $counter.with(|count| count.set(0));
+            }
+
+            fn $get() -> usize {
+                $counter.with(Cell::get)
+            }
+        )+
+    };
+    ($(pub(crate) fn $reset:ident, $get:ident => $counter:ident;)+) => {
+        $(
+            pub(crate) fn $reset() {
+                $counter.with(|count| count.set(0));
+            }
+
+            pub(crate) fn $get() -> usize {
+                $counter.with(Cell::get)
+            }
+        )+
+    };
 }
 
 #[cfg(test)]
-fn compiled_function_execution_count() -> usize {
-    COMPILED_FUNCTION_EXECUTIONS.with(Cell::get)
+test_counter_accessors! {
+    fn reset_compiled_function_execution_count, compiled_function_execution_count => COMPILED_FUNCTION_EXECUTIONS;
+    fn reset_compiled_binding_heap_spills, compiled_binding_heap_spills => COMPILED_BINDING_HEAP_SPILLS;
+    fn reset_diagnostic_object_formatter_calls, diagnostic_object_formatter_calls => DIAGNOSTIC_OBJECT_FORMATTER_CALLS;
+    fn reset_diagnostic_frame_string_allocations, diagnostic_frame_string_allocations => DIAGNOSTIC_FRAME_STRING_ALLOCATIONS;
+    fn reset_runtime_container_registration_traversals, runtime_container_registration_traversals => RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS;
+    fn reset_generic_host_resolutions, generic_host_resolutions => GENERIC_HOST_RESOLUTIONS;
+    fn reset_direct_binding_allocations, direct_binding_allocations => DIRECT_BINDING_ALLOCATIONS;
+    fn reset_nested_generic_script_resolutions, nested_generic_script_resolutions => NESTED_GENERIC_SCRIPT_RESOLUTIONS;
 }
 
 #[cfg(test)]
-pub(crate) fn reset_compiled_source_validations() {
-    COMPILED_SOURCE_VALIDATIONS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn compiled_source_validations() -> usize {
-    COMPILED_SOURCE_VALIDATIONS.with(Cell::get)
-}
-
-#[cfg(test)]
-fn reset_compiled_binding_heap_spills() {
-    COMPILED_BINDING_HEAP_SPILLS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn compiled_binding_heap_spills() -> usize {
-    COMPILED_BINDING_HEAP_SPILLS.with(Cell::get)
+test_counter_accessors! {
+    pub(crate) fn reset_compiled_source_validations, compiled_source_validations => COMPILED_SOURCE_VALIDATIONS;
 }
 
 #[cfg(test)]
@@ -173,66 +186,6 @@ fn reset_compiled_executor_heap_spills() {
     COMPILED_STACK_HEAP_SPILLS.with(|count| count.set(0));
     COMPILED_REGISTERED_SLOT_HEAP_SPILLS.with(|count| count.set(0));
     COMPILED_CALL_ARGUMENT_TEMPORARIES.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn reset_diagnostic_object_formatter_calls() {
-    DIAGNOSTIC_OBJECT_FORMATTER_CALLS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn diagnostic_object_formatter_calls() -> usize {
-    DIAGNOSTIC_OBJECT_FORMATTER_CALLS.with(Cell::get)
-}
-
-#[cfg(test)]
-fn reset_diagnostic_frame_string_allocations() {
-    DIAGNOSTIC_FRAME_STRING_ALLOCATIONS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn diagnostic_frame_string_allocations() -> usize {
-    DIAGNOSTIC_FRAME_STRING_ALLOCATIONS.with(Cell::get)
-}
-
-#[cfg(test)]
-fn reset_runtime_container_registration_traversals() {
-    RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn runtime_container_registration_traversals() -> usize {
-    RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS.with(Cell::get)
-}
-
-#[cfg(test)]
-fn reset_generic_host_resolutions() {
-    GENERIC_HOST_RESOLUTIONS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn generic_host_resolutions() -> usize {
-    GENERIC_HOST_RESOLUTIONS.with(Cell::get)
-}
-
-#[cfg(test)]
-fn reset_direct_binding_allocations() {
-    DIRECT_BINDING_ALLOCATIONS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn direct_binding_allocations() -> usize {
-    DIRECT_BINDING_ALLOCATIONS.with(Cell::get)
-}
-
-#[cfg(test)]
-fn reset_nested_generic_script_resolutions() {
-    NESTED_GENERIC_SCRIPT_RESOLUTIONS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn nested_generic_script_resolutions() -> usize {
-    NESTED_GENERIC_SCRIPT_RESOLUTIONS.with(Cell::get)
 }
 
 struct ValueStackReservation {
@@ -12178,6 +12131,33 @@ impl Environment {
 mod tests {
     use super::*;
 
+    macro_rules! check_eq {
+        ($left:expr => $right:expr) => {
+            assert_eq!($left, $right)
+        };
+        ($left:expr => $right:expr, $($message:tt)+) => {
+            assert_eq!($left, $right, $($message)+)
+        };
+    }
+
+    macro_rules! check {
+        ($condition:expr) => {
+            assert!($condition)
+        };
+        ($condition:expr, $($message:tt)+) => {
+            assert!($condition, $($message)+)
+        };
+    }
+
+    macro_rules! check_script {
+        ($source:expr, $entry:expr, $args:expr; unwrap => $expected:expr) => {
+            check_eq!(execute_script($source, $entry, $args).unwrap() => $expected);
+        };
+        ($source:expr, $entry:expr, $args:expr; expect $message:expr => $expected:expr) => {
+            check_eq!(execute_script($source, $entry, $args).expect($message) => $expected);
+        };
+    }
+
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn wide_raw_bool_keeps_native_union_equality_and_low_word_bool_semantics() {
@@ -12185,15 +12165,15 @@ mod tests {
         let wide_bool = Value::from_c4_bool_data_raw(raw);
         let source_id = Value::C4Id(crate::value::c4_id_from_raw(raw));
 
-        assert!(c4_values_equal(&wide_bool, &source_id, Some(0), None, None));
-        assert!(!c4_values_equal(
+        check!(c4_values_equal(&wide_bool, &source_id, Some(0), None, None));
+        check!(!c4_values_equal(
             &wide_bool,
             &source_id,
             Some(2),
             None,
             None
         ));
-        assert!(c4_values_equal(
+        check!(c4_values_equal(
             &wide_bool,
             &Value::Bool(false),
             Some(3),
@@ -12203,31 +12183,55 @@ mod tests {
     }
     use crate::parser::Parser;
 
+    fn parse_script(source: &str, message: &str) -> crate::ast::Script {
+        Parser::new(source).parse_script_strict().expect(message)
+    }
+
+    fn function_map(script: crate::ast::Script) -> FxHashMap<String, Function> {
+        script
+            .functions
+            .into_iter()
+            .map(|function| (function.name.clone(), function))
+            .collect()
+    }
+
+    fn parse_functions(source: &str, message: &str) -> FxHashMap<String, Function> {
+        function_map(parse_script(source, message))
+    }
+
+    fn parse_function(source: &str, parse_message: &str, function_message: &str) -> Function {
+        parse_script(source, parse_message)
+            .functions
+            .into_iter()
+            .next()
+            .expect(function_message)
+    }
+
+    fn test_vm<'a>(functions: &'a FxHashMap<String, Function>, var_decls: &'a [VarDecl]) -> Vm<'a> {
+        static HOST_FUNCTIONS: std::sync::OnceLock<FxHashMap<String, RegisteredHostFunction>> =
+            std::sync::OnceLock::new();
+        Vm::new(
+            functions,
+            HOST_FUNCTIONS.get_or_init(FxHashMap::default),
+            var_decls,
+            None,
+        )
+    }
+
     fn execute_script(
         source: &str,
         entry_point: &str,
         args: &[Value],
     ) -> Result<Value, RuntimeError> {
-        let script = Parser::new(source)
-            .parse_script_strict()
-            .expect("parse should succeed");
-        let functions: FxHashMap<String, Function> = script
-            .functions
-            .into_iter()
-            .map(|f| (f.name.clone(), f))
-            .collect();
-        let host_functions = FxHashMap::default();
-        let var_decls: Vec<VarDecl> = Vec::new();
-        let vm = Vm::new(&functions, &host_functions, &var_decls, None);
-        vm.call(entry_point, args)
+        let functions = parse_functions(source, "parse should succeed");
+        test_vm(&functions, &[]).call(entry_point, args)
     }
 
     #[test]
     fn local_scalar_control_flow_uses_compiled_executor() {
         reset_compiled_function_execution_count();
 
-        let result = execute_script(
-            r#"
+        check_script!(r#"
                 func SumLoop(iterations) {
                     var acc = 0;
                     var index = 0;
@@ -12239,12 +12243,8 @@ mod tests {
                 }
             "#,
             "SumLoop",
-            &[Value::Int(128)],
-        )
-        .expect("slot-resolved scalar loop runs");
-
-        assert_eq!(result, Value::Int(379));
-        assert_eq!(compiled_function_execution_count(), 1);
+            &[Value::Int(128)]; expect "slot-resolved scalar loop runs" => Value::Int(379));
+        check_eq!(compiled_function_execution_count() => 1);
     }
 
     #[test]
@@ -12260,11 +12260,8 @@ mod tests {
             .load_script("#strict 2\nfunc Probe() { return Native(41); }")
             .expect("script loads");
 
-        assert_eq!(
-            engine.call("Probe", &[]).expect("native call succeeds"),
-            Value::Int(41)
-        );
-        assert_eq!(generic_host_resolutions(), 0);
+        check_eq!(engine.call("Probe", &[]).expect("native call succeeds") => Value::Int(41));
+        check_eq!(generic_host_resolutions() => 0);
     }
 
     #[test]
@@ -12284,13 +12281,10 @@ mod tests {
             )
             .expect("script loads");
 
-        assert_eq!(
-            engine
+        check_eq!(engine
                 .call("Probe", &[Value::Int(20)])
-                .expect("native call succeeds"),
-            Value::Int(41)
-        );
-        assert_eq!(compiled_function_execution_count(), 1);
+                .expect("native call succeeds") => Value::Int(41));
+        check_eq!(compiled_function_execution_count() => 1);
     }
 
     #[test]
@@ -12299,15 +12293,10 @@ mod tests {
         // C4AulExec value stack (C4AulExec.cpp:62-63,330-347), without a
         // per-call heap table for a small ordinary frame.
         reset_compiled_binding_heap_spills();
-        let result = execute_script(
-            "#strict 2\nfunc Probe(value) { var a = value + 1; var b = a + 1; return b; }",
+        check_script!("#strict 2\nfunc Probe(value) { var a = value + 1; var b = a + 1; return b; }",
             "Probe",
-            &[Value::Int(39)],
-        )
-        .expect("compiled frame executes");
-
-        assert_eq!(result, Value::Int(41));
-        assert_eq!(compiled_binding_heap_spills(), 0);
+            &[Value::Int(39)]; expect "compiled frame executes" => Value::Int(41));
+        check_eq!(compiled_binding_heap_spills() => 0);
     }
 
     #[test]
@@ -12316,8 +12305,7 @@ mod tests {
         // and keeps the frame's local slots there as well (C4AulExec.cpp:
         // 62-63,330-347,1217-1223), without per-call buffer allocations.
         reset_compiled_executor_heap_spills();
-        let result = execute_script(
-            r#"#strict 2
+        check_script!(r#"#strict 2
                 func AddOne(value) { return value + 1; }
                 func Probe(iterations) {
                     var value = 0;
@@ -12330,19 +12318,12 @@ mod tests {
                 }
             "#,
             "Probe",
-            &[Value::Int(64)],
-        )
-        .expect("repeated compiled calls succeed");
-
-        assert_eq!(result, Value::Int(64));
-        assert_eq!(
-            (
+            &[Value::Int(64)]; expect "repeated compiled calls succeed" => Value::Int(64));
+        check_eq!((
                 COMPILED_STACK_HEAP_SPILLS.with(Cell::get),
                 COMPILED_REGISTERED_SLOT_HEAP_SPILLS.with(Cell::get),
                 COMPILED_CALL_ARGUMENT_TEMPORARIES.with(Cell::get),
-            ),
-            (0, 0, 0),
-        );
+            ) => (0, 0, 0));
     }
 
     #[test]
@@ -12382,17 +12363,11 @@ mod tests {
             )
             .expect("script loads");
 
-        assert_eq!(
-            engine
+        check_eq!(engine
                 .call("Probe", &[Value::Int(3)])
-                .expect("effect slot loop succeeds"),
-            Value::Int(247)
-        );
-        assert_eq!(
-            *writes.lock().expect("effect write log lock"),
-            vec![9, 8, 7]
-        );
-        assert_eq!(compiled_function_execution_count(), 1);
+                .expect("effect slot loop succeeds") => Value::Int(247));
+        check_eq!(*writes.lock().expect("effect write log lock") => vec![9, 8, 7]);
+        check_eq!(compiled_function_execution_count() => 1);
     }
 
     #[test]
@@ -12415,11 +12390,8 @@ mod tests {
             )
             .expect("script loads");
 
-        assert_eq!(
-            engine.call("Probe", &[]).expect("probe succeeds"),
-            Value::Nil
-        );
-        assert_eq!(compiled_function_execution_count(), 1);
+        check_eq!(engine.call("Probe", &[]).expect("probe succeeds") => Value::Nil);
+        check_eq!(compiled_function_execution_count() => 1);
     }
 
     #[test]
@@ -12452,31 +12424,17 @@ mod tests {
             .expect("script loads");
 
         reset_compiled_function_execution_count();
-        assert_eq!(
-            engine.call("Probe", &[]).expect("probe succeeds"),
-            Value::Int(2)
-        );
-        assert_eq!(compiled_function_execution_count(), 1);
-        assert_eq!(
-            *observed_stack_sizes.lock().expect("stack-size log lock"),
-            vec![12, 12, 12],
-            "the external ten-slot frame, lower operand, and counter reference stay live",
-        );
+        check_eq!(engine.call("Probe", &[]).expect("probe succeeds") => Value::Int(2));
+        check_eq!(compiled_function_execution_count() => 1);
+        check_eq!(*observed_stack_sizes.lock().expect("stack-size log lock") => vec![12, 12, 12], "the external ten-slot frame, lower operand, and counter reference stay live");
         *slot.lock().expect("effect slot lock") = 2;
         observed_stack_sizes
             .lock()
             .expect("stack-size log lock")
             .clear();
-        assert_eq!(
-            engine.call("Interpreted", &[]).expect("probe succeeds"),
-            Value::Int(2)
-        );
-        assert_eq!(compiled_function_execution_count(), 1);
-        assert_eq!(
-            *observed_stack_sizes.lock().expect("stack-size log lock"),
-            vec![12, 12, 12],
-            "the compiled instruction must retain exactly the AST path's C++ stack shape",
-        );
+        check_eq!(engine.call("Interpreted", &[]).expect("probe succeeds") => Value::Int(2));
+        check_eq!(compiled_function_execution_count() => 1);
+        check_eq!(*observed_stack_sizes.lock().expect("stack-size log lock") => vec![12, 12, 12], "the compiled instruction must retain exactly the AST path's C++ stack shape");
     }
 
     #[test]
@@ -12503,7 +12461,7 @@ mod tests {
             .call_with_locals("Probe", &[], &locals)
             .expect("reference-returning call succeeds");
 
-        assert_eq!(result, Value::Nil);
+        check_eq!(result => Value::Nil);
     }
 
     #[test]
@@ -12534,7 +12492,7 @@ mod tests {
             .call_with_locals("Probe", &[], &HashMap::new())
             .expect("same-name reference-aware call succeeds");
 
-        assert_eq!(result, Value::Int(2));
+        check_eq!(result => Value::Int(2));
     }
 
     #[test]
@@ -12546,27 +12504,21 @@ mod tests {
             Some((format!("Object #{id}"), Some("CALL".to_owned())))
         }
 
-        let script =
-            Parser::new("func Helper() { return 41; } func Probe() { return Helper() + 1; }")
-                .parse_script_strict()
-                .expect("script parses");
-        let functions = script
-            .functions
-            .into_iter()
-            .map(|function| (function.name.clone(), function))
-            .collect::<FxHashMap<_, _>>();
-        let host_functions = FxHashMap::default();
+        let functions = parse_functions(
+            "func Helper() { return 41; } func Probe() { return Helper() + 1; }",
+            "script parses",
+        );
         let var_decls = Vec::new();
         reset_diagnostic_object_formatter_calls();
         let result = with_diagnostic_object_formatter(format_object, || {
-            Vm::new(&functions, &host_functions, &var_decls, None)
+            test_vm(&functions, &var_decls)
                 .with_this(Value::Object(7))
                 .call("Probe", &[])
         })
         .expect("nested object call succeeds");
 
-        assert_eq!(result, Value::Int(42));
-        assert_eq!(diagnostic_object_formatter_calls(), 0);
+        check_eq!(result => Value::Int(42));
+        check_eq!(diagnostic_object_formatter_calls() => 0);
     }
 
     #[test]
@@ -12574,24 +12526,18 @@ mod tests {
         // C++ frames retain pointers to their C4AulFunc/C4AulScript metadata;
         // stable function and source names are not copied per call
         // (C4AulExec.cpp:62-63,1328-1342).
-        let script =
-            Parser::new("func Helper() { return 41; } func Probe() { return Helper() + 1; }")
-                .parse_script_strict()
-                .expect("script parses");
-        let functions = script
-            .functions
-            .into_iter()
-            .map(|function| (function.name.clone(), function))
-            .collect::<FxHashMap<_, _>>();
-        let host_functions = FxHashMap::default();
+        let functions = parse_functions(
+            "func Helper() { return 41; } func Probe() { return Helper() + 1; }",
+            "script parses",
+        );
         let var_decls = Vec::new();
         reset_diagnostic_frame_string_allocations();
-        let result = Vm::new(&functions, &host_functions, &var_decls, None)
+        let result = test_vm(&functions, &var_decls)
             .call("Probe", &[])
             .expect("nested compiled call succeeds");
 
-        assert_eq!(result, Value::Int(42));
-        assert_eq!(diagnostic_frame_string_allocations(), 0);
+        check_eq!(result => Value::Int(42));
+        check_eq!(diagnostic_frame_string_allocations() => 0);
     }
 
     #[test]
@@ -12600,15 +12546,10 @@ mod tests {
         // unused trailing nils are stack values, not heap cells
         // (C4AulExec.cpp:62-63, 1217-1223).
         reset_direct_binding_allocations();
-        let result = execute_script(
-            "#strict 2\nfunc Leaf() { return 41; }\nfunc Probe() { return Leaf() + 1; }",
+        check_script!("#strict 2\nfunc Leaf() { return 41; }\nfunc Probe() { return Leaf() + 1; }",
             "Probe",
-            &[],
-        )
-        .expect("zero-argument calls succeed");
-
-        assert_eq!(result, Value::Int(42));
-        assert_eq!(direct_binding_allocations(), 0);
+            &[]; expect "zero-argument calls succeed" => Value::Int(42));
+        check_eq!(direct_binding_allocations() => 0);
     }
 
     #[test]
@@ -12616,15 +12557,10 @@ mod tests {
         // C++ saves the resolved function pointer back into AB_CALL before
         // invoking it (C4AulExec.cpp:1250-1297).
         reset_nested_generic_script_resolutions();
-        let result = execute_script(
-            "#strict 2\nfunc Leaf() { return 41; }\nfunc Probe() { return Leaf() + 1; }",
+        check_script!("#strict 2\nfunc Leaf() { return 41; }\nfunc Probe() { return Leaf() + 1; }",
             "Probe",
-            &[],
-        )
-        .expect("nested call succeeds");
-
-        assert_eq!(result, Value::Int(42));
-        assert_eq!(nested_generic_script_resolutions(), 0);
+            &[]; expect "nested call succeeds" => Value::Int(42));
+        check_eq!(nested_generic_script_resolutions() => 0);
     }
 
     #[test]
@@ -12654,111 +12590,84 @@ mod tests {
             .call_with_locals("Probe", &[], &HashMap::new())
             .expect("Stippel-shaped scalar chain runs");
 
-        assert_eq!(result, Value::Int(17));
-        assert_eq!(locals.get("counter"), Some(&Value::Int(1)));
-        assert_eq!(compiled_function_execution_count(), 2);
+        check_eq!(result => Value::Int(17));
+        check_eq!(locals.get("counter") => Some(&Value::Int(1)));
+        check_eq!(compiled_function_execution_count() => 2);
     }
 
     #[test]
     fn cloned_function_does_not_reuse_a_plan_for_mutated_source() {
-        let script = Parser::new("func Probe() { return 1; }")
-            .parse_script_strict()
-            .expect("first source parses");
-        let functions: FxHashMap<String, Function> = script
-            .functions
-            .into_iter()
-            .map(|function| (function.name.clone(), function))
-            .collect();
-        let host_functions = FxHashMap::default();
+        let functions = parse_functions("func Probe() { return 1; }", "first source parses");
         let var_decls = Vec::new();
-        Vm::new(&functions, &host_functions, &var_decls, None)
+        test_vm(&functions, &var_decls)
             .call_pinned_args(&functions["Probe"], Vec::new())
             .expect("original function warms its plan");
 
-        let replacement = Parser::new("func Probe() { return 2; }")
-            .parse_script_strict()
-            .expect("replacement source parses")
-            .functions
-            .into_iter()
-            .next()
-            .expect("replacement function exists");
+        let replacement = parse_function(
+            "func Probe() { return 2; }",
+            "replacement source parses",
+            "replacement function exists",
+        );
         let mut cloned = functions["Probe"].clone();
         cloned.body = replacement.body;
         let cloned_functions = FxHashMap::from_iter([(cloned.name.clone(), cloned)]);
 
-        let value = Vm::new(&cloned_functions, &host_functions, &var_decls, None)
+        let value = test_vm(&cloned_functions, &var_decls)
             .call("Probe", &[])
             .expect("mutated clone executes");
-        assert_eq!(value, Value::Int(2));
+        check_eq!(value => Value::Int(2));
     }
 
     #[test]
     fn warmed_function_does_not_reuse_a_plan_after_in_place_mutation() {
-        let script = Parser::new("func Probe() { return 1; }")
-            .parse_script_strict()
-            .expect("first source parses");
-        let mut functions: FxHashMap<String, Function> = script
-            .functions
-            .into_iter()
-            .map(|function| (function.name.clone(), function))
-            .collect();
-        let host_functions = FxHashMap::default();
+        let mut functions = parse_functions("func Probe() { return 1; }", "first source parses");
         let var_decls = Vec::new();
-        Vm::new(&functions, &host_functions, &var_decls, None)
+        test_vm(&functions, &var_decls)
             .call("Probe", &[])
             .expect("original function warms its plan");
 
-        let replacement = Parser::new("func Probe() { return 2; }")
-            .parse_script_strict()
-            .expect("replacement source parses")
-            .functions
-            .into_iter()
-            .next()
-            .expect("replacement function exists");
+        let replacement = parse_function(
+            "func Probe() { return 2; }",
+            "replacement source parses",
+            "replacement function exists",
+        );
         functions
             .get_mut("Probe")
             .expect("original function remains owned")
             .body = replacement.body;
 
         reset_compiled_source_validations();
-        let value = Vm::new(&functions, &host_functions, &var_decls, None)
+        let value = test_vm(&functions, &var_decls)
             .call_pinned_args(&functions["Probe"], Vec::new())
             .expect("mutated function executes");
-        assert_eq!(value, Value::Int(2));
-        assert_eq!(compiled_source_validations(), 1);
+        check_eq!(value => Value::Int(2));
+        check_eq!(compiled_source_validations() => 1);
     }
 
     #[test]
     fn inherited_function_does_not_reuse_a_plan_after_in_place_mutation() {
-        let inherited = Parser::new("func Probe() { return 1; }")
-            .parse_script_strict()
-            .expect("inherited source parses")
-            .functions
-            .into_iter()
-            .next()
-            .expect("inherited function exists");
-        let mut function = Parser::new("#strict 2\nfunc Probe() { return inherited(); }")
-            .parse_script_strict()
-            .expect("overriding source parses")
-            .functions
-            .into_iter()
-            .next()
-            .expect("overriding function exists");
+        let inherited = parse_function(
+            "func Probe() { return 1; }",
+            "inherited source parses",
+            "inherited function exists",
+        );
+        let mut function = parse_function(
+            "#strict 2\nfunc Probe() { return inherited(); }",
+            "overriding source parses",
+            "overriding function exists",
+        );
         function.overloaded = Some(std::sync::Arc::new(inherited));
         let mut functions = FxHashMap::from_iter([(function.name.clone(), function)]);
-        let host_functions = FxHashMap::default();
         let var_decls = Vec::new();
-        Vm::new(&functions, &host_functions, &var_decls, None)
+        test_vm(&functions, &var_decls)
             .call("Probe", &[])
             .expect("inherited function warms its plan");
 
-        let replacement = Parser::new("func Probe() { return 2; }")
-            .parse_script_strict()
-            .expect("replacement source parses")
-            .functions
-            .into_iter()
-            .next()
-            .expect("replacement function exists");
+        let replacement = parse_function(
+            "func Probe() { return 2; }",
+            "replacement source parses",
+            "replacement function exists",
+        );
         std::sync::Arc::get_mut(
             functions
                 .get_mut("Probe")
@@ -12770,96 +12679,81 @@ mod tests {
         .expect("inherited function remains uniquely owned")
         .body = replacement.body;
 
-        let value = Vm::new(&functions, &host_functions, &var_decls, None)
+        let value = test_vm(&functions, &var_decls)
             .call_pinned_args(&functions["Probe"], Vec::new())
             .expect("mutated inherited function executes");
-        assert_eq!(value, Value::Int(2));
+        check_eq!(value => Value::Int(2));
     }
 
     #[test]
     fn global_function_does_not_reuse_a_plan_after_in_place_mutation() {
-        let global = Parser::new("global func Probe() { return 1; }")
-            .parse_script_strict()
-            .expect("global source parses")
-            .functions
-            .into_iter()
-            .next()
-            .expect("global function exists");
+        let global = parse_function(
+            "global func Probe() { return 1; }",
+            "global source parses",
+            "global function exists",
+        );
         let functions = FxHashMap::default();
         let mut global_functions = FxHashMap::from_iter([(global.name.clone(), global)]);
-        let host_functions = FxHashMap::default();
         let var_decls = Vec::new();
-        Vm::new(&functions, &host_functions, &var_decls, None)
+        test_vm(&functions, &var_decls)
             .with_optional_globals(Some(&global_functions))
             .call("Probe", &[])
             .expect("global function warms its plan");
 
-        let replacement = Parser::new("global func Probe() { return 2; }")
-            .parse_script_strict()
-            .expect("replacement source parses")
-            .functions
-            .into_iter()
-            .next()
-            .expect("replacement function exists");
+        let replacement = parse_function(
+            "global func Probe() { return 2; }",
+            "replacement source parses",
+            "replacement function exists",
+        );
         global_functions
             .get_mut("Probe")
             .expect("global function remains owned")
             .body = replacement.body;
 
-        let value = Vm::new(&functions, &host_functions, &var_decls, None)
+        let value = test_vm(&functions, &var_decls)
             .with_optional_globals(Some(&global_functions))
             .call("Probe", &[])
             .expect("mutated global function executes");
-        assert_eq!(value, Value::Int(2));
+        check_eq!(value => Value::Int(2));
     }
 
     #[test]
     fn linked_function_does_not_reuse_a_caller_warmed_plan() {
-        let mut function = Parser::new("global func Probe() { return 1; }")
-            .parse_script_strict()
-            .expect("linked source parses")
-            .functions
-            .into_iter()
-            .next()
-            .expect("linked function exists");
+        let mut function = parse_function(
+            "global func Probe() { return 1; }",
+            "linked source parses",
+            "linked function exists",
+        );
         let functions = FxHashMap::from_iter([(function.name.clone(), function.clone())]);
-        let host_functions = FxHashMap::default();
         let var_decls = Vec::new();
-        Vm::new(&functions, &host_functions, &var_decls, None)
+        test_vm(&functions, &var_decls)
             .call_pinned_args(&function, Vec::new())
             .expect("caller-owned function warms its plan");
 
-        let replacement = Parser::new("global func Probe() { return 2; }")
-            .parse_script_strict()
-            .expect("replacement source parses")
-            .functions
-            .into_iter()
-            .next()
-            .expect("replacement function exists");
+        let replacement = parse_function(
+            "global func Probe() { return 2; }",
+            "replacement source parses",
+            "replacement function exists",
+        );
         function.body = replacement.body;
 
         let mut engine = crate::engine::Engine::new();
         engine
             .load_script("global func Probe() { return 0; }")
             .expect("destination link parses");
-        assert!(engine.link_global_access_function("Probe", function));
-        assert_eq!(
-            engine.call("Probe", &[]).expect("linked function executes"),
-            Value::Int(2)
-        );
+        check!(engine.link_global_access_function("Probe", function));
+        check_eq!(engine.call("Probe", &[]).expect("linked function executes") => Value::Int(2));
     }
 
     #[test]
     fn function_debug_omits_the_derived_compilation_cache() {
-        let function = Parser::new("func Probe() { return 1; }")
-            .parse_script_strict()
-            .expect("source parses")
-            .functions
-            .into_iter()
-            .next()
-            .expect("function exists");
+        let function = parse_function(
+            "func Probe() { return 1; }",
+            "source parses",
+            "function exists",
+        );
 
-        assert!(!format!("{function:?}").contains("compiled"));
+        check!(!format!("{function:?}").contains("compiled"));
     }
 
     #[test]
@@ -12871,43 +12765,25 @@ mod tests {
             ("c".to_string(), Value::Int(3)),
         ]));
 
-        let result = execute_script(
-            "#strict 3\nfunc Probe(state) { return state.a + state.b + state.c; }",
+        check_script!("#strict 3\nfunc Probe(state) { return state.a + state.b + state.c; }",
             "Probe",
-            &[state],
-        )
-        .expect("compiled property reads run");
-
-        assert_eq!(result, Value::Int(6));
-        assert_eq!(runtime_container_registration_traversals(), 1);
+            &[state]; expect "compiled property reads run" => Value::Int(6));
+        check_eq!(runtime_container_registration_traversals() => 1);
     }
 
     #[test]
     fn compiled_negative_index_grows_a_referenced_empty_array() {
         reset_compiled_function_execution_count();
-        let result = execute_script(
-            "#strict 3\nfunc Probe() { var state = []; var ignored = state[0xffffffff]; return state; }",
+        check_script!("#strict 3\nfunc Probe() { var state = []; var ignored = state[0xffffffff]; return state; }",
             "Probe",
-            &[],
-        )
-        .expect("negative index follows native array growth");
-
-        assert_eq!(result, Value::Array(vec![Value::Nil]));
-        assert_eq!(compiled_function_execution_count(), 1);
+            &[]; expect "negative index follows native array growth" => Value::Array(vec![Value::Nil]));
+        check_eq!(compiled_function_execution_count() => 1);
     }
 
     #[test]
     fn compiled_indexed_path_preserves_ast_string_registration_order() {
         fn run(source: &str) -> (Value, Vec<Vec<u8>>, usize) {
-            let script = Parser::new(source)
-                .parse_script_strict()
-                .expect("source parses");
-            let functions: FxHashMap<String, Function> = script
-                .functions
-                .into_iter()
-                .map(|function| (function.name.clone(), function))
-                .collect();
-            let host_functions = FxHashMap::default();
+            let functions = parse_functions(source, "source parses");
             let var_decls = Vec::new();
             let registrations = crate::engine::new_string_registrations();
             let state = Value::Proplist(ValueMap::from([
@@ -12915,7 +12791,7 @@ mod tests {
                 ("other".to_string(), Value::from("Other")),
             ]));
             reset_compiled_function_execution_count();
-            let result = Vm::new(&functions, &host_functions, &var_decls, None)
+            let result = test_vm(&functions, &var_decls)
                 .with_string_registrations(Some(&registrations))
                 .call("Probe", &[state])
                 .expect("probe executes");
@@ -12927,24 +12803,16 @@ mod tests {
         let ast =
             run("#strict 3\nfunc Probe(state) { return [state.text[0], state.other]; Unknown(); }");
 
-        assert_eq!(compiled.0, ast.0);
-        assert_eq!(compiled.1, ast.1);
-        assert_eq!(compiled.2, 1);
-        assert_eq!(ast.2, 0);
+        check_eq!(compiled.0 => ast.0);
+        check_eq!(compiled.1 => ast.1);
+        check_eq!(compiled.2 => 1);
+        check_eq!(ast.2 => 0);
     }
 
     #[test]
     fn compiled_stack_overflow_falls_back_before_observable_execution() {
         fn run(source: &str) -> (String, Vec<Vec<u8>>) {
-            let script = Parser::new(source)
-                .parse_script_strict()
-                .expect("source parses");
-            let functions: FxHashMap<String, Function> = script
-                .functions
-                .into_iter()
-                .map(|function| (function.name.clone(), function))
-                .collect();
-            let host_functions = FxHashMap::default();
+            let functions = parse_functions(source, "source parses");
             let var_decls = Vec::new();
             let registrations = crate::engine::new_string_registrations();
             let state = Value::Proplist(ValueMap::from([(
@@ -12952,7 +12820,7 @@ mod tests {
                 Value::from("Observed"),
             )]));
             let live_state = state.clone();
-            let error = Vm::new(&functions, &host_functions, &var_decls, None)
+            let error = test_vm(&functions, &var_decls)
                 .with_string_registrations(Some(&registrations))
                 .call("Probe", &[state])
                 .expect_err("oversized value stack errors")
@@ -12972,23 +12840,15 @@ mod tests {
             "#strict 3\nfunc Probe(state) {{ var earlier = state.other; return [{elements}]; Unknown(); }}"
         ));
 
-        assert_eq!(compiled.0, ast.0);
-        assert_eq!(compiled.1, ast.1);
-        assert!(!ast.1.is_empty());
+        check_eq!(compiled.0 => ast.0);
+        check_eq!(compiled.1 => ast.1);
+        check!(!ast.1.is_empty());
     }
 
     #[test]
     fn compiled_object_path_hook_observes_the_ast_value_stack_depth() {
         fn run(source: &str) -> (Value, usize, usize) {
-            let script = Parser::new(source)
-                .parse_script_strict()
-                .expect("source parses");
-            let functions: FxHashMap<String, Function> = script
-                .functions
-                .into_iter()
-                .map(|function| (function.name.clone(), function))
-                .collect();
-            let host_functions = FxHashMap::default();
+            let functions = parse_functions(source, "source parses");
             let var_decls = Vec::new();
             let observed_depth = Rc::new(Cell::new(0));
             let hook_depth = Rc::clone(&observed_depth);
@@ -13001,7 +12861,7 @@ mod tests {
                 }
             });
             reset_compiled_function_execution_count();
-            let value = Vm::new(&functions, &host_functions, &var_decls, None)
+            let value = test_vm(&functions, &var_decls)
                 .with_local_cell_hook(Some(&hook))
                 .call("Probe", &[Value::Object(7)])
                 .expect("object property probe executes");
@@ -13016,10 +12876,10 @@ mod tests {
         let ast =
             run("#strict 3\nfunc Probe(target) { return target.value; UnknownAfterReturn(); }");
 
-        assert_eq!(compiled.0, ast.0);
-        assert_eq!(compiled.1, ast.1);
-        assert_eq!(compiled.2, 1);
-        assert_eq!(ast.2, 0);
+        check_eq!(compiled.0 => ast.0);
+        check_eq!(compiled.1 => ast.1);
+        check_eq!(compiled.2 => 1);
+        check_eq!(ast.2 => 0);
     }
 
     #[test]
@@ -13027,18 +12887,10 @@ mod tests {
         reset_runtime_container_registration_traversals();
         let state = Value::Proplist(ValueMap::from([("value".to_string(), Value::Int(7))]));
 
-        let result = execute_script(
-            "#strict 3\nfunc Wrap(state) { return { copy = state }; }",
+        check_script!("#strict 3\nfunc Wrap(state) { return { copy = state }; }",
             "Wrap",
-            std::slice::from_ref(&state),
-        )
-        .expect("compiled aggregate construction runs");
-
-        assert_eq!(
-            result,
-            Value::Proplist(ValueMap::from([("copy".to_string(), state)]))
-        );
-        assert_eq!(runtime_container_registration_traversals(), 1);
+            std::slice::from_ref(&state); expect "compiled aggregate construction runs" => Value::Proplist(ValueMap::from([("copy".to_string(), state)])));
+        check_eq!(runtime_container_registration_traversals() => 1);
     }
 
     #[test]
@@ -13056,8 +12908,7 @@ mod tests {
             ("energy".to_string(), Value::Int(100)),
         ]));
 
-        let result = execute_script(
-            r#"
+        check_script!(r#"
                 #strict 3
                 func Step(state, frame, random) {
                     var vx = state.velocity[0];
@@ -13086,25 +12937,18 @@ mod tests {
                 }
             "#,
             "Step",
-            &[state, Value::Int(0), Value::Int(0)],
-        )
-        .expect("slot-resolved container computation runs");
-
-        assert_eq!(
-            result,
-            Value::Proplist(ValueMap::from([
-                (
-                    "position".to_string(),
-                    Value::Array(vec![Value::Int(42), Value::Int(21)])
-                ),
-                (
-                    "velocity".to_string(),
-                    Value::Array(vec![Value::Int(2), Value::Int(1)])
-                ),
-                ("energy".to_string(), Value::Int(99)),
-            ]))
-        );
-        assert_eq!(compiled_function_execution_count(), 1);
+            &[state, Value::Int(0), Value::Int(0)]; expect "slot-resolved container computation runs" => Value::Proplist(ValueMap::from([
+            (
+                "position".to_string(),
+                Value::Array(vec![Value::Int(42), Value::Int(21)])
+            ),
+            (
+                "velocity".to_string(),
+                Value::Array(vec![Value::Int(2), Value::Int(1)])
+            ),
+            ("energy".to_string(), Value::Int(99)),
+        ])));
+        check_eq!(compiled_function_execution_count() => 1);
     }
 
     #[test]
@@ -13113,24 +12957,15 @@ mod tests {
         // script calls to C4AUL_MAX_Par == 10 without allocating a parameter
         // vector (C4AulExec.cpp:62-63, 1112-1130; C4Aul.h).
         CALL_ARG_HEAP_SPILLS.with(|count| count.set(0));
-        let result = execute_script(
-            r#"
+        check_script!(r#"
                 func Callee(a, b, c, d, e, f, g, h, i, j) {
                     return a + b + c + d + e + f + g + h + i + j;
                 }
                 func Test() { return Callee(1, 2, 3, 4, 5, 6, 7, 8, 9, 10); }
             "#,
             "Test",
-            &[],
-        )
-        .expect("ten-argument script call runs");
-
-        assert_eq!(result, Value::Int(55));
-        assert_eq!(
-            CALL_ARG_HEAP_SPILLS.with(Cell::get),
-            0,
-            "C4Aul's fixed-size call frame must not spill ordinary arguments to the heap"
-        );
+            &[]; expect "ten-argument script call runs" => Value::Int(55));
+        check_eq!(CALL_ARG_HEAP_SPILLS.with(Cell::get) => 0, "C4Aul's fixed-size call frame must not spill ordinary arguments to the heap");
     }
 
     #[test]
@@ -13139,41 +12974,25 @@ mod tests {
         // calls resolve through that engine rather than the current object's
         // definition (C4AulParse.cpp:2808-2813). Hazard's AddLightCone must
         // therefore call the global CreateLight, not FLHH::CreateLight.
-        let object_script = Parser::new(
+        let object_functions = parse_functions(
             r#"
                 func CreateLight() { return AddLightCone(); }
                 func Test() { return AddLightCone(); }
             "#,
-        )
-        .parse_script_strict()
-        .expect("object script parses");
-        let object_functions: FxHashMap<String, Function> = object_script
-            .functions
-            .into_iter()
-            .map(|function| (function.name.clone(), function))
-            .collect();
-        let global_script = Parser::new(
+            "object script parses",
+        );
+        let global_functions = parse_functions(
             r#"
                 global func CreateLight() { return 42; }
                 global func AddLightCone() { return CreateLight(); }
             "#,
-        )
-        .parse_script_strict()
-        .expect("global script parses");
-        let global_functions: FxHashMap<String, Function> = global_script
-            .functions
-            .into_iter()
-            .map(|function| (function.name.clone(), function))
-            .collect();
-        let host_functions = FxHashMap::default();
-        let var_decls = Vec::new();
-        let vm = Vm::new(&object_functions, &host_functions, &var_decls, None)
-            .with_optional_globals(Some(&global_functions));
-
-        assert_eq!(
-            vm.call("Test", &[]).expect("global call resolves"),
-            Value::Int(42)
+            "global script parses",
         );
+        let var_decls = Vec::new();
+        let vm =
+            test_vm(&object_functions, &var_decls).with_optional_globals(Some(&global_functions));
+
+        check_eq!(vm.call("Test", &[]).expect("global call resolves") => Value::Int(42));
     }
 
     #[test]
@@ -13188,37 +13007,23 @@ mod tests {
                 return Local(2, target) + 1;
             }
         "#;
-        let script = Parser::new(source)
-            .parse_script_strict()
-            .expect("parse should succeed");
-        let functions: FxHashMap<String, Function> = script
-            .functions
-            .into_iter()
-            .map(|f| (f.name.clone(), f))
-            .collect();
-        let host_functions = FxHashMap::default();
+        let functions = parse_functions(source, "parse should succeed");
         let var_decls: Vec<VarDecl> = Vec::new();
         let cell = value_cell(Value::Nil);
         let hook_cell = cell.clone();
         let hook: crate::engine::LocalCellHook = std::rc::Rc::new(move |target, name| {
             (matches!(target, Value::Int(42)) && name == "__local_2").then(|| hook_cell.clone())
         });
-        let vm = Vm::new(&functions, &host_functions, &var_decls, None)
-            .with_local_cell_hook(Some(&hook));
+        let vm = test_vm(&functions, &var_decls).with_local_cell_hook(Some(&hook));
         let result = vm.call("Test", &[Value::Int(42)]).expect("script runs");
-        assert_eq!(result, Value::Int(85), "the read sees the earlier write");
-        assert_eq!(
-            *cell.borrow(),
-            Value::Int(84),
-            "the write landed in the foreign cell"
-        );
+        check_eq!(result => Value::Int(85), "the read sees the earlier write");
+        check_eq!(*cell.borrow() => Value::Int(84), "the write landed in the foreign cell");
     }
 
     #[test]
     fn vm_executes_basic_arithmetic() {
         let source = "func Test() { return 5 + 3; }";
-        let result = execute_script(source, "Test", &[]).unwrap();
-        assert_eq!(result, Value::Int(8));
+        check_script!(source, "Test", &[]; unwrap => Value::Int(8));
     }
 
     #[test]
@@ -13230,8 +13035,7 @@ mod tests {
                 return x + y;
             }
         "#;
-        let result = execute_script(source, "Test", &[]).unwrap();
-        assert_eq!(result, Value::Int(30));
+        check_script!(source, "Test", &[]; unwrap => Value::Int(30));
     }
 
     #[test]
@@ -13239,7 +13043,7 @@ mod tests {
         // C4Aul's function VarNamed table precedes the object's LocalNamed
         // table. MART relies on this: FxIntDoMagicTimer declares a temporary
         // `var pClonk` without overwriting MART's persistent `local pClonk`.
-        let script = Parser::new(
+        let script = parse_script(
             r#"
                 local pClonk;
                 func Timer() {
@@ -13248,37 +13052,24 @@ mod tests {
                     return pClonk;
                 }
             "#,
-        )
-        .parse_script_strict()
-        .expect("script parses");
+            "script parses",
+        );
         let var_decls = script.var_decls.clone();
-        let functions: FxHashMap<String, Function> = script
-            .functions
-            .into_iter()
-            .map(|function| (function.name.clone(), function))
-            .collect();
-        let host_functions = FxHashMap::default();
-        let vm = Vm::new(&functions, &host_functions, &var_decls, None);
+        let functions = function_map(script);
+        let vm = test_vm(&functions, &var_decls);
         let cells = LocalCells::from_local_vars(&HashMap::from([(
             "pClonk".to_string(),
             Value::Object(574),
         )]));
 
-        assert_eq!(
-            vm.call_with_cells("Timer", &[], &cells)
-                .expect("function-local assignment runs"),
-            Value::Int(99)
-        );
-        assert_eq!(
-            cells.snapshot().get("pClonk"),
-            Some(&Value::Object(574)),
-            "the call-scoped var must not alias the persistent object local"
-        );
+        check_eq!(vm.call_with_cells("Timer", &[], &cells)
+                .expect("function-local assignment runs") => Value::Int(99));
+        check_eq!(cells.snapshot().get("pClonk") => Some(&Value::Object(574)), "the call-scoped var must not alias the persistent object local");
     }
 
     #[test]
     fn varn_reads_and_writes_only_named_function_vars() {
-        let script = Parser::new(
+        let script = parse_script(
             r#"
                 #strict
                 local persisted;
@@ -13291,49 +13082,36 @@ mod tests {
                     return [before, x, VarN("x"), VarN("only_param"), VarN("persisted"), VarN("missing")];
                 }
             "#,
-        )
-        .parse_script_strict()
-        .expect("script parses");
-        let var_decls = script.var_decls.clone();
-        let functions: FxHashMap<String, Function> = script
-            .functions
-            .into_iter()
-            .map(|function| (function.name.clone(), function))
-            .collect();
-        let host_functions = FxHashMap::default();
-        let vm = Vm::new(&functions, &host_functions, &var_decls, None);
-
-        assert_eq!(
-            vm.call("Probe", &[Value::Int(42), Value::Int(84)])
-                .expect("VarN reads and writes the live function-var cell"),
-            Value::Array(vec![
-                Value::Int(5),
-                Value::Int(42),
-                Value::Int(7),
-                Value::Nil,
-                Value::Nil,
-                Value::Nil,
-            ])
+            "script parses",
         );
+        let var_decls = script.var_decls.clone();
+        let functions = function_map(script);
+        let vm = test_vm(&functions, &var_decls);
+
+        check_eq!(vm.call("Probe", &[Value::Int(42), Value::Int(84)])
+            .expect("VarN reads and writes the live function-var cell") => Value::Array(vec![
+            Value::Int(5),
+            Value::Int(42),
+            Value::Int(7),
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+        ]));
     }
 
     #[test]
     fn varn_without_a_script_caller_returns_nil() {
         let engine = crate::engine::Engine::new();
 
-        assert_eq!(
-            engine
+        check_eq!(engine
                 .call("VarN", &[Value::String("x".to_string().into())])
-                .expect("a direct VarN dispatch is not an unknown-function error"),
-            Value::Nil
-        );
+                .expect("a direct VarN dispatch is not an unknown-function error") => Value::Nil);
     }
 
     #[test]
     fn vm_handles_function_parameters() {
         let source = "func Add(a, b) { return a + b; }";
-        let result = execute_script(source, "Add", &[Value::Int(7), Value::Int(3)]).unwrap();
-        assert_eq!(result, Value::Int(10));
+        check_script!(source, "Add", &[Value::Int(7), Value::Int(3)]; unwrap => Value::Int(10));
     }
 
     #[test]
@@ -13342,8 +13120,7 @@ mod tests {
         // change consequently read call arguments 4 and 5, not 5 and 6.
         let source =
             "#strict\nfunc Merge(target, number, name, target, timer, change) { return [target, timer, change]; }";
-        let result = execute_script(
-            source,
+        check_script!(source,
             "Merge",
             &[
                 Value::Int(10),
@@ -13352,27 +13129,21 @@ mod tests {
                 Value::Int(40),
                 Value::Int(50),
                 Value::Int(60),
-            ],
-        )
-        .expect("duplicate-name function runs");
-        assert_eq!(
-            result,
-            Value::Array(vec![Value::Int(10), Value::Int(40), Value::Int(50)])
-        );
+            ]; expect "duplicate-name function runs" => Value::Array(vec![Value::Int(10), Value::Int(40), Value::Int(50)]));
     }
 
     #[test]
     fn vm_reports_undefined_variable() {
         let source = "func Test() { return undefined_var; }";
         let error = execute_script(source, "Test", &[]).unwrap_err();
-        assert!(error.message().contains("undefined variable"));
+        check!(error.message().contains("undefined variable"));
     }
 
     #[test]
     fn vm_reports_unknown_function() {
         let source = "func Test() { return 1; }";
         let error = execute_script(source, "Missing", &[]).unwrap_err();
-        assert!(error.message().contains("unknown function"));
+        check!(error.message().contains("unknown function"));
     }
 
     #[test]
@@ -13381,8 +13152,7 @@ mod tests {
             func Inner() { return 42; }
             func Outer() { return Inner(); }
         "#;
-        let result = execute_script(source, "Outer", &[]).unwrap();
-        assert_eq!(result, Value::Int(42));
+        check_script!(source, "Outer", &[]; unwrap => Value::Int(42));
     }
 
     #[test]
@@ -13396,14 +13166,13 @@ mod tests {
         // Ten parameter slots per call reach C++'s value-stack ceiling before
         // its independent 512-context ceiling.
         let error = execute_script(source, "Recursive", &[Value::Int(102)]).unwrap_err();
-        assert_eq!(error.message(), "internal error: value stack overflow!");
+        check_eq!(error.message() => "internal error: value stack overflow!");
     }
 
     #[test]
     fn vm_handles_array_creation() {
         let source = "#strict\nfunc Test() { var arr = [1, 2, 3]; return arr[1]; }";
-        let result = execute_script(source, "Test", &[]).unwrap();
-        assert_eq!(result, Value::Int(2));
+        check_script!(source, "Test", &[]; unwrap => Value::Int(2));
     }
 
     #[test]
@@ -13416,8 +13185,7 @@ mod tests {
                 return arr[1];
             }
         "#;
-        let result = execute_script(source, "Test", &[]).unwrap();
-        assert_eq!(result, Value::Int(42));
+        check_script!(source, "Test", &[]; unwrap => Value::Int(42));
     }
 
     #[test]
@@ -13430,8 +13198,7 @@ mod tests {
                 return arr[5];
             }
         "#;
-        let result = execute_script(source, "Test", &[]).unwrap();
-        assert_eq!(result, Value::Int(99));
+        check_script!(source, "Test", &[]; unwrap => Value::Int(99));
     }
 
     #[test]
@@ -13454,23 +13221,20 @@ mod tests {
             }
         "#;
 
-        assert_eq!(
-            execute_script(source, "Test", &[]).expect("array accesses succeed"),
+        check_script!(source, "Test", &[]; expect "array accesses succeed" => Value::Array(vec![
             Value::Array(vec![
-                Value::Array(vec![
-                    Value::Int(7),
-                    Value::Int(7),
-                    Value::Int(8),
-                    Value::Nil,
-                ]),
-                Value::Int(5),
+                Value::Int(7),
+                Value::Int(7),
+                Value::Int(8),
                 Value::Nil,
-                Value::Array(vec![Value::Nil]),
-                Value::Int(5),
-                Value::Int(6),
-                Value::Array(vec![Value::Int(3), Value::Int(4)]),
-            ])
-        );
+            ]),
+            Value::Int(5),
+            Value::Nil,
+            Value::Array(vec![Value::Nil]),
+            Value::Int(5),
+            Value::Int(6),
+            Value::Array(vec![Value::Int(3), Value::Int(4)]),
+        ]));
     }
 
     #[test]
@@ -13486,10 +13250,7 @@ mod tests {
             }
         "#;
 
-        assert_eq!(
-            execute_script(source, "Test", &[]).expect("negative array indices clamp"),
-            Value::Array(vec![Value::Int(7), Value::Int(1), Value::Int(2)])
-        );
+        check_script!(source, "Test", &[]; expect "negative array indices clamp" => Value::Array(vec![Value::Int(7), Value::Int(1), Value::Int(2)]));
     }
 
     #[test]
@@ -13521,17 +13282,11 @@ mod tests {
             )
             .expect("script loads");
 
-        assert_eq!(
-            engine
+        check_eq!(engine
                 .call("GrowThroughReference", &[])
-                .expect("reference read succeeds"),
-            Value::Array(vec![Value::Nil])
-        );
-        assert!(engine.call("GrowBeforeNestedFailure", &[]).is_err());
-        assert_eq!(
-            *captured.lock().unwrap(),
-            Some(Value::Array(vec![Value::Nil]))
-        );
+                .expect("reference read succeeds") => Value::Array(vec![Value::Nil]));
+        check!(engine.call("GrowBeforeNestedFailure", &[]).is_err());
+        check_eq!(*captured.lock().unwrap() => Some(Value::Array(vec![Value::Nil])));
     }
 
     #[test]
@@ -13542,13 +13297,13 @@ mod tests {
         let Value::Array(elements) = grown else {
             panic!("array expected");
         };
-        assert_eq!(elements.len(), ARRAY_MAX_SIZE);
-        assert_eq!(elements.last(), Some(&Value::Int(1)));
+        check_eq!(elements.len() => ARRAY_MAX_SIZE);
+        check_eq!(elements.last() => Some(&Value::Int(1)));
         drop(elements);
 
         match execute_script(source, "Grow", &[Value::Int(1_000_000)]) {
             Ok(_) => panic!("index at array cap unexpectedly succeeded"),
-            Err(error) => assert_eq!(error.message(), "out of memory"),
+            Err(error) => check_eq!(error.message() => "out of memory"),
         }
     }
 
@@ -13571,132 +13326,76 @@ mod tests {
             }
         "#;
 
-        assert_eq!(
-            execute_script(source, "Test", &[]).expect("string accesses succeed"),
-            Value::Array(vec![
-                Value::String("a".into()),
-                Value::String("c".into()),
-                Value::Nil,
-                Value::Nil,
-                Value::String("a".into()),
-                Value::String("a".into()),
-                Value::String("b".into()),
-                Value::String("b".into()),
-            ])
-        );
+        check_script!(source, "Test", &[]; expect "string accesses succeed" => Value::Array(vec![
+            Value::String("a".into()),
+            Value::String("c".into()),
+            Value::Nil,
+            Value::Nil,
+            Value::String("a".into()),
+            Value::String("a".into()),
+            Value::String("b".into()),
+            Value::String("b".into()),
+        ]));
     }
 
     #[test]
     fn dynamic_eval_reads_internal_byte_projection_as_source_bytes() {
         let source = "func Probe(string code) { return eval(code); }";
         let code = c4_string_from_bytes(&[b'\"', 0xff, b'\"']);
-        assert_eq!(
-            execute_script(source, "Probe", &[Value::String(code.into())])
-                .expect("projected source evaluates"),
-            Value::String(c4_string_from_bytes(&[0xff]).into())
-        );
+        check_script!(source, "Probe", &[Value::String(code.into())]; expect "projected source evaluates" => Value::String(c4_string_from_bytes(&[0xff]).into()));
 
-        assert_eq!(
-            execute_script(
-                source,
+        check_script!(source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"1\0+1").into())],
-            )
-            .expect("NUL-terminated source evaluates its prefix"),
-            Value::Int(1)
-        );
-        assert_eq!(
-            execute_script(
-                source,
+                &[Value::String(c4_string_from_bytes(b"1\0+1").into())]; expect "NUL-terminated source evaluates its prefix" => Value::Int(1));
+        check_script!(source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"\"open\0\"").into())],
-            )
-            .expect("a literal truncated by NUL is a DirectExec parse failure"),
-            Value::Nil
-        );
+                &[Value::String(c4_string_from_bytes(b"\"open\0\"").into())]; expect "a literal truncated by NUL is a DirectExec parse failure" => Value::Nil);
 
-        assert_eq!(
-            execute_script(
-                source,
+        check_script!(source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"1\x1f+1").into())],
-            )
-            .expect("all C++ control-byte whitespace is skipped"),
-            Value::Int(2)
-        );
-        assert_eq!(
-            execute_script(
-                source,
+                &[Value::String(c4_string_from_bytes(b"1\x1f+1").into())]; expect "all C++ control-byte whitespace is skipped" => Value::Int(2));
+        check_script!(source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"1\xc2\xa0+1").into())],
-            )
-            .expect("non-ASCII whitespace is a DirectExec parse failure"),
-            Value::Nil
-        );
-        assert_eq!(
-            execute_script(
-                source,
+                &[Value::String(c4_string_from_bytes(b"1\xc2\xa0+1").into())]; expect "non-ASCII whitespace is a DirectExec parse failure" => Value::Nil);
+        check_script!(source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"\"a\nb\"").into())],
-            )
-            .expect("a raw newline in a string is a DirectExec parse failure"),
-            Value::Nil
-        );
-        assert_eq!(
-            execute_script(
-                source,
+                &[Value::String(c4_string_from_bytes(b"\"a\nb\"").into())]; expect "a raw newline in a string is a DirectExec parse failure" => Value::Nil);
+        check_script!(source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"true\xc3\xbf").into())],
-            )
-            .expect("the non-ASCII source byte causes a DirectExec parse failure"),
-            Value::Nil
-        );
-        assert_eq!(
-            execute_script(
-                source,
+                &[Value::String(c4_string_from_bytes(b"true\xc3\xbf").into())]; expect "the non-ASCII source byte causes a DirectExec parse failure" => Value::Nil);
+        check_script!(source,
                 "Probe",
                 &[Value::String(
                     c4_string_from_bytes(b"1//comment\r+1").into()
-                )],
-            )
-            .expect("a carriage return ends a C++ line comment"),
-            Value::Int(2)
-        );
+                )]; expect "a carriage return ends a C++ line comment" => Value::Int(2));
     }
 
     #[test]
     fn host_direct_exec_reads_internal_byte_projection_as_source_bytes() {
         let functions = FxHashMap::default();
-        let host_functions = FxHashMap::default();
         let var_decls = Vec::new();
-        let vm = Vm::new(&functions, &host_functions, &var_decls, None);
+        let vm = test_vm(&functions, &var_decls);
         let source = c4_string_from_bytes(&[b'\"', 0xff, b'\"']);
         let expected = Value::String(c4_string_from_bytes(&[0xff]).into());
 
         let (value, _) = vm
             .direct_exec_with_locals(&source, &HashMap::new(), None)
             .expect("projected source executes with copied locals");
-        assert_eq!(value, expected);
+        check_eq!(value => expected);
 
         let cells = LocalCells::default();
-        assert_eq!(
-            vm.direct_exec_with_cells(&source, &cells, None)
-                .expect("projected source executes with live cells"),
-            expected
-        );
+        check_eq!(vm.direct_exec_with_cells(&source, &cells, None)
+                .expect("projected source executes with live cells") => expected);
 
         let nul_terminated = c4_string_from_bytes(b"1\0+1");
         let (value, _) = vm
             .direct_exec_with_locals(&nul_terminated, &HashMap::new(), None)
             .expect("NUL-terminated host source evaluates its prefix");
-        assert_eq!(value, Value::Int(1));
+        check_eq!(value => Value::Int(1));
 
         let truncated_literal = c4_string_from_bytes(b"\"open\0\"");
-        assert_eq!(
-            vm.direct_exec_with_cells(&truncated_literal, &cells, None)
-                .expect("a host literal truncated by NUL is a parse failure"),
-            Value::Nil
-        );
+        check_eq!(vm.direct_exec_with_cells(&truncated_literal, &cells, None)
+                .expect("a host literal truncated by NUL is a parse failure") => Value::Nil);
     }
 
     #[test]
@@ -13709,10 +13408,7 @@ mod tests {
         "#;
         let error = execute_script(source, "Test", &[]).expect_err("string index must fail");
 
-        assert_eq!(
-            error.message(),
-            "indexed string access: index of type string, int expected!"
-        );
+        check_eq!(error.message() => "indexed string access: index of type string, int expected!");
     }
 
     #[test]
@@ -13725,17 +13421,13 @@ mod tests {
             }
         "#;
 
-        assert_eq!(
-            execute_script(source, "Test", &[]).expect("string identity checks succeed"),
-            Value::Array(vec![Value::Bool(true), Value::Bool(false)])
-        );
+        check_script!(source, "Test", &[]; expect "string identity checks succeed" => Value::Array(vec![Value::Bool(true), Value::Bool(false)]));
     }
 
     #[test]
     fn vm_handles_proplist_creation() {
         let source = "#strict 3\nfunc Test() { var obj = { x = 10 }; return obj.x; }";
-        let result = execute_script(source, "Test", &[]).unwrap();
-        assert_eq!(result, Value::Int(10));
+        check_script!(source, "Test", &[]; unwrap => Value::Int(10));
     }
 
     #[test]
@@ -13748,8 +13440,7 @@ mod tests {
                 return obj.x;
             }
         "#;
-        let result = execute_script(source, "Test", &[]).unwrap();
-        assert_eq!(result, Value::Int(42));
+        check_script!(source, "Test", &[]; unwrap => Value::Int(42));
     }
 
     #[test]
@@ -13764,13 +13455,10 @@ mod tests {
             }
         "#;
 
-        assert_eq!(
-            execute_script(source, "Test", &[]).expect("declared map foreach runs"),
-            Value::Proplist(ValueMap::from([
-                ("alpha".to_string(), Value::Int(11)),
-                ("beta".to_string(), Value::Int(22)),
-            ]))
-        );
+        check_script!(source, "Test", &[]; expect "declared map foreach runs" => Value::Proplist(ValueMap::from([
+            ("alpha".to_string(), Value::Int(11)),
+            ("beta".to_string(), Value::Int(22)),
+        ])));
     }
 
     #[test]
@@ -13797,10 +13485,7 @@ mod tests {
             }
         "#;
 
-        assert_eq!(
-            execute_script(source, "Test", &[]).expect("predeclared map foreach runs"),
-            Value::Array(vec![Value::Int(3), Value::Int(4), Value::Int(1)])
-        );
+        check_script!(source, "Test", &[]; expect "predeclared map foreach runs" => Value::Array(vec![Value::Int(3), Value::Int(4), Value::Int(1)]));
     }
 
     #[test]
@@ -13819,15 +13504,12 @@ mod tests {
             }
         "#;
 
-        assert_eq!(
-            execute_script(source, "Test", &[]).expect("ordered map foreach runs"),
-            Value::Array(vec![
-                Value::String("secondfirstthird".to_string().into()),
-                Value::Int(36),
-                Value::String("third".to_string().into()),
-                Value::Int(3),
-            ])
-        );
+        check_script!(source, "Test", &[]; expect "ordered map foreach runs" => Value::Array(vec![
+            Value::String("secondfirstthird".to_string().into()),
+            Value::Int(36),
+            Value::String("third".to_string().into()),
+            Value::Int(3),
+        ]));
     }
 
     #[test]
@@ -13858,10 +13540,7 @@ mod tests {
         ]);
 
         for _ in 0..2 {
-            assert_eq!(
-                execute_script(source, "Test", &[]).expect("map remove/reinsert foreach runs"),
-                expected
-            );
+            check_script!(source, "Test", &[]; expect "map remove/reinsert foreach runs" => expected);
         }
     }
 
@@ -13874,7 +13553,7 @@ mod tests {
         "#;
 
         let error = execute_script(source, "Test", &[]).expect_err("map foreach rejects int");
-        assert!(
+        check!(
             error.message().contains("for: map expected, but got int!"),
             "unexpected error: {}",
             error.message()
@@ -13891,18 +13570,12 @@ mod tests {
             }
         "#;
 
-        assert_eq!(
-            execute_script(
-                source,
+        check_script!(source,
                 "Test",
                 &[Value::Proplist(ValueMap::from([(
                     "entry".to_string(),
                     Value::String("same".into()),
-                )]))],
-            )
-            .expect("map entry removal runs"),
-            Value::Array(vec![Value::Bool(false), Value::Bool(true)])
-        );
+                )]))]; expect "map entry removal runs" => Value::Array(vec![Value::Bool(false), Value::Bool(true)]));
     }
 
     #[test]
@@ -13918,8 +13591,7 @@ mod tests {
                 return sum;
             }
         "#;
-        let result = execute_script(source, "Test", &[]).unwrap();
-        assert_eq!(result, Value::Int(15));
+        check_script!(source, "Test", &[]; unwrap => Value::Int(15));
     }
 
     #[test]
@@ -13932,9 +13604,7 @@ mod tests {
                 return 0;
             }
         "#;
-        let result1 = execute_script(source, "Test", &[Value::Int(15)]).unwrap();
-        assert_eq!(result1, Value::Int(1));
-        let result2 = execute_script(source, "Test", &[Value::Int(5)]).unwrap();
-        assert_eq!(result2, Value::Nil);
+        check_script!(source, "Test", &[Value::Int(15)]; unwrap => Value::Int(1));
+        check_script!(source, "Test", &[Value::Int(5)]; unwrap => Value::Nil);
     }
 }

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clonk_engine::scenario::LegacyDefinitionResolver;
 use clonk_engine::{
     parse_initial_network_game_data, ClientCoreControlData, InitialNetworkGameData, LegacyCString,
-    NetworkResourceCore, Scenario, ScenarioError,
+    Scenario, ScenarioError,
 };
 use clonk_network::{
     compose_initial_network_dynamic, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
@@ -328,44 +328,25 @@ fn content_root() -> PathBuf {
 }
 
 fn tutorial_parameters() -> JoinGameParametersEnvelope {
-    let empty_players = PlayerInfoListSnapshot {
-        last_player_id: 0,
-        clients: Vec::new(),
-    };
-    let host = LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap();
+    let empty_players = PlayerInfoListSnapshot::default();
+    let host = crate::c4(b"OracleHost");
     JoinGameParametersEnvelope {
         random_seed: 424_242,
-        startup_player_count: 0,
         max_players: 1,
-        use_fair_crew: false,
-        fair_crew_forced: false,
-        fair_crew_strength: 0,
         allow_debug: true,
         is_network_game: true,
         control_rate: 2,
         auto_frame_skip: true,
         rules: vec![id_entry(*b"SURR", 1)],
-        goals: Vec::new(),
-        league: LegacyCString::default(),
         league_address: LegacyCString::default(),
-        title: LegacyCString::from_bytes(b"A Clonk".to_vec()).unwrap(),
-        scenario: NetworkResourceCore::default(),
-        game_resources: Vec::new(),
+        title: crate::c4(b"A Clonk"),
         player_infos: empty_players.clone(),
         restore_player_infos: empty_players,
         teams: JoinTeamListSnapshot {
             active: 1,
-            custom: 0,
             allow_hostility_change: 1,
-            allow_team_switch: 0,
             auto_generate_teams: 1,
-            last_team_id: 0,
-            team_distribution: 0,
-            team_colors: 0,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
-            teams: Vec::new(),
+            ..Default::default()
         },
         clients: JoinClientRegistrySnapshot {
             clients: vec![ClientCoreControlData {
@@ -378,6 +359,7 @@ fn tutorial_parameters() -> JoinGameParametersEnvelope {
             }],
             local_client_id: Some(0),
         },
+        ..Default::default()
     }
 }
 

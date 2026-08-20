@@ -144,7 +144,7 @@ struct Aligner {
 impl Aligner {
     fn new(x: i32, y: i32, w: i32, h: i32, margin_x: i32, margin_y: i32) -> Self {
         Self {
-            area: IntRect { x, y, w, h },
+            area: IntRect::new(x, y, w, h),
             margin_x,
             margin_y,
         }
@@ -165,12 +165,12 @@ impl Aligner {
     }
 
     fn take_top(&mut self, height: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: self.area.w - self.margin_x * 2,
-            h: height,
-        };
+        let out = IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.margin_y,
+            self.area.w - self.margin_x * 2,
+            height,
+        );
         let consumed = height + self.margin_y * 2;
         self.area.y += consumed;
         self.area.h -= consumed;
@@ -178,23 +178,23 @@ impl Aligner {
     }
 
     fn take_bottom(&mut self, height: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.area.h - height - self.margin_y,
-            w: self.area.w - self.margin_x * 2,
-            h: height,
-        };
+        let out = IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.area.h - height - self.margin_y,
+            self.area.w - self.margin_x * 2,
+            height,
+        );
         self.area.h -= height + self.margin_y * 2;
         out
     }
 
     fn take_left(&mut self, width: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: width,
-            h: self.area.h - self.margin_y * 2,
-        };
+        let out = IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.margin_y,
+            width,
+            self.area.h - self.margin_y * 2,
+        );
         let consumed = width + self.margin_x * 2;
         self.area.x += consumed;
         self.area.w -= consumed;
@@ -202,23 +202,23 @@ impl Aligner {
     }
 
     fn take_right(&mut self, width: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.area.w - width - self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: width,
-            h: self.area.h - self.margin_y * 2,
-        };
+        let out = IntRect::new(
+            self.area.x + self.area.w - width - self.margin_x,
+            self.area.y + self.margin_y,
+            width,
+            self.area.h - self.margin_y * 2,
+        );
         self.area.w -= width + self.margin_x * 2;
         out
     }
 
     fn all(&self) -> IntRect {
-        IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: self.area.w - self.margin_x * 2,
-            h: self.area.h - self.margin_y * 2,
-        }
+        IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.margin_y,
+            self.area.w - self.margin_x * 2,
+            self.area.h - self.margin_y * 2,
+        )
     }
 
     fn expand_top(&mut self, by: i32) {
@@ -315,12 +315,12 @@ pub struct PlayerPropertiesLayout {
 
 impl PlayerPropertiesLayout {
     pub fn for_size(width: i32, height: i32) -> Self {
-        let paper = IntRect {
-            x: (width - PAPER_WIDTH) / 2,
-            y: (height - PAPER_HEIGHT) / 2,
-            w: PAPER_WIDTH,
-            h: PAPER_HEIGHT,
-        };
+        let paper = IntRect::new(
+            (width - PAPER_WIDTH) / 2,
+            (height - PAPER_HEIGHT) / 2,
+            PAPER_WIDTH,
+            PAPER_HEIGHT,
+        );
         // `caMain(GetClientRect(), 0, 1, true)`: the client rect zeroed to the
         // origin, so every cut below is offset by the dialog margins.
         let mut main = Aligner::new(
@@ -331,11 +331,8 @@ impl PlayerPropertiesLayout {
             0,
             1,
         );
-        let rect = |r: IntRect| IntRect {
-            x: paper.x + MARGIN_LEFT + r.x,
-            y: paper.y + MARGIN_TOP + r.y,
-            ..r
-        };
+        let rect =
+            |r: IntRect| r.with_position(paper.x + MARGIN_LEFT + r.x, paper.y + MARGIN_TOP + r.y);
 
         // `caButtonArea` only reserves space; nothing is placed into it.
         main.take_bottom(BUTTON_AREA_HEIGHT);
@@ -412,18 +409,8 @@ impl PlayerPropertiesLayout {
             // (`C4StartupPlrSelDlg.cpp:1228,1231`), so they land back on the
             // literal paper coordinates. Neither draws anything: the "OK"
             // word and the "x" glyph are painted into `StartupPlrPropBG.png`.
-            ok: IntRect {
-                x: paper.x + 147,
-                y: paper.y + 330,
-                w: 54,
-                h: 33,
-            },
-            cancel: IntRect {
-                x: paper.x + 317,
-                y: paper.y + 16,
-                w: 21,
-                h: 21,
-            },
+            ok: IntRect::new(paper.x + 147, paper.y + 330, 54, 33),
+            cancel: IntRect::new(paper.x + 317, paper.y + 16, 21, 21),
         }
     }
 
@@ -466,12 +453,12 @@ impl PlayerPropertiesLayout {
 
 fn movement_label_rect(button: IntRect, text: &str, font: &ClonkFont) -> IntRect {
     let (w, h) = font.measure(text, true);
-    IntRect {
-        x: button.x + button.w / 2 - w / 2,
-        y: button.y + button.h - 6,
+    IntRect::new(
+        button.x + button.w / 2 - w / 2,
+        button.y + button.h - 6,
         w,
         h,
-    }
+    )
 }
 
 /// Facet sheets used by [`PlayerPropertiesScreen`], in the same resolution
@@ -1929,18 +1916,10 @@ fn aspect_fitted(source_size: (i32, i32), dest: IntRect) -> IntRect {
     }
     if source_w * dest.h > dest.w * source_h {
         let h = source_h * dest.w / source_w;
-        IntRect {
-            y: dest.y + (dest.h - h) / 2,
-            h,
-            ..dest
-        }
+        dest.with_vertical(dest.y + (dest.h - h) / 2, h)
     } else {
         let w = source_w * dest.h / source_h;
-        IntRect {
-            x: dest.x + (dest.w - w) / 2,
-            w,
-            ..dest
-        }
+        dest.with_horizontal(dest.x + (dest.w - w) / 2, w)
     }
 }
 
@@ -1985,12 +1964,12 @@ fn draw_name_edit(
     draw_name_edit_frames(surface, rect, gamma);
     // `Edit::GetMargin*` (`C4GuiEdit.h:101-104`) insets the client rect the
     // text and selection are laid out in.
-    let client = IntRect {
-        x: rect.x + EDIT_MARGIN_X,
-        y: rect.y + EDIT_MARGIN_Y,
-        w: rect.w - EDIT_MARGIN_X * 2,
-        h: rect.h - EDIT_MARGIN_Y * 2,
-    };
+    let client = IntRect::new(
+        rect.x + EDIT_MARGIN_X,
+        rect.y + EDIT_MARGIN_Y,
+        rect.w - EDIT_MARGIN_X * 2,
+        rect.h - EDIT_MARGIN_Y * 2,
+    );
     let line_height = book.book.line_height;
     let (text_y, selection_height) = if client.h <= line_height {
         // "very narrow edit field: use all of it" (`C4GuiEdit.cpp:580-585`).
@@ -2058,16 +2037,7 @@ mod tests {
     fn retained_name_edit_keeps_both_native_draw_frame_passes() {
         let mut surface = Surface::new(32, 16, clonk_graphics::PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
-        draw_name_edit_frames(
-            &mut surface,
-            IntRect {
-                x: 2,
-                y: 2,
-                w: 20,
-                h: 10,
-            },
-            None,
-        );
+        draw_name_edit_frames(&mut surface, IntRect::new(2, 2, 20, 10), None);
 
         let scene = surface
             .take_gpu_scene_capture()
@@ -2112,21 +2082,8 @@ mod tests {
         let layout = PlayerPropertiesLayout::for_size(1280, 720);
         // `C4GUI::Screen::ShowDialog` centers an exclusive dialog
         // (`C4Gui.cpp:660-676`); the paper never scales with the window.
-        assert_eq!(
-            layout.paper,
-            IntRect {
-                x: 457,
-                y: 160,
-                w: 365,
-                h: 400
-            }
-        );
-        let paper = |x: i32, y: i32, w: i32, h: i32| IntRect {
-            x: 457 + x,
-            y: 160 + y,
-            w,
-            h,
-        };
+        assert_eq!(layout.paper, IntRect::new(457, 160, 365, 400));
+        let paper = |x: i32, y: i32, w: i32, h: i32| IntRect::new(457 + x, 160 + y, w, h);
         for (name, got, want) in [
             ("title", layout.title, paper(45, 17, 265, 22)),
             ("name label", layout.name_label, paper(45, 43, 265, 20)),
@@ -2193,25 +2150,15 @@ mod tests {
     /// `C4Facet::Draw` with `fAspect` (`C4Facet.cpp:120-134`).
     #[test]
     fn aspect_fit_matches_the_native_facet_letterboxing() {
-        let dest = IntRect {
-            x: 70,
-            y: 182,
-            w: 88,
-            h: 40,
-        };
+        let dest = IntRect::new(70, 182, 88, 40);
         // fctKeyboard 80x36 into 88x40 scales height: 36*88/80 = 39.
         assert_eq!(
             aspect_fitted((80, 36), dest),
-            IntRect { h: 39, ..dest },
+            dest.with_height(39),
             "keyboard"
         );
         // fctFlagClr 64x64 into 40x40 needs no letterboxing.
-        let square = IntRect {
-            x: 68,
-            y: 116,
-            w: 40,
-            h: 40,
-        };
+        let square = IntRect::new(68, 116, 40, 40);
         assert_eq!(aspect_fitted((64, 64), square), square, "flag");
     }
 

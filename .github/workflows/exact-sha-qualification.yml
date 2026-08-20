@@ -108,28 +108,7 @@ jobs:
         timeout-minutes: 10
         run: |
           read -r -a packages <<< "$APT_PACKAGES"
-          # Bound each apt call so a stalled mirror or dpkg lock cannot burn the
-          # job's whole timeout, and retry so a transient stall self-heals
-          # instead of evicting the merge-queue entry behind it.
-          apt_install() {
-            timeout 240 sudo apt-get install --yes --no-install-recommends "$@"
-          }
-          apt_refresh() { timeout 180 sudo apt-get update; }
-          apt_ensure() {
-            for attempt in 1 2 3; do
-              if apt_install "$@"; then
-                return 0
-              fi
-              apt_refresh || true
-              if apt_install "$@"; then
-                return 0
-              fi
-              echo "apt attempt ${attempt} failed; retrying" >&2
-              sleep $((attempt * 15))
-            done
-            return 1
-          }
-          apt_ensure "${packages[@]}"
+          scripts/install-apt-packages.sh "${packages[@]}"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1

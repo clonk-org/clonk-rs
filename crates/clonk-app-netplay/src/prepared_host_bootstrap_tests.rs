@@ -881,11 +881,11 @@ LastPlayerID=9\n\
     assert_eq!(registry.recreation_players(), vec![(0, 3)]);
     let next = registry
         .admit_request(
-            clonk_engine::PlayerInfoUpdateRequest {
-                client_id: 7,
-                flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
-            },
+            clonk_engine::PlayerInfoUpdateRequest::new(
+                7,
+                clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                vec![clonk_engine::ControlPlayerInfoEntry::default()],
+            ),
             2,
         )
         .expect("one ordinary player slot remains");
@@ -1673,11 +1673,11 @@ fn one_selected_player_is_published_after_dynamic_and_installed_before_admission
 
     let admitted = registry
         .admit_request(
-            clonk_engine::PlayerInfoUpdateRequest {
-                client_id: 3,
-                flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
-            },
+            clonk_engine::PlayerInfoUpdateRequest::new(
+                3,
+                clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                vec![clonk_engine::ControlPlayerInfoEntry::default()],
+            ),
             2,
         )
         .expect("the second scenario slot accepts a remote player");

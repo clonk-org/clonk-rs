@@ -1438,24 +1438,41 @@ mod tests {
         }
     }
 
+    type TestCaptureManager = VoiceCaptureManager<FakeCaptureBackend>;
+
+    fn capture_fixture(
+        default: Option<VoiceInputDeviceId>,
+        inputs: Vec<VoiceInputDeviceId>,
+        input_device: Option<VoiceInputDeviceId>,
+    ) -> (
+        FakeCaptureBackend,
+        Receiver<QueuedVoiceInputFrame>,
+        TestCaptureManager,
+    ) {
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory { default, inputs });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let dropped_frames = Arc::new(AtomicU64::new(0));
+        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+            VoiceProcessingConfig::DISABLED,
+        ));
+        options.input_device = input_device;
+        let capture = VoiceCaptureManager::new(
+            backend.clone(),
+            options,
+            sender,
+            Arc::clone(&dropped_frames),
+        );
+        (backend, receiver, capture)
+    }
+
     #[test]
     fn capture_opens_the_exact_selected_device_even_when_names_collide() {
         let first = input_device_id("test:first");
         let second = input_device_id("test:second");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(first.clone()),
-            inputs: vec![first, second.clone()],
-        });
-        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-            VoiceProcessingConfig::DISABLED,
-        ));
-        options.input_device = Some(second.clone());
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            options,
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, _receiver, mut capture) = capture_fixture(
+            Some(first.clone()),
+            vec![first, second.clone()],
+            Some(second.clone()),
         );
 
         capture.open_initial().expect("selected input opens");
@@ -1471,20 +1488,9 @@ mod tests {
             CaptureStreamEventAction::Invalidate,
         ] {
             let default = input_device_id("test:default");
-            let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-                default: Some(default.clone()),
-                inputs: vec![default],
-            });
+            let (backend, receiver, mut capture) =
+                capture_fixture(Some(default.clone()), vec![default], None);
             backend.report_during_next_open(action);
-            let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-            let mut capture = VoiceCaptureManager::new(
-                backend.clone(),
-                VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                    VoiceProcessingConfig::DISABLED,
-                )),
-                sender,
-                Arc::new(AtomicU64::new(0)),
-            );
 
             capture
                 .open_initial()
@@ -1506,21 +1512,8 @@ mod tests {
     fn missing_selected_input_is_reported_without_opening_the_default() {
         let default = input_device_id("test:default");
         let selected = input_device_id("test:missing");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(default),
-            inputs: Vec::new(),
-        });
-        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-            VoiceProcessingConfig::DISABLED,
-        ));
-        options.input_device = Some(selected.clone());
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            options,
-            sender,
-            Arc::new(AtomicU64::new(0)),
-        );
+        let (backend, _receiver, mut capture) =
+            capture_fixture(Some(default), Vec::new(), Some(selected.clone()));
 
         assert!(matches!(
             capture.open_initial(),
@@ -1533,20 +1526,9 @@ mod tests {
     #[test]
     fn default_capture_does_not_require_full_device_enumeration() {
         let default = input_device_id("test:default");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(default.clone()),
-            inputs: vec![default.clone()],
-        });
+        let (backend, _receiver, mut capture) =
+            capture_fixture(Some(default.clone()), vec![default.clone()], None);
         backend.make_input_enumeration_unavailable();
-        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
-        );
 
         capture
             .open_initial()
@@ -1561,22 +1543,12 @@ mod tests {
     #[test]
     fn exact_capture_fails_closed_when_device_enumeration_is_unavailable() {
         let selected = input_device_id("test:selected");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(selected.clone()),
-            inputs: vec![selected.clone()],
-        });
-        backend.make_input_enumeration_unavailable();
-        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-            VoiceProcessingConfig::DISABLED,
-        ));
-        options.input_device = Some(selected);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            options,
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, _receiver, mut capture) = capture_fixture(
+            Some(selected.clone()),
+            vec![selected.clone()],
+            Some(selected.clone()),
         );
+        backend.make_input_enumeration_unavailable();
 
         assert!(matches!(
             capture.open_initial(),
@@ -1591,18 +1563,12 @@ mod tests {
     fn removed_selected_device_waits_for_that_device_to_return() {
         let selected = input_device_id("test:selected");
         let other = input_device_id("test:other");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(other.clone()),
-            inputs: vec![selected.clone(), other.clone()],
-        });
-        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let dropped_frames = Arc::new(AtomicU64::new(0));
-        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-            VoiceProcessingConfig::DISABLED,
-        ));
-        options.input_device = Some(selected.clone());
-        let mut capture =
-            VoiceCaptureManager::new(backend.clone(), options, sender, dropped_frames.clone());
+        let (backend, receiver, mut capture) = capture_fixture(
+            Some(other.clone()),
+            vec![selected.clone(), other.clone()],
+            Some(selected.clone()),
+        );
+        let dropped_frames = Arc::clone(&capture.dropped_frames);
         capture.open_initial().expect("selected input opens");
         backend.callbacks()[0].send_frame(input_frame(1));
         assert_eq!(capture.drain_frames(&receiver), [input_frame(1)]);
@@ -1658,18 +1624,10 @@ mod tests {
     fn system_default_capture_follows_a_changed_default_device() {
         let first = input_device_id("test:first-default");
         let second = input_device_id("test:second-default");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(first.clone()),
-            inputs: vec![first.clone(), second.clone()],
-        });
-        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, receiver, mut capture) = capture_fixture(
+            Some(first.clone()),
+            vec![first.clone(), second.clone()],
+            None,
         );
         capture.open_initial().expect("default input opens");
 
@@ -1695,19 +1653,8 @@ mod tests {
     #[test]
     fn unchanged_default_identity_does_not_advance_the_stream_generation() {
         let default = input_device_id("test:default-alias");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(default.clone()),
-            inputs: vec![default],
-        });
-        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
-        );
+        let (backend, _receiver, mut capture) =
+            capture_fixture(Some(default.clone()), vec![default], None);
         capture.open_initial().expect("default input opens");
 
         assert!(!capture
@@ -1722,20 +1669,10 @@ mod tests {
     #[test]
     fn route_change_reopens_an_exact_selection_instead_of_accepting_a_reroute() {
         let selected = input_device_id("test:selected");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(selected.clone()),
-            inputs: vec![selected.clone()],
-        });
-        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-            VoiceProcessingConfig::DISABLED,
-        ));
-        options.input_device = Some(selected.clone());
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            options,
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, _receiver, mut capture) = capture_fixture(
+            Some(selected.clone()),
+            vec![selected.clone()],
+            Some(selected.clone()),
         );
         capture.open_initial().expect("selected input opens");
         let callbacks = backend.callbacks()[0].clone();
@@ -1766,19 +1703,8 @@ mod tests {
     #[test]
     fn route_event_drained_after_the_atomic_snapshot_still_rebuilds() {
         let selected = input_device_id("test:selected");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(selected.clone()),
-            inputs: vec![selected],
-        });
-        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
-        );
+        let (backend, _receiver, mut capture) =
+            capture_fixture(Some(selected.clone()), vec![selected], None);
         capture.open_initial().expect("default input opens");
         let callbacks = backend.callbacks()[0].clone();
 
@@ -1804,18 +1730,10 @@ mod tests {
     fn default_route_change_reopens_the_new_default_with_a_clean_generation() {
         let first = input_device_id("test:first");
         let second = input_device_id("test:second");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(first.clone()),
-            inputs: vec![first.clone(), second.clone()],
-        });
-        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, receiver, mut capture) = capture_fixture(
+            Some(first.clone()),
+            vec![first.clone(), second.clone()],
+            None,
         );
         capture.open_initial().expect("default input opens");
         let callbacks = backend.callbacks()[0].clone();
@@ -1845,18 +1763,10 @@ mod tests {
     fn default_route_inventory_failure_quarantines_frames_and_retries() {
         let first = input_device_id("test:first");
         let second = input_device_id("test:second");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(first.clone()),
-            inputs: vec![first.clone(), second.clone()],
-        });
-        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, receiver, mut capture) = capture_fixture(
+            Some(first.clone()),
+            vec![first.clone(), second.clone()],
+            None,
         );
         capture.open_initial().expect("default input opens");
         let callbacks = backend.callbacks()[0].clone();
@@ -1892,18 +1802,10 @@ mod tests {
     fn late_callbacks_from_a_replaced_stream_cannot_affect_the_new_generation() {
         let first = input_device_id("test:first");
         let second = input_device_id("test:second");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(first.clone()),
-            inputs: vec![first.clone(), second.clone()],
-        });
-        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, receiver, mut capture) = capture_fixture(
+            Some(first.clone()),
+            vec![first.clone(), second.clone()],
+            None,
         );
         capture.open_initial().expect("first default opens");
         let old_callbacks = backend.callbacks()[0].clone();
@@ -1932,18 +1834,10 @@ mod tests {
     fn frame_enqueued_by_an_old_callback_after_the_swap_is_filtered() {
         let first = input_device_id("test:first");
         let second = input_device_id("test:second");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(first.clone()),
-            inputs: vec![first.clone(), second.clone()],
-        });
-        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, receiver, mut capture) = capture_fixture(
+            Some(first.clone()),
+            vec![first.clone(), second.clone()],
+            None,
         );
         capture.open_initial().expect("first default opens");
         let old_callbacks = backend.callbacks()[0].clone();
@@ -1967,19 +1861,8 @@ mod tests {
     #[test]
     fn quarantine_between_generation_snapshot_and_return_discards_the_drain() {
         let selected = input_device_id("test:selected");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(selected.clone()),
-            inputs: vec![selected],
-        });
-        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
-        );
+        let (backend, receiver, mut capture) =
+            capture_fixture(Some(selected.clone()), vec![selected], None);
         capture.open_initial().expect("default input opens");
         let callbacks = backend.callbacks()[0].clone();
         callbacks.send_frame(input_frame(1));
@@ -1996,18 +1879,10 @@ mod tests {
     fn failed_replacement_keeps_capture_idle_and_retries_without_leaking() {
         let first = input_device_id("test:first");
         let second = input_device_id("test:second");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(first.clone()),
-            inputs: vec![first.clone(), second.clone()],
-        });
-        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, receiver, mut capture) = capture_fixture(
+            Some(first.clone()),
+            vec![first.clone(), second.clone()],
+            None,
         );
         capture.open_initial().expect("first default opens");
         let stale_callbacks = backend.callbacks()[0].clone();
@@ -2043,18 +1918,10 @@ mod tests {
     fn callback_from_a_failed_open_cannot_invalidate_the_later_retry() {
         let first = input_device_id("test:first");
         let second = input_device_id("test:second");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(first.clone()),
-            inputs: vec![first.clone(), second.clone()],
-        });
-        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, _receiver, mut capture) = capture_fixture(
+            Some(first.clone()),
+            vec![first.clone(), second.clone()],
+            None,
         );
         capture.open_initial().expect("first default opens");
 
@@ -2079,19 +1946,8 @@ mod tests {
     #[test]
     fn fatal_stream_error_is_not_lost_when_the_event_queue_is_full() {
         let selected = input_device_id("test:selected");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(selected.clone()),
-            inputs: vec![selected],
-        });
-        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
-        );
+        let (backend, _receiver, mut capture) =
+            capture_fixture(Some(selected.clone()), vec![selected], None);
         capture.open_initial().expect("default input opens");
         let callbacks = backend.callbacks()[0].clone();
         for _ in 0..VOICE_CAPTURE_EVENT_QUEUE {
@@ -2111,19 +1967,8 @@ mod tests {
     fn failed_future_attempt_cannot_mask_the_active_streams_fatal_error() {
         let selected = input_device_id("test:selected");
         let target = CaptureDeviceTarget::SystemDefault(selected.clone());
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(selected.clone()),
-            inputs: vec![selected],
-        });
-        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
-        );
+        let (backend, _receiver, mut capture) =
+            capture_fixture(Some(selected.clone()), vec![selected], None);
         capture.open_initial().expect("default input opens");
         let active_callbacks = backend.callbacks()[0].clone();
         for _ in 0..VOICE_CAPTURE_EVENT_QUEUE {
@@ -2147,19 +1992,8 @@ mod tests {
     #[test]
     fn transient_inventory_failure_leaves_a_healthy_stream_active() {
         let selected = input_device_id("test:selected");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(selected.clone()),
-            inputs: vec![selected],
-        });
-        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
-        );
+        let (backend, receiver, mut capture) =
+            capture_fixture(Some(selected.clone()), vec![selected], None);
         capture.open_initial().expect("default input opens");
         let callbacks = backend.callbacks()[0].clone();
 
@@ -2180,18 +2014,10 @@ mod tests {
     fn successful_replacement_clears_frames_queued_by_the_previous_stream() {
         let first = input_device_id("test:first");
         let second = input_device_id("test:second");
-        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
-            default: Some(first.clone()),
-            inputs: vec![first.clone(), second.clone()],
-        });
-        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let mut capture = VoiceCaptureManager::new(
-            backend.clone(),
-            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
-                VoiceProcessingConfig::DISABLED,
-            )),
-            sender,
-            Arc::new(AtomicU64::new(0)),
+        let (backend, receiver, mut capture) = capture_fixture(
+            Some(first.clone()),
+            vec![first.clone(), second.clone()],
+            None,
         );
         capture.open_initial().expect("first default opens");
         let first_callbacks = backend.callbacks()[0].clone();

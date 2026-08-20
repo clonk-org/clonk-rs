@@ -2332,47 +2332,6 @@ class BinaryExecutionTests(unittest.TestCase):
             self.assertEqual(cohort.call_args.kwargs["binary"], binary)
             self.assertEqual(cohort.call_args.kwargs["runs"], 2)
 
-    def test_paired_binary_schedule_counterbalances_first_position(self):
-        self.assertEqual(
-            MODULE.counterbalanced_schedule(4),
-            [
-                ("baseline", 1),
-                ("candidate", 1),
-                ("candidate", 2),
-                ("baseline", 2),
-                ("baseline", 3),
-                ("candidate", 3),
-                ("candidate", 4),
-                ("baseline", 4),
-            ],
-        )
-
-    def test_discovers_the_prebuilt_integration_test_from_cargo_messages(self):
-        messages = "\n".join(
-            [
-                json.dumps(
-                    {
-                        "reason": "compiler-artifact",
-                        "target": {"kind": ["lib"], "name": "clonk_network"},
-                        "executable": None,
-                    }
-                ),
-                json.dumps(
-                    {
-                        "reason": "compiler-artifact",
-                        "target": {"kind": ["test"], "name": "integration"},
-                        "executable": "/tmp/integration-abc",
-                    }
-                ),
-                json.dumps({"reason": "build-finished", "success": True}),
-            ]
-        )
-
-        self.assertEqual(
-            MODULE.discover_test_binary(messages),
-            Path("/tmp/integration-abc"),
-        )
-
     def test_records_cargos_effective_profile_for_the_selected_test_artifact(self):
         profile = {
             "opt_level": "3",

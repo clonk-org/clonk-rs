@@ -34,6 +34,11 @@ type CallbackId = usize;
 /// exact render traversal order without coupling this parser to clonk-script.
 pub(crate) type ScriptAlgoCall<'a> = dyn FnMut(&mut LcgRng, &str, [i32; 4]) -> bool + 'a;
 
+#[cfg(test)]
+pub(crate) fn noop_script_algo(_: &mut LcgRng, _: &str, _: [i32; 4]) -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Op {
     None,
@@ -255,30 +260,6 @@ pub(crate) struct PostInitMapCallbacks {
 impl PostInitMapCallbacks {
     pub(crate) fn set_map_zoom(&mut self, map_zoom: i32) {
         self.map_zoom = map_zoom;
-    }
-
-    pub(crate) fn invocations(&self) -> impl Iterator<Item = (&str, [i32; 3])> + '_ {
-        let zoom = self.map_zoom;
-        self.arrays.iter().flat_map(move |array| {
-            let size = array.width.saturating_mul(array.height).max(0) as usize;
-            (0..size).rev().filter_map(move |index| {
-                let enabled = array
-                    .bits
-                    .get(index / 8)
-                    .is_some_and(|byte| byte & (1 << (index % 8)) != 0);
-                enabled.then(|| {
-                    let index = index as i32;
-                    (
-                        array.function.as_str(),
-                        [
-                            (index % array.width) * zoom - zoom / 2,
-                            (index / array.width) * zoom - zoom / 2,
-                            zoom,
-                        ],
-                    )
-                })
-            })
-        })
     }
 
     fn append_from(&mut self, other: &Self) {
@@ -1831,60 +1812,9 @@ impl Parser<'_, '_> {
 }
 
 /// C4Landscape::CreateMapS2 (src/C4Landscape.cpp:530-546): construct the
-/// creator (DefaultMap evaluates the scenario map size — two draws), parse
-/// `Landscape.txt`, render the last complete `map` node. A parse error is
-/// logged and rendering proceeds with the nodes parsed so far, exactly
-/// like C++ ignoring ReadFile's return value (src/C4Landscape.cpp:540).
-/// `Ok(None)` = no map node; the caller falls back to the basic creator.
-pub(crate) fn create_s2_map(
-    source: &str,
-    classifier: &mut MapPixelClassifier,
-    map_width: LegacyC4SVal,
-    map_height: LegacyC4SVal,
-    map_player_extend: bool,
-    player_count: i32,
-    rng: &mut LcgRng,
-) -> Option<clonk_resources::bitmap::IndexedBitmap> {
-    create_s2_map_with_state(
-        source,
-        classifier,
-        map_width,
-        map_height,
-        map_player_extend,
-        player_count,
-        rng,
-    )
-    .bitmap
-}
-
-/// The state-bearing form of [`create_s2_map`]. Unlike the compatibility
-/// wrapper, this returns the evaluated creator tree even when the source has
-/// no renderable map node; C++ still retains that creator when
-/// `KeepMapCreator=1` (C4Landscape.cpp:537-556, 606-614).
-pub(crate) fn create_s2_map_with_state(
-    source: &str,
-    classifier: &mut MapPixelClassifier,
-    map_width: LegacyC4SVal,
-    map_height: LegacyC4SVal,
-    map_player_extend: bool,
-    player_count: i32,
-    rng: &mut LcgRng,
-) -> S2MapCreation {
-    create_s2_map_with_state_and_functions(
-        source,
-        classifier,
-        map_width,
-        map_height,
-        map_player_extend,
-        player_count,
-        rng,
-        &HashSet::new(),
-    )
-}
-
-/// Initial-landscape form with the already-linked scenario host's named
-/// script functions. C4MCV_ScriptFunc rejects a missing name during parsing,
-/// but rendering merely records pixels for the later PostInitMap phase.
+/// creator, parse `Landscape.txt`, and render the last complete map. The
+/// returned tree survives a missing map when `KeepMapCreator=1`
+/// (C4Landscape.cpp:537-556, 606-614).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_s2_map_with_state_and_functions(
     source: &str,
@@ -1941,37 +1871,9 @@ pub(crate) fn create_s2_map_with_state_and_functions_with_script_algo(
     creation
 }
 
-/// Unified `CreateMapS2` entry point for scenario-section activation. With a
-/// retained creator, `ReadFile` mutates that creator and keeps its evaluated
-/// defaults/callback arrays. Without one, construction evaluates the active
-/// section's MapWdt/MapHgt before parsing.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn create_s2_map_for_section_with_state_and_functions(
-    retained: Option<MapCreatorS2State>,
-    source: &str,
-    classifier: &mut MapPixelClassifier,
-    map_width: LegacyC4SVal,
-    map_height: LegacyC4SVal,
-    map_player_extend: bool,
-    player_count: i32,
-    rng: &mut LcgRng,
-    script_functions: &HashSet<String>,
-) -> S2MapCreation {
-    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
-    create_s2_map_for_section_with_state_and_functions_with_script_algo(
-        retained,
-        source,
-        classifier,
-        map_width,
-        map_height,
-        map_player_extend,
-        player_count,
-        rng,
-        script_functions,
-        &mut missing_script_algo,
-    )
-}
-
+/// `CreateMapS2` for section activation. A retained creator keeps its
+/// evaluated defaults and callback arrays; a fresh one evaluates the active
+/// section's dimensions before parsing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_s2_map_for_section_with_state_and_functions_with_script_algo(
     retained: Option<MapCreatorS2State>,
@@ -2021,83 +1923,13 @@ pub(crate) fn create_s2_map_for_section_with_state_and_functions_with_script_alg
     creation
 }
 
-/// Compatibility name for the retained-creator branch of
-/// [`create_s2_map_for_section_with_state_and_functions`].
-pub(crate) fn extend_s2_map_with_state_and_functions(
-    creator: MapCreatorS2State,
-    source: &str,
-    classifier: &mut MapPixelClassifier,
-    rng: &mut LcgRng,
-    script_functions: &HashSet<String>,
-) -> S2MapCreation {
-    create_s2_map_for_section_with_state_and_functions(
-        Some(creator),
-        source,
-        classifier,
-        LegacyC4SVal::default(),
-        LegacyC4SVal::default(),
-        false,
-        1,
-        rng,
-        script_functions,
-    )
-}
-
-/// Section-overload form of `C4Landscape::CreateMapS2`. Native C++ calls
-/// `ReadFile` on the existing `pMapCreator`, rather than constructing a new
-/// creator, so the appended source can resolve named templates from earlier
-/// sections. The creator's construction-time `DefaultMap` and callback masks
-/// also remain live. In particular this performs no new MapWdt/MapHgt RNG
-/// evaluations.
-pub(crate) fn create_s2_map_from_retained_state_and_functions(
-    retained: &MapCreatorS2State,
-    source: &str,
-    classifier: &mut MapPixelClassifier,
-    rng: &mut LcgRng,
-    script_functions: &HashSet<String>,
-) -> S2MapCreation {
-    create_s2_map_for_section_with_state_and_functions(
-        Some(retained.clone()),
-        source,
-        classifier,
-        LegacyC4SVal::default(),
-        LegacyC4SVal::default(),
-        false,
-        1,
-        rng,
-        script_functions,
-    )
-}
-
 /// Runtime C4MapCreatorS2 construction seam for C4Landscape::DrawMap
 /// (C4Landscape.cpp:2636-2668). With KeepMapCreator state, the evaluated
 /// tree is cloned so additional script can resolve its named templates;
 /// otherwise parsing starts from a fresh root. Overlay callback pointers in
 /// the clone still target the original creator's live arrays, so matching
 /// runtime pixels are merged back before the temporary creator is discarded.
-/// No landscape write or script host is performed here.
-pub(crate) fn render_runtime_s2_map(
-    retained: Option<&mut MapCreatorS2State>,
-    source: &str,
-    classifier: &mut MapPixelClassifier,
-    map_width: i32,
-    map_height: i32,
-    rng: &mut LcgRng,
-    script_functions: &HashSet<String>,
-) -> Option<clonk_resources::bitmap::IndexedBitmap> {
-    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
-    render_runtime_s2_map_with_script_algo(
-        retained,
-        source,
-        classifier,
-        map_width,
-        map_height,
-        rng,
-        script_functions,
-        &mut missing_script_algo,
-    )
-}
-
+/// No landscape write is performed here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_runtime_s2_map_with_script_algo(
     retained: Option<&mut MapCreatorS2State>,
@@ -2151,54 +1983,6 @@ fn default_map_for_size(wdt: i32, hgt: i32) -> Overlay {
 
 fn default_retained_map() -> Overlay {
     default_map_for_size(SIZE_RES, SIZE_RES)
-}
-
-fn parse_and_render_s2_map(
-    tree: Tree,
-    source: &str,
-    classifier: &mut MapPixelClassifier,
-    default_map: Overlay,
-    rng: &mut LcgRng,
-    runtime_source: bool,
-    script_functions: &HashSet<String>,
-) -> S2MapCreation {
-    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
-    parse_and_render_s2_map_with_callbacks_and_script_algo(
-        tree,
-        source,
-        classifier,
-        default_map,
-        rng,
-        runtime_source,
-        script_functions,
-        None,
-        &mut missing_script_algo,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn parse_and_render_s2_map_with_callbacks(
-    tree: Tree,
-    source: &str,
-    classifier: &mut MapPixelClassifier,
-    default_map: Overlay,
-    rng: &mut LcgRng,
-    runtime_source: bool,
-    script_functions: &HashSet<String>,
-    retained_callbacks: Option<PostInitMapCallbacks>,
-) -> S2MapCreation {
-    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
-    parse_and_render_s2_map_with_callbacks_and_script_algo(
-        tree,
-        source,
-        classifier,
-        default_map,
-        rng,
-        runtime_source,
-        script_functions,
-        retained_callbacks,
-        &mut missing_script_algo,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2399,26 +2183,6 @@ fn render_map_recording_callbacks(
 /// creator, resize it, re-evaluate the complete tree through the live synced
 /// RNG, then render that exact map. Unlike DrawMap, this mutates the retained
 /// creator and performs no FakeLS MapWdt/MapHgt draws.
-pub(crate) fn render_named_s2_map(
-    creator: &mut MapCreatorS2State,
-    name: &str,
-    classifier: &mut MapPixelClassifier,
-    map_width: i32,
-    map_height: i32,
-    rng: &mut LcgRng,
-) -> Option<clonk_resources::bitmap::IndexedBitmap> {
-    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
-    render_named_s2_map_with_script_algo(
-        creator,
-        name,
-        classifier,
-        map_width,
-        map_height,
-        rng,
-        &mut missing_script_algo,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_named_s2_map_with_script_algo(
     creator: &mut MapCreatorS2State,
@@ -2492,7 +2256,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let (width, height) = params();
-        let creator = create_s2_map_with_state(
+        let creator = create_s2_map_with_state_and_functions(
             shipped_skyparcour,
             &mut classifier,
             width,
@@ -2500,6 +2264,7 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
         .creator;
         assert!(creator.has_skyparcour_water_exposure_guard());
@@ -2830,7 +2595,7 @@ mod tests {
     fn polygon_triangle_and_quad_match_cpp_full_grid_golden() {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
-        let triangle = create_s2_map(
+        let triangle = create_s2_map_with_state_and_functions(
             "map Triangle { seed=1; mat=Earth; tex=Smooth3; sub=0; algo=poly; \
              point { x=5px; y=0px; }; point { x=3px; y=10px; }; \
              point { x=7px; y=10px; }; };",
@@ -2840,7 +2605,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("triangle map renders");
         assert_eq!(
             triangle.indices,
@@ -2864,7 +2631,7 @@ mod tests {
 
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
-        let quad = create_s2_map(
+        let quad = create_s2_map_with_state_and_functions(
             "map Quad { seed=1; mat=Earth; tex=Smooth3; sub=0; algo=poly; \
              point { x=0px; y=0px; }; point { x=10px; y=0px; }; \
              point { x=10px; y=10px; }; point { x=0px; y=10px; }; };",
@@ -2874,7 +2641,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("quad map renders");
         assert_eq!(quad.indices, vec![1; 11 * 11]);
     }
@@ -2888,7 +2657,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let (w, h) = params();
-        let creation = create_s2_map_with_state(
+        let creation = create_s2_map_with_state_and_functions(
             "overlay Named { wdt = 50; seed = 7; };",
             &mut classifier,
             w,
@@ -2896,6 +2665,7 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         );
         assert!(creation.bitmap.is_none());
         assert!(creation.creator.node_count() > 1);
@@ -2938,12 +2708,17 @@ mod tests {
         );
         let before = rng.count;
 
-        let appended = create_s2_map_from_retained_state_and_functions(
-            &retained.creator,
+        let appended = create_s2_map_for_section_with_state_and_functions_with_script_algo(
+            Some(retained.creator.clone()),
             "map Second { seed=11; Named { x=50; }; };",
             &mut classifier,
+            LegacyC4SVal::default(),
+            LegacyC4SVal::default(),
+            false,
+            1,
             &mut rng,
             &functions,
+            &mut noop_script_algo,
         );
         let map = appended.bitmap.as_ref().expect("appended map renders");
         assert_eq!((map.width, map.height), (8, 1));
@@ -2966,12 +2741,17 @@ mod tests {
 
         // Render(nullptr) always chooses the last map in the combined tree;
         // a template-only section therefore renders the preceding map.
-        let template_only = create_s2_map_from_retained_state_and_functions(
-            &appended.creator,
+        let template_only = create_s2_map_for_section_with_state_and_functions_with_script_algo(
+            Some(appended.creator.clone()),
             "overlay Later { seed=13; };",
             &mut classifier,
+            LegacyC4SVal::default(),
+            LegacyC4SVal::default(),
+            false,
+            1,
             &mut rng,
             &functions,
+            &mut noop_script_algo,
         );
         assert_eq!(template_only.bitmap, appended.bitmap);
     }
@@ -2985,7 +2765,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(17);
         let (w, h) = params();
-        let mut retained = create_s2_map_with_state(
+        let mut retained = create_s2_map_with_state_and_functions(
             "overlay Named { mat = Earth; tex = Rough; wdt = 50; seed = 7; };",
             &mut classifier,
             w,
@@ -2993,12 +2773,13 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
         .creator;
         let original = retained.clone();
         let before = rng.count;
 
-        let map = render_runtime_s2_map(
+        let map = render_runtime_s2_map_with_script_algo(
             Some(&mut retained),
             "map Runtime { seed = 9; Named; };",
             &mut classifier,
@@ -3006,6 +2787,7 @@ mod tests {
             4,
             &mut rng,
             &HashSet::new(),
+            &mut noop_script_algo,
         )
         .expect("cloned creator renders retained template");
 
@@ -3030,7 +2812,7 @@ mod tests {
         // src/C4MapCreatorS2.cpp:633-644,741-751).
         let mut classifier = test_classifier();
         let mut main_rng = LcgRng::seed_from_u64(17);
-        let creator = create_s2_map_with_state(
+        let creator = create_s2_map_with_state_and_functions(
             "overlay Shared { mat=Earth; tex=Rough; sub=0; seed=7; }; \
              map Main { seed=9; };",
             &mut classifier,
@@ -3039,18 +2821,24 @@ mod tests {
             false,
             1,
             &mut main_rng,
+            &HashSet::new(),
         )
         .creator;
         let main_node_count = creator.node_count();
         let mut section_rng = LcgRng::seed_from_u64(17);
         let section_count_before = section_rng.count;
 
-        let creation = extend_s2_map_with_state_and_functions(
-            creator,
+        let creation = create_s2_map_for_section_with_state_and_functions_with_script_algo(
+            Some(creator),
             "map Section { seed=11; Shared; };",
             &mut classifier,
+            LegacyC4SVal::default(),
+            LegacyC4SVal::default(),
+            false,
+            1,
             &mut section_rng,
             &HashSet::new(),
+            &mut noop_script_algo,
         );
         let map = creation.bitmap.expect("retained section map renders");
 
@@ -3072,7 +2860,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut setup_rng = LcgRng::seed_from_u64(3);
         let (w, h) = params();
-        let mut creator = create_s2_map_with_state(
+        let mut creator = create_s2_map_with_state_and_functions(
             "overlay Half { mat = Earth; tex = Rough; wdt = 50; }; \
              map Requested { Half; }; \
              map Decoy { seed = 41; overlay { mat = Earth; tex = Rough; seed = 43; }; };",
@@ -3082,13 +2870,22 @@ mod tests {
             false,
             1,
             &mut setup_rng,
+            &HashSet::new(),
         )
         .creator;
 
         let mut rng = LcgRng::seed_from_u64(17);
         let before = rng.count;
-        let map = render_named_s2_map(&mut creator, "Requested", &mut classifier, 2, 2, &mut rng)
-            .expect("named map renders");
+        let map = render_named_s2_map_with_script_algo(
+            &mut creator,
+            "Requested",
+            &mut classifier,
+            2,
+            2,
+            &mut rng,
+            &mut noop_script_algo,
+        )
+        .expect("named map renders");
 
         assert_eq!((map.width, map.height), (2, 2));
         assert_eq!(map.indices, vec![2 | 0x80, 0, 2 | 0x80, 0]);
@@ -3096,10 +2893,16 @@ mod tests {
 
         let creator_before_missing = creator.clone();
         let rng_before_missing = rng.clone();
-        assert!(
-            render_named_s2_map(&mut creator, "Missing", &mut classifier, 1, 1, &mut rng,)
-                .is_none()
-        );
+        assert!(render_named_s2_map_with_script_algo(
+            &mut creator,
+            "Missing",
+            &mut classifier,
+            1,
+            1,
+            &mut rng,
+            &mut noop_script_algo,
+        )
+        .is_none());
         assert_eq!(creator, creator_before_missing);
         assert_eq!(rng, rng_before_missing);
     }
@@ -3119,7 +2922,7 @@ mod tests {
         let mut creation_rng = runtime_rng.clone();
         let before = runtime_rng.count;
 
-        let runtime = render_runtime_s2_map(
+        let runtime = render_runtime_s2_map_with_script_algo(
             None,
             source,
             &mut runtime_classifier,
@@ -3127,9 +2930,10 @@ mod tests {
             5,
             &mut runtime_rng,
             &HashSet::new(),
+            &mut noop_script_algo,
         )
         .expect("fresh runtime creator renders");
-        let initial = create_s2_map(
+        let initial = create_s2_map_with_state_and_functions(
             source,
             &mut creation_classifier,
             LegacyC4SVal::new(9, 0, 9, 9),
@@ -3137,7 +2941,9 @@ mod tests {
             false,
             1,
             &mut creation_rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("initial creator renders");
 
         assert_eq!(runtime, initial);
@@ -3152,7 +2958,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let (w, h) = params();
-        let map = create_s2_map(
+        let map = create_s2_map_with_state_and_functions(
             "map Test { overlay { mat = Earth; tex = Smooth3; }; };",
             &mut classifier,
             w,
@@ -3160,7 +2966,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("map renders");
         assert_eq!((map.width, map.height), (20, 10));
         assert!(map.indices.iter().all(|&byte| byte == 1 | 0x80));
@@ -3171,7 +2979,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let (w, h) = params();
-        let map = create_s2_map(
+        let map = create_s2_map_with_state_and_functions(
             "map Test { overlay { mat = Earth; tex = Smooth3; sub = 0; }; };",
             &mut classifier,
             w,
@@ -3179,7 +2987,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("map renders");
         assert!(map.indices.iter().all(|&byte| byte == 1));
     }
@@ -3191,7 +3001,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let (w, h) = params();
-        let map = create_s2_map(
+        let map = create_s2_map_with_state_and_functions(
             "map Test { overlay { x = 0; y = 0; wdt = 50; hgt = 100; mat = Earth; tex = Rough; }; };",
             &mut classifier,
             w,
@@ -3199,7 +3009,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("map renders");
         let at = |x: u32, y: u32| map.indices[(y * map.width + x) as usize];
         assert_eq!(at(0, 0), 2 | 0x80);
@@ -3214,7 +3026,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let (w, h) = params();
-        let map = create_s2_map(
+        let map = create_s2_map_with_state_and_functions(
             "map Test { overlay { wdt = 50; mat = Earth; tex = Rough; } & overlay { x = 25; wdt = 50; }; };",
             &mut classifier,
             w,
@@ -3222,7 +3034,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("map renders");
         let at = |x: u32, y: u32| map.indices[(y * map.width + x) as usize];
         // Chain: first overlay 0..10, second 5..15 — the SECOND draws the
@@ -3232,7 +3046,7 @@ mod tests {
         assert_eq!(at(7, 5), 0);
         // Give the second overlay a material to see the intersection:
         let mut rng = LcgRng::seed_from_u64(1);
-        let map = create_s2_map(
+        let map = create_s2_map_with_state_and_functions(
             "map Test { overlay { wdt = 50; } & overlay { x = 25; wdt = 50; mat = Rock; tex = Ridge; }; };",
             &mut classifier,
             w,
@@ -3240,7 +3054,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("map renders");
         let at = |x: u32, y: u32| map.indices[(y * map.width + x) as usize];
         assert_eq!(at(4, 5), 0, "left-only region unset");
@@ -3252,7 +3068,7 @@ mod tests {
     fn point_keyword_after_operator_is_ignored_and_chain_reaches_next_overlay_like_cpp() {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
-        let creation = create_s2_map_with_state(
+        let creation = create_s2_map_with_state_and_functions(
             "map Test { seed=1; wdt=3px; hgt=1px; \
                overlay A { seed=2; algo=solid; x=0px; wdt=1px; \
                            mat=Rock; tex=Ridge; sub=0; } & \
@@ -3266,6 +3082,7 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         );
 
         assert_eq!(
@@ -3293,7 +3110,7 @@ mod tests {
         assert!(creation.creator.tree.overlay(children[2]).is_some());
 
         let mut rng = LcgRng::seed_from_u64(1);
-        let rejected = create_s2_map_with_state(
+        let rejected = create_s2_map_with_state_and_functions(
             "map Test { seed=1; wdt=1px; hgt=1px; \
                point {} & overlay B { seed=2; mat=Earth; tex=Rough; sub=0; }; \
                overlay C { seed=3; mat=Rock; tex=Ridge; sub=0; }; \
@@ -3304,6 +3121,7 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         );
         let map = last_map(&rejected.creator.tree).expect("partial map stays linked");
         let children = &rejected.creator.tree.nodes[map].children;
@@ -3324,7 +3142,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let (w, h) = params();
-        let map = create_s2_map(
+        let map = create_s2_map_with_state_and_functions(
             "overlay Tmpl { mat = Earth; tex = Rough; wdt = 50; };\n\
              map Test { Tmpl { mat = Rock; tex = Ridge; }; };",
             &mut classifier,
@@ -3333,7 +3151,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("map renders");
         let at = |x: u32, y: u32| map.indices[(y * map.width + x) as usize];
         assert_eq!(at(0, 0), 3 | 0x80, "copy carries the overridden Rock");
@@ -3349,7 +3169,7 @@ mod tests {
         let mut rng = LcgRng::seed_from_u64(1);
         let base = rng.count;
         let (w, h) = params();
-        create_s2_map(
+        create_s2_map_with_state_and_functions(
             "overlay Tmpl { mat = Earth; tex = Rough; };\n\
              map Test { overlay { }; Tmpl; };",
             &mut classifier,
@@ -3358,6 +3178,7 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         );
         // 2 (map size) + 2 (Tmpl template) + 2 (map) + 2 (inner overlay)
         // + 2 (Tmpl copy) = 10.
@@ -3370,7 +3191,7 @@ mod tests {
         let mut rng = LcgRng::seed_from_u64(1);
         let base = rng.count;
         let (w, h) = params();
-        create_s2_map(
+        create_s2_map_with_state_and_functions(
             "map Test { seed = 42; overlay { seed = 7; }; };",
             &mut classifier,
             w,
@@ -3378,6 +3199,7 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         );
         assert_eq!(rng.count - base, 2, "only the DefaultMap size evaluates");
     }
@@ -3390,7 +3212,7 @@ mod tests {
         let mut rng = LcgRng::seed_from_u64(1);
         let base = rng.count;
         let (w, h) = params();
-        create_s2_map(
+        create_s2_map_with_state_and_functions(
             "map Test { seed = 42; turbulence = 10 - 100; };",
             &mut classifier,
             w,
@@ -3398,6 +3220,7 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         );
         assert_eq!(rng.count - base, 3, "map size + one range draw");
     }
@@ -3409,7 +3232,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let (w, h) = params();
-        let map = create_s2_map(
+        let map = create_s2_map_with_state_and_functions(
             "map Test { overlay { x = 10; y = 10; wdt = 80; hgt = 80; mat = Earth; tex = Rough; \
              overlay { algo = border; a = 1; b = 1; mat = Rock; tex = Ridge; }; }; };",
             &mut classifier,
@@ -3418,7 +3241,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("map renders");
         let at = |x: u32, y: u32| map.indices[(y * map.width + x) as usize];
         // Owner overlay: x=2..18, y=1..9 (percent of 20x10). Its border
@@ -3432,7 +3257,7 @@ mod tests {
     fn missing_script_algorithm_is_false_without_truncating_later_overlay() {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
-        let map = create_s2_map(
+        let map = create_s2_map_with_state_and_functions(
             "map Test { seed=1; wdt=2px; hgt=1px; \
                overlay Missing { algo=script; mat=Rock; tex=Ridge; sub=0; }; \
                overlay { x=1px; y=0px; wdt=1px; hgt=1px; seed=2; \
@@ -3444,7 +3269,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("script algorithm does not abort the later overlay");
 
         assert_eq!(
@@ -3502,7 +3329,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let base = rng.count;
-        let creation = create_s2_map_with_state(
+        let creation = create_s2_map_with_state_and_functions(
             "map M { \
                overlay { mat=Sky; }; \
                overlay { mat=Earth; tex=Rough; sub=0; }; \
@@ -3513,6 +3340,7 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         );
 
         assert_eq!(
@@ -3554,7 +3382,7 @@ mod tests {
             vec!["rough".to_string()],
         );
         let mut rng = LcgRng::seed_from_u64(1);
-        let map = create_s2_map(
+        let map = create_s2_map_with_state_and_functions(
             "map M { overlay { mat=sKy; tex=Rough; sub=0; }; };",
             &mut classifier,
             LegacyC4SVal::new(1, 0, 1, 1),
@@ -3562,7 +3390,9 @@ mod tests {
             false,
             1,
             &mut rng,
+            &HashSet::new(),
         )
+        .bitmap
         .expect("a loaded Sky material renders normally");
 
         assert_eq!(map.indices, vec![1]);
@@ -3697,7 +3527,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let functions = ["OnDraw"].into_iter().map(str::to_string).collect();
-        let map = render_runtime_s2_map(
+        let map = render_runtime_s2_map_with_script_algo(
             None,
             "map Runtime { seed=1; drawFn=OnDraw; mat=Earth; tex=Rough; \
                overlay { x=1px; y=0px; wdt=1px; hgt=1px; seed=2; \
@@ -3708,6 +3538,7 @@ mod tests {
             1,
             &mut rng,
             &functions,
+            &mut noop_script_algo,
         )
         .expect("valid runtime callback field does not abort the later overlay");
 
@@ -3755,8 +3586,18 @@ mod tests {
                  InMat { a = 6; mat = Rock; tex = Ridge; };\n\
                };\n\
              };";
-        let map =
-            create_s2_map(source, &mut classifier, w, h, false, 1, &mut rng).expect("map renders");
+        let map = create_s2_map_with_state_and_functions(
+            source,
+            &mut classifier,
+            w,
+            h,
+            false,
+            1,
+            &mut rng,
+            &HashSet::new(),
+        )
+        .bitmap
+        .expect("map renders");
         let mut histogram = std::collections::BTreeMap::new();
         for &byte in &map.indices {
             *histogram.entry(byte & 0x7f).or_insert(0usize) += 1;

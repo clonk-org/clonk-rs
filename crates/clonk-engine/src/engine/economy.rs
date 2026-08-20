@@ -1170,19 +1170,10 @@ impl Engine {
                     .custom_name
                     .clone()
                     .unwrap_or(info_name);
-                self.messages.add_message(MessageSpec {
-                    kind: message::MessageKind::Target,
-                    text: format!("{object_name} becomes {age}!|Happy birthday!"),
-                    target: Some(object_id),
-                    player: None,
-                    offset: Vector2::ZERO,
-                    color: 0xffff_ffff,
-                    flags: 0,
-                    width: None,
-                    decoration: None,
-                    frame_decoration: None,
-                    portrait: None,
-                });
+                self.messages.add_message(MessageSpec::target(
+                    format!("{object_name} becomes {age}!|Happy birthday!"),
+                    object_id,
+                ));
                 self.pending_audio.push(AudioCommand::PlaySound {
                     name: "Trumpet".to_string(),
                     target: Some(object_id),
@@ -3585,21 +3576,6 @@ impl Engine {
         state
     }
 
-    /// Compatibility seam for the scenario-load tail. ClonkNames now follow
-    /// C4Def::IncludeDefinition inside [`Self::resolve_includes`], alongside
-    /// rank metadata and in the same push-front include order.
-    pub fn inherit_include_clonk_names(&mut self) {
-        // The work is complete once resolve_includes returns.
-    }
-
-    /// Debug helper: a definition's shape rect.
-    pub fn debug_definition_shape(&self, id: &str) -> Option<DefinitionRect> {
-        self.definitions
-            .get(&DefinitionId::from(id))
-            .and_then(|definition| definition.shape_rect())
-    }
-
-    /// Debug helper: landscape solidity probe.
     /// Debug helper: an object's position in the exec vector.
     pub fn debug_object_vector_index(&self, id: u64) -> Option<usize> {
         self.objects

@@ -136,35 +136,35 @@ impl ScrollingInfoDialog {
     /// `TextWindow` client geometry: L10/T8/R5/B8 margins followed by the
     /// permanently reserved 16-pixel `ScrollWindow` scrollbar column.
     pub fn geometry(&self, frame: IntRect, line_height: i32) -> ScrollingInfoGeometry {
-        let client = IntRect {
-            x: frame.x.saturating_add(TEXT_MARGIN_LEFT),
-            y: frame.y.saturating_add(TEXT_MARGIN_TOP),
-            w: frame
+        let client = IntRect::new(
+            frame.x.saturating_add(TEXT_MARGIN_LEFT),
+            frame.y.saturating_add(TEXT_MARGIN_TOP),
+            frame
                 .w
                 .saturating_sub(TEXT_MARGIN_LEFT + TEXT_MARGIN_RIGHT)
                 .max(1),
-            h: frame
+            frame
                 .h
                 .saturating_sub(TEXT_MARGIN_TOP + TEXT_MARGIN_BOTTOM)
                 .max(1),
-        };
+        );
         let scrollbar_width = INFO_SCROLLBAR_EXTENT.min(client.w).max(1);
         ScrollingInfoGeometry {
             frame,
-            viewport: IntRect {
-                x: client.x,
-                y: client.y,
-                w: client.w.saturating_sub(scrollbar_width).max(1),
-                h: client.h,
-            },
-            scrollbar: IntRect {
-                x: client
+            viewport: IntRect::new(
+                client.x,
+                client.y,
+                client.w.saturating_sub(scrollbar_width).max(1),
+                client.h,
+            ),
+            scrollbar: IntRect::new(
+                client
                     .x
                     .saturating_add(client.w.saturating_sub(scrollbar_width)),
-                y: client.y,
-                w: scrollbar_width,
-                h: client.h,
-            },
+                client.y,
+                scrollbar_width,
+                client.h,
+            ),
             line_height: line_height.max(1),
         }
     }
@@ -395,15 +395,7 @@ mod tests {
     use super::*;
 
     fn geometry(dialog: &ScrollingInfoDialog) -> ScrollingInfoGeometry {
-        dialog.geometry(
-            IntRect {
-                x: 0,
-                y: 0,
-                w: 200,
-                h: 116,
-            },
-            10,
-        )
+        dialog.geometry(IntRect::new(0, 0, 200, 116), 10)
     }
 
     #[test]

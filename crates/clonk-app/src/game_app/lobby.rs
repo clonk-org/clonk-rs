@@ -2132,12 +2132,12 @@ impl GameApp {
         {
             return;
         }
-        let update = clonk_engine::ClientUpdateControlData {
-            update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
+        let update = clonk_engine::ClientUpdateControlData::new(
+            clonk_engine::CLIENT_UPDATE_ACTIVATE,
             client_id,
-            data: i32::from(!self.control_clients.is_activated(client_id)),
-            by_client: 0,
-        };
+            i32::from(!self.control_clients.is_activated(client_id)),
+            0,
+        );
         if let Some(Err(error)) = self
             .network
             .as_ref()
@@ -5581,12 +5581,12 @@ impl GameApp {
                 );
                 self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
             } else if let Some(Err(error)) = self.network.as_ref().map(|network| {
-                network.submit_client_update(clonk_engine::ClientUpdateControlData {
-                    update_type: clonk_engine::CLIENT_UPDATE_SET_OBSERVER,
-                    client_id: target.client_id,
-                    data: 0,
-                    by_client: 0,
-                })
+                network.submit_client_update(clonk_engine::ClientUpdateControlData::new(
+                    clonk_engine::CLIENT_UPDATE_SET_OBSERVER,
+                    target.client_id,
+                    0,
+                    0,
+                ))
             }) {
                 tracing::error!(%error, "failed to submit lobby observer command");
             }

@@ -2422,17 +2422,6 @@ func Probe(object crew, object info_less)
         ];
         engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Extra data owner".to_string(),
-                player_info_id: 1,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
                 crew: vec![crate::player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
@@ -2440,9 +2429,7 @@ func Probe(object crew, object info_less)
                     extra_data: extra_data.clone(),
                     ..Default::default()
                 }],
-                control_style: false,
-                auto_context_menu: false,
-                startup_player_count: 1,
+                ..compat_join_player_config("Extra data owner")
             }).test_value();
 
         let crew = engine.player(0).test_value().crew()[0];
@@ -2539,26 +2526,13 @@ func Transfer(object donor, object recipient)
         engine.set_player_starts(vec![start]);
         engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Extra data owner".to_string(),
-                player_info_id: 1,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
                 crew: vec![crate::player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
                     physical: crate::PhysicalInfo::default(),
                     ..Default::default()
                 }],
-                control_style: false,
-                auto_context_menu: false,
-                startup_player_count: 1,
+                ..compat_join_player_config("Extra data owner")
             }).test_value();
 
         let crew = engine.player(0).test_value().crew()[0];

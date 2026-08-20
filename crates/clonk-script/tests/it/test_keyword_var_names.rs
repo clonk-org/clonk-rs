@@ -3,23 +3,16 @@
 //! identifier as-is, so `var func, objhgt = ...` is legal — real content
 //! relies on it (planet/System.c4g/Commits.c:269 `var func, objhgt=...`).
 
-use clonk_script::{Engine, Script, Value};
+use clonk_script::Value;
 
-#[test]
-fn func_keyword_is_a_valid_var_name() {
+run_cases! {
     // Commits.c declares `var func, objhgt=...` and never touches `func`
     // again; the declaration alone must compile and the sibling initializer
     // must work.
-    let source = r#"
+    func_keyword_is_a_valid_var_name: r#"
         global func Probe() {
             var func, objhgt = 5;
             return objhgt + 2;
         }
-    "#;
-    let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("keyword var name compiles"));
-    assert_eq!(
-        engine.call("Probe", &[]).expect("call succeeds"),
-        Value::Int(7)
-    );
+    "#, "Probe", &[] => Value::Int(7);
 }

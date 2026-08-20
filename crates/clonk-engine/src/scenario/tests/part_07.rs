@@ -2117,23 +2117,27 @@
         let mut classifier = MapPixelClassifier::from_runtime_state(raster.texmap().clone());
         let mut probe_rng = crate::rng::LcgRng::seed_from_u64(41);
         let probe_count = probe_rng.count;
-        let retained_main = crate::map_creator_s2::render_named_s2_map(
+        let retained_main = crate::map_creator_s2::render_named_s2_map_with_script_algo(
             &mut retained_creator,
             "Main",
             &mut classifier,
             8,
             1,
             &mut probe_rng,
-        ).test_value();
+            &mut crate::map_creator_s2::noop_script_algo,
+        )
+        .test_value();
         assert_eq!(retained_main.indices, vec![1, 1, 1, 1, 0, 0, 0, 0]);
-        let appended_next = crate::map_creator_s2::render_named_s2_map(
+        let appended_next = crate::map_creator_s2::render_named_s2_map_with_script_algo(
             &mut retained_creator,
             "Next",
             &mut classifier,
             8,
             1,
             &mut probe_rng,
-        ).test_value();
+            &mut crate::map_creator_s2::noop_script_algo,
+        )
+        .test_value();
         assert_eq!(appended_next.indices, vec![0, 0, 0, 0, 1, 1, 1, 1]);
         assert_eq!(
             probe_rng.count, probe_count,

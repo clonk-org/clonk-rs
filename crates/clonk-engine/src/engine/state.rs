@@ -2724,30 +2724,6 @@ impl Engine {
         // their exact ordered call sites.
     }
 
-    fn remove_from_selection(&mut self, owner: i32, object_id: ObjectId) {
-        if let Some(object) = self
-            .objects
-            .iter_mut()
-            .find(|object| object.id == object_id)
-        {
-            object.state.selected = false;
-        }
-        if self.crew_cursor(owner) == Some(object_id) {
-            let replacement = self.selected_crew(owner).last().copied();
-            if let Some(selection) = self.crew_selection.get_mut(&owner) {
-                selection.cursor = replacement;
-            }
-        }
-        if self
-            .crew_selection
-            .get(&owner)
-            .is_some_and(CrewSelection::is_empty)
-        {
-            self.crew_selection.remove(&owner);
-        }
-        self.sync_player_cursor(owner);
-    }
-
     pub(crate) fn remove_from_roles(&mut self, owner: i32, object_id: ObjectId) {
         if let Some(assignments) = self.crew_roles.get_mut(&owner) {
             assignments.remove(&object_id);
@@ -3648,19 +3624,10 @@ impl Engine {
             .find_object_index(object_id)
             .and_then(|index| self.objects[index].state.custom_name.clone())
             .unwrap_or(info.name);
-        self.messages.add_message(MessageSpec {
-            kind: message::MessageKind::Target,
-            text: format!("{object_name} is promoted|to {rank_name}!"),
-            target: Some(object_id),
-            player: None,
-            offset: Vector2::ZERO,
-            color: 0xffff_ffff,
-            flags: 0,
-            width: None,
-            decoration: None,
-            frame_decoration: None,
-            portrait: None,
-        });
+        self.messages.add_message(MessageSpec::target(
+            format!("{object_name} is promoted|to {rank_name}!"),
+            object_id,
+        ));
         self.pending_audio.push(AudioCommand::PlaySound {
             name: "Trumpet".to_string(),
             target: Some(object_id),

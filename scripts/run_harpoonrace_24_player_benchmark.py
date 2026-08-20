@@ -1272,10 +1272,6 @@ def reference_player_names(reference: str) -> set[str]:
     }
 
 
-def reference_has_player(reference: str, player_name: str) -> bool:
-    return player_name in reference_player_names(reference)
-
-
 def reference_client_records(reference: str) -> list[dict[str, str]]:
     return _reference_section_records(
         reference,

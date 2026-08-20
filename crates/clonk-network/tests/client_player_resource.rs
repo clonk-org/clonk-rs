@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use clonk_engine::LegacyCString;
 use clonk_network::{
     publish_client_player_resource, ClientPlayerResourcePublicationSpec, ResourceFileOwnership,
     ResourceTransferBackend,
@@ -36,9 +35,9 @@ fn cpp_client_player_uses_assigned_namespace_and_an_optimized_copy() {
     let publication = publish_client_player_resource(ClientPlayerResourcePublicationSpec {
         resource_id: 7 << 16,
         source_path: player.clone(),
-        wire_name: LegacyCString::from_bytes(b"Players.c4f/Alice.c4p".to_vec()).unwrap(),
+        wire_name: crate::c4(b"Players.c4f/Alice.c4p"),
         network_directory: network.clone(),
-        group_maker: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+        group_maker: crate::c4(b"Alice"),
     })
     .unwrap();
 
@@ -96,7 +95,7 @@ fn cpp_client_player_rewrite_preserves_raw_global_maker_bytes() {
     let directory = TestDirectory::new();
     let player = directory.path().join("RawMaker.c4p");
     let network = directory.path().join("Network");
-    let raw_maker = LegacyCString::from_bytes(vec![0xff, b'A', b'B']).unwrap();
+    let raw_maker = crate::c4(vec![0xff, b'A', b'B']);
     let mut crew = MutableGroup::new("Crew.c4i");
     crew.add_file_with_metadata("ObjectInfo.txt", b"crew".to_vec(), 3, false)
         .unwrap();
@@ -118,7 +117,7 @@ fn cpp_client_player_rewrite_preserves_raw_global_maker_bytes() {
     let publication = publish_client_player_resource(ClientPlayerResourcePublicationSpec {
         resource_id: 8 << 16,
         source_path: player.clone(),
-        wire_name: LegacyCString::from_bytes(b"Players.c4f/RawMaker.c4p".to_vec()).unwrap(),
+        wire_name: crate::c4(b"Players.c4f/RawMaker.c4p"),
         network_directory: network.clone(),
         group_maker: raw_maker.clone(),
     })
@@ -126,9 +125,9 @@ fn cpp_client_player_rewrite_preserves_raw_global_maker_bytes() {
     let utf8_publication = publish_client_player_resource(ClientPlayerResourcePublicationSpec {
         resource_id: (8 << 16) + 1,
         source_path: player,
-        wire_name: LegacyCString::from_bytes(b"Players.c4f/RawMaker.c4p".to_vec()).unwrap(),
+        wire_name: crate::c4(b"Players.c4f/RawMaker.c4p"),
         network_directory: network,
-        group_maker: LegacyCString::from_bytes(b"?AB".to_vec()).unwrap(),
+        group_maker: crate::c4(b"?AB"),
     })
     .unwrap();
 

@@ -5,11 +5,11 @@
 //! dereferenced copies (C4Value.cpp:586-597 — refs convert to values for
 //! every target type except `C4V_pC4Value`).
 
-use clonk_script::{Engine, Script, Value};
+use clonk_script::{Engine, Value};
 
 fn engine_with(source: &str) -> Engine {
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
     engine
 }
 

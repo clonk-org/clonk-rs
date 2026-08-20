@@ -199,11 +199,11 @@ pub fn environment_cycle_recording(frames: usize) -> Result<Recording, EngineErr
 }
 
 fn resource_fixture_error(stage: &str, error: impl std::fmt::Display) -> EngineError {
-    EngineError::InvalidScriptOutput {
-        definition: "FXP1".to_string(),
-        function: "resource_float_snapshot".to_string(),
-        detail: format!("{stage}: {error}"),
-    }
+    EngineError::invalid_script_output(
+        "FXP1",
+        "resource_float_snapshot",
+        format!("{stage}: {error}"),
+    )
 }
 
 fn resource_float_definition() -> Result<Definition, EngineError> {

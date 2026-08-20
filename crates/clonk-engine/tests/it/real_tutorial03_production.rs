@@ -1,31 +1,7 @@
-use std::env;
-use std::path::PathBuf;
-
-use clonk_engine::scenario::LegacyDefinitionResolver;
-use clonk_engine::{Engine, JoinPlayerConfig, ObjectUpdate, Scenario, ScenarioError};
-use clonk_resources::Group;
-
-struct ContentResolver {
-    root: PathBuf,
-}
-
-impl LegacyDefinitionResolver for ContentResolver {
-    fn resolve_definition_groups(
-        &self,
-        _scenario: &Group,
-        identifier: &str,
-    ) -> Result<Vec<Group>, ScenarioError> {
-        Group::open(self.root.join(identifier.replace('\\', "/")))
-            .map(|group| vec![group])
-            .map_err(ScenarioError::Resources)
-    }
-}
-
-fn content_root() -> PathBuf {
-    env::var_os("LC_CONTENT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content"))
-}
+use crate::support::real_scenario::{
+    join_local_player_with_preferences, load_raw_content_scenario,
+};
+use clonk_engine::{Engine, ObjectUpdate};
 
 #[test]
 fn tutorial03_real_sawmill_processes_a_pure_wood_tree() {
@@ -33,33 +9,12 @@ fn tutorial03_real_sawmill_processes_a_pure_wood_tree() {
     // when ComponentAll says every positive component is WOOD, creates one
     // WOOD per component, removes the source and starts Saw
     // (Objects.c4d/Structures.c4d/Sawmill.c4d/Script.c:166-197).
-    let content = content_root();
-    let resolver = ContentResolver {
-        root: content.clone(),
-    };
-    let scenario = crate::support::TestValueExt::test_value(Scenario::load_from_path_with(
-        content.join("Tutorial.c4f/Tutorial03.c4s"),
-        &resolver,
+    let scenario = crate::support::TestValueExt::test_value(load_raw_content_scenario(
+        "Tutorial.c4f/Tutorial03.c4s",
     ));
     let mut engine = Engine::with_seed(0);
     crate::support::TestValueExt::test_value(scenario.apply(&mut engine));
-    crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-        name: "Sawmill production tester".to_string(),
-        player_info_id: 0,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff_00_00,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: false,
-        auto_context_menu: false,
-        startup_player_count: 1,
-    }));
+    join_local_player_with_preferences(&mut engine, "Sawmill production tester", false, false);
 
     let snapshot = engine.snapshot();
     let sawmill = crate::support::TestValueExt::test_value(

@@ -2238,24 +2238,24 @@ fn linux_display_available() -> bool {
 #[cfg(test)]
 mod headless_tests {
     use super::*;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
 
-    struct EnvGuard {
+    pub(super) struct EnvGuard {
         _lock: MutexGuard<'static, ()>,
         saved: Vec<(String, Option<OsString>)>,
     }
 
     impl EnvGuard {
-        fn set(vars: &[(&str, Option<&str>)]) -> Self {
+        pub(super) fn set<T: AsRef<OsStr> + ?Sized>(vars: &[(&str, Option<&T>)]) -> Self {
             let lock = env_lock().lock().unwrap();
             let mut saved = Vec::with_capacity(vars.len());
             for (key, value) in vars {
                 let original = env::var_os(key);
                 saved.push(((*key).to_string(), original));
                 match value {
-                    Some(val) => env::set_var(key, val),
+                    Some(val) => env::set_var(key, val.as_ref()),
                     None => env::remove_var(key),
                 }
             }
@@ -2279,7 +2279,7 @@ mod headless_tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn test_logger(dir: &TempDir) -> LauncherLogger {
+    pub(super) fn test_logger(dir: &TempDir) -> LauncherLogger {
         let log_path = dir.path().join("test.log");
         let file = File::create(&log_path).unwrap();
         LauncherLogger {
@@ -2292,7 +2292,7 @@ mod headless_tests {
 
     #[test]
     fn force_window_env_triggers_reason() {
-        let _guard = EnvGuard::set(&[
+        let _guard = EnvGuard::set::<str>(&[
             (FORCE_WINDOW_ENV, Some("1")),
             (FORCE_FULLSCREEN_ENV, None),
             (DISABLE_HEADLESS_GUARD_ENV, None),
@@ -2318,7 +2318,7 @@ mod headless_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_missing_display_triggers_guard() {
-        let _guard = EnvGuard::set(&[
+        let _guard = EnvGuard::set::<str>(&[
             ("DISPLAY", None),
             ("WAYLAND_DISPLAY", None),
             ("MIR_SOCKET", None),
@@ -3111,6 +3111,7 @@ impl From<&UpdateTelemetrySummary> for AutomationTelemetry {
 
 #[cfg(test)]
 mod tests {
+    use super::headless_tests::{test_logger, EnvGuard};
     use super::*;
     use crate::legacy_registry::{LegacyRegistryData, LegacyRegistryKey, LegacyRegistryValue};
     use clonk_launcher::{
@@ -3125,9 +3126,9 @@ mod tests {
     use std::cell::Cell;
     use std::env;
     use std::fs::{self, File};
-    use std::io::{LineWriter, Read};
+    use std::io::Read;
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
     use zip::write::SimpleFileOptions;
@@ -3167,17 +3168,6 @@ mod tests {
         ($result:expr => $message:literal) => {
             ($result).expect_err($message)
         };
-    }
-
-    fn test_logger(dir: &TempDir) -> LauncherLogger {
-        let log_path = dir.path().join("test.log");
-        let file = File::create(&log_path).unwrap();
-        LauncherLogger {
-            inner: Arc::new(LauncherLoggerInner {
-                writer: Mutex::new(LineWriter::new(file)),
-                path: log_path,
-            }),
-        }
     }
 
     struct AppFixture {
@@ -3249,56 +3239,31 @@ mod tests {
         ok!(Config::load(path))
     }
 
-    struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        saved: Vec<(String, Option<std::ffi::OsString>)>,
-    }
-
-    impl EnvGuard {
-        fn set(vars: &[(&str, Option<&Path>)]) -> Self {
-            let lock = env_lock().lock().unwrap();
-            let mut saved = Vec::with_capacity(vars.len());
-            for (key, value) in vars {
-                let original = env::var_os(key);
-                saved.push((key.to_string(), original));
-                match value {
-                    Some(path) => env::set_var(key, path.as_os_str()),
-                    None => env::remove_var(key),
-                }
-            }
-            Self { _lock: lock, saved }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (key, value) in self.saved.drain(..) {
-                match value {
-                    Some(val) => env::set_var(&key, val),
-                    None => env::remove_var(&key),
-                }
-            }
-        }
-    }
-
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    struct FailingWaitPlatform {
+    struct WaitPlatform {
+        alive: Option<Vec<u32>>,
+        timeout_seconds: u64,
         waited: Mutex<Vec<u32>>,
     }
 
-    impl FailingWaitPlatform {
-        fn new() -> Self {
+    impl WaitPlatform {
+        fn failing() -> Self {
             Self {
+                alive: None,
+                timeout_seconds: 120,
+                waited: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_live_processes(alive: Vec<u32>) -> Self {
+            Self {
+                alive: Some(alive),
+                timeout_seconds: 0,
                 waited: Mutex::new(Vec::new()),
             }
         }
     }
 
-    impl PlatformOps for FailingWaitPlatform {
+    impl PlatformOps for WaitPlatform {
         fn available_space(&self, _path: &Path) -> Result<u64, PlatformError> {
             Ok(u64::MAX)
         }
@@ -3308,44 +3273,11 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(pid);
-            Err(PlatformError::WaitTimeout { pid, seconds: 120 })
-        }
-
-        fn codesign(&self, _arguments: &[&str], _target: &Path) -> Result<(), PlatformError> {
-            Ok(())
-        }
-
-        fn set_installed_version(&self, _version: &str) -> Result<(), PlatformError> {
-            Ok(())
-        }
-    }
-
-    struct LivenessPlatform {
-        alive: Vec<u32>,
-        waited: Mutex<Vec<u32>>,
-    }
-
-    impl LivenessPlatform {
-        fn new(alive: Vec<u32>) -> Self {
-            Self {
-                alive,
-                waited: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl PlatformOps for LivenessPlatform {
-        fn available_space(&self, _path: &Path) -> Result<u64, PlatformError> {
-            Ok(u64::MAX)
-        }
-
-        fn wait_for_process(&self, pid: u32, _timeout: Duration) -> Result<(), PlatformError> {
-            self.waited
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(pid);
-            if self.alive.contains(&pid) {
-                Err(PlatformError::WaitTimeout { pid, seconds: 0 })
+            if self.alive.as_ref().is_none_or(|alive| alive.contains(&pid)) {
+                Err(PlatformError::WaitTimeout {
+                    pid,
+                    seconds: self.timeout_seconds,
+                })
             } else {
                 Ok(())
             }
@@ -3432,7 +3364,7 @@ mod tests {
         fs::write(pending.join(".owner-41"), b"").expect("owner marker");
         fs::write(pending.join("plan.json"), b"active").expect("active plan");
         let paths = fixture.paths;
-        let platform = LivenessPlatform::new(vec![41]);
+        let platform = WaitPlatform::with_live_processes(vec![41]);
 
         let notice = recover_abandoned_pending_updates(&paths, &platform);
 
@@ -3447,7 +3379,7 @@ mod tests {
         fs::write(pending.join(".owner-41"), b"").expect("owner marker");
         fs::write(pending.join("0-engine.zip"), b"partial").expect("partial archive");
         let paths = fixture.paths;
-        let platform = LivenessPlatform::new(Vec::new());
+        let platform = WaitPlatform::with_live_processes(Vec::new());
 
         let notice = ok!(recover_abandoned_pending_updates(&paths, &platform) => "interrupted update notice");
 
@@ -3462,7 +3394,7 @@ mod tests {
         let missing_plan = pending.join("plan.json");
         let install_root = directory.path().join("install");
         fs::create_dir(&install_root).expect("install root");
-        let platform = FailingWaitPlatform::new();
+        let platform = WaitPlatform::failing();
         let relaunched = Cell::new(false);
 
         let error = err!(apply_update_plan_with_relauncher(&missing_plan, &install_root, &[41, 42], true, &platform, 73, |_, _, _, _| {relaunched.set(true); Ok(())},) => "wait failure must stop the helper");

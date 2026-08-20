@@ -2,25 +2,13 @@
 //! `AB_ARRAY_APPEND`: evaluating the postfix grows the array by one nil slot
 //! and leaves a live reference to that new element.
 
+use crate::support::{runtime_error, try_eval as call};
 use clonk_script::{Engine, Script, ScriptError, Value};
 use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-
-fn call(source: &str, args: &[Value]) -> Result<Value, ScriptError> {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("script loads");
-    engine.call("Test", args)
-}
-
-fn runtime_error(source: &str, args: &[Value]) -> String {
-    match call(source, args).expect_err("array append must fail") {
-        ScriptError::Runtime(error) => error.message().to_string(),
-        other => panic!("expected runtime error, got {other}"),
-    }
-}
 
 #[test]
 fn array_append_assignment_is_strict1_plus_only() {

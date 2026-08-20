@@ -1,5 +1,27 @@
-use clonk_engine::{Definition, Engine, ObjectId, ObjectSnapshot, PlayerConfig, SpawnConfig};
+use clonk_engine::{
+    Definition, Engine, JoinPlayerConfig, ObjectId, ObjectSnapshot, PlayerConfig, SpawnConfig,
+};
 use clonk_script::Value;
+
+pub fn join_player_config(name: impl Into<String>) -> JoinPlayerConfig {
+    JoinPlayerConfig {
+        name: name.into(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: false,
+        auto_context_menu: false,
+        startup_player_count: 1,
+    }
+}
 
 pub trait TestValueExt<T> {
     fn test_value(self) -> T;

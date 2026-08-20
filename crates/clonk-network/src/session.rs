@@ -93,6 +93,24 @@ mod tests {
 
     const CPP_COMPATIBILITY_BUILD: i32 = CURRENT_GAME_BUILD + 2;
 
+    macro_rules! host_config {
+        ($($field:ident: $value:expr),* $(,)?) => {
+            HostConfig {
+                $($field: $value,)*
+                ..HostConfig::default()
+            }
+        };
+    }
+
+    macro_rules! network_core {
+        ($($fields:tt)*) => {
+            clonk_engine::NetworkResourceCore {
+                $($fields)*,
+                ..Default::default()
+            }
+        };
+    }
+
     trait TestValueExt<T> {
         fn test_value(self) -> T;
     }
@@ -109,6 +127,21 @@ mod tests {
         fn test_value(self) -> T {
             Result::expect(self, "network-test operation succeeds")
         }
+    }
+
+    async fn await_test<T, U>(future: impl Future<Output = U>) -> T
+    where
+        U: TestValueExt<T>,
+    {
+        timeout(EVENT_WAIT, future)
+            .await
+            .expect("network-test operation completes before the deadline")
+            .test_value()
+    }
+
+    fn c4(bytes: impl AsRef<[u8]>) -> clonk_engine::LegacyCString {
+        clonk_engine::LegacyCString::from_bytes(bytes.as_ref().to_vec())
+            .expect("valid fixture CString")
     }
 
     struct FailingWriteStream;
@@ -148,16 +181,170 @@ mod tests {
         ControlSendTimeSnapshot::default()
     }
 
-    fn compatibility_test_core(client_id: i32, name: &[u8]) -> clonk_engine::ClientCoreControlData {
-        let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value();
+    fn test_client_core(
+        client_id: i32,
+        name: clonk_engine::LegacyCString,
+        lobby_ready: bool,
+    ) -> clonk_engine::ClientCoreControlData {
         clonk_engine::ClientCoreControlData {
             client_id,
             activated: true,
             observer: false,
             name: name.clone(),
             nick: name,
-            lobby_ready: false,
+            lobby_ready,
         }
+    }
+
+    fn compatibility_test_core(client_id: i32, name: &[u8]) -> clonk_engine::ClientCoreControlData {
+        test_client_core(client_id, c4(name), false)
+    }
+
+    fn test_connection_request(
+        core: clonk_engine::ClientCoreControlData,
+        connection_id: u32,
+        port_protocol: bool,
+    ) -> crate::ConnectionRequest {
+        crate::ConnectionRequest {
+            core,
+            build: CURRENT_GAME_BUILD,
+            password: clonk_engine::LegacyCString::default(),
+            connection_id,
+            port_protocol,
+        }
+    }
+
+    fn test_connection_reply(
+        ok: bool,
+        message: clonk_engine::LegacyCString,
+        port_protocol: bool,
+    ) -> crate::ConnectionReply {
+        crate::ConnectionReply {
+            ok,
+            message,
+            wrong_password: false,
+            port_protocol,
+        }
+    }
+
+    fn legacy_frame(
+        client_id: ClientId,
+        tick: Tick,
+        controls: Vec<EngineControlPacket>,
+    ) -> LegacyControlFrame {
+        LegacyControlFrame {
+            client_id,
+            tick,
+            timestamp_ms: 0,
+            controls,
+        }
+    }
+
+    fn assert_single_control_author(
+        control: &EngineControlPacket,
+        author: i32,
+        spoofed_author: i32,
+    ) {
+        let payload = encode_control_entry_payload(control).test_value();
+        assert_eq!(
+            authenticated_single_control(&payload, author).expect("matching author"),
+            control.clone()
+        );
+        let error = authenticated_single_control(&payload, spoofed_author)
+            .expect_err("reject spoofed control author");
+        assert!(error.contains(&format!("claimed author {author}")));
+        assert!(error.contains(&format!("authenticated author is {spoofed_author}")));
+    }
+
+    fn assert_queued_control_author(
+        control: impl Fn(i32) -> EngineControlPacket,
+        control_name: &str,
+    ) {
+        let packet = |author| {
+            encode_control_packet(&legacy_frame(7, 12, vec![control(author)])).test_value()
+        };
+        validate_queued_control_authors(&packet(7)).test_value();
+        let error = validate_queued_control_authors(&packet(0))
+            .expect_err("queued client may not forge the host author");
+        assert!(error.contains(control_name), "{control_name}: {error}");
+        assert!(
+            error.contains("claimed author 0"),
+            "{control_name}: {error}"
+        );
+        assert!(
+            error.contains("authenticated author is 7"),
+            "{control_name}: {error}"
+        );
+    }
+
+    fn test_join_data(
+        client_id: i32,
+        status: NetworkStatus,
+        snapshot: HostJoinSnapshot,
+    ) -> JoinDataEnvelope {
+        JoinDataEnvelope {
+            client_id,
+            start_control_tick: snapshot.dynamic_tick,
+            status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        }
+    }
+
+    fn empty_client_resource_state(client_id: i32, directory: PathBuf) -> ClientResourceState {
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = test_join_data(client_id, host.initial_status, snapshot);
+        ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directory),
+        )
+        .test_value()
+    }
+
+    async fn admit_and_send_test_join_data<S, F>(
+        transport: &mut crate::ControlTransport<S>,
+        snapshot: F,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+        F: FnOnce(&clonk_engine::ClientCoreControlData) -> HostJoinSnapshot,
+    {
+        let host_core = test_client_core(0, c4(b"Host"), false);
+        let request = test_connection_request(host_core.clone(), 9, false);
+        let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
+        let admission = tokio::spawn(async move {
+            let request = admission_rx.recv().await.test_value();
+            let mut assigned = request.request.core.clone();
+            assigned.client_id = 1;
+            request
+                .decision_tx
+                .send(AdmissionDecision::Accept {
+                    peer_core: assigned.clone(),
+                    before_reply: Vec::new(),
+                    message: c4(b"join accepted"),
+                })
+                .test_value();
+            assigned
+        });
+        run_host_connection_handshake(transport, request, &admission_tx)
+            .await
+            .test_value();
+        let assigned = admission.await.test_value();
+        let mut snapshot = snapshot(&host_core);
+        snapshot.parameters.clients =
+            JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
+        transport
+            .send_message(ControlMessage::JoinData(Box::new(test_join_data(
+                assigned.client_id,
+                NetworkStatus::new(NETWORK_STATE_LOBBY, 0, -1),
+                snapshot,
+            ))))
+            .await
+            .test_value();
     }
 
     async fn read_compatibility_request<S>(stream: S) -> crate::ConnectionRequest
@@ -171,17 +358,49 @@ mod tests {
         }
     }
 
+    async fn bind_test_listener() -> (SocketAddr, TcpListener) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener binds");
+        (listener.local_addr().test_value(), listener)
+    }
+
     async fn start_test_host(config: HostConfig) -> (SocketAddr, HostHandle) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let host = start_host(listener, config).await.test_value();
         (address, host)
     }
 
-    async fn connect_test_player(address: SocketAddr, name: &str) -> ClientHandle {
-        connect_client(address, ClientConfig::new(name, ParticipantKind::Player))
-            .await
-            .test_value()
+    fn command_test_host_handle() -> (HostHandle, mpsc::Receiver<HostCommand>) {
+        let (command_tx, commands) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        (
+            HostHandle {
+                command_tx,
+                control_send_time: test_control_send_time_snapshot(),
+                event_rx: Some(event_rx),
+                voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
+                voice_event_rx: Some(mpsc::channel(1).1),
+                shutdown_tx: Some(shutdown_tx),
+                join_handle: tokio::spawn(async {}),
+                udp_local_addr: None,
+                io_statistics: crate::NetworkIoStatistics::new(0),
+            },
+            commands,
+        )
+    }
+
+    async fn connect_test_player(address: SocketAddr, name: impl Into<String>) -> ClientHandle {
+        Result::expect(
+            connect_client(address, ClientConfig::new(name, ParticipantKind::Player)).await,
+            "test player connects",
+        )
+    }
+
+    async fn shutdown_test_session(client: ClientHandle, host: HostHandle) {
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     type TestClientLoop = (
@@ -227,6 +446,77 @@ mod tests {
             resource_state,
         ));
         (host_stream, command_tx, event_rx, shutdown_tx, task)
+    }
+
+    fn start_test_host_route<S>(
+        stream: S,
+        client_id: ClientId,
+    ) -> (
+        HostOutboundSender,
+        mpsc::UnboundedReceiver<HostLoopMessage>,
+        tokio::task::JoinHandle<()>,
+    )
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (outbound, outbound_rx) = HostOutboundSender::channel();
+        let retire_rx = outbound.subscribe_retire();
+        let (host_tx, host_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(
+            ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
+                client_id,
+                transport: crate::ControlTransport::new(stream),
+                outbound_rx,
+                retire_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+        (outbound, host_rx, task)
+    }
+
+    type TestClientRoute = (
+        mpsc::UnboundedSender<ClientRouteCommand>,
+        watch::Sender<bool>,
+        mpsc::UnboundedReceiver<ClientRouteEvent>,
+        tokio::task::JoinHandle<()>,
+    );
+
+    fn start_test_client_route(stream: DuplexStream) -> TestClientRoute {
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        let (retire_tx, retire_rx) = watch::channel(false);
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_client_route(
+            1,
+            11,
+            None,
+            crate::ControlTransport::new(stream),
+            outbound_tx.clone(),
+            outbound_rx,
+            retire_rx,
+            event_tx,
+            ConnectionLivenessState::new_accepted_system(),
+        ));
+        (outbound_tx, retire_tx, event_rx, task)
+    }
+
+    fn single_test_client_route<S>(stream: S) -> ClientRouteManager
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let mut routes = ClientRouteManager::new();
+        routes.add_route(
+            1,
+            11,
+            crate::NetworkProtocol::Tcp,
+            None,
+            crate::ControlTransport::new(stream),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        routes
     }
 
     #[test]
@@ -455,12 +745,9 @@ mod tests {
 
     #[test]
     fn upnp_mapping_requests_require_enablement_and_live_bound_transports() {
-        let mut config = HostConfig {
-            enable_upnp: true,
-            configured_tcp_port: Some(31_112),
-            configured_udp_port: Some(31_113),
-            ..HostConfig::default()
-        };
+        let mut config = host_config!(enable_upnp: true,
+        configured_tcp_port: Some(31_112),
+        configured_udp_port: Some(31_113));
         let tcp = SocketAddr::from(([127, 0, 0, 1], 40_001));
         let udp = SocketAddr::from(([127, 0, 0, 1], 40_002));
         assert_eq!(
@@ -503,12 +790,11 @@ mod tests {
 
     #[test]
     fn configured_zero_udp_port_disables_the_udp_binding() {
-        let binding = HostUdpBinding::bind(&HostConfig {
-            udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-            netpuncher_addresses: vec![SocketAddr::from(([127, 0, 0, 1], 11_115))],
-            configured_udp_port: Some(0),
-            ..HostConfig::default()
-        });
+        let binding = HostUdpBinding::bind(
+            &host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        netpuncher_addresses: vec![SocketAddr::from(([127, 0, 0, 1], 11_115))],
+        configured_udp_port: Some(0)),
+        );
 
         assert_eq!(binding.local_addr(), None);
         assert_eq!(binding.bind_error(), None);
@@ -517,13 +803,10 @@ mod tests {
     #[tokio::test]
     async fn enabled_upnp_host_requests_tcp_udp_and_releases_on_shutdown() {
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let config = HostConfig {
-            enable_upnp: true,
-            udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-            configured_tcp_port: Some(31_112),
-            configured_udp_port: Some(31_113),
-            ..HostConfig::default()
-        };
+        let config = host_config!(enable_upnp: true,
+        udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        configured_tcp_port: Some(31_112),
+        configured_udp_port: Some(31_113));
         let udp_binding = HostUdpBinding::bind(&config);
         assert!(udp_binding.local_addr().is_some());
         let backend = RecordingPortMappingBackend::default();
@@ -560,13 +843,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let mut host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-                netpuncher_addresses: vec![puncher_address],
-                configured_tcp_port: Some(31_112),
-                configured_udp_port: Some(31_113),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+            netpuncher_addresses: vec![puncher_address],
+            configured_tcp_port: Some(31_112),
+            configured_udp_port: Some(31_113)),
         )
         .await
         .test_value();
@@ -679,11 +959,8 @@ mod tests {
             .test_value();
         let host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some(SocketAddr::from(([0_u16; 8], 0))),
-                netpuncher_addresses: Vec::new(),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(SocketAddr::from(([0_u16; 8], 0))),
+            netpuncher_addresses: Vec::new()),
         )
         .await
         .test_value();
@@ -1008,11 +1285,7 @@ mod tests {
             "transport setup must remain accepted"
         );
 
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 0, 0);
         let resource = ResourcePacket::Discover(crate::ResourceDiscoverPacket {
             resource_ids: vec![17],
         });
@@ -1282,11 +1555,7 @@ mod tests {
                 peer_is_port: false,
             },
         );
-        let message = ControlMessage::Status(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: 9,
-        });
+        let message = ControlMessage::Status(NetworkStatus::new(NETWORK_STATE_GO, 0, 9));
 
         assert_eq!(
             broadcast_host_message(
@@ -1412,11 +1681,7 @@ mod tests {
         let mut peer_tcp = add_test_route_queue(&mut routes, 2, 7, crate::NetworkProtocol::Tcp);
         let mut peer_udp = add_test_route_queue(&mut routes, 3, 7, crate::NetworkProtocol::Udp);
         let mut second_peer = add_test_route_queue(&mut routes, 4, 8, crate::NetworkProtocol::Tcp);
-        let message = ControlMessage::Status(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: 9,
-        });
+        let message = ControlMessage::Status(NetworkStatus::new(NETWORK_STATE_GO, 0, 9));
 
         assert_eq!(routes.send_to_connected_peers(message.clone()), vec![7, 8]);
         assert!(
@@ -1608,11 +1873,7 @@ mod tests {
         let (buffered, mut buffered_receiver) = HostOutboundSender::channel();
         let (live, mut live_receiver) = HostOutboundSender::channel();
         let mut state = host_state_with_test_route(buffered_client_id, buffered.clone());
-        let delivered = ControlMessage::Status(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: 9,
-        });
+        let delivered = ControlMessage::Status(NetworkStatus::new(NETWORK_STATE_GO, 0, 9));
         let live_core = compatibility_test_core(live_client_id as i32, b"Live");
         state.clients.insert(
             live_client_id,
@@ -1709,11 +1970,7 @@ mod tests {
                 });
         }
         assert!(!routes.routes[&1].outbound.is_closed());
-        let delivered = ControlMessage::Status(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: 9,
-        });
+        let delivered = ControlMessage::Status(NetworkStatus::new(NETWORK_STATE_GO, 0, 9));
         routes.try_send_to(8, delivered.clone()).test_value();
         assert!(matches!(
             live_receiver.try_recv(),
@@ -2005,10 +2262,7 @@ mod tests {
             }))
             .await
             .test_value();
-        let event = timeout(EVENT_WAIT, event_rx.recv())
-            .await
-            .test_value()
-            .test_value();
+        let event = await_test(event_rx.recv()).await;
         let ClientEvent::LeagueRoundResults { packet } = event else {
             panic!("expected typed forwarded league results, got {event:?}");
         };
@@ -2016,7 +2270,7 @@ mod tests {
             packet,
             crate::LeagueRoundResultsPacket {
                 success: true,
-                result_string: clonk_engine::LegacyCString::from_bytes(b"OK".to_vec()).unwrap(),
+                result_string: c4(b"OK"),
                 players: Vec::new(),
             }
         );
@@ -2059,11 +2313,7 @@ mod tests {
             }))
             .await
             .test_value();
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 0, 0);
         host_transport
             .send_message(ControlMessage::Status(status))
             .await
@@ -2119,10 +2369,7 @@ mod tests {
             .await
             .test_value();
         let mut bytes = vec![0; 64];
-        let count = timeout(EVENT_WAIT, host_stream.read(&mut bytes))
-            .await
-            .test_value()
-            .test_value();
+        let count = await_test(host_stream.read(&mut bytes)).await;
         bytes.truncate(count);
         assert_eq!(
             bytes,
@@ -2186,10 +2433,7 @@ mod tests {
         let (host_stream, command_tx, _event_rx, shutdown_tx, client_handle) =
             start_test_client_loop_with_state(512, 1, 1, BTreeMap::new(), resource_state);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let packet = ReadyCheckPacket {
-            client_id: 12,
-            data: crate::ReadyCheckData::Ready,
-        };
+        let packet = ReadyCheckPacket::new(12, crate::ReadyCheckData::Ready);
 
         command_tx
             .send(ClientCommand::SubmitReadyCheck(packet))
@@ -2241,14 +2485,15 @@ mod tests {
         let mut observer_b = connect_test_player(address, "Observer B").await;
         let mut observer_b_events = observer_b.take_event_receiver();
         let source_id = source.client_id();
-        let data =
-            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
-                player: i32::try_from(source_id).unwrap(),
-                command: 0x22,
-                data: 0x33,
-                by_client: i32::try_from(source_id).unwrap(),
-            }))
-            .test_value();
+        let data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
+            PlayerControlData::new(
+                i32::try_from(source_id).unwrap(),
+                0x22,
+                0x33,
+                i32::try_from(source_id).unwrap(),
+            ),
+        ))
+        .test_value();
 
         source
             .submit_packet(ControlDelivery::Direct, data.clone())
@@ -2349,7 +2594,7 @@ mod tests {
             .send_message(ControlMessage::LeagueRoundResults(
                 crate::LeagueRoundResultsPacket {
                     success: true,
-                    result_string: clonk_engine::LegacyCString::from_bytes(b"OK".to_vec()).unwrap(),
+                    result_string: c4(b"OK"),
                     players: Vec::new(),
                 },
             ))
@@ -2385,8 +2630,7 @@ mod tests {
         drain_raw_client(&mut bob).await;
         let packet = crate::LeagueRoundResultsPacket {
             success: true,
-            result_string: clonk_engine::LegacyCString::from_bytes(b"Counted".to_vec())
-                .test_value(),
+            result_string: c4(b"Counted"),
             players: vec![crate::LeagueRoundResultsPlayer {
                 player_info_id: 17,
                 total_playing_time: 900,
@@ -2396,8 +2640,7 @@ mod tests {
                 league_score_gain: 7,
                 league_rank_new: 3,
                 league_rank_symbol_new: 2,
-                league_progress_data: clonk_engine::LegacyCString::from_bytes(b"p=2".to_vec())
-                    .unwrap(),
+                league_progress_data: c4(b"p=2"),
                 status: crate::LeagueRoundPlayerStatus::Won,
             }],
         };
@@ -2620,24 +2863,16 @@ mod tests {
         // though PackCompleteCtrl left each embedded ByClient unchanged, and
         // CheckCompleteCtrl consumes that complete frame before partials
         // (src/C4GameControlNetwork.cpp:449-490,517-529,679-719,741-777).
-        let config = HostConfig {
-            initial_status: NetworkStatus {
-                state: NETWORK_STATE_GO,
-                control_mode: 0,
-                target_tick: 0,
-            },
-            ..HostConfig::default()
-        };
+        let config = host_config!(initial_status: NetworkStatus::new(NETWORK_STATE_GO, 0, 0));
         let (address, mut host) = start_test_host(config).await;
         let mut host_events = host.take_event_receiver();
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
         drain_raw_client(&mut source).await;
         let source_author = i32::try_from(source_id).test_value();
-        let complete = encode_control_packet(&LegacyControlFrame {
-            client_id: BROADCAST_CLIENT_ID,
-            tick: 0,
-            timestamp_ms: 0,
-            controls: vec![
+        let complete = encode_control_packet(&legacy_frame(
+            BROADCAST_CLIENT_ID,
+            0,
+            vec![
                 EngineControlPacket::PlayerControl(PlayerControlData {
                     player: 1,
                     command: 2,
@@ -2651,20 +2886,19 @@ mod tests {
                     by_client: source_author,
                 }),
             ],
-        })
+        ))
         .test_value();
         let future_complete = |command| {
-            encode_control_packet(&LegacyControlFrame {
-                client_id: BROADCAST_CLIENT_ID,
-                tick: 1,
-                timestamp_ms: 0,
-                controls: vec![EngineControlPacket::PlayerControl(PlayerControlData {
+            encode_control_packet(&legacy_frame(
+                BROADCAST_CLIENT_ID,
+                1,
+                vec![EngineControlPacket::PlayerControl(PlayerControlData {
                     player: 4,
                     command,
                     data: command,
                     by_client: source_author,
                 })],
-            })
+            ))
             .test_value()
         };
         let first_future = future_complete(0x21);
@@ -2780,14 +3014,15 @@ mod tests {
         drain_raw_client(&mut observer_a).await;
         drain_raw_client(&mut observer_b).await;
 
-        let direct_data =
-            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
-                player: i32::try_from(source_id).unwrap(),
-                command: 0x22,
-                data: 0x33,
-                by_client: i32::try_from(source_id).unwrap(),
-            }))
-            .test_value();
+        let direct_data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
+            PlayerControlData::new(
+                i32::try_from(source_id).unwrap(),
+                0x22,
+                0x33,
+                i32::try_from(source_id).unwrap(),
+            ),
+        ))
+        .test_value();
         let mut nested_packet = vec![0x42, u8::from(ControlDelivery::Direct)];
         nested_packet.extend_from_slice(&direct_data);
         source
@@ -2831,14 +3066,15 @@ mod tests {
             }
         }
 
-        let spoofed_data =
-            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
-                player: i32::try_from(source_id).unwrap(),
-                command: 0x44,
-                data: 0x55,
-                by_client: i32::try_from(source_id + 1).unwrap(),
-            }))
-            .test_value();
+        let spoofed_data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
+            PlayerControlData::new(
+                i32::try_from(source_id).unwrap(),
+                0x44,
+                0x55,
+                i32::try_from(source_id + 1).unwrap(),
+            ),
+        ))
+        .test_value();
         let mut spoofed_nested = vec![0x42, u8::from(ControlDelivery::Direct)];
         spoofed_nested.extend_from_slice(&spoofed_data);
         source
@@ -2912,10 +3148,10 @@ mod tests {
         drain_raw_client(&mut source).await;
         drain_raw_client(&mut observer).await;
         let mut observer = observer.into_inner();
-        let ready = ReadyCheckPacket {
-            client_id: i32::try_from(source_id).test_value(),
-            data: crate::ReadyCheckData::Ready,
-        };
+        let ready = ReadyCheckPacket::new(
+            i32::try_from(source_id).test_value(),
+            crate::ReadyCheckData::Ready,
+        );
         let mut nested_packet = vec![0x21];
         nested_packet.extend_from_slice(&ready.client_id.to_ne_bytes());
         nested_packet.extend_from_slice(&i32::from(ready.data).to_ne_bytes());
@@ -3150,20 +3386,7 @@ mod tests {
         // C4Network2::AllowJoin mutates fAllowJoin before returning; callers
         // enter DoLobby only after that synchronous transition
         // (src/C4Network2.cpp:835-843; src/C4Game.cpp:3874-3880).
-        let (command_tx, mut commands) = mpsc::channel(1);
-        let (_event_tx, event_rx) = mpsc::channel(1);
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
-        let handle = HostHandle {
-            command_tx,
-            control_send_time: test_control_send_time_snapshot(),
-            event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
-            shutdown_tx: Some(shutdown_tx),
-            join_handle: tokio::spawn(async {}),
-            udp_local_addr: None,
-            io_statistics: crate::NetworkIoStatistics::new(0),
-        };
+        let (handle, mut commands) = command_test_host_handle();
         let setter = tokio::spawn(async move { handle.set_join_allowed(true).await });
 
         let HostCommand::SetJoinAllowed {
@@ -3181,25 +3404,8 @@ mod tests {
 
     #[tokio::test]
     async fn host_begin_go_carries_status_and_admission_in_one_acknowledged_command() {
-        let (command_tx, mut commands) = mpsc::channel(1);
-        let (_event_tx, event_rx) = mpsc::channel(1);
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
-        let handle = HostHandle {
-            command_tx,
-            control_send_time: test_control_send_time_snapshot(),
-            event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
-            shutdown_tx: Some(shutdown_tx),
-            join_handle: tokio::spawn(async {}),
-            udp_local_addr: None,
-            io_statistics: crate::NetworkIoStatistics::new(0),
-        };
-        let status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 2,
-            target_tick: 41,
-        };
+        let (handle, mut commands) = command_test_host_handle();
+        let status = NetworkStatus::new(NETWORK_STATE_GO, 2, 41);
         let starter = tokio::spawn(async move { handle.begin_go(status, false).await });
 
         let HostCommand::BeginGo {
@@ -3222,25 +3428,8 @@ mod tests {
 
     #[tokio::test]
     async fn host_begin_go_reports_a_dropped_apply_acknowledgement() {
-        let (command_tx, mut commands) = mpsc::channel(1);
-        let (_event_tx, event_rx) = mpsc::channel(1);
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
-        let handle = HostHandle {
-            command_tx,
-            control_send_time: test_control_send_time_snapshot(),
-            event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
-            shutdown_tx: Some(shutdown_tx),
-            join_handle: tokio::spawn(async {}),
-            udp_local_addr: None,
-            io_statistics: crate::NetworkIoStatistics::new(0),
-        };
-        let status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let (handle, mut commands) = command_test_host_handle();
+        let status = NetworkStatus::new(NETWORK_STATE_GO, 1, 0);
         let starter = tokio::spawn(async move { handle.begin_go(status, true).await });
 
         let HostCommand::BeginGo { completion, .. } = commands.recv().await.test_value() else {
@@ -3297,11 +3486,7 @@ mod tests {
 
     #[tokio::test]
     async fn control_tick_consumed_public_handles_only_wait_for_enqueue() {
-        let status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: 7,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_GO, 0, 7);
 
         let (host_command_tx, mut host_commands) = mpsc::channel(1);
         let (host_event_tx, host_event_rx) = mpsc::channel(1);
@@ -3423,14 +3608,10 @@ mod tests {
             tokio::spawn(async move { while host_events.recv().await.is_some() {} });
         let mut client = connect_test_player(address, "Flood").await;
         let mut events = client.take_event_receiver();
-        let flood_data =
-            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
-                player: 0,
-                command: 0x55,
-                data: 0,
-                by_client: HOST_CLIENT_ID as i32,
-            }))
-            .test_value();
+        let flood_data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
+            PlayerControlData::new(0, 0x55, 0, HOST_CLIENT_ID as i32),
+        ))
+        .test_value();
         let (saturated_tx, saturated_rx) = oneshot::channel();
         let event_drain = tokio::spawn(async move {
             let mut direct_count = 0;
@@ -3459,10 +3640,7 @@ mod tests {
                 }
             }
         });
-        timeout(EVENT_WAIT, saturated_rx)
-            .await
-            .test_value()
-            .test_value();
+        await_test(saturated_rx).await;
 
         timeout(
             Duration::from_millis(250),
@@ -3482,21 +3660,8 @@ mod tests {
 
     #[tokio::test]
     async fn host_password_setter_returns_only_after_the_live_state_applies() {
-        let (command_tx, mut commands) = mpsc::channel(1);
-        let (_event_tx, event_rx) = mpsc::channel(1);
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
-        let handle = HostHandle {
-            command_tx,
-            control_send_time: test_control_send_time_snapshot(),
-            event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
-            shutdown_tx: Some(shutdown_tx),
-            join_handle: tokio::spawn(async {}),
-            udp_local_addr: None,
-            io_statistics: crate::NetworkIoStatistics::new(0),
-        };
-        let secret = clonk_engine::LegacyCString::from_bytes(b"secret".to_vec()).test_value();
+        let (handle, mut commands) = command_test_host_handle();
+        let secret = c4(b"secret");
         let setter = tokio::spawn(async move { handle.set_password(Some(secret)).await });
 
         let HostCommand::SetPassword {
@@ -3644,22 +3809,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_queued_client_remove_projects_removing_before_sync_execution() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
-        let config = HostConfig {
-            initial_status: NetworkStatus {
-                state: NETWORK_STATE_GO,
-                control_mode: 0,
-                target_tick: 0,
-            },
-            ..HostConfig::default()
-        };
+        let (address, listener) = bind_test_listener().await;
+        let config = host_config!(initial_status: NetworkStatus::new(NETWORK_STATE_GO, 0, 0));
         let host = start_host(listener, config).await.test_value();
         let client = connect_test_player(address, "Alice").await;
         let remove = encode_control_entry_payload(&EngineControlPacket::ClientRemove(
             clonk_engine::ClientRemoveControlData {
                 client_id: i32::try_from(client.client_id()).unwrap(),
-                reason: clonk_engine::LegacyCString::from_bytes(b"removed".to_vec()).unwrap(),
+                reason: c4(b"removed"),
                 by_client: HOST_CLIENT_ID as i32,
             },
         ))
@@ -3684,8 +3841,7 @@ mod tests {
             Some(RemoteBarrierState::Removing)
         );
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3693,10 +3849,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let mut host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0)))),
         )
         .await
         .test_value();
@@ -3742,8 +3895,7 @@ mod tests {
             .iter()
             .all(|(key, _)| key.connection_id != u32::MAX));
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3751,10 +3903,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let mut host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0)))),
         )
         .await
         .test_value();
@@ -3778,23 +3927,16 @@ mod tests {
         let mut client_frame = crate::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).test_value();
         client_frame.client_id = 99;
         client.voice_sender().try_send(client_frame).test_value();
-        let received = timeout(EVENT_WAIT, host_voice.recv())
-            .await
-            .test_value()
-            .test_value();
+        let received = await_test(host_voice.recv()).await;
         assert_eq!(received.client_id, client_id);
 
         let mut host_frame = crate::VoiceFrame::outbound(8, 12, 30, vec![0xa5; 164]).test_value();
         host_frame.client_id = 99;
         host.voice_sender().try_send(host_frame).test_value();
-        let received = timeout(EVENT_WAIT, client_voice.recv())
-            .await
-            .test_value()
-            .test_value();
+        let received = await_test(client_voice.recv()).await;
         assert_eq!(received.client_id, HOST_CLIENT_ID);
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3802,10 +3944,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let mut host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0)))),
         )
         .await
         .test_value();
@@ -3840,14 +3979,8 @@ mod tests {
 
         alpha.voice_sender().try_send(frame.clone()).test_value();
 
-        let received_by_host = timeout(EVENT_WAIT, host_voice.recv())
-            .await
-            .test_value()
-            .test_value();
-        let received_by_beta = timeout(EVENT_WAIT, beta_voice.recv())
-            .await
-            .test_value()
-            .test_value();
+        let received_by_host = await_test(host_voice.recv()).await;
+        let received_by_beta = await_test(beta_voice.recv()).await;
         for received in [received_by_host, received_by_beta] {
             assert_eq!(received.client_id, alpha_id);
             assert_eq!(received.player_id, frame.player_id);
@@ -3881,11 +4014,8 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
             let mut host = start_host(
                 listener,
-                HostConfig {
-                    udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-                    voice_enabled: host_voice_enabled,
-                    ..HostConfig::default()
-                },
+                host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+                voice_enabled: host_voice_enabled),
             )
             .await
             .test_value();
@@ -3923,8 +4053,7 @@ mod tests {
                 .await
                 .is_err());
 
-            client.shutdown().await.test_value();
-            host.shutdown().await.test_value();
+            shutdown_test_session(client, host).await;
         }
 
         assert_mixed_policy(true, false).await;
@@ -3933,11 +4062,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn udp_only_host_completes_session_admission_and_control() {
-        let config = HostConfig {
-            udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-            configured_tcp_port: Some(0),
-            ..HostConfig::default()
-        };
+        let config = host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        configured_tcp_port: Some(0));
         let udp_binding = HostUdpBinding::bind(&config);
         let udp_address = udp_binding.local_addr().test_value();
         let mut host = start_host_with_bindings(None, config, udp_binding)
@@ -3962,8 +4088,7 @@ mod tests {
         let packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3976,10 +4101,7 @@ mod tests {
         let tcp_address = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some(occupied_address),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(occupied_address)),
         )
         .await
         .test_value();
@@ -3993,16 +4115,10 @@ mod tests {
             })) if error.contains("failed to start reliable-UDP listener")
         ));
 
-        let client = connect_client(
-            tcp_address,
-            ClientConfig::new("Alice", ParticipantKind::Player),
-        )
-        .await
-        .test_value();
+        let client = connect_test_player(tcp_address, "Alice").await;
         assert_eq!(host.accepted_routes().await.len(), 1);
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4075,8 +4191,7 @@ mod tests {
         .test_value();
 
         assert_eq!(host.accepted_routes().await.len(), 1);
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4100,10 +4215,7 @@ mod tests {
         )
         .await
         .test_value();
-        let _puncher_stream = timeout(EVENT_WAIT, puncher.accept())
-            .await
-            .test_value()
-            .test_value();
+        let _puncher_stream = await_test(puncher.accept()).await;
 
         client.shutdown().await.test_value();
         let rebound =
@@ -4383,15 +4495,12 @@ mod tests {
         let mut resource_state = ClientResourceState::empty();
         resource_state.backend =
             Some(crate::ResourceTransferBackend::new(9, directories.client.clone()).test_value());
-        let core = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 77,
-            loadable: true,
-            file_size: 512,
-            chunk_size: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Swarm.bin".to_vec()).test_value(),
-            ..Default::default()
-        };
+        let core = network_core!(resource_type: 2,
+        id: 77,
+        loadable: true,
+        file_size: 512,
+        chunk_size: 1,
+        filename: c4(b"Swarm.bin"));
         resource_state
             .backend
             .as_mut()
@@ -4568,15 +4677,7 @@ mod tests {
         let (udp_client, udp_peer) = duplex(4096);
         let mut tcp = crate::ControlTransport::new(tcp_peer);
         let mut udp = crate::ControlTransport::new(udp_peer);
-        let mut routes = ClientRouteManager::new();
-        routes.add_route(
-            1,
-            11,
-            crate::NetworkProtocol::Tcp,
-            None,
-            crate::ControlTransport::new(tcp_client),
-            ConnectionLivenessState::new_accepted_system(),
-        );
+        let mut routes = single_test_client_route(tcp_client);
         routes.add_route(
             2,
             12,
@@ -4660,11 +4761,7 @@ mod tests {
         })
         .await
         .test_value();
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 0);
         routes
             .send_message(ControlMessage::StatusAck(status))
             .await
@@ -4849,15 +4946,7 @@ mod tests {
         // src/C4Network2Client.cpp:319-337,616-621;
         // src/C4NetIO.cpp:1345-1396).
         let (client_stream, _host_stream) = duplex(1);
-        let mut routes = ClientRouteManager::new();
-        routes.add_route(
-            1,
-            11,
-            crate::NetworkProtocol::Tcp,
-            None,
-            crate::ControlTransport::new(client_stream),
-            ConnectionLivenessState::new_accepted_system(),
-        );
+        let mut routes = single_test_client_route(client_stream);
         let announcements = (0..160)
             .map(|index| crate::AddressPacket {
                 client_id: 1,
@@ -4986,15 +5075,7 @@ mod tests {
         let (tcp_client, _tcp_peer) = duplex(1024);
         let (udp_client, udp_peer) = duplex(1024);
         let mut udp = crate::ControlTransport::new(udp_peer);
-        let mut routes = ClientRouteManager::new();
-        routes.add_route(
-            1,
-            11,
-            crate::NetworkProtocol::Tcp,
-            None,
-            crate::ControlTransport::new(tcp_client),
-            ConnectionLivenessState::new_accepted_system(),
-        );
+        let mut routes = single_test_client_route(tcp_client);
         routes.add_route(
             2,
             12,
@@ -5003,22 +5084,15 @@ mod tests {
             crate::ControlTransport::new(udp_client),
             ConnectionLivenessState::new_accepted_system(),
         );
-        udp.send_message(ControlMessage::ConnectionRequest(
-            crate::ConnectionRequest {
-                core: clonk_engine::ClientCoreControlData::default(),
-                build: CURRENT_GAME_BUILD,
-                password: clonk_engine::LegacyCString::default(),
-                connection_id: 99,
-                port_protocol: false,
-            },
-        ))
+        udp.send_message(ControlMessage::ConnectionRequest(test_connection_request(
+            clonk_engine::ClientCoreControlData::default(),
+            99,
+            false,
+        )))
         .await
         .test_value();
 
-        let event = timeout(EVENT_WAIT, routes.read_event())
-            .await
-            .test_value()
-            .test_value();
+        let event = await_test(routes.read_event()).await;
         assert!(matches!(
             event,
             ClientRouteRead::Disconnected {
@@ -5093,10 +5167,7 @@ mod tests {
         }))
         .await
         .test_value();
-        let (replayed, peer_addr) = timeout(EVENT_WAIT, routes.read_packet())
-            .await
-            .test_value()
-            .test_value();
+        let (replayed, peer_addr) = await_test(routes.read_packet()).await;
         assert!(matches!(
             replayed,
             crate::transport::InboundPacket::Message(
@@ -5124,11 +5195,7 @@ mod tests {
         assert_eq!(reciprocal.packet_counter, 1);
         assert_eq!(reciprocal.packets.len(), 1);
 
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 0);
         routes
             .send_message(ControlMessage::StatusAck(status))
             .await
@@ -5185,15 +5252,7 @@ mod tests {
     #[tokio::test]
     async fn mesh_peer_post_mortem_cannot_retire_or_replay_as_the_host_route() {
         let (host_client, _host_peer) = duplex(512);
-        let mut routes = ClientRouteManager::new();
-        routes.add_route(
-            1,
-            11,
-            crate::NetworkProtocol::Tcp,
-            None,
-            crate::ControlTransport::new(host_client),
-            ConnectionLivenessState::new_accepted_system(),
-        );
+        let mut routes = single_test_client_route(host_client);
         routes.closed_routes.retain(3, HOST_CLIENT_ID, 0);
         let forged_live = crate::PostMortemPacket {
             connection_id: 1,
@@ -5253,15 +5312,7 @@ mod tests {
     #[tokio::test]
     async fn client_route_shutdown_interrupts_a_blocked_write_with_queued_commands() {
         let (client_stream, _peer_stream) = duplex(1);
-        let mut routes = ClientRouteManager::new();
-        routes.add_route(
-            1,
-            11,
-            crate::NetworkProtocol::Tcp,
-            None,
-            crate::ControlTransport::new(client_stream),
-            ConnectionLivenessState::new_accepted_system(),
-        );
+        let mut routes = single_test_client_route(client_stream);
         let outbound = routes.routes[&1].outbound.clone();
         for _ in 0..64 {
             let _ = outbound
@@ -5278,11 +5329,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_handle_shutdown_bypasses_full_command_and_event_queues() {
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 0, 0);
         let (command_tx, _command_rx) = mpsc::channel(1);
         command_tx.send(HostCommand::Shutdown).await.test_value();
         let (event_tx, event_rx) = mpsc::channel(1);
@@ -5307,19 +5354,12 @@ mod tests {
             io_statistics: crate::NetworkIoStatistics::new(0),
         };
 
-        timeout(EVENT_WAIT, handle.shutdown())
-            .await
-            .test_value()
-            .test_value();
+        await_test(handle.shutdown()).await;
     }
 
     #[tokio::test]
     async fn client_handle_shutdown_bypasses_full_command_and_event_queues() {
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 0, 0);
         let (command_tx, _command_rx) = mpsc::channel(1);
         command_tx.send(ClientCommand::Shutdown).await.test_value();
         let (event_tx, event_rx) = mpsc::channel(1);
@@ -5346,28 +5386,15 @@ mod tests {
             io_statistics: crate::NetworkIoStatistics::new(0),
         };
 
-        timeout(EVENT_WAIT, handle.shutdown())
-            .await
-            .test_value()
-            .test_value();
+        await_test(handle.shutdown()).await;
     }
 
     #[tokio::test]
     async fn failed_client_route_retains_commands_already_accepted_by_its_queue() {
         let (client_stream, peer_stream) = duplex(256);
-        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
-        let (_retire_tx, retire_rx) = watch::channel(false);
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let first = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 7,
-        };
-        let second = NetworkStatus {
-            state: NETWORK_STATE_PAUSE,
-            control_mode: 2,
-            target_tick: 8,
-        };
+        let (outbound_tx, _retire_tx, mut event_rx, task) = start_test_client_route(client_stream);
+        let first = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 7);
+        let second = NetworkStatus::new(NETWORK_STATE_PAUSE, 2, 8);
         outbound_tx
             .send(ClientRouteCommand::Message(ControlMessage::Status(first)))
             .test_value();
@@ -5375,18 +5402,6 @@ mod tests {
             .send(ClientRouteCommand::Message(ControlMessage::Status(second)))
             .test_value();
         drop(peer_stream);
-
-        let task = tokio::spawn(run_client_route(
-            1,
-            11,
-            None,
-            crate::ControlTransport::new(client_stream),
-            outbound_tx.clone(),
-            outbound_rx,
-            retire_rx,
-            event_tx,
-            ConnectionLivenessState::new_accepted_system(),
-        ));
         let event = timeout(EVENT_WAIT, event_rx.recv())
             .await
             .expect("failed route did not report its recovery backlog")
@@ -5445,16 +5460,8 @@ mod tests {
             crate::ControlTransport::new(fallback_stream),
             ConnectionLivenessState::new_accepted_system(),
         );
-        let first = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 41,
-        };
-        let second = NetworkStatus {
-            state: NETWORK_STATE_PAUSE,
-            control_mode: 1,
-            target_tick: 42,
-        };
+        let first = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 41);
+        let second = NetworkStatus::new(NETWORK_STATE_PAUSE, 1, 42);
 
         routes
             .try_send_to(7, ControlMessage::Status(first))
@@ -5487,11 +5494,7 @@ mod tests {
 
         let mut logical_order = Vec::new();
         while logical_order.len() < 2 {
-            match timeout(EVENT_WAIT, fallback.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(fallback.read_message()).await {
                 ControlMessage::PostMortem(packet) => {
                     logical_order.extend(packet.packets.into_iter().map(|packet| {
                         crate::transport::parse_complete_packet(&packet)
@@ -5520,20 +5523,7 @@ mod tests {
         // (oracle-src-pinned src/C4NetIO.cpp:690-761,1345-1396).
         let (client_stream, peer_stream) = duplex(64);
         let mut peer = crate::ControlTransport::new(peer_stream);
-        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
-        let (retire_tx, retire_rx) = watch::channel(false);
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_client_route(
-            1,
-            11,
-            None,
-            crate::ControlTransport::new(client_stream),
-            outbound_tx.clone(),
-            outbound_rx,
-            retire_rx,
-            event_tx,
-            ConnectionLivenessState::new_accepted_system(),
-        ));
+        let (outbound_tx, retire_tx, mut event_rx, task) = start_test_client_route(client_stream);
         outbound_tx
             .send(ClientRouteCommand::Message(ControlMessage::Packet {
                 delivery: ControlDelivery::Direct,
@@ -5541,11 +5531,7 @@ mod tests {
             }))
             .test_value();
         tokio::task::yield_now().await;
-        let inbound = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 7,
-        };
+        let inbound = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 7);
         peer.send_message(ControlMessage::Status(inbound))
             .await
             .test_value();
@@ -5568,28 +5554,11 @@ mod tests {
     async fn client_route_reuses_its_liveness_timer_across_packets() {
         let (client_stream, peer_stream) = duplex(4_096);
         let mut peer = crate::ControlTransport::new(peer_stream);
-        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
-        let (retire_tx, retire_rx) = watch::channel(false);
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         reset_liveness_timer_arms();
-        let task = tokio::spawn(run_client_route(
-            1,
-            11,
-            None,
-            crate::ControlTransport::new(client_stream),
-            outbound_tx.clone(),
-            outbound_rx,
-            retire_rx,
-            event_tx,
-            ConnectionLivenessState::new_accepted_system(),
-        ));
+        let (_outbound_tx, retire_tx, mut event_rx, task) = start_test_client_route(client_stream);
 
         for target_tick in 1..=3 {
-            let status = NetworkStatus {
-                state: NETWORK_STATE_LOBBY,
-                control_mode: 1,
-                target_tick,
-            };
+            let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, target_tick);
             peer.send_message(ControlMessage::Status(status))
                 .await
                 .test_value();
@@ -5613,33 +5582,13 @@ mod tests {
     #[tokio::test]
     async fn retiring_client_route_cancels_an_inflight_write_into_post_mortem() {
         let (client_stream, mut peer_stream) = duplex(1);
-        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
-        let (retire_tx, retire_rx) = watch::channel(false);
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 9,
-        };
-        let task = tokio::spawn(run_client_route(
-            1,
-            11,
-            None,
-            crate::ControlTransport::new(client_stream),
-            outbound_tx.clone(),
-            outbound_rx,
-            retire_rx,
-            event_tx,
-            ConnectionLivenessState::new_accepted_system(),
-        ));
+        let (outbound_tx, retire_tx, mut event_rx, task) = start_test_client_route(client_stream);
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 9);
         outbound_tx
             .send(ClientRouteCommand::Message(ControlMessage::Status(status)))
             .test_value();
         let mut first_wire_byte = [0_u8; 1];
-        timeout(EVENT_WAIT, peer_stream.read_exact(&mut first_wire_byte))
-            .await
-            .test_value()
-            .test_value();
+        await_test(peer_stream.read_exact(&mut first_wire_byte)).await;
         retire_tx.send_replace(true);
 
         let event = timeout(EVENT_WAIT, event_rx.recv())
@@ -5815,15 +5764,7 @@ mod tests {
         let (udp_client, udp_peer) = duplex(1024);
         let mut tcp = crate::ControlTransport::new(tcp_peer);
         let mut udp = crate::ControlTransport::new(udp_peer);
-        let mut routes = ClientRouteManager::new();
-        routes.add_route(
-            1,
-            11,
-            crate::NetworkProtocol::Tcp,
-            None,
-            crate::ControlTransport::new(tcp_client),
-            ConnectionLivenessState::new_accepted_system(),
-        );
+        let mut routes = single_test_client_route(tcp_client);
         routes.add_route(
             2,
             12,
@@ -5867,10 +5808,7 @@ mod tests {
         let tcp_address = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0)))),
         )
         .await
         .test_value();
@@ -5909,11 +5847,7 @@ mod tests {
         }
         assert_eq!(joined, 1, "secondary route must not re-Join the client");
 
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 0);
         client.submit_status_ack(status).await.test_value();
         timeout(EVENT_WAIT, async {
             loop {
@@ -5931,8 +5865,7 @@ mod tests {
         .await
         .test_value();
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5941,10 +5874,7 @@ mod tests {
         let host_tcp_address = host_listener.local_addr().test_value();
         let mut host = start_host(
             host_listener,
-            HostConfig {
-                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0)))),
         )
         .await
         .test_value();
@@ -6021,11 +5951,7 @@ mod tests {
         assert_eq!(surviving_routes.len(), 1);
 
         while host_events.try_recv().is_ok() {}
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 17,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 17);
         client.submit_status_ack(status).await.test_value();
         timeout(route_lifecycle_wait, async {
             loop {
@@ -6057,8 +5983,7 @@ mod tests {
         assert_ne!(reconnected_ids, initial_ids);
         wait_for_client_host_protocols(&client, route_lifecycle_wait).await;
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
         proxy.abort();
         let _ = proxy.await;
     }
@@ -6104,11 +6029,7 @@ mod tests {
         .test_value();
         assert_eq!(host.accepted_routes().await.len(), 1);
 
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 0);
         client.submit_status_ack(status).await.test_value();
         timeout(EVENT_WAIT, async {
             loop {
@@ -6126,8 +6047,7 @@ mod tests {
         .await
         .test_value();
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -6142,7 +6062,7 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::Definitions,
                 7,
-                clonk_engine::LegacyCString::from_bytes(b"RouteSplit.c4d".to_vec()).unwrap(),
+                c4(b"RouteSplit.c4d"),
                 "",
             ),
         )
@@ -6155,20 +6075,17 @@ mod tests {
         let tcp_address = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-                resource_directory: Some(directories.host.clone()),
-                resource_registrations: vec![crate::ResourceRegistration::from_core(
-                    &core, true, false,
-                )],
-                resource_files: vec![HostedResourceFile {
-                    core: core.clone(),
-                    path: hosted_path,
-                    ownership: hosted_ownership,
-                    binary_compatible: true,
-                }],
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+            resource_directory: Some(directories.host.clone()),
+            resource_registrations: vec![crate::ResourceRegistration::from_core(
+                &core, true, false,
+            )],
+            resource_files: vec![HostedResourceFile {
+                core: core.clone(),
+                path: hosted_path,
+                ownership: hosted_ownership,
+                binary_compatible: true,
+            }]),
         )
         .await
         .test_value();
@@ -6193,17 +6110,10 @@ mod tests {
 
         let udp_hub =
             crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
-        let udp_stream = timeout(EVENT_WAIT, udp_hub.connect_owned(udp_address))
-            .await
-            .test_value()
-            .test_value();
+        let udp_stream = await_test(udp_hub.connect_owned(udp_address)).await;
         let mut udp = crate::ControlTransport::new(udp_stream);
         let host_request = loop {
-            match timeout(EVENT_WAIT, udp.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(udp.read_message()).await {
                 ControlMessage::ConnectionRequest(request) => break request,
                 ControlMessage::Ping(ping) => {
                     udp.send_message(ControlMessage::Pong(ping))
@@ -6214,31 +6124,16 @@ mod tests {
             }
         };
         let remote_connection_id = 37;
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
-        udp.send_message(ControlMessage::ConnectionRequest(
-            crate::ConnectionRequest {
-                core: clonk_engine::ClientCoreControlData {
-                    client_id: i32::try_from(client_id).unwrap(),
-                    activated: true,
-                    observer: false,
-                    name: name.clone(),
-                    nick: name,
-                    lobby_ready: true,
-                },
-                build: CURRENT_GAME_BUILD,
-                password: clonk_engine::LegacyCString::default(),
-                connection_id: remote_connection_id,
-                port_protocol: true,
-            },
-        ))
+        let name = c4(b"Alice");
+        udp.send_message(ControlMessage::ConnectionRequest(test_connection_request(
+            test_client_core(i32::try_from(client_id).unwrap(), name, true),
+            remote_connection_id,
+            true,
+        )))
         .await
         .test_value();
         loop {
-            match timeout(EVENT_WAIT, udp.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(udp.read_message()).await {
                 ControlMessage::ConnectionReply(reply) if reply.ok => break,
                 ControlMessage::Ping(ping) => {
                     udp.send_message(ControlMessage::Pong(ping))
@@ -6248,13 +6143,11 @@ mod tests {
                 other => panic!("expected positive host UDP connection reply, got {other:?}"),
             }
         }
-        udp.send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-            ok: true,
-            message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
-                .unwrap(),
-            wrong_password: false,
-            port_protocol: false,
-        }))
+        udp.send_message(ControlMessage::ConnectionReply(test_connection_reply(
+            true,
+            c4(b"connection accepted"),
+            false,
+        )))
         .await
         .test_value();
 
@@ -6314,11 +6207,7 @@ mod tests {
         let countdown = crate::LobbyCountdownPacket::new(7);
         host.submit_lobby_countdown(countdown).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, udp.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(udp.read_message()).await {
                 ControlMessage::LobbyCountdown(packet) if packet == countdown => break,
                 ControlMessage::Ping(ping) => {
                     udp.send_message(ControlMessage::Pong(ping))
@@ -6354,11 +6243,7 @@ mod tests {
         .await
         .test_value();
         loop {
-            match timeout(EVENT_WAIT, tcp.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(tcp.read_message()).await {
                 ControlMessage::Resource(ResourcePacket::Data(data))
                     if data.resource_id == core.id =>
                 {
@@ -6405,23 +6290,14 @@ mod tests {
         // a status containing the currently present chunk ranges
         // (src/C4Network2Res.cpp:496-523,553-567,831-845,1557-1568).
         let host = HostConfig::default();
-        let core = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 7,
-            loadable: true,
-            file_size: 8,
-            chunk_size: 4,
-            ..Default::default()
-        };
+        let core = network_core!(resource_type: 2,
+        id: 7,
+        loadable: true,
+        file_size: 8,
+        chunk_size: 4);
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
         snapshot.dynamic = core.clone();
-        let join_data = JoinDataEnvelope {
-            client_id: 1,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
+        let join_data = test_join_data(1, host.initial_status, snapshot);
         let plan = crate::plan_client_bootstrap(
             &join_data,
             &crate::ClientBootstrapLocalCandidates::default(),
@@ -6469,29 +6345,17 @@ mod tests {
         // src/C4Network2Res.cpp:1431-1441).
         let host = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
-        snapshot.dynamic = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 7,
-            loadable: true,
-            file_size: 1,
-            chunk_size: 1,
-            ..Default::default()
-        };
-        snapshot.parameters.scenario = clonk_engine::NetworkResourceCore {
-            resource_type: 1,
-            id: 8,
-            loadable: true,
-            file_size: 1,
-            chunk_size: 1,
-            ..Default::default()
-        };
-        let join_data = JoinDataEnvelope {
-            client_id: 1,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
+        snapshot.dynamic = network_core!(resource_type: 2,
+        id: 7,
+        loadable: true,
+        file_size: 1,
+        chunk_size: 1);
+        snapshot.parameters.scenario = network_core!(resource_type: 1,
+        id: 8,
+        loadable: true,
+        file_size: 1,
+        chunk_size: 1);
+        let join_data = test_join_data(1, host.initial_status, snapshot);
         let plan = crate::plan_client_bootstrap(
             &join_data,
             &crate::ClientBootstrapLocalCandidates::default(),
@@ -6522,25 +6386,16 @@ mod tests {
         fs::write(&local_dynamic, b"local").test_value();
         let host = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
-        let core = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 7,
-            loadable: true,
-            file_size: 5,
-            file_crc: 0x8bd6_88e8,
-            chunk_size: 2,
-            contents_crc: 0x8bd6_88e8,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
-            ..Default::default()
-        };
+        let core = network_core!(resource_type: 2,
+        id: 7,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        chunk_size: 2,
+        contents_crc: 0x8bd6_88e8,
+        filename: c4(b"Dynamic.c4d"));
         snapshot.dynamic = core.clone();
-        let join_data = JoinDataEnvelope {
-            client_id: 1,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
+        let join_data = test_join_data(1, host.initial_status, snapshot);
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(core.id, vec![local_dynamic.clone()]);
         let plan =
@@ -6575,25 +6430,16 @@ mod tests {
         fs::write(&local_dynamic, b"local").test_value();
         let host = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
-        let core = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 7,
-            loadable: true,
-            file_size: 5,
-            file_crc: 0x8bd6_88e8,
-            chunk_size: 2,
-            contents_crc: 0x8bd6_88e8,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
-            ..Default::default()
-        };
+        let core = network_core!(resource_type: 2,
+        id: 7,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        chunk_size: 2,
+        contents_crc: 0x8bd6_88e8,
+        filename: c4(b"Dynamic.c4d"));
         snapshot.dynamic = core.clone();
-        let join_data = JoinDataEnvelope {
-            client_id: 1,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
+        let join_data = test_join_data(1, host.initial_status, snapshot);
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(core.id, vec![local_dynamic.clone()]);
         let plan =
@@ -6646,24 +6492,15 @@ mod tests {
         let directories = SessionResourceDirectories::new();
         let host = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
-        let core = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 7,
-            derived_id: -1,
-            loadable: true,
-            file_size: 5,
-            chunk_size: 5,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
-            ..Default::default()
-        };
+        let core = network_core!(resource_type: 2,
+        id: 7,
+        derived_id: -1,
+        loadable: true,
+        file_size: 5,
+        chunk_size: 5,
+        filename: c4(b"Dynamic.c4d"));
         snapshot.dynamic = core.clone();
-        let join_data = JoinDataEnvelope {
-            client_id: 1,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
+        let join_data = test_join_data(1, host.initial_status, snapshot);
         let plan = crate::plan_client_bootstrap(
             &join_data,
             &crate::ClientBootstrapLocalCandidates::default(),
@@ -6751,26 +6588,17 @@ mod tests {
         fs::write(&local_dynamic, b"local").test_value();
         let host = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
-        let dynamic = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 7,
-            loadable: true,
-            file_size: 5,
-            file_crc: 0x8bd6_88e8,
-            chunk_size: 2,
-            contents_crc: 0x8bd6_88e8,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
-            ..Default::default()
-        };
+        let dynamic = network_core!(resource_type: 2,
+        id: 7,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        chunk_size: 2,
+        contents_crc: 0x8bd6_88e8,
+        filename: c4(b"Dynamic.c4d"));
         snapshot.dynamic = dynamic.clone();
         let scenario_id = snapshot.parameters.scenario.id;
-        let join_data = JoinDataEnvelope {
-            client_id: 1,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
+        let join_data = test_join_data(1, host.initial_status, snapshot);
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(dynamic.id, vec![local_dynamic]);
         let plan =
@@ -6845,28 +6673,11 @@ mod tests {
             .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
             .test_value();
         fs::write(&player, group.pack().unwrap()).test_value();
-        let host = HostConfig::default();
-        let snapshot = synthetic_join_snapshot(host.local_core, 8);
-        let join_data = JoinDataEnvelope {
-            client_id: 7,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
-        let mut state = ClientResourceState::new(
-            &join_data,
-            0,
-            Vec::new(),
-            Vec::new(),
-            ConnectionLivenessState::new_accepted_system(),
-            Some(directories.client.clone()),
-        )
-        .test_value();
+        let mut state = empty_client_resource_state(7, directories.client.clone());
         let request = |wire_name: &[u8], maker: &[u8]| crate::ClientPlayerResourceRequest {
             source_path: player.clone(),
-            wire_name: clonk_engine::LegacyCString::from_bytes(wire_name.to_vec()).test_value(),
-            group_maker: clonk_engine::LegacyCString::from_bytes(maker.to_vec()).test_value(),
+            wire_name: c4(wire_name),
+            group_maker: c4(maker),
         };
 
         let original = state
@@ -6900,29 +6711,12 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::Player,
                 1 << 16,
-                clonk_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                c4(b"Shared.c4p"),
                 "",
             ),
         )
         .test_value();
-        let host = HostConfig::default();
-        let snapshot = synthetic_join_snapshot(host.local_core, 8);
-        let join_data = JoinDataEnvelope {
-            client_id: 7,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
-        let mut state = ClientResourceState::new(
-            &join_data,
-            0,
-            Vec::new(),
-            Vec::new(),
-            ConnectionLivenessState::new_accepted_system(),
-            Some(directories.client.clone()),
-        )
-        .test_value();
+        let mut state = empty_client_resource_state(7, directories.client.clone());
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(publication.core.id, vec![player.clone()]);
         let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
@@ -6943,10 +6737,8 @@ mod tests {
         let reused = state
             .publish_player_resource(crate::ClientPlayerResourceRequest {
                 source_path: player,
-                wire_name: clonk_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec())
-                    .unwrap(),
-                group_maker: clonk_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
-                    .unwrap(),
+                wire_name: c4(b"Renamed.c4p"),
+                group_maker: c4(b"Client maker"),
             })
             .test_value();
 
@@ -6987,37 +6779,16 @@ mod tests {
         )
         .test_value();
         let nested_player = mother_path.join("Shared.c4p");
-        let core = clonk_engine::NetworkResourceCore {
-            resource_type: crate::HostResourceType::Player as u8,
-            id: 1 << 16,
-            derived_id: -1,
-            loadable: true,
-            file_size: player_standalone.len() as u32,
-            file_crc: c4group_file_crc(&player_standalone),
-            chunk_size: 100 * 1024,
-            contents_crc,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Players.c4f/Shared.c4p".to_vec())
-                .test_value(),
-            ..Default::default()
-        };
-        let host = HostConfig::default();
-        let snapshot = synthetic_join_snapshot(host.local_core, 8);
-        let join_data = JoinDataEnvelope {
-            client_id: 7,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
-        let mut state = ClientResourceState::new(
-            &join_data,
-            0,
-            Vec::new(),
-            Vec::new(),
-            ConnectionLivenessState::new_accepted_system(),
-            Some(directories.client.clone()),
-        )
-        .test_value();
+        let core = network_core!(resource_type: crate::HostResourceType::Player as u8,
+        id: 1 << 16,
+        derived_id: -1,
+        loadable: true,
+        file_size: player_standalone.len() as u32,
+        file_crc: c4group_file_crc(&player_standalone),
+        chunk_size: 100 * 1024,
+        contents_crc,
+        filename: c4(b"Players.c4f/Shared.c4p"));
+        let mut state = empty_client_resource_state(7, directories.client.clone());
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(core.id, vec![nested_player.clone()]);
         let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
@@ -7065,29 +6836,12 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::Player,
                 1 << 16,
-                clonk_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                c4(b"Shared.c4p"),
                 "Host maker",
             ),
         )
         .test_value();
-        let host = HostConfig::default();
-        let snapshot = synthetic_join_snapshot(host.local_core, 8);
-        let join_data = JoinDataEnvelope {
-            client_id: 7,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
-        let mut state = ClientResourceState::new(
-            &join_data,
-            0,
-            Vec::new(),
-            Vec::new(),
-            ConnectionLivenessState::new_accepted_system(),
-            Some(directories.client.clone()),
-        )
-        .test_value();
+        let mut state = empty_client_resource_state(7, directories.client.clone());
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(publication.core.id, vec![player.clone()]);
         let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
@@ -7108,9 +6862,8 @@ mod tests {
         let published = state
             .publish_player_resource(crate::ClientPlayerResourceRequest {
                 source_path: player,
-                wire_name: clonk_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
-                group_maker: clonk_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
-                    .unwrap(),
+                wire_name: c4(b"Shared.c4p"),
+                group_maker: c4(b"Client maker"),
             })
             .test_value();
 
@@ -7139,29 +6892,12 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::Player,
                 1 << 16,
-                clonk_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                c4(b"Shared.c4p"),
                 "",
             ),
         )
         .test_value();
-        let host = HostConfig::default();
-        let snapshot = synthetic_join_snapshot(host.local_core, 8);
-        let join_data = JoinDataEnvelope {
-            client_id: 7,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
-        let mut state = ClientResourceState::new(
-            &join_data,
-            0,
-            Vec::new(),
-            Vec::new(),
-            ConnectionLivenessState::new_accepted_system(),
-            Some(directories.client.clone()),
-        )
-        .test_value();
+        let mut state = empty_client_resource_state(7, directories.client.clone());
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(publication.core.id, vec![player.clone()]);
         state.retain_resource_resolver(crate::client_bootstrap::ClientBootstrapResolver::new(
@@ -7182,10 +6918,8 @@ mod tests {
         let reused = state
             .publish_player_resource(crate::ClientPlayerResourceRequest {
                 source_path: player,
-                wire_name: clonk_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec())
-                    .unwrap(),
-                group_maker: clonk_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
-                    .unwrap(),
+                wire_name: c4(b"Renamed.c4p"),
+                group_maker: c4(b"Client maker"),
             })
             .test_value();
 
@@ -7214,19 +6948,12 @@ mod tests {
         fs::write(&player, &original).test_value();
         let request = crate::ClientPlayerResourceRequest {
             source_path: player.clone(),
-            wire_name: clonk_engine::LegacyCString::from_bytes(b"Players.c4f/Alice.c4p".to_vec())
-                .test_value(),
-            group_maker: clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value(),
+            wire_name: c4(b"Players.c4f/Alice.c4p"),
+            group_maker: c4(b"Alice"),
         };
         let host = HostConfig::default();
         let snapshot = synthetic_join_snapshot(host.local_core, 8);
-        let join_data = JoinDataEnvelope {
-            client_id: 7,
-            start_control_tick: snapshot.dynamic_tick,
-            status: host.initial_status,
-            dynamic: snapshot.dynamic,
-            parameters: snapshot.parameters,
-        };
+        let join_data = test_join_data(7, host.initial_status, snapshot);
 
         let direct_directory = directories.root.join("direct");
         let mut direct_state = ClientResourceState::new(
@@ -7358,9 +7085,8 @@ mod tests {
             .add_file_with_metadata("Player.txt", b"host initial player".to_vec(), 1, false)
             .test_value();
         fs::write(&initial_player, initial_group.pack().unwrap()).test_value();
-        let initial_wire =
-            clonk_engine::LegacyCString::from_bytes(b"HostInitial.c4p".to_vec()).test_value();
-        let maker = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value();
+        let initial_wire = c4(b"HostInitial.c4p");
+        let maker = c4(b"Host");
         let initial_request = crate::ClientPlayerResourceRequest {
             source_path: initial_player.clone(),
             wire_name: initial_wire.clone(),
@@ -7386,42 +7112,35 @@ mod tests {
         fs::write(&player, &original).test_value();
         let publication = crate::ClientPlayerResourceRequest {
             source_path: player.clone(),
-            wire_name: clonk_engine::LegacyCString::from_bytes(b"HostRuntime.c4p".to_vec())
-                .test_value(),
+            wire_name: c4(b"HostRuntime.c4p"),
             group_maker: maker,
         };
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let host = start_host(
             listener,
-            HostConfig {
-                resource_registrations: vec![initial_publication.registration],
-                resource_directory: Some(directories.host.clone()),
-                resource_files: vec![initial_publication.resource_file],
-                player_resource_sources: vec![(initial_player, initial_core.clone())],
-                ..HostConfig::default()
-            },
+            host_config!(resource_registrations: vec![initial_publication.registration],
+            resource_directory: Some(directories.host.clone()),
+            resource_files: vec![initial_publication.resource_file],
+            player_resource_sources: vec![(initial_player, initial_core.clone())]),
         )
         .await
         .test_value();
         let stream = TcpStream::connect(address).await.test_value();
         let mut peer = crate::ControlTransport::new(stream);
-        let peer_name = clonk_engine::LegacyCString::from_bytes(b"Peer".to_vec()).test_value();
+        let peer_name = c4(b"Peer");
         run_client_connection_handshake(
             &mut peer,
-            crate::ConnectionRequest {
-                core: clonk_engine::ClientCoreControlData {
+            test_connection_request(
+                clonk_engine::ClientCoreControlData {
                     client_id: -1,
                     name: peer_name.clone(),
                     nick: peer_name,
                     ..Default::default()
                 },
-                build: CURRENT_GAME_BUILD,
-                password: clonk_engine::LegacyCString::default(),
-                connection_id: 0,
-                port_protocol: false,
-            },
+                0,
+                false,
+            ),
         )
         .await
         .test_value();
@@ -7449,11 +7168,7 @@ mod tests {
         .await
         .test_value();
         loop {
-            match timeout(EVENT_WAIT, peer.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(peer.read_message()).await {
                 ControlMessage::Resource(ResourcePacket::Status(status))
                     if status.resource_id == core.id =>
                 {
@@ -7477,11 +7192,7 @@ mod tests {
         .await
         .test_value();
         loop {
-            match timeout(EVENT_WAIT, peer.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(peer.read_message()).await {
                 ControlMessage::Resource(ResourcePacket::Data(data))
                     if data.resource_id == core.id =>
                 {
@@ -7523,7 +7234,7 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::Player,
                 1 << 16,
-                clonk_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec()).unwrap(),
+                c4(b"Alice.c4p"),
                 "Host",
             ),
         )
@@ -7542,13 +7253,7 @@ mod tests {
 
         let local_host = HostConfig::default();
         let local_snapshot = synthetic_join_snapshot(local_host.local_core, 8);
-        let local_join_data = JoinDataEnvelope {
-            client_id: 2,
-            start_control_tick: local_snapshot.dynamic_tick,
-            status: local_host.initial_status,
-            dynamic: local_snapshot.dynamic,
-            parameters: local_snapshot.parameters,
-        };
+        let local_join_data = test_join_data(2, local_host.initial_status, local_snapshot);
         let local_work_path = directories.root.join("client-local");
         let mut local_state = ClientResourceState::new(
             &local_join_data,
@@ -7593,23 +7298,19 @@ mod tests {
             .unwrap()
             .is_complete());
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
-        let host_config = HostConfig {
-            resource_directory: Some(directories.host.clone()),
-            resource_registrations: vec![crate::ResourceRegistration::from_core(
-                &valid_core,
-                true,
-                false,
-            )],
-            resource_files: vec![HostedResourceFile {
-                core: valid_core.clone(),
-                path: hosted_path,
-                ownership: crate::ResourceFileOwnership::Temporary,
-                binary_compatible: true,
-            }],
-            ..HostConfig::default()
-        };
+        let (address, listener) = bind_test_listener().await;
+        let host_config = host_config!(resource_directory: Some(directories.host.clone()),
+        resource_registrations: vec![crate::ResourceRegistration::from_core(
+            &valid_core,
+            true,
+            false,
+        )],
+        resource_files: vec![HostedResourceFile {
+            core: valid_core.clone(),
+            path: hosted_path,
+            ownership: crate::ResourceFileOwnership::Temporary,
+            binary_compatible: true,
+        }]);
         let host = start_host(listener, host_config).await.test_value();
         let mut client = connect_client(
             address,
@@ -7628,10 +7329,10 @@ mod tests {
                 ..Default::default()
             }
         };
-        let info = clonk_engine::PlayerInfoControlData {
-            client_id: 1,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![
+        let info = clonk_engine::PlayerInfoControlData::new(
+            1,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![
                 resource_player(
                     1,
                     clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
@@ -7655,8 +7356,8 @@ mod tests {
                     nonloadable_core,
                 ),
             ],
-            by_client: 0,
-        };
+            0,
+        );
         let encoded = crate::encode_control_entry_payload(
             &clonk_engine::ControlPacket::PlayerInfo(info.clone()),
         )
@@ -7739,8 +7440,7 @@ mod tests {
             }
         }
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7768,20 +7468,16 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::Player,
                 1 << 16,
-                clonk_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec()).unwrap(),
+                c4(b"Alice.c4p"),
                 "Host",
             ),
         )
         .test_value()
         .core;
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
-        let host_config = HostConfig {
-            resource_directory: Some(directories.host.clone()),
-            local_resource_roots: vec![local_root],
-            ..HostConfig::default()
-        };
+        let (address, listener) = bind_test_listener().await;
+        let host_config = host_config!(resource_directory: Some(directories.host.clone()),
+        local_resource_roots: vec![local_root]);
         let mut host = start_host(listener, host_config).await.test_value();
         let mut host_events = host.take_event_receiver();
         let mut client = connect_client(
@@ -7792,17 +7488,17 @@ mod tests {
         .await
         .test_value();
         let mut client_events = client.take_event_receiver();
-        let info = clonk_engine::PlayerInfoControlData {
-            client_id: 1,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        let info = clonk_engine::PlayerInfoControlData::new(
+            1,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 1,
                 flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 resource: Some(core.clone()),
                 ..Default::default()
             }],
-            by_client: 0,
-        };
+            0,
+        );
         host.submit_packet(
             ControlDelivery::Direct,
             crate::encode_control_entry_payload(&clonk_engine::ControlPacket::PlayerInfo(info))
@@ -7881,10 +7577,8 @@ mod tests {
         let reused = host
             .publish_player_resource(crate::ClientPlayerResourceRequest {
                 source_path: source,
-                wire_name: clonk_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec())
-                    .unwrap(),
-                group_maker: clonk_engine::LegacyCString::from_bytes(b"Host maker".to_vec())
-                    .unwrap(),
+                wire_name: c4(b"Renamed.c4p"),
+                group_maker: c4(b"Host maker"),
             })
             .await
             .test_value();
@@ -7893,8 +7587,7 @@ mod tests {
             "AddByFile reuses the locally resolved authoritative resource"
         );
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7919,20 +7612,16 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::Player,
                 1 << 16,
-                clonk_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec()).unwrap(),
+                c4(b"Alice.c4p"),
                 "Host",
             ),
         )
         .test_value()
         .core;
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
-        let host_config = HostConfig {
-            resource_directory: Some(directories.host.clone()),
-            local_resource_roots: vec![host_root],
-            ..HostConfig::default()
-        };
+        let (address, listener) = bind_test_listener().await;
+        let host_config = host_config!(resource_directory: Some(directories.host.clone()),
+        local_resource_roots: vec![host_root]);
         let host = start_host(listener, host_config).await.test_value();
         let mut client = connect_client(
             address,
@@ -7943,17 +7632,17 @@ mod tests {
         .await
         .test_value();
         let mut client_events = client.take_event_receiver();
-        let info = clonk_engine::PlayerInfoControlData {
-            client_id: 1,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        let info = clonk_engine::PlayerInfoControlData::new(
+            1,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 1,
                 flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 resource: Some(core.clone()),
                 ..Default::default()
             }],
-            by_client: 0,
-        };
+            0,
+        );
         host.submit_packet(
             ControlDelivery::Direct,
             crate::encode_control_entry_payload(&clonk_engine::ControlPacket::PlayerInfo(info))
@@ -8008,8 +7697,7 @@ mod tests {
             }
         }
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8023,16 +7711,13 @@ mod tests {
         let directories = SessionResourceDirectories::new();
         let source = directories.host.join("Dynamic.c4d");
         fs::write(&source, b"local").test_value();
-        let core = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 7,
-            loadable: true,
-            file_size: 5,
-            file_crc: 0x8bd6_88e8,
-            chunk_size: 2,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
-            ..Default::default()
-        };
+        let core = network_core!(resource_type: 2,
+        id: 7,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        chunk_size: 2,
+        filename: c4(b"Dynamic.c4d"));
         let mut host_config = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
         snapshot.dynamic = core.clone();
@@ -8082,8 +7767,7 @@ mod tests {
 
         assert_eq!(progress, vec![33, 66, 100]);
         assert_eq!(fs::read(&completed_path).unwrap(), b"local");
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8095,16 +7779,13 @@ mod tests {
         let directories = SessionResourceDirectories::new();
         let host_source = directories.host.join("Dynamic.c4d");
         fs::write(&host_source, b"local").test_value();
-        let parent = clonk_engine::NetworkResourceCore {
-            resource_type: crate::HostResourceType::Dynamic as u8,
-            id: 7,
-            loadable: true,
-            file_size: 5,
-            file_crc: 0x8bd6_88e8,
-            chunk_size: 2,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
-            ..Default::default()
-        };
+        let parent = network_core!(resource_type: crate::HostResourceType::Dynamic as u8,
+        id: 7,
+        loadable: true,
+        file_size: 5,
+        file_crc: 0x8bd6_88e8,
+        chunk_size: 2,
+        filename: c4(b"Dynamic.c4d"));
         let mut host_config = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
         snapshot.dynamic = parent.clone();
@@ -8215,8 +7896,7 @@ mod tests {
         assert_eq!(completed_path, client_source);
         assert_eq!(fs::read(completed_path).unwrap(), b"changed");
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8237,34 +7917,27 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::System,
                 9,
-                clonk_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                c4(b"System.c4g"),
                 "Test host",
             ),
         )
         .test_value();
         let mut host_config = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
-        snapshot.dynamic = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 7,
-            loadable: true,
-            file_size: 1,
-            file_crc: 1,
-            contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
-            ..Default::default()
-        };
-        snapshot.parameters.scenario = clonk_engine::NetworkResourceCore {
-            resource_type: 1,
-            id: 8,
-            loadable: true,
-            file_size: 1,
-            file_crc: 1,
-            contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec())
-                .test_value(),
-            ..Default::default()
-        };
+        snapshot.dynamic = network_core!(resource_type: 2,
+        id: 7,
+        loadable: true,
+        file_size: 1,
+        file_crc: 1,
+        contents_crc: 1,
+        filename: c4(b"Dynamic.c4d"));
+        snapshot.parameters.scenario = network_core!(resource_type: 1,
+        id: 8,
+        loadable: true,
+        file_size: 1,
+        file_crc: 1,
+        contents_crc: 1,
+        filename: c4(b"Scenario.c4s"));
         snapshot
             .parameters
             .game_resources
@@ -8317,7 +7990,7 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::System,
                 2,
-                clonk_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                c4(b"System.c4g"),
                 "C++ host",
             ),
         )
@@ -8375,8 +8048,7 @@ mod tests {
             }
         }
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8388,27 +8060,20 @@ mod tests {
         let directories = SessionResourceDirectories::new();
         let mut host_config = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
-        snapshot.dynamic = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 7,
-            loadable: false,
-            file_size: u32::MAX,
-            file_crc: u32::MAX,
-            contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
-            ..Default::default()
-        };
-        snapshot.parameters.scenario = clonk_engine::NetworkResourceCore {
-            resource_type: 1,
-            id: 8,
-            loadable: true,
-            file_size: 1,
-            file_crc: 1,
-            contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec())
-                .test_value(),
-            ..Default::default()
-        };
+        snapshot.dynamic = network_core!(resource_type: 2,
+        id: 7,
+        loadable: false,
+        file_size: u32::MAX,
+        file_crc: u32::MAX,
+        contents_crc: 1,
+        filename: c4(b"Dynamic.c4d"));
+        snapshot.parameters.scenario = network_core!(resource_type: 1,
+        id: 8,
+        loadable: true,
+        file_size: 1,
+        file_crc: 1,
+        contents_crc: 1,
+        filename: c4(b"Scenario.c4s"));
         assert!(snapshot.parameters.game_resources.is_empty());
         host_config.initial_join_snapshot = Some(snapshot);
 
@@ -8448,34 +8113,27 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::System,
                 9,
-                clonk_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                c4(b"System.c4g"),
                 "Test host",
             ),
         )
         .test_value();
         let mut host_config = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
-        snapshot.dynamic = clonk_engine::NetworkResourceCore {
-            resource_type: 2,
-            id: 7,
-            loadable: true,
-            file_size: 1,
-            file_crc: 1,
-            contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
-            ..Default::default()
-        };
-        snapshot.parameters.scenario = clonk_engine::NetworkResourceCore {
-            resource_type: 1,
-            id: 8,
-            loadable: true,
-            file_size: 1,
-            file_crc: 1,
-            contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec())
-                .test_value(),
-            ..Default::default()
-        };
+        snapshot.dynamic = network_core!(resource_type: 2,
+        id: 7,
+        loadable: true,
+        file_size: 1,
+        file_crc: 1,
+        contents_crc: 1,
+        filename: c4(b"Dynamic.c4d"));
+        snapshot.parameters.scenario = network_core!(resource_type: 1,
+        id: 8,
+        loadable: true,
+        file_size: 1,
+        file_crc: 1,
+        contents_crc: 1,
+        filename: c4(b"Scenario.c4s"));
         snapshot
             .parameters
             .game_resources
@@ -8498,8 +8156,7 @@ mod tests {
         .await
         .test_value();
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8526,7 +8183,7 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::System,
                 9,
-                clonk_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                c4(b"System.c4g"),
                 "Test host",
             ),
         )
@@ -8537,7 +8194,7 @@ mod tests {
             crate::HostResourceCoreSpec::new(
                 crate::HostResourceType::System,
                 10,
-                clonk_engine::LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
+                c4(b"Objects.c4d"),
                 "Test host",
             ),
         )
@@ -8575,8 +8232,7 @@ mod tests {
         .await
         .test_value();
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8603,10 +8259,7 @@ mod tests {
         host_config.initial_join_snapshot = Some(snapshot);
 
         let (address, host) = start_test_host(host_config).await;
-        let mut client =
-            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
-                .await
-                .test_value();
+        let mut client = connect_test_player(address, "Alice").await;
 
         let join_data = client.take_join_data().test_value();
         let player = &join_data.parameters.player_infos.clients[0].players[0];
@@ -8616,8 +8269,7 @@ mod tests {
         );
         assert_eq!(player.resource, None);
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     static NEXT_RESOURCE_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -8683,13 +8335,7 @@ mod tests {
         let authenticated = authenticated_single_control(&direct, 7).test_value();
         assert!(control_requires_host_ingress(&authenticated));
 
-        let queued = encode_control_packet(&LegacyControlFrame {
-            client_id: 7,
-            tick: 12,
-            timestamp_ms: 0,
-            controls: vec![remove],
-        })
-        .test_value();
+        let queued = encode_control_packet(&legacy_frame(7, 12, vec![remove])).test_value();
         assert!(validate_peer_control_packet(&queued, 7)
             .expect_err("peer membership control must be rejected")
             .contains("host-authority"));
@@ -8697,17 +8343,16 @@ mod tests {
 
     #[test]
     fn mesh_peer_control_contribution_must_use_the_ingress_client_id() {
-        let queued = encode_control_packet(&LegacyControlFrame {
-            client_id: 8,
-            tick: 12,
-            timestamp_ms: 0,
-            controls: vec![EngineControlPacket::PlayerControl(PlayerControlData {
+        let queued = encode_control_packet(&legacy_frame(
+            8,
+            12,
+            vec![EngineControlPacket::PlayerControl(PlayerControlData {
                 player: 1,
                 command: 2,
                 data: 3,
                 by_client: 8,
             })],
-        })
+        ))
         .test_value();
 
         assert!(validate_peer_control_packet(&queued, 8).is_ok());
@@ -8750,17 +8395,13 @@ mod tests {
     fn scenario_player_init_authenticates_the_selecting_client() {
         // PID_ControlPkt rejects a non-host packet whose embedded ByClient
         // differs from the authenticated connection (src/C4GameControlNetwork.cpp:478-490).
-        let payload = encode_control_entry_payload(&EngineControlPacket::InitScenarioPlayer(
-            clonk_engine::InitScenarioPlayerControlData {
+        let control =
+            EngineControlPacket::InitScenarioPlayer(clonk_engine::InitScenarioPlayerControlData {
                 team: 2,
                 player: 4,
                 by_client: 7,
-            },
-        ))
-        .test_value();
-
-        assert!(authenticated_single_control(&payload, 7).is_ok());
-        assert!(authenticated_single_control(&payload, 3).is_err());
+            });
+        assert_single_control_author(&control, 7, 3);
     }
 
     #[test]
@@ -8771,50 +8412,32 @@ mod tests {
             by_client: 7,
         }
         .into_control_packet();
-        let payload = encode_control_entry_payload(&control).test_value();
-
-        assert_eq!(
-            authenticated_single_control(&payload, 7).expect("matching author"),
-            control
-        );
-        let error = authenticated_single_control(&payload, 8).expect_err("reject spoofed author");
-        assert!(error.contains("claimed author 7"));
-        assert!(error.contains("authenticated author is 8"));
+        assert_single_control_author(&control, 7, 8);
     }
 
     #[test]
     fn queued_control_set_authentication_uses_frame_client_id() {
-        let packet = |by_client| {
-            encode_control_packet(&LegacyControlFrame {
-                client_id: 7,
-                tick: 12,
-                timestamp_ms: 0,
-                controls: vec![crate::LegacyControlSet {
+        assert_queued_control_author(
+            |by_client| {
+                crate::LegacyControlSet {
                     value_type: 1,
                     data: 0,
                     by_client,
                 }
-                .into_control_packet()],
-            })
-            .test_value()
-        };
-
-        validate_queued_control_authors(&packet(7)).test_value();
-        let error = validate_queued_control_authors(&packet(0))
-            .expect_err("queued client may not forge host CID_Set");
-        assert!(error.contains("claimed author 0"));
-        assert!(error.contains("authenticated author is 7"));
+                .into_control_packet()
+            },
+            "CID_Set",
+        );
     }
 
     #[test]
     fn complete_queued_control_accepts_mixed_embedded_authors() {
         // PackCompleteCtrl marks the merged frame C4ClientIDAll and appends
         // each client's controls unchanged (src/C4GameControlNetwork.cpp:741-777).
-        let packet = encode_control_packet(&LegacyControlFrame {
-            client_id: BROADCAST_CLIENT_ID,
-            tick: 12,
-            timestamp_ms: 0,
-            controls: vec![
+        let packet = encode_control_packet(&legacy_frame(
+            BROADCAST_CLIENT_ID,
+            12,
+            vec![
                 EngineControlPacket::PlayerControl(PlayerControlData {
                     player: 1,
                     command: 2,
@@ -8828,7 +8451,7 @@ mod tests {
                     by_client: 7,
                 }),
             ],
-        })
+        ))
         .test_value();
 
         validate_queued_control_authors(&packet).test_value();
@@ -8863,15 +8486,7 @@ mod tests {
                 }),
             ]
         };
-        let packet = |controls| {
-            encode_control_packet(&LegacyControlFrame {
-                client_id: 7,
-                tick: 12,
-                timestamp_ms: 0,
-                controls,
-            })
-            .test_value()
-        };
+        let packet = |controls| encode_control_packet(&legacy_frame(7, 12, controls)).test_value();
 
         validate_queued_control_authors(&packet(controls(7))).test_value();
 
@@ -8902,20 +8517,9 @@ mod tests {
             disconnected: false,
             by_client: 0,
         });
-        let payload = encode_control_entry_payload(&control).test_value();
-        assert_eq!(
-            authenticated_single_control(&payload, 0).expect("host author matches"),
-            control
-        );
-        assert!(authenticated_single_control(&payload, 7).is_err());
+        assert_single_control_author(&control, 0, 7);
 
-        let packet = encode_control_packet(&LegacyControlFrame {
-            client_id: 7,
-            tick: 12,
-            timestamp_ms: 0,
-            controls: vec![control],
-        })
-        .test_value();
+        let packet = encode_control_packet(&legacy_frame(7, 12, vec![control])).test_value();
         let error = validate_queued_control_authors(&packet)
             .expect_err("queued client may not forge host CID_RemovePlr");
         assert!(error.contains("queued CID_RemovePlr"));
@@ -8928,47 +8532,25 @@ mod tests {
         let control = EngineControlPacket::Script(clonk_engine::ScriptControlData {
             target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
             strictness: clonk_engine::ScriptStrictness::Strict3,
-            script: clonk_engine::LegacyCString::from_bytes(b"1+2".to_vec()).test_value(),
+            script: c4(b"1+2"),
             by_client: 7,
         });
-        let payload = encode_control_entry_payload(&control).test_value();
-
-        assert_eq!(
-            authenticated_single_control(&payload, 7).expect("matching author"),
-            control
-        );
-        let error =
-            authenticated_single_control(&payload, 8).expect_err("reject spoofed script author");
-        assert!(error.contains("claimed author 7"));
-        assert!(error.contains("authenticated author is 8"));
+        assert_single_control_author(&control, 7, 8);
     }
 
     #[test]
     fn queued_script_control_cannot_forge_host_author() {
-        let packet = |by_client| {
-            encode_control_packet(&LegacyControlFrame {
-                client_id: 7,
-                tick: 12,
-                timestamp_ms: 0,
-                controls: vec![EngineControlPacket::Script(
-                    clonk_engine::ScriptControlData {
-                        target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
-                        strictness: clonk_engine::ScriptStrictness::Strict3,
-                        script: clonk_engine::LegacyCString::from_bytes(b"1+2".to_vec())
-                            .expect("fixture is NUL-free"),
-                        by_client,
-                    },
-                )],
-            })
-            .test_value()
-        };
-
-        validate_queued_control_authors(&packet(7)).test_value();
-        let error = validate_queued_control_authors(&packet(0))
-            .expect_err("queued client may not forge host CID_Script");
-        assert!(error.contains("queued CID_Script"));
-        assert!(error.contains("claimed author 0"));
-        assert!(error.contains("authenticated author is 7"));
+        assert_queued_control_author(
+            |by_client| {
+                EngineControlPacket::Script(clonk_engine::ScriptControlData {
+                    target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: clonk_engine::ScriptStrictness::Strict3,
+                    script: c4(b"1+2"),
+                    by_client,
+                })
+            },
+            "CID_Script",
+        );
     }
 
     #[test]
@@ -8976,20 +8558,11 @@ mod tests {
         let control =
             EngineControlPacket::MessageBoardAnswer(clonk_engine::MessageBoardAnswerControlData {
                 object: 42,
-                answer: clonk_engine::LegacyCString::from_bytes(b"answer".to_vec()).test_value(),
+                answer: c4(b"answer"),
                 player: 3,
                 by_client: 7,
             });
-        let payload = encode_control_entry_payload(&control).test_value();
-
-        assert_eq!(
-            authenticated_single_control(&payload, 7).expect("matching author"),
-            control
-        );
-        let error = authenticated_single_control(&payload, 8)
-            .expect_err("reject spoofed message-board answer author");
-        assert!(error.contains("claimed author 7"));
-        assert!(error.contains("authenticated author is 8"));
+        assert_single_control_author(&control, 7, 8);
     }
 
     #[test]
@@ -8998,19 +8571,10 @@ mod tests {
             message_type: clonk_engine::MESSAGE_TYPE_PRIVATE,
             player: 3,
             to_player: 5,
-            message: clonk_engine::LegacyCString::from_bytes(b"secret".to_vec()).test_value(),
+            message: c4(b"secret"),
             by_client: 7,
         });
-        let payload = encode_control_entry_payload(&control).test_value();
-
-        assert_eq!(
-            authenticated_single_control(&payload, 7).expect("matching author"),
-            control
-        );
-        let error =
-            authenticated_single_control(&payload, 8).expect_err("reject spoofed message author");
-        assert!(error.contains("claimed author 7"));
-        assert!(error.contains("authenticated author is 8"));
+        assert_single_control_author(&control, 7, 8);
     }
 
     #[tokio::test]
@@ -9024,7 +8588,7 @@ mod tests {
             message_type: clonk_engine::MESSAGE_TYPE_TEAM,
             player: -1,
             to_player: -1,
-            message: clonk_engine::LegacyCString::from_bytes(b"team secret".to_vec()).test_value(),
+            message: c4(b"team secret"),
             by_client: HOST_CLIENT_ID as i32,
         });
         let data = encode_control_entry_payload(&control).test_value();
@@ -9045,8 +8609,7 @@ mod tests {
             message_type: clonk_engine::MESSAGE_TYPE_SYSTEM,
             player: -1,
             to_player: -1,
-            message: clonk_engine::LegacyCString::from_bytes(b"network notice".to_vec())
-                .test_value(),
+            message: c4(b"network notice"),
             by_client: HOST_CLIENT_ID as i32,
         });
         let data = encode_control_entry_payload(&control).test_value();
@@ -9064,10 +8627,9 @@ mod tests {
         let (outbound, _receiver) = HostOutboundSender::channel();
         let mut state = host_state_with_test_route(7, outbound);
         state.lobby_chat_history.push_back(b"old lobby".to_vec());
-        let effects = state.status_barrier.change_status(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            ..state.status_barrier.status
-        });
+        let effects = state
+            .status_barrier
+            .change_status(state.status_barrier.status.with_state(NETWORK_STATE_GO));
 
         apply_barrier_effects(effects, &mut state).await;
 
@@ -9086,10 +8648,7 @@ mod tests {
                 message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
                 player: -1,
                 to_player: -1,
-                message: clonk_engine::LegacyCString::from_bytes(
-                    format!("message {index}").into_bytes(),
-                )
-                .test_value(),
+                message: c4(format!("message {index}").into_bytes()),
                 by_client: HOST_CLIENT_ID as i32,
             });
             let data = encode_control_entry_payload(&control).test_value();
@@ -9115,7 +8674,7 @@ mod tests {
                 message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
                 player: -1,
                 to_player: -1,
-                message: clonk_engine::LegacyCString::from_bytes(text).test_value(),
+                message: c4(text),
                 by_client: HOST_CLIENT_ID as i32,
             });
             newest = encode_control_entry_payload(&control).test_value();
@@ -9128,79 +8687,45 @@ mod tests {
 
     #[test]
     fn queued_message_board_answer_cannot_forge_host_author() {
-        let packet = |by_client| {
-            encode_control_packet(&LegacyControlFrame {
-                client_id: 7,
-                tick: 12,
-                timestamp_ms: 0,
-                controls: vec![EngineControlPacket::MessageBoardAnswer(
+        assert_queued_control_author(
+            |by_client| {
+                EngineControlPacket::MessageBoardAnswer(
                     clonk_engine::MessageBoardAnswerControlData {
                         object: 42,
-                        answer: clonk_engine::LegacyCString::from_bytes(b"answer".to_vec())
-                            .expect("fixture is NUL-free"),
+                        answer: c4(b"answer"),
                         player: 3,
                         by_client,
                     },
-                )],
-            })
-            .test_value()
-        };
-
-        validate_queued_control_authors(&packet(7)).test_value();
-        let error = validate_queued_control_authors(&packet(0))
-            .expect_err("queued client may not forge host CID_MessageBoardAnswer");
-        assert!(error.contains("queued CID_MessageBoardAnswer"));
-        assert!(error.contains("claimed author 0"));
-        assert!(error.contains("authenticated author is 7"));
+                )
+            },
+            "CID_MessageBoardAnswer",
+        );
     }
 
     #[test]
     fn single_custom_command_authenticates_embedded_author() {
         let control = EngineControlPacket::CustomCommand(clonk_engine::CustomCommandControlData {
-            command: clonk_engine::LegacyCString::from_bytes(b"push".to_vec()).test_value(),
-            argument: clonk_engine::LegacyCString::from_bytes(b"argument".to_vec()).test_value(),
+            command: c4(b"push"),
+            argument: c4(b"argument"),
             player: 3,
             by_client: 7,
         });
-        let payload = encode_control_entry_payload(&control).test_value();
-
-        assert_eq!(
-            authenticated_single_control(&payload, 7).expect("matching author"),
-            control
-        );
-        let error = authenticated_single_control(&payload, 8)
-            .expect_err("reject spoofed custom-command author");
-        assert!(error.contains("claimed author 7"));
-        assert!(error.contains("authenticated author is 8"));
+        assert_single_control_author(&control, 7, 8);
     }
 
     #[test]
     fn queued_custom_command_cannot_forge_host_author() {
-        let packet = |by_client| {
-            encode_control_packet(&LegacyControlFrame {
-                client_id: 7,
-                tick: 12,
-                timestamp_ms: 0,
-                controls: vec![EngineControlPacket::CustomCommand(
-                    clonk_engine::CustomCommandControlData {
-                        command: clonk_engine::LegacyCString::from_bytes(b"push".to_vec())
-                            .expect("fixture is NUL-free"),
-                        argument: clonk_engine::LegacyCString::from_bytes(b"argument".to_vec())
-                            .expect("fixture is NUL-free"),
-                        player: 3,
-                        by_client,
-                    },
-                )],
-            })
-            .test_value()
-        };
-
-        validate_queued_control_authors(&packet(7)).test_value();
-        let error = validate_queued_control_authors(&packet(0))
-            .expect_err("queued client may not forge host CID_CustomCommand");
-        assert!(error.contains("queued CID_CustomCommand"));
-        assert!(error.contains("claimed author 0"));
-        assert!(error.contains("authenticated author is 7"));
+        assert_queued_control_author(
+            |by_client| {
+                EngineControlPacket::CustomCommand(clonk_engine::CustomCommandControlData {
+                    command: c4(b"push"),
+                    argument: c4(b"argument"),
+                    player: 3,
+                    by_client,
+                })
+            },
+            "CID_CustomCommand",
+        );
     }
 
     #[test]
@@ -9213,44 +8738,13 @@ mod tests {
                 target_object: 42,
                 objects: vec![7, 9],
                 strictness: clonk_engine::ScriptStrictness::Strict2,
-                script: clonk_engine::LegacyCString::from_bytes(b"SetXDir(0)".to_vec())
-                    .test_value(),
+                script: c4(b"SetXDir(0)"),
                 by_client,
             })
         };
 
-        let direct = control(7);
-        let payload = encode_control_entry_payload(&direct).test_value();
-        assert_eq!(
-            authenticated_single_control(&payload, 7).expect("matching direct author"),
-            direct
-        );
-        let direct_error = authenticated_single_control(&payload, 8)
-            .expect_err("direct editor control may not spoof its author");
-        assert!(direct_error.contains("claimed author 7"));
-        assert!(direct_error.contains("authenticated author is 8"));
-
-        let packet = encode_control_packet(&LegacyControlFrame {
-            client_id: 7,
-            tick: 12,
-            timestamp_ms: 0,
-            controls: vec![control(7)],
-        })
-        .test_value();
-        validate_queued_control_authors(&packet).test_value();
-
-        let forged_packet = encode_control_packet(&LegacyControlFrame {
-            client_id: 7,
-            tick: 12,
-            timestamp_ms: 0,
-            controls: vec![control(0)],
-        })
-        .test_value();
-        let queued_error = validate_queued_control_authors(&forged_packet)
-            .expect_err("queued editor control may not forge the host author");
-        assert!(queued_error.contains("queued CID_EMMoveObj"));
-        assert!(queued_error.contains("claimed author 0"));
-        assert!(queued_error.contains("authenticated author is 7"));
+        assert_single_control_author(&control(7), 7, 8);
+        assert_queued_control_author(control, "CID_EMMoveObj");
     }
 
     #[test]
@@ -9265,44 +8759,14 @@ mod tests {
                 y2: -78,
                 grade: 9,
                 ift: true,
-                material: clonk_engine::LegacyCString::from_bytes(b"Earth".to_vec()).test_value(),
-                texture: clonk_engine::LegacyCString::from_bytes(b"Rough".to_vec()).test_value(),
+                material: c4(b"Earth"),
+                texture: c4(b"Rough"),
                 by_client,
             })
         };
 
-        let direct = control(7);
-        let payload = encode_control_entry_payload(&direct).test_value();
-        assert_eq!(
-            authenticated_single_control(&payload, 7).expect("matching direct author"),
-            direct
-        );
-        let direct_error = authenticated_single_control(&payload, 8)
-            .expect_err("direct editor draw control may not spoof its author");
-        assert!(direct_error.contains("claimed author 7"));
-        assert!(direct_error.contains("authenticated author is 8"));
-
-        let packet = encode_control_packet(&LegacyControlFrame {
-            client_id: 7,
-            tick: 12,
-            timestamp_ms: 0,
-            controls: vec![control(7)],
-        })
-        .test_value();
-        validate_queued_control_authors(&packet).test_value();
-
-        let forged_packet = encode_control_packet(&LegacyControlFrame {
-            client_id: 7,
-            tick: 12,
-            timestamp_ms: 0,
-            controls: vec![control(0)],
-        })
-        .test_value();
-        let queued_error = validate_queued_control_authors(&forged_packet)
-            .expect_err("queued editor draw control may not forge the host author");
-        assert!(queued_error.contains("queued CID_EMDrawTool"));
-        assert!(queued_error.contains("claimed author 0"));
-        assert!(queued_error.contains("authenticated author is 7"));
+        assert_single_control_author(&control(7), 7, 8);
+        assert_queued_control_author(control, "CID_EMDrawTool");
     }
 
     #[test]
@@ -9316,38 +8780,8 @@ mod tests {
             })
         };
 
-        let direct = control(7);
-        let payload = encode_control_entry_payload(&direct).test_value();
-        assert_eq!(
-            authenticated_single_control(&payload, 7).expect("matching direct author"),
-            direct
-        );
-        let direct_error = authenticated_single_control(&payload, 8)
-            .expect_err("direct editor drop control may not spoof its author");
-        assert!(direct_error.contains("claimed author 7"));
-        assert!(direct_error.contains("authenticated author is 8"));
-
-        let packet = encode_control_packet(&LegacyControlFrame {
-            client_id: 7,
-            tick: 12,
-            timestamp_ms: 0,
-            controls: vec![control(7)],
-        })
-        .test_value();
-        validate_queued_control_authors(&packet).test_value();
-
-        let forged_packet = encode_control_packet(&LegacyControlFrame {
-            client_id: 7,
-            tick: 12,
-            timestamp_ms: 0,
-            controls: vec![control(0)],
-        })
-        .test_value();
-        let queued_error = validate_queued_control_authors(&forged_packet)
-            .expect_err("queued editor drop control may not forge the host author");
-        assert!(queued_error.contains("queued CID_EMDropDef"));
-        assert!(queued_error.contains("claimed author 0"));
-        assert!(queued_error.contains("authenticated author is 7"));
+        assert_single_control_author(&control(7), 7, 8);
+        assert_queued_control_author(control, "CID_EMDropDef");
     }
 
     #[test]
@@ -9391,49 +8825,10 @@ mod tests {
             "CID_SetPlayerTeam",
             "CID_EliminatePlayer",
         ];
-        for (name, control) in names.into_iter().zip(controls(7)) {
-            let payload = encode_control_entry_payload(&control).test_value();
-            assert_eq!(
-                authenticated_single_control(&payload, 7).expect("matching direct author"),
-                control
-            );
-            let direct_error = authenticated_single_control(&payload, 8)
-                .expect_err("direct author spoof must fail");
-            assert!(
-                direct_error.contains("claimed author 7"),
-                "{name}: {direct_error}"
-            );
-
-            let packet = encode_control_packet(&LegacyControlFrame {
-                client_id: 7,
-                tick: 12,
-                timestamp_ms: 0,
-                controls: vec![control],
-            })
-            .test_value();
-            validate_queued_control_authors(&packet).test_value();
-
-            let forged = controls(0)
-                .into_iter()
-                .zip(names)
-                .find_map(|(candidate, candidate_name)| {
-                    (candidate_name == name).then_some(candidate)
-                })
-                .test_value();
-            let forged_packet = encode_control_packet(&LegacyControlFrame {
-                client_id: 7,
-                tick: 12,
-                timestamp_ms: 0,
-                controls: vec![forged],
-            })
-            .test_value();
-            let queued_error = validate_queued_control_authors(&forged_packet)
-                .expect_err("queued author spoof must fail");
-            assert!(queued_error.contains(name), "{name}: {queued_error}");
-            assert!(
-                queued_error.contains("claimed author 0"),
-                "{name}: {queued_error}"
-            );
+        for (index, name) in names.into_iter().enumerate() {
+            let control = |author| controls(author)[index].clone();
+            assert_single_control_author(&control(7), 7, 8);
+            assert_queued_control_author(control, name);
         }
     }
 
@@ -9467,8 +8862,7 @@ mod tests {
         // its own (oracle-src-pinned src/C4Network2.cpp:1291-1299;
         // src/C4Network2Reference.cpp:79,100-102;
         // src/C4GameVersion.h:35-37).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
@@ -9502,8 +8896,7 @@ mod tests {
             clonk_engine::LegacyCString::default(),
         );
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let tcp_peer = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.test_value();
             read_compatibility_request(stream).await
@@ -9565,8 +8958,7 @@ mod tests {
         );
         let bob_id = ClientId::try_from(bob.client_id).test_value();
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let tcp_peer = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.test_value();
             read_compatibility_request(stream).await
@@ -9630,8 +9022,7 @@ mod tests {
         );
         let known_peers = BTreeMap::from([(bob.client_id, bob)]);
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let (peer_stream, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
         let peer_stream = peer_stream.test_value();
         let (accepted_stream, peer_addr) = accepted.test_value();
@@ -9693,8 +9084,7 @@ mod tests {
             CPP_COMPATIBILITY_BUILD,
             clonk_engine::LegacyCString::default(),
         );
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let peer = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.test_value();
             read_compatibility_request(stream).await
@@ -9865,10 +9255,7 @@ mod tests {
         );
 
         drop(active);
-        timeout(EVENT_WAIT, deferred.read_exact(&mut header_and_pid))
-            .await
-            .test_value()
-            .test_value();
+        await_test(deferred.read_exact(&mut header_and_pid)).await;
         assert_eq!(header_and_pid[0], 0xff);
         assert_eq!(header_and_pid[5], 0x02, "promoted route sends PID_Conn");
 
@@ -9916,8 +9303,7 @@ mod tests {
         let stale_request = stale_route.await.test_value();
         assert_eq!(stale_request[0], 0xff);
         assert_eq!(stale_request[5], 0x02, "the first route reached PID_Conn");
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -9925,10 +9311,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0)))),
         )
         .await
         .test_value();
@@ -9950,8 +9333,7 @@ mod tests {
                 .client_id,
             client.client_id() as i32
         );
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -9960,10 +9342,7 @@ mod tests {
         let tcp_address = listener.local_addr().test_value();
         let host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0)))),
         )
         .await
         .test_value();
@@ -9993,8 +9372,7 @@ mod tests {
             .iter()
             .all(|(_, client_id, _)| *client_id == client.client_id()));
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -10002,19 +9380,13 @@ mod tests {
         // A negative ConnRe with WrongPassword set drives the outer password
         // prompt loop; ordinary admission failures remain terminal
         // (src/C4Network2.cpp:281-345,1448-1469).
-        let secret =
-            clonk_engine::LegacyCString::from_bytes(b"correct horse".to_vec()).test_value();
-        let host_config = HostConfig {
-            password: secret.clone(),
-            ..HostConfig::default()
-        };
+        let secret = c4(b"correct horse");
+        let host_config = host_config!(password: secret.clone());
         let (address, host) = start_test_host(host_config).await;
 
         let error = connect_client(
             address,
-            ClientConfig::new("Alice", ParticipantKind::Player).with_password(
-                clonk_engine::LegacyCString::from_bytes(b"wrong".to_vec()).test_value(),
-            ),
+            ClientConfig::new("Alice", ParticipantKind::Player).with_password(c4(b"wrong")),
         )
         .await
         .expect_err("the first password is rejected");
@@ -10029,18 +9401,14 @@ mod tests {
         )
         .await
         .test_value();
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn client_join_flow_keeps_non_password_rejection_terminal() {
         // HandleConnRe presents the peer's exact message text before closing
         // the rejected connection (src/C4Network2.cpp:1476-1485).
-        let host_config = HostConfig {
-            allow_join: false,
-            ..HostConfig::default()
-        };
+        let host_config = host_config!(allow_join: false);
         let (address, host) = start_test_host(host_config).await;
 
         let error = connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
@@ -10056,11 +9424,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn host_begin_go_acknowledgement_closes_admission_before_return() {
         let (address, host) = start_test_host(HostConfig::default()).await;
-        let status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_GO, 1, 0);
 
         host.begin_go(status, false).await.test_value();
         let error = connect_client(
@@ -10078,8 +9442,7 @@ mod tests {
         // C4Network2IO sends PID_Conn through the ordinary C4NetIOTCP frame as
         // soon as the socket opens (src/C4Network2IO.cpp:478-525,1223-1252;
         // src/C4NetIO.cpp:1287-1323).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let client = tokio::spawn(connect_client_from(
             TcpStream::connect(addr),
             ClientConfig::new("Alice", ParticipantKind::Player),
@@ -10129,41 +9492,21 @@ mod tests {
                 .unwrap(),
             ControlMessage::ConnectionRequest(_)
         ));
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
+        let name = c4(b"Alice");
         transport
-            .send_message(ControlMessage::ConnectionRequest(
-                crate::ConnectionRequest {
-                    core: clonk_engine::ClientCoreControlData {
-                        client_id: i32::try_from(client.client_id()).unwrap(),
-                        activated: true,
-                        observer: false,
-                        name: name.clone(),
-                        nick: name,
-                        lobby_ready: true,
-                    },
-                    build: CURRENT_GAME_BUILD,
-                    password: clonk_engine::LegacyCString::default(),
-                    connection_id: 17,
-                    port_protocol: false,
-                },
-            ))
+            .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                test_client_core(i32::try_from(client.client_id()).unwrap(), name, true),
+                17,
+                false,
+            )))
             .await
             .test_value();
 
-        let reply = timeout(EVENT_WAIT, transport.read_message())
-            .await
-            .test_value()
-            .test_value();
-        let accepted_message =
-            clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec()).test_value();
+        let reply = await_test(transport.read_message()).await;
+        let accepted_message = c4(b"connection accepted");
         assert_eq!(
             reply,
-            ControlMessage::ConnectionReply(crate::ConnectionReply {
-                ok: true,
-                message: accepted_message,
-                wrong_password: false,
-                port_protocol: true,
-            })
+            ControlMessage::ConnectionReply(test_connection_reply(true, accepted_message, true,))
         );
 
         host.shutdown().await.test_value();
@@ -10195,7 +9538,7 @@ mod tests {
 
         let remove = EngineControlPacket::ClientRemove(clonk_engine::ClientRemoveControlData {
             client_id: i32::try_from(client_id).test_value(),
-            reason: clonk_engine::LegacyCString::from_bytes(b"voted out".to_vec()).test_value(),
+            reason: c4(b"voted out"),
             by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
         });
         host.submit_packet(
@@ -10205,13 +9548,11 @@ mod tests {
         .await
         .test_value();
 
-        let close = ControlMessage::ConnectionReply(crate::ConnectionReply {
-            ok: false,
-            message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
-                .test_value(),
-            wrong_password: false,
-            port_protocol: false,
-        });
+        let close = ControlMessage::ConnectionReply(test_connection_reply(
+            false,
+            c4(b"removing client"),
+            false,
+        ));
         for route in [&mut canonical, &mut secondary] {
             assert!(raw_client_received_message(route, &close, EVENT_WAIT).await);
             match timeout(EVENT_WAIT, route.read_message()).await {
@@ -10248,7 +9589,7 @@ mod tests {
 
         let remove = EngineControlPacket::ClientRemove(clonk_engine::ClientRemoveControlData {
             client_id: i32::try_from(client_id).test_value(),
-            reason: clonk_engine::LegacyCString::from_bytes(b"voted out".to_vec()).test_value(),
+            reason: c4(b"voted out"),
             by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
         });
         host.submit_packet(
@@ -10258,23 +9599,19 @@ mod tests {
         .await
         .test_value();
 
-        let close = ControlMessage::ConnectionReply(crate::ConnectionReply {
-            ok: false,
-            message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
-                .test_value(),
-            wrong_password: false,
-            port_protocol: false,
-        });
+        let close = ControlMessage::ConnectionReply(test_connection_reply(
+            false,
+            c4(b"removing client"),
+            false,
+        ));
         assert!(raw_client_received_message(&mut canonical, &close, EVENT_WAIT).await);
 
         delayed
-            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-                ok: true,
-                message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
-                    .unwrap(),
-                wrong_password: false,
-                port_protocol: false,
-            }))
+            .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                true,
+                c4(b"connection accepted"),
+                false,
+            )))
             .await
             .test_value();
         let deadline = tokio::time::Instant::now() + EVENT_WAIT;
@@ -10314,11 +9651,7 @@ mod tests {
         let mut beta_events = beta.take_event_receiver();
         activate_joined_client(&host, &mut host_events, beta_id).await;
 
-        let running = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let running = NetworkStatus::new(NETWORK_STATE_GO, 1, 0);
         host.change_status(running).await.test_value();
         for events in [&mut alice_events, &mut beta_events] {
             loop {
@@ -10346,10 +9679,7 @@ mod tests {
         let admission = request_route(&mut delayed, i32::try_from(alice_id).test_value(), 31).await;
         assert!(admission.ok);
 
-        let unreachable = NetworkStatus {
-            target_tick: 2,
-            ..running
-        };
+        let unreachable = running.with_target_tick(2);
         host.change_status(unreachable).await.test_value();
         for events in [&mut alice_events, &mut beta_events] {
             loop {
@@ -10381,13 +9711,11 @@ mod tests {
         }
 
         delayed
-            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-                ok: true,
-                message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
-                    .unwrap(),
-                wrong_password: false,
-                port_protocol: false,
-            }))
+            .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                true,
+                c4(b"connection accepted"),
+                false,
+            )))
             .await
             .test_value();
         let deadline = tokio::time::Instant::now() + EVENT_WAIT;
@@ -10426,14 +9754,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn secondary_route_from_a_different_peer_host_is_rejected() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some("[::1]:0".parse().unwrap()),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some("[::1]:0".parse().unwrap())),
         )
         .await
         .test_value();
@@ -10446,11 +9770,7 @@ mod tests {
             .test_value();
         let mut transport = crate::ControlTransport::new(stream);
         loop {
-            match timeout(EVENT_WAIT, transport.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(transport.read_message()).await {
                 ControlMessage::ConnectionRequest(_) => break,
                 ControlMessage::Ping(ping) => {
                     transport
@@ -10461,33 +9781,18 @@ mod tests {
                 other => panic!("expected host connection request, got {other:?}"),
             }
         }
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
+        let name = c4(b"Alice");
         transport
-            .send_message(ControlMessage::ConnectionRequest(
-                crate::ConnectionRequest {
-                    core: clonk_engine::ClientCoreControlData {
-                        client_id: i32::try_from(client.client_id()).unwrap(),
-                        activated: true,
-                        observer: false,
-                        name: name.clone(),
-                        nick: name,
-                        lobby_ready: true,
-                    },
-                    build: CURRENT_GAME_BUILD,
-                    password: clonk_engine::LegacyCString::default(),
-                    connection_id: 41,
-                    port_protocol: false,
-                },
-            ))
+            .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                test_client_core(i32::try_from(client.client_id()).unwrap(), name, true),
+                41,
+                false,
+            )))
             .await
             .test_value();
 
         let rejection = loop {
-            match timeout(EVENT_WAIT, transport.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(transport.read_message()).await {
                 ControlMessage::ConnectionReply(reply) => break reply,
                 ControlMessage::Ping(ping) => {
                     transport
@@ -10506,8 +9811,7 @@ mod tests {
         assert_eq!(host.accepted_routes().await.len(), 1);
 
         drop(transport);
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -10516,10 +9820,7 @@ mod tests {
         let tcp_address = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
-            HostConfig {
-                udp_bind_address: Some("[::1]:0".parse().unwrap()),
-                ..HostConfig::default()
-            },
+            host_config!(udp_bind_address: Some("[::1]:0".parse().unwrap())),
         )
         .await
         .test_value();
@@ -10583,19 +9884,15 @@ mod tests {
         // only that first connection runs OnClientConnect and its JoinData,
         // lobby, and resource setup (src/C4Network2.cpp:1479-1498,1734-1743,
         // 1768-1783).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut host = start_host(
             listener,
-            HostConfig {
-                resource_registrations: vec![crate::ResourceRegistration {
-                    resource_id: 3,
-                    chunk_count: 1,
-                    binary_compatible: true,
-                    loading: false,
-                }],
-                ..Default::default()
-            },
+            host_config!(resource_registrations: vec![crate::ResourceRegistration {
+                resource_id: 3,
+                chunk_count: 1,
+                binary_compatible: true,
+                loading: false,
+            }]),
         )
         .await
         .test_value();
@@ -10614,24 +9911,13 @@ mod tests {
         };
         let local_connection_id = host_request.connection_id;
         let remote_connection_id = 29;
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
+        let name = c4(b"Alice");
         secondary
-            .send_message(ControlMessage::ConnectionRequest(
-                crate::ConnectionRequest {
-                    core: clonk_engine::ClientCoreControlData {
-                        client_id: i32::try_from(canonical_id).unwrap(),
-                        activated: true,
-                        observer: false,
-                        name: name.clone(),
-                        nick: name,
-                        lobby_ready: true,
-                    },
-                    build: CURRENT_GAME_BUILD,
-                    password: clonk_engine::LegacyCString::default(),
-                    connection_id: remote_connection_id,
-                    port_protocol: false,
-                },
-            ))
+            .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                test_client_core(i32::try_from(canonical_id).unwrap(), name, true),
+                remote_connection_id,
+                false,
+            )))
             .await
             .test_value();
         loop {
@@ -10647,13 +9933,11 @@ mod tests {
             }
         }
         secondary
-            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-                ok: true,
-                message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
-                    .unwrap(),
-                wrong_password: false,
-                port_protocol: false,
-            }))
+            .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                true,
+                c4(b"connection accepted"),
+                false,
+            )))
             .await
             .test_value();
 
@@ -10811,24 +10095,13 @@ mod tests {
                 ControlMessage::ConnectionRequest(request) => request,
                 other => panic!("expected host connection request, got {other:?}"),
             };
-            let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
+            let name = c4(b"Alice");
             transport
-                .send_message(ControlMessage::ConnectionRequest(
-                    crate::ConnectionRequest {
-                        core: clonk_engine::ClientCoreControlData {
-                            client_id: i32::try_from(client_id).unwrap(),
-                            activated: true,
-                            observer: false,
-                            name: name.clone(),
-                            nick: name,
-                            lobby_ready: true,
-                        },
-                        build: CURRENT_GAME_BUILD,
-                        password: clonk_engine::LegacyCString::default(),
-                        connection_id: remote_connection_id,
-                        port_protocol: false,
-                    },
-                ))
+                .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                    test_client_core(i32::try_from(client_id).unwrap(), name, true),
+                    remote_connection_id,
+                    false,
+                )))
                 .await
                 .test_value();
             loop {
@@ -10844,15 +10117,11 @@ mod tests {
                 }
             }
             transport
-                .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-                    ok: true,
-                    message: clonk_engine::LegacyCString::from_bytes(
-                        b"connection accepted".to_vec(),
-                    )
-                    .unwrap(),
-                    wrong_password: false,
-                    port_protocol: true,
-                }))
+                .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                    true,
+                    c4(b"connection accepted"),
+                    true,
+                )))
                 .await
                 .test_value();
             (transport, host_request.connection_id)
@@ -11019,24 +10288,13 @@ mod tests {
                 ControlMessage::ConnectionRequest(request) => request,
                 other => panic!("expected host connection request, got {other:?}"),
             };
-            let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
+            let name = c4(b"Alice");
             transport
-                .send_message(ControlMessage::ConnectionRequest(
-                    crate::ConnectionRequest {
-                        core: clonk_engine::ClientCoreControlData {
-                            client_id: i32::try_from(client_id).unwrap(),
-                            activated: true,
-                            observer: false,
-                            name: name.clone(),
-                            nick: name,
-                            lobby_ready: true,
-                        },
-                        build: CURRENT_GAME_BUILD,
-                        password: clonk_engine::LegacyCString::default(),
-                        connection_id: remote_connection_id,
-                        port_protocol: false,
-                    },
-                ))
+                .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                    test_client_core(i32::try_from(client_id).unwrap(), name, true),
+                    remote_connection_id,
+                    false,
+                )))
                 .await
                 .test_value();
             loop {
@@ -11052,15 +10310,11 @@ mod tests {
                 }
             }
             transport
-                .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-                    ok: true,
-                    message: clonk_engine::LegacyCString::from_bytes(
-                        b"connection accepted".to_vec(),
-                    )
-                    .unwrap(),
-                    wrong_password: false,
-                    port_protocol: false,
-                }))
+                .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                    true,
+                    c4(b"connection accepted"),
+                    false,
+                )))
                 .await
                 .test_value();
             (transport, host_request.connection_id)
@@ -11205,8 +10459,7 @@ mod tests {
     async fn nonresponsive_server_handshake_times_out() {
         // C4Network2IO::CheckTimeout closes connections which do not reach the
         // accepted state after C4NetAcceptTimeout (src/C4Network2IO.cpp:1155-1170).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let (connection, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
         let client_stream = connection.test_value();
         let (_server_stream, _) = accepted.test_value();
@@ -11231,21 +10484,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_emits_one_decodable_ready_packet_for_host_and_client() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
-        let mut host = start_host(
-            listener,
-            HostConfig {
-                max_players: 4,
-                ..Default::default()
-            },
-        )
-        .await
-        .test_value();
-
-        let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+        let (addr, listener) = bind_test_listener().await;
+        let mut host = start_host(listener, host_config!(max_players: 4))
             .await
             .test_value();
+
+        let client = connect_test_player(addr, "Alice").await;
         let mut events = host.take_event_receiver();
         activate_joined_client(&host, &mut events, client.client_id()).await;
 
@@ -11262,8 +10506,7 @@ mod tests {
         assert_eq!(packet.client_id(), BROADCAST_CLIENT_ID);
         assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     fn take_queued_host_ready(events: &mut mpsc::Receiver<HostEvent>) -> Option<ControlPacket> {
@@ -11300,8 +10543,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn async_host_forces_and_broadcasts_incomplete_tick_after_strict_budget() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let mut config = HostConfig::default();
         config.initial_status.control_mode = 2;
         config.async_max_wait_frames = 2;
@@ -11363,15 +10605,13 @@ mod tests {
         let client_ready = wait_for_client_ready(&mut client_events, EVENT_WAIT).await;
         assert_eq!(client_ready, host_ready);
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn central_and_decentral_never_force_incomplete_ticks() {
         for mode in [0, 1] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-            let address = listener.local_addr().test_value();
+            let (address, listener) = bind_test_listener().await;
             let mut config = HostConfig::default();
             config.initial_status.control_mode = mode;
             config.async_max_wait_frames = 2;
@@ -11383,12 +10623,7 @@ mod tests {
                 .control_rate = 2;
             let mut host = start_host(listener, config).await.test_value();
             let mut host_events = host.take_event_receiver();
-            let mut client = connect_client(
-                address,
-                ClientConfig::new(format!("Slow-{mode}"), ParticipantKind::Player),
-            )
-            .await
-            .test_value();
+            let mut client = connect_test_player(address, format!("Slow-{mode}")).await;
             let mut client_events = client.take_event_receiver();
             activate_joined_client(&host, &mut host_events, client.client_id()).await;
 
@@ -11417,15 +10652,13 @@ mod tests {
                 "mode {mode} broadcast an incomplete complete packet"
             );
 
-            client.shutdown().await.test_value();
-            host.shutdown().await.test_value();
+            shutdown_test_session(client, host).await;
         }
     }
 
     #[tokio::test(start_paused = true)]
     async fn async_mode_commit_uses_tick_reach_stamped_in_central_mode() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let mut config = HostConfig::default();
         config.initial_status.control_mode = 1;
         config.async_max_wait_frames = 2;
@@ -11458,11 +10691,7 @@ mod tests {
         settle_paused_network().await;
         assert!(take_queued_host_ready(&mut host_events).is_none());
 
-        let asynchronous = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 2,
-            target_tick: 0,
-        };
+        let asynchronous = NetworkStatus::new(NETWORK_STATE_GO, 2, 0);
         host.change_status(asynchronous).await.test_value();
         loop {
             match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
@@ -11496,8 +10725,7 @@ mod tests {
         assert_eq!(ready.tick(), 0);
         assert_eq!(control_commands(&ready), vec![0xA0]);
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -11590,8 +10818,7 @@ mod tests {
             }) if joined == client_id
         ));
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -11600,55 +10827,46 @@ mod tests {
         // accepted message connection before resource discovery begins
         // (src/C4Network2.cpp:1810-1850;
         // src/C4Network2Client.cpp:319-337,616-621).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let host = start_host(
             listener,
-            HostConfig {
-                resource_registrations: vec![
-                    crate::ResourceRegistration {
-                        resource_id: 3,
-                        chunk_count: 1,
-                        binary_compatible: true,
-                        loading: false,
-                    },
-                    crate::ResourceRegistration {
-                        resource_id: 4,
-                        chunk_count: 2,
-                        binary_compatible: true,
-                        loading: false,
-                    },
-                ],
-                ..Default::default()
-            },
+            host_config!(resource_registrations: vec![
+                crate::ResourceRegistration {
+                    resource_id: 3,
+                    chunk_count: 1,
+                    binary_compatible: true,
+                    loading: false,
+                },
+                crate::ResourceRegistration {
+                    resource_id: 4,
+                    chunk_count: 2,
+                    binary_compatible: true,
+                    loading: false,
+                },
+            ]),
         )
         .await
         .test_value();
         let stream = TcpStream::connect(addr).await.test_value();
         let mut transport = crate::ControlTransport::new(stream);
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
-        let request = crate::ConnectionRequest {
-            core: clonk_engine::ClientCoreControlData {
+        let name = c4(b"Alice");
+        let request = test_connection_request(
+            clonk_engine::ClientCoreControlData {
                 client_id: -1,
                 name: name.clone(),
                 nick: name,
                 ..Default::default()
             },
-            build: CURRENT_GAME_BUILD,
-            password: clonk_engine::LegacyCString::default(),
-            connection_id: 0,
-            port_protocol: false,
-        };
+            0,
+            false,
+        );
 
         let bootstrap = run_client_connection_handshake(&mut transport, request)
             .await
             .test_value();
         assert_eq!(bootstrap.join_data.client_id, 1);
 
-        let packet = timeout(EVENT_WAIT, transport.read_message())
-            .await
-            .test_value()
-            .test_value();
+        let packet = await_test(transport.read_message()).await;
         match packet {
             ControlMessage::Address(crate::AddressPacket {
                 client_id: 0,
@@ -11664,11 +10882,7 @@ mod tests {
             other => panic!("expected host PID_Addr after JoinData, got {other:?}"),
         }
         loop {
-            match timeout(EVENT_WAIT, transport.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(transport.read_message()).await {
                 ControlMessage::Address(crate::AddressPacket { client_id: 0, .. }) => continue,
                 ControlMessage::Resource(ResourcePacket::Discover(discover)) => {
                     assert_eq!(discover.resource_ids, vec![4, 3]);
@@ -11691,10 +10905,7 @@ mod tests {
             .test_value();
         let mut saw_reannouncement = false;
         for _ in 0..8 {
-            let message = timeout(EVENT_WAIT, transport.read_message())
-                .await
-                .test_value()
-                .test_value();
+            let message = await_test(transport.read_message()).await;
             if message == ControlMessage::Address(client_address) {
                 saw_reannouncement = true;
                 break;
@@ -11863,17 +11074,14 @@ mod tests {
         id: i32,
         filename: &[u8],
     ) -> clonk_engine::NetworkResourceCore {
-        clonk_engine::NetworkResourceCore {
-            resource_type,
-            id,
-            derived_id: -1,
-            loadable: false,
-            file_size: u32::MAX,
-            file_crc: u32::MAX,
-            contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(filename.to_vec()).test_value(),
-            ..Default::default()
-        }
+        network_core!(resource_type,
+        id,
+        derived_id: -1,
+        loadable: false,
+        file_size: u32::MAX,
+        file_crc: u32::MAX,
+        contents_crc: 1,
+        filename: c4(filename))
     }
 
     struct ClientBootstrapProbeResult {
@@ -11882,67 +11090,16 @@ mod tests {
     }
 
     async fn start_client_bootstrap_probe(
-        mut snapshot: HostJoinSnapshot,
+        snapshot: HostJoinSnapshot,
     ) -> (
         SocketAddr,
         tokio::task::JoinHandle<ClientBootstrapProbeResult>,
     ) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value();
-            let host_core = clonk_engine::ClientCoreControlData {
-                client_id: 0,
-                activated: true,
-                name: host_name.clone(),
-                nick: host_name,
-                ..Default::default()
-            };
-            let request = crate::ConnectionRequest {
-                core: host_core.clone(),
-                build: CURRENT_GAME_BUILD,
-                password: clonk_engine::LegacyCString::default(),
-                connection_id: 9,
-                port_protocol: false,
-            };
-            let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
-            let admission = tokio::spawn(async move {
-                let request = admission_rx.recv().await.test_value();
-                let mut assigned = request.request.core.clone();
-                assigned.client_id = 1;
-                request
-                    .decision_tx
-                    .send(AdmissionDecision::Accept {
-                        peer_core: assigned.clone(),
-                        before_reply: Vec::new(),
-                        message: clonk_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
-                            .unwrap(),
-                    })
-                    .test_value();
-                assigned
-            });
-            run_host_connection_handshake(&mut transport, request, &admission_tx)
-                .await
-                .test_value();
-            let assigned = admission.await.test_value();
-            snapshot.parameters.clients =
-                JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
-            transport
-                .send_message(ControlMessage::JoinData(Box::new(JoinDataEnvelope {
-                    client_id: assigned.client_id,
-                    start_control_tick: snapshot.dynamic_tick,
-                    status: NetworkStatus {
-                        state: NETWORK_STATE_LOBBY,
-                        control_mode: 0,
-                        target_tick: -1,
-                    },
-                    dynamic: snapshot.dynamic,
-                    parameters: snapshot.parameters,
-                })))
-                .await
-                .test_value();
+            admit_and_send_test_join_data(&mut transport, |_| snapshot).await;
 
             let mut messages = Vec::new();
             let mut disconnected = false;
@@ -12009,11 +11166,7 @@ mod tests {
             .await
             .test_value();
 
-        let status = NetworkStatus {
-            state: NETWORK_STATE_PAUSE,
-            control_mode: 3,
-            target_tick: 17,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_PAUSE, 3, 17);
         let mut host = crate::ControlTransport::new(host_stream);
         host.send_message(ControlMessage::Status(status))
             .await
@@ -12038,22 +11191,7 @@ mod tests {
         // 1141-1177).
         let (host_stream, client_stream) = duplex(512);
         let mut client = crate::ControlTransport::new(client_stream);
-        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
-        let retire_rx = outbound_tx.subscribe_retire();
-        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(
-            ClientTask {
-                local_connection_id: 3,
-                remote_connection_id: 5,
-                client_id: 1,
-                transport: crate::ControlTransport::new(host_stream),
-                outbound_rx,
-                retire_rx,
-                host_tx,
-                liveness: ConnectionLivenessState::new_accepted_system(),
-            }
-            .run(),
-        );
+        let (outbound_tx, mut host_rx, task) = start_test_host_route(host_stream, 1);
 
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(1_500)).await;
@@ -12135,24 +11273,19 @@ mod tests {
             ControlMessage::ConnectionRequest(_)
         ));
         client
-            .send_message(ControlMessage::ConnectionRequest(
-                crate::ConnectionRequest {
-                    core: compatibility_test_core(-1, b"Alice"),
-                    build: CURRENT_GAME_BUILD,
-                    password: clonk_engine::LegacyCString::default(),
-                    connection_id: 11,
-                    port_protocol: false,
-                },
-            ))
+            .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                compatibility_test_core(-1, b"Alice"),
+                11,
+                false,
+            )))
             .await
             .test_value();
         client
-            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-                ok: true,
-                message: clonk_engine::LegacyCString::default(),
-                wrong_password: false,
-                port_protocol: false,
-            }))
+            .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                true,
+                clonk_engine::LegacyCString::default(),
+                false,
+            )))
             .await
             .test_value();
         assert!(matches!(
@@ -12193,22 +11326,7 @@ mod tests {
         // src/C4NetIO.cpp:690-761,1345-1396).
         let (host_stream, peer_stream) = duplex(64);
         let mut peer = crate::ControlTransport::new(peer_stream);
-        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
-        let retire_rx = outbound_tx.subscribe_retire();
-        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(
-            ClientTask {
-                local_connection_id: 3,
-                remote_connection_id: 5,
-                client_id: 7,
-                transport: crate::ControlTransport::new(host_stream),
-                outbound_rx,
-                retire_rx,
-                host_tx,
-                liveness: ConnectionLivenessState::new_accepted_system(),
-            }
-            .run(),
-        );
+        let (outbound_tx, mut host_rx, task) = start_test_host_route(host_stream, 7);
         outbound_tx
             .send(ControlMessage::Packet {
                 delivery: ControlDelivery::Direct,
@@ -12217,11 +11335,7 @@ mod tests {
             .await
             .test_value();
         tokio::task::yield_now().await;
-        let inbound = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 7,
-        };
+        let inbound = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 7);
         peer.send_message(ControlMessage::Status(inbound))
             .await
             .test_value();
@@ -12251,29 +11365,14 @@ mod tests {
         const PACKET_COUNT: usize = 160;
         let (host_stream, peer_stream) = duplex(32 * 1_024);
         let mut peer = crate::ControlTransport::new(peer_stream);
-        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
-        let retire_rx = outbound_tx.subscribe_retire();
-        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(
-            ClientTask {
-                local_connection_id: 3,
-                remote_connection_id: 5,
-                client_id: 7,
-                transport: crate::ControlTransport::new(host_stream),
-                outbound_rx,
-                retire_rx,
-                host_tx,
-                liveness: ConnectionLivenessState::new_accepted_system(),
-            }
-            .run(),
-        );
+        let (outbound_tx, mut host_rx, task) = start_test_host_route(host_stream, 7);
 
         for sequence in 0..PACKET_COUNT {
-            peer.send_message(ControlMessage::Status(NetworkStatus {
-                state: NETWORK_STATE_LOBBY,
-                control_mode: 1,
-                target_tick: sequence as i32,
-            }))
+            peer.send_message(ControlMessage::Status(NetworkStatus::new(
+                NETWORK_STATE_LOBBY,
+                1,
+                sequence as i32,
+            )))
             .await
             .unwrap_or_else(|error| {
                 panic!("host route closed while sending packet {sequence}: {error}")
@@ -12306,7 +11405,7 @@ mod tests {
         }
 
         outbound_tx.retire();
-        timeout(EVENT_WAIT, task).await.test_value().test_value();
+        await_test(task).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -12375,7 +11474,7 @@ mod tests {
         );
 
         outbound_tx.retire();
-        timeout(EVENT_WAIT, task).await.test_value().test_value();
+        await_test(task).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -12385,22 +11484,7 @@ mod tests {
         // first (oracle-src-pinned src/C4Network2Client.cpp:104-118;
         // src/C4NetIO.cpp:1458-1468).
         let (host_stream, _peer_stream) = duplex(1);
-        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
-        let retire_rx = outbound_tx.subscribe_retire();
-        let (host_tx, _host_rx) = mpsc::unbounded_channel();
-        let mut task = tokio::spawn(
-            ClientTask {
-                local_connection_id: 3,
-                remote_connection_id: 5,
-                client_id: 7,
-                transport: crate::ControlTransport::new(host_stream),
-                outbound_rx,
-                retire_rx,
-                host_tx,
-                liveness: ConnectionLivenessState::new_accepted_system(),
-            }
-            .run(),
-        );
+        let (outbound_tx, _host_rx, mut task) = start_test_host_route(host_stream, 7);
         for _ in 0..10_001 {
             outbound_tx
                 .send(ControlMessage::Packet {
@@ -12412,13 +11496,7 @@ mod tests {
         }
         tokio::task::yield_now().await;
         outbound_tx
-            .try_close(crate::ConnectionReply {
-                ok: false,
-                message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
-                    .unwrap(),
-                wrong_password: false,
-                port_protocol: false,
-            })
+            .try_close(test_connection_reply(false, c4(b"removing client"), false))
             .test_value();
 
         timeout(Duration::from_millis(100), &mut task)
@@ -12430,22 +11508,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn accepted_host_decodes_tcp_sim_open_and_keeps_the_connection() {
         let (host_stream, mut client_stream) = duplex(512);
-        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
-        let retire_rx = outbound_tx.subscribe_retire();
-        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(
-            ClientTask {
-                local_connection_id: 3,
-                remote_connection_id: 5,
-                client_id: 7,
-                transport: crate::ControlTransport::new(host_stream),
-                outbound_rx,
-                retire_rx,
-                host_tx,
-                liveness: ConnectionLivenessState::new_accepted_system(),
-            }
-            .run(),
-        );
+        let (outbound_tx, mut host_rx, task) = start_test_host_route(host_stream, 7);
 
         // Packed client 7 plus a TCP IPv6 endpoint, matching the native
         // C4PacketTCPSimOpen binary layout.
@@ -12527,7 +11590,7 @@ mod tests {
             packet,
             crate::LeagueRoundResultsPacket {
                 success: true,
-                result_string: clonk_engine::LegacyCString::from_bytes(b"OK".to_vec()).unwrap(),
+                result_string: c4(b"OK"),
                 players: Vec::new(),
             }
         );
@@ -12573,64 +11636,15 @@ mod tests {
         // src/C4Network2IO.cpp:117-197; src/C4Packet2.cpp:51-73).
         let client_name = b"CurrentThreadBootstrap";
         let (probe_paused, resume_probe) = pause_client_resource_bootstrap_probe(client_name);
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let (ping_result_tx, ping_result_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value();
-            let host_core = clonk_engine::ClientCoreControlData {
-                client_id: 0,
-                activated: true,
-                name: host_name.clone(),
-                nick: host_name,
-                ..Default::default()
-            };
-            let request = crate::ConnectionRequest {
-                core: host_core.clone(),
-                build: CURRENT_GAME_BUILD,
-                password: clonk_engine::LegacyCString::default(),
-                connection_id: 9,
-                port_protocol: false,
-            };
-            let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
-            let admission = tokio::spawn(async move {
-                let request = admission_rx.recv().await.test_value();
-                let mut assigned = request.request.core.clone();
-                assigned.client_id = 1;
-                request
-                    .decision_tx
-                    .send(AdmissionDecision::Accept {
-                        peer_core: assigned.clone(),
-                        before_reply: Vec::new(),
-                        message: clonk_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
-                            .unwrap(),
-                    })
-                    .test_value();
-                assigned
-            });
-            run_host_connection_handshake(&mut transport, request, &admission_tx)
-                .await
-                .test_value();
-            let assigned = admission.await.test_value();
-            let mut snapshot = synthetic_join_snapshot(host_core.clone(), 8);
-            snapshot.parameters.clients =
-                JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
-            transport
-                .send_message(ControlMessage::JoinData(Box::new(JoinDataEnvelope {
-                    client_id: assigned.client_id,
-                    start_control_tick: snapshot.dynamic_tick,
-                    status: NetworkStatus {
-                        state: NETWORK_STATE_LOBBY,
-                        control_mode: 0,
-                        target_tick: -1,
-                    },
-                    dynamic: snapshot.dynamic,
-                    parameters: snapshot.parameters,
-                })))
-                .await
-                .test_value();
+            admit_and_send_test_join_data(&mut transport, |host_core| {
+                synthetic_join_snapshot(host_core.clone(), 8)
+            })
+            .await;
             assert_eq!(
                 transport.read_message().await.unwrap(),
                 ControlMessage::Request { from_tick: 0 }
@@ -12712,65 +11726,16 @@ mod tests {
         const QUEUED_PACKETS: i32 = 96;
         let client_name = b"BootstrapRouteLiveness";
         let (bootstrap_paused, resume_bootstrap) = pause_client_post_join_bootstrap(client_name);
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let address = listener.local_addr().test_value();
+        let (address, listener) = bind_test_listener().await;
         let (probe_complete_tx, probe_complete_rx) = oneshot::channel();
         let (finish_server_tx, finish_server_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value();
-            let host_core = clonk_engine::ClientCoreControlData {
-                client_id: 0,
-                activated: true,
-                name: host_name.clone(),
-                nick: host_name,
-                ..Default::default()
-            };
-            let request = crate::ConnectionRequest {
-                core: host_core.clone(),
-                build: CURRENT_GAME_BUILD,
-                password: clonk_engine::LegacyCString::default(),
-                connection_id: 9,
-                port_protocol: false,
-            };
-            let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
-            let admission = tokio::spawn(async move {
-                let request = admission_rx.recv().await.test_value();
-                let mut assigned = request.request.core.clone();
-                assigned.client_id = 1;
-                request
-                    .decision_tx
-                    .send(AdmissionDecision::Accept {
-                        peer_core: assigned.clone(),
-                        before_reply: Vec::new(),
-                        message: clonk_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
-                            .unwrap(),
-                    })
-                    .test_value();
-                assigned
-            });
-            run_host_connection_handshake(&mut transport, request, &admission_tx)
-                .await
-                .test_value();
-            let assigned = admission.await.test_value();
-            let mut snapshot = synthetic_join_snapshot(host_core.clone(), 8);
-            snapshot.parameters.clients =
-                JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
-            transport
-                .send_message(ControlMessage::JoinData(Box::new(JoinDataEnvelope {
-                    client_id: assigned.client_id,
-                    start_control_tick: snapshot.dynamic_tick,
-                    status: NetworkStatus {
-                        state: NETWORK_STATE_LOBBY,
-                        control_mode: 0,
-                        target_tick: -1,
-                    },
-                    dynamic: snapshot.dynamic,
-                    parameters: snapshot.parameters,
-                })))
-                .await
-                .test_value();
+            admit_and_send_test_join_data(&mut transport, |host_core| {
+                synthetic_join_snapshot(host_core.clone(), 8)
+            })
+            .await;
             assert_eq!(
                 transport.read_message().await.unwrap(),
                 ControlMessage::Request { from_tick: 0 }
@@ -12858,72 +11823,17 @@ mod tests {
         // known, so it is re-announced as a host-owned PID_Addr
         // (src/C4Network2.cpp:1448-1499,1574-1623;
         // src/C4Network2Client.cpp:319-337,616-621).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value();
-            let host_core = clonk_engine::ClientCoreControlData {
-                client_id: 0,
-                activated: true,
-                name: host_name.clone(),
-                nick: host_name,
-                ..Default::default()
-            };
-            let request = crate::ConnectionRequest {
-                core: host_core.clone(),
-                build: CURRENT_GAME_BUILD,
-                password: clonk_engine::LegacyCString::default(),
-                connection_id: 9,
-                port_protocol: false,
-            };
-            let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
-            let admission = tokio::spawn(async move {
-                let request = admission_rx.recv().await.test_value();
-                let mut assigned = request.request.core.clone();
-                assigned.client_id = 1;
-                request
-                    .decision_tx
-                    .send(AdmissionDecision::Accept {
-                        peer_core: assigned.clone(),
-                        before_reply: Vec::new(),
-                        message: clonk_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
-                            .unwrap(),
-                    })
-                    .test_value();
-                assigned
-            });
-            run_host_connection_handshake(&mut transport, request, &admission_tx)
-                .await
-                .test_value();
-            let assigned = admission.await.test_value();
-            let mut snapshot = synthetic_join_snapshot(host_core.clone(), 8);
-            snapshot.parameters.clients =
-                JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
-            transport
-                .send_message(ControlMessage::JoinData(Box::new(JoinDataEnvelope {
-                    client_id: assigned.client_id,
-                    start_control_tick: snapshot.dynamic_tick,
-                    status: NetworkStatus {
-                        state: NETWORK_STATE_LOBBY,
-                        control_mode: 0,
-                        target_tick: -1,
-                    },
-                    dynamic: snapshot.dynamic,
-                    parameters: snapshot.parameters,
-                })))
-                .await
-                .test_value();
+            admit_and_send_test_join_data(&mut transport, |host_core| {
+                synthetic_join_snapshot(host_core.clone(), 8)
+            })
+            .await;
 
-            let control_request = timeout(EVENT_WAIT, transport.read_message())
-                .await
-                .test_value()
-                .test_value();
-            let initial = timeout(EVENT_WAIT, transport.read_message())
-                .await
-                .test_value()
-                .test_value();
+            let control_request = await_test(transport.read_message()).await;
+            let initial = await_test(transport.read_message()).await;
             let learned = crate::AddressPacket {
                 client_id: 0,
                 address: crate::NetworkAddress::new(
@@ -12937,10 +11847,7 @@ mod tests {
                 .test_value();
             let mut echoed = None;
             for _ in 0..8 {
-                let message = timeout(EVENT_WAIT, transport.read_message())
-                    .await
-                    .test_value()
-                    .test_value();
+                let message = await_test(transport.read_message()).await;
                 if message == ControlMessage::Address(learned) {
                     echoed = Some(message);
                     break;
@@ -12971,8 +11878,7 @@ mod tests {
         // dynamic exists. OnGameSynchronized later publishes the fresh
         // dynamic and sends JoinData/Addr without re-running admission
         // (src/C4Network2.cpp:1099-1115,1768-1784,1820-1849).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut config = HostConfig::default();
         let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
         config.initial_join_snapshot = None;
@@ -13017,8 +11923,7 @@ mod tests {
         assert_eq!(join_data.dynamic, snapshot.dynamic);
         assert_eq!(join_data.start_control_tick, snapshot.dynamic_tick);
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13027,8 +11932,7 @@ mod tests {
         // (src/C4Network2.cpp:1099-1115,1768-1784,1820-1849). The
         // presentation-only transcript extension must follow that delayed
         // JoinData just as it follows an immediately available one.
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut config = HostConfig::default();
         let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
         config.initial_join_snapshot = None;
@@ -13050,8 +11954,7 @@ mod tests {
             message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
             player: -1,
             to_player: -1,
-            message: clonk_engine::LegacyCString::from_bytes(b"during delayed join".to_vec())
-                .test_value(),
+            message: c4(b"during delayed join"),
             by_client: HOST_CLIENT_ID as i32,
         };
         let data =
@@ -13094,8 +11997,7 @@ mod tests {
         .ok()
         .flatten();
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
         assert_eq!(replayed, Some(data));
     }
 
@@ -13105,8 +12007,7 @@ mod tests {
         // accepted connection while SendJoinData waits for a fresh dynamic
         // (src/C4Network2IO.cpp:611-623,1155-1191;
         // src/C4Network2.cpp:1107-1133,1836-1865).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut config = HostConfig::default();
         let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
         config.initial_join_snapshot = None;
@@ -13157,8 +12058,7 @@ mod tests {
             .unwrap()
             .test_value();
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -13168,10 +12068,7 @@ mod tests {
         // A normal game execution reaches that check only after ControlTick
         // advances (src/C4Game.cpp:776-782; src/C4GameControl.cpp:325-330).
         let directories = SessionResourceDirectories::new();
-        let config = HostConfig {
-            resource_directory: Some(directories.host.clone()),
-            ..HostConfig::default()
-        };
+        let config = host_config!(resource_directory: Some(directories.host.clone()));
         let parameters = config
             .initial_join_snapshot
             .as_ref()
@@ -13233,10 +12130,7 @@ mod tests {
         // regular game loop is another Execute path; this test covers the
         // host's timer path specifically (src/C4Game.cpp:776-782).
         let directories = SessionResourceDirectories::new();
-        let config = HostConfig {
-            resource_directory: Some(directories.host.clone()),
-            ..HostConfig::default()
-        };
+        let config = host_config!(resource_directory: Some(directories.host.clone()));
         let parameters = config
             .initial_join_snapshot
             .as_ref()
@@ -13367,8 +12261,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn chase_target_timer_arms_only_when_delayed_join_data_is_sent() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut config = HostConfig::default();
         let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
         config.initial_join_snapshot = None;
@@ -13424,8 +12317,7 @@ mod tests {
             }
         );
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13480,7 +12372,7 @@ mod tests {
             message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
             player: -1,
             to_player: -1,
-            message: clonk_engine::LegacyCString::from_bytes(b"before join".to_vec()).test_value(),
+            message: c4(b"before join"),
             by_client: i32::try_from(source_id).test_value(),
         };
         let data =
@@ -13596,14 +12488,15 @@ mod tests {
             TestMeshTransport::Tcp => (0x44, 0x55),
             TestMeshTransport::Udp => (0x66, 0x77),
         };
-        let data =
-            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
-                player: i32::try_from(alpha_id).unwrap(),
+        let data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
+            PlayerControlData::new(
+                i32::try_from(alpha_id).unwrap(),
                 command,
-                data: command_data,
-                by_client: i32::try_from(alpha_id).unwrap(),
-            }))
-            .test_value();
+                command_data,
+                i32::try_from(alpha_id).unwrap(),
+            ),
+        ))
+        .test_value();
         alpha
             .submit_packet(ControlDelivery::Direct, data.clone())
             .await
@@ -13689,10 +12582,7 @@ mod tests {
                 .voice_sender()
                 .try_send(crate::VoiceFrame::outbound(9, 17, 4, vec![0x3c; 164]).test_value())
                 .test_value();
-            let frame = timeout(EVENT_WAIT, beta_voice.recv())
-                .await
-                .test_value()
-                .test_value();
+            let frame = await_test(beta_voice.recv()).await;
             assert_eq!(frame.client_id, alpha.client_id());
             assert_eq!(frame.player_id, 9);
         }
@@ -13717,22 +12607,18 @@ mod tests {
         // PID_ExecSyncCtrl is emitted only when SyncControl is non-empty;
         // connection establishment is not a synchronization release
         // (src/C4GameControlNetwork.cpp:260-276).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let host = start_host(listener, HostConfig::default())
             .await
             .test_value();
-        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .test_value();
+        let mut client = connect_test_player(addr, "Alice").await;
         let mut events = client.take_event_receiver();
 
         assert!(timeout(Duration::from_millis(50), events.recv())
             .await
             .is_err());
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13740,22 +12626,15 @@ mod tests {
         // PID_Status is host-authored; a client answers with PID_StatusAck and
         // the host later broadcasts the final ACK
         // (src/C4Network2.cpp:1501-1534,1994-2012,2062-2077).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut host = start_host(listener, HostConfig::default())
             .await
             .test_value();
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .test_value();
+        let mut client = connect_test_player(addr, "Alice").await;
         let client_id = client.client_id();
         let mut client_events = client.take_event_receiver();
-        let status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 195_995,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_GO, 1, 195_995);
 
         host.change_status(status).await.test_value();
         loop {
@@ -13817,14 +12696,12 @@ mod tests {
             }
         }
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn host_chase_target_updates_only_chasing_clients_and_stops_after_ack() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut config = HostConfig::default();
         let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
         config.initial_join_snapshot = None;
@@ -13851,16 +12728,8 @@ mod tests {
 
         let first_deadline = tokio::time::Instant::now() + CHASE_TARGET_UPDATE_INTERVAL;
         host.publish_join_snapshot(snapshot).await.test_value();
-        let mut alpha = timeout(EVENT_WAIT, alpha_task)
-            .await
-            .unwrap()
-            .unwrap()
-            .test_value();
-        let mut beta = timeout(EVENT_WAIT, beta_task)
-            .await
-            .unwrap()
-            .unwrap()
-            .test_value();
+        let mut alpha = await_test(alpha_task).await.test_value();
+        let mut beta = await_test(beta_task).await.test_value();
         let alpha_id = alpha.client_id();
         let initial_status = alpha.take_join_data().test_value().status;
         let mut alpha_events = alpha.take_event_receiver();
@@ -13905,10 +12774,8 @@ mod tests {
                 ..initial_status
             }
         );
-        let beta_barrier = ReadyCheckPacket {
-            client_id: HOST_CLIENT_ID as i32,
-            data: crate::ReadyCheckData::Other(101),
-        };
+        let beta_barrier =
+            ReadyCheckPacket::new(HOST_CLIENT_ID as i32, crate::ReadyCheckData::Other(101));
         host.submit_ready_check(beta_barrier).await.test_value();
         assert_no_client_status_through_ready_check(&mut beta_events, beta_barrier).await;
 
@@ -13935,10 +12802,8 @@ mod tests {
                 ..initial_status
             }
         );
-        let second_beta_barrier = ReadyCheckPacket {
-            client_id: HOST_CLIENT_ID as i32,
-            data: crate::ReadyCheckData::Other(102),
-        };
+        let second_beta_barrier =
+            ReadyCheckPacket::new(HOST_CLIENT_ID as i32, crate::ReadyCheckData::Other(102));
         host.submit_ready_check(second_beta_barrier)
             .await
             .test_value();
@@ -13962,10 +12827,8 @@ mod tests {
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
-        let stopped_barrier = ReadyCheckPacket {
-            client_id: HOST_CLIENT_ID as i32,
-            data: crate::ReadyCheckData::Other(103),
-        };
+        let stopped_barrier =
+            ReadyCheckPacket::new(HOST_CLIENT_ID as i32, crate::ReadyCheckData::Other(103));
         host.submit_ready_check(stopped_barrier).await.test_value();
         assert_no_client_status_through_ready_check(&mut alpha_events, stopped_barrier).await;
         assert_no_client_status_through_ready_check(&mut beta_events, stopped_barrier).await;
@@ -13981,8 +12844,7 @@ mod tests {
         // resends the host's own stored controls from ControlTick until the
         // first gap (src/C4Network2.cpp:2062-2110;
         // src/C4GameControlNetwork.cpp:360-374).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut config = HostConfig::default();
         config.initial_status.control_mode = 1;
         let mut host = start_host(listener, config).await.test_value();
@@ -13994,11 +12856,7 @@ mod tests {
             &mut client,
             &mut host_events,
             client_id,
-            NetworkStatus {
-                state: NETWORK_STATE_LOBBY,
-                control_mode: 1,
-                target_tick: -1,
-            },
+            NetworkStatus::new(NETWORK_STATE_LOBBY, 1, -1),
         )
         .await;
         drain_raw_client(&mut client).await;
@@ -14010,11 +12868,7 @@ mod tests {
             .await
             .test_value();
 
-        let decentral = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: 0,
-        };
+        let decentral = NetworkStatus::new(NETWORK_STATE_GO, 0, 0);
         host.change_status(decentral).await.test_value();
         loop {
             match timeout(EVENT_WAIT, client.read_message())
@@ -14086,11 +12940,7 @@ mod tests {
             &mut client,
             &mut host_events,
             client_id,
-            NetworkStatus {
-                state: NETWORK_STATE_LOBBY,
-                control_mode: 0,
-                target_tick: -1,
-            },
+            NetworkStatus::new(NETWORK_STATE_LOBBY, 0, -1),
         )
         .await;
         drain_raw_client(&mut client).await;
@@ -14110,11 +12960,7 @@ mod tests {
         assert_eq!(control_commands(&complete), vec![0x11, 0x21]);
         drain_raw_client(&mut client).await;
 
-        let central = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let central = NetworkStatus::new(NETWORK_STATE_GO, 1, 0);
         host.change_status(central).await.test_value();
         loop {
             match timeout(EVENT_WAIT, client.read_message())
@@ -14162,15 +13008,12 @@ mod tests {
         // current control tick. HandleStatusAck must rebroadcast that higher
         // target before the barrier can commit
         // (src/C4Network2.cpp:1994-2012,2062-2077).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut host = start_host(listener, HostConfig::default())
             .await
             .test_value();
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .test_value();
+        let mut client = connect_test_player(addr, "Alice").await;
         let client_id = client.client_id();
         let initial_status = client.take_join_data().test_value().status;
         let mut client_events = client.take_event_receiver();
@@ -14196,11 +13039,7 @@ mod tests {
             }
         }
 
-        let requested = NetworkStatus {
-            state: NETWORK_STATE_PAUSE,
-            control_mode: 1,
-            target_tick: 41,
-        };
+        let requested = NetworkStatus::new(NETWORK_STATE_PAUSE, 1, 41);
         host.change_status(requested).await.test_value();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
@@ -14217,10 +13056,7 @@ mod tests {
             }
         }
 
-        let retargeted = NetworkStatus {
-            target_tick: 44,
-            ..requested
-        };
+        let retargeted = requested.with_target_tick(44);
         client.submit_status_ack(retargeted).await.test_value();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
@@ -14283,8 +13119,7 @@ mod tests {
             }
         }
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -14292,22 +13127,15 @@ mod tests {
         // In running games, CDT_Sync packets accumulate in SyncControl and do
         // not execute until PID_ExecSyncCtrl is emitted after the status
         // barrier (src/C4GameControlNetwork.cpp:181-220,260-297,558-588).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut host = start_host(listener, HostConfig::default())
             .await
             .test_value();
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .test_value();
+        let mut client = connect_test_player(addr, "Alice").await;
         let mut client_events = client.take_event_receiver();
 
-        let running = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let running = NetworkStatus::new(NETWORK_STATE_GO, 1, 0);
         host.change_status(running).await.test_value();
         loop {
             match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
@@ -14348,18 +13176,8 @@ mod tests {
             }
         }
 
-        let first = EngineControlPacket::PlayerControl(PlayerControlData {
-            player: 0,
-            command: 0x41,
-            data: 0,
-            by_client: 0,
-        });
-        let second = EngineControlPacket::PlayerControl(PlayerControlData {
-            player: 0,
-            command: 0x42,
-            data: 0,
-            by_client: 0,
-        });
+        let first = EngineControlPacket::PlayerControl(PlayerControlData::new(0, 0x41, 0, 0));
+        let second = EngineControlPacket::PlayerControl(PlayerControlData::new(0, 0x42, 0, 0));
         for control in [&first, &second] {
             host.submit_packet(
                 ControlDelivery::Sync,
@@ -14468,10 +13286,8 @@ mod tests {
         // it proves the preceding host command and every earlier wire packet
         // have been handled without mistaking a delayed StatusAck or ping for
         // an empty Sync release.
-        let empty_release_barrier = ReadyCheckPacket {
-            client_id: HOST_CLIENT_ID as i32,
-            data: crate::ReadyCheckData::Other(0x5359),
-        };
+        let empty_release_barrier =
+            ReadyCheckPacket::new(HOST_CLIENT_ID as i32, crate::ReadyCheckData::Other(0x5359));
         host.submit_ready_check(empty_release_barrier)
             .await
             .test_value();
@@ -14497,8 +13313,7 @@ mod tests {
             );
         }
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -14507,22 +13322,14 @@ mod tests {
         // CDT_Sync control immediately and then emits PID_ExecSyncCtrl
         // (src/C4Network2.cpp:1982-1991;
         // src/C4GameControlNetwork.cpp:204-213).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut host = start_host(listener, HostConfig::default())
             .await
             .test_value();
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .test_value();
+        let mut client = connect_test_player(addr, "Alice").await;
         let mut client_events = client.take_event_receiver();
-        let control = EngineControlPacket::PlayerControl(PlayerControlData {
-            player: 0,
-            command: 0x51,
-            data: 0,
-            by_client: 0,
-        });
+        let control = EngineControlPacket::PlayerControl(PlayerControlData::new(0, 0x51, 0, 0));
 
         host.submit_packet(
             ControlDelivery::Sync,
@@ -14566,14 +13373,12 @@ mod tests {
             }
         }
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_matches_cpp_pid_control_source_id_semantics() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut host = start_host(listener, HostConfig::default())
             .await
             .test_value();
@@ -14630,8 +13435,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_silently_ignores_valid_control_from_an_unregistered_client() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut host = start_host(listener, HostConfig::default())
             .await
             .test_value();
@@ -14691,8 +13495,7 @@ mod tests {
         // scheduler remains available for later clients
         // (src/C4GameControlNetwork.cpp:867-872;
         // src/C4Network2IO.cpp:822-835).
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut host = start_host(listener, HostConfig::default())
             .await
             .test_value();
@@ -14754,33 +13557,26 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn forged_queued_control_set_author_does_not_consume_the_tick() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut host = start_host(listener, HostConfig::default())
             .await
             .test_value();
         let mut host_events = host.take_event_receiver();
-        let client = connect_client(
-            addr,
-            ClientConfig::new("set-spoof-check", ParticipantKind::Player),
-        )
-        .await
-        .test_value();
+        let client = connect_test_player(addr, "set-spoof-check").await;
         let client_id = client.client_id();
         activate_joined_client(&host, &mut host_events, client_id).await;
         let client_author = i32::try_from(client_id).test_value();
         let queued_set = |by_client| {
-            encode_control_packet(&LegacyControlFrame {
+            encode_control_packet(&legacy_frame(
                 client_id,
-                tick: 0,
-                timestamp_ms: 0,
-                controls: vec![crate::LegacyControlSet {
+                0,
+                vec![crate::LegacyControlSet {
                     value_type: 5,
                     data: 10_000,
                     by_client,
                 }
                 .into_control_packet()],
-            })
+            ))
             .test_value()
         };
 
@@ -14828,24 +13624,17 @@ mod tests {
             }]
         );
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn malformed_contribution_does_not_consume_the_synchronized_tick() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
+        let (addr, listener) = bind_test_listener().await;
         let mut host = start_host(listener, HostConfig::default())
             .await
             .test_value();
         let mut host_events = host.take_event_receiver();
-        let client = connect_client(
-            addr,
-            ClientConfig::new("validation-check", ParticipantKind::Player),
-        )
-        .await
-        .test_value();
+        let client = connect_test_player(addr, "validation-check").await;
         activate_joined_client(&host, &mut host_events, client.client_id()).await;
         client
             .submit_control(legacy_packet(client.client_id(), 0, 0x22))
@@ -14874,23 +13663,16 @@ mod tests {
         assert!(saw_validation_error, "malformed input was not diagnosed");
         assert_eq!(control_commands(&ready), vec![0x11, 0x22]);
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn control_sync_and_reconnect_smoke() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
-        let config = HostConfig {
-            max_players: 4,
-            ..Default::default()
-        };
+        let (addr, listener) = bind_test_listener().await;
+        let config = host_config!(max_players: 4);
         let mut host = start_host(listener, config.clone()).await.test_value();
 
-        let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .test_value();
+        let mut client = connect_test_player(addr, "Alpha").await;
 
         let mut host_events = host.take_event_receiver();
         let mut client_events = client.take_event_receiver();
@@ -14912,10 +13694,7 @@ mod tests {
             .await
             .test_value();
 
-        let mut client_beta =
-            connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
-                .await
-                .test_value();
+        let mut client_beta = connect_test_player(addr, "Beta").await;
         let mut client_beta_events = client_beta.take_event_receiver();
         activate_joined_client(&host, &mut host_events, client_beta.client_id()).await;
 
@@ -14935,21 +13714,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_continues_ready_after_client_disconnect() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
-        let mut host = start_host(
-            listener,
-            HostConfig {
-                max_players: 4,
-                ..Default::default()
-            },
-        )
-        .await
-        .test_value();
-
-        let client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+        let (addr, listener) = bind_test_listener().await;
+        let mut host = start_host(listener, host_config!(max_players: 4))
             .await
             .test_value();
+
+        let client = connect_test_player(addr, "Alpha").await;
 
         let mut host_events = host.take_event_receiver();
         activate_joined_client(&host, &mut host_events, client.client_id()).await;
@@ -14986,11 +13756,7 @@ mod tests {
         let client_id = client.client_id();
         activate_joined_client(&host, &mut host_events, client_id).await;
 
-        let running = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let running = NetworkStatus::new(NETWORK_STATE_GO, 1, 0);
         host.change_status(running).await.test_value();
         loop {
             match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
@@ -15075,23 +13841,12 @@ mod tests {
 
     #[test]
     fn unreached_pause_disconnect_retry_waits_for_runtime_local_reach() {
-        let pause = NetworkStatus {
-            state: NETWORK_STATE_PAUSE,
-            control_mode: 1,
-            target_tick: 12,
-        };
-        let mut barrier = StatusBarrier::stable(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 3,
-        });
+        let pause = NetworkStatus::new(NETWORK_STATE_PAUSE, 1, 12);
+        let mut barrier = StatusBarrier::stable(NetworkStatus::new(NETWORK_STATE_GO, 1, 3));
         barrier.set_remote_state(7, RemoteBarrierState::Ready);
         barrier.change_status(pause);
 
-        let retargeted = NetworkStatus {
-            target_tick: 4,
-            ..pause
-        };
+        let retargeted = pause.with_target_tick(4);
         assert_eq!(
             retry_unreached_status_after_disconnect(&mut barrier, 4),
             vec![
@@ -15124,22 +13879,11 @@ mod tests {
 
     #[test]
     fn initial_go_disconnect_retargets_but_does_not_reach_before_game_initialization() {
-        let initial_go = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 12,
-        };
-        let mut barrier = StatusBarrier::stable(NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: -1,
-        });
+        let initial_go = NetworkStatus::new(NETWORK_STATE_GO, 1, 12);
+        let mut barrier = StatusBarrier::stable(NetworkStatus::new(NETWORK_STATE_LOBBY, 0, -1));
         barrier.change_status(initial_go);
 
-        let retargeted = NetworkStatus {
-            target_tick: 4,
-            ..initial_go
-        };
+        let retargeted = initial_go.with_target_tick(4);
         assert_eq!(
             retry_unreached_status_after_disconnect(&mut barrier, 4),
             vec![
@@ -15192,11 +13936,7 @@ mod tests {
         let mut beta_events = beta.take_event_receiver();
         activate_joined_client(&host, &mut host_events, beta_id).await;
 
-        let running = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let running = NetworkStatus::new(NETWORK_STATE_GO, 1, 0);
         host.change_status(running).await.test_value();
         for events in [&mut alpha_events, &mut beta_events] {
             loop {
@@ -15237,10 +13977,7 @@ mod tests {
         assert_eq!(ready.tick(), 0);
         assert_eq!(control_commands(&ready), vec![0xA0, 0xB0, 0xC0]);
 
-        let unreachable = NetworkStatus {
-            target_tick: 2,
-            ..running
-        };
+        let unreachable = running.with_target_tick(2);
         host.change_status(unreachable).await.test_value();
         for events in [&mut alpha_events, &mut beta_events] {
             loop {
@@ -15283,10 +14020,7 @@ mod tests {
             }
         }
 
-        let retargeted = NetworkStatus {
-            target_tick: 1,
-            ..unreachable
-        };
+        let retargeted = unreachable.with_target_tick(1);
         loop {
             match timeout(EVENT_WAIT, beta_events.recv()).await.test_value() {
                 Some(ClientEvent::Status(status)) if status == retargeted => break,
@@ -15411,22 +14145,18 @@ mod tests {
         let stream = TcpStream::connect(addr).await.test_value();
         let mut failed = crate::ControlTransport::new(stream);
         let _ = failed.read_message().await.test_value();
-        let name = clonk_engine::LegacyCString::from_bytes(b"HalfJoin".to_vec()).test_value();
+        let name = c4(b"HalfJoin");
         failed
-            .send_message(ControlMessage::ConnectionRequest(
-                crate::ConnectionRequest {
-                    core: clonk_engine::ClientCoreControlData {
-                        client_id: -1,
-                        name: name.clone(),
-                        nick: name,
-                        ..Default::default()
-                    },
-                    build: CURRENT_GAME_BUILD,
-                    password: clonk_engine::LegacyCString::default(),
-                    connection_id: 77,
-                    port_protocol: false,
+            .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                clonk_engine::ClientCoreControlData {
+                    client_id: -1,
+                    name: name.clone(),
+                    nick: name,
+                    ..Default::default()
                 },
-            ))
+                77,
+                false,
+            )))
             .await
             .test_value();
         loop {
@@ -15491,11 +14221,7 @@ mod tests {
         let mut witness_events = witness.take_event_receiver();
         activate_joined_client(&host, &mut host_events, witness_id).await;
 
-        let running = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let running = NetworkStatus::new(NETWORK_STATE_GO, 1, 0);
         host.change_status(running).await.test_value();
         loop {
             match timeout(EVENT_WAIT, witness_events.recv())
@@ -15533,10 +14259,7 @@ mod tests {
         assert_eq!(ready.tick(), 0);
         assert_eq!(control_commands(&ready), vec![0xA0, 0xB0]);
 
-        let unreachable = NetworkStatus {
-            target_tick: 2,
-            ..running
-        };
+        let unreachable = running.with_target_tick(2);
         host.change_status(unreachable).await.test_value();
         loop {
             match timeout(EVENT_WAIT, witness_events.recv())
@@ -15570,22 +14293,18 @@ mod tests {
             failed.read_message().await.unwrap(),
             ControlMessage::ConnectionRequest(_)
         ));
-        let name = clonk_engine::LegacyCString::from_bytes(b"HalfJoin".to_vec()).test_value();
+        let name = c4(b"HalfJoin");
         failed
-            .send_message(ControlMessage::ConnectionRequest(
-                crate::ConnectionRequest {
-                    core: clonk_engine::ClientCoreControlData {
-                        client_id: -1,
-                        name: name.clone(),
-                        nick: name,
-                        ..Default::default()
-                    },
-                    build: CURRENT_GAME_BUILD,
-                    password: clonk_engine::LegacyCString::default(),
-                    connection_id: 77,
-                    port_protocol: false,
+            .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                clonk_engine::ClientCoreControlData {
+                    client_id: -1,
+                    name: name.clone(),
+                    nick: name,
+                    ..Default::default()
                 },
-            ))
+                77,
+                false,
+            )))
             .await
             .test_value();
         loop {
@@ -15622,10 +14341,7 @@ mod tests {
         };
         drop(failed);
 
-        let retargeted = NetworkStatus {
-            target_tick: 1,
-            ..unreachable
-        };
+        let retargeted = unreachable.with_target_tick(1);
         loop {
             match timeout(EVENT_WAIT, witness_events.recv())
                 .await
@@ -15724,24 +14440,13 @@ mod tests {
             secondary.read_message().await.unwrap(),
             ControlMessage::ConnectionRequest(_)
         ));
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
+        let name = c4(b"Alice");
         secondary
-            .send_message(ControlMessage::ConnectionRequest(
-                crate::ConnectionRequest {
-                    core: clonk_engine::ClientCoreControlData {
-                        client_id: i32::try_from(canonical_id).unwrap(),
-                        activated: true,
-                        observer: false,
-                        name: name.clone(),
-                        nick: name,
-                        lobby_ready: true,
-                    },
-                    build: CURRENT_GAME_BUILD,
-                    password: clonk_engine::LegacyCString::default(),
-                    connection_id: 29,
-                    port_protocol: false,
-                },
-            ))
+            .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                test_client_core(i32::try_from(canonical_id).unwrap(), name, true),
+                29,
+                false,
+            )))
             .await
             .test_value();
         loop {
@@ -15849,19 +14554,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn new_client_starts_at_fresh_dynamic_tick_without_old_backlog() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
-        let addr = listener.local_addr().test_value();
-        let config = HostConfig {
-            max_players: 4,
-            ..Default::default()
-        };
+        let (addr, listener) = bind_test_listener().await;
+        let config = host_config!(max_players: 4);
         let mut host = start_host(listener, config.clone()).await.test_value();
 
         let mut host_events = host.take_event_receiver();
-        let client_alpha =
-            connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-                .await
-                .test_value();
+        let client_alpha = connect_test_player(addr, "Alpha").await;
         activate_joined_client(&host, &mut host_events, client_alpha.client_id()).await;
 
         submit_control_pair(&mut host, &client_alpha, 0, 0xA1, 0xB2).await;
@@ -15881,10 +14579,7 @@ mod tests {
             .await
             .test_value();
 
-        let mut client_beta =
-            connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
-                .await
-                .test_value();
+        let mut client_beta = connect_test_player(addr, "Beta").await;
         let mut beta_events = client_beta.take_event_receiver();
         assert!(timeout(Duration::from_millis(50), beta_events.recv())
             .await
@@ -15998,11 +14693,7 @@ mod tests {
         let (host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
             start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 1,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_GO, 1, 1);
 
         host_transport
             .send_message(ControlMessage::Status(status))
@@ -16101,11 +14792,7 @@ mod tests {
         let (host_stream, command_tx, mut event_rx, shutdown_tx, client_loop) =
             start_test_client_loop_with_state(512, 8, 8, BTreeMap::new(), resource_state);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let running = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let running = NetworkStatus::new(NETWORK_STATE_GO, 1, 0);
 
         host_transport
             .send_message(ControlMessage::Status(running))
@@ -16225,13 +14912,11 @@ mod tests {
         let mut host_transport = crate::ControlTransport::new(host_stream);
 
         host_transport
-            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-                ok: false,
-                message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
-                    .unwrap(),
-                wrong_password: false,
-                port_protocol: false,
-            }))
+            .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                false,
+                c4(b"removing client"),
+                false,
+            )))
             .await
             .test_value();
 
@@ -16240,10 +14925,7 @@ mod tests {
             Some(ClientEvent::Disconnected { reason: Some(reason) })
                 if reason == "removing client"
         ));
-        timeout(EVENT_WAIT, client_loop)
-            .await
-            .test_value()
-            .test_value();
+        await_test(client_loop).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16256,12 +14938,11 @@ mod tests {
         let mut host_transport = crate::ControlTransport::new(host_stream);
 
         host_transport
-            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-                ok: true,
-                message: clonk_engine::LegacyCString::from_bytes(b"duplicate".to_vec()).unwrap(),
-                wrong_password: false,
-                port_protocol: false,
-            }))
+            .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                true,
+                c4(b"duplicate"),
+                false,
+            )))
             .await
             .test_value();
 
@@ -16280,32 +14961,15 @@ mod tests {
         // not another disconnect when that close becomes EOF
         // (src/C4Network2Client.cpp:104-119,457-492).
         let (host_stream, client_stream) = duplex(128);
-        let (_outbound_tx, outbound_rx) = HostOutboundSender::channel();
-        let retire_rx = _outbound_tx.subscribe_retire();
-        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(
-            ClientTask {
-                local_connection_id: 3,
-                remote_connection_id: 5,
-                client_id: 7,
-                transport: crate::ControlTransport::new(host_stream),
-                outbound_rx,
-                retire_rx,
-                host_tx,
-                liveness: ConnectionLivenessState::new_accepted_system(),
-            }
-            .run(),
-        );
+        let (_outbound_tx, mut host_rx, task) = start_test_host_route(host_stream, 7);
         let mut client_transport = crate::ControlTransport::new(client_stream);
 
         client_transport
-            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-                ok: false,
-                message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
-                    .unwrap(),
-                wrong_password: false,
-                port_protocol: false,
-            }))
+            .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                false,
+                c4(b"removing client"),
+                false,
+            )))
             .await
             .test_value();
         drop(client_transport);
@@ -16337,28 +15001,9 @@ mod tests {
         // (src/C4Network2IO.cpp:520-570,1379-1396;
         // src/C4Network2.cpp:883-905).
         let (host_stream, client_stream) = duplex(256);
-        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
-        let retire_rx = outbound_tx.subscribe_retire();
-        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(
-            ClientTask {
-                local_connection_id: 3,
-                remote_connection_id: 5,
-                client_id: 7,
-                transport: crate::ControlTransport::new(host_stream),
-                outbound_rx,
-                retire_rx,
-                host_tx,
-                liveness: ConnectionLivenessState::new_accepted_system(),
-            }
-            .run(),
-        );
+        let (outbound_tx, mut host_rx, task) = start_test_host_route(host_stream, 7);
         let mut client_transport = crate::ControlTransport::new(client_stream);
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: -1,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, -1);
 
         outbound_tx
             .send(ControlMessage::Status(status))
@@ -16397,16 +15042,8 @@ mod tests {
         let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
         let retire_rx = outbound_tx.subscribe_retire();
         let (host_tx, mut host_rx) = mpsc::unbounded_channel();
-        let first = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 7,
-        };
-        let second = NetworkStatus {
-            state: NETWORK_STATE_PAUSE,
-            control_mode: 2,
-            target_tick: 8,
-        };
+        let first = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 7);
+        let second = NetworkStatus::new(NETWORK_STATE_PAUSE, 2, 8);
         outbound_tx
             .send(ControlMessage::Status(first))
             .await
@@ -16497,16 +15134,8 @@ mod tests {
             }
             .run(),
         );
-        let first = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 51,
-        };
-        let second = NetworkStatus {
-            state: NETWORK_STATE_PAUSE,
-            control_mode: 1,
-            target_tick: 52,
-        };
+        let first = NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 51);
+        let second = NetworkStatus::new(NETWORK_STATE_PAUSE, 1, 52);
 
         assert!(try_send_host_message(
             &state,
@@ -16670,11 +15299,7 @@ mod tests {
             Some(ClientEvent::LobbyCountdown { packet: received }) if received == packet
         ));
 
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 0, 0);
         host_transport
             .send_message(ControlMessage::Status(status))
             .await
@@ -16724,8 +15349,7 @@ mod tests {
             }
         }
 
-        client.shutdown().await.test_value();
-        host.shutdown().await.test_value();
+        shutdown_test_session(client, host).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16736,10 +15360,7 @@ mod tests {
         let (host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
             start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let packet = ReadyCheckPacket {
-            client_id: 0,
-            data: crate::ReadyCheckData::Request,
-        };
+        let packet = ReadyCheckPacket::new(0, crate::ReadyCheckData::Request);
 
         host_transport
             .send_message(ControlMessage::ReadyCheck(packet))
@@ -16750,11 +15371,7 @@ mod tests {
             Some(ClientEvent::ReadyCheck { packet: received }) if received == packet
         ));
 
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: 0,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 0, 0);
         host_transport
             .send_message(ControlMessage::Status(status))
             .await
@@ -16776,10 +15393,7 @@ mod tests {
         let (host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
             start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let rejected = ReadyCheckPacket {
-            client_id: 1,
-            data: crate::ReadyCheckData::Request,
-        };
+        let rejected = ReadyCheckPacket::new(1, crate::ReadyCheckData::Request);
 
         host_transport
             .send_message(ControlMessage::ReadyCheck(rejected))
@@ -16789,10 +15403,7 @@ mod tests {
             .await
             .is_err());
 
-        let accepted = ReadyCheckPacket {
-            client_id: 1,
-            data: crate::ReadyCheckData::Ready,
-        };
+        let accepted = ReadyCheckPacket::new(1, crate::ReadyCheckData::Ready);
         host_transport
             .send_message(ControlMessage::ReadyCheck(accepted))
             .await
@@ -16811,14 +15422,8 @@ mod tests {
         // Packets buffered until JoinData must still pass through the same
         // HandleReadyCheck host-request validation as live packets
         // (src/C4Network2.cpp:949-953,1625-1646).
-        let rejected = ReadyCheckPacket {
-            client_id: 1,
-            data: crate::ReadyCheckData::Request,
-        };
-        let accepted = ReadyCheckPacket {
-            client_id: 0,
-            data: crate::ReadyCheckData::Request,
-        };
+        let rejected = ReadyCheckPacket::new(1, crate::ReadyCheckData::Request);
+        let accepted = ReadyCheckPacket::new(0, crate::ReadyCheckData::Request);
         let mut resource_state = ClientResourceState::empty();
         resource_state.initial_ready_checks = vec![rejected, accepted];
         let (_host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
@@ -16849,10 +15454,7 @@ mod tests {
         let alpha = connect_test_player(addr, "Alpha").await;
         let mut beta = connect_test_player(addr, "Beta").await;
         let mut beta_events = beta.take_event_receiver();
-        let request = ReadyCheckPacket {
-            client_id: HOST_CLIENT_ID as i32,
-            data: crate::ReadyCheckData::Request,
-        };
+        let request = ReadyCheckPacket::new(HOST_CLIENT_ID as i32, crate::ReadyCheckData::Request);
 
         alpha.submit_ready_check(request).await.test_value();
         while let Ok(Some(event)) = timeout(Duration::from_millis(50), host_events.recv()).await {
@@ -16875,10 +15477,8 @@ mod tests {
             }
         }
 
-        let spoofed_ready = ReadyCheckPacket {
-            client_id: HOST_CLIENT_ID as i32,
-            data: crate::ReadyCheckData::Ready,
-        };
+        let spoofed_ready =
+            ReadyCheckPacket::new(HOST_CLIENT_ID as i32, crate::ReadyCheckData::Ready);
         alpha.submit_ready_check(spoofed_ready).await.test_value();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
@@ -16921,10 +15521,7 @@ mod tests {
         let mut alpha_events = alpha.take_event_receiver();
         let mut beta = connect_test_player(addr, "Beta").await;
         let mut beta_events = beta.take_event_receiver();
-        let relayed = ReadyCheckPacket {
-            client_id: 0,
-            data: crate::ReadyCheckData::Ready,
-        };
+        let relayed = ReadyCheckPacket::new(0, crate::ReadyCheckData::Ready);
 
         alpha.submit_ready_check(relayed).await.test_value();
         loop {
@@ -16975,10 +15572,7 @@ mod tests {
             );
         }
 
-        let local = ReadyCheckPacket {
-            client_id: 0,
-            data: crate::ReadyCheckData::Request,
-        };
+        let local = ReadyCheckPacket::new(0, crate::ReadyCheckData::Request);
         host.submit_ready_check(local).await.test_value();
         for events in [&mut alpha_events, &mut beta_events] {
             loop {
@@ -17010,10 +15604,7 @@ mod tests {
         let mut host_events = host.take_event_receiver();
         let alpha = connect_test_player(addr, "Alpha").await;
         alpha
-            .submit_ready_check(ReadyCheckPacket {
-                client_id: 0,
-                data: crate::ReadyCheckData::Ready,
-            })
+            .submit_ready_check(ReadyCheckPacket::new(0, crate::ReadyCheckData::Ready))
             .await
             .test_value();
         loop {
@@ -17058,7 +15649,7 @@ mod tests {
                 ClientResourceState::empty(),
             );
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let name = clonk_engine::LegacyCString::from_bytes(b"Beta".to_vec()).test_value();
+        let name = c4(b"Beta");
         let direct = encode_control_entry_payload(&EngineControlPacket::ClientJoin(
             clonk_engine::ClientJoinControlData {
                 core: clonk_engine::ClientCoreControlData {
@@ -17125,7 +15716,7 @@ mod tests {
         let remove = encode_control_entry_payload(&EngineControlPacket::ClientRemove(
             clonk_engine::ClientRemoveControlData {
                 client_id: 2,
-                reason: clonk_engine::LegacyCString::from_bytes(b"left".to_vec()).unwrap(),
+                reason: c4(b"left"),
                 by_client: 0,
             },
         ))
@@ -17238,11 +15829,8 @@ mod tests {
             );
         }
 
-        let decentral = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: i32::try_from(live_tick).test_value(),
-        };
+        let decentral =
+            NetworkStatus::new(NETWORK_STATE_GO, 0, i32::try_from(live_tick).test_value());
         host_transport
             .send_message(ControlMessage::StatusAck(decentral))
             .await
@@ -17286,11 +15874,7 @@ mod tests {
     #[test]
     fn central_recovery_cursor_waits_for_the_first_missing_complete_tick() {
         let mut control = ClientControlState::central(42);
-        control.set_status_target(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 43,
-        });
+        control.set_status_target(NetworkStatus::new(NETWORK_STATE_GO, 1, 43));
         assert_eq!(control.recovery_tick(), Some(42));
 
         assert_eq!(
@@ -17316,18 +15900,10 @@ mod tests {
     #[test]
     fn client_recovery_target_exists_only_while_chasing_go_or_pause() {
         let mut control = ClientControlState::central(0);
-        control.set_status_target(NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 0,
-        });
+        control.set_status_target(NetworkStatus::new(NETWORK_STATE_LOBBY, 1, 0));
         assert_eq!(control.recovery_tick(), None);
 
-        control.set_status_target(NetworkStatus {
-            state: NETWORK_STATE_PAUSE,
-            control_mode: 1,
-            target_tick: 0,
-        });
+        control.set_status_target(NetworkStatus::new(NETWORK_STATE_PAUSE, 1, 0));
         assert_eq!(control.recovery_tick(), Some(0));
         control.clear_target();
         assert_eq!(control.recovery_tick(), None);
@@ -17339,11 +15915,7 @@ mod tests {
         control.register(0).test_value();
         control.register(1).test_value();
         control.change_mode(0, 0).test_value();
-        control.set_status_target(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: 1,
-        });
+        control.set_status_target(NetworkStatus::new(NETWORK_STATE_GO, 0, 1));
 
         assert!(control
             .ingest_contribution(legacy_packet(0, 1, 0x11))
@@ -17363,11 +15935,7 @@ mod tests {
         control.register(0).test_value();
         control.register(1).test_value();
         control.change_mode(0, 0).test_value();
-        control.set_status_target(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: 1,
-        });
+        control.set_status_target(NetworkStatus::new(NETWORK_STATE_GO, 0, 1));
         assert!(control
             .ingest_contribution(legacy_packet(1, 0, 0x11))
             .unwrap()
@@ -17389,11 +15957,9 @@ mod tests {
         let mut resource_state = ClientResourceState::empty();
         resource_state.catalog.set_local_client_id(1);
         resource_state.control.register(1).test_value();
-        resource_state.control.set_status_target(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        });
+        resource_state
+            .control
+            .set_status_target(NetworkStatus::new(NETWORK_STATE_GO, 1, 0));
         let mut backlog = ControlBacklog::new(8);
 
         assert_eq!(
@@ -17511,11 +16077,7 @@ mod tests {
         let (host_stream, command_tx, mut event_rx, shutdown_tx, client_handle) =
             start_test_client_loop(2048, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let decentral = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: 0,
-        };
+        let decentral = NetworkStatus::new(NETWORK_STATE_GO, 0, 0);
 
         host_transport
             .send_message(ControlMessage::StatusAck(decentral))
@@ -17527,7 +16089,7 @@ mod tests {
         ));
 
         for (client_id, name) in [(0, b"Host".as_slice()), (1, b"Local".as_slice())] {
-            let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value();
+            let name = c4(name);
             let join = EngineControlPacket::ClientJoin(clonk_engine::ClientJoinControlData {
                 core: clonk_engine::ClientCoreControlData {
                     client_id,
@@ -17626,11 +16188,7 @@ mod tests {
         let (host_stream, _command_tx, mut event_rx, shutdown_tx, client_handle) =
             start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let central = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 5,
-        };
+        let central = NetworkStatus::new(NETWORK_STATE_GO, 1, 5);
         let complete = legacy_packet(BROADCAST_CLIENT_ID, 5, 0x44);
 
         host_transport
@@ -17708,12 +16266,12 @@ mod tests {
             }
         }
 
-        let update = ClientUpdateControlData {
-            update_type: CLIENT_UPDATE_ACTIVATE,
-            client_id: i32::try_from(client_id).test_value(),
-            data: 1,
-            by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
-        };
+        let update = ClientUpdateControlData::new(
+            CLIENT_UPDATE_ACTIVATE,
+            i32::try_from(client_id).test_value(),
+            1,
+            i32::try_from(HOST_CLIENT_ID).test_value(),
+        );
         host.submit_packet(
             ControlDelivery::Sync,
             encode_control_entry_payload(&EngineControlPacket::ClientUpdate(update.clone()))
@@ -17744,17 +16302,16 @@ mod tests {
     }
 
     fn legacy_packet(client_id: ClientId, tick: Tick, command: i32) -> ControlPacket {
-        encode_control_packet(&LegacyControlFrame {
+        encode_control_packet(&legacy_frame(
             client_id,
             tick,
-            timestamp_ms: 0,
-            controls: vec![EngineControlPacket::PlayerControl(PlayerControlData {
+            vec![EngineControlPacket::PlayerControl(PlayerControlData {
                 player: i32::try_from(client_id).unwrap_or(i32::MAX),
                 command,
                 data: command,
                 by_client: i32::try_from(client_id).unwrap_or(i32::MAX),
             })],
-        })
+        ))
         .test_value()
     }
 
@@ -17861,21 +16418,8 @@ mod tests {
     ) -> (crate::ControlTransport<TcpStream>, ClientId) {
         let stream = TcpStream::connect(address).await.test_value();
         let mut transport = crate::ControlTransport::new(stream);
-        let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value();
-        let request = crate::ConnectionRequest {
-            core: clonk_engine::ClientCoreControlData {
-                client_id: -1,
-                activated: true,
-                observer: false,
-                name: name.clone(),
-                nick: name,
-                lobby_ready: false,
-            },
-            build: CURRENT_GAME_BUILD,
-            password: clonk_engine::LegacyCString::default(),
-            connection_id: 0,
-            port_protocol: false,
-        };
+        let name = c4(name);
+        let request = test_connection_request(test_client_core(-1, name, false), 0, false);
         let handshake = run_client_connection_handshake(&mut transport, request)
             .await
             .test_value();
@@ -17895,24 +16439,13 @@ mod tests {
             transport.read_message().await.unwrap(),
             ControlMessage::ConnectionRequest(_)
         ));
-        let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value();
+        let name = c4(name);
         transport
-            .send_message(ControlMessage::ConnectionRequest(
-                crate::ConnectionRequest {
-                    core: clonk_engine::ClientCoreControlData {
-                        client_id: i32::try_from(client_id).unwrap(),
-                        activated: true,
-                        observer: false,
-                        name: name.clone(),
-                        nick: name,
-                        lobby_ready: false,
-                    },
-                    build: CURRENT_GAME_BUILD,
-                    password: clonk_engine::LegacyCString::default(),
-                    connection_id: remote_connection_id,
-                    port_protocol: false,
-                },
-            ))
+            .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                test_client_core(i32::try_from(client_id).unwrap(), name, false),
+                remote_connection_id,
+                false,
+            )))
             .await
             .test_value();
         loop {
@@ -17928,13 +16461,11 @@ mod tests {
             }
         }
         transport
-            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
-                ok: true,
-                message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
-                    .unwrap(),
-                wrong_password: false,
-                port_protocol: false,
-            }))
+            .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                true,
+                c4(b"connection accepted"),
+                false,
+            )))
             .await
             .test_value();
         transport
@@ -17949,11 +16480,7 @@ mod tests {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         loop {
-            match timeout(EVENT_WAIT, transport.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(transport.read_message()).await {
                 ControlMessage::ConnectionRequest(_) => break,
                 ControlMessage::Ping(ping) => {
                     transport
@@ -17964,32 +16491,24 @@ mod tests {
                 other => panic!("expected host connection request, got {other:?}"),
             }
         }
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
+        let name = c4(b"Alice");
         transport
-            .send_message(ControlMessage::ConnectionRequest(
-                crate::ConnectionRequest {
-                    core: clonk_engine::ClientCoreControlData {
-                        client_id,
-                        activated: true,
-                        observer: false,
-                        name: name.clone(),
-                        nick: name,
-                        lobby_ready: true,
-                    },
-                    build: CURRENT_GAME_BUILD,
-                    password: clonk_engine::LegacyCString::default(),
-                    connection_id: remote_connection_id,
-                    port_protocol: false,
+            .send_message(ControlMessage::ConnectionRequest(test_connection_request(
+                clonk_engine::ClientCoreControlData {
+                    client_id,
+                    activated: true,
+                    observer: false,
+                    name: name.clone(),
+                    nick: name,
+                    lobby_ready: true,
                 },
-            ))
+                remote_connection_id,
+                false,
+            )))
             .await
             .test_value();
         loop {
-            match timeout(EVENT_WAIT, transport.read_message())
-                .await
-                .test_value()
-                .test_value()
-            {
+            match await_test(transport.read_message()).await {
                 ControlMessage::ConnectionReply(reply) => return reply,
                 ControlMessage::Ping(ping) => {
                     transport

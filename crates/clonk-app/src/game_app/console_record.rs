@@ -1091,10 +1091,7 @@ impl GameApp {
             .initial_network_team_metadata()
             .map(clonk_network::join_team_list_snapshot)
             .map_err(|error| error.to_string())?;
-        let empty_players = clonk_network::PlayerInfoListSnapshot {
-            last_player_id: 0,
-            clients: Vec::new(),
-        };
+        let empty_players = clonk_network::PlayerInfoListSnapshot::default();
         let legacy_text = |text: &[u8]| {
             LegacyCString::from_bytes(text.iter().copied().take_while(|byte| *byte != 0).collect())
                 .unwrap_or_default()
@@ -1105,7 +1102,6 @@ impl GameApp {
             .map(|snapshot| snapshot.parameters.clone())
             .unwrap_or_else(|| clonk_network::JoinGameParametersEnvelope {
                 random_seed: (self.engine.random_seed() as u32) as i32,
-                startup_player_count: 0,
                 max_players: self.engine.max_players().unwrap_or(defaults.max_players),
                 use_fair_crew: self.engine.use_fair_crew(),
                 fair_crew_forced: self.engine.fair_crew_forced(),
@@ -1119,12 +1115,11 @@ impl GameApp {
                 league: legacy_text(&self.network_league_name),
                 league_address: LegacyCString::default(),
                 title: legacy_text(scenario.title.as_bytes()),
-                scenario: clonk_engine::NetworkResourceCore::default(),
-                game_resources: Vec::new(),
                 player_infos: empty_players.clone(),
                 restore_player_infos: empty_players,
                 teams,
                 clients: clonk_network::JoinClientRegistrySnapshot::new(Vec::new()),
+                ..Default::default()
             });
         parameters.random_seed = (self.engine.random_seed() as u32) as i32;
         parameters.startup_player_count = self.engine.startup_player_count().unwrap_or_else(|| {

@@ -4,17 +4,17 @@
 //! target), global functions are not appended (:127), and the appended
 //! script's locals join the target's declarations.
 
-use clonk_script::{Engine, LocalCells, Script, Value};
+use clonk_script::{Engine, LocalCells, Value};
 
 #[test]
 fn appended_functions_override_and_reach_the_original_via_inherited() {
     let mut target = Engine::new();
-    target.add_script(Script::compile("public func Probe() { return 1; }").expect("compiles"));
+    crate::support::load_script(&mut target, "public func Probe() { return 1; }");
 
     let mut append = Engine::new();
-    append.add_script(
-        Script::compile("#strict\npublic func Probe() { return 10 + inherited(); }")
-            .expect("compiles"),
+    crate::support::load_script(
+        &mut append,
+        "#strict\npublic func Probe() { return 10 + inherited(); }",
     );
 
     target.append_overrides_from(&append);
@@ -34,19 +34,17 @@ fn appended_function_reaches_the_targets_own_func_past_its_global_twin() {
     // named definition-scope function. Rust flattens both declarations into
     // one chain, so the appended function must skip the global node.
     let mut target = Engine::new();
-    target.add_script(
-        Script::compile(
-            "#strict\n\
-             public func Probe() { return 1; }\n\
-             global func Probe() { return 1000; }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut target,
+        "#strict\n\
+     public func Probe() { return 1; }\n\
+     global func Probe() { return 1000; }",
     );
 
     let mut append = Engine::new();
-    append.add_script(
-        Script::compile("#strict\npublic func Probe() { return 100 + inherited(); }")
-            .expect("compiles"),
+    crate::support::load_script(
+        &mut append,
+        "#strict\npublic func Probe() { return 100 + inherited(); }",
     );
 
     target.append_overrides_from(&append);
@@ -60,15 +58,13 @@ fn appended_function_reaches_the_targets_own_func_past_its_global_twin() {
 #[test]
 fn appended_scripts_bring_new_functions_but_not_globals() {
     let mut target = Engine::new();
-    target.add_script(Script::compile("public func Own() { return 1; }").expect("compiles"));
+    crate::support::load_script(&mut target, "public func Own() { return 1; }");
 
     let mut append = Engine::new();
-    append.add_script(
-        Script::compile(
-            "public func SetAI(name, interval) { return 7; }\n\
-             global func Helper() { return 9; }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut append,
+        "public func SetAI(name, interval) { return 7; }\n\
+     global func Helper() { return 9; }",
     );
 
     target.append_overrides_from(&append);
@@ -85,15 +81,13 @@ fn appended_scripts_bring_new_functions_but_not_globals() {
 #[test]
 fn appended_locals_resolve_on_the_target() {
     let mut target = Engine::new();
-    target.add_script(Script::compile("// empty\n").expect("compiles"));
+    crate::support::load_script(&mut target, "// empty\n");
 
     let mut append = Engine::new();
-    append.add_script(
-        Script::compile(
-            "local iState;\n\
-             public func Bump() { iState = iState + 1; return iState; }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut append,
+        "local iState;\n\
+     public func Bump() { iState = iState + 1; return iState; }",
     );
 
     target.append_overrides_from(&append);
@@ -113,15 +107,13 @@ fn direct_exec_uses_target_strictness_while_eval_keeps_appended_origin() {
     // original script's strictness (C4Object.cpp:3757-3761;
     // C4Script.cpp:4501-4513).
     let mut target = Engine::new();
-    target.add_script(Script::compile("func Own() { return 1; }").expect("target compiles"));
+    crate::support::load_script(&mut target, "func Own() { return 1; }");
 
     let mut append = Engine::new();
-    append.add_script(
-        Script::compile(
-            "#strict 3\n\
-             func AppendedEval() { return eval(\"1 == true\"); }",
-        )
-        .expect("append compiles"),
+    crate::support::load_script(
+        &mut append,
+        "#strict 3\n\
+     func AppendedEval() { return eval(\"1 == true\"); }",
     );
     target.append_overrides_from(&append);
 

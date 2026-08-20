@@ -1200,11 +1200,7 @@ fn finalize_initial_host_player_info(
     );
     let mut control = player_allocator
         .admit_request(
-            PlayerInfoUpdateRequest {
-                client_id: 0,
-                flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                players,
-            },
+            PlayerInfoUpdateRequest::new(0, CLIENT_PLAYER_INFO_FLAG_INITIAL, players),
             max_players,
         )
         .ok_or(PrepareHostBootstrapError::LocalPlayerAdmissionRejected)?;
@@ -1540,12 +1536,8 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         nick: host_nick,
         lobby_ready: false,
     };
-    let dynamic_host_player_info_control = PlayerInfoControlData {
-        client_id: 0,
-        flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-        players: Vec::new(),
-        by_client: 0,
-    };
+    let dynamic_host_player_info_control =
+        PlayerInfoControlData::new(0, CLIENT_PLAYER_INFO_FLAG_INITIAL, Vec::new(), 0);
     let initial_host_players = PlayerInfoListSnapshot {
         last_player_id: 0,
         clients: vec![ClientPlayerInfosSnapshot {
@@ -1556,25 +1548,17 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     };
     let mut parameters = JoinGameParametersEnvelope {
         random_seed: spec.random_seed_unix_seconds as i32,
-        startup_player_count: 0,
         max_players: 0,
         use_fair_crew: spec.config.fair_crew,
-        fair_crew_forced: false,
         fair_crew_strength: spec.config.fair_crew_strength,
         allow_debug: true,
         is_network_game: true,
         control_rate: spec.config.control_rate,
-        auto_frame_skip: spec.config.auto_frame_skip,
-        rules: Vec::new(),
-        goals: Vec::new(),
-        league: LegacyCString::default(),
-        // Parameters.txt cannot compile LeagueAddress while a Scenario is
+        auto_frame_skip: spec.config.auto_frame_skip, // Parameters.txt cannot compile LeagueAddress while a Scenario is
         // supplied. Configured league signup installs it only after the
         // initial dynamic has been created.
         league_address: LegacyCString::default(),
         title: scenario_title_native,
-        scenario: NetworkResourceCore::default(),
-        game_resources: Vec::new(),
         player_infos: initial_host_players,
         restore_player_infos: restore_player_infos.clone(),
         teams: empty_team_snapshot(),
@@ -1582,6 +1566,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             clients: vec![local_core.clone()],
             local_client_id: Some(0),
         },
+        ..Default::default()
     };
     let scenario_defaults = fill_scenario_derived_join_parameters(
         &mut parameters,
@@ -1823,12 +1808,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         pending_initial_league_players,
     ) = if defer_league_players {
         (
-            PlayerInfoControlData {
-                client_id: 0,
-                flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                players: Vec::new(),
-                by_client: 0,
-            },
+            PlayerInfoControlData::new(0, CLIENT_PLAYER_INFO_FLAG_INITIAL, Vec::new(), 0),
             team_metadata.clone(),
             restore_player_infos.last_player_id,
             Some(PendingInitialLeaguePlayers {
@@ -1887,11 +1867,11 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         async_max_wait_frames: spec.config.async_max_wait,
         local_core,
         group_maker,
-        initial_status: NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: spec.config.control_mode,
-            target_tick: game.control_tick,
-        },
+        initial_status: NetworkStatus::new(
+            NETWORK_STATE_LOBBY,
+            spec.config.control_mode,
+            game.control_tick,
+        ),
         password: legacy_string(spec.network_password),
         allow_join: false,
         enable_upnp: spec.config.enable_upnp,
@@ -2304,10 +2284,7 @@ fn load_save_player_infos_entry(
 }
 
 fn empty_player_info_list() -> PlayerInfoListSnapshot {
-    PlayerInfoListSnapshot {
-        last_player_id: 0,
-        clients: Vec::new(),
-    }
+    PlayerInfoListSnapshot::default()
 }
 
 /// `C4PlayerInfoList::LoadFromGameText` compatibility for savegames created
@@ -2327,10 +2304,7 @@ fn load_old_style_restore_player_infos(
         .windows(b"[PlayerFiles]".len())
         .position(|window| window == b"[PlayerFiles]")
     else {
-        return PlayerInfoListSnapshot {
-            last_player_id: 0,
-            clients: Vec::new(),
-        };
+        return PlayerInfoListSnapshot::default();
     };
 
     let mut position = marker + b"[PlayerFiles]".len();
@@ -2706,20 +2680,7 @@ fn legacy_c4_string(value: &str) -> LegacyCString {
 }
 
 fn empty_team_snapshot() -> JoinTeamListSnapshot {
-    JoinTeamListSnapshot {
-        active: 0,
-        custom: 0,
-        allow_hostility_change: 0,
-        allow_team_switch: 0,
-        auto_generate_teams: 0,
-        last_team_id: 0,
-        team_distribution: 0,
-        team_colors: 0,
-        max_script_players: 0,
-        script_player_names: LegacyCString::default(),
-        random_team_count: 0,
-        teams: Vec::new(),
-    }
+    JoinTeamListSnapshot::default()
 }
 
 #[cfg(test)]

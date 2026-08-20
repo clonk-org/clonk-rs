@@ -87,12 +87,12 @@ pub fn about_layout(w: i32, h: i32) -> AboutLayout {
     let margin_x = if w < 500 { 2 } else { w / 50 };
     let margin_y = if h < 320 { 2 } else { h * 2 / 75 };
     let margin_top = 50 + margin_y;
-    let client = IntRect {
-        x: margin_x,
-        y: margin_top,
-        w: w - 2 * margin_x,
-        h: h - margin_top - margin_y,
-    };
+    let client = IntRect::new(
+        margin_x,
+        margin_top,
+        w - 2 * margin_x,
+        h - margin_top - margin_y,
+    );
     let (cw, ch) = (client.w, client.h);
 
     // Title label: ACenter at clientWdt/2, vertically centered in the title
@@ -118,12 +118,12 @@ pub fn about_layout(w: i32, h: i32) -> AboutLayout {
     let button_y = client.y + buttons_area_y + (buttons_area_h - BUTTON_HGT) / 2;
     let grid_cell = |sect: i32, sects: i32| -> IntRect {
         let cell_w = cw / sects;
-        IntRect {
-            x: client.x + sect * cell_w + (cell_w - button_w) / 2,
-            y: button_y,
-            w: button_w,
-            h: BUTTON_HGT,
-        }
+        IntRect::new(
+            client.x + sect * cell_w + (cell_w - button_w) / 2,
+            button_y,
+            button_w,
+            BUTTON_HGT,
+        )
     };
     let buttons = [grid_cell(0, 3), grid_cell(2, 4), grid_cell(3, 4)];
 
@@ -134,12 +134,12 @@ pub fn about_layout(w: i32, h: i32) -> AboutLayout {
     let section = |x: i32, y: i32, h: i32| -> SectionLayout {
         SectionLayout {
             caption_pos: (client.x + x, client.y + y),
-            textbox: IntRect {
-                x: client.x + x,
-                y: client.y + y + TITLE_LINE_HEIGHT,
-                w: col_w,
-                h: h - TITLE_LINE_HEIGHT,
-            },
+            textbox: IntRect::new(
+                client.x + x,
+                client.y + y + TITLE_LINE_HEIGHT,
+                col_w,
+                h - TITLE_LINE_HEIGHT,
+            ),
         }
     };
     let col2_top = dev_h / 2;
@@ -162,29 +162,24 @@ pub fn about_layout(w: i32, h: i32) -> AboutLayout {
     // LicenseWindow(caMain.GetAll()) followed by ComponentAligner(client,
     // 0, 10): the list consumes one fifth of the width and the TextWindow
     // receives the remainder (C4StartupAboutDlg.cpp:190-197,310-311).
-    let license_window = IntRect {
-        x: client.x,
-        y: client.y,
-        w: cw,
-        h: dev_h,
-    };
+    let license_window = IntRect::new(client.x, client.y, cw, dev_h);
     let license_inner_y = license_window.y + 10;
     let license_inner_h = license_window.h - 20;
     let license_tabs_w = license_window.w / 5;
     let licenses = LicensePageLayout {
         window: license_window,
-        tabs: IntRect {
-            x: license_window.x,
-            y: license_inner_y,
-            w: license_tabs_w,
-            h: license_inner_h,
-        },
-        text: IntRect {
-            x: license_window.x + license_tabs_w,
-            y: license_inner_y,
-            w: license_window.w - license_tabs_w,
-            h: license_inner_h,
-        },
+        tabs: IntRect::new(
+            license_window.x,
+            license_inner_y,
+            license_tabs_w,
+            license_inner_h,
+        ),
+        text: IntRect::new(
+            license_window.x + license_tabs_w,
+            license_inner_y,
+            license_window.w - license_tabs_w,
+            license_inner_h,
+        ),
     };
 
     AboutLayout {
@@ -1326,12 +1321,12 @@ impl AboutScrollMetrics {
 fn credit_viewport(section: &SectionLayout) -> IntRect {
     // CustomMarginTextWindow<0,8,0,8>; its ScrollWindow always reserves the
     // 16px scrollbar width even while the auto-hidden bar is invisible.
-    IntRect {
-        x: section.textbox.x,
-        y: section.textbox.y + 8,
-        w: (section.textbox.w - SCROLL_BAR_WDT).max(0),
-        h: (section.textbox.h - 16).max(0),
-    }
+    IntRect::new(
+        section.textbox.x,
+        section.textbox.y + 8,
+        (section.textbox.w - SCROLL_BAR_WDT).max(0),
+        (section.textbox.h - 16).max(0),
+    )
 }
 
 fn credit_scroll_metrics(
@@ -1350,32 +1345,32 @@ fn credit_scroll_metrics(
 
 fn credit_scrollbar(section: &SectionLayout) -> IntRect {
     let viewport = credit_viewport(section);
-    IntRect {
-        x: section.textbox.x + section.textbox.w - SCROLL_BAR_WDT,
-        y: viewport.y,
-        w: SCROLL_BAR_WDT,
-        h: viewport.h,
-    }
+    IntRect::new(
+        section.textbox.x + section.textbox.w - SCROLL_BAR_WDT,
+        viewport.y,
+        SCROLL_BAR_WDT,
+        viewport.h,
+    )
 }
 
 fn license_tabs_viewport(layout: &AboutLayout) -> IntRect {
     let tabs = layout.licenses.tabs;
-    IntRect {
-        x: tabs.x + 3,
-        y: tabs.y + 3,
-        w: (tabs.w - 6 - SCROLL_BAR_WDT).max(0),
-        h: (tabs.h - 6).max(0),
-    }
+    IntRect::new(
+        tabs.x + 3,
+        tabs.y + 3,
+        (tabs.w - 6 - SCROLL_BAR_WDT).max(0),
+        (tabs.h - 6).max(0),
+    )
 }
 
 fn license_tabs_scrollbar(layout: &AboutLayout) -> IntRect {
     let tabs = layout.licenses.tabs;
-    IntRect {
-        x: tabs.x + tabs.w - 3 - SCROLL_BAR_WDT,
-        y: tabs.y + 3,
-        w: SCROLL_BAR_WDT,
-        h: (tabs.h - 6).max(0),
-    }
+    IntRect::new(
+        tabs.x + tabs.w - 3 - SCROLL_BAR_WDT,
+        tabs.y + 3,
+        SCROLL_BAR_WDT,
+        (tabs.h - 6).max(0),
+    )
 }
 
 fn license_tabs_scroll_metrics(layout: &AboutLayout, license_count: usize) -> AboutScrollMetrics {
@@ -1411,22 +1406,22 @@ fn license_text_viewport(layout: &AboutLayout) -> IntRect {
     let text = layout.licenses.text;
     // TextWindow margins L10/T8/R5/B8, followed by the ScrollWindow's
     // reserved scrollbar column.
-    IntRect {
-        x: text.x + 10,
-        y: text.y + 8,
-        w: (text.w - 15 - SCROLL_BAR_WDT).max(0),
-        h: (text.h - 16).max(0),
-    }
+    IntRect::new(
+        text.x + 10,
+        text.y + 8,
+        (text.w - 15 - SCROLL_BAR_WDT).max(0),
+        (text.h - 16).max(0),
+    )
 }
 
 fn license_text_scrollbar(layout: &AboutLayout) -> IntRect {
     let text = layout.licenses.text;
-    IntRect {
-        x: text.x + text.w - 5 - SCROLL_BAR_WDT,
-        y: text.y + 8,
-        w: SCROLL_BAR_WDT,
-        h: (text.h - 16).max(0),
-    }
+    IntRect::new(
+        text.x + text.w - 5 - SCROLL_BAR_WDT,
+        text.y + 8,
+        SCROLL_BAR_WDT,
+        (text.h - 16).max(0),
+    )
 }
 
 fn license_display_title(license: &AboutLicense) -> String {
@@ -2483,19 +2478,9 @@ mod tests {
         state.resize(1280, 720, &fonts);
         let mut layout = about_layout(1280, 720);
 
-        let button_overlap = IntRect {
-            x: 10,
-            y: 10,
-            w: 40,
-            h: 40,
-        };
+        let button_overlap = IntRect::new(10, 10, 40, 40);
         layout.buttons = [button_overlap; 3];
-        layout.licenses.window = IntRect {
-            x: 1_000,
-            y: 1_000,
-            w: 10,
-            h: 10,
-        };
+        layout.licenses.window = IntRect::new(1_000, 1_000, 10, 10);
         state.layout = Some(layout);
         let button_point = GuiPoint::new(20.0, 20.0);
         assert_eq!(
@@ -2503,12 +2488,7 @@ mod tests {
             Some(AboutButton::Licenses)
         );
 
-        let shared_textbox = IntRect {
-            x: 100,
-            y: 1_000,
-            w: 80,
-            h: 40,
-        };
+        let shared_textbox = IntRect::new(100, 1_000, 80, 40);
         layout.sections[0].textbox = shared_textbox;
         layout.sections[1].textbox = shared_textbox;
         state.layout = Some(layout);
@@ -2521,24 +2501,9 @@ mod tests {
             Some(AboutScrollbar::Credit(1))
         );
 
-        layout.licenses.window = IntRect {
-            x: 0,
-            y: 0,
-            w: 100,
-            h: 100,
-        };
-        layout.licenses.tabs = IntRect {
-            x: 7,
-            y: 7,
-            w: 62,
-            h: 26,
-        };
-        layout.licenses.text = IntRect {
-            x: 0,
-            y: 2,
-            w: 71,
-            h: 36,
-        };
+        layout.licenses.window = IntRect::new(0, 0, 100, 100);
+        layout.licenses.tabs = IntRect::new(7, 7, 62, 26);
+        layout.licenses.text = IntRect::new(0, 2, 71, 36);
         state.layout = Some(layout);
         state.page = AboutPage::Licenses;
         state.license_tabs_max_scroll = 25;

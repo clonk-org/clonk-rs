@@ -55,10 +55,7 @@ const LOAD_RTT_SCOPE: &str =
     "native ping and loaded 24-client ReadyCheck fanout are diagnostics; primary RTT is a fresh one-host/one-client post-shutdown application exchange in the same Tokio process over IPv4 loopback";
 
 const fn application_round_trip_packet(client_id: u32) -> clonk_network::ReadyCheckPacket {
-    clonk_network::ReadyCheckPacket {
-        client_id: client_id as i32,
-        data: clonk_network::ReadyCheckData::Ready,
-    }
+    clonk_network::ReadyCheckPacket::new(client_id as i32, clonk_network::ReadyCheckData::Ready)
 }
 
 fn isolated_round_trip_messages(sample_index: usize) -> (clonk_network::ReadyCheckPacket, i32) {
@@ -66,10 +63,10 @@ fn isolated_round_trip_messages(sample_index: usize) -> (clonk_network::ReadyChe
         .map(|index| index.saturating_add(2))
         .unwrap_or(i32::MAX);
     (
-        clonk_network::ReadyCheckPacket {
-            client_id: ISOLATED_RTT_CLIENT_ID as i32,
-            data: clonk_network::ReadyCheckData::Other(token),
-        },
+        clonk_network::ReadyCheckPacket::new(
+            ISOLATED_RTT_CLIENT_ID as i32,
+            clonk_network::ReadyCheckData::Other(token),
+        ),
         token,
     )
 }
@@ -604,16 +601,16 @@ async fn run_harpoonrace_shaped_24_player_load(measurement_seconds: u64, topolog
         wait_for_host_status_ack(&mut host_events, client_id, initial_status).await;
         probe.wait_for_status_ack(initial_status).await;
 
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: client_id as i32,
-            flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![ControlPlayerInfoEntry {
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            client_id as i32,
+            CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![ControlPlayerInfoEntry {
                 name: legacy_string(&player_name),
                 filename: legacy_string(&format!("{player_name}.c4p")),
                 league_progress_data_is_null: false,
                 ..Default::default()
             }],
-        };
+        );
         probe
             .handle
             .submit_player_info_update(request)
@@ -673,11 +670,7 @@ async fn run_harpoonrace_shaped_24_player_load(measurement_seconds: u64, topolog
     };
 
     eprintln!("LC_NETWORK_LOAD_24 phase=go");
-    let running = NetworkStatus {
-        state: NETWORK_STATE_GO,
-        control_mode: 0,
-        target_tick: 0,
-    };
+    let running = NetworkStatus::new(NETWORK_STATE_GO, 0, 0);
     host.begin_go(running, false)
         .await
         .expect("close joins and begin GO");
@@ -1249,12 +1242,12 @@ async fn measure_one_isolated_application_round_trip(
 fn control_contribution(client_id: u32, tick: Tick) -> ControlPacket {
     let controls = (client_id != HOST_CLIENT_ID)
         .then_some({
-            EngineControlPacket::PlayerControl(PlayerControlData {
-                player: client_id as i32,
-                command: (tick % 16) as i32,
-                data: tick as i32,
-                by_client: client_id as i32,
-            })
+            EngineControlPacket::PlayerControl(PlayerControlData::new(
+                client_id as i32,
+                (tick % 16) as i32,
+                tick as i32,
+                client_id as i32,
+            ))
         })
         .into_iter()
         .collect();
@@ -1369,12 +1362,12 @@ async fn activate_client(
     events: &mut mpsc::Receiver<HostEvent>,
     client_id: u32,
 ) {
-    let update = ClientUpdateControlData {
-        update_type: CLIENT_UPDATE_ACTIVATE,
-        client_id: client_id as i32,
-        data: 1,
-        by_client: HOST_CLIENT_ID as i32,
-    };
+    let update = ClientUpdateControlData::new(
+        CLIENT_UPDATE_ACTIVATE,
+        client_id as i32,
+        1,
+        HOST_CLIENT_ID as i32,
+    );
     host.submit_packet(
         ControlDelivery::Sync,
         encode_control_entry_payload(&EngineControlPacket::ClientUpdate(update.clone()))
@@ -1560,15 +1553,14 @@ fn player_info_registry_from_snapshot(
     let mut registry = ControlPlayerInfoRegistry::default();
     registry.replace_snapshot(
         snapshot.last_player_id,
-        snapshot
-            .clients
-            .iter()
-            .map(|client| clonk_engine::PlayerInfoControlData {
-                client_id: client.client_id,
-                flags: client.flags,
-                players: client.players.clone(),
-                by_client: HOST_CLIENT_ID as i32,
-            }),
+        snapshot.clients.iter().map(|client| {
+            clonk_engine::PlayerInfoControlData::new(
+                client.client_id,
+                client.flags,
+                client.players.clone(),
+                HOST_CLIENT_ID as i32,
+            )
+        }),
     );
     registry
 }
@@ -1978,7 +1970,7 @@ fn summarize(samples: &[i64]) -> MetricSummary {
 }
 
 fn legacy_string(value: &str) -> LegacyCString {
-    LegacyCString::from_bytes(value.as_bytes().to_vec()).expect("test string is NUL-free")
+    crate::c4(value.as_bytes())
 }
 
 fn native_control_interval() -> Duration {
@@ -2894,14 +2886,14 @@ fn every_synthetic_client_roster_requires_all_twenty_four_player_infos() {
     let (_, rows) = roster.retained_rows_snapshot();
     roster.replace_snapshot(
         PLAYER_COUNT as i32,
-        rows.into_iter().map(
-            |(client_id, flags, players)| clonk_engine::PlayerInfoControlData {
+        rows.into_iter().map(|(client_id, flags, players)| {
+            clonk_engine::PlayerInfoControlData::new(
                 client_id,
                 flags,
                 players,
-                by_client: HOST_CLIENT_ID as i32,
-            },
-        ),
+                HOST_CLIENT_ID as i32,
+            )
+        }),
     );
     assert!(has_exact_synthetic_roster(&roster));
 }

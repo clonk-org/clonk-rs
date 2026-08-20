@@ -131,8 +131,8 @@ fn bang_nil_coalescing_assignment_short_circuits_before_reference_check() {
 }
 
 // Exact pattern from DYNB line 57: if(!iCount = GetComponent(...))
-crate::support::compile_case!(
-    dynb_line_57_pattern,
+crate::support::compile_cases! {
+    dynb_line_57_pattern:
     r#"
         func Test() {
             var iCount;
@@ -140,32 +140,20 @@ crate::support::compile_case!(
                 return 1;
             }
         }
-    "#,
-);
+    "#;
 
 // Simple: !x = y is C++-valid syntax with a runtime-invalid bool lhs.
-crate::support::compile_case!(
-    not_with_assignment,
-    r#"func Test() { var x; if(!x = 42) return 1; }"#
-);
+    not_with_assignment: r#"func Test() { var x; if(!x = 42) return 1; }"#;
 
 // Precedence preservation: !a + b should still be (!a) + b, not !(a + b)
-crate::support::compile_case!(
-    not_with_addition_preserved,
-    r#"func Test() { var a = 1; var b = 2; return !a + b; }"#
-);
+    not_with_addition_preserved: r#"func Test() { var a = 1; var b = 2; return !a + b; }"#;
 
 // Baseline: !func() should continue to work
-crate::support::compile_case!(
-    not_with_function_call,
-    r#"func Test() { return !GetFlag(); }"#
-);
+    not_with_function_call: r#"func Test() { return !GetFlag(); }"#;
 
 // Control: !(x = y) with explicit parens should work
-crate::support::compile_case!(
-    not_with_parenthesized_assignment,
-    r#"func Test() { var x; if(!(x = 42)) return 1; }"#
-);
+    not_with_parenthesized_assignment: r#"func Test() { var x; if(!(x = 42)) return 1; }"#;
+}
 
 #[test]
 fn increment_not_affected() {
@@ -185,19 +173,12 @@ fn increment_not_affected() {
 }
 
 // Complex RHS: !x = a + b
-crate::support::compile_case!(
-    not_with_complex_assignment,
-    r#"func Test() { var x, a = 1, b = 2; if(!x = a + b) return 1; }"#
-);
+crate::support::compile_cases! {
+    not_with_complex_assignment: r#"func Test() { var x, a = 1, b = 2; if(!x = a + b) return 1; }"#;
 
 // Ensure ~ (bitwise NOT) still has normal precedence with addition
-crate::support::compile_case!(
-    bitwise_not_precedence_preserved,
-    r#"func Test() { var a = 5; return ~a + 1; }"#
-);
+    bitwise_not_precedence_preserved: r#"func Test() { var a = 5; return ~a + 1; }"#;
 
 // Ensure - (unary negate) still has normal precedence with addition
-crate::support::compile_case!(
-    negate_precedence_preserved,
-    r#"func Test() { var a = 5; return -a + 1; }"#
-);
+    negate_precedence_preserved: r#"func Test() { var a = 5; return -a + 1; }"#;
+}

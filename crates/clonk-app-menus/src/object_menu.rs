@@ -4067,6 +4067,28 @@ mod tests {
         )
     }
 
+    fn solid_rgba_image(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
+        ImageData::new(width, height, rgba.repeat((width * height) as usize))
+    }
+
+    fn script_menu_fixture(
+        identifier: &str,
+        name: &str,
+        script: &str,
+    ) -> clonk_engine::ObjectMenuState {
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition(identifier, name, script)
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new(identifier))
+            .expect("menu object spawns");
+        engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu")
+    }
+
     fn engine_script_menu_fixture(style: i32, item_count: usize) -> clonk_engine::ObjectMenuState {
         let script = format!(
             r#"
@@ -4077,17 +4099,7 @@ mod tests {
             }}
             "#
         );
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", &script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let mut menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let mut menu = script_menu_fixture("MENU", "Menu", &script);
         let template = menu.items[0].clone();
         menu.items = (0..item_count)
             .map(|index| {
@@ -4288,41 +4300,10 @@ mod tests {
         crew.crew_member = true;
         objects.insert(0, crew);
         SimulationSnapshot {
-            frame: 0,
-            game_time: 0,
-            game_over: false,
-            round_results: Default::default(),
-            league_name: Vec::new(),
-            player_info_league_progress_data: Default::default(),
-            player_info_league_scores: Default::default(),
-            physics: None,
             objects,
-            render_order: Vec::new(),
-            environment: Default::default(),
-            sky: None,
-            weather_events: Vec::new(),
-            global_effects: Vec::new(),
-            script_globals: Default::default(),
-            particles: Vec::new(),
             players,
-            fow_players: Default::default(),
-            crew_selection: HashMap::new(),
-            crew_roles: HashMap::new(),
-            known_crew_owners: Vec::new(),
-            eliminated_crew_owners: Vec::new(),
-            landscape: None,
             rng: clonk_engine::LcgRng::seed_from_u64(42),
-            surfaces: Vec::new(),
-            hud: Default::default(),
-            controls: Vec::new(),
-            network_packets: Vec::new(),
-            definition_categories: HashMap::new(),
-            definition_closed_containers: Default::default(),
-            definition_lines: HashMap::new(),
-            transfer_zones: Vec::new(),
-            pathfinder_debug: Default::default(),
-            menu_requests: Vec::new(),
-            audio: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -5186,17 +5167,7 @@ mod tests {
             AddMenuItem("Action", "Choose()", MENU, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let menu = script_menu_fixture("MENU", "Menu", script);
         assert_eq!(menu.style, 1);
         assert_eq!(menu.columns, 1);
 
@@ -5375,17 +5346,7 @@ mod tests {
             AddMenuItem("Two", "", NONE, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let mut menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let mut menu = script_menu_fixture("MENU", "Menu", script);
         menu.selection = 0;
         menu.caption = "{{CAPTION}} {{DUPLICATE}}".to_string();
         menu.items[0].caption = "{{{TITLE}}} {{DUPLICATE}}".to_string();
@@ -5420,17 +5381,7 @@ mod tests {
             AddMenuItem("{{SBTR:8}} $MsgBuyIndian$", "BuyIndian", NONE, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let mut menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let mut menu = script_menu_fixture("MENU", "Menu", script);
         menu.selection = -1;
 
         let fallback = clonk_graphics::BitmapFont::new();
@@ -5529,17 +5480,7 @@ mod tests {
                         "Wrapped information shown beside the picture");
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let menu = script_menu_fixture("MENU", "Menu", script);
         assert_eq!(menu.style, 2);
 
         let fallback = clonk_graphics::BitmapFont::new();
@@ -5679,17 +5620,7 @@ mod tests {
                         "<c 00ff00>green</c>|{{TEST}}");
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let menu = script_menu_fixture("MENU", "Menu", script);
         let mut nested_image_menu = menu.clone();
         nested_image_menu.items[0].info_caption = "{{{TEST}}}".to_string();
         assert_eq!(
@@ -5788,17 +5719,7 @@ mod tests {
                         "A long information row that cannot fit a tiny viewport");
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let menu = script_menu_fixture("MENU", "Menu", script);
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
         let area = Rect::new(10, 20, 120, 80);
@@ -5832,17 +5753,7 @@ mod tests {
             AddMenuItem("Line", "", MENU, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let menu = script_menu_fixture("MENU", "Menu", script);
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
         let gfx = IngameMenuGraphics::default();
@@ -5874,17 +5785,7 @@ mod tests {
             AddMenuItem("Cancel", "Choose", MENU, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let menu = script_menu_fixture("MENU", "Menu", script);
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
         assert_eq!(
@@ -5953,17 +5854,7 @@ mod tests {
             AddMenuItem("{{DIALOG_ROW}} Answer", "Choose", NONE, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let mut menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let mut menu = script_menu_fixture("MENU", "Menu", script);
         menu.items[0].text_display_progress = -1;
 
         let fallback = clonk_graphics::BitmapFont::new();
@@ -6064,17 +5955,7 @@ mod tests {
             AddMenuItem("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", "Choose", MENU, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let menu = script_menu_fixture("MENU", "Menu", script);
         assert!(menu.equal_item_height);
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
@@ -6107,17 +5988,7 @@ mod tests {
             AddMenuItem("éZ", "", NONE, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let menu = script_menu_fixture("MENU", "Menu", script);
         let mut markup = menu.items[0].clone();
         markup.text_display_progress = 0;
         assert_eq!(dialog_visible_caption(&markup), "");
@@ -6156,17 +6027,7 @@ mod tests {
             AddMenuItem("Entry", "Choose", MENU, this(), 0, 0, "Details");
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let mut raw = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let mut raw = script_menu_fixture("MENU", "Menu", script);
         raw.caption = clonk_script::c4_string_from_bytes(b"Tit\xe9");
         raw.items[0].caption = clonk_script::c4_string_from_bytes(b"Entr\xe9");
         raw.items[0].info_caption = clonk_script::c4_string_from_bytes(b"D\xe9tails");
@@ -6221,17 +6082,7 @@ mod tests {
             AddMenuItem("Entry", "Choose", NONE, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let mut raw = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let mut raw = script_menu_fixture("MENU", "Menu", script);
         raw.caption = clonk_script::c4_string_from_bytes(b"Tit\xe9");
         raw.items[0].caption = clonk_script::c4_string_from_bytes(b"Entr\xff");
         raw.items[0].text_display_progress = -1;
@@ -6284,17 +6135,7 @@ mod tests {
             AddMenuItem("Choice", "Choose", MENU, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let mut menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let mut menu = script_menu_fixture("MENU", "Menu", script);
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
         let gfx = IngameMenuGraphics::default();
@@ -6688,16 +6529,6 @@ mod tests {
         // Info and fctExit for Exit (src/C4ObjectMenu.cpp:335-427;
         // src/C4Menu.cpp:43-70). AutoContextMenu's close command contains
         // "Exit", so the command strip also draws fctExit (:874-880).
-        fn solid(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
-            ImageData::new(width, height, rgba.repeat((width * height) as usize))
-        }
-
-        fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
-            (rect.y..rect.y + rect.height as i32).any(|y| {
-                (rect.x..rect.x + rect.width as i32)
-                    .any(|x| surface.get_pixel(x as u32, y as u32) == Some(color))
-            })
-        }
 
         let script = r#"
         func Initialize()
@@ -6706,17 +6537,7 @@ mod tests {
             AddMenuItem("Contents", "Choose()", MENU, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let mut menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let mut menu = script_menu_fixture("MENU", "Menu", script);
         let template = menu.items[0].clone();
         let make_item = |caption: &str, item_id: &str, symbol: clonk_engine::ObjectMenuSymbol| {
             let mut item = template.clone();
@@ -6782,12 +6603,16 @@ mod tests {
         let control = ImageData::new(224, 164, control);
         let gfx = IngameMenuGraphics {
             hud: clonk_frontend::HudGraphics {
-                flag: Some(solid(8, 8, [0, 0, 255, 255])),
-                wealth: Some(solid(8, 8, [green.r, green.g, green.b, green.a])),
+                flag: Some(solid_rgba_image(8, 8, [0, 0, 255, 255])),
+                wealth: Some(solid_rgba_image(8, 8, [green.r, green.g, green.b, green.a])),
                 arrow: Some(ImageData::new(16, 8, arrow)),
-                exit: Some(solid(8, 8, [cyan.r, cyan.g, cyan.b, cyan.a])),
-                hand: Some(solid(8, 8, [purple.r, purple.g, purple.b, purple.a])),
-                construction: Some(solid(8, 8, [brown.r, brown.g, brown.b, brown.a])),
+                exit: Some(solid_rgba_image(8, 8, [cyan.r, cyan.g, cyan.b, cyan.a])),
+                hand: Some(solid_rgba_image(
+                    8,
+                    8,
+                    [purple.r, purple.g, purple.b, purple.a],
+                )),
+                construction: Some(solid_rgba_image(8, 8, [brown.r, brown.g, brown.b, brown.a])),
                 control: Some(control.clone()),
                 ..clonk_frontend::HudGraphics::default()
             },
@@ -6796,7 +6621,7 @@ mod tests {
             show_commands: true,
             ..IngameMenuGraphics::default()
         };
-        let picture = solid(8, 8, [gray.r, gray.g, gray.b, gray.a]);
+        let picture = solid_rgba_image(8, 8, [gray.r, gray.g, gray.b, gray.a]);
         let item_icons = vec![
             Some(picture.clone()),
             Some(picture.clone()),
@@ -6829,38 +6654,38 @@ mod tests {
         let row = |index| layout.item_rect(index).expect("context row is visible");
         for color in [gray, purple] {
             assert!(
-                contains_color(&surface, row(0), color),
+                surface_rect_contains_color(&surface, row(0), color),
                 "missing Put {color:?}"
             );
         }
-        assert!(contains_color(&surface, row(1), gray));
+        assert!(surface_rect_contains_color(&surface, row(1), gray));
         for color in [red, green, yellow] {
             assert!(
-                contains_color(&surface, row(2), color),
+                surface_rect_contains_color(&surface, row(2), color),
                 "missing Buy {color:?}"
             );
         }
         for color in [red, green, magenta] {
             assert!(
-                contains_color(&surface, row(3), color),
+                surface_rect_contains_color(&surface, row(3), color),
                 "missing Sell {color:?}"
             );
         }
-        assert!(contains_color(&surface, row(4), brown));
+        assert!(surface_rect_contains_color(&surface, row(4), brown));
         for color in [gray, orange] {
             assert!(
-                contains_color(&surface, row(5), color),
+                surface_rect_contains_color(&surface, row(5), color),
                 "missing Info {color:?}"
             );
         }
-        assert!(contains_color(&surface, row(6), cyan));
+        assert!(surface_rect_contains_color(&surface, row(6), cyan));
         let command_strip = Rect::new(
             layout.bounds.x,
             layout.bounds.y + layout.bounds.height as i32 - CLASSIC_COMMAND_HEIGHT,
             layout.bounds.width,
             CLASSIC_COMMAND_HEIGHT as u32,
         );
-        assert!(contains_color(&surface, command_strip, cyan));
+        assert!(surface_rect_contains_color(&surface, command_strip, cyan));
     }
 
     #[test]
@@ -6871,16 +6696,6 @@ mod tests {
         // hints, then DrawValue places a 32x16 wealth facet immediately left
         // of the selected value at the footer's right edge
         // (C4Menu.h:248-264; C4Menu.cpp:843-907; C4Facet.cpp:240-260).
-        fn solid(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
-            ImageData::new(width, height, rgba.repeat((width * height) as usize))
-        }
-
-        fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
-            (rect.y..rect.y + rect.height as i32).any(|y| {
-                (rect.x..rect.x + rect.width as i32)
-                    .any(|x| surface.get_pixel(x as u32, y as u32) == Some(color))
-            })
-        }
 
         let script = r#"
         func Initialize()
@@ -6889,17 +6704,7 @@ mod tests {
             AddMenuItem("Buy Lorry", "Choose()", LORY, this());
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let mut menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let mut menu = script_menu_fixture("MENU", "Menu", script);
         menu.title_symbol = clonk_engine::ObjectMenuSymbol::Buy { owner: 7 };
         menu.extra = clonk_engine::ObjectMenuExtra::Value;
         menu.selection = 0;
@@ -6919,8 +6724,8 @@ mod tests {
         }
         let gfx = IngameMenuGraphics {
             hud: clonk_frontend::HudGraphics {
-                flag: Some(solid(8, 8, [0, 0, 255, 255])),
-                wealth: Some(solid(8, 8, [green.r, green.g, green.b, green.a])),
+                flag: Some(solid_rgba_image(8, 8, [0, 0, 255, 255])),
+                wealth: Some(solid_rgba_image(8, 8, [green.r, green.g, green.b, green.a])),
                 arrow: Some(ImageData::new(16, 8, arrow)),
                 ..clonk_frontend::HudGraphics::default()
             },
@@ -6966,12 +6771,12 @@ mod tests {
         );
         for color in [red, green, yellow] {
             assert!(
-                contains_color(&surface, title_symbol, color),
+                surface_rect_contains_color(&surface, title_symbol, color),
                 "missing Buy title component {color:?}"
             );
         }
         assert!(
-            !contains_color(&surface, title_symbol, magenta),
+            !surface_rect_contains_color(&surface, title_symbol, magenta),
             "Buy uses arrow phase 0, not Sell phase 1"
         );
 
@@ -6988,14 +6793,18 @@ mod tests {
             (2 * CLASSIC_COMMAND_HEIGHT) as u32,
             CLASSIC_COMMAND_HEIGHT as u32,
         );
-        assert!(contains_color(&surface, wealth, green));
+        assert!(surface_rect_contains_color(&surface, wealth, green));
         let value_text = Rect::new(
             footer.x + footer.width as i32 - 1 - value_width,
             footer.y,
             value_width.max(1) as u32,
             footer.height,
         );
-        assert!(contains_color(&surface, value_text, CLASSIC_CAPTION_COLOR));
+        assert!(surface_rect_contains_color(
+            &surface,
+            value_text,
+            CLASSIC_CAPTION_COLOR
+        ));
     }
 
     #[test]
@@ -7074,16 +6883,6 @@ mod tests {
         // variant because NMGE removes mana, while ordinary spell menus use
         // this same footer geometry (C4Menu.cpp:883-912;
         // C4Facet.cpp:265-290).
-        fn solid(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
-            ImageData::new(width, height, rgba.repeat((width * height) as usize))
-        }
-
-        fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
-            (rect.y..rect.y + rect.height as i32).any(|y| {
-                (rect.x..rect.x + rect.width as i32)
-                    .any(|x| surface.get_pixel(x as u32, y as u32) == Some(color))
-            })
-        }
 
         let script = r#"
         func Initialize()
@@ -7117,7 +6916,11 @@ mod tests {
         let magic = Color::opaque(207, 35, 231);
         let gfx = IngameMenuGraphics {
             hud: clonk_frontend::HudGraphics {
-                magic: Some(solid(25, 35, [magic.r, magic.g, magic.b, magic.a])),
+                magic: Some(solid_rgba_image(
+                    25,
+                    35,
+                    [magic.r, magic.g, magic.b, magic.a],
+                )),
                 ..clonk_frontend::HudGraphics::default()
             },
             show_commands: false,
@@ -7150,11 +6953,11 @@ mod tests {
         );
 
         assert!(
-            contains_color(&surface, footer, magic),
+            surface_rect_contains_color(&surface, footer, magic),
             "C++ spell menus draw Magic.png in the extra strip"
         );
         assert!(
-            contains_color(&surface, footer, CLASSIC_CAPTION_COLOR),
+            surface_rect_contains_color(&surface, footer, CLASSIC_CAPTION_COLOR),
             "C++ spell menus draw the selected spell's 10/30 cost/mana label"
         );
 
@@ -7187,16 +6990,6 @@ mod tests {
         // section into a 24x16 cell; counts are literal "Nx" labels at the
         // cell's bottom-right (C4Menu.cpp:92-97,843-899;
         // C4IDList.cpp:207-227; C4Facet.cpp:182-213).
-        fn solid(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
-            ImageData::new(width, height, rgba.repeat((width * height) as usize))
-        }
-
-        fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
-            (rect.y..rect.y + rect.height as i32).any(|y| {
-                (rect.x..rect.x + rect.width as i32)
-                    .any(|x| surface.get_pixel(x as u32, y as u32) == Some(color))
-            })
-        }
 
         let script = r#"
         func Initialize()
@@ -7262,8 +7055,8 @@ mod tests {
         let wood = Color::opaque(146, 92, 45);
         let metal = Color::opaque(92, 112, 132);
         let component_icons = vec![
-            Some(solid(8, 8, [wood.r, wood.g, wood.b, wood.a])),
-            Some(solid(8, 8, [metal.r, metal.g, metal.b, metal.a])),
+            Some(solid_rgba_image(8, 8, [wood.r, wood.g, wood.b, wood.a])),
+            Some(solid_rgba_image(8, 8, [metal.r, metal.g, metal.b, metal.a])),
         ];
         let gfx = IngameMenuGraphics {
             show_commands: true,
@@ -7287,16 +7080,16 @@ mod tests {
 
         let metal_cell = Rect::new(521, 428, 24, 16);
         let wood_cell = Rect::new(545, 428, 24, 16);
-        assert!(contains_color(&surface, metal_cell, metal));
-        assert!(!contains_color(&surface, metal_cell, wood));
-        assert!(contains_color(&surface, wood_cell, wood));
-        assert!(!contains_color(&surface, wood_cell, metal));
+        assert!(surface_rect_contains_color(&surface, metal_cell, metal));
+        assert!(!surface_rect_contains_color(&surface, metal_cell, wood));
+        assert!(surface_rect_contains_color(&surface, wood_cell, wood));
+        assert!(!surface_rect_contains_color(&surface, wood_cell, metal));
         assert!(
-            contains_color(&surface, metal_cell, CLASSIC_CAPTION_COLOR),
+            surface_rect_contains_color(&surface, metal_cell, CLASSIC_CAPTION_COLOR),
             "METL cell must overlay the white literal 2x count"
         );
         assert!(
-            contains_color(&surface, wood_cell, CLASSIC_CAPTION_COLOR),
+            surface_rect_contains_color(&surface, wood_cell, CLASSIC_CAPTION_COLOR),
             "WOOD cell must overlay the white literal 4x count"
         );
     }
@@ -7315,17 +7108,7 @@ mod tests {
             AddMenuItem("Selectable", "Choose()", MENU, this(), 3, 0, "Details");
         }
         "#;
-        let mut engine = Engine::new();
-        engine
-            .register_script_definition("MENU", "Menu", script)
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("MENU"))
-            .expect("menu object spawns");
-        let menu = engine
-            .debug_object_menu(object.as_u64())
-            .expect("object exists")
-            .expect("Initialize created its menu");
+        let menu = script_menu_fixture("MENU", "Menu", script);
 
         assert_eq!(engine_script_menu_title(&menu), "Selectable");
         assert_eq!(menu.symbol_id, "MENU");

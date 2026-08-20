@@ -1,62 +1,16 @@
-//! Manual probe: which legacy environment placement costs the activation.
+//! Manual environment-placement probe for clonk-org/clonk-rs#732.
 //!
-//! clonk-org/clonk-rs#732 exists because `run_legacy_init_placements` measured
-//! **98% of ClonkMars `03_Chaos`'s apply interval** — 12.1 s of 12.3 s — and
-//! nothing had ever looked inside it. It covers six `C4Game::InitGame` phases
-//! (C4Game.cpp:2493-2503), and an aggregate that large says only that the
-//! answer is in there somewhere.
-//!
-//! This splits the pass by phase, and reports each phase's placement count
-//! beside its span so the cost can be read per placement rather than in total.
-//!
-//! It reports numbers and asserts nothing about them, so it is `#[ignore]`d
-//! like the tree's other manual timing probes. Run it with:
+//! It reports each legacy placement phase and its placement count for a large
+//! and a small workload without asserting timing thresholds. Run:
 //!
 //! ```sh
 //! cargo nextest run -p clonk-engine-integration-tests --test engine_it \
-//!     --run-ignored all --no-capture -E 'test(environment_placement_profile::)'
+//!   --run-ignored all --no-capture -E 'test(environment_placement_profile::)'
 //! ```
 //!
-//! # Recorded measurement
-//!
-//! Warm process and filesystem cache, seed 0, aarch64 host.
-//!
-//! ## ClonkMars `03_Chaos` — 11.977 s in the pass
-//!
-//! | phase | span | share | placements | each |
-//! |---|---|---|---|---|
-//! | `environment` | 11.933 s | **99%** | **11** | **1.085 s** |
-//! | `in_earth` | 42.9 ms | 0% | 85 | 504 µs |
-//! | `goals` | 737 µs | 0% | 7 | 105 µs |
-//! | `rules` | 278 µs | 0% | 6 | 46 µs |
-//! | `nests` | 8.9 µs | 0% | 1 | 8.9 µs |
-//! | `vegetation` | 125 ns | 0% | 0 | — |
-//! | `animals` | 41 ns | 0% | 0 | — |
-//!
-//! Unattributed: 3.5 µs. The phases account for the whole pass.
-//!
-//! **This is not a scaling problem.** The candidates clonk-org/clonk-rs#732
-//! listed — placement-loop overhead, a superlinear term in the number already
-//! placed, landscape probes per candidate position — all predict cost that
-//! grows with *placements*. `environment` makes **eleven** of them and takes
-//! **1.08 seconds each**. Vegetation, the phase that actually loops, places
-//! nothing here at all.
-//!
-//! The eleven are `Objects=TIME=10;TEMP=1` in the scenario's `[Environment]`
-//! section, so the whole 12-second activation is eleven objects' `Initialize`
-//! callbacks. Which of `TIME` and `TEMP` carries it, and what inside the
-//! callback costs a second, is the next thing to find — but it is a script
-//! question now, not a placement-loop one.
-//!
-//! `in_earth` is worth a second look on its own terms: 504 µs per placement is
-//! slow for something that draws a position and probes the landscape, and it
-//! *is* the shape that scales. It is invisible here only because 85 placements
-//! is a small number.
-//!
-//! ## Tutorial 1 — 10.75 µs in the pass
-//!
-//! One rule object and nothing else. The same pass is six orders of magnitude
-//! cheaper, which is why a threshold taken from one scenario would be wrong.
+//! Current conclusion: ClonkMars cost is concentrated in the Initialize
+//! callbacks of eleven environment objects, not placement-loop scaling.
+//! In-earth placement remains a separate profiling follow-up.
 
 use crate::support::real_scenario::load_installed_scenario;
 

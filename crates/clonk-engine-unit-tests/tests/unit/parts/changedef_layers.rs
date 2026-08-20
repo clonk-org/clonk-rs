@@ -23,18 +23,11 @@ func Bless() {
     animal_def.set_category(CATEGORY_LIVING);
     engine.register_test_definition(animal_def);
 
-    let talker_id =
-        engine.spawn_test_object(SpawnConfig::new("TALK").with_category(CATEGORY_OBJECT));
-    let animal_a = engine.spawn_test_object(
-        SpawnConfig::new("ANML")
-            .with_position(Vector2::new(40, 40))
-            .with_alive(true),
-    );
-    let animal_b = engine.spawn_test_object(
-        SpawnConfig::new("ANML")
-            .with_position(Vector2::new(90, 40))
-            .with_alive(true),
-    );
+    let talker_id = spawn_fixture!(engine, "TALK", with_category: CATEGORY_OBJECT);
+    let animal_a =
+        spawn_fixture!(engine, "ANML", with_position: Vector2::new(40, 40), with_alive: true);
+    let animal_b =
+        spawn_fixture!(engine, "ANML", with_position: Vector2::new(90, 40), with_alive: true);
 
     let idx = engine.test_object_index(talker_id);
     engine.call_test_object_function(idx, "Bless", Vec::new());
@@ -42,7 +35,7 @@ func Bless() {
     for id in [animal_a, animal_b] {
         let idx = engine.test_object_index(id);
         let effects = engine.objects[idx].state.effects.clone();
-        assert!(
+        unit_assert!(
             effects.iter().any(|effect| {
                 effect.name == "Divinity" && effect.priority == 200 && effect.interval == 1
             }),
@@ -81,13 +74,13 @@ func Trigger() {
     let caller = test_definition("CALL", "Caller", caller_script);
     engine.register_test_definition(caller);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
+    let id = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT);
     let idx = engine.test_object_index(id);
     engine.call_test_object_function(idx, "Trigger", Vec::new());
 
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("iHadLife"),
+    unit_assert_eq!(
+        engine.objects[idx].state.local_vars.get("iHadLife") =>
         Some(&Value::Int(1)),
         "Initialize ran inside CreateObject: Life visible immediately \
              (C4Game.cpp:1123-1127)"
@@ -97,7 +90,7 @@ func Trigger() {
         .iter()
         .find(|object| object.definition_id == "BNDT")
         .test_value();
-    assert!(
+    unit_assert!(
         bandit
             .state
             .effects
@@ -111,14 +104,7 @@ func Trigger() {
         .iter()
         .find(|object| object.definition_id == "BNDT")
         .test_value();
-    assert!(
-        bandit
-            .state
-            .effects
-            .iter()
-            .all(|effect| effect.name != "Life"),
-        "materialization must not re-run Initialize after cleanup"
-    );
+    unit_assert!(bandit.state.effects.iter().all(|effect| effect.name != "Life"), "materialization must not re-run Initialize after cleanup");
 }
 
 #[test]
@@ -139,11 +125,7 @@ func Burst() {
     let mut engine = Engine::with_seed(17);
     engine.set_materials(materials);
     engine.register_test_script_definition("CALL", "Caller", script);
-    let caller = engine.spawn_test_object(
-        SpawnConfig::new("CALL")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(100, 200)),
-    );
+    let caller = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT, with_position: Vector2::new(100, 200));
 
     let mut mirror = engine.rng.clone();
     let expected = (0..2)
@@ -161,24 +143,17 @@ func Burst() {
     let index = engine.test_object_index(caller);
     let result = engine.call_test_object_function(index, "Burst", Vec::new());
 
-    assert_eq!(result, Value::Int(expected_return));
-    assert_eq!(engine.rng, mirror);
-    assert_eq!(
-        engine
-            .object_snapshot(caller)
-            .expect("caller remains")
-            .local_vars["cast_result"],
-        Value::Nil,
-        "void FnCastPXS returns nil"
-    );
+    unit_assert_eq!(result => Value::Int(expected_return));
+    unit_assert_eq!(engine.rng => mirror);
+    unit_assert_eq!(engine.object_snapshot(caller).expect("caller remains").local_vars["cast_result"] => Value::Nil, "void FnCastPXS returns nil");
     let particles = engine.pxs_system.iter().collect::<Vec<_>>();
-    assert_eq!(particles.len(), 2);
+    unit_assert_eq!(particles.len() => 2);
     for (particle, (xdir, ydir)) in particles.into_iter().zip(expected) {
-        assert_eq!(particle.mat, water);
-        assert_eq!(particle.x, math::itofix(103));
-        assert_eq!(particle.y, math::itofix(196));
-        assert_eq!(particle.xdir, xdir);
-        assert_eq!(particle.ydir, ydir);
+        unit_assert_eq!(particle.mat => water);
+        unit_assert_eq!(particle.x => math::itofix(103));
+        unit_assert_eq!(particle.y => math::itofix(196));
+        unit_assert_eq!(particle.xdir => xdir);
+        unit_assert_eq!(particle.ydir => ydir);
     }
 }
 
@@ -203,11 +178,7 @@ func Burst() {
     let mut engine = Engine::with_seed(29);
     engine.set_materials(materials);
     engine.register_test_script_definition("CALL", "Caller", script);
-    let caller = engine.spawn_test_object(
-        SpawnConfig::new("CALL")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(4, 5)),
-    );
+    let caller = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 5));
 
     let mut mirror = engine.rng.clone();
     for _ in 0..3 {
@@ -218,14 +189,14 @@ func Burst() {
     let index = engine.test_object_index(caller);
     engine.call_test_object_function(index, "Burst", Vec::new());
 
-    assert_eq!(engine.rng, mirror);
+    unit_assert_eq!(engine.rng => mirror);
     let particles = engine.pxs_system.iter().collect::<Vec<_>>();
-    assert_eq!(particles.len(), 1, "only the final valid cast creates PXS");
-    assert_eq!(particles[0].mat, water);
-    assert_eq!(particles[0].x, math::itofix(4));
-    assert_eq!(particles[0].y, math::itofix(5));
-    assert_eq!(particles[0].xdir, C4Fixed::ZERO);
-    assert_eq!(particles[0].ydir, C4Fixed::ZERO);
+    unit_assert_eq!(particles.len() => 1, "only the final valid cast creates PXS");
+    unit_assert_eq!(particles[0].mat => water);
+    unit_assert_eq!(particles[0].x => math::itofix(4));
+    unit_assert_eq!(particles[0].y => math::itofix(5));
+    unit_assert_eq!(particles[0].xdir => C4Fixed::ZERO);
+    unit_assert_eq!(particles[0].ydir => C4Fixed::ZERO);
 }
 
 #[test]
@@ -239,7 +210,7 @@ fn presentation_snapshot_preserves_pxs_chunk_slot_identity() {
     let snow = materials.id_of("Snow").test_value();
     let mut engine = Engine::new();
     engine.set_materials(materials);
-    assert!(engine.pxs_system.create_at(
+    unit_assert!(engine.pxs_system.create_at(
         0,
         417,
         clonk_engine::pxs::Pxs {
@@ -257,7 +228,7 @@ fn presentation_snapshot_preserves_pxs_chunk_slot_identity() {
         .into_iter()
         .find(|particle| particle.definition_id == "material/pxs/snow")
         .test_value();
-    assert_eq!(particle.pxs_slot, Some(417));
+    unit_assert_eq!(particle.pxs_slot => Some(417));
 }
 
 #[test]
@@ -310,13 +281,7 @@ protected func Initialize() {
         HashMap::from([("Sparkle".to_string(), ActionSpec::default().with_delay(1))]),
     );
     engine.register_test_definition(spark);
-    let caller = engine.spawn_test_object(
-        SpawnConfig::new("CALL")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(100, 200))
-            .with_owner(2)
-            .with_controller(3),
-    );
+    let caller = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT, with_position: Vector2::new(100, 200), with_owner: 2, with_controller: 3);
 
     let mut mirror = engine.rng.clone();
     let mut expected = Vec::new();
@@ -332,93 +297,35 @@ protected func Initialize() {
     let index = engine.test_object_index(caller);
     engine.call_test_object_function(index, "Burst", Vec::new());
 
-    assert_eq!(engine.rng, mirror, "callbacks interleave with cast draws");
-    assert_eq!(
-        engine
-            .object_snapshot(caller)
-            .expect("caller remains")
-            .local_vars["result"],
-        Value::Nil,
-        "void FnCastObjects returns nil"
-    );
+    unit_assert_eq!(engine.rng => mirror, "callbacks interleave with cast draws");
+    unit_assert_eq!(engine.object_snapshot(caller).expect("caller remains").local_vars["result"] => Value::Nil, "void FnCastObjects returns nil");
     let mut sparks: Vec<&Object> = engine
         .objects
         .iter()
         .filter(|object| object.definition_id == "SPRK")
         .collect();
     sparks.sort_by_key(|object| object.id);
-    assert_eq!(sparks.len(), 2);
+    unit_assert_eq!(sparks.len() => 2);
     for (spark, (xdir, ydir, completion_random)) in sparks.into_iter().zip(expected) {
-        assert_eq!(spark.state.position, Vector2::new(103, 193));
-        assert_eq!(
-            spark.fixed_position,
-            FixedVec2::from_ints(103, 193),
-            "Completion's SetAction resyncs fix_y to the adjusted integer y"
-        );
-        assert_eq!(spark.state.owner, 2);
-        assert_eq!(spark.state.controller, 3);
-        assert_eq!(spark.state.rotation, 0, "non-rotateable Init clears r");
-        assert_eq!(spark.fixed_velocity, FixedVec2::new(xdir, ydir));
-        assert_eq!(
-            spark.rotation_velocity,
-            C4Fixed::ZERO,
-            "non-rotateable Init clears rdir"
-        );
-        assert_eq!(spark.state.action.name, "Sparkle");
-        assert_eq!(
-            spark.state.local_vars.get("iConstructed"),
-            Some(&Value::Int(1)),
-            "Construction runs once, synchronously"
-        );
-        assert_eq!(
-            spark.state.local_vars.get("pConstructedBy"),
-            Some(&Value::Object(caller.as_u64())),
-            "Construction receives the creator"
-        );
-        assert_eq!(
-            spark.state.local_vars.get("iConstructionCon"),
-            Some(&Value::Int(0)),
-            "Construction runs before initial DoCon"
-        );
-        assert_eq!(
-            spark.state.local_vars.get("iConstructionY"),
-            Some(&Value::Int(196)),
-            "Construction sees the raw Init center"
-        );
-        assert_eq!(
-            spark.state.local_vars.get("bConstructionAlive"),
-            Some(&Value::Bool(false)),
-            "Init only marks living definitions alive"
-        );
-        assert_eq!(
-            spark.state.local_vars.get("iCompletionCon"),
-            Some(&Value::Int(100)),
-            "Completion follows initial DoCon"
-        );
-        assert_eq!(
-            spark.state.local_vars.get("iCompletionY"),
-            Some(&Value::Int(193)),
-            "Completion sees the bottom-adjusted center"
-        );
-        assert_eq!(
-            spark.state.local_vars.get("iCompletionR"),
-            Some(&Value::Int(0)),
-            "Completion observes the post-Init rotation"
-        );
-        assert_eq!(
-            spark.state.local_vars.get("iCompletionRDir"),
-            Some(&Value::Int(0)),
-            "Completion observes the post-Init rdir"
-        );
-        assert_eq!(
-            spark.state.local_vars.get("iCompleted"),
-            Some(&Value::Int(completion_random))
-        );
-        assert_eq!(
-            spark.state.local_vars.get("iInitialized"),
-            Some(&Value::Int(1)),
-            "Initialize follows Completion exactly once"
-        );
+        unit_assert_eq!(spark.state.position => Vector2::new(103, 193));
+        unit_assert_eq!(spark.fixed_position => FixedVec2::from_ints(103, 193), "Completion's SetAction resyncs fix_y to the adjusted integer y");
+        unit_assert_eq!(spark.state.owner => 2);
+        unit_assert_eq!(spark.state.controller => 3);
+        unit_assert_eq!(spark.state.rotation => 0, "non-rotateable Init clears r");
+        unit_assert_eq!(spark.fixed_velocity => FixedVec2::new(xdir, ydir));
+        unit_assert_eq!(spark.rotation_velocity => C4Fixed::ZERO, "non-rotateable Init clears rdir");
+        unit_assert_eq!(spark.state.action.name => "Sparkle");
+        unit_assert_eq!(spark.state.local_vars.get("iConstructed") => Some(&Value::Int(1)), "Construction runs once, synchronously");
+        unit_assert_eq!(spark.state.local_vars.get("pConstructedBy") => Some(&Value::Object(caller.as_u64())), "Construction receives the creator");
+        unit_assert_eq!(spark.state.local_vars.get("iConstructionCon") => Some(&Value::Int(0)), "Construction runs before initial DoCon");
+        unit_assert_eq!(spark.state.local_vars.get("iConstructionY") => Some(&Value::Int(196)), "Construction sees the raw Init center");
+        unit_assert_eq!(spark.state.local_vars.get("bConstructionAlive") => Some(&Value::Bool(false)), "Init only marks living definitions alive");
+        unit_assert_eq!(spark.state.local_vars.get("iCompletionCon") => Some(&Value::Int(100)), "Completion follows initial DoCon");
+        unit_assert_eq!(spark.state.local_vars.get("iCompletionY") => Some(&Value::Int(193)), "Completion sees the bottom-adjusted center");
+        unit_assert_eq!(spark.state.local_vars.get("iCompletionR") => Some(&Value::Int(0)), "Completion observes the post-Init rotation");
+        unit_assert_eq!(spark.state.local_vars.get("iCompletionRDir") => Some(&Value::Int(0)), "Completion observes the post-Init rdir");
+        unit_assert_eq!(spark.state.local_vars.get("iCompleted") => Some(&Value::Int(completion_random)));
+        unit_assert_eq!(spark.state.local_vars.get("iInitialized") => Some(&Value::Int(1)), "Initialize follows Completion exactly once");
     }
 }
 
@@ -436,7 +343,7 @@ func Burst() {
 "#;
     let mut engine = Engine::with_seed(29);
     engine.register_test_script_definition("CALL", "Caller", script);
-    let caller = engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
+    let caller = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT);
     let next_object_id = engine.next_object_id;
     let mut mirror = engine.rng.clone();
     for _ in 0..2 {
@@ -449,9 +356,9 @@ func Burst() {
     let index = engine.test_object_index(caller);
     engine.call_test_object_function(index, "Burst", Vec::new());
 
-    assert_eq!(engine.rng, mirror);
-    assert_eq!(engine.next_object_id, next_object_id);
-    assert_eq!(engine.objects.len(), 1);
+    unit_assert_eq!(engine.rng => mirror);
+    unit_assert_eq!(engine.next_object_id => next_object_id);
+    unit_assert_eq!(engine.objects.len() => 1);
 }
 
 #[test]
@@ -470,11 +377,7 @@ func Burst() {
     let mut cast = test_definition("ROTA", "Rotating", "");
     cast.set_rotateable(1);
     engine.register_test_definition(cast);
-    let caller = engine.spawn_test_object(
-        SpawnConfig::new("CALL")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(10, 20)),
-    );
+    let caller = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 20));
     let mut mirror = engine.rng.clone();
     let rdir = math::itofix(mirror.random(3) + 1);
     let ydir = math::fixed10(mirror.random(9) - 4);
@@ -489,11 +392,11 @@ func Burst() {
         .iter()
         .find(|object| object.definition_id == "ROTA")
         .test_value();
-    assert_eq!(engine.rng, mirror);
-    assert_eq!(object.state.position, Vector2::new(10, 20));
-    assert_eq!(object.fixed_velocity, FixedVec2::new(xdir, ydir));
-    assert_eq!(object.state.rotation, rotation);
-    assert_eq!(object.rotation_velocity, rdir);
+    unit_assert_eq!(engine.rng => mirror);
+    unit_assert_eq!(object.state.position => Vector2::new(10, 20));
+    unit_assert_eq!(object.fixed_velocity => FixedVec2::new(xdir, ydir));
+    unit_assert_eq!(object.state.rotation => rotation);
+    unit_assert_eq!(object.rotation_velocity => rdir);
 }
 
 #[test]
@@ -513,11 +416,7 @@ func Burst() {
     grow.set_shape_rect(Some(DefinitionRect::new(-2, -2, 5, 5)));
     grow.set_stretch_growth(true);
     engine.register_test_definition(grow);
-    let caller = engine.spawn_test_object(
-        SpawnConfig::new("CALL")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(100, 200)),
-    );
+    let caller = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT, with_position: Vector2::new(100, 200));
 
     let index = engine.test_object_index(caller);
     engine.call_test_object_function(index, "Burst", Vec::new());
@@ -527,8 +426,8 @@ func Burst() {
         .iter()
         .find(|object| object.definition_id == "GROW")
         .test_value();
-    assert_eq!(object.state.position, Vector2::new(103, 193));
-    assert_eq!(object.fixed_position, FixedVec2::from_ints(103, 196));
+    unit_assert_eq!(object.state.position => Vector2::new(103, 193));
+    unit_assert_eq!(object.fixed_position => FixedVec2::from_ints(103, 196));
 }
 
 #[test]
@@ -555,7 +454,7 @@ protected func Initialize() {
     let mut engine = Engine::with_seed(47);
     engine.register_test_script_definition("CALL", "Caller", caller_script);
     engine.register_test_script_definition("GONE", "Removed", removed_script);
-    let caller = engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
+    let caller = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT);
     let next_object_id = engine.next_object_id;
     let mut mirror = engine.rng.clone();
     let _ = mirror.random(3);
@@ -566,9 +465,9 @@ protected func Initialize() {
     let index = engine.test_object_index(caller);
     engine.call_test_object_function(index, "Burst", Vec::new());
 
-    assert_eq!(engine.rng, mirror, "Initialize did not draw");
-    assert_eq!(engine.next_object_id, next_object_id + 1);
-    assert_eq!(engine.objects.len(), 1, "removed spawn never materializes");
+    unit_assert_eq!(engine.rng => mirror, "Initialize did not draw");
+    unit_assert_eq!(engine.next_object_id => next_object_id + 1);
+    unit_assert_eq!(engine.objects.len() => 1, "removed spawn never materializes");
 }
 
 // FnGetController (C4Script.cpp:1316-1320) reads C4Object::Controller,
@@ -587,20 +486,12 @@ func Trigger() {
     let def = test_definition("CALL", "Caller", script);
     engine.register_test_definition(def);
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("CALL")
-            .with_category(CATEGORY_OBJECT)
-            .with_owner(2),
-    );
+    let id = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT, with_owner: 2);
     let idx = engine.test_object_index(id);
     engine.call_test_object_function(idx, "Trigger", Vec::new());
 
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("iCtrl"),
-        Some(&Value::Int(2)),
-        "Controller = Owner at Init (C4Object.cpp:162)"
-    );
+    unit_assert_eq!(engine.objects[idx].state.local_vars.get("iCtrl") => Some(&Value::Int(2)), "Controller = Owner at Init (C4Object.cpp:162)");
 }
 
 // FnCreateObject copies the creating object's controller onto the
@@ -623,27 +514,19 @@ func Trigger() {
     let caller = test_definition("CALL", "Caller", caller_script);
     engine.register_test_definition(caller);
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("CALL")
-            .with_category(CATEGORY_OBJECT)
-            .with_owner(2),
-    );
+    let id = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT, with_owner: 2);
     let idx = engine.test_object_index(id);
     engine.call_test_object_function(idx, "Trigger", Vec::new());
 
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("iCtrl"),
-        Some(&Value::Int(2)),
-        "spawn controller = creator controller (C4Script.cpp:1905-1906)"
-    );
+    unit_assert_eq!(engine.objects[idx].state.local_vars.get("iCtrl") => Some(&Value::Int(2)), "spawn controller = creator controller (C4Script.cpp:1905-1906)");
     let bandit = engine
         .objects
         .iter()
         .find(|object| object.definition_id == "BNDT")
         .test_value();
-    assert_eq!(bandit.state.owner, OWNER_NONE, "owner stays NO_OWNER");
-    assert_eq!(bandit.state.controller, 2, "controller traces the cause");
+    unit_assert_eq!(bandit.state.owner => OWNER_NONE, "owner stays NO_OWNER");
+    unit_assert_eq!(bandit.state.controller => 2, "controller traces the cause");
 }
 
 // FnSetController (C4Script.cpp:1322-1331): NO_OWNER always passes,
@@ -669,42 +552,20 @@ func Trigger(object pOther) {
     let other = test_definition("OTHR", "Other", "#strict\n");
     engine.register_test_definition(other);
 
-    let caller_id = engine.spawn_test_object(
-        SpawnConfig::new("CALL")
-            .with_category(CATEGORY_OBJECT)
-            .with_owner(0),
-    );
-    let other_id = engine.spawn_test_object(
-        SpawnConfig::new("OTHR")
-            .with_category(CATEGORY_OBJECT)
-            .with_owner(0),
-    );
+    let caller_id = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT, with_owner: 0);
+    let other_id = spawn_fixture!(engine, "OTHR", with_category: CATEGORY_OBJECT, with_owner: 0);
     let idx = engine.test_object_index(caller_id);
     engine.call_test_object_function(idx, "Trigger", vec![Value::Object(other_id.as_u64())]);
 
     let idx = engine.test_object_index(caller_id);
     let locals = &engine.objects[idx].state.local_vars;
-    assert_eq!(
-        locals.get("iInvalid"),
-        Some(&Value::Bool(false)),
-        "invalid player rejected (ValidPlr gate)"
-    );
-    assert_eq!(locals.get("iSelf"), Some(&Value::Bool(true)));
-    assert_eq!(locals.get("iForeign"), Some(&Value::Bool(true)));
-    assert_eq!(
-        locals.get("iCleared"),
-        Some(&Value::Bool(true)),
-        "NO_OWNER bypasses the player check"
-    );
-    assert_eq!(
-        engine.objects[idx].state.controller, OWNER_NONE,
-        "self ends cleared"
-    );
+    unit_assert_eq!(locals.get("iInvalid") => Some(&Value::Bool(false)), "invalid player rejected (ValidPlr gate)");
+    unit_assert_eq!(locals.get("iSelf") => Some(&Value::Bool(true)));
+    unit_assert_eq!(locals.get("iForeign") => Some(&Value::Bool(true)));
+    unit_assert_eq!(locals.get("iCleared") => Some(&Value::Bool(true)), "NO_OWNER bypasses the player check");
+    unit_assert_eq!(engine.objects[idx].state.controller => OWNER_NONE, "self ends cleared");
     let other_idx = engine.test_object_index(other_id);
-    assert_eq!(
-        engine.objects[other_idx].state.controller, 1,
-        "foreign target updated"
-    );
+    unit_assert_eq!(engine.objects[other_idx].state.controller => 1, "foreign target updated");
 }
 
 // FnGetDefCoreVal (C4Script.cpp:4177) must resolve the blast-chain
@@ -734,15 +595,15 @@ func Probe() {
     hut.set_blast_incinerate(50);
     hut.set_fire_properties(10, false, false);
     engine.register_test_definition(hut);
-    let caller = engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
+    let caller = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT);
     let caller_idx = engine.test_object_index(caller);
     engine.call_test_object_function(caller_idx, "Probe", Vec::new());
     let locals = &engine.objects[caller_idx].state.local_vars;
-    assert_eq!(locals.get("iGrab"), Some(&Value::Int(2)));
-    assert_eq!(locals.get("iFix"), Some(&Value::Int(1)));
-    assert_eq!(locals.get("iShield"), Some(&Value::Int(1)));
-    assert_eq!(locals.get("iBlast"), Some(&Value::Int(50)));
-    assert_eq!(locals.get("iContact"), Some(&Value::Int(10)));
+    unit_assert_eq!(locals.get("iGrab") => Some(&Value::Int(2)));
+    unit_assert_eq!(locals.get("iFix") => Some(&Value::Int(1)));
+    unit_assert_eq!(locals.get("iShield") => Some(&Value::Int(1)));
+    unit_assert_eq!(locals.get("iBlast") => Some(&Value::Int(50)));
+    unit_assert_eq!(locals.get("iContact") => Some(&Value::Int(10)));
 }
 
 #[test]
@@ -779,10 +640,7 @@ fn get_def_core_val_reflects_fire_top_from_def_core() -> Result<(), EngineError>
     let index = engine.test_object_index(id);
     engine.call_object_function(index, "Probe", Vec::new())?;
 
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("iFireTop"),
-        Some(&Value::Int(10))
-    );
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("iFireTop") => Some(&Value::Int(10)));
     Ok(())
 }
 
@@ -812,21 +670,12 @@ func Probe() {
     let mut heavy = simple_definition("HEVY");
     heavy.set_mass(100);
     engine.register_test_definition(heavy);
-    let caller =
-        engine.spawn_test_object(SpawnConfig::new("CALL").with_position(Vector2::new(9000, 0)));
+    let caller = spawn_fixture!(engine, "CALL", with_position: Vector2::new(9000, 0));
 
     // Distance wrap: dx=50000 → 2.5e9 wraps negative in i32 and sorts
     // FIRST; dx=1000 stays 1e6.
-    let far = engine.spawn_test_object(
-        SpawnConfig::new("HEVY")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(50_000, 0)),
-    );
-    engine.spawn_test_object(
-        SpawnConfig::new("HEVY")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(1_000, 0)),
-    );
+    let far = spawn_fixture!(engine, "HEVY", with_category: CATEGORY_OBJECT, with_position: Vector2::new(50_000, 0));
+    spawn_fixture!(engine, "HEVY", with_category: CATEGORY_OBJECT, with_position: Vector2::new(1_000, 0));
     // Speed keys are 0/1: both movers key 1, so the STABLE sort keeps
     // whichever the main-list walk met first — the newest object.
     let fast_idx = engine.test_object_index(far);
@@ -840,22 +689,14 @@ func Probe() {
     let caller_idx = engine.test_object_index(caller);
     engine.call_test_object_function(caller_idx, "Probe", Vec::new());
     let locals = &engine.objects[caller_idx].state.local_vars;
-    assert_eq!(
-        locals.get("iFarFirst"),
-        Some(&Value::Int(50_000)),
-        "the wrapped-negative distance key sorts first (i32 overflow)"
-    );
-    assert_eq!(
-        locals.get("iFastFirst"),
+    unit_assert_eq!(locals.get("iFarFirst") => Some(&Value::Int(50_000)), "the wrapped-negative distance key sorts first (i32 overflow)");
+    unit_assert_eq!(
+        locals.get("iFastFirst") =>
         Some(&Value::Int(1_000)),
         "0/1 speed keys tie; the stable sort keeps the newest-first \
              main-list order, so the later-spawned near object leads"
     );
-    assert_eq!(
-        locals.get("iHalfMass"),
-        Some(&Value::Int(1_000)),
-        "live con-scaled mass sorts the half-built object first"
-    );
+    unit_assert_eq!(locals.get("iHalfMass") => Some(&Value::Int(1_000)), "live con-scaled mass sorts the half-built object first");
 }
 
 // C4FindObjectLayer::Check is `pObj->pLayer == pLayer`
@@ -876,27 +717,15 @@ func Probe(pLayer) {
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("CALL", "Caller", caller_script);
     engine.register_test_definition(simple_definition("OTHR"));
-    let caller = engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
-    let layer = engine.spawn_test_object(SpawnConfig::new("OTHR").with_category(CATEGORY_OBJECT));
-    engine.spawn_test_object(
-        SpawnConfig::new("OTHR")
-            .with_category(CATEGORY_OBJECT)
-            .with_layer(layer),
-    );
+    let caller = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT);
+    let layer = spawn_fixture!(engine, "OTHR", with_category: CATEGORY_OBJECT);
+    spawn_fixture!(engine, "OTHR", with_category: CATEGORY_OBJECT, with_layer: layer);
 
     let caller_idx = engine.test_object_index(caller);
     engine.call_test_object_function(caller_idx, "Probe", vec![Value::Object(layer.as_u64())]);
     let locals = &engine.objects[caller_idx].state.local_vars;
-    assert_eq!(
-        locals.get("iBare"),
-        Some(&Value::Int(2)),
-        "nil layer matches the two unlayered objects"
-    );
-    assert_eq!(
-        locals.get("iLayered"),
-        Some(&Value::Int(1)),
-        "the layer's one member matches"
-    );
+    unit_assert_eq!(locals.get("iBare") => Some(&Value::Int(2)), "nil layer matches the two unlayered objects");
+    unit_assert_eq!(locals.get("iLayered") => Some(&Value::Int(1)), "the layer's one member matches");
 }
 
 // FnGetObjectLayer (C4Script.cpp:5160-5166): the object's pLayer —
@@ -918,24 +747,16 @@ func Trigger(object pLayered) {
     let other = test_definition("OTHR", "Other", "#strict\n");
     engine.register_test_definition(other);
 
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
-    let layered_id = engine.spawn_test_object(
-        SpawnConfig::new("OTHR")
-            .with_category(CATEGORY_OBJECT)
-            .with_layer(caller_id),
-    );
+    let caller_id = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT);
+    let layered_id =
+        spawn_fixture!(engine, "OTHR", with_category: CATEGORY_OBJECT, with_layer: caller_id);
     let idx = engine.test_object_index(caller_id);
     engine.call_test_object_function(idx, "Trigger", vec![Value::Object(layered_id.as_u64())]);
 
     let idx = engine.test_object_index(caller_id);
     let locals = &engine.objects[idx].state.local_vars;
-    assert_eq!(locals.get("aBare"), Some(&Value::Nil), "no layer -> nil");
-    assert_eq!(
-        locals.get("aLayered"),
-        Some(&Value::Object(caller_id.as_u64())),
-        "layer object returned"
-    );
+    unit_assert_eq!(locals.get("aBare") => Some(&Value::Nil), "no layer -> nil");
+    unit_assert_eq!(locals.get("aLayered") => Some(&Value::Object(caller_id.as_u64())), "layer object returned");
 }
 
 #[test]
@@ -988,78 +809,44 @@ func Cull()
     )?;
 
     engine.cross_check(3)?;
-    assert_eq!(
-        engine
-            .object_snapshot(item)
-            .expect("item remains")
-            .container,
-        None,
-        "the layer mismatch blocks a collection-eligible CrossCheck"
-    );
+    unit_assert_eq!(engine.object_snapshot(item).expect("item remains").container => None, "the layer mismatch blocks a collection-eligible CrossCheck");
     for _ in 0..2 {
         engine.tick_without_snapshot()?;
-        assert_eq!(
-            engine
-                .object_snapshot(item)
-                .expect("item remains")
-                .container,
-            None,
-            "different layers cannot collect before removal"
-        );
+        unit_assert_eq!(engine.object_snapshot(item).expect("item remains").container => None, "different layers cannot collect before removal");
     }
-    assert_eq!(
-        engine
-            .object_snapshot(collector)
-            .expect("collector remains")
-            .layer,
-        Some(layer)
-    );
+    unit_assert_eq!(engine.object_snapshot(collector).expect("collector remains").layer => Some(layer));
 
     engine.tick_without_snapshot()?;
 
-    assert!(engine.object_snapshot(layer).is_none(), "layer was removed");
+    unit_assert!(engine.object_snapshot(layer).is_none(), "layer was removed");
     let remover_index = engine.test_object_index(remover);
-    assert_eq!(
+    unit_assert_eq!(
         engine.objects[remover_index]
             .state
             .local_vars
-            .get("cleared_immediately"),
+            .get("cleared_immediately") =>
         Some(&Value::Bool(true)),
         "GetObjectLayer is nil before RemoveObject returns to the script"
     );
-    assert_eq!(
+    unit_assert_eq!(
         engine.objects[remover_index]
             .state
             .local_vars
-            .get("nil_layer_count"),
+            .get("nil_layer_count") =>
         Some(&Value::Int(3)),
         "same-call Find_Layer(nil) includes the former layer member"
     );
-    assert_eq!(
-        engine
-            .object_snapshot(collector)
-            .expect("collector remains")
-            .layer,
-        None,
-        "the live object snapshot cannot retain the dead layer id"
-    );
-    assert_eq!(
+    unit_assert_eq!(engine.object_snapshot(collector).expect("collector remains").layer => None, "the live object snapshot cannot retain the dead layer id");
+    unit_assert_eq!(
         engine
             .snapshot()
             .object(collector)
             .expect("collector is serialized")
-            .layer,
+            .layer =>
         None,
         "the simulation snapshot serializes the cleared layer without a reload"
     );
-    assert_eq!(
-        engine
-            .object_snapshot(item)
-            .expect("item remains")
-            .container,
-        Some(collector),
-        "the frame-3 CrossCheck pairs both now-unlayered objects"
-    );
+    unit_assert_eq!(engine.object_snapshot(item).expect("item remains").container => Some(collector), "the frame-3 CrossCheck pairs both now-unlayered objects");
     Ok(())
 }
 
@@ -1112,20 +899,11 @@ func Probe() { cleared_before_callback = !GetObjectLayer(member); }
     let order = engine.debug_exec_order();
     let layer_position = order.iter().position(|id| *id == layer).test_value();
     let observer_position = order.iter().position(|id| *id == observer).test_value();
-    assert!(
-        layer_position < observer_position,
-        "the native removal executes before the observer callback"
-    );
+    unit_assert!(layer_position < observer_position, "the native removal executes before the observer callback");
 
     for _ in 0..2 {
         engine.tick_without_snapshot()?;
-        assert_eq!(
-            engine
-                .object_snapshot(item)
-                .expect("item remains")
-                .container,
-            None
-        );
+        unit_assert_eq!(engine.object_snapshot(item).expect("item remains").container => None);
     }
     engine.queue_object_command(
         layer,
@@ -1135,26 +913,20 @@ func Probe() { cleared_before_callback = !GetObjectLayer(member); }
     engine.tick_without_snapshot()?;
 
     let observer_index = engine.test_object_index(observer);
-    assert_eq!(
+    unit_assert_eq!(
         engine.objects[observer_index]
             .state
             .local_vars
-            .get("cleared_before_callback"),
+            .get("cleared_before_callback") =>
         Some(&Value::Bool(true)),
         "native ClearPointers is visible to later object callbacks, not just CrossCheck"
     );
-    assert_eq!(
-        engine
-            .object_snapshot(collector)
-            .expect("collector remains")
-            .layer,
-        None
-    );
-    assert_eq!(
+    unit_assert_eq!(engine.object_snapshot(collector).expect("collector remains").layer => None);
+    unit_assert_eq!(
         engine
             .object_snapshot(item)
             .expect("item remains")
-            .container,
+            .container =>
         Some(collector),
         "native destruction clears the layer before frame-3 CrossCheck"
     );
@@ -1181,10 +953,8 @@ func Trigger(object pOther) {
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("CALL", "Caller", caller_script);
     engine.register_test_script_definition("OTHR", "Other", "#strict\n");
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
-    let other_id =
-        engine.spawn_test_object(SpawnConfig::new("OTHR").with_category(CATEGORY_OBJECT));
+    let caller_id = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT);
+    let other_id = spawn_fixture!(engine, "OTHR", with_category: CATEGORY_OBJECT);
     let caller_index = engine.test_object_index(caller_id);
 
     engine.call_test_object_function(
@@ -1194,26 +964,14 @@ func Trigger(object pOther) {
     );
 
     let caller = engine.test_object_snapshot(caller_id);
-    assert_eq!(caller.local_vars.get("bSelf"), Some(&Value::Bool(true)));
-    assert_eq!(
-        caller.local_vars.get("pSelfNow"),
-        Some(&Value::Object(caller_id.as_u64()))
-    );
-    assert_eq!(caller.local_vars.get("bForeign"), Some(&Value::Bool(true)));
-    assert_eq!(
-        caller.local_vars.get("pForeignNow"),
-        Some(&Value::Object(caller_id.as_u64()))
-    );
-    assert_eq!(caller.local_vars.get("bClear"), Some(&Value::Bool(true)));
-    assert_eq!(caller.local_vars.get("pCleared"), Some(&Value::Nil));
-    assert_eq!(caller.layer, Some(caller_id));
-    assert_eq!(
-        engine
-            .object_snapshot(other_id)
-            .expect("other remains")
-            .layer,
-        None
-    );
+    unit_assert_eq!(caller.local_vars.get("bSelf") => Some(&Value::Bool(true)));
+    unit_assert_eq!(caller.local_vars.get("pSelfNow") => Some(&Value::Object(caller_id.as_u64())));
+    unit_assert_eq!(caller.local_vars.get("bForeign") => Some(&Value::Bool(true)));
+    unit_assert_eq!(caller.local_vars.get("pForeignNow") => Some(&Value::Object(caller_id.as_u64())));
+    unit_assert_eq!(caller.local_vars.get("bClear") => Some(&Value::Bool(true)));
+    unit_assert_eq!(caller.local_vars.get("pCleared") => Some(&Value::Nil));
+    unit_assert_eq!(caller.layer => Some(caller_id));
+    unit_assert_eq!(engine.object_snapshot(other_id).expect("other remains").layer => None);
 }
 
 #[test]
@@ -1234,24 +992,12 @@ func Trigger(object direct, object inactive, object grandchild) {
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("CALL", "Caller", caller_script);
     engine.register_test_script_definition("ITEM", "Item", "#strict\n");
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
-    let direct_id = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_category(CATEGORY_OBJECT)
-            .with_container(caller_id),
-    );
-    let inactive_id = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_category(CATEGORY_OBJECT)
-            .with_status(ObjectStatus::Inactive)
-            .with_container(caller_id),
-    );
-    let grandchild_id = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_category(CATEGORY_OBJECT)
-            .with_container(direct_id),
-    );
+    let caller_id = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT);
+    let direct_id =
+        spawn_fixture!(engine, "ITEM", with_category: CATEGORY_OBJECT, with_container: caller_id);
+    let inactive_id = spawn_fixture!(engine, "ITEM", with_category: CATEGORY_OBJECT, with_status: ObjectStatus::Inactive, with_container: caller_id);
+    let grandchild_id =
+        spawn_fixture!(engine, "ITEM", with_category: CATEGORY_OBJECT, with_container: direct_id);
     let caller_index = engine.test_object_index(caller_id);
 
     engine.call_test_object_function(
@@ -1265,37 +1011,13 @@ func Trigger(object direct, object inactive, object grandchild) {
     );
 
     let caller = engine.test_object_snapshot(caller_id);
-    assert_eq!(caller.local_vars.get("bSet"), Some(&Value::Bool(true)));
-    assert_eq!(
-        caller.local_vars.get("pDirect"),
-        Some(&Value::Object(caller_id.as_u64()))
-    );
-    assert_eq!(
-        caller.local_vars.get("pInactive"),
-        Some(&Value::Object(caller_id.as_u64()))
-    );
-    assert_eq!(caller.local_vars.get("pGrandchild"), Some(&Value::Nil));
-    assert_eq!(
-        engine
-            .object_snapshot(direct_id)
-            .expect("direct content remains")
-            .layer,
-        Some(caller_id)
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(inactive_id)
-            .expect("inactive content remains")
-            .layer,
-        Some(caller_id)
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(grandchild_id)
-            .expect("grandchild remains")
-            .layer,
-        None
-    );
+    unit_assert_eq!(caller.local_vars.get("bSet") => Some(&Value::Bool(true)));
+    unit_assert_eq!(caller.local_vars.get("pDirect") => Some(&Value::Object(caller_id.as_u64())));
+    unit_assert_eq!(caller.local_vars.get("pInactive") => Some(&Value::Object(caller_id.as_u64())));
+    unit_assert_eq!(caller.local_vars.get("pGrandchild") => Some(&Value::Nil));
+    unit_assert_eq!(engine.object_snapshot(direct_id).expect("direct content remains").layer => Some(caller_id));
+    unit_assert_eq!(engine.object_snapshot(inactive_id).expect("inactive content remains").layer => Some(caller_id));
+    unit_assert_eq!(engine.object_snapshot(grandchild_id).expect("grandchild remains").layer => None);
 }
 
 #[test]
@@ -1332,10 +1054,8 @@ func ProbeMaterializedCaches() {
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("CALL", "Caller", caller_script);
     engine.register_test_script_definition("ITEM", "Item", "#strict\n");
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
-    let container_id =
-        engine.spawn_test_object(SpawnConfig::new("ITEM").with_category(CATEGORY_OBJECT));
+    let caller_id = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT);
+    let container_id = spawn_fixture!(engine, "ITEM", with_category: CATEGORY_OBJECT);
     engine
         .apply_object_update(
             caller_id,
@@ -1382,68 +1102,28 @@ func ProbeMaterializedCaches() {
         Some(Value::Object(id)) => ObjectId::new(*id),
         other => panic!("CreateConstruction result should be an object, got {other:?}"),
     };
-    assert_eq!(
-        caller.local_vars.get("pObjectLayer"),
-        Some(&Value::Object(caller_id.as_u64())),
-        "CreateObject exposes the inherited layer in the same call"
-    );
-    assert_eq!(
-        caller.local_vars.get("pConstructionLayer"),
+    unit_assert_eq!(caller.local_vars.get("pObjectLayer") => Some(&Value::Object(caller_id.as_u64())), "CreateObject exposes the inherited layer in the same call");
+    unit_assert_eq!(
+        caller.local_vars.get("pConstructionLayer") =>
         Some(&Value::Object(caller_id.as_u64())),
         "CreateConstruction exposes the inherited layer in the same call"
     );
-    assert_eq!(
-        caller.local_vars.get("pContentsLayer"),
-        Some(&Value::Object(container_id.as_u64())),
-        "CreateContents uses the selected container as creator"
-    );
+    unit_assert_eq!(caller.local_vars.get("pContentsLayer") => Some(&Value::Object(container_id.as_u64())), "CreateContents uses the selected container as creator");
     for name in [
         "iObjectLayerCache",
         "iConstructionLayerCache",
         "iObjectLayerCacheAfter",
         "iConstructionLayerCacheAfter",
     ] {
-        assert_eq!(
-            caller.local_vars.get(name),
-            Some(&Value::Int(321)),
-            "{name} copies the caller's raw layer cache",
-        );
+        unit_assert_eq!(caller.local_vars.get(name) => Some(&Value::Int(321)), "{name} copies the caller's raw layer cache",);
     }
     for name in ["iContentsLayerCache", "iContentsLayerCacheAfter"] {
-        assert_eq!(
-            caller.local_vars.get(name),
-            Some(&Value::Int(654)),
-            "{name} copies the container's raw layer cache",
-        );
+        unit_assert_eq!(caller.local_vars.get(name) => Some(&Value::Int(654)), "{name} copies the container's raw layer cache",);
     }
-    assert_eq!(
-        engine
-            .object_snapshot(object_id)
-            .expect("created object remains")
-            .layer,
-        Some(caller_id)
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(construction_id)
-            .expect("construction remains")
-            .layer,
-        Some(caller_id)
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(contents_id)
-            .expect("created content remains")
-            .layer,
-        Some(container_id)
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(contents_id)
-            .expect("created content remains")
-            .container,
-        Some(container_id)
-    );
+    unit_assert_eq!(engine.object_snapshot(object_id).expect("created object remains").layer => Some(caller_id));
+    unit_assert_eq!(engine.object_snapshot(construction_id).expect("construction remains").layer => Some(caller_id));
+    unit_assert_eq!(engine.object_snapshot(contents_id).expect("created content remains").layer => Some(container_id));
+    unit_assert_eq!(engine.object_snapshot(contents_id).expect("created content remains").container => Some(container_id));
 }
 
 #[test]
@@ -1461,20 +1141,12 @@ global func ApplyLayer(object pLayer, object pTarget) {
     engine
         .install_scenario_script_with_convention("Scenario", scenario_script, true)
         .test_value();
-    let layer_id =
-        engine.spawn_test_object(SpawnConfig::new("ITEM").with_category(CATEGORY_OBJECT));
-    let target_id =
-        engine.spawn_test_object(SpawnConfig::new("ITEM").with_category(CATEGORY_OBJECT));
-    let direct_id = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_category(CATEGORY_OBJECT)
-            .with_container(target_id),
-    );
-    let grandchild_id = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_category(CATEGORY_OBJECT)
-            .with_container(direct_id),
-    );
+    let layer_id = spawn_fixture!(engine, "ITEM", with_category: CATEGORY_OBJECT);
+    let target_id = spawn_fixture!(engine, "ITEM", with_category: CATEGORY_OBJECT);
+    let direct_id =
+        spawn_fixture!(engine, "ITEM", with_category: CATEGORY_OBJECT, with_container: target_id);
+    let grandchild_id =
+        spawn_fixture!(engine, "ITEM", with_category: CATEGORY_OBJECT, with_container: direct_id);
 
     engine
         .call_scenario_script_function(
@@ -1486,29 +1158,16 @@ global func ApplyLayer(object pLayer, object pTarget) {
         )
         .test_value();
 
-    assert_eq!(
-        engine
-            .object_snapshot(target_id)
-            .expect("target remains")
-            .layer,
-        Some(layer_id)
-    );
-    assert_eq!(
+    unit_assert_eq!(engine.object_snapshot(target_id).expect("target remains").layer => Some(layer_id));
+    unit_assert_eq!(
         engine
             .object_snapshot(direct_id)
             .expect("content remains")
-            .layer,
+            .layer =>
         Some(layer_id),
         "scenario host snapshot exposes the target's direct contents"
     );
-    assert_eq!(
-        engine
-            .object_snapshot(grandchild_id)
-            .expect("grandchild remains")
-            .layer,
-        None,
-        "layer propagation remains direct-only"
-    );
+    unit_assert_eq!(engine.object_snapshot(grandchild_id).expect("grandchild remains").layer => None, "layer propagation remains direct-only");
 }
 
 #[test]
@@ -1549,22 +1208,16 @@ func Trigger(object pOther) {
 
     let caller = engine.test_object_snapshot(caller_id);
     let locals = &caller.local_vars;
-    assert_eq!(locals.get("iSelfInitial"), Some(&Value::Int(2)));
-    assert_eq!(locals.get("iForeignInitial"), Some(&Value::Int(4)));
-    assert_eq!(locals.get("iSetPrevious"), Some(&Value::Int(2)));
-    assert_eq!(locals.get("iSelfCustom"), Some(&Value::Int(129)));
-    assert_eq!(locals.get("iResetPrevious"), Some(&Value::Int(129)));
-    assert_eq!(locals.get("iSelfReset"), Some(&Value::Int(2)));
-    assert_eq!(locals.get("iForeignPrevious"), Some(&Value::Int(4)));
-    assert_eq!(locals.get("iForeignCustom"), Some(&Value::Int(130)));
-    assert_eq!(caller.blit_mode, 2);
-    assert_eq!(
-        engine
-            .object_snapshot(other_id)
-            .expect("other remains")
-            .blit_mode,
-        130
-    );
+    unit_assert_eq!(locals.get("iSelfInitial") => Some(&Value::Int(2)));
+    unit_assert_eq!(locals.get("iForeignInitial") => Some(&Value::Int(4)));
+    unit_assert_eq!(locals.get("iSetPrevious") => Some(&Value::Int(2)));
+    unit_assert_eq!(locals.get("iSelfCustom") => Some(&Value::Int(129)));
+    unit_assert_eq!(locals.get("iResetPrevious") => Some(&Value::Int(129)));
+    unit_assert_eq!(locals.get("iSelfReset") => Some(&Value::Int(2)));
+    unit_assert_eq!(locals.get("iForeignPrevious") => Some(&Value::Int(4)));
+    unit_assert_eq!(locals.get("iForeignCustom") => Some(&Value::Int(130)));
+    unit_assert_eq!(caller.blit_mode => 2);
+    unit_assert_eq!(engine.object_snapshot(other_id).expect("other remains").blit_mode => 130);
 }
 
 #[test]
@@ -1600,19 +1253,13 @@ func Trigger() {
     engine.call_test_object_function(index, "Trigger", Vec::new());
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(
-        snapshot.local_vars.get("iSetExisting"),
-        Some(&Value::Int(1))
-    );
-    assert_eq!(
-        snapshot.local_vars.get("iGetExisting"),
-        Some(&Value::Int(2))
-    );
-    assert_eq!(snapshot.local_vars.get("iSetMissing"), Some(&Value::Nil));
-    assert_eq!(snapshot.local_vars.get("iGetMissing"), Some(&Value::Nil));
-    assert_eq!(snapshot.graphics_overlays.len(), 1);
-    assert_eq!(snapshot.graphics_overlays[0].id, 7);
-    assert_eq!(snapshot.graphics_overlays[0].blit_mode, 2);
+    unit_assert_eq!(snapshot.local_vars.get("iSetExisting") => Some(&Value::Int(1)));
+    unit_assert_eq!(snapshot.local_vars.get("iGetExisting") => Some(&Value::Int(2)));
+    unit_assert_eq!(snapshot.local_vars.get("iSetMissing") => Some(&Value::Nil));
+    unit_assert_eq!(snapshot.local_vars.get("iGetMissing") => Some(&Value::Nil));
+    unit_assert_eq!(snapshot.graphics_overlays.len() => 1);
+    unit_assert_eq!(snapshot.graphics_overlays[0].id => 7);
+    unit_assert_eq!(snapshot.graphics_overlays[0].blit_mode => 2);
 }
 
 #[test]
@@ -1640,20 +1287,17 @@ func Trigger() {
     engine.call_test_object_function(index, "Trigger", Vec::new());
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.local_vars.get("iObject"), Some(&Value::Int(2)));
-    assert_eq!(
-        snapshot.local_vars.get("iConstruction"),
-        Some(&Value::Int(2))
-    );
-    assert_eq!(snapshot.local_vars.get("iContents"), Some(&Value::Int(2)));
-    assert_eq!(
+    unit_assert_eq!(snapshot.local_vars.get("iObject") => Some(&Value::Int(2)));
+    unit_assert_eq!(snapshot.local_vars.get("iConstruction") => Some(&Value::Int(2)));
+    unit_assert_eq!(snapshot.local_vars.get("iContents") => Some(&Value::Int(2)));
+    unit_assert_eq!(
         engine
             .snapshot()
             .objects
             .iter()
             .filter(|object| object.definition_id == "ITEM")
             .map(|object| object.blit_mode)
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![2, 2, 2]
     );
 }
@@ -1678,7 +1322,7 @@ func Switch() {
     engine.register_test_definition(old);
     engine.register_test_definition(new);
     let default_id = engine.spawn_test_object(SpawnConfig::new("OLDD"));
-    let custom_id = engine.spawn_test_object(SpawnConfig::new("OLDD").with_blit_mode(129));
+    let custom_id = spawn_fixture!(engine, "OLDD", with_blit_mode: 129);
 
     for id in [default_id, custom_id] {
         let index = engine.test_object_index(id);
@@ -1686,14 +1330,14 @@ func Switch() {
     }
 
     let default = engine.test_object_snapshot(default_id);
-    assert_eq!(default.local_vars.get("bChanged"), Some(&Value::Bool(true)));
-    assert_eq!(default.definition_id, "NEWD");
-    assert_eq!(default.local_vars.get("iAfter"), Some(&Value::Int(4)));
-    assert_eq!(default.blit_mode, 4);
+    unit_assert_eq!(default.local_vars.get("bChanged") => Some(&Value::Bool(true)));
+    unit_assert_eq!(default.definition_id => "NEWD");
+    unit_assert_eq!(default.local_vars.get("iAfter") => Some(&Value::Int(4)));
+    unit_assert_eq!(default.blit_mode => 4);
     let custom = engine.test_object_snapshot(custom_id);
-    assert_eq!(custom.definition_id, "NEWD");
-    assert_eq!(custom.local_vars.get("iAfter"), Some(&Value::Int(129)));
-    assert_eq!(custom.blit_mode, 129);
+    unit_assert_eq!(custom.definition_id => "NEWD");
+    unit_assert_eq!(custom.local_vars.get("iAfter") => Some(&Value::Int(129)));
+    unit_assert_eq!(custom.blit_mode => 129);
 }
 
 #[test]
@@ -1777,74 +1421,38 @@ protected func Entrance(pContainer) { pContainer->NoteEntrance(); return(1); }
     )?;
 
     let container_idx = engine.test_object_index(container);
-    assert_eq!(
-        engine.objects[container_idx].state.contents,
-        vec![changed, peer_b, peer_a],
-        "the fixture starts with the changed object at the sorted front"
-    );
+    unit_assert_eq!(engine.objects[container_idx].state.contents => vec![changed, peer_b, peer_a], "the fixture starts with the changed object at the sorted front");
 
     let changed_idx = engine.test_object_index(changed);
     engine.objects[changed_idx].fixed_velocity = FixedVec2::new(itofix(8), itofix(9));
     engine.objects[changed_idx].rotation_velocity = itofix(6);
     engine.objects[changed_idx].state.mobile = false;
     engine.objects[changed_idx].state.in_liquid = true;
-    assert_eq!(
-        engine.call_object_function(changed_idx, "Swap", Vec::new())?,
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(changed_idx, "Swap", Vec::new())? => Value::Bool(true));
 
     let changed_idx = engine.test_object_index(changed);
     let changed_object = &engine.objects[changed_idx];
-    assert_eq!(changed_object.definition_id, "NEWD");
-    assert_eq!(
-        changed_object.state.category, CATEGORY_VEHICLE,
-        "ChangeDef preserves the live C4Object::Category"
-    );
-    assert_eq!(changed_object.state.container, Some(container));
-    assert_eq!(changed_object.state.position, Vector2::new(37, 49));
-    assert_eq!(
-        changed_object.fixed_position,
-        FixedVec2::new(itofix(37), itofix(49)),
-        "Enter CopyMotion snaps FixX/FixY to the container's integer position"
-    );
-    assert_eq!(changed_object.fixed_velocity, container_velocity);
-    assert_eq!(
-        changed_object.rotation_velocity,
-        C4Fixed::ZERO,
-        "CopyMotion copies xdir/ydir only; the silent Exit's zero rdir survives"
-    );
-    assert!(
-        changed_object.state.mobile,
-        "the silent Exit still mobilizes"
-    );
-    assert!(
-        !changed_object.state.in_liquid,
-        "the silent Exit clears InLiquid"
-    );
-    assert_eq!(
-        changed_object.state.local_vars.get("reject_count"),
-        Some(&Value::Int(1)),
-        "the NEW definition's RejectEntrance runs synchronously"
-    );
+    unit_assert_eq!(changed_object.definition_id => "NEWD");
+    unit_assert_eq!(changed_object.state.category => CATEGORY_VEHICLE, "ChangeDef preserves the live C4Object::Category");
+    unit_assert_eq!(changed_object.state.container => Some(container));
+    unit_assert_eq!(changed_object.state.position => Vector2::new(37, 49));
+    unit_assert_eq!(changed_object.fixed_position => FixedVec2::new(itofix(37), itofix(49)), "Enter CopyMotion snaps FixX/FixY to the container's integer position");
+    unit_assert_eq!(changed_object.fixed_velocity => container_velocity);
+    unit_assert_eq!(changed_object.rotation_velocity => C4Fixed::ZERO, "CopyMotion copies xdir/ydir only; the silent Exit's zero rdir survives");
+    unit_assert!(changed_object.state.mobile, "the silent Exit still mobilizes");
+    unit_assert!(!changed_object.state.in_liquid, "the silent Exit clears InLiquid");
+    unit_assert_eq!(changed_object.state.local_vars.get("reject_count") => Some(&Value::Int(1)), "the NEW definition's RejectEntrance runs synchronously");
 
     let container_idx = engine.test_object_index(container);
     let container_state = &engine.objects[container_idx].state;
-    assert_eq!(
-        container_state.contents,
-        vec![peer_b, peer_a, changed],
-        "Unsorted bypasses stContents sorting and appends at the forward tail"
-    );
+    unit_assert_eq!(container_state.contents => vec![peer_b, peer_a, changed], "Unsorted bypasses stContents sorting and appends at the forward tail");
     for callback in [
         "ejection_count",
         "departure_count",
         "collection_count",
         "entrance_count",
     ] {
-        assert_eq!(
-            container_state.local_vars.get(callback),
-            Some(&Value::Int(0)),
-            "ChangeDef's silent exit/re-entry suppresses {callback}"
-        );
+        unit_assert_eq!(container_state.local_vars.get(callback) => Some(&Value::Int(0)), "ChangeDef's silent exit/re-entry suppresses {callback}");
     }
     Ok(())
 }
@@ -1908,44 +1516,36 @@ protected func Entrance(pContainer) { pContainer->NoteEntrance(); return(1); }
     engine.objects[changed_idx].state.mobile = false;
     engine.objects[changed_idx].state.in_liquid = true;
 
-    assert_eq!(
-        engine.call_object_function(changed_idx, "Swap", Vec::new())?,
+    unit_assert_eq!(
+        engine.call_object_function(changed_idx, "Swap", Vec::new())? =>
         Value::Bool(true),
         "ChangeDef succeeds even when its attempted re-entry is vetoed"
     );
 
     let changed_idx = engine.test_object_index(changed);
     let changed_object = &engine.objects[changed_idx];
-    assert_eq!(changed_object.definition_id, "NEWD");
-    assert_eq!(changed_object.state.container, None);
-    assert_eq!(changed_object.state.position, Vector2::ZERO);
-    assert_eq!(changed_object.fixed_position, FixedVec2::ZERO);
-    assert_eq!(changed_object.fixed_velocity, FixedVec2::ZERO);
-    assert_eq!(changed_object.state.rotation, 0);
-    assert_eq!(changed_object.fixed_rotation, C4Fixed::ZERO);
-    assert_eq!(changed_object.rotation_velocity, C4Fixed::ZERO);
-    assert!(changed_object.state.mobile);
-    assert!(!changed_object.state.in_liquid);
-    assert_eq!(
-        changed_object.state.local_vars.get("reject_count"),
-        Some(&Value::Int(1)),
-        "the veto came from the NEW definition"
-    );
+    unit_assert_eq!(changed_object.definition_id => "NEWD");
+    unit_assert_eq!(changed_object.state.container => None);
+    unit_assert_eq!(changed_object.state.position => Vector2::ZERO);
+    unit_assert_eq!(changed_object.fixed_position => FixedVec2::ZERO);
+    unit_assert_eq!(changed_object.fixed_velocity => FixedVec2::ZERO);
+    unit_assert_eq!(changed_object.state.rotation => 0);
+    unit_assert_eq!(changed_object.fixed_rotation => C4Fixed::ZERO);
+    unit_assert_eq!(changed_object.rotation_velocity => C4Fixed::ZERO);
+    unit_assert!(changed_object.state.mobile);
+    unit_assert!(!changed_object.state.in_liquid);
+    unit_assert_eq!(changed_object.state.local_vars.get("reject_count") => Some(&Value::Int(1)), "the veto came from the NEW definition");
 
     let container_idx = engine.test_object_index(container);
     let container_state = &engine.objects[container_idx].state;
-    assert!(container_state.contents.is_empty());
+    unit_assert!(container_state.contents.is_empty());
     for callback in [
         "ejection_count",
         "departure_count",
         "collection_count",
         "entrance_count",
     ] {
-        assert_eq!(
-            container_state.local_vars.get(callback),
-            Some(&Value::Int(0)),
-            "a vetoed ChangeDef transfer still suppresses {callback}"
-        );
+        unit_assert_eq!(container_state.local_vars.get(callback) => Some(&Value::Int(0)), "a vetoed ChangeDef transfer still suppresses {callback}");
     }
     Ok(())
 }
@@ -2053,21 +1653,15 @@ protected func Entrance(pContainer) {{ entrance_calls += 1; return(1); }}
     let changed_index = engine.test_object_index(changed);
     engine.objects[changed_index].set_fixed_velocity(FixedVec2::new(itofix(8), itofix(9)));
 
-    assert_eq!(
-        engine.call_object_function(changed_index, "Swap", Vec::new())?,
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(changed_index, "Swap", Vec::new())? => Value::Bool(true));
 
     let changed_index = engine.test_object_index(changed);
     let changed_object = &engine.objects[changed_index];
-    assert_eq!(changed_object.definition_id, "NEWD");
-    assert_eq!(changed_object.state.container, None);
-    assert_eq!(changed_object.state.position, Vector2::new(4, 3));
-    assert_eq!(
-        changed_object.fixed_position,
-        FixedVec2::new(itofix(4), itofix(3))
-    );
-    assert_eq!(changed_object.fixed_velocity, FixedVec2::ZERO);
+    unit_assert_eq!(changed_object.definition_id => "NEWD");
+    unit_assert_eq!(changed_object.state.container => None);
+    unit_assert_eq!(changed_object.state.position => Vector2::new(4, 3));
+    unit_assert_eq!(changed_object.fixed_position => FixedVec2::new(itofix(4), itofix(3)));
+    unit_assert_eq!(changed_object.fixed_velocity => FixedVec2::ZERO);
     let locals = &changed_object.state.local_vars;
     for (name, expected) in [
         ("order", 1234),
@@ -2086,7 +1680,7 @@ protected func Entrance(pContainer) {{ entrance_calls += 1; return(1); }}
         ("departure_calls", 0),
         ("entrance_calls", 0),
     ] {
-        assert_eq!(locals.get(name), Some(&Value::Int(expected)), "{name}");
+        unit_assert_eq!(locals.get(name) => Some(&Value::Int(expected)), "{name}");
     }
     for name in [
         "left_contained",
@@ -2094,15 +1688,15 @@ protected func Entrance(pContainer) {{ entrance_calls += 1; return(1); }}
         "abort_contained",
         "reject_contained",
     ] {
-        assert_eq!(locals.get(name), Some(&Value::Bool(false)), "{name}");
+        unit_assert_eq!(locals.get(name) => Some(&Value::Bool(false)), "{name}");
     }
     let container_index = engine.test_object_index(container);
-    assert!(engine.objects[container_index].state.contents.is_empty());
-    assert_eq!(
+    unit_assert!(engine.objects[container_index].state.contents.is_empty());
+    unit_assert_eq!(
         engine.objects[container_index]
             .state
             .local_vars
-            .get("ejection_calls"),
+            .get("ejection_calls") =>
         Some(&Value::Int(0)),
         "fCalls=false suppresses Ejection while BoundsCheck contacts still run"
     );
@@ -2208,19 +1802,16 @@ protected func Entrance(pContainer) {{ entrance_calls += 1; return(1); }}
     let burner_index = engine.test_object_index(burner);
     engine.objects[burner_index].set_fixed_velocity(FixedVec2::new(itofix(6), itofix(7)));
 
-    assert!(engine.incinerate_object(burner_index, 1, false, None)?);
+    unit_assert!(engine.incinerate_object(burner_index, 1, false, None)?);
 
     let burner_index = engine.test_object_index(burner);
     let burner_object = &engine.objects[burner_index];
-    assert_eq!(burner_object.definition_id, "NEWD");
-    assert!(burner_object.state.on_fire);
-    assert_eq!(burner_object.state.container, None);
-    assert_eq!(burner_object.state.position, Vector2::new(5, 2));
-    assert_eq!(
-        burner_object.fixed_position,
-        FixedVec2::new(itofix(5), itofix(2))
-    );
-    assert_eq!(burner_object.fixed_velocity, FixedVec2::ZERO);
+    unit_assert_eq!(burner_object.definition_id => "NEWD");
+    unit_assert!(burner_object.state.on_fire);
+    unit_assert_eq!(burner_object.state.container => None);
+    unit_assert_eq!(burner_object.state.position => Vector2::new(5, 2));
+    unit_assert_eq!(burner_object.fixed_position => FixedVec2::new(itofix(5), itofix(2)));
+    unit_assert_eq!(burner_object.fixed_velocity => FixedVec2::ZERO);
     let locals = &burner_object.state.local_vars;
     for (name, expected) in [
         ("order", 1234),
@@ -2239,20 +1830,14 @@ protected func Entrance(pContainer) {{ entrance_calls += 1; return(1); }}
         ("departure_calls", 0),
         ("entrance_calls", 0),
     ] {
-        assert_eq!(locals.get(name), Some(&Value::Int(expected)), "{name}");
+        unit_assert_eq!(locals.get(name) => Some(&Value::Int(expected)), "{name}");
     }
     for name in ["left_contained", "top_contained"] {
-        assert_eq!(locals.get(name), Some(&Value::Bool(false)), "{name}");
+        unit_assert_eq!(locals.get(name) => Some(&Value::Bool(false)), "{name}");
     }
     let container_index = engine.test_object_index(container);
-    assert!(engine.objects[container_index].state.contents.is_empty());
-    assert_eq!(
-        engine.objects[container_index]
-            .state
-            .local_vars
-            .get("ejection_calls"),
-        Some(&Value::Int(0))
-    );
+    unit_assert!(engine.objects[container_index].state.contents.is_empty());
+    unit_assert_eq!(engine.objects[container_index].state.local_vars.get("ejection_calls") => Some(&Value::Int(0)));
     Ok(())
 }
 
@@ -2341,16 +1926,16 @@ protected func RejectEntrance(pContainer)
         )?;
         let changed_index = engine.test_object_index(changed);
         if via_burn_turn_to {
-            assert_eq!(
-                engine.call_object_function(changed_index, "Prime", vec![Value::Bool(false)],)?,
+            unit_assert_eq!(
+                engine.call_object_function(changed_index, "Prime", vec![Value::Bool(false)],)? =>
                 Value::Int(1),
                 "{path}: SetShape primes the live object shape"
             );
             let changed_index = engine.test_object_index(changed);
-            assert!(engine.incinerate_object(changed_index, 1, false, None)?);
+            unit_assert!(engine.incinerate_object(changed_index, 1, false, None)?);
         } else {
-            assert_eq!(
-                engine.call_object_function(changed_index, "Prime", vec![Value::Bool(true)],)?,
+            unit_assert_eq!(
+                engine.call_object_function(changed_index, "Prime", vec![Value::Bool(true)],)? =>
                 Value::Bool(true),
                 "{path}: same-call SetShape + ChangeDef succeeds"
             );
@@ -2358,17 +1943,10 @@ protected func RejectEntrance(pContainer)
 
         let changed_index = engine.test_object_index(changed);
         let object = &engine.objects[changed_index];
-        assert_eq!(object.definition_id, "NEWD", "{path}: definition changes");
-        assert_eq!(object.state.container, None, "{path}: re-entry is vetoed");
-        assert_eq!(
-            object.state.position,
-            Vector2::new(7, 8),
-            "{path}: BoundsCheck clamps with live SetShape offsets"
-        );
-        assert_eq!(
-            object.state.shape_override, None,
-            "{path}: non-line UpdateFace(true) discards SetShape geometry"
-        );
+        unit_assert_eq!(object.definition_id => "NEWD", "{path}: definition changes");
+        unit_assert_eq!(object.state.container => None, "{path}: re-entry is vetoed");
+        unit_assert_eq!(object.state.position => Vector2::new(7, 8), "{path}: BoundsCheck clamps with live SetShape offsets");
+        unit_assert_eq!(object.state.shape_override => None, "{path}: non-line UpdateFace(true) discards SetShape geometry");
         for (name, expected) in [
             ("abort_width", 4),
             ("abort_height", 6),
@@ -2379,11 +1957,7 @@ protected func RejectEntrance(pContainer)
             ("reject_x", -1),
             ("reject_y", -4),
         ] {
-            assert_eq!(
-                object.state.local_vars.get(name),
-                Some(&Value::Int(expected)),
-                "{path}: {name}"
-            );
+            unit_assert_eq!(object.state.local_vars.get(name) => Some(&Value::Int(expected)), "{path}: {name}");
         }
     }
     Ok(())
@@ -2479,42 +2053,31 @@ protected func RejectEntrance(pContainer)
         )?;
 
         let container_index = engine.test_object_index(container);
-        assert_eq!(
-            engine.object_ocf_at_index(container_index) & ocf::HIT_SPEED4,
-            0,
-            "{path}: parent OCF starts without HitSpeed4"
-        );
+        unit_assert_eq!(engine.object_ocf_at_index(container_index) & ocf::HIT_SPEED4 => 0, "{path}: parent OCF starts without HitSpeed4");
         engine.objects[container_index]
             .set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(9)));
-        assert_eq!(
-            engine.object_ocf_at_index(container_index) & ocf::HIT_SPEED4,
-            0,
-            "{path}: changing velocity alone leaves the parent cache stale"
-        );
+        unit_assert_eq!(engine.object_ocf_at_index(container_index) & ocf::HIT_SPEED4 => 0, "{path}: changing velocity alone leaves the parent cache stale");
 
         let changed_index = engine.test_object_index(changed);
         engine.objects[changed_index].set_fixed_velocity(FixedVec2::new(itofix(9), C4Fixed::ZERO));
         engine.refresh_object_ocf(changed_index);
         let cached_before = engine.object_ocf_at_index(changed_index);
-        assert_ne!(cached_before & ocf::HIT_SPEED4, 0);
-        assert_eq!(
-            cached_before & (ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE),
+        unit_assert_ne!(cached_before & ocf::HIT_SPEED4 => 0);
+        unit_assert_eq!(
+            cached_before & (ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE) =>
             0,
             "{path}: put-only containment hides all outside-only bits"
         );
 
         if via_burn_turn_to {
-            assert!(engine.incinerate_object(changed_index, 1, false, None)?);
+            unit_assert!(engine.incinerate_object(changed_index, 1, false, None)?);
         } else {
-            assert_eq!(
-                engine.call_object_function(changed_index, "Swap", Vec::new())?,
-                Value::Bool(true)
-            );
+            unit_assert_eq!(engine.call_object_function(changed_index, "Swap", Vec::new())? => Value::Bool(true));
         }
 
         let changed_index = engine.test_object_index(changed);
         let object = &engine.objects[changed_index];
-        assert_eq!(object.state.position, Vector2::new(4, 60), "{path}: clamp");
+        unit_assert_eq!(object.state.position => Vector2::new(4, 60), "{path}: clamp");
         let local_mask = |name: &str| -> u32 {
             match object.state.local_vars.get(name) {
                 Some(Value::Int(value)) => *value as u32,
@@ -2522,36 +2085,16 @@ protected func RejectEntrance(pContainer)
             }
         };
         let contact_ocf = local_mask("contact_ocf");
-        assert_ne!(
-            contact_ocf & ocf::HIT_SPEED4,
-            0,
-            "{path}: Contact sees the target's stale cached HitSpeed4"
-        );
-        assert_eq!(
-            contact_ocf & (ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE),
-            0,
-            "{path}: Contact still sees the cached contained OCF"
-        );
-        assert_eq!(
-            object.state.local_vars.get("contact_xdir"),
-            Some(&Value::Int(0)),
-            "{path}: TargetBounds zeroes xdir before Contact"
-        );
-        assert_ne!(
-            local_mask("parent_ocf") & ocf::HIT_SPEED4,
-            0,
-            "{path}: the old parent's pre-Contact SetOCF is a full refresh"
-        );
+        unit_assert_ne!(contact_ocf & ocf::HIT_SPEED4 => 0, "{path}: Contact sees the target's stale cached HitSpeed4");
+        unit_assert_eq!(contact_ocf & (ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE) => 0, "{path}: Contact still sees the cached contained OCF");
+        unit_assert_eq!(object.state.local_vars.get("contact_xdir") => Some(&Value::Int(0)), "{path}: TargetBounds zeroes xdir before Contact");
+        unit_assert_ne!(local_mask("parent_ocf") & ocf::HIT_SPEED4 => 0, "{path}: the old parent's pre-Contact SetOCF is a full refresh");
 
         for callback in ["abort_ocf", "reject_ocf"] {
             let refreshed = local_mask(callback);
-            assert_eq!(
-                refreshed & ocf::HIT_SPEED4,
-                0,
-                "{path}: {callback} sees zero-dir HitSpeed refresh"
-            );
-            assert_eq!(
-                refreshed & (ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE),
+            unit_assert_eq!(refreshed & ocf::HIT_SPEED4 => 0, "{path}: {callback} sees zero-dir HitSpeed refresh");
+            unit_assert_eq!(
+                refreshed & (ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE) =>
                 ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE,
                 "{path}: {callback} sees the full post-Exit position/container refresh"
             );
@@ -2594,37 +2137,23 @@ fn change_def_waits_for_a_later_global_unsorted_sweep_then_uses_the_new_def_clus
     let trigger =
         engine.spawn_object(SpawnConfig::new("TRIG").with_category(CATEGORY_STATIC_BACK))?;
     let before = vec![trigger, changed, separator, new_peer];
-    assert_eq!(engine.debug_exec_order(), before);
+    unit_assert_eq!(engine.debug_exec_order() => before);
 
     let changed_idx = engine.test_object_index(changed);
-    assert_eq!(
-        engine.call_object_function(changed_idx, "Swap", Vec::new())?,
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(changed_idx, "Swap", Vec::new())? => Value::Bool(true));
     let changed_idx = engine.test_object_index(changed);
-    assert_eq!(engine.objects[changed_idx].definition_id, "NEWD");
-    assert_eq!(
-        engine.objects[changed_idx].state.category, CATEGORY_OBJECT,
-        "ChangeDef does not copy the new definition's Category"
-    );
-    assert_eq!(
-        engine.debug_exec_order(),
-        before,
-        "ChangeDef marks Unsorted without immediately moving the master-list link"
-    );
+    unit_assert_eq!(engine.objects[changed_idx].definition_id => "NEWD");
+    unit_assert_eq!(engine.objects[changed_idx].state.category => CATEGORY_OBJECT, "ChangeDef does not copy the new definition's Category");
+    unit_assert_eq!(engine.debug_exec_order() => before, "ChangeDef marks Unsorted without immediately moving the master-list link");
     engine.execute_object_order_commands();
-    assert_eq!(
-        engine.debug_exec_order(),
-        before,
-        "ChangeDef alone does not request the global ResortUnsorted scan"
-    );
+    unit_assert_eq!(engine.debug_exec_order() => before, "ChangeDef alone does not request the global ResortUnsorted scan");
 
     let trigger_idx = engine.test_object_index(trigger);
     engine.call_object_function(trigger_idx, "Wake", Vec::new())?;
-    assert_eq!(engine.debug_exec_order(), before, "Resort is deferred");
+    unit_assert_eq!(engine.debug_exec_order() => before, "Resort is deferred");
     engine.execute_object_order_commands();
-    assert_eq!(
-        engine.debug_exec_order(),
+    unit_assert_eq!(
+        engine.debug_exec_order() =>
         vec![trigger, separator, new_peer, changed],
         "the unrelated Resort sweeps every Unsorted object and ChangeDef's re-add joins NEWD"
     );
@@ -2664,40 +2193,24 @@ fn change_def_unsorted_link_survives_a_frame_until_an_explicit_resort() -> Resul
     let raw_category = CATEGORY_LIVING | CATEGORY_OBJECT;
     let changed = engine.spawn_object(SpawnConfig::new("OLDD").with_category(raw_category))?;
     let fixed_link = vec![trigger, anchor, changed];
-    assert_eq!(engine.debug_exec_order(), fixed_link);
+    unit_assert_eq!(engine.debug_exec_order() => fixed_link);
 
     let changed_index = engine.test_object_index(changed);
-    assert_eq!(
-        engine.call_object_function(changed_index, "Swap", Vec::new())?,
-        Value::Bool(true)
-    );
-    assert!(engine.objects[changed_index].unsorted);
+    unit_assert_eq!(engine.call_object_function(changed_index, "Swap", Vec::new())? => Value::Bool(true));
+    unit_assert!(engine.objects[changed_index].unsorted);
 
     engine.tick_without_snapshot()?;
     let changed_index = engine.test_object_index(changed);
-    assert_eq!(
-        engine.debug_exec_order(),
-        fixed_link,
-        "a frame boundary does not move a ChangeDef-only Unsorted link"
-    );
-    assert_eq!(
-        engine.objects[changed_index].state.category, raw_category,
-        "runtime categories are not normalized by the post-load repair"
-    );
-    assert!(
-        engine.objects[changed_index].unsorted,
-        "ChangeDef alone does not arm the global Unsorted sweep"
-    );
+    unit_assert_eq!(engine.debug_exec_order() => fixed_link, "a frame boundary does not move a ChangeDef-only Unsorted link");
+    unit_assert_eq!(engine.objects[changed_index].state.category => raw_category, "runtime categories are not normalized by the post-load repair");
+    unit_assert!(engine.objects[changed_index].unsorted, "ChangeDef alone does not arm the global Unsorted sweep");
 
     let trigger_index = engine.test_object_index(trigger);
     engine.call_object_function(trigger_index, "Wake", Vec::new())?;
     engine.execute_object_order_commands();
     let changed_index = engine.test_object_index(changed);
-    assert!(
-        !engine.objects[changed_index].unsorted,
-        "an explicit Resort finally consumes the ChangeDef flag"
-    );
-    assert_eq!(engine.debug_exec_order(), fixed_link);
+    unit_assert!(!engine.objects[changed_index].unsorted, "an explicit Resort finally consumes the ChangeDef flag");
+    unit_assert_eq!(engine.debug_exec_order() => fixed_link);
     Ok(())
 }
 
@@ -2738,37 +2251,18 @@ fn construction_change_def_keeps_the_original_spawn_link_until_a_later_resort(
 
     let before_sweep = vec![trigger, new_peer, separator, changed];
     let changed_index = engine.test_object_index(changed);
-    assert_eq!(engine.objects[changed_index].definition_id, "NEWD");
-    assert_eq!(
-        engine.objects[changed_index].state.category,
-        CATEGORY_OBJECT
-    );
-    assert!(engine.objects[changed_index].unsorted);
-    assert_eq!(
-        engine.debug_exec_order(),
-        before_sweep,
-        "Construction ChangeDef keeps the link inserted for OLDD"
-    );
+    unit_assert_eq!(engine.objects[changed_index].definition_id => "NEWD");
+    unit_assert_eq!(engine.objects[changed_index].state.category => CATEGORY_OBJECT);
+    unit_assert!(engine.objects[changed_index].unsorted);
+    unit_assert_eq!(engine.debug_exec_order() => before_sweep, "Construction ChangeDef keeps the link inserted for OLDD");
     engine.execute_object_order_commands();
-    assert_eq!(
-        engine.debug_exec_order(),
-        before_sweep,
-        "ChangeDef alone does not arm the global unsorted sweep"
-    );
+    unit_assert_eq!(engine.debug_exec_order() => before_sweep, "ChangeDef alone does not arm the global unsorted sweep");
 
     let trigger_index = engine.test_object_index(trigger);
     engine.call_object_function(trigger_index, "Wake", Vec::new())?;
-    assert_eq!(
-        engine.debug_exec_order(),
-        before_sweep,
-        "Resort is deferred"
-    );
+    unit_assert_eq!(engine.debug_exec_order() => before_sweep, "Resort is deferred");
     engine.execute_object_order_commands();
-    assert_eq!(
-        engine.debug_exec_order(),
-        vec![trigger, new_peer, changed, separator],
-        "the later sweep re-adds the object into NEWD's cluster"
-    );
+    unit_assert_eq!(engine.debug_exec_order() => vec![trigger, new_peer, changed, separator], "the later sweep re-adds the object into NEWD's cluster");
     Ok(())
 }
 
@@ -2795,14 +2289,8 @@ fn change_def_self_arrow_resolves_the_new_definition_inline() {
 
     let result = engine.call_test_object_function(index, "Swap", Vec::new());
 
-    assert_eq!(result, Value::Int(2));
-    assert_eq!(
-        engine
-            .object_snapshot(id)
-            .expect("object remains")
-            .definition_id,
-        "NEWD"
-    );
+    unit_assert_eq!(result => Value::Int(2));
+    unit_assert_eq!(engine.object_snapshot(id).expect("object remains").definition_id => "NEWD");
 }
 
 #[test]
@@ -2826,15 +2314,8 @@ fn self_arrow_world_dispatch_keeps_object_locals_live() {
 
     let result = engine.call_test_object_function(index, "Outer", Vec::new());
 
-    assert_eq!(result, Value::Int(707));
-    assert_eq!(
-        engine
-            .object_snapshot(id)
-            .expect("object remains")
-            .local_vars
-            .get("iValue"),
-        Some(&Value::Int(7))
-    );
+    unit_assert_eq!(result => Value::Int(707));
+    unit_assert_eq!(engine.object_snapshot(id).expect("object remains").local_vars.get("iValue") => Some(&Value::Int(7)));
 }
 
 #[test]
@@ -2867,10 +2348,10 @@ fn change_def_self_arrow_reference_resolves_the_new_definition_inline() {
 
     let result = engine.call_test_object_function(index, "Swap", Vec::new());
 
-    assert_eq!(result, Value::Int(9));
+    unit_assert_eq!(result => Value::Int(9));
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.local_vars.get("iNew"), Some(&Value::Int(9)));
-    assert_ne!(snapshot.local_vars.get("iOld"), Some(&Value::Int(9)));
+    unit_assert_eq!(snapshot.local_vars.get("iNew") => Some(&Value::Int(9)));
+    unit_assert_ne!(snapshot.local_vars.get("iOld") => Some(&Value::Int(9)));
 }
 
 // FnChangeDef -> C4Object::ChangeDef (C4Object.cpp:1180-1231): the
@@ -2918,13 +2399,7 @@ public func Death()
     );
     engine.register_test_definition(corpse);
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("HRSX")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(50, 50))
-            .with_alive(true)
-            .with_action(ActionState::new("Gallop")),
-    );
+    let id = spawn_fixture!(engine, "HRSX", with_category: CATEGORY_OBJECT, with_position: Vector2::new(50, 50), with_alive: true, with_action: ActionState::new("Gallop"));
     let idx = engine.test_object_index(id);
     engine.objects[idx].state.energy = 30;
 
@@ -2937,18 +2412,14 @@ public func Death()
 
     let idx = engine.test_object_index(id);
     let object = &engine.objects[idx];
-    assert_eq!(
-        object.definition_id.as_str(),
-        "CRPS",
-        "ChangeDef swapped the definition"
-    );
-    assert_eq!(
-        object.state.action.name, "Dead",
+    unit_assert_eq!(object.definition_id.as_str() => "CRPS", "ChangeDef swapped the definition");
+    unit_assert_eq!(
+        object.state.action.name => "Dead",
         "SetAction after ChangeDef resolves against the NEW def's ActMap \
              (C4Object.cpp:1205-1231 swaps inline; SetActionByName then finds \
              \"Dead\")"
     );
-    assert!(!object.state.alive);
+    unit_assert!(!object.state.alive);
 }
 
 // FnFling requires an explicit target: `if (!pObj) return false;`
@@ -2983,25 +2454,13 @@ protected func Activity() { return(Fling(GetActionTarget(), 1, -3)); }
     let mut engine = Engine::with_seed(0);
     engine.set_physics(PhysicsSettings::new(0, 20, -20));
     engine.register_test_definition(horse);
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("HRSX")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(50, 50))
-            .with_action(ActionState::new("Gallop")),
-    );
+    let id = spawn_fixture!(engine, "HRSX", with_category: CATEGORY_OBJECT, with_position: Vector2::new(50, 50), with_action: ActionState::new("Gallop"));
 
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(id);
     let object = &engine.objects[idx];
-    assert_eq!(
-        object.fixed_velocity,
-        FixedVec2::ZERO,
-        "Fling(nil, 1, -3) must not launch the CALLER (C4Script.cpp:349)"
-    );
-    assert_eq!(
-        object.state.action.name, "Gallop",
-        "no Tumble transition from a nil-target Fling"
-    );
+    unit_assert_eq!(object.fixed_velocity => FixedVec2::ZERO, "Fling(nil, 1, -3) must not launch the CALLER (C4Script.cpp:349)");
+    unit_assert_eq!(object.state.action.name => "Gallop", "no Tumble transition from a nil-target Fling");
 }
 
 #[test]
@@ -3036,18 +2495,9 @@ fn shake_objects_flings_attached_living_object_with_cpp_rng_order() {
     let mut engine = Engine::with_seed(2);
     engine.register_test_definition(caller);
     engine.register_test_definition(target);
-    let caller_id = engine.spawn_test_object(
-        SpawnConfig::new("QUAK")
-            .with_position(Vector2::new(10, 10))
-            .with_owner(7),
-    );
-    let target_id = engine.spawn_test_object(
-        SpawnConfig::new("CLNK")
-            .with_position(Vector2::new(12, 10))
-            .with_action(ActionState::new("Walk"))
-            .with_category(CATEGORY_LIVING | CATEGORY_OBJECT)
-            .with_alive(true),
-    );
+    let caller_id =
+        spawn_fixture!(engine, "QUAK", with_position: Vector2::new(10, 10), with_owner: 7);
+    let target_id = spawn_fixture!(engine, "CLNK", with_position: Vector2::new(12, 10), with_action: ActionState::new("Walk"), with_category: CATEGORY_LIVING | CATEGORY_OBJECT, with_alive: true);
     let target_idx = engine.test_object_index(target_id);
     let initial_attach = CNAT_BOTTOM | CNAT_LEFT | CNAT_TOP;
     engine.objects[target_idx].state.mobile = false;
@@ -3062,19 +2512,16 @@ fn shake_objects_flings_attached_living_object_with_cpp_rng_order() {
     };
 
     let mut expected_rng = engine.rng.clone();
-    assert_eq!(expected_rng.random(3), 0, "fixture passes the shake gate");
+    unit_assert_eq!(expected_rng.random(3) => 0, "fixture passes the shake gate");
     let expected_xdir = expected_rng.rnd3();
     let caller_idx = engine.test_object_index(caller_id);
     engine.call_test_object_function(caller_idx, "Shake", Vec::new());
 
     let target_idx = engine.test_object_index(target_id);
-    assert_eq!(engine.objects[target_idx].state.action.name, "Tumble");
-    assert_eq!(
-        engine.objects[target_idx].fixed_velocity,
-        FixedVec2::new(itofix(expected_xdir), C4Fixed::ZERO)
-    );
-    assert_eq!(
-        engine.objects[target_idx].state.direction,
+    unit_assert_eq!(engine.objects[target_idx].state.action.name => "Tumble");
+    unit_assert_eq!(engine.objects[target_idx].fixed_velocity => FixedVec2::new(itofix(expected_xdir), C4Fixed::ZERO));
+    unit_assert_eq!(
+        engine.objects[target_idx].state.direction =>
         if expected_xdir < 0 {
             Direction::Right
         } else {
@@ -3082,20 +2529,11 @@ fn shake_objects_flings_attached_living_object_with_cpp_rng_order() {
         },
         "C4Object::Fling passes the raw `(txdir < 0)` bool to SetDir"
     );
-    assert!(
-        !engine.objects[target_idx].state.mobile,
-        "ObjectActionTumble does not change C4Object::Mobile"
-    );
-    assert_eq!(
-        engine.objects[target_idx].state.t_attach, initial_attach,
-        "ShakeObjects calls C4Object::Fling directly, so Tumble preserves t_attach"
-    );
-    assert_eq!(
-        engine.objects[target_idx].frame_t_attach, initial_attach,
-        "the current-frame attachment latch is preserved too"
-    );
-    assert_eq!(engine.objects[target_idx].last_energy_loss_cause, 7);
-    assert_eq!(engine.rng, expected_rng);
+    unit_assert!(!engine.objects[target_idx].state.mobile, "ObjectActionTumble does not change C4Object::Mobile");
+    unit_assert_eq!(engine.objects[target_idx].state.t_attach => initial_attach, "ShakeObjects calls C4Object::Fling directly, so Tumble preserves t_attach");
+    unit_assert_eq!(engine.objects[target_idx].frame_t_attach => initial_attach, "the current-frame attachment latch is preserved too");
+    unit_assert_eq!(engine.objects[target_idx].last_energy_loss_cause => 7);
+    unit_assert_eq!(engine.rng => expected_rng);
 }
 
 #[test]
@@ -3141,16 +2579,8 @@ public func Fling(pObj, iX, iY, iPrec, fAddSpeed) {
     let mut engine = Engine::with_seed(13);
     engine.register_test_definition(caller);
     engine.register_test_definition(target);
-    let caller_id = engine.spawn_test_object(
-        SpawnConfig::new("FLCL")
-            .with_category(CATEGORY_OBJECT)
-            .with_owner(4),
-    );
-    let target_id = engine.spawn_test_object(
-        SpawnConfig::new("FLTG")
-            .with_category(CATEGORY_OBJECT)
-            .with_action(ActionState::new("Walk")),
-    );
+    let caller_id = spawn_fixture!(engine, "FLCL", with_category: CATEGORY_OBJECT, with_owner: 4);
+    let target_id = spawn_fixture!(engine, "FLTG", with_category: CATEGORY_OBJECT, with_action: ActionState::new("Walk"));
     let target_idx = engine.test_object_index(target_id);
     let initial_attach = CNAT_LEFT | CNAT_TOP | CNAT_BOTTOM;
     engine.objects[target_idx].state.mobile = false;
@@ -3163,30 +2593,17 @@ public func Fling(pObj, iX, iY, iPrec, fAddSpeed) {
         "Throw",
         vec![compat::object_reference_value(target_id)],
     );
-    assert_eq!(result, Value::Bool(true));
+    unit_assert_eq!(result => Value::Bool(true));
 
     let target_idx = engine.test_object_index(target_id);
     let object = &engine.objects[target_idx];
-    assert_ne!(
-        object.state.local_vars.get("override_hit"),
-        Some(&Value::Int(1)),
-        "the target's script-level Fling override must not run"
-    );
-    assert_eq!(object.state.action.name, "Tumble");
-    assert_eq!(
-        object.fixed_velocity,
-        FixedVec2::new(itofix(-2), itofix(-3))
-    );
-    assert_eq!(object.state.direction, Direction::Right);
-    assert!(
-        !object.state.mobile,
-        "the native Tumble branch preserves Mobile"
-    );
-    assert_eq!(object.state.t_attach, 0, "FnFling clears every attach bit");
-    assert_eq!(
-        object.frame_t_attach, 0,
-        "FnFling also clears the current-frame latch"
-    );
+    unit_assert_ne!(object.state.local_vars.get("override_hit") => Some(&Value::Int(1)), "the target's script-level Fling override must not run");
+    unit_assert_eq!(object.state.action.name => "Tumble");
+    unit_assert_eq!(object.fixed_velocity => FixedVec2::new(itofix(-2), itofix(-3)));
+    unit_assert_eq!(object.state.direction => Direction::Right);
+    unit_assert!(!object.state.mobile, "the native Tumble branch preserves Mobile");
+    unit_assert_eq!(object.state.t_attach => 0, "FnFling clears every attach bit");
+    unit_assert_eq!(object.frame_t_attach => 0, "FnFling also clears the current-frame latch");
 }
 
 #[test]
@@ -3211,31 +2628,26 @@ fn fling_add_speed_uses_cpp_bool_coercion() {
     let mut engine = Engine::with_seed(19);
     engine.register_test_definition(caller);
     engine.register_test_definition(target);
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("FLBC").with_category(CATEGORY_OBJECT));
-    let target_id =
-        engine.spawn_test_object(SpawnConfig::new("FLBT").with_category(CATEGORY_OBJECT));
+    let caller_id = spawn_fixture!(engine, "FLBC", with_category: CATEGORY_OBJECT);
+    let target_id = spawn_fixture!(engine, "FLBT", with_category: CATEGORY_OBJECT);
     let initial_velocity = FixedVec2::new(C4Fixed::from_raw(147_456), C4Fixed::from_raw(-81_920));
     let expected_velocity = FixedVec2::new(C4Fixed::from_raw(729_088), C4Fixed::from_raw(-696_320));
     for flag in [Value::Int(2), Value::Bool(true)] {
         let target_index = engine.test_object_index(target_id);
         engine.objects[target_index].set_fixed_velocity(initial_velocity);
         let caller_index = engine.test_object_index(caller_id);
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(
                     caller_index,
                     "Throw",
                     vec![compat::object_reference_value(target_id), flag],
                 )
-                .expect("native Fling executes"),
+                .expect("native Fling executes") =>
             Value::Bool(true)
         );
         let target_index = engine.test_object_index(target_id);
-        assert_eq!(
-            engine.objects[target_index].fixed_velocity, expected_velocity,
-            "nonzero integer and true must both add half the current speed"
-        );
+        unit_assert_eq!(engine.objects[target_index].fixed_velocity => expected_velocity, "nonzero integer and true must both add half the current speed");
     }
 }
 
@@ -3282,68 +2694,45 @@ public func FlingThenSet(pTarget) {
     let mut engine = Engine::with_seed(17);
     engine.register_test_definition(caller);
     engine.register_test_definition(target);
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("FLOR").with_category(CATEGORY_OBJECT));
-    let set_then_fling = engine.spawn_test_object(
-        SpawnConfig::new("FLOT")
-            .with_category(CATEGORY_OBJECT)
-            .with_action(ActionState::new("Walk")),
-    );
-    let fling_then_set = engine.spawn_test_object(
-        SpawnConfig::new("FLOT")
-            .with_category(CATEGORY_OBJECT)
-            .with_action(ActionState::new("Walk")),
-    );
+    let caller_id = spawn_fixture!(engine, "FLOR", with_category: CATEGORY_OBJECT);
+    let set_then_fling = spawn_fixture!(engine, "FLOT", with_category: CATEGORY_OBJECT, with_action: ActionState::new("Walk"));
+    let fling_then_set = spawn_fixture!(engine, "FLOT", with_category: CATEGORY_OBJECT, with_action: ActionState::new("Walk"));
     for id in [set_then_fling, fling_then_set] {
         let index = engine.test_object_index(id);
         engine.objects[index].state.mobile = false;
     }
 
     let caller_idx = engine.test_object_index(caller_id);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 caller_idx,
                 "SetThenFling",
                 vec![compat::object_reference_value(set_then_fling)],
             )
-            .expect("SetXDir then Fling executes"),
+            .expect("SetXDir then Fling executes") =>
         Value::Bool(true)
     );
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 caller_idx,
                 "FlingThenSet",
                 vec![compat::object_reference_value(fling_then_set)],
             )
-            .expect("Fling then SetXDir executes"),
+            .expect("Fling then SetXDir executes") =>
         Value::Bool(true)
     );
 
     let first = &engine.objects[engine.test_object_index(set_then_fling)];
-    assert_eq!(first.state.action.name, "Tumble");
-    assert_eq!(
-        first.fixed_velocity,
-        FixedVec2::new(itofix(-2), itofix(-3)),
-        "the later Tumble velocity replaces the earlier SetXDir component"
-    );
-    assert!(
-        first.state.mobile,
-        "Tumble preserves the Mobile=1 written by SetXDir"
-    );
+    unit_assert_eq!(first.state.action.name => "Tumble");
+    unit_assert_eq!(first.fixed_velocity => FixedVec2::new(itofix(-2), itofix(-3)), "the later Tumble velocity replaces the earlier SetXDir component");
+    unit_assert!(first.state.mobile, "Tumble preserves the Mobile=1 written by SetXDir");
 
     let second = &engine.objects[engine.test_object_index(fling_then_set)];
-    assert_eq!(second.state.action.name, "Tumble");
-    assert_eq!(
-        second.fixed_velocity,
-        FixedVec2::new(itofix(5), itofix(-3)),
-        "the later SetXDir component replaces only Tumble's x velocity"
-    );
-    assert!(
-        second.state.mobile,
-        "SetXDir sets Mobile=1 after Tumble preserved the false entry value"
-    );
+    unit_assert_eq!(second.state.action.name => "Tumble");
+    unit_assert_eq!(second.fixed_velocity => FixedVec2::new(itofix(5), itofix(-3)), "the later SetXDir component replaces only Tumble's x velocity");
+    unit_assert!(second.state.mobile, "SetXDir sets Mobile=1 after Tumble preserved the false entry value");
 }
 
 #[test]
@@ -3392,44 +2781,26 @@ protected func TumbleStart()
     let mut engine = Engine::with_seed(19);
     engine.register_test_definition(caller);
     engine.register_test_definition(target);
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("FIIC").with_category(CATEGORY_OBJECT));
-    let target_id = engine.spawn_test_object(
-        SpawnConfig::new("FIIT")
-            .with_category(CATEGORY_OBJECT)
-            .with_action(ActionState::new("Walk"))
-            .with_construction(FULL_CON / 2)
-            .with_loaded(true),
-    );
+    let caller_id = spawn_fixture!(engine, "FIIC", with_category: CATEGORY_OBJECT);
+    let target_id = spawn_fixture!(engine, "FIIT", with_category: CATEGORY_OBJECT, with_action: ActionState::new("Walk"), with_construction: FULL_CON / 2, with_loaded: true);
 
     let caller_idx = engine.test_object_index(caller_id);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 caller_idx,
                 "Throw",
                 vec![compat::object_reference_value(target_id)],
             )
-            .expect("native Fling executes"),
+            .expect("native Fling executes") =>
         Value::Bool(true)
     );
 
     let target_idx = engine.test_object_index(target_id);
     let object = &engine.objects[target_idx];
-    assert_eq!(
-        object.state.action.name, "Idle",
-        "SetAction must coerce Tumble to ActIdle on an incomplete target"
-    );
-    assert_ne!(
-        object.state.local_vars.get("tumble_started"),
-        Some(&Value::Int(1)),
-        "the coerced idle action has no Tumble StartCall"
-    );
-    assert_eq!(
-        object.fixed_velocity,
-        FixedVec2::new(itofix(2), itofix(-3)),
-        "ObjectActionTumble still assigns velocity after SetAction returns true"
-    );
+    unit_assert_eq!(object.state.action.name => "Idle", "SetAction must coerce Tumble to ActIdle on an incomplete target");
+    unit_assert_ne!(object.state.local_vars.get("tumble_started") => Some(&Value::Int(1)), "the coerced idle action has no Tumble StartCall");
+    unit_assert_eq!(object.fixed_velocity => FixedVec2::new(itofix(2), itofix(-3)), "ObjectActionTumble still assigns velocity after SetAction returns true");
 }
 
 #[test]
@@ -3511,39 +2882,26 @@ protected func OldAbort(int old_phase)
     engine.register_test_definition(new);
     engine.register_test_definition(old);
     engine.register_test_definition(caller);
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("FCDC").with_category(CATEGORY_OBJECT));
-    let target_id = engine.spawn_test_object(
-        SpawnConfig::new("FCDO")
-            .with_category(CATEGORY_OBJECT)
-            .with_action(ActionState::new("Walk"))
-            .with_loaded(true),
-    );
+    let caller_id = spawn_fixture!(engine, "FCDC", with_category: CATEGORY_OBJECT);
+    let target_id = spawn_fixture!(engine, "FCDO", with_category: CATEGORY_OBJECT, with_action: ActionState::new("Walk"), with_loaded: true);
 
     let caller_idx = engine.test_object_index(caller_id);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 caller_idx,
                 "Throw",
                 vec![compat::object_reference_value(target_id)],
             )
-            .expect("native Fling executes"),
+            .expect("native Fling executes") =>
         Value::Bool(true)
     );
 
-    assert_eq!(
-        calls.lock().unwrap().as_slice(),
-        ["TumbleStart"],
-        "ChangeDef in StartCall must suppress the old action's AbortCall"
-    );
+    unit_assert_eq!(calls.lock().unwrap().as_slice() => ["TumbleStart"], "ChangeDef in StartCall must suppress the old action's AbortCall");
     let target_idx = engine.test_object_index(target_id);
     let object = &engine.objects[target_idx];
-    assert_eq!(object.definition_id, "FCDN");
-    assert_eq!(
-        object.state.action.name, "Idle",
-        "ChangeDef's enforced ActIdle must win over the outer Tumble request"
-    );
+    unit_assert_eq!(object.definition_id => "FCDN");
+    unit_assert_eq!(object.state.action.name => "Idle", "ChangeDef's enforced ActIdle must win over the outer Tumble request");
 }
 
 #[test]
@@ -3593,31 +2951,21 @@ protected func TumbleStart()
     let mut engine = Engine::with_seed(29);
     engine.register_test_definition(target);
     engine.register_test_definition(caller);
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("FOCC").with_category(CATEGORY_OBJECT));
-    let target_id = engine.spawn_test_object(
-        SpawnConfig::new("FOCT")
-            .with_category(CATEGORY_LIVING | CATEGORY_OBJECT)
-            .with_alive(true)
-            .with_action(ActionState::new("Walk")),
-    );
+    let caller_id = spawn_fixture!(engine, "FOCC", with_category: CATEGORY_OBJECT);
+    let target_id = spawn_fixture!(engine, "FOCT", with_category: CATEGORY_LIVING | CATEGORY_OBJECT, with_alive: true, with_action: ActionState::new("Walk"));
     let target_idx = engine.test_object_index(target_id);
     let gated_bits = ocf::FIGHT_READY | ocf::COLLECTION;
-    assert_eq!(
-        engine.objects[target_idx].state.ocf & gated_bits,
-        gated_bits,
-        "the enabled Walk action starts fight-ready and collectible"
-    );
+    unit_assert_eq!(engine.objects[target_idx].state.ocf & gated_bits => gated_bits, "the enabled Walk action starts fight-ready and collectible");
 
     let caller_idx = engine.test_object_index(caller_id);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 caller_idx,
                 "Throw",
                 vec![compat::object_reference_value(target_id)],
             )
-            .expect("native Fling executes"),
+            .expect("native Fling executes") =>
         Value::Bool(true)
     );
 
@@ -3632,17 +2980,9 @@ protected func TumbleStart()
             _ => None,
         })
         .test_value();
-    assert_eq!(
-        seen & gated_bits,
-        0,
-        "StartCall must observe SetOCF for the disabled Tumble action"
-    );
-    assert_eq!(object.state.action.name, "Tumble");
-    assert_eq!(
-        object.state.ocf & gated_bits,
-        0,
-        "the foreign target's cached OCF must stay refreshed after folding"
-    );
+    unit_assert_eq!(seen & gated_bits => 0, "StartCall must observe SetOCF for the disabled Tumble action");
+    unit_assert_eq!(object.state.action.name => "Tumble");
+    unit_assert_eq!(object.state.ocf & gated_bits => 0, "the foreign target's cached OCF must stay refreshed after folding");
 }
 
 #[test]
@@ -3663,13 +3003,7 @@ fn shake_objects_matches_cpp_master_order_gate_ledger() {
     let mut engine = Engine::with_seed(2);
     engine.register_test_definition(caller);
     engine.register_test_definition(target);
-    let caller_id = engine.spawn_test_object(
-        SpawnConfig::new("SHKO")
-            .with_custom_name("caller")
-            .with_position(Vector2::new(10, 10))
-            .with_owner(7)
-            .with_category(CATEGORY_OBJECT),
-    );
+    let caller_id = spawn_fixture!(engine, "SHKO", with_custom_name: "caller", with_position: Vector2::new(10, 10), with_owner: 7, with_category: CATEGORY_OBJECT);
 
     struct Row {
         name: &'static str,
@@ -3759,17 +3093,10 @@ fn shake_objects_matches_cpp_master_order_gate_ledger() {
     for (row_index, row) in rows.iter().enumerate() {
         let raw_x = 1_000 + row_index as i32;
         let raw_y = -(2_000 + row_index as i32);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("SHKT")
-                .with_custom_name(row.name)
-                .with_position(row.position)
-                .with_fixed_velocity(FixedVec2::new(
-                    C4Fixed::from_raw(raw_x),
-                    C4Fixed::from_raw(raw_y),
-                ))
-                .with_category(CATEGORY_LIVING | CATEGORY_OBJECT)
-                .with_alive(false),
-        );
+        let id = spawn_fixture!(engine, "SHKT", with_custom_name: row.name, with_position: row.position, with_fixed_velocity: FixedVec2::new(
+            C4Fixed::from_raw(raw_x),
+            C4Fixed::from_raw(raw_y),
+        ), with_category: CATEGORY_LIVING | CATEGORY_OBJECT, with_alive: false);
         let index = engine.test_object_index(id);
         engine.objects[index].state.status = row.status;
         engine.objects[index].state.container = row.contained.then_some(caller_id);
@@ -3797,10 +3124,7 @@ fn shake_objects_matches_cpp_master_order_gate_ledger() {
         row_ids["attached_mnone"],
     ];
     engine.exec_list = master_order.iter().rev().copied().collect();
-    assert_eq!(
-        (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()),
-        (500, 3_424_448_854, 0)
-    );
+    unit_assert_eq!((engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()) => (500, 3_424_448_854, 0));
 
     let before = rows
         .iter()
@@ -3812,29 +3136,19 @@ fn shake_objects_matches_cpp_master_order_gate_ledger() {
         .collect::<HashMap<_, _>>();
     let caller_idx = engine.test_object_index(caller_id);
     let result = engine.call_test_object_function(caller_idx, "Shake", Vec::new());
-    assert_eq!(result, Value::Nil);
-    assert_eq!(
-        (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()),
-        (504, 1_287_806_202, 1)
-    );
+    unit_assert_eq!(result => Value::Nil);
+    unit_assert_eq!((engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()) => (504, 1_287_806_202, 1));
 
     for row in &rows[..rows.len() - 1] {
         let index = engine.test_object_index(row_ids[row.name]);
-        assert_eq!(
-            engine.objects[index].fixed_velocity, before[row.name],
-            "{} must not reach Fling",
-            row.name
-        );
+        unit_assert_eq!(engine.objects[index].fixed_velocity => before[row.name], "{} must not reach Fling", row.name);
     }
     let survivor = engine.test_object_index(row_ids["attached_mnone"]);
-    assert_eq!(
-        engine.objects[survivor].fixed_velocity,
-        FixedVec2::new(C4Fixed::from_raw(65_536), C4Fixed::ZERO)
-    );
-    assert!(engine.objects[survivor].state.mobile);
-    assert_eq!(engine.objects[survivor].state.t_attach, 0);
-    assert_eq!(engine.objects[survivor].frame_t_attach, 0);
-    assert_eq!(engine.objects[survivor].state.controller, 7);
+    unit_assert_eq!(engine.objects[survivor].fixed_velocity => FixedVec2::new(C4Fixed::from_raw(65_536), C4Fixed::ZERO));
+    unit_assert!(engine.objects[survivor].state.mobile);
+    unit_assert_eq!(engine.objects[survivor].state.t_attach => 0);
+    unit_assert_eq!(engine.objects[survivor].frame_t_attach => 0);
+    unit_assert_eq!(engine.objects[survivor].state.controller => 7);
 }
 
 #[test]
@@ -3863,36 +3177,21 @@ fn change_def_swaps_definition_in_place_like_cpp() {
     );
     engine.register_test_definition(caller);
 
-    let target = engine.spawn_test_object(
-        SpawnConfig::new("OLDD")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(50, 50))
-            .with_owner(3)
-            .with_action(ActionState::new("Spin")),
-    );
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
+    let target = spawn_fixture!(engine, "OLDD", with_category: CATEGORY_OBJECT, with_position: Vector2::new(50, 50), with_owner: 3, with_action: ActionState::new("Spin"));
+    let caller_id = spawn_fixture!(engine, "CALL", with_category: CATEGORY_OBJECT);
     let idx = engine.test_object_index(caller_id);
     let target_value = compat::object_reference_value(target);
     engine.call_test_object_function(idx, "Swap", vec![target_value]);
 
     let idx = engine.test_object_index(target);
     let object = &engine.objects[idx];
-    assert_eq!(object.definition_id.as_str(), "NEWD", "definition swapped");
+    unit_assert_eq!(object.definition_id.as_str() => "NEWD", "definition swapped");
     // Spawn bottom-growth put the center at 50-(8-4)=46; ChangeDef
     // must not move it (C4Object::ChangeDef never touches x/y).
-    assert_eq!(object.state.position, Vector2::new(50, 46), "position kept");
-    assert_eq!(object.state.owner, 3, "owner kept");
-    assert_eq!(
-        object.state.action.name,
-        clonk_engine::action::DEFAULT_ACTION_NAME,
-        "SetAction(ActIdle) at def change (C4Object.cpp:1190)"
-    );
-    assert_eq!(
-        object.state.vertices.first().map(|v| v.friction),
-        Some(77),
-        "shape/vertices rebuilt from the NEW def (UpdateFace)"
-    );
+    unit_assert_eq!(object.state.position => Vector2::new(50, 46), "position kept");
+    unit_assert_eq!(object.state.owner => 3, "owner kept");
+    unit_assert_eq!(object.state.action.name => clonk_engine::action::DEFAULT_ACTION_NAME, "SetAction(ActIdle) at def change (C4Object.cpp:1190)");
+    unit_assert_eq!(object.state.vertices.first().map(|v| v.friction) => Some(77), "shape/vertices rebuilt from the NEW def (UpdateFace)");
 }
 
 #[test]
@@ -3929,10 +3228,10 @@ fn foreign_target_change_def_cannot_be_shadowed_by_target_script() {
         vec![compat::object_reference_value(target)],
     );
 
-    assert_eq!(result, Value::Bool(true));
+    unit_assert_eq!(result => Value::Bool(true));
     let target = engine.test_object_snapshot(target);
-    assert_eq!(target.definition_id, "NEWD");
-    assert_ne!(target.local_vars.get("shadow_calls"), Some(&Value::Int(1)));
+    unit_assert_eq!(target.definition_id => "NEWD");
+    unit_assert_ne!(target.local_vars.get("shadow_calls") => Some(&Value::Int(1)));
 }
 
 #[test]
@@ -3995,39 +3294,19 @@ fn change_def_forced_idle_preserves_abort_callback_action_payload_on_both_paths(
 
         let object_index = engine.test_object_index(object_id);
         if via_burn_turn_to {
-            assert!(engine.incinerate_object(object_index, 1, false, None)?);
+            unit_assert!(engine.incinerate_object(object_index, 1, false, None)?);
         } else {
-            assert_eq!(
-                engine.call_object_function(object_index, "Swap", Vec::new())?,
-                Value::Bool(true)
-            );
+            unit_assert_eq!(engine.call_object_function(object_index, "Swap", Vec::new())? => Value::Bool(true));
         }
 
         let object_index = engine.test_object_index(object_id);
         let object = &engine.objects[object_index];
-        assert_eq!(object.definition_id, "NEWD", "{path}: definition swaps");
-        assert_eq!(
-            object.state.local_vars.get("abort_calls"),
-            Some(&Value::Int(1)),
-            "{path}: the old action AbortCall runs"
-        );
-        assert_eq!(
-            object.state.action.name,
-            clonk_engine::action::DEFAULT_ACTION_NAME,
-            "{path}: unconditional Action.Act=ActIdle wins"
-        );
-        assert_eq!(
-            object.state.action.time, 0,
-            "{path}: the AbortCall's SetAction time reset survives"
-        );
-        assert_eq!(
-            object.state.action.data, 73,
-            "{path}: callback-written Action.Data survives"
-        );
-        assert_eq!(
-            object.state.action.phase, 4,
-            "{path}: callback-written Action.Phase survives"
-        );
+        unit_assert_eq!(object.definition_id => "NEWD", "{path}: definition swaps");
+        unit_assert_eq!(object.state.local_vars.get("abort_calls") => Some(&Value::Int(1)), "{path}: the old action AbortCall runs");
+        unit_assert_eq!(object.state.action.name => clonk_engine::action::DEFAULT_ACTION_NAME, "{path}: unconditional Action.Act=ActIdle wins");
+        unit_assert_eq!(object.state.action.time => 0, "{path}: the AbortCall's SetAction time reset survives");
+        unit_assert_eq!(object.state.action.data => 73, "{path}: callback-written Action.Data survives");
+        unit_assert_eq!(object.state.action.phase => 4, "{path}: callback-written Action.Phase survives");
     }
     Ok(())
 }
@@ -4058,7 +3337,7 @@ fn change_def_from_idle_preserves_time_but_resets_phase_on_both_paths() -> Resul
         let object_index = engine.test_object_index(object_id);
         {
             let action = &mut engine.objects[object_index].state.action;
-            assert_eq!(action.name, clonk_engine::action::DEFAULT_ACTION_NAME);
+            unit_assert_eq!(action.name => clonk_engine::action::DEFAULT_ACTION_NAME);
             action.time = 77;
             action.data = 19;
             action.phase = 5;
@@ -4066,38 +3345,19 @@ fn change_def_from_idle_preserves_time_but_resets_phase_on_both_paths() -> Resul
         }
 
         if via_burn_turn_to {
-            assert!(engine.incinerate_object(object_index, 1, false, None)?);
+            unit_assert!(engine.incinerate_object(object_index, 1, false, None)?);
         } else {
-            assert_eq!(
-                engine.call_object_function(object_index, "Swap", Vec::new())?,
-                Value::Bool(true)
-            );
+            unit_assert_eq!(engine.call_object_function(object_index, "Swap", Vec::new())? => Value::Bool(true));
         }
 
         let object_index = engine.test_object_index(object_id);
         let object = &engine.objects[object_index];
-        assert_eq!(object.definition_id, "NEWD", "{path}: definition swaps");
-        assert_eq!(
-            object.state.action.name,
-            clonk_engine::action::DEFAULT_ACTION_NAME,
-            "{path}: action remains built-in Idle"
-        );
-        assert_eq!(
-            object.state.action.time, 77,
-            "{path}: same-slot SetAction preserves Action.Time"
-        );
-        assert_eq!(
-            object.state.action.data, 19,
-            "{path}: same-procedure SetAction preserves Action.Data"
-        );
-        assert_eq!(
-            object.state.action.phase, 0,
-            "{path}: SetAction still clears Action.Phase"
-        );
-        assert_eq!(
-            object.state.action.ticks, 0,
-            "{path}: SetAction still clears Action.PhaseDelay"
-        );
+        unit_assert_eq!(object.definition_id => "NEWD", "{path}: definition swaps");
+        unit_assert_eq!(object.state.action.name => clonk_engine::action::DEFAULT_ACTION_NAME, "{path}: action remains built-in Idle");
+        unit_assert_eq!(object.state.action.time => 77, "{path}: same-slot SetAction preserves Action.Time");
+        unit_assert_eq!(object.state.action.data => 19, "{path}: same-procedure SetAction preserves Action.Data");
+        unit_assert_eq!(object.state.action.phase => 0, "{path}: SetAction still clears Action.Phase");
+        unit_assert_eq!(object.state.action.ticks => 0, "{path}: SetAction still clears Action.PhaseDelay");
     }
     Ok(())
 }
@@ -4158,22 +3418,15 @@ fn change_def_veto_after_abort_enter_keeps_the_pre_swap_contents_link() -> Resul
     )?;
 
     let changed_index = engine.test_object_index(changed);
-    assert_eq!(
-        engine.call_object_function(changed_index, "Swap", Vec::new())?,
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(changed_index, "Swap", Vec::new())? => Value::Bool(true));
 
     let changed_index = engine.test_object_index(changed);
-    assert_eq!(engine.objects[changed_index].definition_id, "NEWD");
-    assert_eq!(engine.objects[changed_index].state.container, Some(stay));
+    unit_assert_eq!(engine.objects[changed_index].definition_id => "NEWD");
+    unit_assert_eq!(engine.objects[changed_index].state.container => Some(stay));
     let home_index = engine.test_object_index(home);
-    assert!(engine.objects[home_index].state.contents.is_empty());
+    unit_assert!(engine.objects[home_index].state.contents.is_empty());
     let stay_index = engine.test_object_index(stay);
-    assert_eq!(
-        engine.objects[stay_index].state.contents,
-        vec![changed, peer],
-        "the old-definition Enter link stays in place after the saved-container veto"
-    );
+    unit_assert_eq!(engine.objects[stay_index].state.contents => vec![changed, peer], "the old-definition Enter link stays in place after the saved-container veto");
     Ok(())
 }
 
@@ -4226,26 +3479,12 @@ fn connect_lines_track_their_targets_like_cpp() {
     ]);
     engine.register_test_definition(anchor_def);
 
-    let horse = engine.spawn_test_object(
-        SpawnConfig::new("ANCR")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(77, 250)),
-    );
-    let wagon = engine.spawn_test_object(
-        SpawnConfig::new("ANCR")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(28, 250)),
-    );
-    let beam_id = engine.spawn_test_object(
-        SpawnConfig::new("BEAM")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(28, 250))
-            .with_action(ActionState::new("Connect"))
-            .with_local_vars(HashMap::from([
-                ("__local_2".to_string(), Value::Int(1)),
-                ("__local_3".to_string(), Value::Int(2)),
-            ])),
-    );
+    let horse = spawn_fixture!(engine, "ANCR", with_category: CATEGORY_OBJECT, with_position: Vector2::new(77, 250));
+    let wagon = spawn_fixture!(engine, "ANCR", with_category: CATEGORY_OBJECT, with_position: Vector2::new(28, 250));
+    let beam_id = spawn_fixture!(engine, "BEAM", with_category: CATEGORY_OBJECT, with_position: Vector2::new(28, 250), with_action: ActionState::new("Connect"), with_local_vars: HashMap::from([
+        ("__local_2".to_string(), Value::Int(1)),
+        ("__local_3".to_string(), Value::Int(2)),
+    ]));
 
     // SetAction("Connect", horse, wagon) like CHBM::Connect.
     engine
@@ -4267,16 +3506,8 @@ fn connect_lines_track_their_targets_like_cpp() {
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(beam_id);
     let vertices = &engine.objects[idx].state.vertices;
-    assert_eq!(
-        (vertices[0].x, vertices[0].y),
-        (83, 243),
-        "first vertex = Target position + its Local[2]-selected vertex"
-    );
-    assert_eq!(
-        (vertices[1].x, vertices[1].y),
-        (37, 254),
-        "last vertex = Target2 position + its Local[3]-selected vertex"
-    );
+    unit_assert_eq!((vertices[0].x, vertices[0].y) => (83, 243), "first vertex = Target position + its Local[2]-selected vertex");
+    unit_assert_eq!((vertices[1].x, vertices[1].y) => (37, 254), "last vertex = Target2 position + its Local[3]-selected vertex");
 
     // GetVertexX/Y return zero for negative and too-large indices
     // (C4Shape.cpp:409-419), so invalid locals attach at object origin.
@@ -4291,8 +3522,8 @@ fn connect_lines_track_their_targets_like_cpp() {
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(beam_id);
     let vertices = &engine.objects[idx].state.vertices;
-    assert_eq!((vertices[0].x, vertices[0].y), (77, 250));
-    assert_eq!((vertices[1].x, vertices[1].y), (28, 250));
+    unit_assert_eq!((vertices[0].x, vertices[0].y) => (77, 250));
+    unit_assert_eq!((vertices[1].x, vertices[1].y) => (28, 250));
 
     engine
         .apply_object_update(
@@ -4307,31 +3538,25 @@ fn connect_lines_track_their_targets_like_cpp() {
         )
         .test_value();
     engine.tick_without_snapshot().test_value();
-    assert!(
-        engine.find_object_index(beam_id).is_some(),
-        "C4OS_INACTIVE action targets retain their native pointers"
-    );
+    unit_assert!(engine.find_object_index(beam_id).is_some(), "C4OS_INACTIVE action targets retain their native pointers");
 
     // Real AssignRemoval reaches Game.ClearPointers synchronously. Do
     // not use the low-level mark_destroyed test seam here: it deliberately
     // creates a status-zero tombstone before ClearPointers, during which
     // native raw Action.Target references remain usable.
     let beam_idx = engine.test_object_index(beam_id);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 beam_idx,
                 "RemoveEndpoint",
                 vec![object_reference_value(horse)],
             )
-            .expect("endpoint removal succeeds"),
+            .expect("endpoint removal succeeds") =>
         Value::Bool(true)
     );
     engine.tick_without_snapshot().test_value();
-    assert!(
-        engine.find_object_index(beam_id).is_none(),
-        "broken line fires LineBreak and removes itself (C4Object.cpp:5368-5375)"
-    );
+    unit_assert!(engine.find_object_index(beam_id).is_none(), "broken line fires LineBreak and removes itself (C4Object.cpp:5368-5375)");
 }
 
 #[test]
@@ -4377,31 +3602,16 @@ fn connect_target_loss_runs_line_break_then_assign_removal_destruction() {
     );
     engine.register_test_definition(line);
 
-    let observer = engine.spawn_test_object(
-        SpawnConfig::new("LINE")
-            .with_category(CATEGORY_OBJECT)
-            .with_local_vars(HashMap::from([("lifecycle".to_string(), Value::Int(0))])),
-    );
+    let observer = spawn_fixture!(engine, "LINE", with_category: CATEGORY_OBJECT, with_local_vars: HashMap::from([("lifecycle".to_string(), Value::Int(0))]));
     let mut connect = ActionState::new("Connect");
     connect.target = Some(observer);
-    let line = engine.spawn_test_object(
-        SpawnConfig::new("LINE")
-            .with_category(CATEGORY_OBJECT)
-            .with_action(connect),
-    );
+    let line = spawn_fixture!(engine, "LINE", with_category: CATEGORY_OBJECT, with_action: connect);
 
     engine.tick_without_snapshot().test_value();
 
-    assert!(
-        engine.find_object_index(line).is_none(),
-        "AssignRemoval deletes the broken line"
-    );
+    unit_assert!(engine.find_object_index(line).is_none(), "AssignRemoval deletes the broken line");
     let observer = engine.test_object_snapshot(observer);
-    assert_eq!(
-        observer.local_vars.get("lifecycle"),
-        Some(&Value::Int(12)),
-        "LineBreak must run before AssignRemoval's Destruction callback"
-    );
+    unit_assert_eq!(observer.local_vars.get("lifecycle") => Some(&Value::Int(12)), "LineBreak must run before AssignRemoval's Destruction callback");
 }
 
 #[test]
@@ -4456,42 +3666,20 @@ fn connect_geometry_break_runs_unflagged_line_break_then_destruction_and_removal
     );
     engine.register_test_definition(line);
 
-    let observer = engine.spawn_test_object(
-        SpawnConfig::new("LINE")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(10, 0))
-            .with_local_vars(HashMap::from([("lifecycle".to_string(), Value::Int(0))])),
-    );
-    let second_target = engine.spawn_test_object(
-        SpawnConfig::new("LINE")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(20, 0)),
-    );
+    let observer = spawn_fixture!(engine, "LINE", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 0), with_local_vars: HashMap::from([("lifecycle".to_string(), Value::Int(0))]));
+    let second_target = spawn_fixture!(engine, "LINE", with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 0));
     let mut connect = ActionState::new("Connect");
     connect.target = Some(observer);
     connect.target2 = Some(second_target);
-    let broken_line = engine.spawn_test_object(
-        SpawnConfig::new("LINE")
-            .with_category(CATEGORY_OBJECT)
-            .with_action(connect),
-    );
+    let broken_line =
+        spawn_fixture!(engine, "LINE", with_category: CATEGORY_OBJECT, with_action: connect);
 
     engine.tick_without_snapshot().test_value();
 
-    assert!(
-        engine.find_object_index(broken_line).is_none(),
-        "AssignRemoval deletes the geometry-broken line"
-    );
-    assert!(
-        engine.find_object_index(second_target).is_some(),
-        "the second action target remains live"
-    );
+    unit_assert!(engine.find_object_index(broken_line).is_none(), "AssignRemoval deletes the geometry-broken line");
+    unit_assert!(engine.find_object_index(second_target).is_some(), "the second action target remains live");
     let observer = engine.test_object_snapshot(observer);
-    assert_eq!(
-        observer.local_vars.get("lifecycle"),
-        Some(&Value::Int(12)),
-        "zero-argument LineBreak must run before AssignRemoval's Destruction callback"
-    );
+    unit_assert_eq!(observer.local_vars.get("lifecycle") => Some(&Value::Int(12)), "zero-argument LineBreak must run before AssignRemoval's Destruction callback");
 }
 
 #[test]
@@ -4507,15 +3695,15 @@ fn resource_definition_preserves_line_core_fields() {
     let resource = ResourceDefinitionData::load(&group).test_value();
     let definition = Definition::from_resource(&resource).test_value();
 
-    assert_eq!(definition.line(), resource.core.line);
-    assert_eq!(definition.line_intersect(), resource.core.line_intersect);
-    assert_ne!(definition.line(), 0, "PWRL is a typed line definition");
+    unit_assert_eq!(definition.line() => resource.core.line);
+    unit_assert_eq!(definition.line_intersect() => resource.core.line_intersect);
+    unit_assert_ne!(definition.line() => 0, "PWRL is a typed line definition");
 
     let mut engine = Engine::new();
     engine.register_test_definition(definition);
     let snapshot = engine.snapshot();
-    assert_eq!(
-        snapshot.definition_lines.get("PWRL"),
+    unit_assert_eq!(
+        snapshot.definition_lines.get("PWRL") =>
         Some(&DefinitionLineMetadata {
             line: resource.core.line,
             line_intersect: resource.core.line_intersect,
@@ -4529,7 +3717,7 @@ fn resource_definition_preserves_line_core_fields() {
         .test_value()
         .remove("definition_lines");
     let legacy: SimulationSnapshot = serde_json::from_value(legacy_json).test_value();
-    assert!(legacy.definition_lines.is_empty());
+    unit_assert!(legacy.definition_lines.is_empty());
 }
 
 #[test]
@@ -4563,46 +3751,31 @@ fn shipped_power_line_inserts_first_cpp_bend_around_solid_pixel() {
     landscape.set_world_height(10);
     engine.set_landscape(landscape);
 
-    let first = engine.spawn_test_object(
-        SpawnConfig::new("ANCR")
-            .with_category(CATEGORY_STATIC_BACK)
-            .with_position(Vector2::new(0, 5)),
-    );
-    let second = engine.spawn_test_object(
-        SpawnConfig::new("ANCR")
-            .with_category(CATEGORY_STATIC_BACK)
-            .with_position(Vector2::new(10, 5)),
-    );
+    let first = spawn_fixture!(engine, "ANCR", with_category: CATEGORY_STATIC_BACK, with_position: Vector2::new(0, 5));
+    let second = spawn_fixture!(engine, "ANCR", with_category: CATEGORY_STATIC_BACK, with_position: Vector2::new(10, 5));
     let mut action = ActionState::new("Connect");
     action.target = Some(first);
     action.target2 = Some(second);
-    let line = engine.spawn_test_object(
-        SpawnConfig::new("PWRL")
-            // Keep the shipped line/action definition, but execute it
-            // as a synthetic active object so this unit oracle does
-            // not depend on loaded StaticBack scheduling.
-            .with_category(CATEGORY_OBJECT)
-            .with_loaded(true)
-            .with_action(action)
-            .with_local_vars(HashMap::from([
-                ("__local_2".to_string(), Value::Int(99)),
-                ("__local_3".to_string(), Value::Int(-1)),
-            ]))
-            .with_vertices(vec![ObjectVertex::new(2, 5), ObjectVertex::new(10, 5)]),
+    // Keep the shipped line/action definition, but execute it
+    // as a synthetic active object so this unit oracle does
+    // not depend on loaded StaticBack scheduling.
+    let line = spawn_fixture!(
+        engine,
+        "PWRL",
+        with_category: CATEGORY_OBJECT,
+        with_loaded: true,
+        with_action: action,
+        with_local_vars: HashMap::from([
+            ("__local_2".to_string(), Value::Int(99)),
+            ("__local_3".to_string(), Value::Int(-1)),
+        ]),
+        with_vertices: vec![ObjectVertex::new(2, 5), ObjectVertex::new(10, 5)],
     );
 
     engine.tick_without_snapshot().test_value();
 
     let index = engine.test_object_index(line);
-    assert_eq!(
-        engine.objects[index]
-            .state
-            .vertices
-            .iter()
-            .map(|vertex| (vertex.x, vertex.y))
-            .collect::<Vec<_>>(),
-        vec![(0, 5), (3, 3), (10, 5)]
-    );
+    unit_assert_eq!(engine.objects[index].state.vertices.iter().map(|vertex| (vertex.x, vertex.y)).collect::<Vec<_>>() => vec![(0, 5), (3, 3), (10, 5)]);
 }
 
 #[test]
@@ -4643,16 +3816,8 @@ fn shipped_power_line_old_endpoint_fallback_uses_cpp_material_index_quirk() {
         landscape.set_world_height(20);
         engine.set_landscape(landscape);
 
-        let first = engine.spawn_test_object(
-            SpawnConfig::new("ANCR")
-                .with_category(CATEGORY_STATIC_BACK)
-                .with_position(Vector2::new(2, 10)),
-        );
-        let second = engine.spawn_test_object(
-            SpawnConfig::new("ANCR")
-                .with_category(CATEGORY_STATIC_BACK)
-                .with_position(Vector2::new(18, 10)),
-        );
+        let first = spawn_fixture!(engine, "ANCR", with_category: CATEGORY_STATIC_BACK, with_position: Vector2::new(2, 10));
+        let second = spawn_fixture!(engine, "ANCR", with_category: CATEGORY_STATIC_BACK, with_position: Vector2::new(18, 10));
         let mut action = ActionState::new("Connect");
         action.target = Some(first);
         action.target2 = Some(second);
@@ -4661,13 +3826,7 @@ fn shipped_power_line_old_endpoint_fallback_uses_cpp_material_index_quirk() {
         } else {
             vec![ObjectVertex::new(2, 10), ObjectVertex::new(15, 10)]
         };
-        let line = engine.spawn_test_object(
-            SpawnConfig::new("PWRL")
-                .with_category(CATEGORY_OBJECT)
-                .with_loaded(true)
-                .with_action(action)
-                .with_vertices(vertices),
-        );
+        let line = spawn_fixture!(engine, "PWRL", with_category: CATEGORY_OBJECT, with_loaded: true, with_action: action, with_vertices: vertices);
 
         engine.tick_without_snapshot().test_value();
         engine.find_object_index(line).map(|index| {
@@ -4687,23 +3846,15 @@ fn shipped_power_line_old_endpoint_fallback_uses_cpp_material_index_quirk() {
     .test_value();
     let resource = ResourceDefinitionData::load(&group).test_value();
 
-    assert_eq!(
-        run_case(&resource, "Vehicle", true),
-        Some(vec![(2, 10), (5, 10), (18, 10)]),
-        "first endpoint keeps the old point as a bend through Vehicle"
-    );
-    assert_eq!(
-        run_case(&resource, "Vehicle", false),
-        Some(vec![(2, 10), (15, 10), (18, 10)]),
-        "last endpoint keeps the old point as a bend through Vehicle"
-    );
-    assert_eq!(
-        run_case(&resource, "Granite", true),
+    unit_assert_eq!(run_case(&resource, "Vehicle", true) => Some(vec![(2, 10), (5, 10), (18, 10)]), "first endpoint keeps the old point as a bend through Vehicle");
+    unit_assert_eq!(run_case(&resource, "Vehicle", false) => Some(vec![(2, 10), (15, 10), (18, 10)]), "last endpoint keeps the old point as a bend through Vehicle");
+    unit_assert_eq!(
+        run_case(&resource, "Granite", true) =>
         Some(vec![(2, 10), (5, 10), (18, 10)]),
         "low-index Granite keeps the old point as a first-endpoint bend"
     );
-    assert_eq!(
-        run_case(&resource, "Granite", false),
+    unit_assert_eq!(
+        run_case(&resource, "Granite", false) =>
         Some(vec![(2, 10), (15, 10), (18, 10)]),
         "low-index Granite keeps the old point as a last-endpoint bend"
     );
@@ -4743,21 +3894,9 @@ fn connect_lines_reduce_redundant_bends_on_tick35_like_cpp() {
     anchor.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
     engine.register_test_definition(anchor);
 
-    let first = engine.spawn_test_object(
-        SpawnConfig::new("ANCR")
-            .with_category(CATEGORY_STATIC_BACK)
-            .with_position(Vector2::new(10, 10)),
-    );
-    let second = engine.spawn_test_object(
-        SpawnConfig::new("ANCR")
-            .with_category(CATEGORY_STATIC_BACK)
-            .with_position(Vector2::new(30, 10)),
-    );
-    let line_id = engine.spawn_test_object(
-        SpawnConfig::new("LINE")
-            .with_category(CATEGORY_OBJECT)
-            .with_action(ActionState::new("Connect")),
-    );
+    let first = spawn_fixture!(engine, "ANCR", with_category: CATEGORY_STATIC_BACK, with_position: Vector2::new(10, 10));
+    let second = spawn_fixture!(engine, "ANCR", with_category: CATEGORY_STATIC_BACK, with_position: Vector2::new(30, 10));
+    let line_id = spawn_fixture!(engine, "LINE", with_category: CATEGORY_OBJECT, with_action: ActionState::new("Connect"));
     engine
         .apply_object_update(
             line_id,
@@ -4778,23 +3917,11 @@ fn connect_lines_reduce_redundant_bends_on_tick35_like_cpp() {
         engine.tick_without_snapshot().test_value();
     }
     let idx = engine.test_object_index(line_id);
-    assert_eq!(
-        engine.objects[idx].state.vertices.len(),
-        3,
-        "line is unchanged before !Tick35"
-    );
+    unit_assert_eq!(engine.objects[idx].state.vertices.len() => 3, "line is unchanged before !Tick35");
 
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(line_id);
-    assert_eq!(
-        engine.objects[idx]
-            .state
-            .vertices
-            .iter()
-            .map(|vertex| (vertex.x, vertex.y))
-            .collect::<Vec<_>>(),
-        vec![(10, 10), (30, 10)]
-    );
+    unit_assert_eq!(engine.objects[idx].state.vertices.iter().map(|vertex| (vertex.x, vertex.y)).collect::<Vec<_>>() => vec![(10, 10), (30, 10)]);
 }
 
 // DFA_WALK arms Action.t_attach |= CNAT_Bottom every exec
@@ -4827,17 +3954,8 @@ fn walkers_snap_to_one_pixel_above_ground_like_cpp() {
 
     // Bottom vertex at 92+8 = 100 = INSIDE the ground row: the C++
     // attach shifts the position up one pixel (vertex to 99).
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("WLKR")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(50, 92))
-            .with_action(ActionState::new("Walk"))
-            .with_loaded(true),
-    );
+    let id = spawn_fixture!(engine, "WLKR", with_category: CATEGORY_OBJECT, with_position: Vector2::new(50, 92), with_action: ActionState::new("Walk"), with_loaded: true);
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.position.y, 91,
-        "walk attach snaps the stander up one pixel (C4Shape::Attach)"
-    );
+    unit_assert_eq!(engine.objects[idx].state.position.y => 91, "walk attach snaps the stander up one pixel (C4Shape::Attach)");
 }

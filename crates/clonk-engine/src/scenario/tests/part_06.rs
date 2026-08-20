@@ -5,12 +5,10 @@
     fn non_fixed_definition_seed_expands_through_root_before_originals() {
         fn write_pack(root: &Path, id: &str) {
             let definition = root.join("Objects.c4d").join(format!("{id}.c4d"));
-            std::fs::create_dir_all(&definition).test_value();
-            write_test_file(
-                definition.join("DefCore.txt"),
+            write_definition_fixture(
+                &definition,
                 format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
             );
-            write_test_definition_graphics(&definition);
         }
 
         let dir = test_tempdir();
@@ -18,10 +16,9 @@
         let definition_root = dir.path().join("rooted");
         write_pack(&normal_root, "NORM");
         write_pack(&definition_root, "ROOT");
-        let scenario_dir = dir.path().join("SeededRoot.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
+        let scenario_dir = scenario_test_group(
+            dir.path(),
+            "SeededRoot.c4s",
             "[Head]\nTitle=Seeded root\n\n[Definitions]\nLocalOnly=1\nDefinition1=Ignored.c4d\n",
         );
 
@@ -31,7 +28,8 @@
             &["US"],
             &["Objects.c4d"],
             &definition_root,
-        ).test_value();
+        )
+        .test_value();
         assert_eq!(
             scenario
                 .definitions
@@ -68,17 +66,11 @@
 
         let normal_root = dir.path().join("normal");
         let original = normal_root.join("pack.c4d/nested.c4d");
-        std::fs::create_dir_all(&original).test_value();
-        write_test_file(
-            original.join("DefCore.txt"),
-            "[DefCore]\nid=ORIG\nName=Original\nCategory=0\n",
-        );
-        write_test_definition_graphics(&original);
+        write_definition_fixture(&original, "[DefCore]\nid=ORIG\nName=Original\nCategory=0\n");
 
-        let scenario_dir = dir.path().join("PackedRoot.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
+        let scenario_dir = scenario_test_group(
+            dir.path(),
+            "PackedRoot.c4s",
             "[Head]\nTitle=Packed root\n\n[Definitions]\n\
              Definitions=\"pack.c4d\\\\nested.c4d\"\n",
         );
@@ -89,7 +81,8 @@
             &["US"],
             &["IgnoredSeed.c4d"],
             &definition_root,
-        ).test_value();
+        )
+        .test_value();
         assert_eq!(
             scenario
                 .definitions
@@ -109,21 +102,14 @@
     fn write_legacy_sky_fixture(dir: &Path, landscape_section: &str) -> PathBuf {
         let defs_root = dir.join("Defs.c4d");
         let foo_core = defs_root.join("Foo.c4d");
-        std::fs::create_dir_all(&foo_core).test_value();
-        write_test_file(
-            foo_core.join("DefCore.txt"),
+        write_definition_fixture(
+            &foo_core,
             "[DefCore]\nid=FOOO\nName=Foo\nCategory=0\nCrewMember=0\n",
         );
-        write_test_definition_graphics(&foo_core);
 
-        let scenario_dir = dir.join("SkyTest.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
-            format!(
+        let scenario_dir = scenario_test_group(dir, "SkyTest.c4s", format!(
                 "[Head]\nTitle=Sky Test\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Landscape]\n{landscape_section}"
-            ),
-        );
+            ));
         scenario_dir
     }
 
@@ -149,12 +135,8 @@
 
         let mut jpeg = Vec::new();
         image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
-            .encode(
-                &[80u8, 120, 200].repeat(16),
-                4,
-                4,
-                ColorType::Rgb8.into(),
-            ).test_value();
+            .encode(&[80u8, 120, 200].repeat(16), 4, 4, ColorType::Rgb8.into())
+            .test_value();
         write_test_file(scenario_dir.join("Sky.jpg"), jpeg);
 
         let scenario = load_legacy_sky(dir.path(), &scenario_dir);
@@ -197,7 +179,8 @@
             use image::ImageEncoder as _;
             let mut png = Vec::new();
             image::codecs::png::PngEncoder::new(&mut png)
-                .write_image(&pixel, 1, 1, ColorType::Rgba8.into()).test_value();
+                .write_image(&pixel, 1, 1, ColorType::Rgba8.into())
+                .test_value();
             write_test_file(path, png);
         };
         write_png(&scenario_dir.join("A.png"), [1, 2, 3, 255]);
@@ -214,14 +197,16 @@
         let scenario = load_legacy_sky_with_seed(dir.path(), &scenario_dir, 7);
         let surface = scenario
             .sky()
-            .and_then(|sky| sky.surface.as_ref()).test_value();
+            .and_then(|sky| sky.surface.as_ref())
+            .test_value();
         assert_eq!(&surface.pixels()[..4], &[20, 40, 60, 255]);
 
         assert_eq!(independent_index(0), 2);
         let scenario = load_legacy_sky_with_seed(dir.path(), &scenario_dir, 0);
         let surface = scenario
             .sky()
-            .and_then(|sky| sky.surface.as_ref()).test_value();
+            .and_then(|sky| sky.surface.as_ref())
+            .test_value();
         assert_eq!(&surface.pixels()[..4], &[70, 80, 90, 255]);
     }
 
@@ -284,12 +269,8 @@
         {
             use image::ImageEncoder as _;
             image::codecs::png::PngEncoder::new(&mut png)
-                .write_image(
-                    &[10u8, 20, 30, 255],
-                    1,
-                    1,
-                    ColorType::Rgba8.into(),
-                ).test_value();
+                .write_image(&[10u8, 20, 30, 255], 1, 1, ColorType::Rgba8.into())
+                .test_value();
         }
         write_test_file(scenario_dir.join("Sky.png"), png);
 
@@ -320,20 +301,13 @@
         );
 
         let bar_core = defs_root.join("Bar.c4d");
-        std::fs::create_dir_all(&bar_core).test_value();
-        write_test_file(
-            bar_core.join("DefCore.txt"),
+        write_scripted_definition_fixture(
+            &bar_core,
             "[DefCore]\nid=BARR\nName=Bar\nCategory=0\nCrewMember=0\n",
+            "// bar script\n",
         );
-        write_test_file(bar_core.join("Script.c"), "// bar script\n");
-        write_test_definition_graphics(&bar_core);
 
-        let scenario_dir = dir.path().join("SkipDefsScenario.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=SkipDefs\n\n[Definitions]\nDefinition1=Defs.c4d\nSkipDefs=FOOO\n\n[Player1]\nCrew=BARR\n",
-        );
+        let scenario_dir = scenario_test_group(dir.path(), "SkipDefsScenario.c4s", "[Head]\nTitle=SkipDefs\n\n[Definitions]\nDefinition1=Defs.c4d\nSkipDefs=FOOO\n\n[Player1]\nCrew=BARR\n");
         write_test_file(
             scenario_dir.join("Script.c"),
             "global func Initialize(state, random) { return 0; }\n",
@@ -341,8 +315,7 @@
 
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
-        let scenario =
-            load_test_scenario(&scenario_dir, &resolver);
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
         let ids: Vec<String> = scenario
             .definitions
             .iter()
@@ -388,9 +361,9 @@
 
     #[test]
     fn legacy_unsigned_object_words_accept_signed_cpp_spellings() {
-        let mut records = parse_legacy_objects(
+        let mut records = parsed_objects(
             "[Object]\nid=GOOD\nNumber=1\nOCF=-1\nColorDw=-2\nColorMod=-3\nBlitMode=-4\n",
-        ).test_value();
+        );
         let record = records.remove(0);
         assert_eq!(record.ocf, Some((-1_i32) as u32));
         assert_eq!(record.color, Some((-2_i32) as u32));
@@ -403,12 +376,10 @@
         // Shipped 4.9 scenarios use `$1`: it already carries BaseMode, but
         // retains the pre-v2 compatibility rule that textual `0` is empty.
         let version_one =
-            parse_legacy_object_command("$1,MoveTo,i517,177,0,0,0,0,1,0,0,0,0,0,1,0", 7).test_value();
+            parse_legacy_object_command("$1,MoveTo,i517,177,0,0,0,0,1,0,0,0,0,0,1,0", 7)
+                .test_value();
         assert_eq!(version_one.name, "MoveTo");
-        assert_eq!(
-            version_one.tx,
-            SerializedC4Value::Value(clonk_script::Value::Int(517))
-        );
+        assert_eq!(version_one.tx, SerializedC4Value::Value(script_int(517)));
         assert_eq!(version_one.ty, 177);
         assert_eq!(version_one.evaluated, 1);
         assert_eq!(version_one.base_mode, 1);
@@ -420,21 +391,23 @@
         assert!(unversioned.text.is_empty());
 
         let explicit_zero =
-            parse_legacy_object_command("$0,MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0", 9).test_value();
+            parse_legacy_object_command("$0,MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0", 9)
+                .test_value();
         assert_eq!(explicit_zero.base_mode, 0);
         assert!(explicit_zero.text.is_empty());
 
         let version_two =
-            parse_legacy_object_command("$2,MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0,0", 10).test_value();
+            parse_legacy_object_command("$2,MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0,0", 10)
+                .test_value();
         assert_eq!(version_two.base_mode, 0);
         assert_eq!(version_two.text, "0");
     }
 
     #[test]
     fn legacy_object_property_and_section_names_are_exact_case() {
-        let mut wrong_case = parse_legacy_objects(
+        let mut wrong_case = parsed_objects(
             "[Object]\nid=GOOD\nNumber=1\nx=9\ny=10\nxdir=F1\nYDIR=F2\nFixx=F3\nfixY=F4\nFIXR=F5\nRdir=F6\nmobile=true\nrotation=7\n",
-        ).test_value();
+        );
         let wrong_case = wrong_case.remove(0);
         assert_eq!(wrong_case.x, None);
         assert_eq!(wrong_case.y, None);
@@ -447,9 +420,9 @@
         assert_eq!(wrong_case.mobile, None);
         assert_eq!(wrong_case.rotation, None);
 
-        let mut exact = parse_legacy_objects(
+        let mut exact = parsed_objects(
             "[Object]\nid=GOOD\nNumber=1\nX=9\nY=10\nXDir=F1\nYDir=F2\nFixX=F3\nFixY=F4\nFixR=F5\nRDir=F6\nMobile=true\nRotation=7\n",
-        ).test_value();
+        );
         let exact = exact.remove(0);
         assert_eq!(exact.x, Some(9));
         assert_eq!(exact.y, Some(10));
@@ -462,9 +435,9 @@
         assert_eq!(exact.mobile, Some(true));
         assert_eq!(exact.rotation, Some(7));
 
-        let wrong_object = parse_legacy_objects(
+        let wrong_object = parsed_objects(
             "[object]\nid=GOOD\nNumber=1\n[Object]\nid=GOOD\nNumber=2\nowner=7\nEnergy=4\nENERGY=9\n[Commands]\nCommand01=$2,Wait,A0,0,0,0,0,0,0,0,0,0,0,0,0,\n",
-        ).test_value();
+        );
         assert_eq!(wrong_object.len(), 1);
         assert_eq!(wrong_object[0].number, Some(2));
         assert_eq!(wrong_object[0].owner, None);
@@ -474,14 +447,14 @@
 
     #[test]
     fn legacy_object_rct_all_values_preserve_slashes_and_trailing_spaces() {
-        let mut records = parse_legacy_objects(concat!(
+        let mut records = parsed_objects(concat!(
             "[Object]\n",
             "id=GOOD\n",
             "Number=1\n",
             "Info=Captain // veteran  \n",
             "[Commands]\n",
             "Command1=$2,Call,A0,0,0,0,0,0,0,0,0,0,0,0,0,Foo//Bar  \n",
-        )).test_value();
+        ));
         let record = records.remove(0);
         assert_eq!(record.info_name.as_deref(), Some("Captain // veteran  "));
         assert_eq!(
@@ -546,7 +519,7 @@
             "[Physical]\n",
             "Energy=not-an-integer\n",
         );
-        let mut records = parse_legacy_objects(source).test_value();
+        let mut records = parsed_objects(source);
         assert_eq!(records.len(), 1);
         let record = records.remove(0);
         let expected = crate::PhysicalInfo {
@@ -595,7 +568,8 @@
         };
         let config = record
             .into_spawn(&definition_ids, &resolution)
-            .expect("record converts").test_value()
+            .expect("record converts")
+            .test_value()
             .config;
         assert_eq!(
             (config.energy, config.breath, config.damage),
@@ -603,8 +577,7 @@
         );
         assert_eq!(config.temporary_physical, Some(expected));
 
-        let mut definition =
-            Definition::from_script("GOOD", "Good", "").test_value();
+        let mut definition = Definition::from_script("GOOD", "Good", "").test_value();
         definition.set_physical(crate::PhysicalInfo {
             energy: 77_001,
             breath: 77_002,
@@ -619,7 +592,8 @@
         let object = snapshot
             .objects
             .iter()
-            .find(|object| object.id == object_id).test_value();
+            .find(|object| object.id == object_id)
+            .test_value();
         assert_eq!(
             (object.energy, object.breath, object.damage),
             (9001, 9002, 9003)
@@ -710,7 +684,7 @@
             // The same indentation rule resumes the Physical naming.
             "Breath=809\n",
         );
-        let records = parse_legacy_objects(source).test_value();
+        let records = parsed_objects(source);
         let definition_ids = HashSet::from(["GOOD"]);
         let object_numbers = HashSet::from([2_u64, 3, 4, 5, 6, 7, 8]);
         let string_registrations = clonk_script::new_string_registrations();
@@ -723,7 +697,8 @@
             .map(|record| {
                 record
                     .into_spawn(&definition_ids, &resolution)
-                    .expect("record converts").test_value()
+                    .expect("record converts")
+                    .test_value()
                     .config
             })
             .collect::<Vec<_>>();
@@ -784,7 +759,7 @@
             "Changes=Walk=10,NoSuchPhysical=20,Energy=30\n",
             "Changes=Energy=40\n",
         );
-        let mut records = parse_legacy_objects(source).test_value();
+        let mut records = parsed_objects(source);
         assert_eq!(records.len(), 1);
         let record = records.remove(0);
         assert_eq!(
@@ -851,7 +826,7 @@
             "Number=2\n",
         );
 
-        let mut records = parse_legacy_objects(source).test_value();
+        let mut records = parsed_objects(source);
         assert_eq!(records.len(), 2);
         let first = records.remove(0);
         assert_eq!(first.info_name.as_deref(), Some("Captain"));
@@ -865,9 +840,7 @@
                 ("Walk".to_string(), 30),
             ]
         );
-        let physical = first
-            .temporary_physical
-            .as_ref().test_value();
+        let physical = first.temporary_physical.as_ref().test_value();
         assert_eq!(
             (physical.energy, physical.breath, physical.walk),
             (50, 60, 70)
@@ -894,7 +867,8 @@
         };
         let spawn = first
             .into_spawn(&definition_ids, &resolution)
-            .expect("record converts").test_value();
+            .expect("record converts")
+            .test_value();
         assert_eq!(spawn.info_name.as_deref(), Some("Captain"));
         assert_eq!(spawn.contents_handles, ["3", "2", "3"]);
         let config = spawn.config;
@@ -946,15 +920,13 @@
         );
         let overlay = config.graphics_overlays.first().test_value();
         assert_eq!(overlay.id, 7);
-        assert_eq!(overlay.overlay_object, Some(ObjectId::new(2)));
+        assert_eq!(overlay.overlay_object, Some(oid(2)));
         assert_eq!(overlay.transform, Some(crate::DrawTransform::identity()));
         assert_eq!(
             config.effects[0].vars[2],
             EffectVarValue::String("saved text".to_string().into())
         );
-        let temporary = config
-            .temporary_physical
-            .as_ref().test_value();
+        let temporary = config.temporary_physical.as_ref().test_value();
         assert_eq!(
             (temporary.energy, temporary.breath, temporary.walk),
             (50, 60, 70)
@@ -963,12 +935,12 @@
         let command_stack = config.command_stack.as_ref().test_value();
         assert_eq!(command_stack.command_names(), ["Call", "MoveTo", "Wait"]);
         let commands = command_stack.command_views();
-        assert_eq!(commands[0].target, Some(ObjectId::new(2)));
+        assert_eq!(commands[0].target, Some(oid(2)));
         assert_eq!(
             commands[0].tx_value,
             Some(clonk_script::Value::Array(vec![
-                clonk_script::Value::Int(7),
-                clonk_script::Value::String("saved text".to_string().into()),
+                script_int(7),
+                script_string("saved text".to_string().into()),
                 clonk_script::Value::C4Id(clonk_script::c4_id_from_raw(0)),
             ]))
         );
@@ -983,15 +955,16 @@
         assert_eq!(
             commands[2].tx_value,
             Some(clonk_script::Value::Array(vec![
-                clonk_script::Value::Int(4),
-                clonk_script::Value::Int(5),
+                script_int(4),
+                script_int(5),
             ]))
         );
 
         let defaulted = records
             .remove(0)
             .into_spawn(&definition_ids, &resolution)
-            .expect("minimal record converts").test_value()
+            .expect("minimal record converts")
+            .test_value()
             .config;
         assert!(defaulted.loaded);
         assert!(defaulted.native_compiled_object_defaults);
@@ -1005,18 +978,15 @@
     fn legacy_objects_restore_ordered_command_stack() {
         let dir = test_tempdir();
         let definition = dir.path().join("Defs.c4d/Command.c4d");
-        std::fs::create_dir_all(&definition).test_value();
-        write_test_file(
-            definition.join("DefCore.txt"),
+        write_scripted_definition_fixture(
+            &definition,
             "[DefCore]\nid=CMND\nName=Command object\nCategory=17\n",
+            "#strict\n",
         );
-        write_test_file(definition.join("Script.c"), "#strict\n");
-        write_test_definition_graphics(&definition);
 
-        let scenario_dir = dir.path().join("Commands.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
+        let scenario_dir = scenario_test_group(
+            dir.path(),
+            "Commands.c4s",
             concat!(
                 "[Head]\nTitle=Commands\nSaveGame=1\nNoInitialize=1\n\n",
                 "[Definitions]\nDefinition1=Defs.c4d\n",
@@ -1046,7 +1016,7 @@
         apply_test_scenario(&scenario, &mut engine);
 
         let assert_stack = |engine: &Engine| {
-            let actor_index = engine.test_object_index(ObjectId::new(100));
+            let actor_index = engine.test_object_index(oid(100));
             let saved = engine.objects[actor_index].commands.legacy_save_commands();
             assert_eq!(
                 saved.len(),
@@ -1063,18 +1033,18 @@
             );
 
             let call = &saved[0];
-            assert_eq!(call.view.target, Some(ObjectId::new(101)));
+            assert_eq!(call.view.target, Some(oid(101)));
             assert_eq!(
                 call.view.target2,
-                Some(ObjectId::new(102)),
+                Some(oid(102)),
                 "inactive objects remain valid command targets",
             );
             assert_eq!(
                 call.view.tx_value,
                 Some(clonk_script::Value::Array(vec![
-                    clonk_script::Value::Int(7),
-                    clonk_script::Value::Object(101),
-                    clonk_script::Value::Object(102),
+                    script_int(7),
+                    script_object(101),
+                    script_object(102),
                     clonk_script::Value::Nil,
                     clonk_script::Value::C4Id(clonk_script::c4_id_from_raw(0)),
                 ])),
@@ -1096,11 +1066,8 @@
                 move_to.view.target, None,
                 "missing Target denumerates to null"
             );
-            assert_eq!(move_to.view.target2, Some(ObjectId::new(101)));
-            assert_eq!(
-                move_to.view.tx_value,
-                Some(clonk_script::Value::Object(102)),
-            );
+            assert_eq!(move_to.view.target2, Some(oid(101)));
+            assert_eq!(move_to.view.tx_value, Some(script_object(102)),);
             assert_eq!(move_to.view.ty, Some(44));
             assert_eq!(move_to.view.data, crate::command::CommandData::Integer(-55));
             assert_eq!(move_to.update_interval, -66);
@@ -1121,7 +1088,7 @@
 
         assert_eq!(
             engine
-                .object_snapshot(ObjectId::new(102))
+                .object_snapshot(oid(102))
                 .expect("inactive target remains addressable")
                 .status,
             ObjectStatus::Inactive,
@@ -1130,8 +1097,7 @@
 
         let encoded = serde_json::to_string(&engine.capture_state()).test_value();
         let restored = serde_json::from_str(&encoded).test_value();
-        engine
-            .restore_state(&restored).test_value();
+        engine.restore_state(&restored).test_value();
         assert_stack(&engine);
 
         // A section's Objects.Load resolves against objects retained from the
@@ -1153,18 +1119,17 @@
             &HashSet::from(["CMND"]),
             &clonk_script::new_string_registrations(),
             &HashSet::from([102]),
-        ).test_value();
+        )
+        .test_value();
         let retained = spawns[0]
             .config
             .command_stack
-            .as_ref().test_value()
+            .as_ref()
+            .test_value()
             .legacy_save_commands();
-        assert_eq!(retained[0].view.target, Some(ObjectId::new(102)));
+        assert_eq!(retained[0].view.target, Some(oid(102)));
         assert_eq!(retained[0].view.target2, None);
-        assert_eq!(
-            retained[0].view.tx_value,
-            Some(clonk_script::Value::Object(102)),
-        );
+        assert_eq!(retained[0].view.tx_value, Some(script_object(102)),);
     }
 
     #[test]
@@ -1175,23 +1140,16 @@
             [("Clonk.c4d", "CLNK", 1, 17), ("Thing.c4d", "THNG", 0, 17)]
         {
             let definition = defs_root.join(folder);
-            std::fs::create_dir_all(&definition).test_value();
-            write_test_file(
-                definition.join("DefCore.txt"),
+            write_scripted_definition_fixture(
+                &definition,
                 format!(
                     "[DefCore]\nid={id}\nName={id}\nCategory={category}\nCrewMember={crew_member}\nMass=50\n"
                 ),
+                "#strict\n",
             );
-            write_test_file(definition.join("Script.c"), "#strict\n");
-            write_test_definition_graphics(&definition);
         }
 
-        let scenario_dir = dir.path().join("RuntimeFields.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Runtime Fields\nSaveGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n",
-        );
+        let scenario_dir = scenario_test_group(dir.path(), "RuntimeFields.c4s", "[Head]\nTitle=Runtime Fields\nSaveGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n");
         write_test_file(
             scenario_dir.join("Objects.txt"),
             concat!(
@@ -1211,8 +1169,7 @@
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario = load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(73);
-        scenario
-            .apply_before_players(&mut engine).test_value();
+        scenario.apply_before_players(&mut engine).test_value();
         engine.register_test_player(crate::PlayerConfig::new(0, "Restored"));
 
         let selected_physical = crate::PhysicalInfo {
@@ -1242,10 +1199,9 @@
             ],
         );
         engine.crew_info_order.insert(0, vec![0, 1]);
-        engine
-            .finalize_restored_players(false).test_value();
+        engine.finalize_restored_players(false).test_value();
 
-        let crew_id = ObjectId::new(100);
+        let crew_id = oid(100);
         let crew_index = engine.test_object_index(crew_id);
         let crew = &engine.objects[crew_index];
         assert_eq!(crew.compiler_cache.info, "Captain");
@@ -1288,7 +1244,7 @@
         assert!(engine.crew_rosters[&0][1].in_action);
         assert_eq!(engine.player(0).expect("player").crew(), [crew_id]);
 
-        let non_info_id = ObjectId::new(101);
+        let non_info_id = oid(101);
         let view_objects = engine.player(0).test_value().fow_view_objects();
         assert!(view_objects.contains(&crew_id), "Info object restores FoW");
         assert!(
@@ -1328,15 +1284,12 @@
         // InitPlayers, including when RecreatePlayers joined nobody
         // (C4Game.cpp:2724-2729,3157-3165).
         let mut engine = Engine::new();
-        engine.register_test_definition(
-                Definition::from_script("THNG", "Thing", "").test_value(),
-            );
+        engine.register_test_definition(Definition::from_script("THNG", "Thing", "").test_value());
         let object = engine.spawn_test_object(SpawnConfig::new("THNG").with_owner(7));
         let object_index = engine.test_object_index(object);
         assert_eq!(engine.objects[object_index].state.owner, 7);
 
-        engine
-            .finalize_restored_players(false).test_value();
+        engine.finalize_restored_players(false).test_value();
 
         assert_eq!(engine.objects[object_index].state.owner, crate::OWNER_NONE);
     }
@@ -1350,22 +1303,20 @@
         // C4Object.cpp:6267-6291).
         let mut engine = Engine::new();
         for id in ["FLAG", "CREW", "KEEP"] {
-            engine.register_test_definition(
-                    Definition::from_script(id, id, "").test_value(),
-                );
+            engine.register_test_definition(Definition::from_script(id, id, "").test_value());
         }
         let flag = engine.spawn_test_object(SpawnConfig::new("FLAG").with_owner(7));
         let crew = engine.spawn_test_object(
-                SpawnConfig::new("CREW")
-                    .with_owner(7)
-                    .with_category(1 << 18),
-            );
+            SpawnConfig::new("CREW")
+                .with_owner(7)
+                .with_category(1 << 18),
+        );
         let ordinary = engine.spawn_test_object(SpawnConfig::new("KEEP").with_owner(7));
         let associated = engine.spawn_test_object(
-                SpawnConfig::new("CREW")
-                    .with_owner(8)
-                    .with_category(1 << 18),
-            );
+            SpawnConfig::new("CREW")
+                .with_owner(8)
+                .with_category(1 << 18),
+        );
         let ownerless = engine.spawn_test_object(SpawnConfig::new("FLAG"));
 
         let mut current = crate::ControlPlayerInfoRegistry::default();
@@ -1399,7 +1350,8 @@
         ];
 
         engine
-            .remove_unassociated_savegame_player_objects(&current, &restore).test_value();
+            .remove_unassociated_savegame_player_objects(&current, &restore)
+            .test_value();
 
         assert_eq!(
             engine
@@ -1455,27 +1407,22 @@
 
         let defs_root = dir.path().join("Defs.c4d");
         let box_core = defs_root.join("Box.c4d");
-        std::fs::create_dir_all(&box_core).test_value();
-        write_test_file(
-            box_core.join("DefCore.txt"),
+        write_scripted_definition_fixture(
+            &box_core,
             "[DefCore]\nid=BOX1\nName=Box\nCategory=0\nCrewMember=0\n",
+            "// box script\n",
         );
-        write_test_file(box_core.join("Script.c"), "// box script\n");
-        write_test_definition_graphics(&box_core);
 
         let gem_core = defs_root.join("Gem.c4d");
-        std::fs::create_dir_all(&gem_core).test_value();
-        write_test_file(
-            gem_core.join("DefCore.txt"),
+        write_scripted_definition_fixture(
+            &gem_core,
             "[DefCore]\nid=GEM1\nName=Gem\nCategory=0\nCrewMember=0\n",
+            "// gem script\n",
         );
-        write_test_file(gem_core.join("Script.c"), "// gem script\n");
-        write_test_definition_graphics(&gem_core);
 
-        let scenario_dir = dir.path().join("LegacyObjects.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
+        let scenario_dir = scenario_test_group(
+            dir.path(),
+            "LegacyObjects.c4s",
             "[Head]\nTitle=Legacy Objects\n\n[Definitions]\nDefinition1=Defs.c4d\n",
         );
         write_test_file(
@@ -1488,8 +1435,7 @@
         );
 
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
-        let scenario =
-            load_test_scenario(&scenario_dir, &resolver);
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
 
         assert_eq!(scenario.initial_spawns.len(), 2);
 
@@ -1504,7 +1450,7 @@
         let first_fixed_velocity = first.config.fixed_velocity.test_value();
         assert_eq!(first_fixed_velocity.x.val(), 45_875);
         assert_eq!(first_fixed_velocity.y.val(), -78_643);
-        assert_eq!(first.config.id, Some(ObjectId::new(100)));
+        assert_eq!(first.config.id, Some(oid(100)));
         assert_eq!(
             first.config.custom_name.as_deref(),
             Some("Scroll: Alchemist's bag")
@@ -1515,7 +1461,7 @@
         assert_eq!(second.container_handle.as_deref(), Some("100"));
         assert_eq!(second.config.definition_id, "GEM1");
         assert_eq!(second.config.custom_name.as_deref(), Some("ScriptWipf"));
-        assert_eq!(second.config.layer, Some(ObjectId::new(100)));
+        assert_eq!(second.config.layer, Some(oid(100)));
         assert_eq!(second.config.visibility, Some(13));
         assert_eq!(second.config.blit_mode, Some(132));
         assert_eq!(second.config.color, Some(0x0011_2233));
@@ -1544,23 +1490,21 @@
         assert_eq!(action.ticks, 0);
         assert_eq!(action.phase, 2);
         assert_eq!(action.data, 5);
-        assert_eq!(action.target, Some(ObjectId::new(100)));
+        assert_eq!(action.target, Some(oid(100)));
 
-        let mut engine = Engine::with_seed(0);
-        apply_test_scenario(&scenario, &mut engine);
+        let mut engine = applied_test_scenario(&scenario);
         assert_eq!(
             engine.debug_exec_order(),
-            [ObjectId::new(101), ObjectId::new(100)],
+            [oid(101), oid(100)],
             "FixObjectOrder category-sorts the native execution order"
         );
 
-        let box_snapshot = engine
-            .object_snapshot(ObjectId::new(100)).test_value();
+        let box_snapshot = engine.object_snapshot(oid(100)).test_value();
         assert_eq!(box_snapshot.definition_id, "BOX1");
         assert_eq!(box_snapshot.owner, 1);
         assert_eq!(box_snapshot.controller, 2, "loaded Controller= sticks");
         assert_eq!(box_snapshot.position, Vector2::new(10, 20));
-        let box_index = engine.test_object_index(ObjectId::new(100));
+        let box_index = engine.test_object_index(oid(100));
         assert_eq!(engine.objects[box_index].fixed_velocity.x.val(), 45_875);
         assert_eq!(engine.objects[box_index].fixed_velocity.y.val(), -78_643);
         assert_eq!(
@@ -1568,9 +1512,8 @@
             Some("Scroll: Alchemist's bag")
         );
 
-        let gem_snapshot = engine
-            .object_snapshot(ObjectId::new(101)).test_value();
-        let gem_index = engine.test_object_index(ObjectId::new(101));
+        let gem_snapshot = engine.object_snapshot(oid(101)).test_value();
+        let gem_index = engine.test_object_index(oid(101));
         assert_eq!(
             engine.objects[gem_index].compiler_cache,
             crate::ObjectCompilerCache {
@@ -1591,7 +1534,7 @@
         );
         assert_eq!(gem_snapshot.definition_id, "GEM1");
         assert_eq!(gem_snapshot.custom_name.as_deref(), Some("ScriptWipf"));
-        assert_eq!(gem_snapshot.layer, Some(ObjectId::new(100)));
+        assert_eq!(gem_snapshot.layer, Some(oid(100)));
         assert_eq!(gem_snapshot.visibility, 13);
         assert_eq!(gem_snapshot.blit_mode, 132);
         assert_eq!(gem_snapshot.color, 0x0011_2233);
@@ -1615,7 +1558,7 @@
         assert!(gem_snapshot.selected);
         assert_eq!(gem_snapshot.magic_energy, 192_000);
         assert!(!gem_snapshot.alive);
-        assert_eq!(gem_snapshot.container, Some(ObjectId::new(100)));
+        assert_eq!(gem_snapshot.container, Some(oid(100)));
         assert_eq!(gem_snapshot.direction, Direction::Right);
         assert_eq!(gem_snapshot.command_direction, CommandDirection::Right);
         assert_eq!(gem_snapshot.action.name, "Idle");
@@ -1625,7 +1568,7 @@
         assert_eq!(gem_snapshot.action.phase, 2);
         assert_eq!(gem_snapshot.action.time, 6);
         assert_eq!(gem_snapshot.action.data, 5);
-        assert_eq!(gem_snapshot.action.target, Some(ObjectId::new(100)));
+        assert_eq!(gem_snapshot.action.target, Some(oid(100)));
 
         let saved = engine
             .serialize_live_c4_save_with_policy(
@@ -1644,14 +1587,14 @@
                 crate::LiveC4SavePolicy::Scenario {
                     force_exact_landscape: false,
                 },
-            ).test_value();
+            )
+            .test_value();
         let objects_txt = String::from_utf8(saved.objects_txt).test_value();
         assert!(objects_txt.contains("XDir=F45875\r\n"));
         assert!(objects_txt.contains("YDir=F-78643\r\n"));
 
-        engine
-            .restore_state(&captured).test_value();
-        let restored_gem_index = engine.test_object_index(ObjectId::new(101));
+        engine.restore_state(&captured).test_value();
+        let restored_gem_index = engine.test_object_index(oid(101));
         assert_eq!(
             engine.objects[restored_gem_index].compiler_cache,
             captured.objects[gem_index].compiler_cache,
@@ -1670,18 +1613,15 @@
 
         let defs_root = dir.path().join("Defs.c4d");
         let box_core = defs_root.join("Box.c4d");
-        std::fs::create_dir_all(&box_core).test_value();
-        write_test_file(
-            box_core.join("DefCore.txt"),
+        write_scripted_definition_fixture(
+            &box_core,
             "[DefCore]\nid=BOX1\nName=Box\nCategory=0\nCrewMember=0\n",
+            "// box\n",
         );
-        write_test_file(box_core.join("Script.c"), "// box\n");
-        write_test_definition_graphics(&box_core);
 
-        let scenario_dir = dir.path().join("LegacyObjects.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
+        let scenario_dir = scenario_test_group(
+            dir.path(),
+            "LegacyObjects.c4s",
             "[Head]\nTitle=Legacy Objects\n\n[Definitions]\nDefinition1=Defs.c4d\n",
         );
         write_test_file(
@@ -1697,10 +1637,8 @@
         );
 
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
-        let scenario =
-            load_test_scenario(&scenario_dir, &resolver);
-        let mut engine = Engine::with_seed(0);
-        apply_test_scenario(&scenario, &mut engine);
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
+        let mut engine = applied_test_scenario(&scenario);
         join_test_player(&mut engine);
 
         // AssignRemoval clears Status immediately (C4Object.cpp); the
@@ -1730,32 +1668,24 @@
 
         let defs_root = dir.path().join("Defs.c4d");
         let box_core = defs_root.join("Box.c4d");
-        std::fs::create_dir_all(&box_core).test_value();
-        write_test_file(
-            box_core.join("DefCore.txt"),
+        write_scripted_definition_fixture(
+            &box_core,
             "[DefCore]\nid=BOX1\nName=Box\nCategory=0\nCrewMember=0\n",
-        );
-        write_test_file(
-            box_core.join("Script.c"),
             "#strict\nlocal iMark;\n\
              protected func Construction() { iMark = 1; }\n\
              protected func Initialize() { iMark = 2; CreateObject(GEM1, 5, 5, -1); }\n",
         );
-        write_test_definition_graphics(&box_core);
 
         let gem_core = defs_root.join("Gem.c4d");
-        std::fs::create_dir_all(&gem_core).test_value();
-        write_test_file(
-            gem_core.join("DefCore.txt"),
+        write_scripted_definition_fixture(
+            &gem_core,
             "[DefCore]\nid=GEM1\nName=Gem\nCategory=0\nCrewMember=0\n",
+            "// gem script\n",
         );
-        write_test_file(gem_core.join("Script.c"), "// gem script\n");
-        write_test_definition_graphics(&gem_core);
 
-        let scenario_dir = dir.path().join("LegacyObjects.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
+        let scenario_dir = scenario_test_group(
+            dir.path(),
+            "LegacyObjects.c4s",
             "[Head]\nTitle=Legacy Objects\n\n[Definitions]\nDefinition1=Defs.c4d\n",
         );
         write_test_file(
@@ -1764,16 +1694,15 @@
         );
 
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
-        let scenario =
-            load_test_scenario(&scenario_dir, &resolver);
-        let mut engine = Engine::with_seed(0);
-        apply_test_scenario(&scenario, &mut engine);
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
+        let engine = applied_test_scenario(&scenario);
 
         let snapshot = engine.snapshot();
         let placed = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "BOX1").test_value();
+            .find(|object| object.definition_id == "BOX1")
+            .test_value();
         assert!(
             matches!(
                 placed.local_vars.get("iMark"),
@@ -1867,23 +1796,13 @@
 
         let defs_root = dir.path().join("Defs.c4d");
         let good = defs_root.join("Good.c4d");
-        std::fs::create_dir_all(&good).test_value();
-        write_test_file(
-            good.join("DefCore.txt"),
+        write_scripted_definition_fixture(
+            &good,
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
-        );
-        write_test_file(
-            good.join("Script.c"),
             "#strict\nlocal iWet;\npublic func Probe() { iWet = InLiquid(); return 1; }\n",
         );
-        write_test_definition_graphics(&good);
 
-        let scenario_dir = dir.path().join("Liquid.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Liquid\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Landscape]\nMapZoom=10\n",
-        );
+        let scenario_dir = scenario_test_group(dir.path(), "Liquid.c4s", "[Head]\nTitle=Liquid\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Landscape]\nMapZoom=10\n");
         write_test_file(
             scenario_dir.join("Landscape.bmp"),
             encode_indexed_bmp(&[
@@ -1929,38 +1848,38 @@
         );
 
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
-        let scenario =
-            load_test_scenario(&scenario_dir, &resolver);
-        let mut engine = Engine::with_seed(0);
-        apply_test_scenario(&scenario, &mut engine);
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
+        let mut engine = applied_test_scenario(&scenario);
 
         let flag = |engine: &Engine, number: u64| {
             engine
                 .snapshot()
                 .objects
                 .iter()
-                .find(|object| object.id == ObjectId::new(number))
-                .map(|object| object.in_liquid).test_value()
+                .find(|object| object.id == oid(number))
+                .map(|object| object.in_liquid)
+                .test_value()
         };
         let probed = |engine: &Engine, number: u64| {
             engine
                 .snapshot()
                 .objects
                 .iter()
-                .find(|object| object.id == ObjectId::new(number))
-                .and_then(|object| object.local_vars.get("iWet").cloned()).test_value()
+                .find(|object| object.id == oid(number))
+                .and_then(|object| object.local_vars.get("iWet").cloned())
+                .test_value()
         };
 
         assert!(!flag(&engine, 80), "loaded default is false even in water");
         assert!(flag(&engine, 81), "loaded InLiquid=1 sticks until movement");
         assert_eq!(
             probed(&engine, 80),
-            clonk_script::Value::Bool(false),
+            script_bool(false),
             "InLiquid() reads the stale flag, not the landscape"
         );
         assert_eq!(
             probed(&engine, 81),
-            clonk_script::Value::Bool(true),
+            script_bool(true),
             "InLiquid() reads the stale loaded flag on dry land too"
         );
 
@@ -1977,10 +1896,8 @@
             "immobile objects keep the stale flag (C4Movement.cpp:567)"
         );
         assert!(flag(&engine, 81), "stale flag survives while demobilized");
-        engine
-            .tick_without_snapshot().test_value();
-        engine
-            .tick_without_snapshot().test_value();
+        engine.tick_without_snapshot().test_value();
+        engine.tick_without_snapshot().test_value();
         assert!(
             flag(&engine, 80),
             "movement sets the flag in liquid (C4Movement.cpp:443-460)"
@@ -1996,25 +1913,15 @@
         let data = crate::parse_initial_network_game_data(
             b"[Script]\r\nGo=true\r\n  [Globals]\r\n  0=17\r\n  2=b1\r\n  [GlobalNamed]\r\n  saved=23\r\n",
         );
-        let runtime =
-            InitialNetworkRuntimeState::parse(&data).test_value();
+        let runtime = InitialNetworkRuntimeState::parse(&data).test_value();
         let string_registrations = clonk_script::new_string_registrations();
         let (globals, effects) =
             runtime.resolve_post_object_state(&HashSet::new(), &string_registrations);
         assert!(effects.is_empty());
-        assert_eq!(
-            globals.numbered.get(&0),
-            Some(&clonk_script::Value::Int(17))
-        );
+        assert_eq!(globals.numbered.get(&0), Some(&script_int(17)));
         assert_eq!(globals.numbered.get(&1), Some(&clonk_script::Value::Nil));
-        assert_eq!(
-            globals.numbered.get(&2),
-            Some(&clonk_script::Value::Bool(true))
-        );
-        assert_eq!(
-            globals.named.get("saved"),
-            Some(&clonk_script::Value::Int(23))
-        );
+        assert_eq!(globals.numbered.get(&2), Some(&script_bool(true)));
+        assert_eq!(globals.named.get("saved"), Some(&script_int(23)));
     }
 
     #[test]
@@ -2022,8 +1929,7 @@
         let data = crate::parse_initial_network_game_data(
             b"[Sky]\r\n\r\n[Effects]\r\n\r\n[Scoreboard]\r\n",
         );
-        let mut runtime =
-            InitialNetworkRuntimeState::parse(&data).test_value();
+        let mut runtime = InitialNetworkRuntimeState::parse(&data).test_value();
         assert!(runtime.global_effects.is_empty());
         assert_eq!(
             (
@@ -2044,14 +1950,12 @@
         engine.set_sky(scenario_settings.clone());
         let frame = runtime
             .sky
-            .take().test_value()
+            .take()
+            .test_value()
             .into_frame(scenario_settings, true, 1);
         engine.apply_initial_network_sky_frame(&frame);
 
-        let restored = engine
-            .sky
-            .as_ref().test_value()
-            .snapshot();
+        let restored = engine.sky.as_ref().test_value().snapshot();
         assert!(
             restored.settings.has_surface,
             "scenario surface is retained"
@@ -2074,7 +1978,8 @@
         let scenario_settings = SkySettings::default().with_surface(128, 64);
         let fresh = runtime
             .sky
-            .take().test_value()
+            .take()
+            .test_value()
             .into_frame(scenario_settings, false, 2);
         assert_eq!(fresh.fixed, Some([0, 0, 0, 0]));
         assert_eq!(fresh.settings.parallax_mode, SkyParallaxMode::Fixed);
@@ -2108,21 +2013,21 @@
             parse_serialized_c4value("A1000000007", 1)
                 .expect("legacy any parses")
                 .resolve(&resolution),
-            clonk_script::Value::Object(7),
+            script_object(7),
             "C4V_Any words in the legacy pointer range denumerate"
         );
         assert_eq!(
             parse_serialized_c4value("A1000000009", 1)
                 .expect("missing legacy any parses")
                 .resolve(&resolution),
-            clonk_script::Value::Int(1_000_000_009),
+            script_int(1_000_000_009),
             "a missing C4V_Any pointer is guessed back to int"
         );
         assert_eq!(
             parse_serialized_c4value("A1001000001", 1)
                 .expect("raw any parses")
                 .resolve(&resolution),
-            clonk_script::Value::Int(1_001_000_001),
+            script_int(1_001_000_001),
             "words above C4EnumPointer2 are never shifted"
         );
         let packed_id = i32::from_le_bytes(*b"TEST");
@@ -2133,8 +2038,7 @@
             clonk_script::Value::C4Id("TEST".to_string()),
             "GuessType recognizes packed IDs before its integer fallback"
         );
-        let old_slots =
-            parse_local_slots("1000000007,17", 1).test_value();
+        let old_slots = parse_local_slots("1000000007,17", 1).test_value();
         assert_eq!(old_slots.len(), 10);
         assert_eq!(
             old_slots
@@ -2142,42 +2046,38 @@
                 .take(2)
                 .map(|value| value.resolve(&resolution))
                 .collect::<Vec<_>>(),
-            vec![clonk_script::Value::Object(7), clonk_script::Value::Int(17)],
+            vec![script_object(7), script_int(17)],
             "old slot zero and untyped following values retain C4V_Any semantics"
         );
 
-        let resolved = parse_serialized_c4value("m[4;i1=O9;O9=i2;i3=a[1;O9];i4=A1000000007]", 1).test_value()
+        let resolved = parse_serialized_c4value("m[4;i1=O9;O9=i2;i3=a[1;O9];i4=A1000000007]", 1)
+            .test_value()
             .resolve(&resolution);
         let clonk_script::Value::Proplist(resolved) = resolved else {
             panic!("expected resolved map");
         };
         assert_eq!(resolved.len(), 2);
         assert_eq!(
-            resolved.get_key(&clonk_script::Value::Int(3)),
+            resolved.get_key(&script_int(3)),
             Some(&clonk_script::Value::Array(vec![clonk_script::Value::Nil])),
             "nested missing objects become nil without removing the parent entry"
         );
-        assert_eq!(
-            resolved.get_key(&clonk_script::Value::Int(4)),
-            Some(&clonk_script::Value::Object(7))
-        );
+        assert_eq!(resolved.get_key(&script_int(4)), Some(&script_object(7)));
 
         assert_eq!(
             parse_serialized_c4value("a[1;i3,O9]", 1)
                 .expect("array ignores extra elements")
                 .resolve(&resolution),
-            clonk_script::Value::Array(vec![clonk_script::Value::Int(3)])
+            clonk_script::Value::Array(vec![script_int(3)])
         );
-        let extra_map = parse_serialized_c4value("m[1;i5=i6;broken]", 1).test_value()
+        let extra_map = parse_serialized_c4value("m[1;i5=i6;broken]", 1)
+            .test_value()
             .resolve(&resolution);
         let clonk_script::Value::Proplist(extra_map) = extra_map else {
             panic!("expected one-entry map");
         };
         assert_eq!(extra_map.len(), 1);
-        assert_eq!(
-            extra_map.get_key(&clonk_script::Value::Int(5)),
-            Some(&clonk_script::Value::Int(6))
-        );
+        assert_eq!(extra_map.get_key(&script_int(5)), Some(&script_int(6)));
 
         let effect = |command_target| SerializedEffectState {
             number: 1,
@@ -2212,7 +2112,8 @@
             object_numbers: &object_numbers,
             string_registrations: &registrations,
         };
-        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[1;S0=o999]", 1).test_value()
+        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[1;S0=o999]", 1)
+            .test_value()
             .resolve(&resolution)
         else {
             panic!("expected resolved map");
@@ -2229,13 +2130,13 @@
             object_numbers: &object_numbers,
             string_registrations: &registrations,
         };
-        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[2;S0=o999;i1=S0]", 1).test_value()
+        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[2;S0=o999;i1=S0]", 1)
+            .test_value()
             .resolve(&resolution)
         else {
             panic!("expected resolved map");
         };
-        let Some(clonk_script::Value::String(sibling)) = map.get_key(&clonk_script::Value::Int(1))
-        else {
+        let Some(clonk_script::Value::String(sibling)) = map.get_key(&script_int(1)) else {
             panic!("resolved sibling string remains visible");
         };
         let registered = clonk_script::resolve_c4_string(&registrations, 0).test_value();
@@ -2250,23 +2151,21 @@
             string_registrations: &registrations,
         };
         let clonk_script::Value::Proplist(mut map) =
-            parse_serialized_c4value("m[2;o999=S0;i1=i2]", 1).test_value()
+            parse_serialized_c4value("m[2;o999=S0;i1=i2]", 1)
+                .test_value()
                 .resolve(&resolution)
         else {
             panic!("expected resolved map");
         };
         assert_eq!(map.len(), 1);
         assert_eq!(
-            map.get_key(&clonk_script::Value::Int(1)),
-            Some(&clonk_script::Value::Int(2)),
+            map.get_key(&script_int(1)),
+            Some(&script_int(2)),
             "a slot compiled after the doomed key does not reuse emptyValues"
         );
         assert!(clonk_script::resolve_c4_string(&registrations, 0).is_some());
-        map.insert_key(clonk_script::Value::Int(7), clonk_script::Value::Int(8));
-        assert_eq!(
-            map.get_key(&clonk_script::Value::Int(7)),
-            Some(&clonk_script::Value::Int(8))
-        );
+        map.insert_key(script_int(7), script_int(8));
+        assert_eq!(map.get_key(&script_int(7)), Some(&script_int(8)));
         assert!(clonk_script::resolve_c4_string(&registrations, 0).is_none());
     }
 
@@ -2280,7 +2179,8 @@
             object_numbers: &object_numbers,
             string_registrations: &registrations,
         };
-        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[2;i1=S0;i1=o999]", 1).test_value()
+        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[2;i1=S0;i1=o999]", 1)
+            .test_value()
             .resolve(&resolution)
         else {
             panic!("expected resolved map");
@@ -2298,22 +2198,22 @@
             object_numbers: &object_numbers,
             string_registrations: &registrations,
         };
-        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[2;i1=o999;i1=S0]", 1).test_value()
+        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[2;i1=o999;i1=S0]", 1)
+            .test_value()
             .resolve(&resolution)
         else {
             panic!("expected resolved map");
         };
         assert_eq!(
-            map.get_key(&clonk_script::Value::Int(1)),
-            Some(&clonk_script::Value::String("loaded".into()))
+            map.get_key(&script_int(1)),
+            Some(&script_string("loaded".into()))
         );
         assert_eq!(map.hidden_values().count(), 0);
     }
 
     #[test]
     fn local_named_consumes_exactly_the_declared_count() {
-        let entries =
-            parse_local_named("1;kept=i1,ignored=i2", 1).test_value();
+        let entries = parse_local_named("1;kept=i1,ignored=i2", 1).test_value();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "kept");
         assert!(parse_local_named("0;ignored=i2", 1)
@@ -2374,17 +2274,11 @@
 
         let defs_root = dir.path().join("Defs.c4d");
         let good = defs_root.join("Good.c4d");
-        std::fs::create_dir_all(&good).test_value();
-        write_test_file(
-            good.join("DefCore.txt"),
-            "[DefCore]\nid=GOOD\nName=Good\nCategory=16\n",
-        );
-        write_test_definition_graphics(&good);
+        write_definition_fixture(&good, "[DefCore]\nid=GOOD\nName=Good\nCategory=16\n");
 
-        let scenario_dir = dir.path().join("Locals.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
+        let scenario_dir = scenario_test_group(
+            dir.path(),
+            "Locals.c4s",
             "[Head]\nTitle=Locals\n\n[Definitions]\nDefinition1=Defs.c4d\n",
         );
         write_test_file(
@@ -2397,18 +2291,16 @@
         );
 
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
-        let scenario =
-            load_test_scenario(&scenario_dir, &resolver);
-        let mut engine = Engine::with_seed(0);
-        apply_test_scenario(&scenario, &mut engine);
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
+        let engine = applied_test_scenario(&scenario);
 
-        let idx = engine.test_object_index(ObjectId::new(95));
+        let idx = engine.test_object_index(oid(95));
         let locals = &engine.objects[idx].state.local_vars;
-        assert_eq!(locals.get("iNum"), Some(&clonk_script::Value::Int(17)));
-        assert_eq!(locals.get("fFlag"), Some(&clonk_script::Value::Bool(true)));
+        assert_eq!(locals.get("iNum"), Some(&script_int(17)));
+        assert_eq!(locals.get("fFlag"), Some(&script_bool(true)));
         assert_eq!(
             locals.get("pRef"),
-            Some(&clonk_script::Value::Object(80)),
+            Some(&script_object(80)),
             "O-typed refs resolve after every object has loaded"
         );
         assert_eq!(
@@ -2419,8 +2311,8 @@
         assert_eq!(
             locals.get("aList"),
             Some(&clonk_script::Value::Array(vec![
-                clonk_script::Value::Int(1),
-                clonk_script::Value::Int(2),
+                script_int(1),
+                script_int(2),
                 clonk_script::Value::Nil,
                 clonk_script::Value::Nil,
             ])),
@@ -2472,17 +2364,11 @@
 
         let defs_root = dir.path().join("Defs.c4d");
         let good = defs_root.join("Good.c4d");
-        std::fs::create_dir_all(&good).test_value();
-        write_test_file(
-            good.join("DefCore.txt"),
-            "[DefCore]\nid=GOOD\nName=Good\nCategory=16\n",
-        );
-        write_test_definition_graphics(&good);
+        write_definition_fixture(&good, "[DefCore]\nid=GOOD\nName=Good\nCategory=16\n");
 
-        let scenario_dir = dir.path().join("Identities.c4s");
-        std::fs::create_dir_all(&scenario_dir).test_value();
-        write_test_file(
-            scenario_dir.join("Scenario.txt"),
+        let scenario_dir = scenario_test_group(
+            dir.path(),
+            "Identities.c4s",
             "[Head]\nTitle=Identities\n\n[Definitions]\nDefinition1=Defs.c4d\n",
         );
         write_test_file(
@@ -2499,29 +2385,26 @@
         );
 
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
-        let scenario =
-            load_test_scenario(&scenario_dir, &resolver);
-        let mut engine = Engine::with_seed(0);
-        apply_test_scenario(&scenario, &mut engine);
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
+        let engine = applied_test_scenario(&scenario);
 
-        let holder = engine
-            .object_snapshot(ObjectId::new(10)).test_value();
+        let holder = engine.object_snapshot(oid(10)).test_value();
         let locals = &holder.local_vars;
         assert_eq!(
             locals.get("pOffset"),
-            Some(&clonk_script::Value::Object(419)),
+            Some(&script_object(419)),
             "C4EnumPointer1 is removed before lookup"
         );
         assert_eq!(
             locals.get("pPlain"),
-            Some(&clonk_script::Value::Object(419)),
+            Some(&script_object(419)),
             "unoffset enum values resolve too"
         );
         assert_eq!(locals.get("pMissing"), Some(&clonk_script::Value::Nil));
         assert_eq!(
             locals.get("aRefs"),
             Some(&clonk_script::Value::Array(vec![
-                clonk_script::Value::Object(419),
+                script_object(419),
                 clonk_script::Value::Nil,
                 clonk_script::Value::Nil,
             ])),
@@ -2529,7 +2412,7 @@
         );
         assert_eq!(
             locals.get("sFirst"),
-            Some(&clonk_script::Value::String("first".to_string().into()))
+            Some(&script_string("first".to_string().into()))
         );
         let Some(clonk_script::Value::String(umlaut)) = locals.get("sUmlaut") else {
             panic!("raw string-table identity denumerates to a string");
@@ -2546,7 +2429,7 @@
         );
         assert_eq!(
             locals.get("sDuplicate"),
-            Some(&clonk_script::Value::String("same".to_string().into()))
+            Some(&script_string("same".to_string().into()))
         );
         assert_eq!(
             locals.get("sFirst").and_then(|value| match value {
@@ -2573,8 +2456,7 @@
         assert_eq!(locals.get("sMissing"), Some(&clonk_script::Value::Nil));
 
         let persisted = serde_json::to_string(&holder).test_value();
-        let restored: crate::ObjectSnapshot =
-            serde_json::from_str(&persisted).test_value();
+        let restored: crate::ObjectSnapshot = serde_json::from_str(&persisted).test_value();
         assert_eq!(restored.local_vars, holder.local_vars);
     }
 
@@ -2644,8 +2526,7 @@
         );
 
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
-        let scenario =
-            load_test_scenario(&scenario_dir, &resolver);
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
         assert_ne!(
             scenario.environment().expect("scenario environment"),
             EnvironmentSettings::default(),
@@ -2659,7 +2540,8 @@
 
         let mut engine = Engine::with_seed(9);
         scenario
-            .apply_before_network_final_init(&mut engine).test_value();
+            .apply_before_network_final_init(&mut engine)
+            .test_value();
 
         let global = |name: &str| {
             engine
@@ -2668,7 +2550,7 @@
                 .get(name)
                 .map(|cell| cell.borrow().clone())
         };
-        let default_getters = clonk_script::Value::Array(vec![clonk_script::Value::Int(0); 4]);
+        let default_getters = clonk_script::Value::Array(vec![script_int(0); 4]);
         assert_eq!(
             global("initialize_def_weather"),
             Some(default_getters.clone()),
@@ -2694,28 +2576,28 @@
         // Gravity, InitializeDef, the two unconditional placement-level
         // evaluates, the placed object's Initialize, then Weather.Init.
         let mut replay = crate::rng::LcgRng::seed_from_u64(9);
-        LegacyC4SVal::new(120, 3, 10, 200).evaluate(&mut replay);
+        c4s(120, 3, 10, 200).evaluate(&mut replay);
         let initialize_def_random = replay.random(1_000_000);
-        LegacyC4SVal::new(20, 4, 0, 100).evaluate(&mut replay);
-        LegacyC4SVal::new(30, 2, 0, 100).evaluate(&mut replay);
+        c4s(20, 4, 0, 100).evaluate(&mut replay);
+        c4s(30, 2, 0, 100).evaluate(&mut replay);
         let placement_random = replay.random(1_000_000);
-        let season = LegacyC4SVal::new(30, 10, 0, 100).evaluate(&mut replay);
-        let year_speed = LegacyC4SVal::new(45, 5, 0, 100).evaluate(&mut replay);
-        let climate = 100 - LegacyC4SVal::new(60, 10, 0, 100).evaluate(&mut replay) - 50;
-        let wind = LegacyC4SVal::new(10, 5, -20, 20).evaluate(&mut replay);
-        let rain = LegacyC4SVal::new(25, 5, 0, 100).evaluate(&mut replay);
-        let lightning = LegacyC4SVal::new(12, 5, 0, 100).evaluate(&mut replay);
-        let meteorite = LegacyC4SVal::new(25, 4, 0, 100).evaluate(&mut replay);
-        let volcano = LegacyC4SVal::new(15, 3, 0, 100).evaluate(&mut replay);
-        let earthquake = LegacyC4SVal::new(5, 2, 0, 100).evaluate(&mut replay);
+        let season = c4s(30, 10, 0, 100).evaluate(&mut replay);
+        let year_speed = c4s(45, 5, 0, 100).evaluate(&mut replay);
+        let climate = 100 - c4s(60, 10, 0, 100).evaluate(&mut replay) - 50;
+        let wind = c4s(10, 5, -20, 20).evaluate(&mut replay);
+        let rain = c4s(25, 5, 0, 100).evaluate(&mut replay);
+        let lightning = c4s(12, 5, 0, 100).evaluate(&mut replay);
+        let meteorite = c4s(25, 4, 0, 100).evaluate(&mut replay);
+        let volcano = c4s(15, 3, 0, 100).evaluate(&mut replay);
+        let earthquake = c4s(5, 2, 0, 100).evaluate(&mut replay);
 
         assert_eq!(
             global("initialize_def_random"),
-            Some(clonk_script::Value::Int(initialize_def_random))
+            Some(script_int(initialize_def_random))
         );
         assert_eq!(
             global("placement_random"),
-            Some(clonk_script::Value::Int(placement_random))
+            Some(script_int(placement_random))
         );
         let environment = engine.environment();
         assert_eq!(

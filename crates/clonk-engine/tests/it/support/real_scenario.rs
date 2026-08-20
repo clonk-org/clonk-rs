@@ -2,11 +2,27 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use clonk_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
-use clonk_engine::{Engine, JoinPlayerConfig, Scenario, ScenarioError};
+use clonk_engine::{Engine, JoinPlayerConfig, JoinedPlayer, ObjectId, Scenario, ScenarioError};
 use clonk_resources::{Group, MaterialLibrary};
 
 struct ContentResolver {
     roots: Vec<PathBuf>,
+}
+
+struct RawContentResolver {
+    root: PathBuf,
+}
+
+impl LegacyDefinitionResolver for RawContentResolver {
+    fn resolve_definition_groups(
+        &self,
+        _scenario: &Group,
+        identifier: &str,
+    ) -> Result<Vec<Group>, ScenarioError> {
+        Group::open(self.root.join(identifier.replace('\\', "/")))
+            .map(|group| vec![group])
+            .map_err(ScenarioError::Resources)
+    }
 }
 
 impl LegacyDefinitionResolver for ContentResolver {
@@ -68,6 +84,19 @@ pub fn content_root() -> PathBuf {
     env::var_os("LC_CONTENT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| repository_root().join("content"))
+}
+
+/// Load only the scenario and definition groups rooted in `content/`.
+/// This preserves tests that intentionally bypass installed materials and
+/// system scripts; use `load_installed_scenario` for app-like activation.
+pub fn load_raw_content_scenario(
+    relative_path: impl AsRef<Path>,
+) -> Result<Scenario, ScenarioError> {
+    let content = content_root();
+    Scenario::load_from_path_with(
+        content.join(relative_path),
+        &RawContentResolver { root: content },
+    )
 }
 
 /// Boot a repository scenario through the same prerequisites as the app:
@@ -225,6 +254,43 @@ pub fn load_tutorial(number: u8, seed: u64) -> Engine {
     load_installed_scenario(format!("Tutorial.c4f/Tutorial{number:02}.c4s"), seed)
 }
 
+pub fn load_tutorial_with_local_player(
+    number: u8,
+    seed: u64,
+    name: impl Into<String>,
+    control_style: bool,
+    auto_context_menu: bool,
+) -> (Engine, i32) {
+    let mut engine = load_tutorial(number, seed);
+    let player =
+        join_local_player_with_preferences(&mut engine, name, control_style, auto_context_menu);
+    (engine, player)
+}
+
+pub fn join_local_player_with_preferences(
+    engine: &mut Engine,
+    name: impl Into<String>,
+    control_style: bool,
+    auto_context_menu: bool,
+) -> i32 {
+    engine
+        .join_player(local_player_config(name, control_style, auto_context_menu))
+        .unwrap_or_else(|error| panic!("local virtual player joins: {error}"))
+        .number()
+}
+
+pub fn join_initialized_local_player_details_with_preferences(
+    engine: &mut Engine,
+    name: impl Into<String>,
+    control_style: bool,
+    auto_context_menu: bool,
+) -> JoinedPlayer {
+    join_initialized_local_player_details(
+        engine,
+        local_player_config(name, control_style, auto_context_menu),
+    )
+}
+
 pub fn join_local_player(engine: &mut Engine, name: impl Into<String>) -> i32 {
     join_initialized_local_player(engine, name, None)
 }
@@ -242,28 +308,98 @@ fn join_initialized_local_player(
     name: impl Into<String>,
     team: Option<i32>,
 ) -> i32 {
+    let mut config = local_player_config(name, false, false);
+    config.team = team;
+    join_initialized_local_player_config(engine, config)
+}
+
+fn join_initialized_local_player_config(engine: &mut Engine, config: JoinPlayerConfig) -> i32 {
+    join_initialized_local_player_details(engine, config).number
+}
+
+fn join_initialized_local_player_details(
+    engine: &mut Engine,
+    config: JoinPlayerConfig,
+) -> JoinedPlayer {
     engine
-        .join_player(JoinPlayerConfig {
-            name: name.into(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        })
+        .join_player(config)
         .unwrap_or_else(|error| panic!("local virtual player joins: {error}"))
         .initialized()
         .unwrap_or_else(|| {
             panic!("local virtual player requires an explicit runtime team selection")
         })
-        .number
+}
+
+fn local_player_config(
+    name: impl Into<String>,
+    control_style: bool,
+    auto_context_menu: bool,
+) -> JoinPlayerConfig {
+    JoinPlayerConfig {
+        name: name.into(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style,
+        auto_context_menu,
+        startup_player_count: 1,
+    }
+}
+
+pub fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
+    engine.first_object_for_definition(definition)
+}
+
+pub fn object_with_definition_near_x(
+    engine: &Engine,
+    definition: &str,
+    expected_x: i32,
+) -> Option<ObjectId> {
+    engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| object.definition_id == definition)
+        .min_by_key(|object| (object.position.x - expected_x).abs())
+        .map(|object| object.id)
+}
+
+pub fn object_contents_count(engine: &Engine, object: ObjectId, definition: &str) -> usize {
+    engine.object_snapshot(object).map_or(0, |object| {
+        object
+            .contents
+            .iter()
+            .filter(|item| {
+                engine
+                    .object_snapshot(**item)
+                    .is_some_and(|item| item.definition_id == definition)
+            })
+            .count()
+    })
+}
+
+pub fn clonk_contents_count(engine: &Engine, clonk: ObjectId, definition: &str) -> usize {
+    object_contents_count(engine, clonk, definition)
+}
+
+pub fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
+    engine.object_snapshot(clonk).is_some_and(|clonk| {
+        clonk.contents.iter().any(|item| {
+            engine
+                .object_snapshot(*item)
+                .is_some_and(|item| item.definition_id == definition)
+        })
+    })
+}
+
+pub fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
+    engine.message_line_contains(needle)
 }

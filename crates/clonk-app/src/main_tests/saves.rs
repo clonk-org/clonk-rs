@@ -1,6 +1,107 @@
 // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
+macro_rules! saves_fixture {
+    (resource: $id:expr, $filename:expr $(,)?) => {
+        clonk_engine::NetworkResourceCore {
+            resource_type: clonk_network::HostResourceType::Player as u8,
+            id: $id,
+            loadable: true,
+            filename: $filename,
+            ..Default::default()
+        }
+    };
+    (player_list: $last_player_id:expr, $clients:expr $(,)?) => {
+        clonk_network::PlayerInfoListSnapshot {
+            last_player_id: $last_player_id,
+            clients: $clients,
+        }
+    };
+    (client_players: $client_id:expr, $players:expr $(,)?) => {
+        clonk_network::ClientPlayerInfosSnapshot {
+            client_id: $client_id,
+            flags: 0,
+            players: $players,
+        }
+    };
+    (player_info_id_name_filename: $id:expr, $name:expr, $filename:expr $(,)?) => {
+        clonk_engine::ControlPlayerInfoEntry {
+            id: $id,
+            name: $name,
+            filename: $filename,
+            player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+            ..Default::default()
+        }
+    };
+    (player_info_id_flags_name_filename: $id:expr, $flags:expr, $name:expr, $filename:expr $(,)?) => {
+        clonk_engine::ControlPlayerInfoEntry {
+            id: $id,
+            flags: $flags,
+            name: $name,
+            filename: $filename,
+            player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+            ..Default::default()
+        }
+    };
+    (saved_game: $version:expr, $scenario:expr, $definition_load:expr, $focus_id:expr, $user_label:expr, $runtime_music_enabled:expr, $engine_state:expr $(,)?) => {
+        SavedGameFile {
+            version: $version,
+            saved_at_seconds: 0,
+            scenario: $scenario,
+            definition_load: $definition_load,
+            focus_id: $focus_id,
+            user_label: $user_label,
+            runtime_music_enabled: $runtime_music_enabled,
+            source_save_player_infos: None,
+            source_string_table: None,
+            source_title_png: None,
+            engine_state: $engine_state,
+        }
+    };
+    (scenario: $identifier:expr, $title:expr, $kind:expr $(,)?) => {
+        clonk_frontend::ScenarioSummary {
+            identifier: $identifier,
+            title: $title,
+            kind: $kind,
+        }
+    };
+    (sourced_gamepad: $gamepad:expr, $cluster:expr, $event:expr $(,)?) => {
+        SourcedGamepadEvent {
+            gamepad: $gamepad,
+            cluster: $cluster,
+            event: $event,
+        }
+    };
+    (synchronize: $save_player_files:expr, $sync_clearance:expr $(,)?) => {
+        clonk_engine::SynchronizeControlData {
+            save_player_files: $save_player_files,
+            sync_clearance: $sync_clearance,
+            by_client: 0,
+        }
+    };
+    (object_update $(,)?) => {
+        ObjectUpdate {
+            menu: Some(None),
+            ..ObjectUpdate::default()
+        }
+    };
+    (viewport_close: $closed_any:expr, $remaining_count:expr $(,)?) => {
+        PhysicalViewportCloseEffect {
+            closed_any: $closed_any,
+            remaining_count: $remaining_count,
+        }
+    };
+    (player_info_id_name_game_number: $id:expr, $name:expr, $game_number:expr $(,)?) => {
+        clonk_engine::ControlPlayerInfoEntry {
+            id: $id,
+            name: $name,
+            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+            game_number: $game_number,
+            ..Default::default()
+        }
+    };
+}
+
 #[test]
 fn initial_record_uses_the_preinitialize_game_snapshot() {
     let directory = tempdir();
@@ -51,25 +152,15 @@ fn initial_record_uses_the_preinitialize_game_snapshot() {
     let record = Group::from_memory(PathBuf::from("Snapshot.c4s"), packed).test_value();
     let game = String::from_utf8(record.read_file("Game.txt").test_value()).test_value();
 
-    assert!(!record.exists("PlayerInfos.txt"));
-    assert_eq!(
-        record.read_file("CtrlRec.txt").unwrap(),
-        b"copied text stream"
-    );
-    assert_eq!(
-        record.read_file("RecPlayerInfos.txt").unwrap(),
-        b"copied final roster"
-    );
-    assert!(game.contains("Frame=41\r\n"));
-    assert!(game.contains("ControlTick=17\r\n"));
-    assert!(game.contains("Go=true\r\n"));
-    assert!(game.contains("Counter=9\r\n"));
-    assert!(game.contains("MusicEnabled=true\r\n"));
-    assert_eq!(
-        app.engine.frame(),
-        0,
-        "live engine remains post-menu default"
-    );
+    main_assert!(!record.exists("PlayerInfos.txt"));
+    main_assert_eq!(record.read_file("CtrlRec.txt").unwrap() => b"copied text stream");
+    main_assert_eq!(record.read_file("RecPlayerInfos.txt").unwrap() => b"copied final roster");
+    main_assert!(game.contains("Frame=41\r\n"));
+    main_assert!(game.contains("ControlTick=17\r\n"));
+    main_assert!(game.contains("Go=true\r\n"));
+    main_assert!(game.contains("Counter=9\r\n"));
+    main_assert!(game.contains("MusicEnabled=true\r\n"));
+    main_assert_eq!(app.engine.frame() => 0, "live engine remains post-menu default");
 }
 
 #[test]
@@ -98,17 +189,18 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
     let mut app = new_state_only_menu_app(320, 200);
     app.recordings_dir = Some(directory.path().join("Records.c4f"));
     app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        .apply(clonk_engine::PlayerInfoControlData::new(
+            0,
+            0,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 117,
                 savegame_player: 17,
                 name: LegacyCString::from_bytes(b"Current takeover".to_vec()).unwrap(),
                 flags: 0,
                 ..Default::default()
             }],
-            ..Default::default()
-        });
+            -1,
+        ));
 
     app.engine.register_test_definition(
         clonk_engine::Definition::from_script(
@@ -121,7 +213,7 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
     app.engine
         .spawn_test_object(clonk_engine::SpawnConfig::new("TST1").with_id(ObjectId::new(41)));
     let mut landscape = clonk_engine::Landscape::flat(2, 1);
-    assert!(landscape.set_mode(clonk_engine::LANDSCAPE_MODE_EXACT));
+    main_assert!(landscape.set_mode(clonk_engine::LANDSCAPE_MODE_EXACT));
     landscape.set_pixel_grid(clonk_engine::landscape::PixelGrid::new(
         2,
         1,
@@ -167,59 +259,42 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
         .resume_joined_savegame_player(17, 0, false);
     let packed = app.recording_template.test_ref().group.pack().test_value();
     let record = Group::from_memory(PathBuf::from("Loaded.c4s"), packed).test_value();
-    assert_eq!(
-        record
-            .read_file("SavePlayerInfos.txt")
-            .expect("original restore roster"),
-        b"original saved roster"
-    );
-    assert_eq!(
-        record.read_file("Title.png").expect("loaded save title"),
-        b"saved game screenshot"
-    );
+    main_assert_eq!(record.read_file("SavePlayerInfos.txt").expect("original restore roster") => b"original saved roster");
+    main_assert_eq!(record.read_file("Title.png").expect("loaded save title") => b"saved game screenshot");
     let initial_players = clonk_network::decode_player_info_list_ini(
         &record.read_file("PlayerInfos.txt").test_value(),
     )
     .test_value();
-    assert_eq!(initial_players.clients[0].players[0].id, 117);
-    assert_eq!(initial_players.clients[0].players[0].flags, 0);
-    assert_eq!(
-        app.control_player_infos.recreation_info_ids(),
-        vec![17],
-        "live takeover rows resume only after fInitial"
-    );
+    main_assert_eq!(initial_players.clients[0].players[0].id => 117);
+    main_assert_eq!(initial_players.clients[0].players[0].flags => 0);
+    main_assert_eq!(app.control_player_infos.recreation_info_ids() => vec![17], "live takeover rows resume only after fInitial");
 
     let objects = String::from_utf8(record.read_file("Objects.txt").test_value()).test_value();
-    assert!(objects.contains("id=TST1\r\n"));
-    assert!(objects.contains("Number=41\r\n"));
+    main_assert!(objects.contains("id=TST1\r\n"));
+    main_assert!(objects.contains("Number=41\r\n"));
     let landscape = clonk_resources::bitmap::IndexedBitmap::decode(
         &record.read_file("Landscape.bmp").test_value(),
     )
     .test_value();
-    assert_eq!((landscape.width, landscape.height), (2, 1));
-    assert_eq!(landscape.indices, [0, 1]);
-    assert!(record.exists("Landscape.png"));
+    main_assert_eq!((landscape.width, landscape.height) => (2, 1));
+    main_assert_eq!(landscape.indices => [0, 1]);
+    main_assert!(record.exists("Landscape.png"));
     let strings = record.read_file("Strings.txt").test_value();
-    assert!(strings
-        .windows(b"materialized string".len())
-        .any(|window| window == b"materialized string"));
+    main_assert!(strings.windows(b"materialized string".len()).any(|window| window == b"materialized string"));
     let section = record.open_child("SectArchive.c4g").test_value();
-    assert_eq!(
-        section.read_file("Archive.bin").expect("section payload"),
-        b"section payload"
-    );
+    main_assert_eq!(section.read_file("Archive.bin").expect("section payload") => b"section payload");
 
     let scenario_core =
         String::from_utf8(record.read_file("Scenario.txt").test_value()).test_value();
     for expected in ["SaveGame=1", "NoInitialize=1", "Replay=1"] {
-        assert!(scenario_core.contains(expected), "missing {expected}");
+        main_assert!(scenario_core.contains(expected), "missing {expected}");
     }
 
     let game = String::from_utf8(record.read_file("Game.txt").test_value()).test_value();
     let player_start = game.find("[Player17]").test_value();
-    assert!(!game.contains("[Player999]"));
-    assert!(game[player_start..].contains("Wealth=99\r\n"));
-    assert_eq!(game.matches("[Player").count(), 1);
+    main_assert!(!game.contains("[Player999]"));
+    main_assert!(game[player_start..].contains("Wealth=99\r\n"));
+    main_assert_eq!(game.matches("[Player").count() => 1);
 
     let post_materialization = app
         .engine
@@ -229,13 +304,9 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
         .expect("serialize post-materialization initial projection")
         .test_value();
     let expected_game = String::from_utf8(expected_game).test_value();
-    assert_eq!(
-        game[..player_start].trim_end(),
-        expected_game.trim_end(),
-        "the non-player prefix must be the post-materialization fInitial projection",
-    );
-    assert!(game[..player_start].contains("Frame=73\r\n"));
-    assert!(game[..player_start].contains("GlobalNamed="));
+    main_assert_eq!(game[..player_start].trim_end() => expected_game.trim_end(), "the non-player prefix must be the post-materialization fInitial projection",);
+    main_assert!(game[..player_start].contains("Frame=73\r\n"));
+    main_assert!(game[..player_start].contains("GlobalNamed="));
 }
 
 #[test]
@@ -285,35 +356,14 @@ fn classic_recdump_writes_cpp_text_and_binary_outputs() {
         "Type=16\r\n",
         "\n\n",
     );
-    assert_eq!(fs::read(&text_path).unwrap(), expected_text.as_bytes());
-    assert_eq!(
-        fs::read(&leading_dot_text_path).unwrap(),
-        expected_text.as_bytes()
-    );
-    assert_eq!(
-        fs::read(&binary_path).unwrap(),
-        [
-            5,
-            clonk_engine::RCT_CTRL,
-            0x86,
-            1,
-            1,
-            0,
-            0xff,
-            42,
-            clonk_engine::RCT_END,
-        ]
-    );
+    main_assert_eq!(fs::read(&text_path).unwrap() => expected_text.as_bytes());
+    main_assert_eq!(fs::read(&leading_dot_text_path).unwrap() => expected_text.as_bytes());
+    main_assert_eq!(fs::read(&binary_path).unwrap() => [5, clonk_engine::RCT_CTRL, 0x86, 1, 1, 0, 0xff, 42, clonk_engine::RCT_END,]);
 
     let missing_parent = directory.path().join("missing/dump.c4b");
     let error = write_classic_record_dump(&chunks, &missing_parent)
         .expect_err("an unwritable destination must fail replay loading");
-    assert!(
-        error
-            .to_string()
-            .contains("failed to write classic record dump"),
-        "unexpected write diagnostic: {error:#}"
-    );
+    main_assert!(error.to_string().contains("failed to write classic record dump"), "unexpected write diagnostic: {error:#}");
 }
 
 #[test]
@@ -323,18 +373,11 @@ fn classic_record_stream_forms_share_one_last_assignment() {
         OsString::from("/stream:Second.c4r"),
         OsString::from("Third.C4R"),
     ]);
-    assert_eq!(classic.record_stream, Some(PathBuf::from("Third.C4R")));
+    main_assert_eq!(classic.record_stream => Some(PathBuf::from("Third.C4R")));
 
     let prefixed = parse_classic_command_line(&[OsString::from("/stream:Nested/League.c4r")]);
-    assert_eq!(
-        prefixed.record_stream,
-        Some(PathBuf::from("Nested/League.c4r")),
-        "the .c4r suffix must not retain the /stream: prefix"
-    );
-    assert_eq!(
-        parse_classic_command_line(&[OsString::from("/stream:")]).record_stream,
-        Some(PathBuf::new())
-    );
+    main_assert_eq!(prefixed.record_stream => Some(PathBuf::from("Nested/League.c4r")), "the .c4r suffix must not retain the /stream: prefix");
+    main_assert_eq!(parse_classic_command_line(&[OsString::from("/stream:")]).record_stream => Some(PathBuf::new()));
 }
 
 #[test]
@@ -447,74 +490,47 @@ fn classic_record_stream_is_converted_and_activated() {
         OsString::from(format!("/stream:{}", stream_path.display())),
         OsString::from("/network"),
     ]);
-    assert_eq!(
-        classic.record_stream.as_deref(),
-        Some(stream_path.as_path())
-    );
+    main_assert_eq!(classic.record_stream.as_deref() => Some(stream_path.as_path()));
     let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
     app.apply_classic_command_line(&classic).test_value();
     app.launch_classic_command_line_scenario().test_value();
-    assert!(app.auto_start_classic_command_line_scenario);
+    main_assert!(app.auto_start_classic_command_line_scenario);
     wait_for_running_with_attempts(&mut app, 2_400);
 
     let output_path = fixture.path().join("League.c4s");
-    assert_eq!(
-        app.classic_command_line.scenario.as_deref(),
-        Some(output_path.as_path())
-    );
-    assert_eq!(
-        app.active_scenario
-            .as_ref()
-            .and_then(|scenario| scenario.path.as_deref()),
-        Some(output_path.as_path())
-    );
-    assert!(app.control_playback.is_some());
-    assert!(app.network.is_none());
-    assert!(app.network_mode.is_none());
-    assert!(!app.classic_record_stream_activation_pending);
-    assert!(output_path.is_dir());
+    main_assert_eq!(app.classic_command_line.scenario.as_deref() => Some(output_path.as_path()));
+    main_assert_eq!(app.active_scenario.as_ref().and_then(|scenario| scenario.path.as_deref()) => Some(output_path.as_path()));
+    main_assert!(app.control_playback.is_some());
+    main_assert!(app.network.is_none());
+    main_assert!(app.network_mode.is_none());
+    main_assert!(!app.classic_record_stream_activation_pending);
+    main_assert!(output_path.is_dir());
     for child in ["OriginChild.c4g", "InitialChild.c4g", "LaterChild.c4g"] {
-        assert!(
-            output_path.join(child).is_file(),
-            "folder-backed conversion must retain {child} as a packed file"
-        );
+        main_assert!(output_path.join(child).is_file(), "folder-backed conversion must retain {child} as a packed file");
     }
     let output = Group::open(&output_path).test_value();
-    assert_eq!(
-        output
-            .read_file("OriginOnly.txt")
-            .expect("origin component"),
-        b"copied from origin"
-    );
-    assert_eq!(
-        output
-            .read_file("InitialOnly.txt")
-            .expect("initial component"),
-        b"initial component"
-    );
-    assert_eq!(
-        output.read_file("Layer.txt").expect("later overlay"),
-        b"later"
-    );
-    assert_eq!(
-        output.read_file("CtrlRec.c4b").expect("converted CtrlRec"),
+    main_assert_eq!(output.read_file("OriginOnly.txt").expect("origin component") => b"copied from origin");
+    main_assert_eq!(output.read_file("InitialOnly.txt").expect("initial component") => b"initial component");
+    main_assert_eq!(output.read_file("Layer.txt").expect("later overlay") => b"later");
+    main_assert_eq!(
+        output.read_file("CtrlRec.c4b").expect("converted CtrlRec") =>
         [14, clonk_engine::RCT_FRAME],
         "file chunks are removed and their deltas folded into the retained stream"
     );
-    assert_eq!(
+    main_assert_eq!(
         output
             .open_child("LaterChild.c4g")
             .expect("open streamed packed child")
             .read_file("LaterChild.txt")
-            .expect("streamed child component"),
+            .expect("streamed child component") =>
         b"later child"
     );
-    assert_eq!(
+    main_assert_eq!(
         output
             .open_child("InitialChild.c4g")
             .expect("open initial packed child")
             .raw_image()
-            .expect("read initial child image"),
+            .expect("read initial child image") =>
         initial_child_raw,
         "unpacking the streamed initial save preserves child images"
     );
@@ -558,13 +574,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
     )
     .test_value();
     let native = |bytes: &[u8]| LegacyCString::from_bytes(bytes.to_vec()).test_value();
-    let recorded_resource = clonk_engine::NetworkResourceCore {
-        resource_type: clonk_network::HostResourceType::Player as u8,
-        id: 17,
-        loadable: true,
-        filename: native(b"Alice.c4p"),
-        ..Default::default()
-    };
+    let recorded_resource = saves_fixture!(resource: 17, native(b"Alice.c4p"));
     let fallback_profile_path = user_data.path().join("Local.c4p");
     fs::create_dir(&fallback_profile_path).test_value();
     fs::write(
@@ -572,17 +582,10 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
         "[Player]\nName=Local recorded profile\nScore=37\n[Preferences]\nControl=1\nMouse=0\n",
     )
     .test_value();
-    let fallback_profile_filename = LegacyCString::from_bytes(
-        clonk_resources::path_to_legacy_bytes(&fallback_profile_path),
-    )
-    .test_value();
-    let stale_resource = clonk_engine::NetworkResourceCore {
-        resource_type: clonk_network::HostResourceType::Player as u8,
-        id: 18,
-        loadable: true,
-        filename: native(b"Wrong.c4p"),
-        ..Default::default()
-    };
+    let fallback_profile_filename = legacy_cstring(clonk_resources::path_to_legacy_bytes(
+        &fallback_profile_path,
+    ));
+    let stale_resource = saves_fixture!(resource: 18, native(b"Wrong.c4p"));
     let stale_resource_path = user_data.path().join("Wrong.c4p");
     fs::create_dir(&stale_resource_path).test_value();
     fs::write(
@@ -590,103 +593,101 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
         "[Player]\nName=Wrong resource profile\nScore=99\n",
     )
     .test_value();
-    let missing_profile_filename = LegacyCString::from_bytes(
-        clonk_resources::path_to_legacy_bytes(&user_data.path().join("Missing.c4p")),
-    )
-    .test_value();
-    let current_infos = clonk_network::PlayerInfoListSnapshot {
-        last_player_id: 100,
-        clients: vec![
-            clonk_network::ClientPlayerInfosSnapshot {
-                client_id: 4,
-                flags: 0,
-                players: vec![
-                    clonk_engine::ControlPlayerInfoEntry {
-                        id: 100,
-                        name: native(b"New-team ordering probe"),
-                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
-                        team: -1,
-                        ..Default::default()
-                    },
-                    clonk_engine::ControlPlayerInfoEntry {
-                        id: 91,
-                        name: native(b"Current replay player"),
-                        filename: native(b"Alice.c4p"),
-                        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
-                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
-                        color: 0x0044_5566,
-                        team: 4,
-                        resource: Some(recorded_resource),
-                        ..Default::default()
-                    },
-                    clonk_engine::ControlPlayerInfoEntry {
-                        id: 93,
-                        name: native(b"Missing replay profile"),
-                        filename: missing_profile_filename,
-                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
-                        ..Default::default()
-                    },
-                ],
-            },
-            clonk_network::ClientPlayerInfosSnapshot {
-                client_id: -1,
-                flags: 0,
-                players: vec![clonk_engine::ControlPlayerInfoEntry {
-                    id: 92,
-                    name: native(b"Unknown-client replay player"),
-                    filename: fallback_profile_filename,
-                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
-                    player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
-                    resource: Some(stale_resource.clone()),
-                    ..Default::default()
-                }],
-            },
-        ],
-    };
-    let restore_infos = clonk_network::PlayerInfoListSnapshot {
-        last_player_id: 7,
-        clients: vec![
-            clonk_network::ClientPlayerInfosSnapshot {
-                client_id: 4,
-                flags: 0,
-                players: vec![
-                    clonk_engine::ControlPlayerInfoEntry {
-                        id: 7,
-                        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
-                            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
-                        name: native(b"Current replay player"),
-                        filename: native(b"Alice.c4p"),
-                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
-                        color: 0x0011_2233,
-                        team: 3,
-                        ..Default::default()
-                    },
-                    clonk_engine::ControlPlayerInfoEntry {
-                        id: 6,
-                        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
-                            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
-                        name: native(b"Missing replay profile"),
-                        filename: native(b"Missing.c4p"),
-                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
-                        ..Default::default()
-                    },
-                ],
-            },
-            clonk_network::ClientPlayerInfosSnapshot {
-                client_id: -1,
-                flags: 0,
-                players: vec![clonk_engine::ControlPlayerInfoEntry {
-                    id: 8,
-                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
-                        | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
-                    name: native(b"Unknown-client replay player"),
-                    filename: native(b"Local.c4p"),
-                    player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
-                    ..Default::default()
-                }],
-            },
-        ],
-    };
+    let missing_profile_filename = legacy_cstring(clonk_resources::path_to_legacy_bytes(
+        &user_data.path().join("Missing.c4p"),
+    ));
+    let current_infos = saves_fixture!(
+        player_list:
+            100,
+            vec![
+                        saves_fixture!(
+                client_players:
+                    4,
+                    vec![
+                                        clonk_engine::ControlPlayerInfoEntry {
+                                            id: 100,
+                                            name: native(b"New-team ordering probe"),
+                                            player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                                            team: -1,
+                                            ..Default::default()
+                                        },
+                                        clonk_engine::ControlPlayerInfoEntry {
+                                            id: 91,
+                                            name: native(b"Current replay player"),
+                                            filename: native(b"Alice.c4p"),
+                                            flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                                            player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                                            color: 0x0044_5566,
+                                            team: 4,
+                                            resource: Some(recorded_resource),
+                                            ..Default::default()
+                                        },
+                                        saves_fixture!(
+                        player_info_id_name_filename:
+                            93,
+                            native(b"Missing replay profile"),
+                            missing_profile_filename,
+                    ),
+                                    ],
+            ),
+                        saves_fixture!(
+                client_players:
+                    -1,
+                    vec![clonk_engine::ControlPlayerInfoEntry {
+                                        id: 92,
+                                        name: native(b"Unknown-client replay player"),
+                                        filename: fallback_profile_filename,
+                                        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                                        resource: Some(stale_resource.clone()),
+                                        ..Default::default()
+                                    }],
+            ),
+                    ],
+    );
+    let restore_infos = saves_fixture!(
+        player_list:
+            7,
+            vec![
+                        saves_fixture!(
+                client_players:
+                    4,
+                    vec![
+                                        clonk_engine::ControlPlayerInfoEntry {
+                                            id: 7,
+                                            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                                                | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+                                            name: native(b"Current replay player"),
+                                            filename: native(b"Alice.c4p"),
+                                            player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                                            color: 0x0011_2233,
+                                            team: 3,
+                                            ..Default::default()
+                                        },
+                                        saves_fixture!(
+                        player_info_id_flags_name_filename:
+                            6,
+                            clonk_engine::PLAYER_INFO_FLAG_JOINED
+                                                        | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+                            native(b"Missing replay profile"),
+                            native(b"Missing.c4p"),
+                    ),
+                                    ],
+            ),
+                        saves_fixture!(
+                client_players:
+                    -1,
+                    vec![saves_fixture!(
+                        player_info_id_flags_name_filename:
+                            8,
+                            clonk_engine::PLAYER_INFO_FLAG_JOINED
+                                                    | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+                            native(b"Unknown-client replay player"),
+                            native(b"Local.c4p"),
+                    )],
+            ),
+                    ],
+    );
     fs::write(
         replay_path.join("PlayerInfos.txt"),
         clonk_network::encode_player_info_list_ini(&current_infos).test_value(),
@@ -724,7 +725,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
     wait_for_running_with_attempts(&mut app, 2_400);
 
     let player = app.engine.test_player(2);
-    assert_eq!(
+    main_assert_eq!(
         (
             player.player_info_id(),
             player.name(),
@@ -732,7 +733,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
             player.score(),
             player.at_client(),
             player.at_client_name(),
-        ),
+        ) =>
         (
             7,
             "Current replay player",
@@ -743,23 +744,16 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
         )
     );
     let resumed_info = app.control_player_infos.get(7).test_value();
-    assert!(
-        resumed_info.filename.is_empty(),
-        "DeleteTempFile clears the extracted Recreate filename after the join"
-    );
-    assert!(resumed_info.resource.is_none());
-    assert_eq!(
-        resumed_info.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+    main_assert!(resumed_info.filename.is_empty(), "DeleteTempFile clears the extracted Recreate filename after the join");
+    main_assert!(resumed_info.resource.is_none());
+    main_assert_eq!(
+        resumed_info.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE =>
         clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
         "replay DiscardResource has no live resource pointer and preserves HasRes"
     );
-    assert_eq!(
-        (resumed_info.game_number, resumed_info.game_join_frame),
-        (-1, -1),
-        "non-scenario-init recreation does not call SetJoined"
-    );
-    assert!(app.control_player_infos.get(91).is_none());
-    assert!(
+    main_assert_eq!((resumed_info.game_number, resumed_info.game_join_frame) => (-1, -1), "non-scenario-init recreation does not call SetJoined");
+    main_assert!(app.control_player_infos.get(91).is_none());
+    main_assert!(
         app.control_player_infos
             .get(6)
             .is_some_and(|info| { info.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0 }),
@@ -773,19 +767,12 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
         .into_iter()
         .find(|result| result.player_info_id == 6)
         .test_value();
-    assert_eq!(
-        (
-            failed_result.total_playing_time,
-            failed_result.score_old,
-            failed_result.score_new,
-        ),
-        (0, 0, None)
-    );
+    main_assert_eq!((failed_result.total_playing_time, failed_result.score_old, failed_result.score_new,) => (0, 0, None));
     // A failed/missing Recreate extraction leaves the original filename in
     // place, so RecreatePlayers can still load the installed profile
     // (C4PlayerInfo.cpp:1468-1504,1566-1603).
     let local_player = app.engine.test_player(3);
-    assert_eq!(
+    main_assert_eq!(
         (
             local_player.player_info_id(),
             local_player.name(),
@@ -793,7 +780,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
             local_player.score(),
             local_player.at_client(),
             local_player.at_client_name(),
-        ),
+        ) =>
         (
             8,
             "Unknown-client replay player",
@@ -803,44 +790,31 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
             "Replay",
         )
     );
-    assert!(app.local_controls.assignment(3).is_some());
-    assert_eq!(app.engine.snapshot().hud.local_players, vec![3]);
+    main_assert!(app.local_controls.assignment(3).is_some());
+    main_assert_eq!(app.engine.snapshot().hud.local_players => vec![3]);
     let teams = app.engine.teams();
-    assert!(teams.iter().any(|team| team.id == 4));
+    main_assert!(teams.iter().any(|team| team.id == 4));
     // RecheckAutoGeneratedTeams visits PlayerInfos in packet/row order. A
     // TEAMID_New row before team 4 therefore generates team 1 first and must
     // not append team 5 (C4PlayerInfo.cpp:819-831; C4Teams.cpp:409-420).
-    assert!(!teams.iter().any(|team| team.id == 5));
-    assert_eq!(
-        teams
-            .iter()
-            .find(|team| team.id == 3)
-            .map(|team| team.player_ids.as_slice()),
-        Some(&[7][..])
-    );
-    assert!(
-        app.control_clients.snapshot().is_empty(),
-        "replay PlayerInfos packets do not synthesize Parameters.Clients"
-    );
-    assert_eq!(app.engine.game_time(), 17);
-    assert_eq!(
-        app.control_player_infos.retained_rows_snapshot().0,
-        7,
-        "SavePlayerInfos overwrites the replay PlayerInfos ID counter"
-    );
+    main_assert!(!teams.iter().any(|team| team.id == 5));
+    main_assert_eq!(teams.iter().find(|team| team.id == 3).map(|team| team.player_ids.as_slice()) => Some(&[7][..]));
+    main_assert!(app.control_clients.snapshot().is_empty(), "replay PlayerInfos packets do not synthesize Parameters.Clients");
+    main_assert_eq!(app.engine.game_time() => 17);
+    main_assert_eq!(app.control_player_infos.retained_rows_snapshot().0 => 7, "SavePlayerInfos overwrites the replay PlayerInfos ID counter");
     // InitGame snapshots the raw PlayerInfos before InitPlayers merges the
     // restore list (C4Game.cpp:2390-2399,2827-2850).
-    assert_eq!(
+    main_assert_eq!(
         app.restart_restore_infos
             .players
-            .get(b"Current replay player".as_slice()),
+            .get(b"Current replay player".as_slice()) =>
         Some(&RestartRestorePlayerInfo {
             player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
             team: 4,
             color: 0x0044_5566,
         })
     );
-    assert!(app.control_playback.is_some());
+    main_assert!(app.control_playback.is_some());
     app.apply_ready_controls(
         0,
         vec![NetworkControl::ClientUpdate(
@@ -853,10 +827,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
         )],
     )
     .test_value();
-    assert!(
-        app.engine.player(2).is_some(),
-        "ClientUpdate is a no-op when Parameters.Clients has no matching row"
-    );
+    main_assert!(app.engine.player(2).is_some(), "ClientUpdate is a no-op when Parameters.Clients has no matching row");
     // ClientRemove has a replay-only absent-client fallback that removes the
     // client's runtime players without inventing a client row
     // (C4Control.cpp:578-584,637-649).
@@ -871,8 +842,8 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
         )],
     )
     .test_value();
-    assert!(app.engine.player(2).is_none());
-    assert!(app.engine.player(3).is_some());
+    main_assert!(app.engine.player(2).is_none());
+    main_assert!(app.engine.player(3).is_some());
     reset_cached_app_paths();
 }
 
@@ -905,29 +876,24 @@ fn savegame_replay_empty_current_packet_does_not_adopt_restore_players() {
         [0, clonk_engine::RCT_FRAME],
     )
     .test_value();
-    let current_infos = clonk_network::PlayerInfoListSnapshot {
-        last_player_id: 91,
-        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
-            client_id: 4,
-            flags: 0,
-            players: Vec::new(),
-        }],
-    };
-    let restore_infos = clonk_network::PlayerInfoListSnapshot {
-        last_player_id: 7,
-        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
-            client_id: 4,
-            flags: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: 7,
-                game_number: 2,
-                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
-                    | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
-                player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
-                ..Default::default()
-            }],
-        }],
-    };
+    let current_infos =
+        saves_fixture!(player_list: 91, vec![saves_fixture!(client_players: 4, Vec::new())]);
+    let restore_infos = saves_fixture!(
+        player_list:
+            7,
+            vec![saves_fixture!(
+                client_players:
+                    4,
+                    vec![clonk_engine::ControlPlayerInfoEntry {
+                                    id: 7,
+                                    game_number: 2,
+                                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                                        | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+                                    player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+                                    ..Default::default()
+                                }],
+            )],
+    );
     fs::write(
         replay_path.join("PlayerInfos.txt"),
         clonk_network::encode_player_info_list_ini(&current_infos).test_value(),
@@ -944,16 +910,10 @@ fn savegame_replay_empty_current_packet_does_not_adopt_restore_players() {
     app.start_scenario(frontend).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
-    assert!(app.engine.player(2).is_none());
-    assert_eq!(
-        app.engine
-            .object_snapshot(clonk_engine::ObjectId::new(10))
-            .expect("unassociated crew tombstone")
-            .status,
-        clonk_engine::ObjectStatus::Deleted
-    );
-    assert_eq!(app.control_player_infos.retained_rows_snapshot().0, 7);
-    assert!(app.control_player_infos.contains_client(4));
+    main_assert!(app.engine.player(2).is_none());
+    main_assert_eq!(app.engine.object_snapshot(clonk_engine::ObjectId::new(10)).expect("unassociated crew tombstone").status => clonk_engine::ObjectStatus::Deleted);
+    main_assert_eq!(app.control_player_infos.retained_rows_snapshot().0 => 7);
+    main_assert!(app.control_player_infos.contains_client(4));
     reset_cached_app_paths();
 }
 
@@ -978,35 +938,36 @@ fn savegame_replay_removed_restore_rows_do_not_gain_associations() {
     )
     .test_value();
     let native = |bytes: &[u8]| LegacyCString::from_bytes(bytes.to_vec()).test_value();
-    let current_infos = clonk_network::PlayerInfoListSnapshot {
-        last_player_id: 91,
-        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
-            client_id: 4,
-            flags: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: 91,
-                name: native(b"Removed restore match"),
-                filename: native(b"Alice.c4p"),
-                player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
-                ..Default::default()
-            }],
-        }],
-    };
-    let restore_infos = clonk_network::PlayerInfoListSnapshot {
-        last_player_id: 7,
-        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
-            client_id: 4,
-            flags: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: 7,
-                name: native(b"Removed restore match"),
-                filename: native(b"Alice.c4p"),
-                flags: clonk_engine::PLAYER_INFO_FLAG_REMOVED,
-                player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
-                ..Default::default()
-            }],
-        }],
-    };
+    let current_infos = saves_fixture!(
+        player_list:
+            91,
+            vec![saves_fixture!(
+                client_players:
+                    4,
+                    vec![saves_fixture!(
+                        player_info_id_name_filename:
+                            91,
+                            native(b"Removed restore match"),
+                            native(b"Alice.c4p"),
+                    )],
+            )],
+    );
+    let restore_infos = saves_fixture!(
+        player_list:
+            7,
+            vec![saves_fixture!(
+                client_players:
+                    4,
+                    vec![clonk_engine::ControlPlayerInfoEntry {
+                                    id: 7,
+                                    name: native(b"Removed restore match"),
+                                    filename: native(b"Alice.c4p"),
+                                    flags: clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+                                    player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                                    ..Default::default()
+                                }],
+            )],
+    );
     fs::write(
         replay_path.join("PlayerInfos.txt"),
         clonk_network::encode_player_info_list_ini(&current_infos).test_value(),
@@ -1024,8 +985,8 @@ fn savegame_replay_removed_restore_rows_do_not_gain_associations() {
     wait_for_running_with_attempts(&mut app, 2_400);
 
     let current = app.control_player_infos.get(91).test_value();
-    assert_eq!(current.savegame_player, 0);
-    assert_eq!(app.control_player_infos.retained_rows_snapshot().0, 7);
+    main_assert_eq!(current.savegame_player => 0);
+    main_assert_eq!(app.control_player_infos.retained_rows_snapshot().0 => 7);
     reset_cached_app_paths();
 }
 
@@ -1049,19 +1010,20 @@ fn savegame_replay_removed_only_restore_still_overwrites_id_counter() {
         [0, clonk_engine::RCT_FRAME],
     )
     .test_value();
-    let restore_infos = clonk_network::PlayerInfoListSnapshot {
-        last_player_id: 7,
-        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
-            client_id: 4,
-            flags: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: 7,
-                flags: clonk_engine::PLAYER_INFO_FLAG_REMOVED,
-                player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
-                ..Default::default()
-            }],
-        }],
-    };
+    let restore_infos = saves_fixture!(
+        player_list:
+            7,
+            vec![saves_fixture!(
+                client_players:
+                    4,
+                    vec![clonk_engine::ControlPlayerInfoEntry {
+                                    id: 7,
+                                    flags: clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+                                    player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                                    ..Default::default()
+                                }],
+            )],
+    );
     fs::write(
         replay_path.join("SavePlayerInfos.txt"),
         clonk_network::encode_player_info_list_ini(&restore_infos).test_value(),
@@ -1073,8 +1035,8 @@ fn savegame_replay_removed_only_restore_still_overwrites_id_counter() {
     app.start_scenario(frontend).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
-    assert_eq!(app.control_player_infos.retained_rows_snapshot().0, 7);
-    assert!(app.control_player_infos.get(7).is_none());
+    main_assert_eq!(app.control_player_infos.retained_rows_snapshot().0 => 7);
+    main_assert!(app.control_player_infos.get(7).is_none());
     reset_cached_app_paths();
 }
 
@@ -1098,29 +1060,18 @@ fn unusable_classic_record_stream_exits_without_showing_startup() {
         app.test_update();
         thread::sleep(Duration::from_millis(2));
     }
-    assert!(app.exit_requested, "explicit unusable .c4r must terminate");
-    assert_ne!(app.mode, AppMode::Menu);
-    assert!(app
-        .status_text
-        .contains("Could not process record stream data"));
+    main_assert!(app.exit_requested, "explicit unusable .c4r must terminate");
+    main_assert_ne!(app.mode => AppMode::Menu);
+    main_assert!(app.status_text.contains("Could not process record stream data"));
     reset_cached_app_paths();
 }
 
 #[test]
 fn save_description_language_preserves_an_explicit_empty_first_segment() {
     let _lock = env_lock().lock();
-    assert_eq!(
-        materialized_save_description_language(b"[General]\nLanguage=,DE\n"),
-        Vec::<u8>::new()
-    );
-    assert_eq!(
-        materialized_save_description_language(b"[General]\nLanguage=DE,US\n"),
-        b"DE"
-    );
-    assert_eq!(
-        materialized_save_description_language(b"[General]\nLanguageEx=DE,US\n"),
-        classic_loader_system_language().unwrap_or("US").as_bytes()
-    );
+    main_assert_eq!(materialized_save_description_language(b"[General]\nLanguage=,DE\n") => Vec::<u8>::new());
+    main_assert_eq!(materialized_save_description_language(b"[General]\nLanguage=DE,US\n") => b"DE");
+    main_assert_eq!(materialized_save_description_language(b"[General]\nLanguageEx=DE,US\n") => classic_loader_system_language().unwrap_or("US").as_bytes());
 }
 
 #[test]
@@ -1129,21 +1080,15 @@ fn default_bad_safety_restores_and_saves_defaults() {
     let path = dir.path().join("clonk-rust.config");
     fs::write(&path, "[General]\nConfigResetSafety=7junk\nVendorPoison=keep\n\n[Graphics]\nResolutionX=1234\n\n[Vendor]\nPoison=yes\n").test_value();
 
-    assert!(validate_or_repair_startup_config(&path, false).expect("repair default config"));
+    main_assert!(validate_or_repair_startup_config(&path, false).expect("repair default config"));
 
     let repaired = Config::load(&path).test_value();
-    assert_eq!(
-        repaired.get_in(Some("General"), "ConfigResetSafety"),
-        Some("42")
-    );
-    assert_eq!(
-        repaired.get_in(Some("Graphics"), "ResolutionX"),
-        Some("800")
-    );
-    assert_eq!(repaired.get_in(Some("General"), "Version"), Some("362"));
-    assert_eq!(repaired.get_in(Some("Graphics"), "Shader"), Some("1"));
-    assert_eq!(repaired.get_in(Some("General"), "VendorPoison"), None);
-    assert_eq!(repaired.get_in(Some("Vendor"), "Poison"), None);
+    main_assert_eq!(repaired.get_in(Some("General"), "ConfigResetSafety") => Some("42"));
+    main_assert_eq!(repaired.get_in(Some("Graphics"), "ResolutionX") => Some("800"));
+    main_assert_eq!(repaired.get_in(Some("General"), "Version") => Some("362"));
+    main_assert_eq!(repaired.get_in(Some("Graphics"), "Shader") => Some("1"));
+    main_assert_eq!(repaired.get_in(Some("General"), "VendorPoison") => None);
+    main_assert_eq!(repaired.get_in(Some("Vendor"), "Poison") => None);
 }
 
 #[test]
@@ -1156,16 +1101,10 @@ fn default_zero_resolution_restores_and_saves_defaults() {
     )
     .test_value();
 
-    assert!(validate_or_repair_startup_config(&path, false).expect("repair zero resolution"));
+    main_assert!(validate_or_repair_startup_config(&path, false).expect("repair zero resolution"));
     let repaired = Config::load(&path).test_value();
-    assert_eq!(
-        repaired.get_in(Some("Graphics"), "ResolutionX"),
-        Some("800")
-    );
-    assert_eq!(
-        repaired.get_in(Some("Graphics"), "ResolutionY"),
-        Some("600")
-    );
+    main_assert_eq!(repaired.get_in(Some("Graphics"), "ResolutionX") => Some("800"));
+    main_assert_eq!(repaired.get_in(Some("Graphics"), "ResolutionY") => Some("600"));
 }
 
 #[test]
@@ -1209,52 +1148,49 @@ fn one_shot_sample_stops_at_the_cpp_twenty_instance_limit() {
             )
             .test_value();
     }
-    assert_eq!(audio.active_channels.len(), 20);
+    main_assert_eq!(audio.active_channels.len() => 20);
 }
 
 #[test]
 fn save_file_version_deserializes_legacy_integer() {
     let version: SaveFileVersion = serde_json::from_str("1").test_value();
-    assert_eq!(version, SaveFileVersion::new(1, 0, 0));
+    main_assert_eq!(version => SaveFileVersion::new(1, 0, 0));
 }
 
 #[test]
 fn save_file_version_deserializes_string() {
     let version: SaveFileVersion = serde_json::from_str("\"2.3.4\"").test_value();
-    assert_eq!(version, SaveFileVersion::new(2, 3, 4));
+    main_assert_eq!(version => SaveFileVersion::new(2, 3, 4));
 }
 
 #[test]
 fn migration_allows_previous_minor_version() {
     let engine = Engine::new();
     let engine_state = engine.capture_state();
-    let save = SavedGameFile {
-        version: SaveFileVersion::new(1, 0, 0),
-        saved_at_seconds: 0,
-        scenario: SavedScenarioInfo {
-            identifier: "test".to_string(),
-            title: "Test Scenario".to_string(),
-            description: None,
-            path: None,
-            root_label: None,
-            is_editable: false,
-            is_playable: true,
-            label: "Test".to_string(),
-            fallback_ground: 0,
-            sandbox: true,
-        },
-        definition_load: None,
-        focus_id: None,
-        user_label: None,
-        runtime_music_enabled: None,
-        source_save_player_infos: None,
-        source_string_table: None,
-        source_title_png: None,
-        engine_state,
-    };
+    let save = saves_fixture!(
+        saved_game:
+            SaveFileVersion::new(1, 0, 0),
+            SavedScenarioInfo {
+                        identifier: "test".to_string(),
+                        title: "Test Scenario".to_string(),
+                        description: None,
+                        path: None,
+                        root_label: None,
+                        is_editable: false,
+                        is_playable: true,
+                        label: "Test".to_string(),
+                        fallback_ground: 0,
+                        sandbox: true,
+                    },
+            None,
+            None,
+            None,
+            None,
+            engine_state,
+    );
 
     let migrated = migrate_save_file(save).test_value();
-    assert_eq!(migrated.version, SAVE_FILE_VERSION);
+    main_assert_eq!(migrated.version => SAVE_FILE_VERSION);
 }
 
 #[test]
@@ -1283,17 +1219,17 @@ fn saved_scenario_round_trips_basic_metadata() {
         definition_modules: Vec::new(),
     };
     let info = SavedScenarioInfo::from_frontend(&original, "Label", 123);
-    assert_eq!(info.identifier, original.identifier);
-    assert_eq!(info.title, original.title);
-    assert_eq!(info.path, original.path);
-    assert_eq!(info.label, "Label");
-    assert_eq!(info.fallback_ground, 123);
+    main_assert_eq!(info.identifier => original.identifier);
+    main_assert_eq!(info.title => original.title);
+    main_assert_eq!(info.path => original.path);
+    main_assert_eq!(info.label => "Label");
+    main_assert_eq!(info.fallback_ground => 123);
     let restored = info.to_frontend();
-    assert_eq!(restored.identifier, original.identifier);
-    assert_eq!(restored.title, original.title);
-    assert_eq!(restored.path, original.path);
-    assert!(restored.children.is_empty());
-    assert_eq!(restored.kind, ScenarioKind::Scenario);
+    main_assert_eq!(restored.identifier => original.identifier);
+    main_assert_eq!(restored.title => original.title);
+    main_assert_eq!(restored.path => original.path);
+    main_assert!(restored.children.is_empty());
+    main_assert_eq!(restored.kind => ScenarioKind::Scenario);
 }
 
 #[test]
@@ -1313,9 +1249,9 @@ fn local_scenario_player_gate_matches_cpp_max_savegame_and_replay_rules() {
         "[Head]\nMinPlayer=1\nMaxPlayer=1\n",
     )
     .test_value();
-    assert_eq!(
+    main_assert_eq!(
         app.local_scenario_player_count_error(&scenario)
-            .expect("inspect regular scenario"),
+            .expect("inspect regular scenario") =>
         Some("This scenario is designed for a maximum of 1 players.".to_string())
     );
 
@@ -1324,9 +1260,9 @@ fn local_scenario_player_gate_matches_cpp_max_savegame_and_replay_rules() {
         "[Head]\nMinPlayer=2\nMaxPlayer=0\nSaveGame=1\n",
     )
     .test_value();
-    assert_eq!(
+    main_assert_eq!(
         app.local_scenario_player_count_error(&scenario)
-            .expect("inspect savegame scenario"),
+            .expect("inspect savegame scenario") =>
         None,
         "savegames raise a stale maximum to the minimum player count"
     );
@@ -1337,12 +1273,7 @@ fn local_scenario_player_gate_matches_cpp_max_savegame_and_replay_rules() {
         "[Head]\nMinPlayer=9\nMaxPlayer=0\nReplay=1\n",
     )
     .test_value();
-    assert_eq!(
-        app.local_scenario_player_count_error(&scenario)
-            .expect("inspect replay scenario"),
-        None,
-        "replays bypass regular-game player-count checks"
-    );
+    main_assert_eq!(app.local_scenario_player_count_error(&scenario).expect("inspect replay scenario") => None, "replays bypass regular-game player-count checks");
     reset_cached_app_paths();
 }
 
@@ -1378,66 +1309,51 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     app.menu_state.definition_checkbox_checked = true;
 
     app.handle_menu_input(|_| {
-        vec![StartupMenuAction::StartScenario(
-            clonk_frontend::ScenarioSummary {
-                identifier: scenario.identifier.clone(),
-                title: scenario.title.clone(),
-                kind: ScenarioKind::Scenario,
-            },
-        )]
+        vec![StartupMenuAction::StartScenario(saves_fixture!(
+            scenario:
+                scenario.identifier.clone(),
+                scenario.title.clone(),
+                ScenarioKind::Scenario,
+        ))]
     })
     .test_value();
 
-    assert_eq!(app.mode, AppMode::Menu);
-    assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
-    assert!(app.loading_state.is_none());
-    assert!(app.definition_selector.is_none());
-    assert!(app.status_text.is_empty());
-    assert_eq!(app.message_dialogs.len(), 1);
-    assert_eq!(
-        app.message_dialogs[0].state.caption(),
-        "Cannot start scenario."
-    );
-    assert_eq!(
-            app.message_dialogs[0].state.message(),
+    main_assert_eq!(app.mode => AppMode::Menu);
+    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert!(app.loading_state.is_none());
+    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.status_text.is_empty());
+    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.message_dialogs[0].state.caption() => "Cannot start scenario.");
+    main_assert_eq!(
+            app.message_dialogs[0].state.message() =>
             "This scenario is designed for a minimum of 1 players. Please go to the Player Selection dialog and activate the participants for this round."
         );
-    assert_eq!(
-        app.message_dialogs[0].state.icon(),
-        clonk_frontend::message_dialog::MessageDialogIcon::ERROR
-    );
-    assert_eq!(
-        app.message_dialogs[0].state.focused_button(),
-        Some(clonk_frontend::message_dialog::MessageDialogButton::Ok)
-    );
+    main_assert_eq!(app.message_dialogs[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
+    main_assert_eq!(app.message_dialogs[0].state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Ok));
     let mut frame = vec![0_u8; 640 * 480 * 4];
     app.test_render(&mut frame);
     let ok = app.top_message_dialog_layout().test_value().buttons[0].rect;
     let ok_point = PhysicalPosition::new(f64::from(ok.x + ok.w / 2), f64::from(ok.y + ok.h / 2));
     app.test_cursor(ok_point);
-    assert!(app.message_dialogs[0].state.has_pointer_hover());
-    assert_eq!(
-        app.menu_state.pointer_position(),
-        None,
-        "the exclusive startup popup owns pointer movement"
-    );
+    main_assert!(app.message_dialogs[0].state.has_pointer_hover());
+    main_assert_eq!(app.menu_state.pointer_position() => None, "the exclusive startup popup owns pointer movement");
     app.test_left_button(ElementState::Pressed);
     app.test_cursor(PhysicalPosition::new(ok_point.x + 1.0, ok_point.y));
-    assert!(app.message_dialogs[0].state.has_pointer_capture());
-    assert!(app.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(app.message_dialogs[0].state.has_pointer_capture());
+    main_assert!(app.message_dialogs[0].state.has_pointer_hover());
     app.test_left_button(ElementState::Released);
-    assert!(app.message_dialogs.is_empty());
-    assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
-    assert!(app.status_text.is_empty());
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert!(app.status_text.is_empty());
 
     app.handle_menu_input(|_| {
-        vec![StartupMenuAction::StartScenario(
-            clonk_frontend::ScenarioSummary {
-                identifier: scenario.identifier.clone(),
-                title: scenario.title.clone(),
-                kind: ScenarioKind::Scenario,
-            },
-        )]
+        vec![StartupMenuAction::StartScenario(saves_fixture!(
+            scenario:
+                scenario.identifier.clone(),
+                scenario.title.clone(),
+                ScenarioKind::Scenario,
+        ))]
     })
     .test_value();
     let close = app
@@ -1452,14 +1368,14 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     app.test_cursor(close_point);
     app.test_left_button(ElementState::Pressed);
     app.test_cursor(PhysicalPosition::new(close_point.x + 1.0, close_point.y));
-    assert!(app.message_dialogs[0].state.has_pointer_capture());
-    assert!(app.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(app.message_dialogs[0].state.has_pointer_capture());
+    main_assert!(app.message_dialogs[0].state.has_pointer_hover());
     app.test_left_button(ElementState::Released);
-    assert!(app.message_dialogs.is_empty());
-    assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
-    assert!(app.loading_state.is_none());
-    assert!(app.definition_selector.is_none());
-    assert!(app.status_text.is_empty());
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert!(app.loading_state.is_none());
+    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.status_text.is_empty());
     reset_cached_app_paths();
 }
 
@@ -1488,12 +1404,7 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
         &staged.definition_load,
     )
     .test_value();
-    assert!(staged
-        .scenario
-        .lobby_metadata()
-        .expect("reloaded lobby metadata")
-        .head()
-        .is_replay());
+    main_assert!(staged.scenario.lobby_metadata().expect("reloaded lobby metadata").head().is_replay());
     app.staged_network_host_scenario = Some(staged);
     app.network_mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
@@ -1524,9 +1435,10 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
     app.control_player_infos.replace_snapshot(
         1,
         [
-            clonk_engine::PlayerInfoControlData {
-                client_id: 0,
-                players: vec![
+            clonk_engine::PlayerInfoControlData::new(
+                0,
+                0,
+                vec![
                     player(30, 0, clonk_engine::PLAYER_INFO_TYPE_USER),
                     player(
                         20,
@@ -1535,11 +1447,12 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
                     ),
                     player(40, 0, clonk_engine::PLAYER_INFO_TYPE_SCRIPT),
                 ],
-                ..Default::default()
-            },
-            clonk_engine::PlayerInfoControlData {
-                client_id: 7,
-                players: vec![
+                -1,
+            ),
+            clonk_engine::PlayerInfoControlData::new(
+                7,
+                0,
+                vec![
                     player(10, 0, clonk_engine::PLAYER_INFO_TYPE_USER),
                     player(
                         5,
@@ -1547,8 +1460,8 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
                         clonk_engine::PLAYER_INFO_TYPE_USER,
                     ),
                 ],
-                ..Default::default()
-            },
+                -1,
+            ),
         ],
     );
     install_test_classic_host_lobby(&mut app);
@@ -1556,8 +1469,8 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
     app.sync_classic_lobby_roster();
 
     let rows = app.classic_host_lobby.test_ref().controller.rows();
-    assert_eq!(
-        rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>(),
+    main_assert_eq!(
+        rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>() =>
         vec![
             LobbyRosterId::Header(LobbyRosterHeader::ReplayPlayers),
             LobbyRosterId::Player(5),
@@ -1572,19 +1485,11 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
     let LobbyRosterRow::Header(replay_header) = &rows[0] else {
         panic!("replay roster starts with its header");
     };
-    assert_eq!(replay_header.label, "Replay players");
-    assert_eq!(replay_header.icon, LobbyRosterIcon::Standard(21));
-    assert!(!replay_header.can_add_player);
-    assert!(rows
-        .iter()
-        .filter_map(|row| match row {
-            LobbyRosterRow::Player(player) => Some(player),
-            _ => None,
-        })
-        .all(|player| player.client_id == -1));
-    assert!(!rows
-        .iter()
-        .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 20)));
+    main_assert_eq!(replay_header.label => "Replay players");
+    main_assert_eq!(replay_header.icon => LobbyRosterIcon::Standard(21));
+    main_assert!(!replay_header.can_add_player);
+    main_assert!(rows.iter().filter_map(|row| match row {LobbyRosterRow::Player(player) => Some(player), _ => None,}).all(|player| player.client_id == -1));
+    main_assert!(!rows.iter().any(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 20)));
     reset_cached_app_paths();
 }
 
@@ -1600,7 +1505,7 @@ fn singleton_default_music_replays_without_a_second_random_draw() {
     let first = resolver
         .select_default_with(None, |range| {
             draws += 1;
-            assert_eq!(range, 1, "SafeRandom(1) is still consumed initially");
+            main_assert_eq!(range => 1, "SafeRandom(1) is still consumed initially");
             0
         })
         .test_value();
@@ -1611,8 +1516,8 @@ fn singleton_default_music_replays_without_a_second_random_draw() {
         })
         .test_value();
 
-    assert_eq!(draws, 1);
-    assert!(Arc::ptr_eq(&second.identity, &recent));
+    main_assert_eq!(draws => 1);
+    main_assert!(Arc::ptr_eq(&second.identity, &recent));
 }
 
 #[test]
@@ -1629,20 +1534,20 @@ fn duplicate_music_records_exclude_only_the_record_that_started() {
 
     let first = catalog
         .select_enabled_with(None, None, |range| {
-            assert_eq!(range, 2);
+            main_assert_eq!(range => 2);
             0
         })
         .test_value();
     let recent = Arc::clone(&first.identity);
     let second = catalog
         .select_enabled_with(None, Some(&recent), |range| {
-            assert_eq!(range, 1);
+            main_assert_eq!(range => 1);
             0
         })
         .test_value();
 
-    assert_eq!(first.full_path_bytes, second.full_path_bytes);
-    assert!(!Arc::ptr_eq(&first.identity, &second.identity));
+    main_assert_eq!(first.full_path_bytes => second.full_path_bytes);
+    main_assert!(!Arc::ptr_eq(&first.identity, &second.identity));
 }
 
 #[test]
@@ -1650,50 +1555,31 @@ fn menu_dump_writes_main_menu_png_at_1280x720() {
     clonk_logging::init();
 
     let dir = tempdir();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(dir.path())),
-    ]);
+    let repository = test_repository_root();
+    let _guard = test_env_guard(repository, dir.path());
     let app_paths = Arc::new(test_app_paths());
     let path = dir.path().join("menu.png");
     run_menu_dump(
         &path,
         "main",
         Some(&app_paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Player".to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with("Player", false),
     )
     .test_value();
 
     // PNG IHDR: width/height are big-endian u32 at byte offsets 16/20.
     let png = fs::read(&path).test_value();
-    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "not a PNG file");
+    main_assert_eq!(&png[..8] => b"\x89PNG\r\n\x1a\n", "not a PNG file");
     let width = u32::from_be_bytes(png[16..20].try_into().test_value());
     let height = u32::from_be_bytes(png[20..24].try_into().test_value());
-    assert_eq!((width, height), (1280, 720));
+    main_assert_eq!((width, height) => (1280, 720));
 }
 
 #[test]
 fn player_properties_save_refreshes_selection_and_renamed_participant() {
     let _lock = env_lock().lock();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     let player_root = user_data.path().join("Players");
     let mut config = Config::new();
     config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
@@ -1718,19 +1604,9 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
-    assert_eq!(
-        app.message_dialogs
-            .last()
-            .expect("empty-name modal")
-            .state
-            .message(),
-        "You must specify a player name!"
-    );
-    assert!(app
-        .startup_player_properties_dialog
-        .as_ref()
-        .is_some_and(|pending| pending.controller.validation_error().is_none()));
-    assert!(app.startup_player_files.is_empty());
+    main_assert_eq!(app.message_dialogs.last().expect("empty-name modal").state.message() => "You must specify a player name!");
+    main_assert!(app.startup_player_properties_dialog.as_ref().is_some_and(|pending| pending.controller.validation_error().is_none()));
+    main_assert!(app.startup_player_files.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     app.startup_player_properties_dialog
@@ -1742,32 +1618,17 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
     ]);
 
     let created = player_root.join("Created.c4p");
-    assert!(created.is_file());
+    main_assert!(created.is_file());
     let created_group = Group::open(&created).test_value();
-    assert!(created_group.read_file("Player.txt").is_ok());
-    assert!(created_group.read_file("Portrait.png").is_ok());
-    assert!(created_group.read_file("BigIcon.png").is_ok());
-    assert!(app.startup_player_properties_dialog.is_none());
-    assert_eq!(app.startup_player_files.len(), 1);
-    assert!(app.startup_player_files[0].render_model.activated);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.selected_index()),
-        Some(0)
-    );
-    assert_eq!(
-        app.selected_player_file
-            .as_ref()
-            .map(|player| player.name.as_str()),
-        Some("Created")
-    );
-    assert_eq!(
-        Config::load(paths.config_file())
-            .expect("reload config")
-            .get_in(Some("General"), "Participants"),
-        Some(created.to_string_lossy().as_ref())
-    );
+    main_assert!(created_group.read_file("Player.txt").is_ok());
+    main_assert!(created_group.read_file("Portrait.png").is_ok());
+    main_assert!(created_group.read_file("BigIcon.png").is_ok());
+    main_assert!(app.startup_player_properties_dialog.is_none());
+    main_assert_eq!(app.startup_player_files.len() => 1);
+    main_assert!(app.startup_player_files[0].render_model.activated);
+    main_assert_eq!(app.startup_player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => Some(0));
+    main_assert_eq!(app.selected_player_file.as_ref().map(|player| player.name.as_str()) => Some("Created"));
+    main_assert_eq!(Config::load(paths.config_file()).expect("reload config").get_in(Some("General"), "Participants") => Some(created.to_string_lossy().as_ref()));
 
     app.open_existing_startup_player_properties(0);
     app.startup_player_properties_dialog
@@ -1778,14 +1639,14 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
     let renamed = player_root.join("Renamed.c4p");
-    assert!(!created.exists());
-    assert!(renamed.is_file());
-    assert_eq!(app.startup_player_files[0].player_file.name, "Renamed");
-    assert!(app.startup_player_files[0].render_model.activated);
-    assert_eq!(
+    main_assert!(!created.exists());
+    main_assert!(renamed.is_file());
+    main_assert_eq!(app.startup_player_files[0].player_file.name => "Renamed");
+    main_assert!(app.startup_player_files[0].render_model.activated);
+    main_assert_eq!(
         Config::load(paths.config_file())
             .expect("reload renamed config")
-            .get_in(Some("General"), "Participants"),
+            .get_in(Some("General"), "Participants") =>
         Some(renamed.to_string_lossy().as_ref())
     );
     reset_cached_app_paths();
@@ -1807,8 +1668,8 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
     fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n").test_value();
     persist_config_value(&paths, "General", "Participants", old.to_string_lossy()).test_value();
     app.refresh_startup_player_list();
-    assert_eq!(app.startup_player_files.len(), 1);
-    assert!(app.startup_player_files[0].render_model.activated);
+    main_assert_eq!(app.startup_player_files.len() => 1);
+    main_assert!(app.startup_player_files[0].render_model.activated);
 
     app.open_existing_startup_player_properties(0);
     app.startup_player_properties_dialog
@@ -1826,55 +1687,33 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
     ]);
 
     let renamed = player_root.join("Renamed.c4p");
-    assert!(!old.exists());
-    assert!(
-        renamed.is_file(),
-        "rename completed before group-open failed"
-    );
-    assert!(
-        app.startup_player_properties_dialog.is_none(),
-        "the properties form closes before the screen-owned error dialog"
-    );
-    assert!(app.startup_player_files.is_empty());
-    assert!(app.startup_player_models.is_empty());
+    main_assert!(!old.exists());
+    main_assert!(renamed.is_file(), "rename completed before group-open failed");
+    main_assert!(app.startup_player_properties_dialog.is_none(), "the properties form closes before the screen-owned error dialog");
+    main_assert!(app.startup_player_files.is_empty());
+    main_assert!(app.startup_player_models.is_empty());
     let selector = app.startup_player_dialog.test_ref();
-    assert!(selector.player_activations().is_empty());
-    assert_eq!(selector.selected_index(), None);
-    assert!(app.selected_player_file.is_none());
-    assert!(app.status_text.is_empty());
-    assert_eq!(
-        Config::load(paths.config_file())
-            .expect("reload reconciled config")
-            .get_in(Some("General"), "Participants"),
-        Some("")
-    );
+    main_assert!(selector.player_activations().is_empty());
+    main_assert_eq!(selector.selected_index() => None);
+    main_assert!(app.selected_player_file.is_none());
+    main_assert!(app.status_text.is_empty());
+    main_assert_eq!(Config::load(paths.config_file()).expect("reload reconciled config").get_in(Some("General"), "Participants") => Some(""));
 
     let modal = app.message_dialogs.last().test_value();
-    assert_eq!(modal.state.caption(), "Error");
-    assert!(modal.state.message().starts_with("Error opening file \""));
-    assert!(modal
-        .state
-        .message()
-        .contains(&renamed.display().to_string()));
-    assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
-    assert_eq!(modal.state.icon(), MessageDialogIcon::ERROR);
-    assert_eq!(modal.state.size(), MessageDialogSize::Regular);
-    assert!(matches!(
-        modal.continuation,
-        MessageDialogContinuation::None
-    ));
+    main_assert_eq!(modal.state.caption() => "Error");
+    main_assert!(modal.state.message().starts_with("Error opening file \""));
+    main_assert!(modal.state.message().contains(&renamed.display().to_string()));
+    main_assert_eq!(modal.state.buttons() => MessageDialogButtons::OK);
+    main_assert_eq!(modal.state.icon() => MessageDialogIcon::ERROR);
+    main_assert_eq!(modal.state.size() => MessageDialogSize::Regular);
+    main_assert!(matches!(modal.continuation, MessageDialogContinuation::None));
 
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    assert!(app.message_dialogs.is_empty());
-    assert!(app.startup_player_properties_dialog.is_none());
-    assert!(app.startup_player_files.is_empty());
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.selected_index()),
-        None
-    );
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.startup_player_properties_dialog.is_none());
+    main_assert!(app.startup_player_files.is_empty());
+    main_assert_eq!(app.startup_player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => None);
 }
 
 #[test]
@@ -1907,62 +1746,56 @@ fn startup_player_properties_save_failure_modal_names_step_and_path() {
 
     let renamed = player_root.join("Renamed.c4p");
     let modal = app.message_dialogs.last().test_value();
-    assert_eq!(modal.state.caption(), "Error");
+    main_assert_eq!(modal.state.caption() => "Error");
     let message = modal.state.message().to_string();
     let expected_body = format!(
         "Rename failure.\nError renaming file \"{}\" to \"{}\".\n",
         old.display(),
         renamed.display()
     );
-    assert!(
-        message.starts_with(&expected_body),
-        "rename modal must lead with step and both paths: {message}"
-    );
-    assert!(
-        message.len() > expected_body.len(),
-        "rename modal must keep the underlying error detail: {message}"
-    );
+    main_assert!(message.starts_with(&expected_body), "rename modal must lead with step and both paths: {message}");
+    main_assert!(message.len() > expected_body.len(), "rename modal must keep the underlying error detail: {message}");
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
 
     // The remaining storage steps compose the same way; pin each branch's
     // localized step string and path.
-    assert_eq!(
+    main_assert_eq!(
         app.startup_player_properties_save_failure_text(&PlayerPropertiesSaveError::Open {
             path: PathBuf::from("/players/Ada.c4p"),
             detail: "boom".to_string(),
-        }),
+        }) =>
         "Error opening file \"/players/Ada.c4p\": boom"
     );
-    assert_eq!(
+    main_assert_eq!(
         app.startup_player_properties_save_failure_text(&PlayerPropertiesSaveError::WriteCore {
             path: PathBuf::from("/players/Ada.c4p"),
             entry: "Player.txt",
             detail: "boom".to_string(),
-        }),
+        }) =>
         "File modification failure.\n\"/players/Ada.c4p/Player.txt\": boom"
     );
-    assert_eq!(
+    main_assert_eq!(
         app.startup_player_properties_save_failure_text(&PlayerPropertiesSaveError::WriteImage {
             path: PathBuf::from("/players/Ada.c4p"),
             entry: "BigIcon.png",
             detail: "boom".to_string(),
-        }),
+        }) =>
         "Error at graphics file /players/Ada.c4p/BigIcon.png: boom"
     );
-    assert_eq!(
+    main_assert_eq!(
         app.startup_player_properties_save_failure_text(&PlayerPropertiesSaveError::Close {
             path: PathBuf::from("/players/Ada.c4p"),
             detail: "boom".to_string(),
-        }),
+        }) =>
         "Close: \"/players/Ada.c4p\": boom"
     );
-    assert_eq!(
+    main_assert_eq!(
         app.startup_player_properties_save_failure_text(&PlayerPropertiesSaveError::Rename {
             from: PathBuf::from("/players/Old.c4p"),
             to: PathBuf::from("/players/Ada.c4p"),
             detail: "boom".to_string(),
-        }),
+        }) =>
         "Rename failure.\nError renaming file \"/players/Old.c4p\" to \"/players/Ada.c4p\".\nboom"
     );
 }
@@ -1977,19 +1810,13 @@ fn runtime_point_filtering_reloads_after_advanced_config_save() {
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
     app.synchronize_advanced_options_runtime();
-    assert!(app.graphics.point_filtering());
-    assert!(app
-        .loader_render_config
-        .expect("loader render config remains materialized")
-        .point_filtering());
+    main_assert!(app.graphics.point_filtering());
+    main_assert!(app.loader_render_config.expect("loader render config remains materialized").point_filtering());
 
     fs::write(paths.config_file(), b"[Graphics]\nPointFiltering=false\n").test_value();
     app.synchronize_advanced_options_runtime();
-    assert!(!app.graphics.point_filtering());
-    assert!(!app
-        .loader_render_config
-        .expect("loader config follows live advanced save")
-        .point_filtering());
+    main_assert!(!app.graphics.point_filtering());
+    main_assert!(!app.loader_render_config.expect("loader config follows live advanced save").point_filtering());
 }
 
 #[test]
@@ -2004,10 +1831,10 @@ fn runtime_pxs_graphics_reload_is_live_and_presentation_only() {
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
     app.synchronize_advanced_options_runtime();
-    assert!(app.display_flags.pxs_gfx);
-    assert!(app.graphics.pxs_graphics_enabled());
+    main_assert!(app.display_flags.pxs_gfx);
+    main_assert!(app.graphics.pxs_graphics_enabled());
 
-    assert!(app.engine.pxs_system.create(
+    main_assert!(app.engine.pxs_system.create(
         clonk_engine::MaterialId::new(0).test_value(),
         clonk_engine::math::C4Fixed::from_raw(0x12345),
         clonk_engine::math::C4Fixed::from_raw(0x23456),
@@ -2023,28 +1850,21 @@ fn runtime_pxs_graphics_reload_is_live_and_presentation_only() {
         .map(|(chunk, slot, pxs)| (chunk, slot, *pxs))
         .collect::<Vec<_>>();
     let assert_simulation_unchanged = |app: &GameApp| {
-        assert_eq!(app.engine.snapshot(), simulation);
-        assert_eq!(app.engine.sync_check(0), sync);
-        assert_eq!(
-            app.engine
-                .pxs_system
-                .iter_slots()
-                .map(|(chunk, slot, pxs)| (chunk, slot, *pxs))
-                .collect::<Vec<_>>(),
-            pxs_slots
-        );
+        main_assert_eq!(app.engine.snapshot() => simulation);
+        main_assert_eq!(app.engine.sync_check(0) => sync);
+        main_assert_eq!(app.engine.pxs_system.iter_slots().map(|(chunk, slot, pxs)| (chunk, slot, *pxs)).collect::<Vec<_>>() => pxs_slots);
     };
 
     persist_config_value(&paths, "Graphics", "PXSGfx", "0").test_value();
     app.synchronize_advanced_options_runtime();
-    assert!(!app.display_flags.pxs_gfx);
-    assert!(!app.graphics.pxs_graphics_enabled());
+    main_assert!(!app.display_flags.pxs_gfx);
+    main_assert!(!app.graphics.pxs_graphics_enabled());
     assert_simulation_unchanged(&app);
 
     persist_config_value(&paths, "Graphics", "PXSGfx", "1").test_value();
     app.synchronize_advanced_options_runtime();
-    assert!(app.display_flags.pxs_gfx);
-    assert!(app.graphics.pxs_graphics_enabled());
+    main_assert!(app.display_flags.pxs_gfx);
+    main_assert!(app.graphics.pxs_graphics_enabled());
     assert_simulation_unchanged(&app);
 }
 
@@ -2064,12 +1884,7 @@ fn runtime_advanced_voice_opt_in_retries_a_missing_audio_context() {
     app.audio = None;
     app.synchronize_advanced_options_runtime();
 
-    assert!(
-        app.audio
-            .as_ref()
-            .is_some_and(|audio| audio.options.voice_enabled),
-        "saving Advanced Voice.Enabled must not require an application restart",
-    );
+    main_assert!(app.audio.as_ref().is_some_and(|audio| audio.options.voice_enabled), "saving Advanced Voice.Enabled must not require an application restart",);
 }
 
 fn decode_rgb_screenshot(path: &Path) -> (u32, u32, Vec<u8>) {
@@ -2083,8 +1898,8 @@ fn decode_rgb_screenshot(path: &Path) -> (u32, u32, Vec<u8>) {
             .expect("screenshot buffer size fits usize")
     ];
     let info = reader.next_frame(&mut buffer).test_value();
-    assert_eq!(info.color_type, ColorType::Rgb);
-    assert_eq!(info.bit_depth, BitDepth::Eight);
+    main_assert_eq!(info.color_type => ColorType::Rgb);
+    main_assert_eq!(info.bit_depth => BitDepth::Eight);
     buffer.truncate(info.buffer_size());
     (info.width, info.height, buffer)
 }
@@ -2100,8 +1915,8 @@ fn rgba_png_encoding_preserves_png_017_bytes() {
     let pixels = [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8];
     let encoded = encode_rgba_png(2, 2, &pixels).test_value();
 
-    assert_eq!(encoded.len(), 86);
-    assert_eq!(fnv1a_png_bytes(&encoded), 11_539_277_311_474_003_906);
+    main_assert_eq!(encoded.len() => 86);
+    main_assert_eq!(fnv1a_png_bytes(&encoded) => 11_539_277_311_474_003_906);
 }
 
 #[test]
@@ -2109,8 +1924,8 @@ fn screenshot_png_encoding_preserves_png_017_bytes() {
     let pixels = [1, 2, 3, 255, 5, 6, 7, 128, 1, 2, 3, 64, 5, 6, 7, 0];
     let encoded = encode_screenshot_png(2, 2, &pixels).test_value();
 
-    assert_eq!(encoded.len(), 82);
-    assert_eq!(fnv1a_png_bytes(&encoded), 8_588_350_724_413_462_130);
+    main_assert_eq!(encoded.len() => 82);
+    main_assert_eq!(fnv1a_png_bytes(&encoded) => 8_588_350_724_413_462_130);
 }
 
 #[test]
@@ -2123,14 +1938,8 @@ fn retained_gpu_save_thumbnail_waits_for_the_presented_frame() {
 
     app.write_save_thumbnail(&save_path).test_value();
 
-    assert_eq!(
-        app.pending_gpu_thumbnail_paths.iter().collect::<Vec<_>>(),
-        vec![&thumbnail_path]
-    );
-    assert!(
-        !thumbnail_path.exists(),
-        "the stale CPU surface must not be written before GPU readback"
-    );
+    main_assert_eq!(app.pending_gpu_thumbnail_paths.iter().collect::<Vec<_>>() => vec![&thumbnail_path]);
+    main_assert!(!thumbnail_path.exists(), "the stale CPU surface must not be written before GPU readback");
 }
 
 #[test]
@@ -2147,11 +1956,8 @@ fn retained_gpu_save_thumbnail_matches_cpp_title_extent() {
     ];
     let info = reader.next_frame(&mut buffer).test_value();
 
-    assert_eq!(
-        (info.width, info.height),
-        (SAVE_THUMBNAIL_WIDTH, SAVE_THUMBNAIL_HEIGHT)
-    );
-    assert_eq!(info.color_type, ColorType::Rgba);
+    main_assert_eq!((info.width, info.height) => (SAVE_THUMBNAIL_WIDTH, SAVE_THUMBNAIL_HEIGHT));
+    main_assert_eq!(info.color_type => ColorType::Rgba);
 }
 
 /// `Screenshot` is registered `KEYSCOPE_Fullscreen | KEYSCOPE_Gui`, so bare F9
@@ -2165,17 +1971,13 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
     let user_data = tempdir();
     fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
     fs::write(install.path().join("planet/System.c4g/LanguageUS.txt"), b"IDS_PRC_SCREENSHOT=Saved screenshot %s.\nIDS_PRC_SCREENSHOTERROR=Failure creating screenshot %s.\n").test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
 
     let mut app = new_menu_app(320, 200);
     app.app_paths = Some(paths);
-    assert_eq!(app.mode, AppMode::Menu);
+    main_assert_eq!(app.mode => AppMode::Menu);
     let presented = vec![
         1, 2, 3, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170,
         180, 190, 200, 210, 220, 230, 240, 250, 249, 248, 247,
@@ -2185,7 +1987,7 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
     app.keyboard_modifiers = ModifiersState::CONTROL;
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F9, ElementState::Released);
-    assert!(app.pending_screenshots.is_empty());
+    main_assert!(app.pending_screenshots.is_empty());
 
     // Bare F9 queues the presented-frame capture on every startup view.
     app.keyboard_modifiers = ModifiersState::empty();
@@ -2200,10 +2002,10 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
         app.startup_view = view;
         app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
         app.test_key(VirtualKeyCode::F9, ElementState::Released);
-        assert_eq!(
+        main_assert_eq!(
             app.pending_screenshots
                 .pop_back()
-                .map(|request| request.kind),
+                .map(|request| request.kind) =>
             Some(ScreenshotKind::PresentedFrame),
             "{view:?} must queue a presented-frame capture"
         );
@@ -2214,29 +2016,19 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
     let outcome = app
         .save_next_screenshot(Some(&presented), 4, 2, 1.0)
         .test_value();
-    assert!(
-        outcome.result.is_ok(),
-        "startup screenshot failed: {:?}",
-        outcome.result
-    );
+    main_assert!(outcome.result.is_ok(), "startup screenshot failed: {:?}", outcome.result);
     let path = outcome.path.clone();
-    assert_eq!(
-        app.report_screenshot_result(Some(outcome)).as_deref(),
-        Some("Saved screenshot Screenshots/Screenshot001.png.")
-    );
-    assert_eq!(path, install.path().join("Screenshots/Screenshot001.png"));
+    main_assert_eq!(app.report_screenshot_result(Some(outcome)).as_deref() => Some("Saved screenshot Screenshots/Screenshot001.png."));
+    main_assert_eq!(path => install.path().join("Screenshots/Screenshot001.png"));
     let (width, height, _) = decode_rgb_screenshot(&path);
-    assert_eq!((width, height), (4, 2));
+    main_assert_eq!((width, height) => (4, 2));
 
     // A second capture reuses the next free slot, like the running path.
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     let second = app
         .save_next_screenshot(Some(&presented), 4, 2, 1.0)
         .test_value();
-    assert_eq!(
-        second.path,
-        install.path().join("Screenshots/Screenshot002.png")
-    );
+    main_assert_eq!(second.path => install.path().join("Screenshots/Screenshot002.png"));
 }
 
 #[test]
@@ -2245,11 +2037,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     let user_data = tempdir();
     fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
     fs::write(install.path().join("planet/System.c4g/LanguageUS.txt"), b"IDS_PRC_SCREENSHOT=Saved screenshot %s.\nIDS_PRC_SCREENSHOTERROR=Failure creating screenshot %s.\n").test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
 
@@ -2257,47 +2045,34 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     app.app_paths = Some(paths);
     app.set_display_mode(DisplayMode::Window);
     app.clear_message_board_log();
-    assert!(
-        !app.display_flags.is_fullscreen,
-        "C++ isFullScreen means non-console mode, so an OS window remains eligible"
-    );
+    main_assert!(!app.display_flags.is_fullscreen, "C++ isFullScreen means non-console mode, so an OS window remains eligible");
     let presented = vec![
         1, 2, 3, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170,
         180, 190, 200, 210, 220, 230, 240, 250, 249, 248, 247,
     ];
 
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
-    assert_eq!(
-        app.pending_screenshots.front().map(|request| request.kind),
-        Some(ScreenshotKind::PresentedFrame)
-    );
+    main_assert_eq!(app.pending_screenshots.front().map(|request| request.kind) => Some(ScreenshotKind::PresentedFrame));
     let first_outcome = app
         .save_next_screenshot(Some(&presented), 4, 2, 2.0)
         .test_value();
-    assert!(
-        first_outcome.result.is_ok(),
-        "presented screenshot failed: {:?}",
-        first_outcome.result
-    );
+    main_assert!(first_outcome.result.is_ok(), "presented screenshot failed: {:?}", first_outcome.result);
     let first = first_outcome.path.clone();
-    assert_eq!(
-        app.report_screenshot_result(Some(first_outcome)).as_deref(),
-        Some("Saved screenshot Screenshots/Screenshot001.png.")
-    );
-    assert_eq!(
+    main_assert_eq!(app.report_screenshot_result(Some(first_outcome)).as_deref() => Some("Saved screenshot Screenshots/Screenshot001.png."));
+    main_assert_eq!(
         app.message_board
             .log_history
             .iter()
             .cloned()
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         app.graphics
             .prepare_message_board_lines("Saved screenshot Screenshots/Screenshot001.png.")
     );
-    assert_eq!(first, install.path().join("Screenshots/Screenshot001.png"));
+    main_assert_eq!(first => install.path().join("Screenshots/Screenshot001.png"));
     let (width, height, rgb) = decode_rgb_screenshot(&first);
-    assert_eq!((width, height), (4, 2));
-    assert_eq!(
-        rgb,
+    main_assert_eq!((width, height) => (4, 2));
+    main_assert_eq!(
+        rgb =>
         presented
             .chunks_exact(4)
             .flat_map(|pixel| pixel[..3].iter().copied())
@@ -2325,65 +2100,41 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     app.start_running_chat(RunningChatMode::All);
     app.keyboard_modifiers = ModifiersState::CONTROL;
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
-    assert_eq!(
-        app.pending_screenshots.front().map(|request| request.kind),
-        Some(ScreenshotKind::FullLandscape)
-    );
-    assert_eq!(
-        app.pending_screenshots
-            .front()
-            .map(|request| &request.gamma),
-        Some(&installed_gamma),
-        "queued capture retains the ramp installed at keydown"
-    );
-    assert!(
-        app.running_chat.is_some(),
-        "the global screenshot binding works above an open chat dialog"
-    );
+    main_assert_eq!(app.pending_screenshots.front().map(|request| request.kind) => Some(ScreenshotKind::FullLandscape));
+    main_assert_eq!(app.pending_screenshots.front().map(|request| &request.gamma) => Some(&installed_gamma), "queued capture retains the ramp installed at keydown");
+    main_assert!(app.running_chat.is_some(), "the global screenshot binding works above an open chat dialog");
     app.graphics
         .apply_gamma_now(&app.snapshot.environment.gamma);
     app.clear_message_board_log();
     let second_outcome = app
         .save_next_screenshot(Some(&presented), 4, 2, 1.5)
         .test_value();
-    assert!(
-        second_outcome.result.is_ok(),
-        "full-landscape screenshot failed: {:?}",
-        second_outcome.result
-    );
+    main_assert!(second_outcome.result.is_ok(), "full-landscape screenshot failed: {:?}", second_outcome.result);
     let second = second_outcome.path.clone();
-    assert_eq!(
-        app.report_screenshot_result(Some(second_outcome))
-            .as_deref(),
-        Some("Saved screenshot Screenshots/Screenshot002.png.")
-    );
-    assert_eq!(
+    main_assert_eq!(app.report_screenshot_result(Some(second_outcome)).as_deref() => Some("Saved screenshot Screenshots/Screenshot002.png."));
+    main_assert_eq!(
         app.message_board
             .log_history
             .iter()
             .cloned()
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         app.graphics
             .prepare_message_board_lines("Saved screenshot Screenshots/Screenshot002.png.")
     );
-    assert_eq!(second, install.path().join("Screenshots/Screenshot002.png"));
+    main_assert_eq!(second => install.path().join("Screenshots/Screenshot002.png"));
     let (width, height, _) = decode_rgb_screenshot(&second);
-    assert_eq!((width, height), (expected_width, expected_height));
-    assert_eq!(
-        app.mode,
-        AppMode::Running,
-        "screenshots do not end the game"
-    );
+    main_assert_eq!((width, height) => (expected_width, expected_height));
+    main_assert_eq!(app.mode => AppMode::Running, "screenshots do not end the game");
 
     app.close_running_chat().test_value();
     app.keyboard_modifiers = ModifiersState::empty();
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
-    assert_eq!(
+    main_assert_eq!(
         app.pending_screenshots
             .iter()
             .map(|request| request.kind)
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![
             ScreenshotKind::PresentedFrame,
             ScreenshotKind::PresentedFrame,
@@ -2398,11 +2149,7 @@ fn screenshot_failures_keep_localized_path_for_both_capture_kinds() {
     let user_data = tempdir();
     fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
     fs::write(install.path().join("planet/System.c4g/LanguageUS.txt"), b"IDS_PRC_SCREENSHOT=Localized success: %s\nIDS_PRC_SCREENSHOTERROR=Localized failure: %s\n").test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
 
@@ -2419,32 +2166,21 @@ fn screenshot_failures_keep_localized_path_for_both_capture_kinds() {
         app.keyboard_modifiers = modifiers;
         app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
         let outcome = app.save_next_screenshot(None, 4, 2, 1.0).test_value();
-        assert_eq!(outcome.kind, kind);
-        assert_eq!(outcome.path, expected_path);
-        assert!(outcome
-            .result
-            .as_ref()
-            .expect_err("a missing back buffer must fail before capture")
-            .to_string()
-            .contains("initialized presentation back buffer"));
+        main_assert_eq!(outcome.kind => kind);
+        main_assert_eq!(outcome.path => expected_path);
+        main_assert!(outcome.result.as_ref().expect_err("a missing back buffer must fail before capture").to_string().contains("initialized presentation back buffer"));
         app.clear_message_board_log();
-        assert_eq!(
-            app.report_screenshot_result(Some(outcome)).as_deref(),
-            Some("Localized failure: Screenshots/Screenshot001.png")
-        );
-        assert_eq!(
+        main_assert_eq!(app.report_screenshot_result(Some(outcome)).as_deref() => Some("Localized failure: Screenshots/Screenshot001.png"));
+        main_assert_eq!(
             app.message_board
                 .log_history
                 .iter()
                 .cloned()
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>() =>
             app.graphics
                 .prepare_message_board_lines("Localized failure: Screenshots/Screenshot001.png")
         );
-        assert!(
-            !expected_path.exists(),
-            "a failed attempt leaves its numbered slot reusable"
-        );
+        main_assert!(!expected_path.exists(), "a failed attempt leaves its numbered slot reusable");
     }
 }
 
@@ -2453,10 +2189,7 @@ fn definition_root_vector_font_files_are_ignored_by_loader_and_saved_target() {
     let _lock = env_lock().lock();
     let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
+    let repository = test_repository_root();
     let definition_root = tempdir();
     let custom_objects = definition_root.path().join("Objects.c4d");
     fs::create_dir_all(&custom_objects).test_value();
@@ -2475,20 +2208,14 @@ fn definition_root_vector_font_files_are_ignored_by_loader_and_saved_target() {
     let setup = build_scenario_loader(&frontend, &definition_load, &paths, app.assets.as_ref())
         .test_value();
     for name in CLASSIC_GLOBAL_GUI_FONTS {
-        assert!(
-            !setup.refreshed_global_gui_failures.contains_key(name),
-            "definition-root vector file incorrectly overrode loader {name}"
-        );
+        main_assert!(!setup.refreshed_global_gui_failures.contains_key(name), "definition-root vector file incorrectly overrode loader {name}");
     }
 
     let resolution = app
         .loaded_game_global_gui_resolution(&frontend, Some(&definition_load))
         .test_value();
     for name in CLASSIC_GLOBAL_GUI_FONTS {
-        assert!(
-            !resolution.failures.contains_key(name),
-            "definition-root vector file incorrectly overrode saved target {name}"
-        );
+        main_assert!(!resolution.failures.contains_key(name), "definition-root vector file incorrectly overrode saved target {name}");
     }
     app.assets
         .require_classic_global_gui_bootstrap_resources(&resolution.failures)
@@ -2505,16 +2232,8 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     use clonk_frontend::startup_options_network::NetworkTextField;
 
     let _lock = env_lock().lock();
-    let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_root)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "# standalone note\n[General]\nLanguageEx=DE\nName=Old # keep this note\nFPS=yes\nVersion=347\nConfigResetSafety=42\nVendorExtension=keep\n[Graphics]\nSmokeLevel=200\n[Vendor]\nTemplate=\"<i>keep</i>\"\nEscaped=\"\\101\\x42\\33\"\n").test_value();
 
@@ -2538,19 +2257,12 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     app.test_left_button(ElementState::Released);
 
     let warning = app.message_dialogs.last().test_value();
-    assert_eq!(warning.state.buttons(), MessageDialogButtons::OK_CANCEL);
-    assert_eq!(
-        warning.state.focused_button(),
-        Some(MessageDialogButton::Cancel),
-        "the dangerous action defaults to Cancel"
-    );
-    assert!(app.startup_options_advanced_dialog.is_none());
+    main_assert_eq!(warning.state.buttons() => MessageDialogButtons::OK_CANCEL);
+    main_assert_eq!(warning.state.focused_button() => Some(MessageDialogButton::Cancel), "the dangerous action defaults to Cancel");
+    main_assert!(app.startup_options_advanced_dialog.is_none());
     app.finish_message_dialog(MessageDialogResult::Cancel)
         .test_value();
-    assert_eq!(
-        fs::read(paths.config_file()).expect("config after warning cancel"),
-        before_warning
-    );
+    main_assert_eq!(fs::read(paths.config_file()).expect("config after warning cancel") => before_warning);
 
     {
         let options = app.startup_options_dialog.test_mut();
@@ -2564,22 +2276,22 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    assert_eq!(
-        fs::read(paths.config_file()).expect("config after opening advanced editor"),
+    main_assert_eq!(
+        fs::read(paths.config_file()).expect("config after opening advanced editor") =>
         before_editor_open,
         "opening Advanced must not persist or rewrite Options configuration"
     );
     let controller = &app.startup_options_advanced_dialog.test_ref().controller;
-    assert_eq!(controller.labels().caption, "Erweiterte Einstellungen");
-    assert_eq!(controller.labels().save, "&Speichern");
-    assert_eq!(controller.labels().cancel, "Abbrechen");
-    assert_eq!(controller.sections().len(), 17);
-    assert_eq!(
+    main_assert_eq!(controller.labels().caption => "Erweiterte Einstellungen");
+    main_assert_eq!(controller.labels().save => "&Speichern");
+    main_assert_eq!(controller.labels().cancel => "Abbrechen");
+    main_assert_eq!(controller.sections().len() => 17);
+    main_assert_eq!(
         controller
             .sections()
             .iter()
             .map(|section| section.name.as_str())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![
             "General",
             "Controls",
@@ -2600,77 +2312,48 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
             "Logging",
         ]
     );
-    assert!(matches!(
-        controller.value("General", "Name"),
-        Some(AdvancedConfigValue::Text(value)) if value == "Old # keep this note"
-    ));
-    assert_eq!(
-        controller.value("General", "FPS"),
-        Some(&AdvancedConfigValue::Bool(false))
-    );
-    assert!(matches!(
-        controller.value("Graphics", "SmokeLevel"),
-        Some(AdvancedConfigValue::Integer { value: 200, .. })
-    ));
-    assert!(matches!(
-        controller.value("General", "Version"),
-        Some(AdvancedConfigValue::ReadOnly(value)) if value == "347"
-    ));
-    assert_eq!(
-        controller.layout().bounds,
-        clonk_frontend::classic_gui::IntRect {
-            x: 160,
-            y: 90,
-            w: 960,
-            h: 540,
-        }
-    );
+    main_assert!(matches!(controller.value("General", "Name"), Some(AdvancedConfigValue::Text(value)) if value == "Old # keep this note"));
+    main_assert_eq!(controller.value("General", "FPS") => Some(&AdvancedConfigValue::Bool(false)));
+    main_assert!(matches!(controller.value("Graphics", "SmokeLevel"), Some(AdvancedConfigValue::Integer { value: 200, .. })));
+    main_assert!(matches!(controller.value("General", "Version"), Some(AdvancedConfigValue::ReadOnly(value)) if value == "347"));
+    main_assert_eq!(controller.layout().bounds => clonk_frontend::classic_gui::IntRect::new(160, 90, 960, 540));
 
     let mut rendered = vec![0_u8; 1280 * 720 * 4];
     app.test_render(&mut rendered);
-    assert!(rendered.iter().any(|byte| *byte != 0));
+    main_assert!(rendered.iter().any(|byte| *byte != 0));
 
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    assert!(app.startup_options_advanced_dialog.is_some());
+    main_assert!(app.startup_options_advanced_dialog.is_some());
     app.test_key(VirtualKeyCode::KeyS, ElementState::Pressed);
     app.test_modifiers(ModifiersState::empty());
-    assert!(app.startup_options_advanced_dialog.is_none());
-    assert_eq!(
+    main_assert!(app.startup_options_advanced_dialog.is_none());
+    main_assert_eq!(
         Config::load(paths.config_file())
             .expect("config after Alt+S normalization")
-            .get_in(Some("General"), "FPS"),
+            .get_in(Some("General"), "FPS") =>
         Some("0"),
         "Advanced Save canonicalizes existing typed values even when untouched"
     );
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .expect("Options recreated after Alt+S")
-            .active_sheet(),
-        OptionsSheet::Network
-    );
+    main_assert_eq!(app.startup_options_dialog.as_ref().expect("Options recreated after Alt+S").active_sheet() => OptionsSheet::Network);
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
         .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
 
     let slot = GamepadSlot::new(0);
-    let sourced = |gamepad, cluster, event| SourcedGamepadEvent {
-        gamepad,
-        cluster,
-        event,
-    };
+    let sourced =
+        |gamepad, cluster, event| saves_fixture!(sourced_gamepad: gamepad, cluster, event);
     app.process_sourced_gamepad_event_batch(
         [sourced(
             1,
             0,
-            GamepadEvent::GuiButton {
-                slot: GamepadSlot::new(1),
-                class: GuiButtonClass::High,
-                state: ElementState::Pressed,
-            },
+            gamepad_gui_button_event(
+                GamepadSlot::new(1),
+                GuiButtonClass::High,
+                ElementState::Pressed,
+            ),
         )],
         true,
     )
@@ -2679,16 +2362,12 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         [sourced(
             0,
             1,
-            GamepadEvent::GuiButton {
-                slot,
-                class: GuiButtonClass::High,
-                state: ElementState::Pressed,
-            },
+            gamepad_gui_button_event(slot, GuiButtonClass::High, ElementState::Pressed),
         )],
         false,
     )
     .test_value();
-    assert!(app.startup_options_advanced_dialog.is_some());
+    main_assert!(app.startup_options_advanced_dialog.is_some());
 
     {
         let controller = &mut app.startup_options_advanced_dialog.test_mut().controller;
@@ -2702,11 +2381,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         [sourced(
             0,
             2,
-            GamepadEvent::GuiButton {
-                slot,
-                class: GuiButtonClass::Low,
-                state: ElementState::Pressed,
-            },
+            gamepad_gui_button_event(slot, GuiButtonClass::Low, ElementState::Pressed),
         )],
         true,
     )
@@ -2718,122 +2393,68 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
             sourced(
                 0,
                 4,
-                GamepadEvent::GuiButton {
-                    slot,
-                    class: GuiButtonClass::Low,
-                    state: ElementState::Released,
-                },
+                gamepad_gui_button_event(slot, GuiButtonClass::Low, ElementState::Released),
             ),
             sourced(
                 0,
                 4,
-                GamepadEvent::Action {
-                    slot,
-                    action: GamepadActionType::Select,
-                    state: ElementState::Released,
-                },
+                gamepad_action_event(slot, GamepadActionType::Select, ElementState::Released),
             ),
         ],
         true,
     )
     .test_value();
-    assert!(app.startup_options_advanced_dialog.is_some());
+    main_assert!(app.startup_options_advanced_dialog.is_some());
 
     app.process_sourced_gamepad_event_batch(
         [
             sourced(
                 0,
                 5,
-                GamepadEvent::GuiButton {
-                    slot,
-                    class: GuiButtonClass::High,
-                    state: ElementState::Pressed,
-                },
+                gamepad_gui_button_event(slot, GuiButtonClass::High, ElementState::Pressed),
             ),
             sourced(
                 0,
                 5,
-                GamepadEvent::Action {
-                    slot,
-                    action: GamepadActionType::Cancel,
-                    state: ElementState::Pressed,
-                },
+                gamepad_action_event(slot, GamepadActionType::Cancel, ElementState::Pressed),
             ),
         ],
         true,
     )
     .test_value();
-    assert!(app.startup_options_advanced_dialog.is_none());
-    assert_eq!(app.startup_view, StartupView::Options);
-    assert!(app.startup_options_dialog.is_some());
+    main_assert!(app.startup_options_advanced_dialog.is_none());
+    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert!(app.startup_options_dialog.is_some());
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
         .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
 
     let controller = &mut app.startup_options_advanced_dialog.test_mut().controller;
-    assert!(controller.set_value(
-        "General",
-        "Name",
-        AdvancedConfigValue::Text("New name".to_string()),
-    ));
-    assert!(controller.set_value("General", "FPS", AdvancedConfigValue::Bool(true)));
-    assert!(controller.set_value("General", "Record", AdvancedConfigValue::Bool(true),));
-    assert!(controller.set_value("General", "NoCrew", AdvancedConfigValue::Bool(true),));
-    assert!(controller.set_value(
-        "Graphics",
-        "SmokeLevel",
-        AdvancedConfigValue::Integer {
-            value: 321,
-            min: i128::MIN,
-            max: i128::MAX,
-        },
-    ));
-    assert!(controller.set_value(
-        "General",
-        "MissionAccess",
-        AdvancedConfigValue::Text("Secret;Beta".to_string()),
-    ));
-    assert!(controller.set_value(
-        "Graphics",
-        "ShowFolderMaps",
-        AdvancedConfigValue::Bool(false),
-    ));
-    assert!(controller.set_value("Sound", "MenuMusic", AdvancedConfigValue::Bool(false),));
+    main_assert!(controller.set_value("General", "Name", AdvancedConfigValue::Text("New name".to_string()),));
+    main_assert!(controller.set_value("General", "FPS", AdvancedConfigValue::Bool(true)));
+    main_assert!(controller.set_value("General", "Record", AdvancedConfigValue::Bool(true),));
+    main_assert!(controller.set_value("General", "NoCrew", AdvancedConfigValue::Bool(true),));
+    main_assert!(controller.set_value("Graphics", "SmokeLevel", AdvancedConfigValue::Integer {value: 321, min: i128::MIN, max: i128::MAX,},));
+    main_assert!(controller.set_value("General", "MissionAccess", AdvancedConfigValue::Text("Secret;Beta".to_string()),));
+    main_assert!(controller.set_value("Graphics", "ShowFolderMaps", AdvancedConfigValue::Bool(false),));
+    main_assert!(controller.set_value("Sound", "MenuMusic", AdvancedConfigValue::Bool(false),));
     let replacement_key = input::advanced_config_default_raw_keyboard_keys()[0][1];
-    assert!(controller.set_value(
-        "Controls",
-        "Kbd1Key1",
-        AdvancedConfigValue::Integer {
-            value: i128::from(replacement_key),
-            min: i128::MIN,
-            max: i128::MAX,
-        },
-    ));
-    assert!(!controller.set_value(
-        "General",
-        "Version",
-        AdvancedConfigValue::ReadOnly("999".to_string()),
-    ));
+    main_assert!(controller.set_value("Controls", "Kbd1Key1", AdvancedConfigValue::Integer {value: i128::from(replacement_key), min: i128::MIN, max: i128::MAX,},));
+    main_assert!(!controller.set_value("General", "Version", AdvancedConfigValue::ReadOnly("999".to_string()),));
     app.process_options_advanced_actions(vec![AdvancedConfigAction::Save])
         .test_value();
 
-    assert!(app.startup_options_advanced_dialog.is_none());
-    assert_eq!(app.startup_view, StartupView::Options);
-    assert_eq!(app.graphics_smoke_level, 321);
-    assert_eq!(app.mission_access.snapshot(), "Secret;Beta");
-    assert!(!app.show_folder_maps);
-    assert!(app.startup_view_flags.record);
-    assert_eq!(app.recording_enabled, app.recordings_dir.is_some());
-    assert!(app.startup_view_flags.fair_crew);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .expect("recreated Options dialog")
-            .active_sheet(),
-        OptionsSheet::Network
-    );
-    assert!(
+    main_assert!(app.startup_options_advanced_dialog.is_none());
+    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert_eq!(app.graphics_smoke_level => 321);
+    main_assert_eq!(app.mission_access.snapshot() => "Secret;Beta");
+    main_assert!(!app.show_folder_maps);
+    main_assert!(app.startup_view_flags.record);
+    main_assert_eq!(app.recording_enabled => app.recordings_dir.is_some());
+    main_assert!(app.startup_view_flags.fair_crew);
+    main_assert_eq!(app.startup_options_dialog.as_ref().expect("recreated Options dialog").active_sheet() => OptionsSheet::Network);
+    main_assert!(
         !app.startup_options_dialog
             .as_ref()
             .expect("recreated Options dialog")
@@ -2842,41 +2463,25 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         "the recreated Sound sheet must use the advanced value"
     );
     let saved = Config::load(paths.config_file()).test_value();
-    assert_eq!(saved.get_in(Some("General"), "Name"), Some("New name"));
-    assert_eq!(saved.get_in(Some("General"), "FPS"), Some("1"));
-    assert_eq!(saved.get_in(Some("General"), "Record"), Some("1"));
-    assert_eq!(saved.get_in(Some("General"), "NoCrew"), Some("true"));
-    assert!(fs::read(paths.config_file())
+    main_assert_eq!(saved.get_in(Some("General"), "Name") => Some("New name"));
+    main_assert_eq!(saved.get_in(Some("General"), "FPS") => Some("1"));
+    main_assert_eq!(saved.get_in(Some("General"), "Record") => Some("1"));
+    main_assert_eq!(saved.get_in(Some("General"), "NoCrew") => Some("true"));
+    main_assert!(fs::read(paths.config_file())
         .expect("read native advanced NoCrew")
         .split(|byte| matches!(*byte, b'\r' | b'\n'))
         .any(|line| line == b"NoCrew=true"));
-    assert_eq!(saved.get_in(Some("Graphics"), "SmokeLevel"), Some("321"));
-    assert_eq!(saved.get_in(Some("General"), "Version"), Some("347"));
-    assert_eq!(
-        saved.get_in(Some("General"), "ConfigResetSafety"),
-        Some("42")
-    );
-    assert_eq!(
-        saved.get_in(Some("General"), "VendorExtension"),
-        Some("keep")
-    );
-    assert_eq!(
-        saved.get_in(Some("Vendor"), "Template"),
-        Some("<i>keep</i>")
-    );
-    assert_eq!(saved.get_in(Some("Vendor"), "Escaped"), Some("AB\u{1b}"));
-    assert_eq!(saved.get_in(Some("Sound"), "MenuMusic"), Some("0"));
-    assert_eq!(
-        saved.get_in(Some("Network"), "LocalName"),
-        Some("Unsaved host"),
-        "Save commits the retained normal Options draft before recreation"
-    );
+    main_assert_eq!(saved.get_in(Some("Graphics"), "SmokeLevel") => Some("321"));
+    main_assert_eq!(saved.get_in(Some("General"), "Version") => Some("347"));
+    main_assert_eq!(saved.get_in(Some("General"), "ConfigResetSafety") => Some("42"));
+    main_assert_eq!(saved.get_in(Some("General"), "VendorExtension") => Some("keep"));
+    main_assert_eq!(saved.get_in(Some("Vendor"), "Template") => Some("<i>keep</i>"));
+    main_assert_eq!(saved.get_in(Some("Vendor"), "Escaped") => Some("AB\u{1b}"));
+    main_assert_eq!(saved.get_in(Some("Sound"), "MenuMusic") => Some("0"));
+    main_assert_eq!(saved.get_in(Some("Network"), "LocalName") => Some("Unsaved host"), "Save commits the retained normal Options draft before recreation");
     let replacement_key_text = replacement_key.to_string();
-    assert_eq!(
-        saved.get_in(Some("Controls"), "Kbd1Key1"),
-        Some(replacement_key_text.as_str())
-    );
-    assert!({
+    main_assert_eq!(saved.get_in(Some("Controls"), "Kbd1Key1") => Some(replacement_key_text.as_str()));
+    main_assert!({
         let serialized =
             fs::read_to_string(paths.config_file()).expect("serialized advanced config");
         serialized.contains("Name=\"New name\"")
@@ -2887,11 +2492,9 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         .expect("open Options config")
         .test_value();
     let resaved = Config::load(paths.config_file()).test_value();
-    assert!(resaved
-        .get_in(Some("Sound"), "MenuMusic")
-        .is_some_and(|value| !parse_config_bool(value)));
-    assert_eq!(
-        resaved.get_in(Some("Controls"), "Kbd1Key1"),
+    main_assert!(resaved.get_in(Some("Sound"), "MenuMusic").is_some_and(|value| !parse_config_bool(value)));
+    main_assert_eq!(
+        resaved.get_in(Some("Controls"), "Kbd1Key1") =>
         Some(replacement_key_text.as_str()),
         "normal Options persistence must not undo the advanced binding"
     );
@@ -2908,11 +2511,8 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    assert_eq!(
-        fs::read(paths.config_file()).expect("config after cancel-path open"),
-        before_cancel
-    );
-    assert!(app
+    main_assert_eq!(fs::read(paths.config_file()).expect("config after cancel-path open") => before_cancel);
+    main_assert!(app
         .startup_options_advanced_dialog
         .as_mut()
         .expect("cancel-path editor")
@@ -2934,21 +2534,12 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     );
     app.test_touch(TouchPhase::Started, cancel_point);
     app.test_touch(TouchPhase::Ended, cancel_point);
-    assert!(app.startup_options_advanced_dialog.is_none());
+    main_assert!(app.startup_options_advanced_dialog.is_none());
     let options_after_cancel = app.startup_options_dialog.test_ref();
-    assert_eq!(
-        options_after_cancel as *const _ as usize,
-        options_before_cancel
-    );
-    assert_eq!(options_after_cancel.active_sheet(), OptionsSheet::Network);
-    assert_eq!(
-        options_after_cancel.network().local_name,
-        "Keep this unsaved edit"
-    );
-    assert_eq!(
-        fs::read(paths.config_file()).expect("config after editor cancel"),
-        before_cancel
-    );
+    main_assert_eq!(options_after_cancel as *const _ as usize => options_before_cancel);
+    main_assert_eq!(options_after_cancel.active_sheet() => OptionsSheet::Network);
+    main_assert_eq!(options_after_cancel.network().local_name => "Keep this unsaved edit");
+    main_assert_eq!(fs::read(paths.config_file()).expect("config after editor cancel") => before_cancel);
 
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
         .test_value();
@@ -2958,22 +2549,12 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     fs::create_dir(paths.config_file()).test_value();
     app.process_options_advanced_actions(vec![AdvancedConfigAction::Save])
         .test_value();
-    assert!(
-        app.startup_options_advanced_dialog.is_some(),
-        "a failed Save keeps the draft editor open"
-    );
-    assert_eq!(
-        app.message_dialogs
-            .last()
-            .expect("advanced save error dialog")
-            .state
-            .caption(),
-        "Fehler"
-    );
-    assert!(app.status_text.is_empty());
+    main_assert!(app.startup_options_advanced_dialog.is_some(), "a failed Save keeps the draft editor open");
+    main_assert_eq!(app.message_dialogs.last().expect("advanced save error dialog").state.caption() => "Fehler");
+    main_assert!(app.status_text.is_empty());
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    assert!(app.startup_options_advanced_dialog.is_some());
+    main_assert!(app.startup_options_advanced_dialog.is_some());
     fs::remove_dir(paths.config_file()).test_value();
     reset_cached_app_paths();
 }
@@ -2995,35 +2576,25 @@ fn options_gamepad_capture_records_the_exact_axis_key() {
     let slot = GamepadSlot::new(0);
     app.process_sourced_gamepad_event_batch(
         [
-            SourcedGamepadEvent {
-                gamepad: 0,
-                cluster: 4,
-                event: GamepadEvent::Axis {
-                    slot,
-                    axis: LegacyGamepadAxis::new(1, false),
-                    state: ElementState::Pressed,
-                },
-            },
-            SourcedGamepadEvent {
-                gamepad: 0,
-                cluster: 4,
-                event: GamepadEvent::Direction {
-                    slot,
-                    button: ControlButton::Up,
-                    state: ElementState::Pressed,
-                },
-            },
+            saves_fixture!(
+                sourced_gamepad:
+                    0,
+                    4,
+                    gamepad_axis_event(slot, LegacyGamepadAxis::new(1, false), ElementState::Pressed),
+            ),
+            saves_fixture!(
+                sourced_gamepad:
+                    0,
+                    4,
+                    gamepad_direction_event(slot, ControlButton::Up, ElementState::Pressed),
+            ),
         ],
         true,
     )
     .test_value();
 
-    assert!(app.message_dialogs.is_empty());
-    assert_eq!(
-        app.gamepad_bindings
-            .raw_key_for_set(0, ControlBindingId::Dig),
-        input::legacy_gamepad_axis_key(0, 1, false)
-    );
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert_eq!(app.gamepad_bindings.raw_key_for_set(0, ControlBindingId::Dig) => input::legacy_gamepad_axis_key(0, 1, false));
 }
 
 // C4GamePadControl::FeedEvent converts every raw SDL joystick event into
@@ -3082,7 +2653,7 @@ fn options_gamepad_capture_accepts_full_classic_raw_event_space() {
 
         let mut manager = GamepadManager::disabled();
         let events = manager.feed_raw_event(slot, raw_event);
-        assert!(
+        main_assert!(
             events.iter().any(|sourced| matches!(
                 sourced.event,
                 GamepadEvent::Axis { axis, state: ElementState::Pressed, .. }
@@ -3093,9 +2664,9 @@ fn options_gamepad_capture_accepts_full_classic_raw_event_space() {
         app.process_sourced_gamepad_event_batch(events, true)
             .test_value();
 
-        assert!(app.message_dialogs.is_empty(), "capture closed its modal");
-        assert_eq!(
-            app.gamepad_bindings.raw_key_for_set(0, control),
+        main_assert!(app.message_dialogs.is_empty(), "capture closed its modal");
+        main_assert_eq!(
+            app.gamepad_bindings.raw_key_for_set(0, control) =>
             input::legacy_gamepad_axis_key(0, expected_axis, expected_high),
             "{raw_event:?} binds the exact KEY_JOY_Axis code"
         );
@@ -3107,16 +2678,8 @@ fn options_gamepad_capture_accepts_full_classic_raw_event_space() {
 // (C4StartupOptionsDlg.cpp:564-568, 1150-1184, 1189-1194).
 #[test]
 fn options_dialog_saves_log_timestamps_when_closed() {
-    let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_root)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     persist_config_value(&paths, "General", "ShowLogTimestamps", "1").test_value();
     persist_config_value(&paths, "Sound", "MaxChannels", "37").test_value();
     persist_config_value(&paths, "Sound", "VendorExtension", "keep-me").test_value();
@@ -3132,12 +2695,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
             ..Default::default()
         },
         Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Player".to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with("Player", false),
     )
     .test_value();
     wait_for_menu(&mut app);
@@ -3160,40 +2718,19 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     app.test_cursor(point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert!(
-        !app.startup_options_dialog
-            .as_ref()
-            .expect("options dialog")
-            .program()
-            .show_log_timestamps,
-        "checkbox toggles before the dialog closes"
-    );
-    assert_eq!(
+    main_assert!(!app.startup_options_dialog.as_ref().expect("options dialog").program().show_log_timestamps, "checkbox toggles before the dialog closes");
+    main_assert_eq!(
         Config::load(paths.config_file())
             .expect("config before close")
-            .get_in(Some("General"), "ShowLogTimestamps"),
+            .get_in(Some("General"), "ShowLogTimestamps") =>
         Some("1"),
         "C++ defers Config.Save until DoBack"
     );
 
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    assert!(
-        app.startup_options_dialog
-            .as_ref()
-            .expect("options dialog")
-            .sound()
-            .frontend_sound_effects,
-        "Ctrl+F3 leaves the classic checkbox visually stale"
-    );
-    assert!(
-        !app.audio
-            .as_ref()
-            .expect("test audio")
-            .options
-            .menu_sound_enabled,
-        "live audio configuration remains authoritative"
-    );
+    main_assert!(app.startup_options_dialog.as_ref().expect("options dialog").sound().frontend_sound_effects, "Ctrl+F3 leaves the classic checkbox visually stale");
+    main_assert!(!app.audio.as_ref().expect("test audio").options.menu_sound_enabled, "live audio configuration remains authoritative");
     app.test_modifiers(ModifiersState::empty());
 
     {
@@ -3221,12 +2758,12 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     ));
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert_eq!(
+    main_assert_eq!(
         app.audio
             .as_ref()
             .expect("test audio")
             .options
-            .voice_volume_percent(),
+            .voice_volume_percent() =>
         200,
         "the Voice slider's right endpoint is the port-only boost ceiling",
     );
@@ -3236,14 +2773,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     ));
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert_eq!(
-        app.audio
-            .as_ref()
-            .expect("test audio")
-            .options
-            .voice_activation_mode,
-        crate::settings::VoiceActivationMode::VoiceActivated,
-    );
+    main_assert_eq!(app.audio.as_ref().expect("test audio").options.voice_activation_mode => crate::settings::VoiceActivationMode::VoiceActivated,);
 
     app.bindings
         .rebind_for_set(2, ControlBindingId::Dig, VirtualKeyCode::KeyZ);
@@ -3253,63 +2783,34 @@ fn options_dialog_saves_log_timestamps_when_closed() {
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
     let config = Config::load(paths.config_file()).test_value();
-    assert_eq!(
-        config.get_in(Some("General"), "ShowLogTimestamps"),
-        Some("0")
-    );
-    assert_eq!(config.get_in(Some("Sound"), "Sound"), Some("false"));
-    assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true"));
-    assert_eq!(config.get_in(Some("Sound"), "MenuMusic"), Some("false"));
-    assert_eq!(config.get_in(Some("Sound"), "MenuSound"), Some("false"));
-    assert_eq!(config.get_in(Some("Sound"), "MusicVolume"), Some("83"));
-    assert_eq!(config.get_in(Some("Sound"), "SoundVolume"), Some("27"));
-    assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("37"));
-    assert_eq!(
-        config.get_in(Some("Sound"), "VendorExtension"),
-        Some("keep-me")
-    );
+    main_assert_eq!(config.get_in(Some("General"), "ShowLogTimestamps") => Some("0"));
+    main_assert_eq!(config.get_in(Some("Sound"), "Sound") => Some("false"));
+    main_assert_eq!(config.get_in(Some("Sound"), "Music") => Some("true"));
+    main_assert_eq!(config.get_in(Some("Sound"), "MenuMusic") => Some("false"));
+    main_assert_eq!(config.get_in(Some("Sound"), "MenuSound") => Some("false"));
+    main_assert_eq!(config.get_in(Some("Sound"), "MusicVolume") => Some("83"));
+    main_assert_eq!(config.get_in(Some("Sound"), "SoundVolume") => Some("27"));
+    main_assert_eq!(config.get_in(Some("Sound"), "MaxChannels") => Some("37"));
+    main_assert_eq!(config.get_in(Some("Sound"), "VendorExtension") => Some("keep-me"));
     // The port-only rows land in their own section, and the activation mode is
     // persisted as the canonical token `VoiceActivationMode::parse` accepts --
     // a localized label here would silently read back as push-to-talk.
-    assert_eq!(config.get_in(Some("Voice"), "Enabled"), Some("false"));
-    assert_eq!(config.get_in(Some("Voice"), "Volume"), Some("200"));
-    assert_eq!(
-        config.get_in(Some("Voice"), "ActivationMode"),
-        Some(crate::settings::VoiceActivationMode::VOICE_ACTIVATED)
-    );
-    assert_eq!(
-        config.get_in(Some("Graphics"), "DisplayMode"),
-        Some("Window")
-    );
-    assert_eq!(config.get_in(Some("Graphics"), "SmokeLevel"), Some("73"));
-    assert_eq!(config.get_in(Some("Graphics"), "FireParticles"), Some("0"));
-    assert_eq!(config.get_in(Some("Network"), "PortTCP"), Some("0"));
-    assert_eq!(
-        config.get_in(Some("Network"), "UseAlternateServer"),
-        Some("1")
-    );
-    assert_eq!(
-        config.get_in(Some("Network"), "LocalName"),
-        Some("Same Name")
-    );
-    assert_eq!(config.get_in(Some("Network"), "Nick"), Some(""));
-    assert_eq!(
-        config.get_in(Some("Startup"), "HideMsgNoOfficialLeague"),
-        Some("1")
-    );
-    assert!(config.get_in(Some("Controls"), "Kbd3Key6").is_some());
-    assert_eq!(
-        config.get_in(Some("Controls"), "GamepadGuiControl"),
-        Some("1")
-    );
-    assert_eq!(
-        config.get_in(Some("Gamepad1"), "Button5"),
-        input::legacy_gamepad_button_key(1, 4)
-            .map(|key| key.to_string())
-            .as_deref()
-    );
+    main_assert_eq!(config.get_in(Some("Voice"), "Enabled") => Some("false"));
+    main_assert_eq!(config.get_in(Some("Voice"), "Volume") => Some("200"));
+    main_assert_eq!(config.get_in(Some("Voice"), "ActivationMode") => Some(crate::settings::VoiceActivationMode::VOICE_ACTIVATED));
+    main_assert_eq!(config.get_in(Some("Graphics"), "DisplayMode") => Some("Window"));
+    main_assert_eq!(config.get_in(Some("Graphics"), "SmokeLevel") => Some("73"));
+    main_assert_eq!(config.get_in(Some("Graphics"), "FireParticles") => Some("0"));
+    main_assert_eq!(config.get_in(Some("Network"), "PortTCP") => Some("0"));
+    main_assert_eq!(config.get_in(Some("Network"), "UseAlternateServer") => Some("1"));
+    main_assert_eq!(config.get_in(Some("Network"), "LocalName") => Some("Same Name"));
+    main_assert_eq!(config.get_in(Some("Network"), "Nick") => Some(""));
+    main_assert_eq!(config.get_in(Some("Startup"), "HideMsgNoOfficialLeague") => Some("1"));
+    main_assert!(config.get_in(Some("Controls"), "Kbd3Key6").is_some());
+    main_assert_eq!(config.get_in(Some("Controls"), "GamepadGuiControl") => Some("1"));
+    main_assert_eq!(config.get_in(Some("Gamepad1"), "Button5") => input::legacy_gamepad_button_key(1, 4).map(|key| key.to_string()).as_deref());
 }
 
 #[test]
@@ -3331,35 +2832,19 @@ fn axis_binding_routes_to_configured_set_not_physical_slot() {
         .test_value();
     app.engine.set_local_players([primary, secondary]);
     app.local_controls = LocalControlRegistry::default();
-    app.local_controls.initialize(LocalControlInit {
-        owner: primary,
-        preferred_set: 4,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
-    app.local_controls.initialize(LocalControlInit {
-        owner: secondary,
-        preferred_set: 5,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
+    app.local_controls
+        .initialize(test_local_control_init(primary, 4, false, false));
+    app.local_controls
+        .initialize(test_local_control_init(secondary, 5, false, false));
 
     let slot = GamepadSlot::new(1);
     app.test_gamepad_events([
-        GamepadEvent::Axis {
+        gamepad_axis_event(
             slot,
-            axis: LegacyGamepadAxis::new(0, false),
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Direction {
-            slot,
-            button: ControlButton::Left,
-            state: ElementState::Pressed,
-        },
+            LegacyGamepadAxis::new(0, false),
+            ElementState::Pressed,
+        ),
+        gamepad_direction_event(slot, ControlButton::Left, ElementState::Pressed),
     ]);
 
     let pressed = |app: &GameApp, owner| {
@@ -3372,8 +2857,8 @@ fn axis_binding_routes_to_configured_set_not_physical_slot() {
             .control
             .pressed_coms
     };
-    assert_ne!(pressed(&app, primary) & (1 << clonk_engine::COM_LEFT), 0);
-    assert_eq!(pressed(&app, secondary) & (1 << clonk_engine::COM_LEFT), 0);
+    main_assert_ne!(pressed(&app, primary) & (1 << clonk_engine::COM_LEFT) => 0);
+    main_assert_eq!(pressed(&app, secondary) & (1 << clonk_engine::COM_LEFT) => 0);
 }
 
 /// `C4GameSave::SaveCore` shortens the scenario path with
@@ -3389,18 +2874,8 @@ fn initial_record_origin_is_relative_to_cpp_executable_root() {
         .executable_data_root()
         .join("Missions.c4f/Deep/Game.c4s");
 
-    assert_eq!(
-        record_scenario_origin(&scenario, Some(&paths), "wrong-ui-identifier"),
-        "Missions.c4f/Deep/Game.c4s"
-    );
-    assert_eq!(
-        record_scenario_origin(
-            Path::new("/outside/Missions.c4f/Deep/Game.c4s"),
-            Some(&paths),
-            "wrong-ui-identifier",
-        ),
-        "Missions.c4f/Deep/Game.c4s"
-    );
+    main_assert_eq!(record_scenario_origin(&scenario, Some(&paths), "wrong-ui-identifier") => "Missions.c4f/Deep/Game.c4s");
+    main_assert_eq!(record_scenario_origin(Path::new("/outside/Missions.c4f/Deep/Game.c4s"), Some(&paths), "wrong-ui-identifier",) => "Missions.c4f/Deep/Game.c4s");
 }
 
 #[test]
@@ -3411,20 +2886,17 @@ fn record_index_and_basename_match_cpp_directory_scan() {
     fs::write(directory.path().join("mixed.C4S"), b"record").test_value();
     fs::write(directory.path().join("999-not-a-record.txt"), b"other").test_value();
 
-    assert_eq!(next_recording_index(directory.path()).unwrap(), 4);
-    assert_eq!(sanitize_record_name("Scenario007"), "Scenario");
-    assert_eq!(sanitize_record_name("123"), "1");
-    assert_eq!(sanitize_record_name("Odd name!?"), "Odd name!?");
+    main_assert_eq!(next_recording_index(directory.path()).unwrap() => 4);
+    main_assert_eq!(sanitize_record_name("Scenario007") => "Scenario");
+    main_assert_eq!(sanitize_record_name("123") => "1");
+    main_assert_eq!(sanitize_record_name("Odd name!?") => "Odd name!?");
 }
 
 #[test]
 fn forced_recording_rejects_missing_prepared_storage() {
     let mut app = new_state_only_running_sandbox_app();
-    assert_eq!(
-        app.start_recording(true),
-        Err("recording storage was not prepared".to_string())
-    );
-    assert!(app.recording.is_none());
+    main_assert_eq!(app.start_recording(true) => Err("recording storage was not prepared".to_string()));
+    main_assert!(app.recording.is_none());
 }
 
 #[test]
@@ -3435,24 +2907,17 @@ fn synchronize_record_request_starts_with_the_executing_control_list() {
     app.recording_enabled = false;
     install_test_recording_template(&mut app, output_path.clone());
     app.runtime_record_requested = true;
-    let synchronize = clonk_engine::SynchronizeControlData {
-        save_player_files: false,
-        sync_clearance: true,
-        by_client: 0,
-    };
+    let synchronize = saves_fixture!(synchronize: false, true);
 
     app.apply_ready_controls(0, vec![NetworkControl::Synchronize(synchronize.clone())])
         .test_value();
-    assert!(app.recording.is_some(), "the sync request arms recording");
-    assert!(app.finish_recording().is_none());
+    main_assert!(app.recording.is_some(), "the sync request arms recording");
+    main_assert!(app.finish_recording().is_none());
 
     let group = Group::open(output_path).test_value();
     let stream = group.read_file("CtrlRec.c4b").test_value();
     let mut playback = ControlRecordPlayback::from_bytes(&stream).test_value();
-    assert_eq!(
-        playback.take_controls(0),
-        vec![clonk_engine::ControlPacket::Synchronize(synchronize)]
-    );
+    main_assert_eq!(playback.take_controls(0) => vec![clonk_engine::ControlPacket::Synchronize(synchronize)]);
 }
 
 #[test]
@@ -3463,33 +2928,25 @@ fn any_synchronize_starts_only_an_explicitly_requested_runtime_record() {
     app.apply_synchronized_controls(
         0,
         vec![NetworkControl::Synchronize(
-            clonk_engine::SynchronizeControlData {
-                save_player_files: false,
-                sync_clearance: false,
-                by_client: 0,
-            },
+            saves_fixture!(synchronize: false, false),
         )],
     )
     .test_value();
 
-    assert!(app.recording.is_none());
-    assert!(app.recording_template.is_some());
+    main_assert!(app.recording.is_none());
+    main_assert!(app.recording_template.is_some());
 
     app.runtime_record_requested = true;
     app.apply_synchronized_controls(
         1,
         vec![NetworkControl::Synchronize(
-            clonk_engine::SynchronizeControlData {
-                save_player_files: false,
-                sync_clearance: false,
-                by_client: 0,
-            },
+            saves_fixture!(synchronize: false, false),
         )],
     )
     .test_value();
 
-    assert!(!app.runtime_record_requested);
-    assert!(app.recording.is_some());
+    main_assert!(!app.runtime_record_requested);
+    main_assert!(app.recording.is_some());
 }
 
 #[test]
@@ -3591,95 +3048,51 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
     app.engine.set_local_players([player_number]);
     app.control_player_infos.replace_snapshot(
         info_id,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            flags: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        [clonk_engine::PlayerInfoControlData::new(
+            0,
+            0,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: info_id,
-                name: LegacyCString::from_bytes(b"Persistent Player".to_vec())
-                    .expect("player name"),
-                filename: LegacyCString::from_bytes(b"Local.c4p".to_vec())
-                    .expect("player filename"),
+                name: legacy_cstring(b"Persistent Player"),
+                filename: legacy_cstring(b"Local.c4p"),
                 flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
                 game_number: player_number,
                 ..clonk_engine::ControlPlayerInfoEntry::default()
             }],
-            by_client: 0,
-        }],
+            0,
+        )],
     );
     app.local_player_profile_paths
         .insert(info_id, profile_path.clone());
 
-    let synchronize = || {
-        NetworkControl::Synchronize(clonk_engine::SynchronizeControlData {
-            save_player_files: true,
-            sync_clearance: false,
-            by_client: 0,
-        })
-    };
+    let synchronize = || NetworkControl::Synchronize(saves_fixture!(synchronize: true, false));
     app.apply_synchronized_controls(0, vec![synchronize()])
         .test_value();
 
     let saved = PlayerFile::load_from_path(&profile_path).test_value();
-    assert_eq!(saved.name, "Persistent Player");
-    assert_eq!(
-        (
-            saved.score,
-            saved.rounds,
-            saved.rounds_won,
-            saved.rounds_lost
-        ),
-        (900, 8, 5, 3)
-    );
-    assert_eq!(saved.total_playing_time, 55);
-    assert_eq!(
-        saved.info_core.extra_data,
-        vec![("PlayerToken".to_string(), Value::Int(99))]
-    );
+    main_assert_eq!(saved.name => "Persistent Player");
+    main_assert_eq!((saved.score, saved.rounds, saved.rounds_won, saved.rounds_lost) => (900, 8, 5, 3));
+    main_assert_eq!(saved.total_playing_time => 55);
+    main_assert_eq!(saved.info_core.extra_data => vec![("PlayerToken".to_string(), Value::Int(99))]);
     let hero = saved
         .crew
         .iter()
         .find(|crew| crew.name == "Hero")
         .test_value();
-    assert_eq!(
-        (hero.experience, hero.death_count, hero.total_playing_time),
-        (321, 2, 22)
-    );
-    assert_eq!(
-        hero.extra_data,
-        vec![("CrewToken".to_string(), Value::Int(77))]
-    );
+    main_assert_eq!((hero.experience, hero.death_count, hero.total_playing_time) => (321, 2, 22));
+    main_assert_eq!(hero.extra_data => vec![("CrewToken".to_string(), Value::Int(77))]);
     let idle = saved
         .crew
         .iter()
         .find(|crew| crew.name == "Idle")
         .test_value();
-    assert_eq!(
-        idle.total_playing_time, 11,
-        "idle crew has no active-time delta"
-    );
+    main_assert_eq!(idle.total_playing_time => 11, "idle crew has no active-time delta");
     let saved_group = Group::open(&profile_path).test_value();
-    assert_eq!(
-        saved_group.read_file("KeepRoot.dat").unwrap(),
-        b"root sentinel"
-    );
-    assert_eq!(
-        saved_group
-            .open_child("Hero.c4i")
-            .unwrap()
-            .read_file("KeepCrew.dat")
-            .unwrap(),
-        b"Hero sentinel"
-    );
-    assert_eq!(
-        fs::read(profile_path.join("Hero.c4i/.crew-metadata")).unwrap(),
-        b"Hero metadata"
-    );
-    assert!(!saved_group.exists("C4Player.c4b"));
-    assert_eq!(
-        fs::read(profile_path.join(".local-metadata")).unwrap(),
-        b"ignored sentinel"
-    );
+    main_assert_eq!(saved_group.read_file("KeepRoot.dat").unwrap() => b"root sentinel");
+    main_assert_eq!(saved_group.open_child("Hero.c4i").unwrap().read_file("KeepCrew.dat").unwrap() => b"Hero sentinel");
+    main_assert_eq!(fs::read(profile_path.join("Hero.c4i/.crew-metadata")).unwrap() => b"Hero metadata");
+    main_assert!(!saved_group.exists("C4Player.c4b"));
+    main_assert_eq!(fs::read(profile_path.join(".local-metadata")).unwrap() => b"ignored sentinel");
 
     // A removed local source is not an eligibility failure in C++: its
     // unchecked copy leaves a fresh temp group that Save fills. Recreate
@@ -3689,20 +3102,12 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
     app.apply_synchronized_controls(1, vec![synchronize()])
         .test_value();
     let recreated = PlayerFile::load_from_path(&profile_path).test_value();
-    assert_eq!(recreated.total_playing_time, 55);
-    assert_eq!(
-        recreated
-            .crew
-            .iter()
-            .find(|crew| crew.name == "Hero")
-            .expect("recreated active crew")
-            .total_playing_time,
-        22
-    );
+    main_assert_eq!(recreated.total_playing_time => 55);
+    main_assert_eq!(recreated.crew.iter().find(|crew| crew.name == "Hero").expect("recreated active crew").total_playing_time => 22);
     let recreated_group = Group::open(&profile_path).test_value();
-    assert!(!recreated_group.exists("KeepRoot.dat"));
-    assert!(!recreated_group.exists("C4Player.c4b"));
-    assert!(fs::read_dir(directory.path())
+    main_assert!(!recreated_group.exists("KeepRoot.dat"));
+    main_assert!(!recreated_group.exists("C4Player.c4b"));
+    main_assert!(fs::read_dir(directory.path())
         .expect("enumerate rewrite directory")
         .all(|entry| !entry
             .expect("rewrite directory entry")
@@ -3730,8 +3135,8 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
     app.engine.set_replay_control(true);
     app.apply_synchronized_controls(2, vec![synchronize()])
         .test_value();
-    assert_eq!(fs::read(&profile_path).unwrap(), profile_before_replay);
-    assert_eq!(
+    main_assert_eq!(fs::read(&profile_path).unwrap() => profile_before_replay);
+    main_assert_eq!(
         (
             app.engine
                 .player(player_number)
@@ -3741,7 +3146,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
                 .player(player_number)
                 .expect("replay player remains")
                 .game_join_time(),
-        ),
+        ) =>
         (55, 25)
     );
     let replay_state = app.engine.capture_state();
@@ -3750,10 +3155,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
         .iter()
         .find(|crew| crew.name == "Hero")
         .test_value();
-    assert_eq!(
-        (replay_hero.total_playing_time, replay_hero.in_action_time),
-        (22, 25)
-    );
+    main_assert_eq!((replay_hero.total_playing_time, replay_hero.in_action_time) => (22, 25));
 }
 
 #[test]
@@ -3765,41 +3167,24 @@ fn developer_console_runtime_record_waits_for_its_queued_synchronize() {
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
     let tick = app.local_control_submission_tick();
 
-    assert!(app.developer_console_runtime_record_possible());
-    assert!(app
-        .developer_console_request_runtime_record()
-        .expect("queue console runtime record"));
-    assert!(app.runtime_record_requested);
-    assert!(!app.developer_console_runtime_record_possible());
-    assert!(app.recording.is_none());
+    main_assert!(app.developer_console_runtime_record_possible());
+    main_assert!(app.developer_console_request_runtime_record().expect("queue console runtime record"));
+    main_assert!(app.runtime_record_requested);
+    main_assert!(!app.developer_console_runtime_record_possible());
+    main_assert!(app.recording.is_none());
 
     let decided = commands.take_submitted_decided_controls();
-    assert_eq!(
-        decided,
-        vec![(
-            tick,
-            clonk_engine::ControlPacket::Synchronize(clonk_engine::SynchronizeControlData {
-                save_player_files: false,
-                sync_clearance: true,
-                by_client: 0,
-            },),
-            false,
-        )]
-    );
+    main_assert_eq!(decided => vec![(tick, clonk_engine::ControlPacket::Synchronize(saves_fixture!(synchronize: false, true),), false,)]);
 
     app.apply_ready_controls(
         tick,
         vec![NetworkControl::Synchronize(
-            clonk_engine::SynchronizeControlData {
-                save_player_files: false,
-                sync_clearance: true,
-                by_client: 0,
-            },
+            saves_fixture!(synchronize: false, true),
         )],
     )
     .test_value();
-    assert!(!app.runtime_record_requested);
-    assert!(app.recording.is_some());
+    main_assert!(!app.runtime_record_requested);
+    main_assert!(app.recording.is_some());
 }
 
 #[test]
@@ -3812,11 +3197,8 @@ fn developer_console_save_as_preserves_unpacked_group_representation() {
         .test_value();
 
     persist_console_save_group(&group, &destination, true).test_value();
-    assert!(destination.is_dir());
-    assert_eq!(
-        fs::read(destination.join("Scenario.txt")).unwrap(),
-        b"[Head]\nTitle=Copy\n"
-    );
+    main_assert!(destination.is_dir());
+    main_assert_eq!(fs::read(destination.join("Scenario.txt")).unwrap() => b"[Head]\nTitle=Copy\n");
 }
 
 #[test]
@@ -3837,12 +3219,9 @@ fn folder_live_save_material_respects_existing_directory_representation() {
 
     replay_folder_save_journal(&journal, &destination, b"Folder maker").test_value();
 
-    assert!(material.is_dir());
-    assert_eq!(fs::read(material.join("Keep.dat")).unwrap(), b"keep");
-    assert_eq!(
-        fs::read(material.join("TexMap.txt")).unwrap(),
-        b"new texture map"
-    );
+    main_assert!(material.is_dir());
+    main_assert_eq!(fs::read(material.join("Keep.dat")).unwrap() => b"keep");
+    main_assert_eq!(fs::read(material.join("TexMap.txt")).unwrap() => b"new texture map");
 }
 
 #[test]
@@ -3855,27 +3234,27 @@ fn ctrlrec_control_executes_at_start_of_recorded_frame() {
     app.engine.set_replay_control(true);
 
     app.test_update();
-    assert_eq!(app.engine.frame(), 1);
-    assert_eq!(
+    main_assert_eq!(app.engine.frame() => 1);
+    main_assert_eq!(
         app.engine
             .player(app.local_owner)
             .expect("local player")
             .control
             .pressed_coms
-            & (1 << clonk_engine::COM_RIGHT),
+            & (1 << clonk_engine::COM_RIGHT) =>
         0,
         "frame-one control must not execute during frame zero"
     );
 
     app.test_update();
-    assert_eq!(app.engine.frame(), 2);
-    assert_ne!(
+    main_assert_eq!(app.engine.frame() => 2);
+    main_assert_ne!(
         app.engine
             .player(app.local_owner)
             .expect("local player")
             .control
             .pressed_coms
-            & (1 << clonk_engine::COM_RIGHT),
+            & (1 << clonk_engine::COM_RIGHT) =>
         0,
         "recorded control executes before frame one's simulation tick"
     );
@@ -3922,13 +3301,9 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
     );
     fs::write(replay_path.join("CtrlRec.txt"), text.as_bytes()).test_value();
 
-    let binary_control =
-        clonk_engine::ControlPacket::PlayerControl(clonk_engine::PlayerControlData {
-            player,
-            command: i32::from(clonk_engine::COM_LEFT),
-            data: 0,
-            by_client: 0,
-        });
+    let binary_control = clonk_engine::ControlPacket::PlayerControl(
+        clonk_engine::PlayerControlData::new(player, i32::from(clonk_engine::COM_LEFT), 0, 0),
+    );
     let mut binary = ControlRecordWriter::new();
     binary.record_packet(0, &binary_control).test_value();
     fs::write(replay_path.join("CtrlRec.c4b"), binary.finish(1)).test_value();
@@ -3938,22 +3313,18 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
     let dump_path = directory.path().join("preferred.txt");
     write_classic_record_dump(&replay_chunks, &dump_path).test_value();
     let dump = fs::read_to_string(&dump_path).test_value();
-    assert!(dump.contains(&format!("    Com={}\r\n", clonk_engine::COM_RIGHT)));
-    assert!(dump.contains(&format!("  Com={}\r\n", clonk_engine::COM_UP)));
-    assert!(!dump.contains(&format!("  Com={}\r\n", clonk_engine::COM_LEFT)));
+    main_assert!(dump.contains(&format!("    Com={}\r\n", clonk_engine::COM_RIGHT)));
+    main_assert!(dump.contains(&format!("  Com={}\r\n", clonk_engine::COM_UP)));
+    main_assert!(!dump.contains(&format!("  Com={}\r\n", clonk_engine::COM_LEFT)));
     app.control_playback = Some(ControlRecordPlayback::from_chunks(replay_chunks));
     app.engine.set_replay_control(true);
     app.engine.set_control_host(false);
     app.test_update();
 
     let pressed = app.engine.test_player(player).control.pressed_coms;
-    assert_ne!(pressed & (1 << clonk_engine::COM_RIGHT), 0);
-    assert_ne!(pressed & (1 << clonk_engine::COM_UP), 0);
-    assert_eq!(
-        pressed & (1 << clonk_engine::COM_LEFT),
-        0,
-        "the lower-priority binary control must not execute"
-    );
+    main_assert_ne!(pressed & (1 << clonk_engine::COM_RIGHT) => 0);
+    main_assert_ne!(pressed & (1 << clonk_engine::COM_UP) => 0);
+    main_assert_eq!(pressed & (1 << clonk_engine::COM_LEFT) => 0, "the lower-priority binary control must not execute");
 
     let binary_only_path = directory.path().join("BinaryFallback.c4s");
     fs::create_dir(&binary_only_path).test_value();
@@ -3963,7 +3334,7 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
     let binary_only = Group::open(&binary_only_path).test_value();
     let mut fallback =
         ControlRecordPlayback::from_chunks(replay_control_record_chunks(&binary_only).test_value());
-    assert_eq!(fallback.take_controls(0), vec![binary_control.clone()]);
+    main_assert_eq!(fallback.take_controls(0) => vec![binary_control.clone()]);
 
     let invalid_text_path = directory.path().join("InvalidTextWins.c4s");
     fs::create_dir(&invalid_text_path).test_value();
@@ -3978,8 +3349,8 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
     let invalid_text = Group::open(&invalid_text_path).test_value();
     let error = replay_control_record_chunks(&invalid_text)
         .expect_err("loaded malformed text must not fall back to binary");
-    assert!(error.contains("invalid CtrlRec.txt"));
-    assert!(error.contains("packet ID 0xff"));
+    main_assert!(error.contains("invalid CtrlRec.txt"));
+    main_assert!(error.contains("packet ID 0xff"));
 }
 
 #[test]
@@ -3992,9 +3363,9 @@ fn ctrlrec_end_finishes_the_replay_and_restores_local_control() {
 
     app.test_update();
 
-    assert!(app.control_playback.is_none());
-    assert!(app.engine.is_control_host());
-    assert!(app.snapshot.game_over);
+    main_assert!(app.control_playback.is_none());
+    main_assert!(app.engine.is_control_host());
+    main_assert!(app.snapshot.game_over);
 }
 
 #[test]
@@ -4017,8 +3388,8 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     let before = app.graphics.active_viewport_projections()[0];
-    assert_eq!(before.owner, owner);
-    assert!(before.is_no_owner_viewport);
+    main_assert_eq!(before.owner => owner);
+    main_assert!(before.is_no_owner_viewport);
     app.engine
         .scroll_player_view(
             owner,
@@ -4037,14 +3408,10 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
 
     let after_move = app.graphics.active_viewport_projections()[0];
-    assert_eq!(after_move.target_x, before.target_x - 10);
-    assert!(
-        app.ingame_edge_scroll
-            .expect("classified observer edge remains live")
-            .observer
-    );
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports(),
+    main_assert_eq!(after_move.target_x => before.target_x - 10);
+    main_assert!(app.ingame_edge_scroll.expect("classified observer edge remains live").observer);
+    main_assert_eq!(
+        app.engine.player(owner).unwrap().viewports() =>
         player_viewports.as_slice(),
         "temporary film assignment must not turn observer scrolling into player scrolling"
     );
@@ -4052,23 +3419,20 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
     // SetFilmView changes the viewport's displayed Player but preserves
     // fIsNoOwnerViewport. MouseControl remains assigned to NO_OWNER, so
     // its retained VpX/VpY must continue through that owner change.
-    assert!(app.set_physical_film_view(OWNER_NONE));
+    main_assert!(app.set_physical_film_view(OWNER_NONE));
     app.test_render(&mut frame);
     let retargeted = app.graphics.active_viewport_projections()[0];
-    assert_eq!(retargeted.owner, OWNER_NONE);
-    assert!(retargeted.is_no_owner_viewport);
+    main_assert_eq!(retargeted.owner => OWNER_NONE);
+    main_assert!(retargeted.is_no_owner_viewport);
 
     app.test_update();
 
     let after_tick = app.graphics.active_viewport_projections()[0];
-    assert_eq!(after_tick.target_x, retargeted.target_x - 10);
+    main_assert_eq!(after_tick.target_x => retargeted.target_x - 10);
     let scroll = app.ingame_edge_scroll.test_value();
-    assert!(scroll.observer);
-    assert_eq!(scroll.owner, OWNER_NONE);
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports(),
-        player_viewports.as_slice()
-    );
+    main_assert!(scroll.observer);
+    main_assert_eq!(scroll.owner => OWNER_NONE);
+    main_assert_eq!(app.engine.player(owner).unwrap().viewports() => player_viewports.as_slice());
 }
 
 #[test]
@@ -4122,20 +3486,13 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
 
     let ordinary = collect_viewport_inputs(&snapshot).test_value();
     let film = collect_viewport_inputs_with_film_view(&snapshot, Some(film_player.id)).test_value();
-    assert_eq!(film.len(), ordinary.len());
-    assert_eq!(film[0].owner, film_player.id);
-    assert_eq!(film[0].center, Vector2::new(700, 800));
-    assert_eq!(
-        film[0].offset,
-        Vector2::new(17, 19),
-        "temporary Init preserves the physical viewport offset"
-    );
-    assert_eq!(film[0].focus.expect("film viewport focus").id, film_focus);
-    assert_eq!(
-        film[0].zoom, ordinary[0].zoom,
-        "temporary Init preserves the physical viewport zoom"
-    );
-    assert_eq!(
+    main_assert_eq!(film.len() => ordinary.len());
+    main_assert_eq!(film[0].owner => film_player.id);
+    main_assert_eq!(film[0].center => Vector2::new(700, 800));
+    main_assert_eq!(film[0].offset => Vector2::new(17, 19), "temporary Init preserves the physical viewport offset");
+    main_assert_eq!(film[0].focus.expect("film viewport focus").id => film_focus);
+    main_assert_eq!(film[0].zoom => ordinary[0].zoom, "temporary Init preserves the physical viewport zoom");
+    main_assert_eq!(
         film[1..]
             .iter()
             .map(|viewport| {
@@ -4146,7 +3503,7 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
                     viewport.focus.expect("local viewport focus").id,
                 )
             })
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         ordinary[1..]
             .iter()
             .map(|viewport| {
@@ -4163,11 +3520,11 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
 
     let ownerless =
         collect_viewport_inputs_with_film_view(&snapshot, Some(OWNER_NONE)).test_value();
-    assert_eq!(ownerless[0].owner, OWNER_NONE);
-    assert_eq!(ownerless[0].center, ordinary[0].center);
-    assert_eq!(ownerless[0].zoom, ordinary[0].zoom);
-    assert_eq!(ownerless[0].focus, ordinary[0].focus);
-    assert_eq!(ownerless.len(), ordinary.len());
+    main_assert_eq!(ownerless[0].owner => OWNER_NONE);
+    main_assert_eq!(ownerless[0].center => ordinary[0].center);
+    main_assert_eq!(ownerless[0].zoom => ordinary[0].zoom);
+    main_assert_eq!(ownerless[0].focus => ordinary[0].focus);
+    main_assert_eq!(ownerless.len() => ordinary.len());
 
     let mut no_target_focus = snapshot.clone();
     let target = no_target_focus
@@ -4182,9 +3539,9 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
     no_target_focus.hud.local_players = vec![local_owner];
     let unfocused =
         collect_viewport_inputs_with_film_view(&no_target_focus, Some(film_player.id)).test_value();
-    assert_eq!(unfocused[0].owner, film_player.id);
-    assert_eq!(unfocused[0].center, Vector2::new(700, 800));
-    assert_eq!(unfocused[0].focus, ordinary[0].focus);
+    main_assert_eq!(unfocused[0].owner => film_player.id);
+    main_assert_eq!(unfocused[0].center => Vector2::new(700, 800));
+    main_assert_eq!(unfocused[0].focus => ordinary[0].focus);
 
     let mut no_target_viewport = no_target_focus;
     no_target_viewport
@@ -4197,8 +3554,8 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
     let without_local_slot =
         collect_viewport_inputs_with_film_view(&no_target_viewport, Some(film_player.id))
             .test_value();
-    assert_eq!(without_local_slot[0].owner, film_player.id);
-    assert_eq!(without_local_slot[0].center, ordinary[0].center);
+    main_assert_eq!(without_local_slot[0].owner => film_player.id);
+    main_assert_eq!(without_local_slot[0].center => ordinary[0].center);
 }
 
 #[test]
@@ -4223,50 +3580,39 @@ fn viewport_player_cycle_matches_film_and_observer_end_states() {
         y: 10,
     };
     app.runtime_flash_message = Some(observer_flash.clone());
-    assert!(app.cycle_primary_viewport_player(true));
-    assert_eq!(app.film_view_player, Some(first));
-    assert!(
-        app.runtime_flash_message.is_none(),
-        "temporary Init to an owned player clears the observer flash"
-    );
+    main_assert!(app.cycle_primary_viewport_player(true));
+    main_assert_eq!(app.film_view_player => Some(first));
+    main_assert!(app.runtime_flash_message.is_none(), "temporary Init to an owned player clears the observer flash");
 
-    assert!(app.cycle_primary_viewport_player(true));
-    assert_eq!(app.film_view_player, Some(second));
+    main_assert!(app.cycle_primary_viewport_player(true));
+    main_assert_eq!(app.film_view_player => Some(second));
 
-    assert!(app.set_physical_film_view(third));
-    assert!(app.cycle_primary_viewport_player(true));
-    assert_eq!(app.film_view_player, Some(first), "film wraps to First");
+    main_assert!(app.set_physical_film_view(third));
+    main_assert!(app.cycle_primary_viewport_player(true));
+    main_assert_eq!(app.film_view_player => Some(first), "film wraps to First");
 
-    assert!(app.set_physical_film_view(third));
+    main_assert!(app.set_physical_film_view(third));
     app.runtime_flash_message = Some(observer_flash.clone());
-    assert!(app.cycle_primary_viewport_player(false));
-    assert_eq!(app.film_view_player, Some(OWNER_NONE));
-    assert_eq!(
-        app.runtime_flash_message,
-        Some(observer_flash.clone()),
-        "temporary Init to NO_OWNER retains the observer flash"
-    );
-    assert!(app.cycle_primary_viewport_player(false));
-    assert_eq!(app.film_view_player, Some(first));
+    main_assert!(app.cycle_primary_viewport_player(false));
+    main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
+    main_assert_eq!(app.runtime_flash_message => Some(observer_flash.clone()), "temporary Init to NO_OWNER retains the observer flash");
+    main_assert!(app.cycle_primary_viewport_player(false));
+    main_assert_eq!(app.film_view_player => Some(first));
 
-    assert!(app.set_physical_film_view(77));
-    assert!(app.cycle_primary_viewport_player(false));
-    assert_eq!(
-        app.film_view_player,
-        Some(first),
-        "invalid player selects First"
-    );
+    main_assert!(app.set_physical_film_view(77));
+    main_assert!(app.cycle_primary_viewport_player(false));
+    main_assert_eq!(app.film_view_player => Some(first), "invalid player selects First");
 
     app.engine.remove_player(second).test_value();
     app.engine.remove_player(third).test_value();
     app.runtime_flash_message = Some(observer_flash.clone());
-    assert!(!app.cycle_primary_viewport_player(true));
-    assert_eq!(app.runtime_flash_message, Some(observer_flash.clone()));
+    main_assert!(!app.cycle_primary_viewport_player(true));
+    main_assert_eq!(app.runtime_flash_message => Some(observer_flash.clone()));
 
     app.engine.remove_player(first).test_value();
-    assert!(app.set_physical_film_view(OWNER_NONE));
-    assert!(!app.cycle_primary_viewport_player(true));
-    assert_eq!(app.film_view_player, Some(OWNER_NONE));
+    main_assert!(app.set_physical_film_view(OWNER_NONE));
+    main_assert!(!app.cycle_primary_viewport_player(true));
+    main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
 }
 
 #[test]
@@ -4283,13 +3629,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         (1, 2, false),
     ] {
         app.engine
-            .apply_object_update(
-                cursor,
-                ObjectUpdate {
-                    menu: Some(None),
-                    ..ObjectUpdate::default()
-                },
-            )
+            .apply_object_update(cursor, saves_fixture!(object_update))
             .test_value();
         set_test_scenario_head_flags(&mut app, replay, film);
         app.snapshot.hud.messages.clear();
@@ -4301,21 +3641,11 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         app.message_board = message_board;
         let mut with_menu = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut with_menu);
-        assert_eq!(
-            with_menu != without_menu,
-            overlays_visible,
-            "Replay={replay}, Film={film}"
-        );
+        main_assert_eq!(with_menu != without_menu => overlays_visible, "Replay={replay}, Film={film}");
     }
 
     app.engine
-        .apply_object_update(
-            cursor,
-            ObjectUpdate {
-                menu: Some(None),
-                ..ObjectUpdate::default()
-            },
-        )
+        .apply_object_update(cursor, saves_fixture!(object_update))
         .test_value();
     set_test_scenario_head_flags(&mut app, 1, 1);
     app.snapshot.hud.messages.clear();
@@ -4340,10 +3670,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
     app.message_board = message_board.clone();
     let mut with_message = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut with_message);
-    assert_ne!(
-        with_message, without_message,
-        "the clean film viewport must retain Game.Messages"
-    );
+    main_assert_ne!(with_message => without_message, "the clean film viewport must retain Game.Messages");
 
     let mut invalid_hidden_menu = two_item_script_menu(cursor);
     invalid_hidden_menu.style = 99;
@@ -4372,49 +3699,33 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
     app.message_board = message_board;
     let mut with_hidden_menus = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut with_hidden_menus);
-    assert_eq!(
-        with_hidden_menus, with_message,
-        "script and player menus contribute no film-replay pixels"
-    );
-    assert_eq!(
-        app.script_menu_pointer_target_for_owner(owner, GuiPoint::new(160.0, 100.0))
-            .expect("hidden menu pointer routing is inert"),
-        None
-    );
-    assert_eq!(
-        app.ingame_menu_pointer_target(GuiPoint::new(160.0, 100.0)),
-        None
-    );
+    main_assert_eq!(with_hidden_menus => with_message, "script and player menus contribute no film-replay pixels");
+    main_assert_eq!(app.script_menu_pointer_target_for_owner(owner, GuiPoint::new(160.0, 100.0)).expect("hidden menu pointer routing is inert") => None);
+    main_assert_eq!(app.ingame_menu_pointer_target(GuiPoint::new(160.0, 100.0)) => None);
     let menu_button = clonk_frontend::hud::viewport_button_rect(
         viewport,
         clonk_frontend::hud::ViewportButton::PlayerMenu,
     );
-    assert_eq!(
+    main_assert_eq!(
         app.ingame_viewport_region(
             owner,
             GuiPoint::new(menu_button.x as f32 + 1.0, menu_button.y as f32 + 1.0),
-        ),
+        ) =>
         None,
         "suppressed HUD regions cannot consume film input"
     );
 
     app.ingame_menu.clear();
     app.engine
-        .apply_object_update(
-            cursor,
-            ObjectUpdate {
-                menu: Some(None),
-                ..ObjectUpdate::default()
-            },
-        )
+        .apply_object_update(cursor, saves_fixture!(object_update))
         .test_value();
     let next_owner = owner + 1;
     app.engine
         .register_player(PlayerConfig::new(next_owner, "Second film player"))
         .test_value();
-    assert!(app.set_physical_film_view(owner));
+    main_assert!(app.set_physical_film_view(owner));
     app.test_key(VirtualKeyCode::ArrowRight, ElementState::Pressed);
-    assert_eq!(app.film_view_player, Some(next_owner));
+    main_assert_eq!(app.film_view_player => Some(next_owner));
 }
 
 #[test]
@@ -4425,68 +3736,28 @@ fn bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     app.engine
         .register_player(PlayerConfig::new(second, "Second film player"))
         .test_value();
-    assert!(app.set_physical_film_view(first));
+    main_assert!(app.set_physical_film_view(first));
 
-    assert!(!app.handle_film_view_key_for_mode(
-        VirtualKeyCode::ArrowRight,
-        ElementState::Pressed,
-        false,
-    ));
-    assert_eq!(app.film_view_player, Some(first));
+    main_assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, false,));
+    main_assert_eq!(app.film_view_player => Some(first));
 
-    assert!(app.handle_film_view_key_for_mode(
-        VirtualKeyCode::ArrowRight,
-        ElementState::Pressed,
-        true,
-    ));
-    assert_eq!(
-        app.film_view_player,
-        Some(second),
-        "ViewportCheck assigns Players.First before the first film key"
-    );
-    assert!(!app.handle_film_view_key_for_mode(
-        VirtualKeyCode::ArrowRight,
-        ElementState::Released,
-        true,
-    ));
-    assert_eq!(
-        app.film_view_player,
-        Some(second),
-        "C4KeyCB has no key-up callback"
-    );
+    main_assert!(app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
+    main_assert_eq!(app.film_view_player => Some(second), "ViewportCheck assigns Players.First before the first film key");
+    main_assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Released, true,));
+    main_assert_eq!(app.film_view_player => Some(second), "C4KeyCB has no key-up callback");
 
     app.keyboard_modifiers = ModifiersState::SHIFT;
-    assert!(!app.handle_film_view_key_for_mode(
-        VirtualKeyCode::ArrowRight,
-        ElementState::Pressed,
-        true,
-    ));
-    assert_eq!(app.film_view_player, Some(second));
+    main_assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
+    main_assert_eq!(app.film_view_player => Some(second));
     app.keyboard_modifiers = ModifiersState::empty();
 
     app.scoreboard_dialog = Some(app.scoreboard_request());
-    assert!(app.handle_film_view_key_for_mode(
-        VirtualKeyCode::ArrowRight,
-        ElementState::Pressed,
-        true,
-    ));
-    assert_eq!(
-        app.film_view_player,
-        Some(first),
-        "the nonexclusive scoreboard does not acquire GUI key focus"
-    );
+    main_assert!(app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
+    main_assert_eq!(app.film_view_player => Some(first), "the nonexclusive scoreboard does not acquire GUI key focus");
 
     app.start_running_chat(RunningChatMode::All);
-    assert!(!app.handle_film_view_key_for_mode(
-        VirtualKeyCode::ArrowRight,
-        ElementState::Pressed,
-        true,
-    ));
-    assert_eq!(
-        app.film_view_player,
-        Some(first),
-        "the exclusive chat owns GUI scope"
-    );
+    main_assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
+    main_assert_eq!(app.film_view_player => Some(first), "the exclusive chat owns GUI scope");
 }
 
 #[test]
@@ -4533,11 +3804,8 @@ fn set_film_view_builtin_reaches_the_real_replay_viewport() {
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0; app.graphics.surface().pixels().len()];
     app.render_running(&mut frame, false).test_value();
-    assert_eq!(app.film_view_player, None);
-    assert_eq!(
-        app.graphics.active_viewport_projections()[0].owner,
-        local_owner
-    );
+    main_assert_eq!(app.film_view_player => None);
+    main_assert_eq!(app.graphics.active_viewport_projections()[0].owner => local_owner);
 
     app.engine.set_replay_control(true);
     app.engine
@@ -4545,15 +3813,12 @@ fn set_film_view_builtin_reaches_the_real_replay_viewport() {
         .test_value();
     app.snapshot = app.engine.snapshot();
     app.render_running(&mut frame, false).test_value();
-    assert_eq!(app.film_view_player, Some(film_player));
-    assert_eq!(
-        app.graphics.active_viewport_projections()[0].owner,
-        film_player
-    );
+    main_assert_eq!(app.film_view_player => Some(film_player));
+    main_assert_eq!(app.graphics.active_viewport_projections()[0].owner => film_player);
     let inputs =
         collect_viewport_inputs_from_physical_state(&app.snapshot, &app.physical_viewports)
             .test_value();
-    assert_eq!(inputs[0].offset, Vector2::new(17, 19));
+    main_assert_eq!(inputs[0].offset => Vector2::new(17, 19));
 }
 
 fn assert_running_viewport_boundary(app: &mut GameApp, expected_reason: ClassicViewportBoundary) {
@@ -4568,24 +3833,14 @@ fn assert_running_viewport_boundary(app: &mut GameApp, expected_reason: ClassicV
         .render_running(&mut frame, false)
         .expect_err("unsupported viewport state must fail closed");
 
-    assert_eq!(
-        error.downcast_ref::<ClassicParityBoundary>(),
-        Some(&expected)
-    );
-    assert!(
+    main_assert_eq!(error.downcast_ref::<ClassicParityBoundary>() => Some(&expected));
+    main_assert!(
         error.to_string().contains("solid navy")
             && error.to_string().contains("arbitrary first-object"),
         "boundary must name both rejected viewport substitutes: {error:#}"
     );
-    assert_eq!(
-        frame, frame_before,
-        "caller frame must remain byte-identical"
-    );
-    assert_eq!(
-        app.graphics.surface().pixels(),
-        surface_before.as_slice(),
-        "graphics surface must remain byte-identical"
-    );
+    main_assert_eq!(frame => frame_before, "caller frame must remain byte-identical");
+    main_assert_eq!(app.graphics.surface().pixels() => surface_before.as_slice(), "graphics surface must remain byte-identical");
 }
 
 #[test]
@@ -4658,42 +3913,33 @@ fn focusless_owned_slot_renders_in_normal_cursor_mode() {
     );
 
     let inputs = collect_viewport_inputs(&app.snapshot).test_value();
-    assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0].focus.map(|focus| focus.id), Some(valid_focus));
-    assert!(inputs[1].focus.is_none());
-    assert_eq!(inputs[1].owner, local_owner);
-    assert_eq!(inputs[1].center, Vector2::new(900, 700));
-    assert_eq!(inputs[1].zoom, 1.25);
+    main_assert_eq!(inputs.len() => 2);
+    main_assert_eq!(inputs[0].focus.map(|focus| focus.id) => Some(valid_focus));
+    main_assert!(inputs[1].focus.is_none());
+    main_assert_eq!(inputs[1].owner => local_owner);
+    main_assert_eq!(inputs[1].center => Vector2::new(900, 700));
+    main_assert_eq!(inputs[1].zoom => 1.25);
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.render_running(&mut frame, false).test_value();
-    assert_eq!(app.graphics.active_viewport_projections().len(), 2);
+    main_assert_eq!(app.graphics.active_viewport_projections().len() => 2);
 }
 
 #[test]
 fn close_effect_uses_displayed_film_owners_not_local_assignments() {
-    assert_eq!(
-        physical_viewport_close_effect(&[10, 11], Some(11), 11),
-        PhysicalViewportCloseEffect {
-            closed_any: true,
-            remaining_count: 0,
-        },
+    main_assert_eq!(
+        physical_viewport_close_effect(&[10, 11], Some(11), 11) =>
+        saves_fixture!(viewport_close: true, 0),
         "retargeting the primary viewport can make every viewport match"
     );
-    assert_eq!(
-        physical_viewport_close_effect(&[10], Some(11), 10),
-        PhysicalViewportCloseEffect {
-            closed_any: false,
-            remaining_count: 1,
-        },
+    main_assert_eq!(
+        physical_viewport_close_effect(&[10], Some(11), 10) =>
+        saves_fixture!(viewport_close: false, 1),
         "the local owner no longer owns its retargeted physical viewport"
     );
-    assert_eq!(
-        physical_viewport_close_effect(&[], Some(11), 11),
-        PhysicalViewportCloseEffect {
-            closed_any: true,
-            remaining_count: 0,
-        },
+    main_assert_eq!(
+        physical_viewport_close_effect(&[], Some(11), 11) =>
+        saves_fixture!(viewport_close: true, 0),
         "film can retarget the sole ownerless physical viewport"
     );
 }
@@ -4730,12 +3976,9 @@ fn view_offset_and_film_view_share_one_physical_request_order() {
             .test_value();
         let _ = app.apply_pending_viewport_presentation_requests();
 
-        assert_eq!(app.physical_viewports[0].displayed_player, target);
-        assert_eq!(app.physical_viewports[0].preserved_offset, expected_offset);
-        assert!(
-            app.runtime_flash_message.is_none(),
-            "valid temporary C4Viewport::Init clears the flash"
-        );
+        main_assert_eq!(app.physical_viewports[0].displayed_player => target);
+        main_assert_eq!(app.physical_viewports[0].preserved_offset => expected_offset);
+        main_assert!(app.runtime_flash_message.is_none(), "valid temporary C4Viewport::Init clears the flash");
     }
 }
 
@@ -4746,7 +3989,7 @@ fn film_assigned_ownerless_offset_is_consumed_after_one_draw() {
     app.local_controls = LocalControlRegistry::default();
     app.engine.set_local_players([]);
     app.refresh_non_authoritative_physical_viewports();
-    assert!(app.physical_viewports[0].is_no_owner_viewport);
+    main_assert!(app.physical_viewports[0].is_no_owner_viewport);
     app.engine.clear_scenario_script();
     app.engine
         .install_scenario_script_with_convention(
@@ -4762,16 +4005,13 @@ fn film_assigned_ownerless_offset_is_consumed_after_one_draw() {
         .call_scenario_script_function("Probe", Vec::new())
         .test_value();
     let _ = app.apply_pending_viewport_presentation_requests();
-    assert_eq!(
-        app.physical_viewports[0].preserved_offset,
-        Vector2::new(13, 17)
-    );
+    main_assert_eq!(app.physical_viewports[0].preserved_offset => Vector2::new(13, 17));
 
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    assert_eq!(app.physical_viewports[0].preserved_offset, Vector2::ZERO);
-    assert!(app.physical_viewports[0].is_no_owner_viewport);
+    main_assert_eq!(app.physical_viewports[0].preserved_offset => Vector2::ZERO);
+    main_assert!(app.physical_viewports[0].is_no_owner_viewport);
 }
 
 #[test]
@@ -4795,33 +4035,27 @@ fn recalculation_does_not_reapply_a_stale_scalar_film_target() {
             )
             .test_value();
     }
-    assert!(app.create_physical_viewport(lower_layout, true, true, false));
-    assert!(app.set_physical_film_view(high_layout_target));
-    assert_eq!(
-        app.physical_viewports
-            .iter()
-            .map(|viewport| viewport.displayed_player)
-            .collect::<Vec<_>>(),
-        vec![high_layout_target, lower_layout]
-    );
+    main_assert!(app.create_physical_viewport(lower_layout, true, true, false));
+    main_assert!(app.set_physical_film_view(high_layout_target));
+    main_assert_eq!(app.physical_viewports.iter().map(|viewport| viewport.displayed_player).collect::<Vec<_>>() => vec![high_layout_target, lower_layout]);
 
-    assert!(app.create_physical_viewport(temporary, true, true, false));
-    assert!(app.close_physical_viewports(temporary, true, true));
-    assert_eq!(
+    main_assert!(app.create_physical_viewport(temporary, true, true, false));
+    main_assert!(app.close_physical_viewports(temporary, true, true));
+    main_assert_eq!(
         app.physical_viewports
             .iter()
             .map(|viewport| viewport.displayed_player)
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![lower_layout, high_layout_target],
         "RecalculateViewports may sort the retargeted physical viewport away from index zero"
     );
 
     app.sync_film_view_presentation();
-    assert_eq!(
+    main_assert_eq!(
         app.physical_viewports
             .iter()
             .map(|viewport| viewport.displayed_player)
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![lower_layout, high_layout_target],
         "the compatibility scalar must not execute SetFilmView a second time"
     );
@@ -4836,14 +4070,9 @@ fn remote_film_close_does_not_resurrect_the_original_primary() {
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary local"))
         .test_value();
-    let control = app.local_controls.initialize(LocalControlInit {
-        owner: secondary,
-        preferred_set: 1,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
+    let control = app
+        .local_controls
+        .initialize(test_local_control_init(secondary, 1, false, false));
     app.engine
         .set_player_runtime_control(secondary, control.runtime_control())
         .test_value();
@@ -4852,27 +4081,21 @@ fn remote_film_close_does_not_resurrect_the_original_primary() {
         .register_player(PlayerConfig::new(remote, "Remote film target"))
         .test_value();
     let _ = app.create_physical_viewport(secondary, false, true, true);
-    assert!(app.set_physical_film_view(remote));
+    main_assert!(app.set_physical_film_view(remote));
     app.ui_sound_log.clear();
 
     app.remove_runtime_player_with_viewport_feedback(remote)
         .test_value();
 
-    assert_eq!(
+    main_assert_eq!(
         app.physical_viewports
             .iter()
             .map(|viewport| viewport.displayed_player)
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![secondary],
         "the erased primary must not be regenerated from local controls"
     );
-    assert_eq!(
-        app.ui_sound_log
-            .iter()
-            .filter(|sound| sound.as_str() == "CloseViewport")
-            .count(),
-        1
-    );
+    main_assert_eq!(app.ui_sound_log.iter().filter(|sound| sound.as_str() == "CloseViewport").count() => 1);
 }
 
 #[test]
@@ -4911,14 +4134,14 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
     app.ui_sound_log.clear();
 
     app.initialize_physical_viewports(false);
-    assert_eq!(app.physical_viewports.len(), 1);
-    assert_eq!(app.physical_viewports[0].displayed_player, first);
-    assert!(!app.physical_viewports[0].is_no_owner_viewport);
-    assert_eq!(
+    main_assert_eq!(app.physical_viewports.len() => 1);
+    main_assert_eq!(app.physical_viewports[0].displayed_player => first);
+    main_assert!(!app.physical_viewports[0].is_no_owner_viewport);
+    main_assert_eq!(
         app.ui_sound_log
             .iter()
             .filter(|sound| sound.as_str() == "CloseViewport")
-            .count(),
+            .count() =>
         1,
         "zero-view replay film creates the first-player viewport non-silently"
     );
@@ -4927,13 +4150,13 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
     app.snapshot = app.engine.snapshot();
     app.ui_sound_log.clear();
     app.initialize_physical_viewports(false);
-    assert!(app.physical_viewports[0].is_no_owner_viewport);
-    assert!(app.ui_sound_log.is_empty());
+    main_assert!(app.physical_viewports[0].is_no_owner_viewport);
+    main_assert!(app.ui_sound_log.is_empty());
 
     app.film_view_player = Some(first);
     app.sync_film_view_presentation();
-    assert_eq!(app.film_view_player, None, "stale scalar target is ignored");
-    assert_eq!(app.physical_viewports[0].displayed_player, OWNER_NONE);
+    main_assert_eq!(app.film_view_player => None, "stale scalar target is ignored");
+    main_assert_eq!(app.physical_viewports[0].displayed_player => OWNER_NONE);
 
     app.engine
         .register_player(PlayerConfig::new(first, "Late replay player"))
@@ -4945,13 +4168,10 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
     )
     .test_value();
     app.check_fullscreen_physical_viewports(false);
-    assert_eq!(app.physical_viewports[0].displayed_player, first);
-    assert!(
-        app.physical_viewports[0].is_no_owner_viewport,
-        "late film retarget preserves the ownerless classification"
-    );
-    assert!(app.runtime_flash_message.is_none());
-    assert!(app.ui_sound_log.is_empty(), "ownerless retarget is silent");
+    main_assert_eq!(app.physical_viewports[0].displayed_player => first);
+    main_assert!(app.physical_viewports[0].is_no_owner_viewport, "late film retarget preserves the ownerless classification");
+    main_assert!(app.runtime_flash_message.is_none());
+    main_assert!(app.ui_sound_log.is_empty(), "ownerless retarget is silent");
 }
 
 #[test]
@@ -4968,15 +4188,8 @@ fn removing_a_remote_film_target_closes_its_physical_viewport_once() {
     app.remove_runtime_player_with_viewport_feedback(film_player)
         .test_value();
 
-    assert_eq!(app.film_view_player, None);
-    assert_eq!(
-        app.ui_sound_log
-            .iter()
-            .filter(|sound| sound.as_str() == "CloseViewport")
-            .count(),
-        1,
-        "the retargeted physical viewport closes once"
-    );
+    main_assert_eq!(app.film_view_player => None);
+    main_assert_eq!(app.ui_sound_log.iter().filter(|sound| sound.as_str() == "CloseViewport").count() => 1, "the retargeted physical viewport closes once");
 }
 
 #[test]
@@ -4987,14 +4200,9 @@ fn film_target_removal_recreates_the_first_player_viewport() {
     app.engine
         .register_player(PlayerConfig::new(film_player, "Film target"))
         .test_value();
-    let film_control = app.local_controls.initialize(LocalControlInit {
-        owner: film_player,
-        preferred_set: 1,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
+    let film_control =
+        app.local_controls
+            .initialize(test_local_control_init(film_player, 1, false, false));
     app.engine
         .set_player_runtime_control(film_player, film_control.runtime_control())
         .test_value();
@@ -5031,25 +4239,22 @@ fn film_target_removal_recreates_the_first_player_viewport() {
     app.ui_sound_log.clear();
 
     let physical_owners = app.live_local_viewport_owners_with_primary_first();
-    assert_eq!(physical_owners, [local_player, film_player]);
-    assert_eq!(
-        physical_viewport_close_effect(&physical_owners, app.film_view_player, film_player,),
-        PhysicalViewportCloseEffect {
-            closed_any: true,
-            remaining_count: 0,
-        },
+    main_assert_eq!(physical_owners => [local_player, film_player]);
+    main_assert_eq!(
+        physical_viewport_close_effect(&physical_owners, app.film_view_player, film_player,) =>
+        saves_fixture!(viewport_close: true, 0),
         "SetFilmView retargets the first physical viewport, producing two matching targets"
     );
 
     app.remove_runtime_player_with_viewport_feedback(film_player)
         .test_value();
 
-    assert_eq!(app.film_view_player, Some(local_player));
-    assert_eq!(
+    main_assert_eq!(app.film_view_player => Some(local_player));
+    main_assert_eq!(
         app.ui_sound_log
             .iter()
             .filter(|sound| sound.as_str() == "CloseViewport")
-            .count(),
+            .count() =>
         2,
         "film mode closes the old viewport and creates its replacement"
     );
@@ -5062,23 +4267,20 @@ fn saved_game_rxmusic_reenables_music_but_not_transient_flash() {
         .active_scenario
         .clone()
         .unwrap_or_else(FrontendScenario::fallback);
-    let save = SavedGameFile {
-        version: SAVE_FILE_VERSION,
-        saved_at_seconds: 0,
-        scenario: SavedScenarioInfo::from_frontend(
-            &scenario,
-            &app.scenario_label,
-            app.fallback_ground,
-        ),
-        definition_load: app.active_definition_load.clone(),
-        focus_id: app.focus_id,
-        user_label: Some("runtime music state".to_string()),
-        runtime_music_enabled: Some(false),
-        source_save_player_infos: None,
-        source_string_table: None,
-        source_title_png: None,
-        engine_state: app.engine.capture_state(),
-    };
+    let save = saves_fixture!(
+        saved_game:
+            SAVE_FILE_VERSION,
+            SavedScenarioInfo::from_frontend(
+                        &scenario,
+                        &app.scenario_label,
+                        app.fallback_ground,
+                    ),
+            app.active_definition_load.clone(),
+            app.focus_id,
+            Some("runtime music state".to_string()),
+            Some(false),
+            app.engine.capture_state(),
+    );
     app.audio.test_mut().options.music_enabled = true;
     app.runtime_music_enabled = true;
     app.set_runtime_flash_message("not serialized", RuntimeHelpCharset::Windows1252)
@@ -5086,17 +4288,10 @@ fn saved_game_rxmusic_reenables_music_but_not_transient_flash() {
 
     app.apply_loaded_game(save).test_value();
 
-    assert!(
-        app.audio
-            .as_ref()
-            .expect("test audio")
-            .options
-            .music_enabled,
-        "RXMusic remains an independent configured option"
-    );
-    assert!(app.runtime_music_enabled, "RXMusic force-enables resume");
-    assert!(app.audio.as_ref().expect("test audio").music_is_playing());
-    assert!(app.runtime_flash_message.is_none());
+    main_assert!(app.audio.as_ref().expect("test audio").options.music_enabled, "RXMusic remains an independent configured option");
+    main_assert!(app.runtime_music_enabled, "RXMusic force-enables resume");
+    main_assert!(app.audio.as_ref().expect("test audio").music_is_playing());
+    main_assert!(app.runtime_flash_message.is_none());
 }
 
 #[test]
@@ -5125,40 +4320,37 @@ fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
     saved_player.message_status = 2;
     saved_player.view_wealth = 5;
     saved_player.no_elimination_check = true;
-    let save = SavedGameFile {
-        version: SAVE_FILE_VERSION,
-        saved_at_seconds: 0,
-        scenario: SavedScenarioInfo::from_frontend(
-            &scenario,
-            &app.scenario_label,
-            app.fallback_ground,
-        ),
-        definition_load: app.active_definition_load.clone(),
-        focus_id: app.focus_id,
-        user_label: Some("local control restore".to_string()),
-        runtime_music_enabled: Some(app.runtime_music_enabled),
-        source_save_player_infos: None,
-        source_string_table: None,
-        source_title_png: None,
-        engine_state,
-    };
+    let save = saves_fixture!(
+        saved_game:
+            SAVE_FILE_VERSION,
+            SavedScenarioInfo::from_frontend(
+                        &scenario,
+                        &app.scenario_label,
+                        app.fallback_ground,
+                    ),
+            app.active_definition_load.clone(),
+            app.focus_id,
+            Some("local control restore".to_string()),
+            Some(app.runtime_music_enabled),
+            engine_state,
+    );
 
     app.apply_loaded_game(save).test_value();
 
     let player = app.engine.test_player(owner);
-    assert_eq!((player.control_set(), player.mouse_control()), (0, 1));
-    assert_eq!(player.at_client(), clonk_engine::PlayerAtClient::HOST);
-    assert_eq!(player.at_client_name(), "Local");
-    assert!(!player.control.control_style);
-    assert!(!player.control.auto_context_menu);
-    assert_eq!(player.control.last_com, 0);
-    assert_eq!(player.control.last_com_down_double, 1);
-    assert_eq!(player.control.pressed_coms, 0);
-    assert_eq!(player.message_status(), 1);
-    assert_eq!(player.view_wealth(), 4);
-    assert!(player.no_elimination_check());
-    assert_eq!(app.local_controls.mouse_owner(), Some(owner));
-    assert!(app.mouse_control);
+    main_assert_eq!((player.control_set(), player.mouse_control()) => (0, 1));
+    main_assert_eq!(player.at_client() => clonk_engine::PlayerAtClient::HOST);
+    main_assert_eq!(player.at_client_name() => "Local");
+    main_assert!(!player.control.control_style);
+    main_assert!(!player.control.auto_context_menu);
+    main_assert_eq!(player.control.last_com => 0);
+    main_assert_eq!(player.control.last_com_down_double => 1);
+    main_assert_eq!(player.control.pressed_coms => 0);
+    main_assert_eq!(player.message_status() => 1);
+    main_assert_eq!(player.view_wealth() => 4);
+    main_assert!(player.no_elimination_check());
+    main_assert_eq!(app.local_controls.mouse_owner() => Some(owner));
+    main_assert!(app.mouse_control);
 }
 
 #[test]
@@ -5168,43 +4360,41 @@ fn saved_game_skips_removed_current_player_without_deleting_objects() {
     let info_id = app.engine.test_player(owner).player_info_id();
     let object = app.engine.snapshot().objects.first().test_value().id;
     app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        .apply(clonk_engine::PlayerInfoControlData::new(
+            0,
+            0,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: info_id,
                 flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
                     | clonk_engine::PLAYER_INFO_FLAG_REMOVED,
                 ..Default::default()
             }],
-            ..Default::default()
-        });
+            -1,
+        ));
     let scenario = app
         .active_scenario
         .clone()
         .unwrap_or_else(FrontendScenario::fallback);
-    let save = SavedGameFile {
-        version: SAVE_FILE_VERSION,
-        saved_at_seconds: 0,
-        scenario: SavedScenarioInfo::from_frontend(
-            &scenario,
-            &app.scenario_label,
-            app.fallback_ground,
-        ),
-        definition_load: app.active_definition_load.clone(),
-        focus_id: app.focus_id,
-        user_label: Some("removed player skipped".to_string()),
-        runtime_music_enabled: Some(app.runtime_music_enabled),
-        source_save_player_infos: None,
-        source_string_table: None,
-        source_title_png: None,
-        engine_state: app.engine.capture_state(),
-    };
+    let save = saves_fixture!(
+        saved_game:
+            SAVE_FILE_VERSION,
+            SavedScenarioInfo::from_frontend(
+                        &scenario,
+                        &app.scenario_label,
+                        app.fallback_ground,
+                    ),
+            app.active_definition_load.clone(),
+            app.focus_id,
+            Some("removed player skipped".to_string()),
+            Some(app.runtime_music_enabled),
+            app.engine.capture_state(),
+    );
 
     app.apply_loaded_game(save).test_value();
 
-    assert!(app.engine.player(owner).is_none());
+    main_assert!(app.engine.player(owner).is_none());
     let object = app.engine.test_object_snapshot(object);
-    assert_eq!(object.owner, clonk_engine::OWNER_NONE);
+    main_assert_eq!(object.owner => clonk_engine::OWNER_NONE);
 }
 
 #[test]
@@ -5218,7 +4408,7 @@ fn always_debug_survives_rust_saves_and_rearms_restored_rounds() {
     ] {
         let mut engine = Engine::new();
         arm_graphical_engine_debug_mode(&mut engine, config);
-        assert_eq!(engine.debug_mode(), expected);
+        main_assert_eq!(engine.debug_mode() => expected);
     }
 
     let enabled_config = b"[General]\nDebugMode=true\n";
@@ -5227,16 +4417,16 @@ fn always_debug_survives_rust_saves_and_rearms_restored_rounds() {
     let state = allowed.capture_state();
     let mut restored = Engine::new();
     restored.restore_state(&state).test_value();
-    assert!(!restored.debug_mode(), "DebugMode is not serialized");
+    main_assert!(!restored.debug_mode(), "DebugMode is not serialized");
     arm_graphical_engine_debug_mode(&mut restored, enabled_config);
-    assert!(restored.debug_mode(), "round restore reapplies AlwaysDebug");
+    main_assert!(restored.debug_mode(), "round restore reapplies AlwaysDebug");
     let mut denied = Engine::new();
     denied.set_allow_debug(false);
     arm_graphical_engine_debug_mode(&mut denied, enabled_config);
-    assert!(!denied.debug_mode());
+    main_assert!(!denied.debug_mode());
     let mut disabled = Engine::new();
     arm_graphical_engine_debug_mode(&mut disabled, b"");
-    assert!(!disabled.debug_mode());
+    main_assert!(!disabled.debug_mode());
 
     let _lock = env_lock().lock();
     reset_cached_app_paths();
@@ -5254,13 +4444,10 @@ fn always_debug_survives_rust_saves_and_rearms_restored_rounds() {
 
     persist_config_value(&paths, "Network", "Comment", "preserve debug").test_value();
     let saved = fs::read(paths.config_file()).test_value();
-    assert_eq!(
-        clonk_app_netplay::configured_native_boolean(&saved, "General", "DebugMode"),
-        Some(true)
-    );
+    main_assert_eq!(clonk_app_netplay::configured_native_boolean(&saved, "General", "DebugMode") => Some(true));
     let mut next_round = Engine::new();
     arm_configured_graphical_engine_debug_mode(&mut next_round, Some(&paths));
-    assert!(next_round.debug_mode());
+    main_assert!(next_round.debug_mode());
     reset_cached_app_paths();
 }
 
@@ -5289,13 +4476,8 @@ fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
     app.active_scenario = Some(old_style.clone());
 
     let old_slot = configured_folder.join("Missions.c4f").join("Missions1.c4s");
-    assert_eq!(app.savegame_slot_path(1), old_slot);
-    assert_eq!(
-        app.savegame_slot_path(10),
-        configured_folder
-            .join("Missions.c4f")
-            .join("Missions10.c4s")
-    );
+    main_assert_eq!(app.savegame_slot_path(1) => old_slot);
+    main_assert_eq!(app.savegame_slot_path(10) => configured_folder.join("Missions.c4f").join("Missions10.c4s"));
 
     let mut new_style = old_style;
     new_style.identifier = "AnotherAlias.c4f/AlsoWrong.c4s".to_string();
@@ -5305,28 +4487,16 @@ fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
             .join("planet/Tutorial.c4f/Tutorial007.c4s"),
     );
     app.active_scenario = Some(new_style);
-    assert_eq!(
-        app.savegame_slot_path(10),
-        configured_folder
-            .join("Tutorial.c4f")
-            .join("Tutorial10.c4s")
-    );
+    main_assert_eq!(app.savegame_slot_path(10) => configured_folder.join("Tutorial.c4f").join("Tutorial10.c4s"));
 
     let mut loose_numeric = FrontendScenario::fallback();
     loose_numeric.identifier = "Loose/01.c4s".to_string();
     loose_numeric.path = Some(paths.install_root().join("planet/Loose/01.c4s"));
     app.active_scenario = Some(loose_numeric);
-    assert_eq!(
-        app.savegame_slot_path(1),
-        configured_folder.join("01.c4f").join("011.c4s"),
-        "a regular directory is not Game.pParentGroup"
-    );
+    main_assert_eq!(app.savegame_slot_path(1) => configured_folder.join("01.c4f").join("011.c4s"), "a regular directory is not Game.pParentGroup");
 
     persist_config_value(&paths, "General", "SaveGameFolder", "Relative Saves.c4f").test_value();
-    assert_eq!(
-        configured_savegame_directory(Some(&paths)),
-        paths.install_root().join("Relative Saves.c4f")
-    );
+    main_assert_eq!(configured_savegame_directory(Some(&paths)) => paths.install_root().join("Relative Saves.c4f"));
     persist_config_value(
         &paths,
         "General",
@@ -5335,8 +4505,8 @@ fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
     )
     .test_value();
 
-    assert!(looks_like_cpp_integer("+999999999999999999999999"));
-    assert!(looks_like_cpp_integer("-01"));
+    main_assert!(looks_like_cpp_integer("+999999999999999999999999"));
+    main_assert!(looks_like_cpp_integer("-01"));
 }
 
 #[test]
@@ -5380,13 +4550,9 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
         .iter()
         .find(|entry| entry.path.as_deref() == Some(save_root.as_path()))
         .test_value();
-    assert_eq!(savegames.title, "Savegames");
-    assert_eq!(savegames.kind, ScenarioKind::Folder);
-    assert_eq!(
-        scensel_entry_icon(savegames),
-        0,
-        "a .c4f save playlist uses the classic yellow folder phase"
-    );
+    main_assert_eq!(savegames.title => "Savegames");
+    main_assert_eq!(savegames.kind => ScenarioKind::Folder);
+    main_assert_eq!(scensel_entry_icon(savegames) => 0, "a .c4f save playlist uses the classic yellow folder phase");
     let mission = savegames
         .children
         .iter()
@@ -5397,8 +4563,8 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
         .iter()
         .find(|entry| entry.path.as_deref() == Some(saved_scenario.as_path()))
         .test_value();
-    assert_eq!(resume.title, "Resume cave mission");
-    assert_eq!(resume.kind, ScenarioKind::Scenario);
+    main_assert_eq!(resume.title => "Resume cave mission");
+    main_assert_eq!(resume.kind => ScenarioKind::Scenario);
 
     let player_root = fixture.path().join("Players");
     fs::create_dir(&player_root).test_value();
@@ -5409,11 +4575,7 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
     app.menu_state = MenuState::new(menu, entries.clone());
     app.scenario_catalog = build_scenario_catalog(&entries);
     app.open_scenario_browser();
-    let summary = |entry: &FrontendScenario| clonk_frontend::ScenarioSummary {
-        identifier: entry.identifier.clone(),
-        title: entry.title.clone(),
-        kind: entry.kind,
-    };
+    let summary = |entry: &FrontendScenario| saves_fixture!(scenario: entry.identifier.clone(), entry.title.clone(), entry.kind);
     app.process_menu_actions(vec![StartupMenuAction::OpenEntry(summary(savegames))])
         .test_value();
     app.process_menu_actions(vec![StartupMenuAction::OpenEntry(summary(mission))])
@@ -5422,23 +4584,18 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
         .process_menu_actions(vec![StartupMenuAction::StartScenario(summary(resume))])
         .test_value();
     let selected = selected.test_value();
-    assert_eq!(
+    main_assert_eq!(
         app.scenario_catalog
             .get(&selected)
-            .and_then(|entry| entry.path.as_deref()),
+            .and_then(|entry| entry.path.as_deref()) =>
         Some(saved_scenario.as_path()),
         "the selected row resumes from the stored native C4Group"
     );
 
     app.handle_menu_actions(vec![StartupMenuAction::StartScenario(summary(resume))])
         .test_value();
-    assert_eq!(app.mode, AppMode::Loading);
-    assert_eq!(
-        app.loading_state
-            .as_ref()
-            .and_then(|loading| loading.scenario.path.as_deref()),
-        Some(saved_scenario.as_path())
-    );
+    main_assert_eq!(app.mode => AppMode::Loading);
+    main_assert_eq!(app.loading_state.as_ref().and_then(|loading| loading.scenario.path.as_deref()) => Some(saved_scenario.as_path()));
     reset_cached_app_paths();
 }
 
@@ -5463,10 +4620,7 @@ fn savegame_slot_probe_uses_c4group_validity() {
     scenario.path = Some(fixture.path().join("Probe.c4s"));
     app.active_scenario = Some(scenario);
     app.network_is_league = true;
-    assert!(
-        app.can_quick_save(),
-        "offline saves ignore retained league state"
-    );
+    main_assert!(app.can_quick_save(), "offline saves ignore retained league state");
 
     let slot_root = save_root.join("Probe.c4f");
     fs::create_dir_all(&slot_root).test_value();
@@ -5480,11 +4634,11 @@ fn savegame_slot_probe_uses_c4group_validity() {
     fs::write(slot_root.join("Probe4.c4s"), [0x1f, 0x8b, 0x08]).test_value();
 
     let slots = app.savegame_slots();
-    assert!(slots[0].free, "plain files are not occupied C4Groups");
-    assert!(!slots[1].free, "packed C4Groups occupy slots");
-    assert!(!slots[2].free, "folder C4Groups occupy slots");
-    assert!(slots[3].free, "malformed packed files remain free");
-    assert!(slots[4..].iter().all(|slot| slot.free));
+    main_assert!(slots[0].free, "plain files are not occupied C4Groups");
+    main_assert!(!slots[1].free, "packed C4Groups occupy slots");
+    main_assert!(!slots[2].free, "folder C4Groups occupy slots");
+    main_assert!(slots[3].free, "malformed packed files remain free");
+    main_assert!(slots[4..].iter().all(|slot| slot.free));
 }
 
 #[test]
@@ -5494,32 +4648,21 @@ fn save_demo_folder_controls_recording_directory() {
     let absolute_records = fixture.path().join("Absolute Records.c4f");
     let (_guard, paths) = exact_loader_test_paths(&user_data, None);
 
-    assert_eq!(
-        paths.recordings_dir(),
-        paths.install_root().join("Records.c4f")
-    );
+    main_assert_eq!(paths.recordings_dir() => paths.install_root().join("Records.c4f"));
 
     persist_config_value(&paths, "General", "SaveDemoFolder", "Relative Records.c4f").test_value();
     let relative_records = paths.install_root().join("Relative Records.c4f");
-    assert_eq!(paths.recordings_dir(), relative_records);
+    main_assert_eq!(paths.recordings_dir() => relative_records);
 
     let app = GameApp::new(
         320,
         200,
         AudioOptions::default(),
         Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Player".to_string(),
-            network: None,
-            record_enabled: true,
-        },
+        test_runtime_config_with("Player", true),
     )
     .test_value();
-    assert_eq!(
-        app.recordings_dir.as_deref(),
-        Some(relative_records.as_path())
-    );
+    main_assert_eq!(app.recordings_dir.as_deref() => Some(relative_records.as_path()));
 
     persist_config_value(
         &paths,
@@ -5528,7 +4671,7 @@ fn save_demo_folder_controls_recording_directory() {
         absolute_records.to_string_lossy().into_owned(),
     )
     .test_value();
-    assert_eq!(paths.recordings_dir(), absolute_records);
+    main_assert_eq!(paths.recordings_dir() => absolute_records);
 }
 
 #[test]
@@ -5537,10 +4680,7 @@ fn game_app_uses_selected_user_root_for_scenario_discovery() {
     let selected_user = fixture.path().join("selected-user");
     let ambient_user = fixture.path().join("ambient-user");
     let config_file = fixture.path().join("selected.config");
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
+    let repository = test_repository_root();
     fs::write(
         &config_file,
         format!(
@@ -5570,14 +4710,9 @@ fn game_app_uses_selected_user_root_for_scenario_discovery() {
     let _ambient_guard = EnvGuard::set(&[("LC_USER_DATA_DIR", Some(&ambient_user))]);
     let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
 
-    assert_eq!(paths.user_data_dir(), selected_user);
-    assert_eq!(paths.config_file(), config_file);
-    assert_eq!(
-        app.scenario_catalog
-            .get("L016Configured.c4s")
-            .map(|scenario| scenario.title.as_str()),
-        Some("Selected User Scenario")
-    );
+    main_assert_eq!(paths.user_data_dir() => selected_user);
+    main_assert_eq!(paths.config_file() => config_file);
+    main_assert_eq!(app.scenario_catalog.get("L016Configured.c4s").map(|scenario| scenario.title.as_str()) => Some("Selected User Scenario"));
 }
 
 #[test]
@@ -5597,14 +4732,8 @@ fn quick_save_round_trips_state() {
         for _ in 0..5 {
             app.test_update();
         }
-        assert_eq!(
-            app.snapshot.game_time, 0,
-            "headless frame updates do not synthesize real-time pulses"
-        );
-        assert!(
-            app.sec1_timer().expect("explicit saved-game clock pulse"),
-            "explicit pulse consumes the tick latch"
-        );
+        main_assert_eq!(app.snapshot.game_time => 0, "headless frame updates do not synthesize real-time pulses");
+        main_assert!(app.sec1_timer().expect("explicit saved-game clock pulse"), "explicit pulse consumes the tick latch");
         let saved_frame = app.snapshot.frame;
         let saved_game_time = app.snapshot.game_time;
         let saved_player_info_id = app.engine.test_player(app.local_owner).player_info_id();
@@ -5613,51 +4742,27 @@ fn quick_save_round_trips_state() {
             .insert(saved_player_info_id, saved_big_icon.clone());
 
         app.quick_save().test_value();
-        assert!(
-            app.last_save_path
-                .as_ref()
-                .map(|path| path.ends_with(QUICK_SAVE_FILE))
-                .unwrap_or(false),
-            "quick save should note the save path"
-        );
+        main_assert!(app.last_save_path.as_ref().map(|path| path.ends_with(QUICK_SAVE_FILE)).unwrap_or(false), "quick save should note the save path");
         let thumbnail_path = resolve_save_directory().join("quicksave.png");
-        assert!(
-            thumbnail_path.exists(),
-            "expected quick save thumbnail to be written"
-        );
+        main_assert!(thumbnail_path.exists(), "expected quick save thumbnail to be written");
 
         for _ in 0..3 {
             app.test_update();
         }
-        assert!(
-            app.sec1_timer().expect("later saved-game clock pulse"),
-            "later pulse advances Game.Time"
-        );
-        assert!(
-            app.snapshot.frame > saved_frame,
-            "frame should advance after save"
-        );
-        assert!(app.snapshot.game_time > saved_game_time);
+        main_assert!(app.sec1_timer().expect("later saved-game clock pulse"), "later pulse advances Game.Time");
+        main_assert!(app.snapshot.frame > saved_frame, "frame should advance after save");
+        main_assert!(app.snapshot.game_time > saved_game_time);
 
         app.quick_load().test_value();
-        assert_eq!(
-            app.snapshot.frame, saved_frame,
-            "quick load should restore saved frame"
-        );
-        assert_eq!(
-            app.snapshot.game_time, saved_game_time,
-            "quick load should restore Game.Time"
-        );
-        assert_eq!(app.game_time_seconds(), saved_game_time.max(0) as u64);
-        assert_eq!(
-            app.runtime_player_big_icons.get(&saved_player_info_id),
+        main_assert_eq!(app.snapshot.frame => saved_frame, "quick load should restore saved frame");
+        main_assert_eq!(app.snapshot.game_time => saved_game_time, "quick load should restore Game.Time");
+        main_assert_eq!(app.game_time_seconds() => saved_game_time.max(0) as u64);
+        main_assert_eq!(
+            app.runtime_player_big_icons.get(&saved_player_info_id) =>
             Some(&saved_big_icon),
             "in-round restore keeps C4Player::BigIcon by stable player-info ID"
         );
-        assert!(
-            matches!(app.mode, AppMode::Running),
-            "quick load should keep the game running"
-        );
+        main_assert!(matches!(app.mode, AppMode::Running), "quick load should keep the game running");
 
         cleanup_quicksave_file();
     }
@@ -5727,14 +4832,8 @@ fn quick_save_persists_across_sessions() {
             let frame_before_save = app.snapshot.frame;
 
             app.quick_save().test_value();
-            assert!(
-                quicksave_path.exists(),
-                "expected quick save file to be written"
-            );
-            assert!(
-                quicksave_path.with_extension("png").exists(),
-                "expected quick save thumbnail to be written"
-            );
+            main_assert!(quicksave_path.exists(), "expected quick save file to be written");
+            main_assert!(quicksave_path.with_extension("png").exists(), "expected quick save thumbnail to be written");
 
             frame_before_save
         };
@@ -5747,29 +4846,14 @@ fn quick_save_persists_across_sessions() {
             // asserting the fresh session is at the menu (not mid-game).
             wait_for_menu(&mut app);
 
-            assert!(
-                app.last_save_path
-                    .as_ref()
-                    .map(|path| path.ends_with(QUICK_SAVE_FILE))
-                    .unwrap_or(false),
-                "expected quick save path to be remembered"
-            );
-            assert!(
-                matches!(app.mode, AppMode::Menu),
-                "new session should start in menu"
-            );
+            main_assert!(app.last_save_path.as_ref().map(|path| path.ends_with(QUICK_SAVE_FILE)).unwrap_or(false), "expected quick save path to be remembered");
+            main_assert!(matches!(app.mode, AppMode::Menu), "new session should start in menu");
 
             app.quick_load().test_value();
 
-            assert!(
-                matches!(app.mode, AppMode::Running),
-                "quick load should enter running mode"
-            );
-            assert_eq!(
-                app.snapshot.frame, saved_frame,
-                "quick load should restore the saved frame"
-            );
-            assert!(
+            main_assert!(matches!(app.mode, AppMode::Running), "quick load should enter running mode");
+            main_assert_eq!(app.snapshot.frame => saved_frame, "quick load should restore the saved frame");
+            main_assert!(
                 app.active_scenario
                     .as_ref()
                     .and_then(|scenario| scenario.path.as_ref())
@@ -5795,11 +4879,7 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
     let user_data = tempdir();
     fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
     fs::write(install.path().join("planet/System.c4g/LanguageUS.txt"), b"IDS_MSG_PLAYERASSIGNMENT=Participant %s will continue for player %s from the savegame.\n          IDS_MSG_FREESAVEGAMEPLRS=Player assignment\n          IDS_MSG_DONTSHOW=&Don't display this message in the future.\n").test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
 
@@ -5821,22 +4901,16 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
         .map(|table| table.entries)
         .unwrap_or_default();
     app.report_offline_wild_takeovers(&takeovers).test_value();
-    assert_eq!(app.message_dialogs.len(), 2);
-    assert_eq!(
-        app.message_dialogs[0].state.message(),
-        "Participant Carol will continue for player Ghost from the savegame."
-    );
-    assert_eq!(app.message_dialogs[0].state.caption(), "Player assignment");
-    assert_eq!(
-        app.message_dialogs[1].state.message(),
-        "Participant Dave will continue for player Stranger from the savegame."
-    );
+    main_assert_eq!(app.message_dialogs.len() => 2);
+    main_assert_eq!(app.message_dialogs[0].state.message() => "Participant Carol will continue for player Ghost from the savegame.");
+    main_assert_eq!(app.message_dialogs[0].state.caption() => "Player assignment");
+    main_assert_eq!(app.message_dialogs[1].state.message() => "Participant Dave will continue for player Stranger from the savegame.");
 
     // The checkbox persists Startup.HideMsgPlrTakeOver.
     // The `&Don't display...` mnemonic is how the native checkbox is toggled.
-    assert_eq!(app.message_dialogs[0].state.checkbox_checked(), Some(false));
+    main_assert_eq!(app.message_dialogs[0].state.checkbox_checked() => Some(false));
     app.message_dialogs[0].state.handle_hotkey('D');
-    assert_eq!(app.message_dialogs[0].state.checkbox_checked(), Some(true));
+    main_assert_eq!(app.message_dialogs[0].state.checkbox_checked() => Some(true));
     app.persist_message_dialog_checkbox_changes(0);
     // `ShowMessageModal` writes the `HideMsg*` flag through its by-pointer
     // argument and no call site saves (C4ChatDlg.cpp:624; no `Config.Save()` in
@@ -5844,10 +4918,7 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
     // surface. This test's subject is the stored value, so it flushes here.
     app.flush_deferred_config();
     let config = Config::load(paths.config_file()).test_value();
-    assert_eq!(
-        config.get_in(Some("Startup"), "HideMsgPlrTakeOver"),
-        Some("1")
-    );
+    main_assert_eq!(config.get_in(Some("Startup"), "HideMsgPlrTakeOver") => Some("1"));
 
     // With the preference set, later sessions log but show nothing.
     let mut hidden = new_menu_app(320, 200);
@@ -5855,13 +4926,13 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
     hidden
         .report_offline_wild_takeovers(&takeovers)
         .test_value();
-    assert!(hidden.message_dialogs.is_empty());
+    main_assert!(hidden.message_dialogs.is_empty());
 
     // An empty set never opens a dialog at all.
     let mut none = new_menu_app(320, 200);
     none.app_paths = Some(paths.clone());
     none.report_offline_wild_takeovers(&[]).test_value();
-    assert!(none.message_dialogs.is_empty());
+    main_assert!(none.message_dialogs.is_empty());
 }
 
 /// `RestoreSavegameInfos` logs an unassociated current participant only for a
@@ -5872,9 +4943,10 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
 fn savegame_resume_logs_localized_unassociated_player_removals() {
     let native = |text: &str| LegacyCString::from_bytes(text.as_bytes().to_vec()).test_value();
     let mut current = ControlPlayerInfoRegistry::default();
-    current.apply(clonk_engine::PlayerInfoControlData {
-        client_id: 0,
-        players: vec![
+    current.apply(clonk_engine::PlayerInfoControlData::new(
+        0,
+        0,
+        vec![
             clonk_engine::ControlPlayerInfoEntry {
                 name: native("Resumed participant"),
                 savegame_player: 7,
@@ -5885,23 +4957,11 @@ fn savegame_resume_logs_localized_unassociated_player_removals() {
                 ..Default::default()
             },
         ],
-        ..Default::default()
-    });
+        -1,
+    ));
     let restore = vec![
-        clonk_engine::ControlPlayerInfoEntry {
-            id: 7,
-            name: native("Resumed player"),
-            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
-            game_number: 7,
-            ..Default::default()
-        },
-        clonk_engine::ControlPlayerInfoEntry {
-            id: 8,
-            name: native("Unclaimed player"),
-            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
-            game_number: 8,
-            ..Default::default()
-        },
+        saves_fixture!(player_info_id_name_game_number: 7, native("Resumed player"), 7),
+        saves_fixture!(player_info_id_name_game_number: 8, native("Unclaimed player"), 8),
     ];
     let resources = HashMap::from([
         (
@@ -5920,17 +4980,8 @@ fn savegame_resume_logs_localized_unassociated_player_removals() {
 
     let (before, after) = savegame_player_removal_log_lines(&current, &restore, true, &resources);
 
-    assert_eq!(
-        before,
-        vec![
-            "localized participant New participant".to_string(),
-            "localized remaining 1".to_string(),
-        ]
-    );
-    assert_eq!(
-        after,
-        vec!["localized removed Unclaimed player".to_string()]
-    );
+    main_assert_eq!(before => vec!["localized participant New participant".to_string(), "localized remaining 1".to_string(),]);
+    main_assert_eq!(after => vec!["localized removed Unclaimed player".to_string()]);
 
     let capture = clonk_logging::ConsoleLogCapture::default();
     let subscriber = tracing_subscriber::fmt()
@@ -5952,8 +5003,8 @@ fn savegame_resume_logs_localized_unassociated_player_removals() {
         .test_value();
     });
     let logged = capture.take();
-    assert_eq!(
-        logged.lines().map(str::to_owned).collect::<Vec<_>>(),
+    main_assert_eq!(
+        logged.lines().map(str::to_owned).collect::<Vec<_>>() =>
         vec![
             "localized participant New participant".to_string(),
             "localized remaining 1".to_string(),
@@ -5963,9 +5014,6 @@ fn savegame_resume_logs_localized_unassociated_player_removals() {
 
     let (regular_before, regular_after) =
         savegame_player_removal_log_lines(&current, &restore, false, &resources);
-    assert_eq!(regular_before, vec!["localized remaining 1".to_string()]);
-    assert_eq!(
-        regular_after,
-        vec!["localized removed Unclaimed player".to_string()]
-    );
+    main_assert_eq!(regular_before => vec!["localized remaining 1".to_string()]);
+    main_assert_eq!(regular_after => vec!["localized removed Unclaimed player".to_string()]);
 }

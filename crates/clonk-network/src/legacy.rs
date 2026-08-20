@@ -204,7 +204,7 @@ pub struct JoinDataIdListEntry {
 }
 
 /// The synchronized `C4GameParameters` payload carried by JoinData.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JoinGameParametersEnvelope {
     pub random_seed: i32,
     pub startup_player_count: i32,
@@ -237,11 +237,7 @@ pub fn decode_join_data_envelope(data: &[u8]) -> Result<JoinDataEnvelope, Legacy
     let mut reader = Reader::new(data);
     let client_id = reader.read_int32()?;
     let start_control_tick = reader.read_int32()?;
-    let status = NetworkStatus {
-        state: reader.read_u8()?,
-        control_mode: reader.read_int32()?,
-        target_tick: -1,
-    };
+    let status = NetworkStatus::new(reader.read_u8()?, reader.read_int32()?, -1);
     let dynamic = reader.read_network_resource_core()?;
     let parameters_data = reader
         .data
@@ -600,11 +596,7 @@ pub fn decode_player_info_update_payload(
     }
     let mut reader = Reader::new(payload);
     let (client_id, flags, players) = decode_player_info_contents(&mut reader)?;
-    Ok(PlayerInfoUpdateRequest {
-        client_id,
-        flags,
-        players,
-    })
+    Ok(PlayerInfoUpdateRequest::new(client_id, flags, players))
 }
 
 fn decode_control_list(
@@ -885,23 +877,17 @@ fn decode_client_update(
         0
     };
     let by_client = reader.read_int32()?;
-    Ok(EngineControlPacket::ClientUpdate(ClientUpdateControlData {
-        update_type,
-        client_id,
-        data,
-        by_client,
-    }))
+    Ok(EngineControlPacket::ClientUpdate(
+        ClientUpdateControlData::new(update_type, client_id, data, by_client),
+    ))
 }
 
 fn decode_player_info(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
     let (client_id, flags, players) = decode_player_info_contents(reader)?;
     let by_client = reader.read_int32()?;
-    Ok(EngineControlPacket::PlayerInfo(PlayerInfoControlData {
-        client_id,
-        flags,
-        players,
-        by_client,
-    }))
+    Ok(EngineControlPacket::PlayerInfo(PlayerInfoControlData::new(
+        client_id, flags, players, by_client,
+    )))
 }
 
 fn decode_player_info_contents(
@@ -1018,12 +1004,9 @@ fn decode_player_control(
     let command = reader.read_int32()?;
     let data = reader.read_int32()?;
     let by_client = reader.read_int32()?;
-    Ok(EngineControlPacket::PlayerControl(PlayerControlData {
-        player,
-        command,
-        data,
-        by_client,
-    }))
+    Ok(EngineControlPacket::PlayerControl(PlayerControlData::new(
+        player, command, data, by_client,
+    )))
 }
 
 fn decode_player_select(
@@ -2656,12 +2639,7 @@ mod tests {
             Ok(message_bytes.to_vec())
         );
 
-        let following = EngineControlPacket::PlayerControl(PlayerControlData {
-            player: 5,
-            command: 6,
-            data: 7,
-            by_client: 4,
-        });
+        let following = EngineControlPacket::PlayerControl(PlayerControlData::new(5, 6, 7, 4));
         let frame = LegacyControlFrame {
             client_id: 4,
             tick: 9,
@@ -2961,48 +2939,24 @@ mod tests {
     }
 
     fn minimal_join_game_parameters() -> JoinGameParametersEnvelope {
-        let empty_players = PlayerInfoListSnapshot {
-            last_player_id: 0,
-            clients: Vec::new(),
-        };
+        let empty_players = PlayerInfoListSnapshot::default();
         JoinGameParametersEnvelope {
-            random_seed: 0,
-            startup_player_count: 0,
             max_players: 8,
-            use_fair_crew: false,
-            fair_crew_forced: false,
-            fair_crew_strength: 0,
             allow_debug: true,
             is_network_game: true,
             control_rate: 1,
-            auto_frame_skip: false,
-            rules: Vec::new(),
-            goals: Vec::new(),
-            league: LegacyCString::default(),
             league_address: LegacyCString::default(),
             title: LegacyCString::from_bytes(b"No title".to_vec()).unwrap(),
-            scenario: NetworkResourceCore::default(),
-            game_resources: Vec::new(),
             player_infos: empty_players.clone(),
             restore_player_infos: empty_players,
             teams: JoinTeamListSnapshot {
                 active: 1,
-                custom: 0,
                 allow_hostility_change: 1,
-                allow_team_switch: 0,
                 auto_generate_teams: 1,
-                last_team_id: 0,
-                team_distribution: 0,
-                team_colors: 0,
-                max_script_players: 0,
-                script_player_names: LegacyCString::default(),
-                random_team_count: 0,
-                teams: Vec::new(),
+                ..Default::default()
             },
-            clients: JoinClientRegistrySnapshot {
-                clients: Vec::new(),
-                local_client_id: None,
-            },
+            clients: JoinClientRegistrySnapshot::default(),
+            ..Default::default()
         }
     }
 
@@ -3204,12 +3158,7 @@ mod tests {
     fn build_control_list(controls: &[[i32; 4]]) -> Vec<u8> {
         let mut payload = Vec::new();
         for control in controls {
-            let data = PlayerControlData {
-                player: control[0],
-                command: control[1],
-                data: control[2],
-                by_client: control[3],
-            };
+            let data = PlayerControlData::new(control[0], control[1], control[2], control[3]);
             let mut encoded = Vec::new();
             super::encode_player_control(&mut encoded, &data);
             payload.extend(encoded);
@@ -3319,12 +3268,7 @@ mod tests {
             league_progress_data: LegacyCString::default(),
             resource: None,
         };
-        let dirty_data = PlayerInfoControlData {
-            client_id: 7,
-            flags: 0,
-            players: vec![dirty_player],
-            by_client: 7,
-        };
+        let dirty_data = PlayerInfoControlData::new(7, 0, vec![dirty_player], 7);
         let dirty = EngineControlPacket::PlayerInfo(dirty_data.clone());
         let wire = encode_control_entry_payload(&dirty).expect("encode dirty PlayerInfo fixture");
 
@@ -3349,14 +3293,14 @@ mod tests {
 
         // PID_PlayerInfoUpdReq carries the same C4ClientPlayerInfos body and
         // therefore reaches the same C4PlayerInfo validation path.
-        let dirty_update = PlayerInfoUpdateRequest {
-            client_id: 7,
-            flags: 0,
-            players: match dirty {
+        let dirty_update = PlayerInfoUpdateRequest::new(
+            7,
+            0,
+            match dirty {
                 EngineControlPacket::PlayerInfo(data) => data.players,
                 _ => unreachable!(),
             },
-        };
+        );
         let update_wire =
             encode_player_info_update_payload(&dirty_update).expect("encode update fixture");
         let decoded_update =
@@ -3670,18 +3614,9 @@ mod tests {
 
     #[test]
     fn aggregate_complete_control_is_ordered_and_has_one_list_terminator() {
-        let host_control = EngineControlPacket::PlayerControl(PlayerControlData {
-            player: 0,
-            command: 2,
-            data: 10,
-            by_client: 0,
-        });
-        let client_control = EngineControlPacket::PlayerControl(PlayerControlData {
-            player: 1,
-            command: 5,
-            data: 20,
-            by_client: 1,
-        });
+        let host_control = EngineControlPacket::PlayerControl(PlayerControlData::new(0, 2, 10, 0));
+        let client_control =
+            EngineControlPacket::PlayerControl(PlayerControlData::new(1, 5, 20, 1));
         let packet = |client_id, timestamp_ms, control| {
             encode_control_packet(&LegacyControlFrame {
                 client_id,
@@ -3728,12 +3663,7 @@ mod tests {
     #[test]
     fn aggregate_strips_each_control_packet_trailing_suffix() {
         let control = |player, by_client| {
-            EngineControlPacket::PlayerControl(PlayerControlData {
-                player,
-                command: 5,
-                data: 0,
-                by_client,
-            })
+            EngineControlPacket::PlayerControl(PlayerControlData::new(player, 5, 0, by_client))
         };
         let packet = |client_id: ClientId, control: EngineControlPacket| {
             let mut payload = encode_control_list_payload(std::slice::from_ref(&control))

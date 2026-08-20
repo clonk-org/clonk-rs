@@ -4,37 +4,21 @@ use std::sync::Arc;
 
 use clonk_script::{Engine, Script, Value};
 
-crate::support::compile_case!(
-    simple_reference_parameter,
-    r#"func SetValues(&x, &y) { x = 10; y = 20; }"#
-);
+crate::support::compile_cases! {
+    simple_reference_parameter: r#"func SetValues(&x, &y) { x = 10; y = 20; }"#;
 
-crate::support::compile_case!(
-    reference_with_type_annotation,
-    r#"func SetValues(int &x, int &y) { x = 10; y = 20; }"#
-);
+    reference_with_type_annotation: r#"func SetValues(int &x, int &y) { x = 10; y = 20; }"#;
 
-crate::support::compile_case!(
-    mixed_reference_and_value_parameters,
-    r#"func GetSum(a, b, &result) { result = a + b; }"#
-);
+    mixed_reference_and_value_parameters: r#"func GetSum(a, b, &result) { result = a + b; }"#;
 
 // The actual pattern from MGWP script
-crate::support::compile_case!(
-    mgwp_pattern,
-    r#"private func GetWarpPosition(&x, &y) { x = 10; y = 20; }"#
-);
+    mgwp_pattern: r#"private func GetWarpPosition(&x, &y) { x = 10; y = 20; }"#;
 
-crate::support::compile_case!(
-    reference_parameter_with_object_type,
-    r#"func GetObject(object &obj) { obj = FindObject(CLNK); }"#
-);
+    reference_parameter_with_object_type: r#"func GetObject(object &obj) { obj = FindObject(CLNK); }"#;
+}
 
-#[test]
-fn reference_parameter_mutates_variable() {
-    let mut engine = Engine::new();
-    engine
-        .load_script(
+run_cases! {
+    reference_parameter_mutates_variable:
             r#"
             func SetValue(&x) { x = 7; }
             func Test() {
@@ -43,10 +27,7 @@ fn reference_parameter_mutates_variable() {
                 return value;
             }
             "#,
-        )
-        .expect("script loads");
-
-    assert_eq!(engine.call("Test", &[]).unwrap(), Value::Int(7));
+        "Test", &[] => Value::Int(7);
 }
 
 #[test]

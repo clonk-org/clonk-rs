@@ -1,26 +1,21 @@
-// Contiguous slice 5 of 7 of the `command/tests` battery, spliced by
-// `include!` from the parent module so every test id is unchanged.
+    // Contiguous slice 5 of 7 of the `command/tests` battery, spliced by
+    // `include!` from the parent module so every test id is unchanged.
 
     #[test]
     fn home_fails_when_no_base_available() {
         let builder_id = ObjectId::new(550);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 23;
+        let builder = command_object!(builder_id.as_u64(); owner = 23);
 
         let objects = command_objects([builder.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: builder.position,
-            ..command_ctx(
-                objects.get(&builder_id).expect("builder present"),
-                &objects,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx(
+            objects.get(&builder_id).expect("builder present"),
+            &objects,
+            0,
+        ); position: builder.position);
 
-        let mut state =
-            HomeState::from_request(&CommandRequest::new(CommandId::Home)).expect("state created");
+        let mut state = HomeState::from_request(&request!(Home)).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Failed);
@@ -32,14 +27,11 @@
         let lower_id_later = ObjectId::new(2);
         let higher_id_earlier = ObjectId::new(99);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.owner = 7;
-        actor.position = Vector2::ZERO;
+        let actor = command_object!(actor_id.as_u64(); owner = 7; position = Vector2::ZERO);
 
         let base = |id: ObjectId, position: Vector2, master_list_order: usize| {
-            let mut snapshot = snapshot_with_id(id.as_u64());
-            snapshot.master_list_order = master_list_order;
-            snapshot.position = position;
+            let mut snapshot = command_object!(id.as_u64(); master_list_order = master_list_order;
+                position = position);
             // All three commands select bases through C4Object::Base.
             snapshot.base = actor.owner;
             snapshot.owner = 99;
@@ -53,26 +45,12 @@
             // strict improvement therefore retains the earlier base.
             base(higher_id_earlier, Vector2::new(-10, 4), 1),
         ]);
-        let players = HashMap::from([(
-            actor.owner,
-            CommandPlayerSnapshot {
-                status: PlayerStatus::Active,
-                surrendered: false,
-                wealth: 0,
-                home_base_material: HashMap::new(),
-                home_base_material_entries: Vec::new(),
-                knowledge: Vec::new(),
-                hostile_to: Vec::new(),
-            },
-        )]);
+        let players = HashMap::from([(actor.owner, command_player!(0))]);
         let choose = |objects: &CommandObjectSnapshots| {
             let ctx = command_ctx_with_players(&actor, objects, &players, 0);
-            let mut sell =
-                SellState::from_request(&CommandRequest::new(CommandId::Sell)).expect("sell state");
-            let mut buy =
-                BuyState::from_request(&CommandRequest::new(CommandId::Buy)).expect("buy state");
-            let mut home =
-                HomeState::from_request(&CommandRequest::new(CommandId::Home)).expect("home state");
+            let mut sell = SellState::from_request(&request!(Sell)).expect("sell state");
+            let mut buy = BuyState::from_request(&request!(Buy)).expect("buy state");
+            let mut home = HomeState::from_request(&request!(Home)).expect("home state");
             (
                 sell.resolve_base(&ctx),
                 buy.resolve_base(&ctx),
@@ -114,14 +92,10 @@
         let allied_id = ObjectId::new(3);
         let own_id = ObjectId::new(4);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.owner = 1;
-        actor.position = Vector2::ZERO;
+        let actor = command_object!(actor_id.as_u64(); owner = 1; position = Vector2::ZERO);
         let base = |id: ObjectId, player: i32, x: i32, order: usize| {
-            let mut snapshot = snapshot_with_id(id.as_u64());
-            snapshot.base = player;
-            snapshot.position = Vector2::new(x, 0);
-            snapshot.master_list_order = order;
+            let snapshot = command_object!(id.as_u64(); base = player; position = Vector2::new(x, 0);
+                master_list_order = order);
             // FindFriendlyBase does not require Structure, Entrance, object
             // ownership, or a non-collectible definition.
             snapshot
@@ -132,23 +106,14 @@
             base(allied_id, 3, 5, 2),
             base(own_id, 1, 10, 3),
         ]);
-        let player = |hostile_to| CommandPlayerSnapshot {
-            status: PlayerStatus::Active,
-            surrendered: false,
-            wealth: 0,
-            home_base_material: HashMap::new(),
-            home_base_material_entries: Vec::new(),
-            knowledge: Vec::new(),
-            hostile_to,
-        };
+        let player = |hostile_to| command_player!(0, hostile_to: hostile_to);
         let players = HashMap::from([
             (1, player(vec![2])),
             (2, player(Vec::new())),
             (3, player(Vec::new())),
         ]);
         let ctx = command_ctx_with_players(&actor, &objects, &players, 0);
-        let mut buy =
-            BuyState::from_request(&CommandRequest::new(CommandId::Buy)).expect("buy state");
+        let mut buy = BuyState::from_request(&request!(Buy)).expect("buy state");
 
         assert_eq!(buy.resolve_base(&ctx), Some(allied_id));
         assert_eq!(buy.target, Some(allied_id));
@@ -162,20 +127,16 @@
         let actor_id = ObjectId::new(49);
         let container_id = ObjectId::new(50);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
-        actor.action_name = "Attach".to_string();
-        actor.action_procedure = ActionProcedure::Attach;
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id);
+            action_name = "Attach".to_string(); action_procedure = ActionProcedure::Attach;
+            command_direction = CommandDirection::Right);
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(17, 23);
-        container.entrance_status = true;
+        let container = command_object!(container_id.as_u64(); position = Vector2::new(17, 23);
+            entrance_status = true);
 
         let objects = command_objects([actor.clone(), container.clone()]);
         let ctx = command_ctx(&actor, &objects, 0);
-        let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+        let mut state = ExitState::from_request(&request!(Exit)).expect("state created");
 
         let evaluation = state.step(&ctx);
         assert_eq!(evaluation.status, CommandStatus::Running);
@@ -221,30 +182,21 @@
         let actor_id = ObjectId::new(51);
         let container_id = ObjectId::new(52);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
-        actor.collectible = true;
-        actor.action_name = "Walk".to_string();
-        actor.action_procedure = ActionProcedure::Walk;
-        actor.command_direction = CommandDirection::Left;
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id);
+            collectible = true; action_name = "Walk".to_string(); action_procedure = ActionProcedure::Walk;
+            command_direction = CommandDirection::Left);
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.definition_id = "CARR".to_string();
-        container.position = Vector2::new(80, 120);
-        container.entrance_status = true;
+        let container = command_object!(container_id.as_u64(); definition_id = "CARR".to_string();
+            position = Vector2::new(80, 120); entrance_status = true);
 
         let objects = command_objects([actor.clone(), container.clone()]);
         let definitions = HashMap::from([(
             container.definition_id.clone(),
-            CommandDefinitionSnapshot {
-                collection_rect: Some(DefinitionRect::new(-10, -25, 20, 30)),
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { collection_rect: Some(DefinitionRect::new(-10, -25, 20, 30)) },
         )]);
         let ctx = command_ctx_with_definitions(&actor, &objects, &definitions, 0);
         let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
-                .expect("state created");
+            ExitState::from_request(&request!(Exit, with_evaluated: true)).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -272,14 +224,10 @@
 
         let objects = command_objects([actor.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0); position: actor.position);
 
         let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
-                .expect("state created");
+            ExitState::from_request(&request!(Exit, with_evaluated: true)).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -293,28 +241,20 @@
         let container_id = ObjectId::new(70);
         let parent_id = ObjectId::new(80);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id);
+            command_direction = CommandDirection::Right);
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.container = Some(parent_id);
-        container.position = Vector2::new(12, 34);
-        container.entrance_status = true;
+        let container = command_object!(container_id.as_u64(); container = Some(parent_id);
+            position = Vector2::new(12, 34); entrance_status = true);
 
-        let mut parent = snapshot_with_id(parent_id.as_u64());
-        parent.position = Vector2::new(100, -20);
+        let parent = command_object!(parent_id.as_u64(); position = Vector2::new(100, -20));
 
         let objects = command_objects([actor.clone(), container, parent.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 10)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 10); position: actor.position);
 
         let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
-                .expect("state created");
+            ExitState::from_request(&request!(Exit, with_evaluated: true)).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -335,25 +275,18 @@
         let actor_id = ObjectId::new(90);
         let container_id = ObjectId::new(100);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
-        actor.position = Vector2::new(7, 9);
-        actor.command_direction = CommandDirection::Left;
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id);
+            position = Vector2::new(7, 9); command_direction = CommandDirection::Left);
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(-40, 5);
-        container.entrance_status = true;
+        let container = command_object!(container_id.as_u64(); position = Vector2::new(-40, 5);
+            entrance_status = true);
 
         let objects = command_objects([actor.clone(), container.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 20)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 20); position: actor.position);
 
         let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
-                .expect("state created");
+            ExitState::from_request(&request!(Exit, with_evaluated: true)).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -380,27 +313,20 @@
         let actor_id = ObjectId::new(91);
         let container_id = ObjectId::new(101);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
-        actor.shape_top = -3;
+        let actor =
+            command_object!(actor_id.as_u64(); container = Some(container_id); shape_top = -3);
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(586, 245);
-        container.alive = false;
-        container.entrance_status = true;
+        let mut container = command_object!(container_id.as_u64(); position = Vector2::new(586, 245);
+            alive = false; entrance_status = true);
         container.ocf |= ocf::ENTRANCE;
         container.entrance = Some(DefinitionRect::new(568, 253, 16, 17));
 
         let objects = command_objects([actor.clone(), container]);
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 20)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 20); position: actor.position);
 
         let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
-                .expect("state created");
+            ExitState::from_request(&request!(Exit, with_evaluated: true)).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -422,24 +348,18 @@
         let actor_id = ObjectId::new(92);
         let container_id = ObjectId::new(102);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id);
+            command_direction = CommandDirection::Right);
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.alive = false;
-        container.entrance_status = false;
+        let mut container =
+            command_object!(container_id.as_u64(); alive = false; entrance_status = false);
         container.ocf |= ocf::ENTRANCE;
 
         let objects = command_objects([actor.clone(), container]);
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 20)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 20); position: actor.position);
 
         let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
-                .expect("state created");
+            ExitState::from_request(&request!(Exit, with_evaluated: true)).expect("state created");
         let result = state.step(&ctx);
 
         assert_eq!(result.status, CommandStatus::Running);
@@ -461,7 +381,7 @@
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Exit).with_evaluated(true))
+            .push_back(request!(Exit, with_evaluated: true))
             .expect("Exit command queues");
         let armed = stack.execute_front(&ctx).expect("Exit arms activation");
         assert!(matches!(
@@ -480,16 +400,12 @@
         // DoorOpen window (Hut3.c4d/ActMap.txt:2-26).
         let actor_id = ObjectId::new(93);
         let container_id = ObjectId::new(103);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.entrance_status = false;
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id));
+        let mut container = command_object!(container_id.as_u64(); entrance_status = false);
         container.ocf |= ocf::ENTRANCE;
         let mut objects = command_objects([actor, container]);
         let mut state = ExitState::from_request(
-            &CommandRequest::new(CommandId::Exit)
-                .with_update_interval(50)
-                .with_evaluated(true),
+            &request!(Exit, with_update_interval: 50, with_evaluated: true),
         )
         .expect("state created");
 
@@ -521,24 +437,18 @@
         let container_id = ObjectId::new(120);
         let callback_container_id = ObjectId::new(121);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
-        actor.action_procedure = ActionProcedure::Build;
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id);
+            action_procedure = ActionProcedure::Build);
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(0, 0);
-        container.entrance_status = true;
+        let container = command_object!(container_id.as_u64(); position = Vector2::new(0, 0);
+            entrance_status = true);
 
         let objects = command_objects([actor.clone(), container]);
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 30)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 30); position: actor.position);
 
         let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
-                .expect("state created");
+            ExitState::from_request(&request!(Exit, with_evaluated: true)).expect("state created");
 
         let stop = state.step(&ctx);
         assert_eq!(stop.status, CommandStatus::Running);
@@ -559,8 +469,8 @@
         callback_actor.container = Some(callback_container_id);
         callback_actor.action_procedure = ActionProcedure::Walk;
         callback_actor.position = Vector2::new(31, 41);
-        let mut callback_container = snapshot_with_id(callback_container_id.as_u64());
-        callback_container.entrance_status = true;
+        let callback_container = command_object!(callback_container_id.as_u64();
+            entrance_status = true);
         let callback_objects = command_objects([callback_actor.clone(), callback_container]);
         let callback_ctx = command_ctx(&callback_actor, &callback_objects, 30);
 
@@ -584,7 +494,7 @@
         // completion, including through the legacy zero-token seam.
         let mut stack = CommandStack::new();
         stack
-            .push_front(CommandRequest::new(CommandId::Exit).with_evaluated(true))
+            .push_front(request!(Exit, with_evaluated: true))
             .expect("original Exit queues");
         let original_instance_id = stack.entries.front().expect("original Exit").instance_id;
         let stop = stack
@@ -599,7 +509,7 @@
         ));
         stack.clear();
         stack
-            .push_front(CommandRequest::new(CommandId::Exit).with_evaluated(true))
+            .push_front(request!(Exit, with_evaluated: true))
             .expect("callback replacement Exit queues");
         let replacement_instance_id = stack.entries.front().expect("replacement Exit").instance_id;
         assert_ne!(replacement_instance_id, original_instance_id);
@@ -629,28 +539,22 @@
         let attacker_id = ObjectId::new(7);
         let target_id = ObjectId::new(8);
 
-        let mut attacker = snapshot_with_id(attacker_id.as_u64());
-        attacker.command_direction = CommandDirection::Right;
+        let attacker = command_object!(attacker_id.as_u64();
+            command_direction = CommandDirection::Right);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.crew_member = true;
+        let mut target = command_object!(target_id.as_u64(); crew_member = true);
         target.ocf &= !ocf::CREW_MEMBER;
 
         let objects = command_objects([attacker.clone(), target]);
 
-        let ctx = CommandRuntimeContext {
-            position: attacker.position,
-            ..command_ctx(
-                objects.get(&attacker_id).expect("attacker present"),
-                &objects,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx(
+            objects.get(&attacker_id).expect("attacker present"),
+            &objects,
+            0,
+        ); position: attacker.position);
 
-        let mut state = AttackState::from_request(
-            &CommandRequest::new(CommandId::Attack).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = AttackState::from_request(&request!(Attack, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -662,26 +566,22 @@
         let attacker_id = ObjectId::new(30);
         let target_id = ObjectId::new(40);
 
-        let mut attacker = snapshot_with_id(attacker_id.as_u64());
-        attacker.command_direction = CommandDirection::Left;
+        let attacker = command_object!(attacker_id.as_u64();
+            command_direction = CommandDirection::Left);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.crew_member = true;
+        let mut target = command_object!(target_id.as_u64(); crew_member = true);
         target.ocf |= ocf::CREW_MEMBER;
         target.position = Vector2::new(5, -5);
 
         let objects = command_objects([attacker.clone(), target]);
 
-        let ctx = CommandRuntimeContext {
-            position: attacker.position,
-            ..command_ctx(
-                objects.get(&attacker_id).expect("attacker present"),
-                &objects,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx(
+            objects.get(&attacker_id).expect("attacker present"),
+            &objects,
+            0,
+        ); position: attacker.position);
 
-        let parent_request = CommandRequest::new(CommandId::Attack).with_target(Some(target_id));
+        let parent_request = request!(Attack, with_target: Some(target_id));
         let mut state = AttackState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
@@ -718,19 +618,17 @@
         let ordinary_id = ObjectId::new(52);
         let first_projectile_id = ObjectId::new(53);
         let second_projectile_id = ObjectId::new(54);
-        let mut attacker = snapshot_with_id(attacker_id.as_u64());
-        attacker.container = Some(ObjectId::new(60));
-        attacker.contents = vec![ordinary_id, first_projectile_id, second_projectile_id];
+        let attacker = command_object!(attacker_id.as_u64(); container = Some(ObjectId::new(60));
+            contents = vec![ordinary_id, first_projectile_id, second_projectile_id]);
         let mut target = snapshot_with_id(target_id.as_u64());
         target.ocf |= ocf::CREW_MEMBER;
         target.container = Some(ObjectId::new(61));
         target.position = Vector2::new(123, -45);
-        let mut ordinary = snapshot_with_id(ordinary_id.as_u64());
-        ordinary.definition_id = "WOOD".into();
-        let mut first_projectile = snapshot_with_id(first_projectile_id.as_u64());
-        first_projectile.definition_id = "ROCK".into();
-        let mut second_projectile = snapshot_with_id(second_projectile_id.as_u64());
-        second_projectile.definition_id = "FLNT".into();
+        let ordinary = command_object!(ordinary_id.as_u64(); definition_id = "WOOD".into());
+        let first_projectile = command_object!(first_projectile_id.as_u64();
+            definition_id = "ROCK".into());
+        let second_projectile = command_object!(second_projectile_id.as_u64();
+            definition_id = "FLNT".into());
         let objects = command_objects([
             attacker.clone(),
             target,
@@ -740,26 +638,12 @@
         ]);
         let definitions = HashMap::from([
             ("WOOD".into(), CommandDefinitionSnapshot::default()),
-            (
-                "ROCK".into(),
-                CommandDefinitionSnapshot {
-                    projectile: -2,
-                    ..CommandDefinitionSnapshot::default()
-                },
-            ),
-            (
-                "FLNT".into(),
-                CommandDefinitionSnapshot {
-                    projectile: 1,
-                    ..CommandDefinitionSnapshot::default()
-                },
-            ),
+            ("ROCK".into(), command_definition! { projectile: -2 }),
+            ("FLNT".into(), command_definition! { projectile: 1 }),
         ]);
         let ctx = command_ctx_with_definitions(&attacker, &objects, &definitions, 0);
-        let mut state = AttackState::from_request(
-            &CommandRequest::new(CommandId::Attack).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = AttackState::from_request(&request!(Attack, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
 
@@ -776,13 +660,12 @@
         let target_id = ObjectId::new(71);
         let actor_container = ObjectId::new(72);
         let target_container = ObjectId::new(73);
-        let mut attacker = snapshot_with_id(attacker_id.as_u64());
-        attacker.container = Some(actor_container);
+        let mut attacker = command_object!(attacker_id.as_u64(); container = Some(actor_container));
         let mut target = snapshot_with_id(target_id.as_u64());
         target.ocf |= ocf::CREW_MEMBER;
         target.container = Some(target_container);
         let mut objects = command_objects([attacker.clone(), target.clone()]);
-        let request = CommandRequest::new(CommandId::Attack).with_target(Some(target_id));
+        let request = request!(Attack, with_target: Some(target_id));
 
         let ctx = command_ctx(&attacker, &objects, 0);
         let mut exiting = AttackState::from_request(&request).expect("state created");
@@ -817,7 +700,7 @@
         let target = snapshot_with_id(2);
         let objects = command_objects([actor.clone(), target.clone()]);
         let ctx = command_ctx(&actor, &objects, 0);
-        let request = CommandRequest::new(CommandId::Call).with_target(Some(target.id));
+        let request = request!(Call, with_target: Some(target.id));
         let mut state = CallState::from_request(&request).expect("textless Call materializes");
 
         let result = state.step(&ctx);
@@ -831,10 +714,7 @@
         let mut stack = CommandStack::new();
         stack
             .push_front(
-                CommandRequest::new(CommandId::Call)
-                    .with_target(Some(ObjectId::new(2)))
-                    .with_tx(Some(37))
-                    .with_data(CommandData::Text("Work".into())),
+                request!(Call, with_target: Some(ObjectId::new(2)), with_tx: Some(37), with_data: CommandData::Text("Work".into())),
             )
             .expect("Call queues");
 
@@ -873,38 +753,29 @@
         let target_id = ObjectId::new(2);
         let target2_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.command_direction = CommandDirection::Right;
+        let builder =
+            command_object!(builder_id.as_u64(); command_direction = CommandDirection::Right);
 
         // C4Command::Call only requires a non-null Target pointer; it does
         // not require Alive or C4OS_NORMAL (C4Command.cpp:2355-2365,
         // C4Object.cpp:2224-2227). Real targets include inactive objects and
         // nonliving structures such as Tutorial07's WRKS.
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.alive = false;
-        target.status = crate::ObjectStatus::Inactive;
+        let target = command_object!(target_id.as_u64(); alive = false;
+            status = crate::ObjectStatus::Inactive);
 
         let objects = command_objects([builder.clone(), target.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: builder.position,
-            ..command_ctx(
-                objects.get(&builder_id).expect("builder present"),
-                &objects,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx(
+            objects.get(&builder_id).expect("builder present"),
+            &objects,
+            0,
+        ); position: builder.position);
 
         let mut state = CallState::from_request(
-            &CommandRequest::new(CommandId::Call)
-                .with_target(Some(target_id))
-                .with_target2(Some(target2_id))
-                .with_tx_value(clonk_script::Value::Array(vec![
-                    clonk_script::Value::Int(42),
-                    clonk_script::Value::String("tagged".into()),
-                ]))
-                .with_ty(Some(7))
-                .with_data(CommandData::Text("ControlCall".into())),
+            &request!(Call, with_target: Some(target_id), with_target2: Some(target2_id), with_tx_value: clonk_script::Value::Array(vec![
+                clonk_script::Value::Int(42),
+                clonk_script::Value::String("tagged".into()),
+            ]), with_ty: Some(7), with_data: CommandData::Text("ControlCall".into())),
         )
         .expect("state created");
 
@@ -954,7 +825,7 @@
 
     #[test]
     fn context_requires_target_object() {
-        let request = CommandRequest::new(CommandId::Context);
+        let request = request!(Context);
         assert!(ContextState::from_request(&request).is_err());
     }
 
@@ -963,24 +834,17 @@
         let crew_id = ObjectId::new(77);
         let target_id = ObjectId::new(88);
 
-        let mut crew = snapshot_with_id(crew_id.as_u64());
-        crew.owner = 42;
-        crew.command_direction = CommandDirection::Left;
+        let crew = command_object!(crew_id.as_u64(); owner = 42;
+            command_direction = CommandDirection::Left);
 
         let target = snapshot_with_id(target_id.as_u64());
 
         let objects = command_objects([crew.clone(), target.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: crew.position,
-            ..command_ctx(objects.get(&crew_id).expect("crew present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&crew_id).expect("crew present"), &objects, 0); position: crew.position);
 
         let mut state = ContextState::from_request(
-            &CommandRequest::new(CommandId::Context)
-                .with_target2(Some(target_id))
-                .with_tx(Some(15))
-                .with_ty(Some(25)),
+            &request!(Context, with_target2: Some(target_id), with_tx: Some(15), with_ty: Some(25)),
         )
         .expect("state created");
 
@@ -1015,23 +879,18 @@
         let crew_id = ObjectId::new(101);
         let target_id = ObjectId::new(202);
 
-        let mut crew = snapshot_with_id(crew_id.as_u64());
-        crew.owner = OWNER_NONE;
-        crew.command_direction = CommandDirection::Right;
+        let crew = command_object!(crew_id.as_u64(); owner = OWNER_NONE;
+            command_direction = CommandDirection::Right);
 
         let target = snapshot_with_id(target_id.as_u64());
 
         let objects = command_objects([crew.clone(), target.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: crew.position,
-            ..command_ctx(objects.get(&crew_id).expect("crew present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&crew_id).expect("crew present"), &objects, 0); position: crew.position);
 
-        let mut state = ContextState::from_request(
-            &CommandRequest::new(CommandId::Context).with_target2(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state =
+            ContextState::from_request(&request!(Context, with_target2: Some(target_id)))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1044,22 +903,15 @@
         let crew_id = ObjectId::new(101);
         let container_id = ObjectId::new(102);
 
-        let mut crew = snapshot_with_id(crew_id.as_u64());
-        crew.owner = OWNER_NONE;
-        crew.controller = 23;
-        crew.command_direction = CommandDirection::Left;
-        crew.container = Some(container_id);
+        let crew = command_object!(crew_id.as_u64(); owner = OWNER_NONE; controller = 23;
+            command_direction = CommandDirection::Left; container = Some(container_id));
         let container = snapshot_with_id(container_id.as_u64());
 
         let objects = command_objects([crew.clone(), container]);
 
-        let ctx = CommandRuntimeContext {
-            position: crew.position,
-            ..command_ctx(objects.get(&crew_id).expect("crew present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&crew_id).expect("crew present"), &objects, 0); position: crew.position);
 
-        let mut state =
-            TakeState::from_request(&CommandRequest::new(CommandId::Take)).expect("take state");
+        let mut state = TakeState::from_request(&request!(Take)).expect("take state");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1084,23 +936,19 @@
     fn take2_uncontained_completes_without_recording_base_failure() {
         let crew_id = ObjectId::new(201);
 
-        let mut crew = snapshot_with_id(crew_id.as_u64());
-        crew.owner = 5;
-        crew.command_direction = CommandDirection::Right;
+        let crew = command_object!(crew_id.as_u64(); owner = 5;
+            command_direction = CommandDirection::Right);
 
         let objects = command_objects([crew.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: crew.position,
-            ..command_ctx(objects.get(&crew_id).expect("crew present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&crew_id).expect("crew present"), &objects, 0); position: crew.position);
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .push_back(request!(Wait, with_mode: CommandMode::Base))
             .expect("base command queues");
         stack
-            .push_front(CommandRequest::new(CommandId::Take2).with_mode(CommandMode::SilentSub))
+            .push_front(request!(Take2, with_mode: CommandMode::SilentSub))
             .expect("take2 command queues");
 
         let result = stack.step(&ctx).expect("take2 executes");
@@ -1118,23 +966,16 @@
         let crew_id = ObjectId::new(301);
         let container_id = ObjectId::new(302);
 
-        let mut crew = snapshot_with_id(crew_id.as_u64());
-        crew.owner = 9;
-        crew.command_direction = CommandDirection::Right;
-        crew.container = Some(container_id);
+        let crew = command_object!(crew_id.as_u64(); owner = 9;
+            command_direction = CommandDirection::Right; container = Some(container_id));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.owner = 9;
+        let container = command_object!(container_id.as_u64(); owner = 9);
 
         let objects = command_objects([crew.clone(), container.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: crew.position,
-            ..command_ctx(objects.get(&crew_id).expect("crew present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&crew_id).expect("crew present"), &objects, 0); position: crew.position);
 
-        let mut state =
-            Take2State::from_request(&CommandRequest::new(CommandId::Take2)).expect("take2 state");
+        let mut state = Take2State::from_request(&request!(Take2)).expect("take2 state");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1162,7 +1003,7 @@
 
     #[test]
     fn transfer_requires_target() {
-        let request = CommandRequest::new(CommandId::Transfer);
+        let request = request!(Transfer);
         assert!(TransferState::from_request(&request).is_err());
     }
 
@@ -1171,12 +1012,10 @@
         let actor_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(0, 90);
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(0, 90);
+            command_direction = CommandDirection::Right);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 90);
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(100, 90));
 
         let objects = command_objects([actor.clone(), target.clone()]);
 
@@ -1194,14 +1033,11 @@
         let mut surface = vec![120; 200];
         surface[89] = 80;
         let landscape = crate::Landscape::new(200, surface).expect("transfer landscape");
-        let ctx = CommandRuntimeContext {
-            landscape: Some(&landscape),
-            position: actor.position,
-            transfer_zones: &transfer_zones,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0); landscape: Some(&landscape),
+        position: actor.position,
+        transfer_zones: &transfer_zones);
 
-        let parent_request = CommandRequest::new(CommandId::Transfer).with_target(Some(target_id));
+        let parent_request = request!(Transfer, with_target: Some(target_id));
         let mut state = TransferState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
@@ -1227,7 +1063,7 @@
             &ctx,
         );
 
-        let ctx_next = CommandRuntimeContext { frame: 1, ..ctx };
+        let ctx_next = command_context!(ctx; frame: 1);
         let next = state.step(&ctx_next);
         assert_eq!(next.status, CommandStatus::Running);
         assert!(
@@ -1254,11 +1090,8 @@
         let mut blocked_landscape =
             crate::Landscape::new(200, vec![0; 200]).expect("fully solid transfer perimeter");
         blocked_landscape.set_world_height(200);
-        let blocked_ctx = CommandRuntimeContext {
-            landscape: Some(&blocked_landscape),
-            frame: 1,
-            ..ctx_next
-        };
+        let blocked_ctx = command_context!(ctx_next; landscape: Some(&blocked_landscape),
+        frame: 1);
         let blocked = state.step(&blocked_ctx);
         assert_eq!(
             blocked.status,
@@ -1274,8 +1107,7 @@
     fn negative_transfer_zone_command_entry_fails_without_panicking() {
         let actor_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(20, 5);
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(20, 5));
         let target = snapshot_with_id(target_id.as_u64());
         let objects = command_objects([actor.clone(), target]);
         let mut transfer_zones = TransferZoneTable::default();
@@ -1288,14 +1120,11 @@
                 height: -2,
             },
         );
-        let ctx = CommandRuntimeContext {
-            transfer_zones: &transfer_zones,
-            ..command_ctx(&actor, &objects, 0)
-        };
-        let mut state = TransferState::from_request(
-            &CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let ctx =
+            command_context!(command_ctx(&actor, &objects, 0); transfer_zones: &transfer_zones);
+        let mut state =
+            TransferState::from_request(&request!(Transfer, with_target: Some(target_id)))
+                .expect("state created");
 
         let result = state.step(&ctx);
 
@@ -1309,12 +1138,10 @@
         let actor_id = ObjectId::new(100);
         let target_id = ObjectId::new(200);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(95, 0);
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(95, 0);
+            command_direction = CommandDirection::Right);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 0);
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(100, 0));
 
         let objects = command_objects([actor.clone(), target.clone()]);
 
@@ -1330,18 +1157,12 @@
         );
 
         let mut state = TransferState::from_request(
-            &CommandRequest::new(CommandId::Transfer)
-                .with_target(Some(target_id))
-                .with_tx(Some(42))
-                .with_ty(Some(-5)),
+            &request!(Transfer, with_target: Some(target_id), with_tx: Some(42), with_ty: Some(-5)),
         )
         .expect("state created");
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            transfer_zones: &transfer_zones,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 5)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 5); position: actor.position,
+        transfer_zones: &transfer_zones);
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1374,11 +1195,8 @@
             "Tick5 is a frame predicate, not a per-command cooldown"
         );
 
-        let ctx_next = CommandRuntimeContext {
-            position: actor.position,
-            transfer_zones: &transfer_zones,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 6)
-        };
+        let ctx_next = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 6); position: actor.position,
+        transfer_zones: &transfer_zones);
 
         let follow_up = state.step(&ctx_next);
         assert_eq!(follow_up.status, CommandStatus::Running);
@@ -1390,9 +1208,7 @@
 
         let tagged_tx = clonk_script::Value::C4Id("GOLD".to_string());
         let mut tagged_state = TransferState::from_request(
-            &CommandRequest::new(CommandId::Transfer)
-                .with_target(Some(target_id))
-                .with_tx_value(tagged_tx.clone()),
+            &request!(Transfer, with_target: Some(target_id), with_tx_value: tagged_tx.clone()),
         )
         .expect("tagged Transfer state");
         let tagged = tagged_state.step(&ctx);
@@ -1407,24 +1223,18 @@
         let actor_id = ObjectId::new(123);
         let target_id = ObjectId::new(456);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(0, 0);
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(0, 0);
+            command_direction = CommandDirection::Right);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(10, 0);
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(10, 0));
 
         let objects = command_objects([actor.clone(), target.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0); position: actor.position);
 
-        let mut state = TransferState::from_request(
-            &CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state =
+            TransferState::from_request(&request!(Transfer, with_target: Some(target_id)))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Failed);
@@ -1433,10 +1243,9 @@
             "missing-zone failure leaves ComDir Right untouched"
         );
 
-        let mut missing_target_state = TransferState::from_request(
-            &CommandRequest::new(CommandId::Transfer).with_target(Some(ObjectId::new(789))),
-        )
-        .expect("state created");
+        let mut missing_target_state =
+            TransferState::from_request(&request!(Transfer, with_target: Some(ObjectId::new(789))))
+                .expect("state created");
         let missing_target = missing_target_state.step(&ctx);
         assert_eq!(missing_target.status, CommandStatus::Failed);
         assert!(
@@ -1450,23 +1259,19 @@
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.command_direction = CommandDirection::Right;
+        let mut builder =
+            command_object!(builder_id.as_u64(); command_direction = CommandDirection::Right);
         builder.physical.can_construct = 1;
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.construction = FULL_CON;
-        target.category = CATEGORY_VEHICLE;
-        target.container = Some(builder_id);
+        let target = command_object!(target_id.as_u64(); construction = FULL_CON;
+            category = CATEGORY_VEHICLE; container = Some(builder_id));
 
         let objects = command_objects([builder.clone(), target]);
 
         let ctx = command_ctx(&builder, &objects, 0);
 
-        let mut state = BuildState::from_request(
-            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-        )
-        .expect("build state");
+        let mut state = BuildState::from_request(&request!(Build, with_target: Some(target_id)))
+            .expect("build state");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1488,25 +1293,19 @@
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.position = Vector2::new(0, 0);
+        let mut builder = command_object!(builder_id.as_u64(); position = Vector2::new(0, 0));
         builder.physical.can_construct = 1;
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 0);
-        target.status = ObjectStatus::Normal;
-        target.alive = false;
-        target.category = CATEGORY_STRUCTURE;
-        target.construction = FULL_CON * 4 / 5;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(100, 0);
+            status = ObjectStatus::Normal; alive = false; category = CATEGORY_STRUCTURE;
+            construction = FULL_CON * 4 / 5);
 
         let objects = command_objects([builder.clone(), target]);
 
         let ctx = command_ctx(&builder, &objects, 0);
 
-        let mut state = BuildState::from_request(
-            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-        )
-        .expect("build state");
+        let mut state = BuildState::from_request(&request!(Build, with_target: Some(target_id)))
+            .expect("build state");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1541,28 +1340,19 @@
         let target_id = ObjectId::new(2);
         let workshop_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.position = Vector2::new(8, 199);
+        let mut builder = command_object!(builder_id.as_u64(); position = Vector2::new(8, 199));
         builder.physical.can_construct = 1;
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(150, 184);
-        target.container = Some(workshop_id);
-        target.alive = false;
-        target.construction = FULL_CON / 100;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(150, 184);
+            container = Some(workshop_id); alive = false; construction = FULL_CON / 100);
 
-        let mut workshop = snapshot_with_id(workshop_id.as_u64());
-        workshop.position = target.position;
-        workshop.alive = false;
-        workshop.category = CATEGORY_STRUCTURE;
+        let workshop = command_object!(workshop_id.as_u64(); position = target.position; alive = false;
+            category = CATEGORY_STRUCTURE);
 
         let objects = command_objects([builder.clone(), target, workshop]);
         let ctx = command_ctx(&builder, &objects, 0);
         let mut state = BuildState::from_request(
-            &CommandRequest::new(CommandId::Build)
-                .with_target(Some(target_id))
-                .with_tx(Some(0))
-                .with_ty(Some(0)),
+            &request!(Build, with_target: Some(target_id), with_tx: Some(0), with_ty: Some(0)),
         )
         .expect("Build state");
 
@@ -1583,19 +1373,15 @@
     fn activate_explicit_container_opens_menu_before_movement_logic() {
         let actor_id = ObjectId::new(1);
         let container_id = ObjectId::new(2);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.owner = 17;
-        actor.controller = 23;
-        actor.command_direction = CommandDirection::Right;
-        actor.action_procedure = ActionProcedure::Dig;
+        let actor = command_object!(actor_id.as_u64(); owner = 17; controller = 23;
+            command_direction = CommandDirection::Right; action_procedure = ActionProcedure::Dig);
         let container = snapshot_with_id(container_id.as_u64());
         let objects = command_objects([actor.clone(), container]);
         let ctx = command_ctx(&actor, &objects, 0);
 
-        let mut state = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)),
-        )
-        .expect("activate state");
+        let mut state =
+            ActivateState::from_request(&request!(Activate, with_target2: Some(container_id)))
+                .expect("activate state");
         let result = state.step(&ctx);
 
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1613,24 +1399,20 @@
         );
 
         let mut stale = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate).with_target2(Some(ObjectId::new(999))),
+            &request!(Activate, with_target2: Some(ObjectId::new(999))),
         )
         .expect("stale activate state");
         let stale_result = stale.step(&ctx);
         assert_eq!(stale_result.status, CommandStatus::Failed);
         assert!(stale_result.events.is_empty());
 
-        let mut deleted_container = snapshot_with_id(container_id.as_u64());
-        deleted_container.status = ObjectStatus::Deleted;
+        let deleted_container =
+            command_object!(container_id.as_u64(); status = ObjectStatus::Deleted);
         let deleted_objects = command_objects([actor.clone(), deleted_container]);
-        let deleted_ctx = CommandRuntimeContext {
-            objects: &deleted_objects,
-            ..ctx
-        };
-        let mut retained_deleted = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)),
-        )
-        .expect("deleted-target activate state");
+        let deleted_ctx = command_context!(ctx; objects: &deleted_objects);
+        let mut retained_deleted =
+            ActivateState::from_request(&request!(Activate, with_target2: Some(container_id)))
+                .expect("deleted-target activate state");
         let deleted_result = retained_deleted.step(&deleted_ctx);
         assert_eq!(deleted_result.status, CommandStatus::Completed);
         assert!(matches!(
@@ -1643,7 +1425,7 @@
 
         let mut cleared = CommandStack::new();
         cleared
-            .push_front(CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)))
+            .push_front(request!(Activate, with_target2: Some(container_id)))
             .expect("Activate queues");
         assert!(cleared.clear_object_reference(container_id));
         assert_eq!(
@@ -1661,17 +1443,15 @@
 
         let actor = snapshot_with_id(actor_id.as_u64());
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.container = None;
+        let target = command_object!(target_id.as_u64(); container = None);
 
         let objects = command_objects([actor.clone(), target]);
 
         let ctx = command_ctx(&actor, &objects, 0);
 
-        let mut state = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state =
+            ActivateState::from_request(&request!(Activate, with_target: Some(target_id)))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1685,28 +1465,21 @@
         let container_id = ObjectId::new(20);
         let target_id = ObjectId::new(30);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(100, 0);
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(100, 0));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(0, 0);
-        container.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        let mut container = command_object!(container_id.as_u64(); position = Vector2::new(0, 0);
+            ocf = ocf::ENTRANCE | ocf::AVAILABLE);
         container.contents.push(target_id);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = container.position;
-        target.container = Some(container_id);
-        target.collectible = true;
-        target.construction = FULL_CON;
+        let target = command_object!(target_id.as_u64(); position = container.position;
+            container = Some(container_id); collectible = true; construction = FULL_CON);
 
         let objects = command_objects([actor.clone(), container, target]);
 
         let ctx = command_ctx(&actor, &objects, 0);
 
         let mut state = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate)
-                .with_target(Some(target_id))
-                .with_update_interval(5),
+            &request!(Activate, with_target: Some(target_id), with_update_interval: 5),
         )
         .expect("state created");
 
@@ -1729,20 +1502,15 @@
         let exiting_id = ObjectId::new(42);
 
         let actor = snapshot_with_id(actor_id.as_u64());
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.ocf = ocf::ENTRANCE;
+        let mut container = command_object!(container_id.as_u64(); ocf = ocf::ENTRANCE);
         container.contents.push(exiting_id);
-        let mut exiting = snapshot_with_id(exiting_id.as_u64());
-        exiting.definition_id = "FLNT".into();
-        exiting.container = Some(container_id);
-        exiting.commands = vec![command_view(CommandId::Exit, None)];
+        let exiting = command_object!(exiting_id.as_u64(); definition_id = "FLNT".into();
+            container = Some(container_id); commands = vec![command_view(CommandId::Exit, None)]);
 
         let objects = command_objects([actor.clone(), container, exiting]);
         let ctx = command_ctx(&actor, &objects, 0);
         let mut state = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate)
-                .with_target2(Some(container_id))
-                .with_data(CommandData::Text("FLNT".into())),
+            &request!(Activate, with_target2: Some(container_id), with_data: CommandData::Text("FLNT".into())),
         )
         .expect("Activate state");
 
@@ -1762,30 +1530,22 @@
         let container_id = ObjectId::new(6);
         let target_id = ObjectId::new(7);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.owner = 42;
-        actor.controller = 23;
-        actor.position = Vector2::new(15, 5);
-        actor.container = Some(container_id);
+        let actor = command_object!(actor_id.as_u64(); owner = 42; controller = 23;
+            position = Vector2::new(15, 5); container = Some(container_id));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(12, 4);
+        let mut container = command_object!(container_id.as_u64(); position = Vector2::new(12, 4));
         container.contents.push(target_id);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = container.position;
-        target.container = Some(container_id);
-        target.collectible = true;
-        target.construction = FULL_CON;
+        let target = command_object!(target_id.as_u64(); position = container.position;
+            container = Some(container_id); collectible = true; construction = FULL_CON);
 
         let objects = command_objects([actor.clone(), container, target]);
 
         let ctx = command_ctx(&actor, &objects, 0);
 
-        let mut state = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state =
+            ActivateState::from_request(&request!(Activate, with_target: Some(target_id)))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1812,29 +1572,25 @@
         let deeper_exit_id = ObjectId::new(53);
         let empty_stack_id = ObjectId::new(54);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.controller = 23;
-        actor.container = Some(container_id);
+        let actor =
+            command_object!(actor_id.as_u64(); controller = 23; container = Some(container_id));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.contents = vec![already_exiting_id, deeper_exit_id, empty_stack_id];
+        let container = command_object!(container_id.as_u64();
+            contents = vec![already_exiting_id, deeper_exit_id, empty_stack_id]);
 
-        let mut already_exiting = snapshot_with_id(already_exiting_id.as_u64());
-        already_exiting.definition_id = "FLNT".into();
-        already_exiting.container = Some(container_id);
-        already_exiting.commands = vec![command_view(CommandId::Exit, None)];
+        let already_exiting = command_object!(already_exiting_id.as_u64();
+            definition_id = "FLNT".into(); container = Some(container_id);
+            commands = vec![command_view(CommandId::Exit, None)]);
 
-        let mut deeper_exit = snapshot_with_id(deeper_exit_id.as_u64());
-        deeper_exit.definition_id = "FLNT".into();
-        deeper_exit.container = Some(container_id);
+        let mut deeper_exit = command_object!(deeper_exit_id.as_u64(); definition_id = "FLNT".into();
+            container = Some(container_id));
         deeper_exit.commands = vec![
             command_view(CommandId::Wait, None),
             command_view(CommandId::Exit, None),
         ];
 
-        let mut empty_stack = snapshot_with_id(empty_stack_id.as_u64());
-        empty_stack.definition_id = "FLNT".into();
-        empty_stack.container = Some(container_id);
+        let empty_stack = command_object!(empty_stack_id.as_u64(); definition_id = "FLNT".into();
+            container = Some(container_id));
 
         let objects = command_objects([
             actor.clone(),
@@ -1848,10 +1604,7 @@
         let mut stack = CommandStack::new();
         stack
             .push_front(
-                CommandRequest::new(CommandId::Activate)
-                    .with_target2(Some(container_id))
-                    .with_tx(Some(2))
-                    .with_data(CommandData::Text("FLNT".into())),
+                request!(Activate, with_target2: Some(container_id), with_tx: Some(2), with_data: CommandData::Text("FLNT".into())),
             )
             .expect("multi-count Activate queues");
 
@@ -1893,22 +1646,17 @@
         let container_id = ObjectId::new(61);
         let target_id = ObjectId::new(62);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.controller = 9;
-        actor.container = Some(container_id);
+        let actor =
+            command_object!(actor_id.as_u64(); controller = 9; container = Some(container_id));
         let mut container = snapshot_with_id(container_id.as_u64());
         container.contents.push(target_id);
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.definition_id = "FLNT".into();
-        target.container = Some(container_id);
+        let target = command_object!(target_id.as_u64(); definition_id = "FLNT".into();
+            container = Some(container_id));
 
         let objects = command_objects([actor.clone(), container, target]);
         let ctx = command_ctx(&actor, &objects, 0);
         let mut state = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate)
-                .with_target2(Some(container_id))
-                .with_tx(Some(2))
-                .with_data(CommandData::Text("FLNT".into())),
+            &request!(Activate, with_target2: Some(container_id), with_tx: Some(2), with_data: CommandData::Text("FLNT".into())),
         )
         .expect("Activate state");
 

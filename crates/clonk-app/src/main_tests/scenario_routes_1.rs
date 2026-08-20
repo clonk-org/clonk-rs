@@ -44,7 +44,7 @@ fn real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running() {
     app.start_scenario(scenario).test_value();
     wait_for_running_with_attempts(&mut app, 4_800);
 
-    assert!(app.effective_global_gui_failures().is_empty());
+    main_assert!(app.effective_global_gui_failures().is_empty());
     app.assets
         .require_classic_global_gui_bootstrap_resources(&HashMap::new())
         .test_value();
@@ -54,10 +54,7 @@ fn real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running() {
             .active_gui_sheet_sources
             .get(stem)
             .unwrap_or_else(|| panic!("{stem} must be rebound while Hazard runs"));
-        assert!(
-            source.contains("Hazard.c4f") && source.contains("Graphics.c4g"),
-            "{stem} must be won by the Hazard folder pack: {source}"
-        );
+        main_assert!(source.contains("Hazard.c4f") && source.contains("Graphics.c4g"), "{stem} must be won by the Hazard folder pack: {source}");
     }
     let running_scroll = app
         .assets
@@ -65,25 +62,18 @@ fn real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running() {
         .get("GUIScroll.png")
         .test_value()
         .clone();
-    assert_ne!(
-        running_scroll.pixels(),
-        pristine_scroll.pixels(),
-        "the Hazard scroll sheet must replace the global surface"
-    );
-    assert!(
-        app.assets.message_dialog_resources().is_some(),
-        "running dialogs resolve from the rebound sheets"
-    );
+    main_assert_ne!(running_scroll.pixels() => pristine_scroll.pixels(), "the Hazard scroll sheet must replace the global surface");
+    main_assert!(app.assets.message_dialog_resources().is_some(), "running dialogs resolve from the rebound sheets");
 
     app.return_to_menu();
-    assert!(app.assets.active_gui_sheet_sources.is_empty());
-    assert_eq!(
+    main_assert!(app.assets.active_gui_sheet_sources.is_empty());
+    main_assert_eq!(
         app.assets
             .startup_dialog_images
             .get("GUIScroll.png")
             .expect("restored scroll sheet")
             .pixels()
-            .as_ptr(),
+            .as_ptr() =>
         pristine_scroll.pixels().as_ptr(),
         "teardown must restore the pristine startup scroll sheet"
     );
@@ -141,11 +131,7 @@ fn run_real_alchemy_app_subcase(
 }
 
 fn assert_no_real_alchemy_app_subcase_failures(failures: Vec<&str>) {
-    assert!(
-        failures.is_empty(),
-        "Alchemy app subcase(s) failed: {}",
-        failures.join(", ")
-    );
+    main_assert!(failures.is_empty(), "Alchemy app subcase(s) failed: {}", failures.join(", "));
 }
 
 fn real_alchemy_right_click_positions_classic_context_magic_menu(
@@ -159,18 +145,12 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
     let mut app = prepared.instantiate("Alchemy mouse context parity", false);
     let owner = app.local_owner;
     let mage = app.engine.test_crew_cursor(owner);
-    assert_eq!(
+    main_assert_eq!(app.engine.object_snapshot(mage).expect("mage remains live").definition_id => "MCLK");
+    main_assert_eq!(
         app.engine
             .object_snapshot(mage)
             .expect("mage remains live")
-            .definition_id,
-        "MCLK"
-    );
-    assert_eq!(
-        app.engine
-            .object_snapshot(mage)
-            .expect("mage remains live")
-            .magic_energy,
+            .magic_energy =>
         0,
         "Alchemy's NMGE rule leaves raw mana at zero, so C++ draws no HUD mana bar"
     );
@@ -185,22 +165,12 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         }
         app.test_update();
     }
-    assert!(
-        app.engine
-            .object_snapshot(mage)
-            .expect("mage remains live")
-            .container
-            .is_none(),
-        "Alchemy mage exits the home base before a world context click"
-    );
+    main_assert!(app.engine.object_snapshot(mage).expect("mage remains live").container.is_none(), "Alchemy mage exits the home base before a world context click");
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     let rendered_mage = app.snapshot.object(mage).cloned().test_value();
-    assert_ne!(
-        rendered_mage.ocf, 0,
-        "live MCLK carries a targetable cached OCF"
-    );
+    main_assert_ne!(rendered_mage.ocf => 0, "live MCLK carries a targetable cached OCF");
     let (screen_x, screen_y) = app
         .graphics
         .world_to_screen(owner, app.engine.test_object_snapshot(mage).position)
@@ -209,9 +179,9 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         f64::from(screen_x),
         f64::from(screen_y),
     ));
-    assert_eq!(
+    main_assert_eq!(
         app.graphics
-            .object_at_point(&app.snapshot, owner, GuiPoint::new(screen_x, screen_y),),
+            .object_at_point(&app.snapshot, owner, GuiPoint::new(screen_x, screen_y),) =>
         Some(mage),
         "C++ front-to-back object picking selects the topmost MCLK",
     );
@@ -223,27 +193,20 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         .find(|viewport| viewport.owner == owner)
         .test_value();
     let (click_x, click_y) = ingame_pointer_viewport_pixel(pointer, projection);
-    assert_ne!(click_x, 0, "fixture must enter C++'s free-alignment branch");
-    assert_ne!(click_y, 0, "fixture must enter C++'s free-alignment branch");
+    main_assert_ne!(click_x => 0, "fixture must enter C++'s free-alignment branch");
+    main_assert_ne!(click_y => 0, "fixture must enter C++'s free-alignment branch");
     let click_location = Vector2::new(click_x, click_y);
 
     app.test_right_button(ElementState::Pressed);
-    assert!(app.engine.cursor_object_menu(owner).is_none());
+    main_assert!(app.engine.cursor_object_menu(owner).is_none());
     app.test_right_button(ElementState::Released);
     app.test_update();
 
-    assert!(
-        app.object_menu.is_none(),
-        "mouse context must use the classic engine menu, not the app fallback"
-    );
+    main_assert!(app.object_menu.is_none(), "mouse context must use the classic engine menu, not the app fallback");
     let context = app.engine.cursor_object_menu(owner).test_value().1.clone();
-    assert_eq!(context.style, 1);
-    assert!(!context.permanent);
-    assert_eq!(
-        context.location,
-        Some(click_location),
-        "the synchronized Context command keeps logical viewport-local Tx/Ty"
-    );
+    main_assert_eq!(context.style => 1);
+    main_assert!(!context.permanent);
+    main_assert_eq!(context.location => Some(click_location), "the synchronized Context command keeps logical viewport-local Tx/Ty");
     let magic_index = context
         .items
         .iter()
@@ -270,24 +233,18 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         latched_screen.0.saturating_sub(viewport.x),
         latched_screen.1.saturating_sub(viewport.y),
     );
-    assert!(
-        latched_local.x <= click_location.x && latched_local.y <= click_location.y,
-        "right/bottom edges may clamp the menu back into the viewport"
-    );
-    assert_eq!(
+    main_assert!(latched_local.x <= click_location.x && latched_local.y <= click_location.y, "right/bottom edges may clamp the menu back into the viewport");
+    main_assert_eq!(
         app.ingame_menu_gfx
             .as_ref()
-            .and_then(|gfx| gfx.menu_location),
+            .and_then(|gfx| gfx.menu_location) =>
         Some(latched_screen),
         "viewport-local coordinates are translated exactly once for drawing"
     );
 
     let mut moved_context = context.clone();
     let moved_x = latched_local.x.saturating_sub(4);
-    assert_ne!(
-        moved_x, latched_local.x,
-        "fixture must leave room for relocation"
-    );
+    main_assert_ne!(moved_x => latched_local.x, "fixture must leave room for relocation");
     moved_context.location = Some(Vector2::new(moved_x, latched_local.y));
     app.engine
         .apply_object_update(
@@ -299,10 +256,10 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         )
         .test_value();
     app.test_render(&mut frame);
-    assert_eq!(
+    main_assert_eq!(
         app.script_menu_presentations
             .get(&owner)
-            .and_then(|state| state.location),
+            .and_then(|state| state.location) =>
         Some((
             viewport.x.saturating_add(moved_x),
             viewport.y.saturating_add(latched_local.y),
@@ -342,10 +299,10 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         )
         .test_value();
     app.test_render(&mut frame);
-    assert_eq!(
+    main_assert_eq!(
         app.script_menu_presentations
             .get(&owner)
-            .and_then(|state| state.location),
+            .and_then(|state| state.location) =>
         Some(edge_latched),
         "C++ refills retain the first post-clamp rcBounds position"
     );
@@ -372,18 +329,14 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
     .test_value();
 
     let spell_menu = app.engine.cursor_object_menu(owner).test_value().1;
-    assert_eq!(
-        spell_menu.extra,
-        clonk_engine::ObjectMenuExtra::Components,
-        "ALCO+NMGE uses C4MN_Extra_Components, never a mana footer"
-    );
+    main_assert_eq!(spell_menu.extra => clonk_engine::ObjectMenuExtra::Components, "ALCO+NMGE uses C4MN_Extra_Components, never a mana footer");
     let raise_gravity = spell_menu
         .items
         .iter()
         .find(|item| item.item_id == "MGUP")
         .test_value();
-    assert_eq!(
-        raise_gravity.components,
+    main_assert_eq!(
+        raise_gravity.components =>
         [clonk_engine::ObjectMenuComponent {
             definition_id: "IROC".to_string(),
             count: 1,
@@ -466,16 +419,12 @@ fn real_alchemy_right_drag_rectangle_replaces_crew_selection(
         .test_value();
     let target = GuiPoint::new(target_x, target_y);
     let start = GuiPoint::new(target.x - 24.0, target.y - 24.0);
-    assert_eq!(
-        app.graphics.object_at_point(&app.snapshot, owner, target),
+    main_assert_eq!(
+        app.graphics.object_at_point(&app.snapshot, owner, target) =>
         Some(replacement),
         "right-up lands on the second mage, which would expose a collapsed context click"
     );
-    assert_eq!(
-        app.graphics.object_at_point(&app.snapshot, owner, start),
-        None,
-        "right-down begins on ordinary landscape"
-    );
+    main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, start) => None, "right-down begins on ordinary landscape");
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(start.x),
@@ -487,24 +436,13 @@ fn real_alchemy_right_drag_rectangle_replaces_crew_selection(
         f64::from(target.y),
     ));
     let drag = app.ingame_right_mouse_state.test_value();
-    assert_eq!(drag.motion.selection_kind, IngameDragSelectionKind::Crew);
-    assert_eq!(
-        app.ingame_selection_candidates(drag.motion),
-        vec![replacement],
-        "C4MouseControl's transient Selection contains the framed crew"
-    );
+    main_assert_eq!(drag.motion.selection_kind => IngameDragSelectionKind::Crew);
+    main_assert_eq!(app.ingame_selection_candidates(drag.motion) => vec![replacement], "C4MouseControl's transient Selection contains the framed crew");
     app.test_right_button(ElementState::Released);
 
-    assert_eq!(
-        app.engine.selected_crew(owner),
-        vec![replacement],
-        "CID_PlrSelect replaces, rather than extends, the previous crew selection"
-    );
-    assert_eq!(app.engine.crew_cursor(owner), Some(replacement));
-    assert!(
-        app.engine.cursor_object_menu(owner).is_none(),
-        "a completed selection drag must not fall through to C4CMD_Context"
-    );
+    main_assert_eq!(app.engine.selected_crew(owner) => vec![replacement], "CID_PlrSelect replaces, rather than extends, the previous crew selection");
+    main_assert_eq!(app.engine.crew_cursor(owner) => Some(replacement));
+    main_assert!(app.engine.cursor_object_menu(owner).is_none(), "a completed selection drag must not fall through to C4CMD_Context");
 }
 
 fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
@@ -573,12 +511,12 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
     let first_bag = spawn_bag(&mut app, anchor);
     let second_bag = spawn_bag(&mut app, Vector2::new(anchor.x + 20, anchor.y));
     for bag in [first_bag, second_bag] {
-        assert_ne!(
+        main_assert_ne!(
             app.engine
                 .object_snapshot(bag)
                 .expect("spawned bag remains live")
                 .ocf
-                & clonk_engine::ocf::CARRYABLE,
+                & clonk_engine::ocf::CARRYABLE =>
             0,
             "the regression target uses the shipped carryable definition"
         );
@@ -594,17 +532,8 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
     let frame_start = GuiPoint::new(first_x.min(second_x) - 24.0, first_y.min(second_y) - 24.0);
     let frame_end = GuiPoint::new(first_x.max(second_x) + 24.0, first_y.max(second_y) + 24.0);
     for point in [frame_start, frame_end] {
-        assert!(
-            app.graphics
-                .viewport_point_at(point)
-                .is_some_and(|pointer| pointer.owner == owner),
-            "selection frame endpoint remains in the local viewport"
-        );
-        assert_eq!(
-            app.graphics.object_at_point(&app.snapshot, owner, point),
-            None,
-            "selection begins and ends on landscape"
-        );
+        main_assert!(app.graphics.viewport_point_at(point).is_some_and(|pointer| pointer.owner == owner), "selection frame endpoint remains in the local viewport");
+        main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, point) => None, "selection begins and ends on landscape");
     }
 
     app.test_cursor(PhysicalPosition::new(
@@ -617,14 +546,10 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
         f64::from(frame_end.y),
     ));
     let drag = app.ingame_right_mouse_state.test_value();
-    assert_eq!(drag.motion.selection_kind, IngameDragSelectionKind::Objects);
-    assert_eq!(
-        app.ingame_selection_candidates(drag.motion),
-        vec![second_bag, first_bag],
-        "object marks retain C++ Game.Objects newest-first order"
-    );
+    main_assert_eq!(drag.motion.selection_kind => IngameDragSelectionKind::Objects);
+    main_assert_eq!(app.ingame_selection_candidates(drag.motion) => vec![second_bag, first_bag], "object marks retain C++ Game.Objects newest-first order");
     app.test_right_button(ElementState::Released);
-    assert!(
+    main_assert!(
         app.engine
             .object_snapshot(mage)
             .expect("mage remains live")
@@ -679,20 +604,18 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
         .test_object_snapshot(mage)
         .command_stack
         .command_views();
-    assert_eq!(commands.len(), 2, "both framed bags receive commands");
-    assert!(commands.iter().all(|command| command.name == "Drop"));
-    assert_eq!(
+    main_assert_eq!(commands.len() => 2, "both framed bags receive commands");
+    main_assert!(commands.iter().all(|command| command.name == "Drop"));
+    main_assert_eq!(
         commands
             .iter()
             .map(|command| command.target)
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![Some(second_bag), Some(first_bag)],
         "Game.Objects main-list order is preserved through Set then Append"
     );
-    assert!(commands.iter().all(|command| {
-        command.tx == Some(drop_pointer.1.x) && command.ty == Some(drop_pointer.1.y)
-    }));
-    assert!(app.engine.cursor_object_menu(owner).is_none());
+    main_assert!(commands.iter().all(|command| {command.tx == Some(drop_pointer.1.x) && command.ty == Some(drop_pointer.1.y)}));
+    main_assert!(app.engine.cursor_object_menu(owner).is_none());
 }
 
 fn real_alchemy_control_right_drag_puts_carryable_into_hut(
@@ -725,15 +648,7 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
         .find(|object| object.definition_id == "AHUT" && object.owner == owner)
         .map(|object| object.id)
         .test_value();
-    assert_ne!(
-        app.engine
-            .object_snapshot(hut)
-            .expect("AHUT remains live")
-            .ocf
-            & clonk_engine::ocf::CONTAINER,
-        0,
-        "AHUT is the C++ OCF_Container Put target"
-    );
+    main_assert_ne!(app.engine.object_snapshot(hut).expect("AHUT remains live").ocf & clonk_engine::ocf::CONTAINER => 0, "AHUT is the C++ OCF_Container Put target");
 
     app.snapshot = app.engine.snapshot();
     app.refresh_focus();
@@ -801,13 +716,13 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
         .test_object_snapshot(mage)
         .command_stack
         .command_views();
-    assert_eq!(commands.len(), 1, "the drag emits exactly one Put");
-    assert_eq!(commands[0].name, "Put");
-    assert_eq!(commands[0].target, Some(hut));
-    assert_eq!(commands[0].target2, Some(bag));
-    assert_eq!(commands[0].tx, None);
-    assert_eq!(commands[0].ty, None);
-    assert!(app.engine.cursor_object_menu(owner).is_none());
+    main_assert_eq!(commands.len() => 1, "the drag emits exactly one Put");
+    main_assert_eq!(commands[0].name => "Put");
+    main_assert_eq!(commands[0].target => Some(hut));
+    main_assert_eq!(commands[0].target2 => Some(bag));
+    main_assert_eq!(commands[0].tx => None);
+    main_assert_eq!(commands[0].ty => None);
+    main_assert!(app.engine.cursor_object_menu(owner).is_none());
 }
 
 fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
@@ -861,11 +776,7 @@ fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
     }
     let bag = app.engine.spawn_test_object(bag_spawn);
     let bag_snapshot = app.engine.test_object_snapshot(bag);
-    assert_ne!(
-        bag_snapshot.ocf & clonk_engine::ocf::CARRYABLE,
-        0,
-        "the regression target uses the shipped carryable definition"
-    );
+    main_assert_ne!(bag_snapshot.ocf & clonk_engine::ocf::CARRYABLE => 0, "the regression target uses the shipped carryable definition");
 
     // FindVisObject's OCF filter is part of the pick itself. A newer
     // foreground object with no primary mouse OCF must therefore be
@@ -898,17 +809,8 @@ fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
         f64::from(bag_point.y),
     ));
     let click_world = ingame_pointer_world_pixel(app.ingame_pointer.test_value());
-    assert_eq!(
-        app.graphics
-            .object_at_point(&app.snapshot, owner, bag_point),
-        Some(blocker),
-        "the unfiltered foreground pick sees the newer blocker",
-    );
-    assert_eq!(
-        app.ingame_primary_mouse_target(owner, bag_point),
-        Some(bag),
-        "the primary mouse OCF pick skips that blocker and resolves the carryable",
-    );
+    main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, bag_point) => Some(blocker), "the unfiltered foreground pick sees the newer blocker",);
+    main_assert_eq!(app.ingame_primary_mouse_target(owner, bag_point) => Some(bag), "the primary mouse OCF pick skips that blocker and resolves the carryable",);
 
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
@@ -917,11 +819,11 @@ fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
         .test_object_snapshot(mage)
         .command_stack
         .command_views();
-    assert_eq!(first_click.len(), 1);
-    assert_eq!(first_click[0].name, "MoveTo");
-    assert_eq!(first_click[0].target, None);
-    assert_eq!(first_click[0].tx, Some(click_world.x));
-    assert_eq!(first_click[0].ty, Some(click_world.y));
+    main_assert_eq!(first_click.len() => 1);
+    main_assert_eq!(first_click[0].name => "MoveTo");
+    main_assert_eq!(first_click[0].target => None);
+    main_assert_eq!(first_click[0].tx => Some(click_world.x));
+    main_assert_eq!(first_click[0].ty => Some(click_world.y));
 
     app.test_left_button(ElementState::Pressed);
     let double_click = app
@@ -929,19 +831,19 @@ fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
         .test_object_snapshot(mage)
         .command_stack
         .command_views();
-    assert_eq!(double_click.len(), 1);
-    assert_eq!(double_click[0].name, "Get");
-    assert_eq!(double_click[0].target, Some(bag));
-    assert_eq!(double_click[0].tx, None);
-    assert_eq!(double_click[0].ty, None);
+    main_assert_eq!(double_click.len() => 1);
+    main_assert_eq!(double_click[0].name => "Get");
+    main_assert_eq!(double_click[0].target => Some(bag));
+    main_assert_eq!(double_click[0].tx => None);
+    main_assert_eq!(double_click[0].ty => None);
 
     app.test_left_button(ElementState::Released);
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .object_snapshot(mage)
             .expect("mage remains live after ignored release")
             .command_stack
-            .command_views(),
+            .command_views() =>
         double_click,
         "the post-double release must not overwrite Get with MoveTo"
     );
@@ -978,7 +880,7 @@ fn real_tutorial06_elevator_rider_view_target_and_camera_stay_continuous() {
     let elevator = first.object(elevator).test_value();
     let case_id = elevator.action.target.test_value();
     let case = first.object(case_id).test_value();
-    assert_eq!(case.definition_id, "ELEC");
+    main_assert_eq!(case.definition_id => "ELEC");
 
     // CLNK's bottom vertex is y+9 and ELEC's shipped mask begins at
     // case y+11. Put the selected crew exactly on that platform and use
@@ -1025,13 +927,10 @@ fn real_tutorial06_elevator_rider_view_target_and_camera_stay_continuous() {
     app.refresh_focus();
     let initial_snapshot = app.snapshot.clone();
     let initial_inputs = collect_viewport_inputs(&initial_snapshot).test_value();
-    assert_eq!(initial_inputs.len(), 1);
-    assert_eq!(
-        initial_inputs[0].focus.expect("player viewport focus").id,
-        rider
-    );
-    assert_eq!(
-        initial_inputs[0].center,
+    main_assert_eq!(initial_inputs.len() => 1);
+    main_assert_eq!(initial_inputs[0].focus.expect("player viewport focus").id => rider);
+    main_assert_eq!(
+        initial_inputs[0].center =>
         app.snapshot.object(rider).expect("initial rider").position,
         "C4Player::UpdateView follows the live ViewCursor position"
     );
@@ -1070,24 +969,17 @@ fn real_tutorial06_elevator_rider_view_target_and_camera_stay_continuous() {
             .object(rider)
             .unwrap_or_else(|| panic!("CLNK survives frame {frame}"))
             .clone();
-        assert_eq!(
-            (rider_now.action.name.as_str(), rider_now.action.target),
-            ("Push", Some(case_id)),
-            "real PUSH attachment survives frame {frame}"
-        );
-        assert!(
+        main_assert_eq!((rider_now.action.name.as_str(), rider_now.action.target) => ("Push", Some(case_id)), "real PUSH attachment survives frame {frame}");
+        main_assert!(
                 (rider_now.position.y - case.position.y - rider_offset.y).abs() <= 1,
                 "rider and carriage cannot diverge on frame {frame}: rider={rider_now:?}, case={case:?}"
             );
 
         let render_snapshot = app.snapshot.clone();
         let inputs = collect_viewport_inputs(&render_snapshot).test_value();
-        assert_eq!(inputs.len(), 1, "one local viewport on frame {frame}");
-        assert_eq!(inputs[0].focus.expect("player viewport focus").id, rider);
-        assert_eq!(
-                inputs[0].center, rider_now.position,
-                "the app must present the rider's current frame position to C4Viewport on frame {frame}"
-            );
+        main_assert_eq!(inputs.len() => 1, "one local viewport on frame {frame}");
+        main_assert_eq!(inputs[0].focus.expect("player viewport focus").id => rider);
+        main_assert_eq!(inputs[0].center => rider_now.position, "the app must present the rider's current frame position to C4Viewport on frame {frame}");
         app.graphics.render_frame(&render_snapshot, &inputs);
         let world_origin = app
             .graphics
@@ -1107,49 +999,31 @@ fn real_tutorial06_elevator_rider_view_target_and_camera_stay_continuous() {
         ));
     }
 
-    assert!(
-        samples.last().expect("final sample").0 > samples[0].0,
-        "the real ELEC must move during the sample: {samples:?}"
-    );
+    main_assert!(samples.last().expect("final sample").0 > samples[0].0, "the real ELEC must move during the sample: {samples:?}");
     for pair in samples.windows(2) {
         let [before, after] = pair else {
             unreachable!()
         };
-        assert!(
-            after.0 >= before.0 && after.1 >= before.1,
-            "carriage/rider reversed between frames: {before:?} -> {after:?}"
-        );
-        assert!(
-            after.2 <= before.2,
-            "the fixed-point C4Viewport camera reversed between frames: {before:?} -> {after:?}"
-        );
-        assert!(
-            after.3 >= before.3,
-            "the rider jittered backwards on screen: {before:?} -> {after:?}"
-        );
+        main_assert!(after.0 >= before.0 && after.1 >= before.1, "carriage/rider reversed between frames: {before:?} -> {after:?}");
+        main_assert!(after.2 <= before.2, "the fixed-point C4Viewport camera reversed between frames: {before:?} -> {after:?}");
+        main_assert!(after.3 >= before.3, "the rider jittered backwards on screen: {before:?} -> {after:?}");
     }
 }
 
 #[test]
 fn overlay_text_helper_respects_custom_text() {
-    assert!(overlay_text_needs_update("", "FRAME "));
-    assert!(overlay_text_needs_update("FRAME 00005", "FRAME "));
-    assert!(!overlay_text_needs_update("Inventory open", "FRAME "));
+    main_assert!(overlay_text_needs_update("", "FRAME "));
+    main_assert!(overlay_text_needs_update("FRAME 00005", "FRAME "));
+    main_assert!(!overlay_text_needs_update("Inventory open", "FRAME "));
 
-    assert!(overlay_text_needs_update("", "ENERGY "));
-    assert!(overlay_text_needs_update(
-        "ENERGY 100 DAMAGE 000 OWNER 1",
-        "ENERGY "
-    ));
-    assert!(!overlay_text_needs_update("Paused", "ENERGY "));
+    main_assert!(overlay_text_needs_update("", "ENERGY "));
+    main_assert!(overlay_text_needs_update("ENERGY 100 DAMAGE 000 OWNER 1", "ENERGY "));
+    main_assert!(!overlay_text_needs_update("Paused", "ENERGY "));
 
-    assert_eq!(
-        c4_presentation_text(&clonk_script::c4_string_from_bytes(&[0xe9])),
-        "\u{e9}"
-    );
+    main_assert_eq!(c4_presentation_text(&clonk_script::c4_string_from_bytes(&[0xe9])) => "\u{e9}");
 
     let raw_name = clonk_script::c4_string_from_bytes(&[0xe9]);
-    assert_eq!(player_join_board_line(&raw_name), "Player join: \u{e9}");
+    main_assert_eq!(player_join_board_line(&raw_name) => "Player join: \u{e9}");
 }
 
 #[test]
@@ -1194,32 +1068,21 @@ fn real_tutorial01_renders_cpp_decorated_portrait_message(
         })
         .test_value()
         .clone();
-    assert_eq!(message.kind, MessageKind::GlobalPlayer);
-    assert_eq!(message.player, Some(app.local_owner));
-    assert_eq!(message.target, None);
-    assert_eq!(message.lines, ["Welcome to the world of Clonk."]);
-    assert_eq!(message.offset, Vector2::new(50, 50));
-    assert_eq!(message.color, 0xffff_ffff);
-    assert_eq!(message.flags, 0x718);
-    assert_eq!(message.width, Some(30));
-    assert_eq!(message.decoration.as_deref(), Some("DECO"));
-    assert_eq!(
-        message.portrait.as_deref(),
-        Some("Portrait:SCLK::0000ff::1")
-    );
+    main_assert_eq!(message.kind => MessageKind::GlobalPlayer);
+    main_assert_eq!(message.player => Some(app.local_owner));
+    main_assert_eq!(message.target => None);
+    main_assert_eq!(message.lines => ["Welcome to the world of Clonk."]);
+    main_assert_eq!(message.offset => Vector2::new(50, 50));
+    main_assert_eq!(message.color => 0xffff_ffff);
+    main_assert_eq!(message.flags => 0x718);
+    main_assert_eq!(message.width => Some(30));
+    main_assert_eq!(message.decoration.as_deref() => Some("DECO"));
+    main_assert_eq!(message.portrait.as_deref() => Some("Portrait:SCLK::0000ff::1"));
 
     let decoration = message.frame_decoration.test_ref();
-    assert_eq!(decoration.source_definition, "DECO");
-    assert_eq!(decoration.background_color, 0x8032_3232);
-    assert_eq!(
-        (
-            decoration.border_top,
-            decoration.border_left,
-            decoration.border_right,
-            decoration.border_bottom,
-        ),
-        (0, 0, 0, 0)
-    );
+    main_assert_eq!(decoration.source_definition => "DECO");
+    main_assert_eq!(decoration.background_color => 0x8032_3232);
+    main_assert_eq!((decoration.border_top, decoration.border_left, decoration.border_right, decoration.border_bottom,) => (0, 0, 0, 0));
     let facets = [
         decoration.top_left.as_ref(),
         decoration.top.as_ref(),
@@ -1241,8 +1104,8 @@ fn real_tutorial01_renders_cpp_decorated_portrait_message(
             facet.target_y,
         )
     });
-    assert_eq!(
-        facets,
+    main_assert_eq!(
+        facets =>
         [
             (0, 0, 16, 16, -8, -7),
             (16, 0, 58, 12, 0, -7),
@@ -1276,12 +1139,9 @@ fn real_tutorial01_renders_cpp_decorated_portrait_message(
         .find(|viewport| viewport.owner == app.local_owner)
         .test_value()
         .rect;
-    assert_eq!(viewport, Rect::new(216, 56, 720, 560));
+    main_assert_eq!(viewport => Rect::new(216, 56, 720, 560));
     let fonts = app.assets.clonk_fonts.as_deref().test_value();
-    assert_eq!(
-        fonts.text.measure("Welcome to the world of Clonk.", true),
-        (194, 22)
-    );
+    main_assert_eq!(fonts.text.measure("Welcome to the world of Clonk.", true) => (194, 22));
 
     let core_frame = Rect::new(576, 106, 278, 64);
     let deco_envelope = Rect::new(568, 99, 295, 81);
@@ -1297,13 +1157,13 @@ fn real_tutorial01_renders_cpp_decorated_portrait_message(
         .enumerate()
         .filter_map(|(index, (actual, before))| (actual != before).then_some(index))
         .collect::<Vec<_>>();
-    assert!(!changed.is_empty(), "the C4GameMessage contributes pixels");
-    assert!(changed.iter().all(|index| {
+    main_assert!(!changed.is_empty(), "the C4GameMessage contributes pixels");
+    main_assert!(changed.iter().all(|index| {
         let x = (*index % 1152) as i32;
         let y = (*index / 1152) as i32;
         inside(viewport, x, y) && inside(deco_envelope, x, y)
     }));
-    assert!(
+    main_assert!(
         changed.iter().any(|index| {
             let x = (*index % 1152) as i32;
             let y = (*index / 1152) as i32;
@@ -1321,8 +1181,8 @@ fn real_tutorial01_renders_cpp_decorated_portrait_message(
             frame[offset + 3],
         )
     };
-    assert_eq!(
-        pixel(&rendered, 572, 100),
+    main_assert_eq!(
+        pixel(&rendered, 572, 100) =>
         clonk_frontend::gamma_encode_fragment(Color::opaque(126, 66, 23), &frame_gamma),
         "the opaque top-left DECO texel must draw outside the core frame"
     );
@@ -1340,8 +1200,8 @@ fn real_tutorial01_renders_cpp_decorated_portrait_message(
         0x8032_3232,
         Some(&frame_gamma),
     );
-    assert_eq!(
-        pixel(&rendered, 645, 130),
+    main_assert_eq!(
+        pixel(&rendered, 645, 130) =>
         expected_gap.get_pixel(0, 0).expect("blended gap pixel"),
         "the ten-pixel portrait/text gap contains only DECO background"
     );
@@ -1361,7 +1221,7 @@ fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base(
         app_tutorial_message_contains(app, "Welcome to the world of Clonk.")
     });
     app.configure_native_startup_fonts(3.0, false);
-    assert!(app.can_defer_native_game_messages(3.0));
+    main_assert!(app.can_defer_native_game_messages(3.0));
 
     let gamma = app
         .graphics
@@ -1373,15 +1233,12 @@ fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base(
             app.render_for_presentation(frame, false, false, true)
         })
         .test_value();
-    assert!(refreshed);
+    main_assert!(refreshed);
     let filtered_base = output.clone();
 
     app.render_native_game_messages(&mut output, presenter.presentation_geometry(), &gamma)
         .test_value();
-    assert_ne!(
-        output, filtered_base,
-        "the physical C4GameMessage pass must contribute message pixels"
-    );
+    main_assert_ne!(output => filtered_base, "the physical C4GameMessage pass must contribute message pixels");
 
     // A 320x200 logical surface creates a nominal 960x600 lower-left GL
     // viewport in a 960x598 framebuffer, clipping two physical rows from
@@ -1409,14 +1266,9 @@ fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base(
     for index in changed {
         changed_count += 1;
         let point = Rect::new((index % 960) as i32, (index / 960) as i32, 1, 1);
-        assert!(
-            physical_viewport.intersection(point).is_some(),
-            "native message pixel ({}, {}) escaped its viewport clip",
-            point.x,
-            point.y
-        );
+        main_assert!(physical_viewport.intersection(point).is_some(), "native message pixel ({}, {}) escaped its viewport clip", point.x, point.y);
     }
-    assert!(changed_count > 0);
+    main_assert!(changed_count > 0);
 
     let solid = [17_u8, 29, 43, 255];
     let mut nominal = solid
@@ -1440,12 +1292,7 @@ fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base(
     for y in 0..598_usize {
         let clipped_row = &clipped[y * 960 * 4..(y + 1) * 960 * 4];
         let nominal_row = &nominal[(y + 2) * 960 * 4..(y + 3) * 960 * 4];
-        assert_eq!(
-            clipped_row,
-            nominal_row,
-            "the 598-row framebuffer must clip nominal physical row {}",
-            y + 2
-        );
+        main_assert_eq!(clipped_row => nominal_row, "the 598-row framebuffer must clip nominal physical row {}", y + 2);
     }
 }
 
@@ -1479,11 +1326,7 @@ fn run_real_tutorial09_app_subcase(
 }
 
 fn assert_no_real_tutorial09_app_subcase_failures(failures: Vec<&str>) {
-    assert!(
-        failures.is_empty(),
-        "Tutorial09 app subcase(s) failed: {}",
-        failures.join(", ")
-    );
+    main_assert!(failures.is_empty(), "Tutorial09 app subcase(s) failed: {}", failures.join(", "));
 }
 
 fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
@@ -1513,8 +1356,8 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
         .find_object_index(clonk)
         .map(|index| app.engine.object_physical(index).breath)
         .test_value();
-    assert_eq!(current_breath, 50_000, "CLNK keeps its birth breath");
-    assert_eq!(capacity, 250_000, "Tutorial09 installs AquaClonk capacity");
+    main_assert_eq!(current_breath => 50_000, "CLNK keeps its birth breath");
+    main_assert_eq!(capacity => 250_000, "Tutorial09 installs AquaClonk capacity");
 
     let overlays = {
         let game_app = &mut app.app;
@@ -1531,9 +1374,9 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
         .find(|player| player.owner == app.local_owner)
         .and_then(|player| player.crew.iter().find(|crew| crew.object_id == clonk))
         .test_value();
-    assert_eq!(crew.breath, 50_000);
-    assert_eq!(crew.breath_capacity, 250_000);
-    assert!(crew.breath != 0 && crew.breath < crew.breath_capacity);
+    main_assert_eq!(crew.breath => 50_000);
+    main_assert_eq!(crew.breath_capacity => 250_000);
+    main_assert!(crew.breath != 0 && crew.breath < crew.breath_capacity);
 
     hold_message_board_for_frame_comparison(&mut app);
 
@@ -1545,7 +1388,7 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
     // (C4Facet.cpp:334-387).
     let hud = app.graphics.hud_graphics();
     let bars = hud.energy_bars.test_ref();
-    assert_eq!((bars.width(), bars.height()), (48, 36));
+    main_assert_eq!((bars.width(), bars.height()) => (48, 36));
     let mut surface = Surface::new(320, 200, PixelFormat::Rgba8888);
     clonk_frontend::hud::draw_level_bar(
         &mut surface,
@@ -1571,11 +1414,9 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
             )
         })
         .collect::<Vec<_>>();
-    assert!(!painted.is_empty(), "real cyan breath asset draws pixels");
-    assert!(painted
-        .iter()
-        .all(|(x, y, _)| (14..22).contains(x) && (55..160).contains(y)));
-    assert!(
+    main_assert!(!painted.is_empty(), "real cyan breath asset draws pixels");
+    main_assert!(painted.iter().all(|(x, y, _)| (14..22).contains(x) && (55..160).contains(y)));
+    main_assert!(
         painted.iter().any(|(_, y, [r, g, b])| *y >= 139
             && *g > r.saturating_add(20)
             && *b > r.saturating_add(20)),
@@ -1614,16 +1455,13 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
         .test_value()
         .breath = capacity;
     app.render_running(&mut frame, false).test_value();
-    assert_eq!(
-        frame, without_breath,
-        "the stationary real frame is otherwise deterministic"
-    );
+    main_assert_eq!(frame => without_breath, "the stationary real frame is otherwise deterministic");
 
     let viewport = app.graphics.viewport_rect(app.local_owner).test_value();
     let bar_x = viewport.x + 14;
     let bar_y = viewport.y + 55;
     let bar_height = viewport.height as i32 - 95;
-    assert!(bar_height > 0, "C++ viewport height gate permits HUD bars");
+    main_assert!(bar_height > 0, "C++ viewport height gate permits HUD bars");
     let fill_y = bar_y + bar_height - current_breath * bar_height / capacity;
     let changed = with_breath
         .chunks_exact(4)
@@ -1638,21 +1476,15 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
             )
         })
         .collect::<Vec<_>>();
-    assert!(
-        !changed.is_empty(),
-        "partial real Tutorial09 breath paints the HUD"
-    );
-    assert!(
+    main_assert!(!changed.is_empty(), "partial real Tutorial09 breath paints the HUD");
+    main_assert!(
         changed.iter().all(|(x, y, _)| {
             (bar_x..bar_x + 8).contains(x) && (bar_y..bar_y + bar_height).contains(y)
         }),
         "breath-only fragments stay inside the C++ bar rectangle: {changed:?}"
     );
-    assert!(
-        changed.iter().any(|(_, y, _)| *y < fill_y),
-        "the empty breath source column paints above yBar"
-    );
-    assert!(
+    main_assert!(changed.iter().any(|(_, y, _)| *y < fill_y), "the empty breath source column paints above yBar");
+    main_assert!(
         changed.iter().any(|(_, y, [r, g, b])| {
             *y >= fill_y && *g > r.saturating_add(10) && *b > r.saturating_add(10)
         }),
@@ -1675,14 +1507,10 @@ fn app_virtual_keyboard_routes_cpp_player_one_keys_without_arrow_aliases() {
         (VirtualKeyCode::KeyC, clonk_engine::COM_RIGHT),
     ] {
         keyboard.press(key);
-        assert_ne!(
-            keyboard.player_control().pressed_coms & (1 << com),
-            0,
-            "{key:?} must reach the matching C4Player::InCom bit"
-        );
+        main_assert_ne!(keyboard.player_control().pressed_coms & (1 << com) => 0, "{key:?} must reach the matching C4Player::InCom bit");
         keyboard.release(key);
-        assert_eq!(
-            keyboard.player_control().pressed_coms & (1 << com),
+        main_assert_eq!(
+            keyboard.player_control().pressed_coms & (1 << com) =>
             0,
             "{key:?} release must clear the C4Player::InCom bit in either \
                  control style (clonk-rs key-up divergence)"
@@ -1699,7 +1527,7 @@ fn app_virtual_keyboard_routes_cpp_player_one_keys_without_arrow_aliases() {
         keyboard.press(key);
         keyboard.release(key);
     }
-    assert_eq!(keyboard.player_control(), before_arrows);
+    main_assert_eq!(keyboard.player_control() => before_arrows);
 }
 
 #[test]
@@ -1751,11 +1579,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
         if clonk_now.action.name == "Walk" {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard.tap(VirtualKeyCode::KeyS);
-            assert_ne!(
-                keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_LEFT),
-                0,
-                "releasing S must preserve held Z/Left"
-            );
+            main_assert_ne!(keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_LEFT) => 0, "releasing S must preserve held Z/Left");
         }
         for _ in 0..12 {
             app.test_update();
@@ -1780,17 +1604,8 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
         });
         AppVirtualKeyboard::new(&mut app).release(VirtualKeyCode::KeyC);
     }
-    assert_eq!(
-        app.engine
-            .object_snapshot(flag)
-            .expect("collected FLAG")
-            .container,
-        Some(clonk)
-    );
-    assert!(
-        app_cursor_inventory_contains(&mut app, clonk, "FLAG"),
-        "the collected FLAG must reach the rendered cursor inventory"
-    );
+    main_assert_eq!(app.engine.object_snapshot(flag).expect("collected FLAG").container => Some(clonk));
+    main_assert!(app_cursor_inventory_contains(&mut app, clonk, "FLAG"), "the collected FLAG must reach the rendered cursor inventory");
     app.snapshot.hud.messages.clear();
     let mut rendered = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut rendered);
@@ -1810,11 +1625,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
         if clonk_now.action.name == "Walk" {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard.tap(VirtualKeyCode::KeyS);
-            assert_ne!(
-                keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_RIGHT),
-                0,
-                "releasing S must preserve held C/Right"
-            );
+            main_assert_ne!(keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_RIGHT) => 0, "releasing S must preserve held C/Right");
         }
         for _ in 0..12 {
             app.test_update();
@@ -1903,7 +1714,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
         }
         AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyX);
     }
-    assert!(
+    main_assert!(
         app.engine
             .cursor_object_menu(app.local_owner)
             .and_then(|(_, menu)| usize::try_from(menu.selection)
@@ -1960,25 +1771,15 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Dig")
     });
-    assert!(
-        app.engine.frame().saturating_sub(dig_press_frame) > 10,
-        "physical D must wait through C4DoubleClick before DigSingle"
-    );
+    main_assert!(app.engine.frame().saturating_sub(dig_press_frame) > 10, "physical D must wait through C4DoubleClick before DigSingle");
     {
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
         keyboard.press(VirtualKeyCode::KeyX);
         keyboard.press(VirtualKeyCode::KeyZ);
         let control = keyboard.player_control();
-        assert_ne!(control.pressed_coms & (1 << clonk_engine::COM_DOWN), 0);
-        assert_ne!(control.pressed_coms & (1 << clonk_engine::COM_LEFT), 0);
-        assert_eq!(
-            keyboard
-                .engine()
-                .object_snapshot(clonk)
-                .expect("CLNK after X+Z")
-                .command_direction,
-            CommandDirection::DownLeft
-        );
+        main_assert_ne!(control.pressed_coms & (1 << clonk_engine::COM_DOWN) => 0);
+        main_assert_ne!(control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
+        main_assert_eq!(keyboard.engine().object_snapshot(clonk).expect("CLNK after X+Z").command_direction => CommandDirection::DownLeft);
     }
     advance_app_until(&mut app, "diagonal Dig reaches GOLD depth", 140, |app| {
         app_clonk_carries(app, clonk, "GOLD")
@@ -1991,11 +1792,11 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
         keyboard.release(VirtualKeyCode::KeyX);
         let control = keyboard.player_control();
-        assert_eq!(control.pressed_coms & (1 << clonk_engine::COM_DOWN), 0);
-        assert_ne!(control.pressed_coms & (1 << clonk_engine::COM_LEFT), 0);
+        main_assert_eq!(control.pressed_coms & (1 << clonk_engine::COM_DOWN) => 0);
+        main_assert_ne!(control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
         let clonk_now = keyboard.engine().test_object_snapshot(clonk);
-        assert_eq!(clonk_now.action.name, "Dig");
-        assert_eq!(clonk_now.command_direction, CommandDirection::Left);
+        main_assert_eq!(clonk_now.action.name => "Dig");
+        main_assert_eq!(clonk_now.command_direction => CommandDirection::Left);
     }
     advance_app_until(
         &mut app,
@@ -2004,13 +1805,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
         |app| app_clonk_carries(app, clonk, "GOLD"),
     );
     AppVirtualKeyboard::new(&mut app).release(VirtualKeyCode::KeyZ);
-    assert_eq!(
-        app.engine
-            .object_snapshot(gold)
-            .expect("collected GOLD")
-            .container,
-        Some(clonk)
-    );
+    main_assert_eq!(app.engine.object_snapshot(gold).expect("collected GOLD").container => Some(clonk));
     advance_app_until(
         &mut app,
         "CLNK stops digging after GOLD pickup",
@@ -2021,10 +1816,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
                 .is_some_and(|object| object.action.name == "Walk")
         },
     );
-    assert!(
-        app_cursor_inventory_contains(&mut app, clonk, "GOLD"),
-        "the collected GOLD must reach the rendered cursor inventory"
-    );
+    main_assert!(app_cursor_inventory_contains(&mut app, clonk, "GOLD"), "the collected GOLD must reach the rendered cursor inventory");
     // Typed C4GameMessage rejection has its own regression; isolate this
     // inventory-render assertion from that unported overlay.
     app.snapshot.hud.messages.clear();
@@ -2066,22 +1858,13 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
         } else if landed || left_scale_in_flight {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard.tap(VirtualKeyCode::KeyS);
-            assert_ne!(
-                keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_RIGHT),
-                0,
-                "releasing S must preserve held C during the return climb"
-            );
+            main_assert_ne!(keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_RIGHT) => 0, "releasing S must preserve held C during the return climb");
         }
         previous_action = action;
         app.test_update();
     }
     AppVirtualKeyboard::new(&mut app).release(VirtualKeyCode::KeyC);
-    assert!(
-        app.engine
-            .object_snapshot(clonk)
-            .is_some_and(|object| object.position.x >= 558),
-        "the GOLD-carrying CLNK must reach the cabin hill naturally"
-    );
+    main_assert!(app.engine.object_snapshot(clonk).is_some_and(|object| object.position.x >= 558), "the GOLD-carrying CLNK must reach the cabin hill naturally");
     advance_app_until(
         &mut app,
         "GOLD-carrying CLNK lands beside HUT2",
@@ -2120,16 +1903,9 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
     advance_app_until(&mut app, "Tutorial01 reaches GameOver", 320, |app| {
         app.snapshot.game_over && app.game_over_dialog.is_some()
     });
-    assert!(
-        app.snapshot
-            .round_results
-            .fulfilled_goals
-            .iter()
-            .any(|goal| goal == "SCRG"),
-        "Tutorial01 must fulfill its real SCRG before GameOver"
-    );
-    assert_eq!(
-        app.engine.next_mission().path,
+    main_assert!(app.snapshot.round_results.fulfilled_goals.iter().any(|goal| goal == "SCRG"), "Tutorial01 must fulfill its real SCRG before GameOver");
+    main_assert_eq!(
+        app.engine.next_mission().path =>
         r"Tutorial.c4f\Tutorial02.c4s"
     );
     // The typed C4GameMessage guard has a dedicated regression.
@@ -2179,7 +1955,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         }
         app.test_update();
     }
-    assert!(
+    main_assert!(
         app.engine
             .object_snapshot(clonk)
             .is_some_and(|object| object.container.is_none() && object.action.name == "Walk"),
@@ -2202,11 +1978,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     }
     let pushing = app.engine.test_object_snapshot(clonk);
     let balloon_before = app.engine.test_object_snapshot(balloon);
-    assert_eq!(
-        (pushing.action.name.as_str(), pushing.action.target),
-        ("Push", Some(balloon)),
-        "physical X/X must grab BALN through GameApp"
-    );
+    main_assert_eq!((pushing.action.name.as_str(), pushing.action.target) => ("Push", Some(balloon)), "physical X/X must grab BALN through GameApp");
     let platform_delta_y = pushing.position.y - balloon_before.position.y;
 
     {
@@ -2218,26 +1990,18 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         app.test_update();
         let clonk_now = app.engine.test_object_snapshot(clonk);
         let balloon_now = app.engine.test_object_snapshot(balloon);
-        assert_eq!(
-            (clonk_now.action.name.as_str(), clonk_now.action.target),
+        main_assert_eq!(
+            (clonk_now.action.name.as_str(), clonk_now.action.target) =>
             ("Push", Some(balloon)),
             "DFA_PUSH must retain BALN on app lift frame {lift_frame}"
         );
-        assert!(
+        main_assert!(
             (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
             "CLNK must remain on BALN's platform on app lift frame {lift_frame}; \
                  initial delta={platform_delta_y}, clonk={clonk_now:?}, balloon={balloon_now:?}"
         );
     }
-    assert!(
-        app.engine
-            .object_snapshot(balloon)
-            .expect("BALN after lift")
-            .position
-            .y
-            < balloon_before.position.y,
-        "physical S must lift BALN"
-    );
+    main_assert!(app.engine.object_snapshot(balloon).expect("BALN after lift").position.y < balloon_before.position.y, "physical S must lift BALN");
 
     // The engine-only Tutorial02 replay deliberately joins a classic
     // player. This app fixture is the fresh-player Jump'n'Run default, so
@@ -2255,35 +2019,27 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         app.test_update();
         let clonk_now = app.engine.test_object_snapshot(clonk);
         let balloon_now = app.engine.test_object_snapshot(balloon);
-        assert_eq!(
-            (clonk_now.action.name.as_str(), clonk_now.action.target),
+        main_assert_eq!(
+            (clonk_now.action.name.as_str(), clonk_now.action.target) =>
             ("Push", Some(balloon)),
             "DFA_PUSH must retain BALN on app lift frame {lift_frame}"
         );
-        assert!(
+        main_assert!(
             (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
             "CLNK must remain on BALN's platform on app lift frame {lift_frame}"
         );
     }
-    assert!(
-        app.engine
-            .object_snapshot(balloon)
-            .is_some_and(|object| object.position.y <= 150),
-        "held physical S must reach Tutorial02's flight corridor"
-    );
+    main_assert!(app.engine.object_snapshot(balloon).is_some_and(|object| object.position.y <= 150), "held physical S must reach Tutorial02's flight corridor");
     {
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
-        assert!(
-            keyboard.player_control().control_style,
-            "the isolated fresh player must use Jump'n'Run/AutoStop control"
-        );
+        main_assert!(keyboard.player_control().control_style, "the isolated fresh player must use Jump'n'Run/AutoStop control");
         keyboard.release(VirtualKeyCode::KeyS);
-        assert_eq!(
+        main_assert_eq!(
             keyboard
                 .engine()
                 .object_snapshot(balloon)
                 .expect("BALN after S release")
-                .command_direction,
+                .command_direction =>
             CommandDirection::Stop,
             "Jump'n'Run S release must stop vertical BALN control"
         );
@@ -2302,18 +2058,14 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         app.test_update();
         let clonk_now = app.engine.test_object_snapshot(clonk);
         let balloon_now = app.engine.test_object_snapshot(balloon);
-        assert_eq!(
-            (clonk_now.action.name.as_str(), clonk_now.action.target),
-            ("Push", Some(balloon)),
-            "DFA_PUSH must retain BALN on coast frame {coast_frame}"
-        );
-        assert!(
+        main_assert_eq!((clonk_now.action.name.as_str(), clonk_now.action.target) => ("Push", Some(balloon)), "DFA_PUSH must retain BALN on coast frame {coast_frame}");
+        main_assert!(
             (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
             "CLNK must remain on BALN's platform on coast frame {coast_frame}; \
                  initial delta={platform_delta_y}, clonk={clonk_now:?}, balloon={balloon_now:?}"
         );
     }
-    assert!(
+    main_assert!(
         app.engine
             .object_snapshot(balloon)
             .is_some_and(|object| object.position.x >= 520),
@@ -2327,14 +2079,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     {
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
         keyboard.press(VirtualKeyCode::KeyX);
-        assert_eq!(
-            keyboard
-                .engine()
-                .object_snapshot(balloon)
-                .expect("BALN after X press")
-                .command_direction,
-            CommandDirection::Down
-        );
+        main_assert_eq!(keyboard.engine().object_snapshot(balloon).expect("BALN after X press").command_direction => CommandDirection::Down);
     }
     for descent_frame in 1..=240 {
         let in_gate = app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -2349,17 +2094,17 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         app.test_update();
         let clonk_now = app.engine.test_object_snapshot(clonk);
         let balloon_now = app.engine.test_object_snapshot(balloon);
-        assert_eq!(
-            (clonk_now.action.name.as_str(), clonk_now.action.target),
+        main_assert_eq!(
+            (clonk_now.action.name.as_str(), clonk_now.action.target) =>
             ("Push", Some(balloon)),
             "DFA_PUSH must retain BALN on descent frame {descent_frame}"
         );
-        assert!(
+        main_assert!(
             (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
             "CLNK must remain on BALN's platform on descent frame {descent_frame}"
         );
     }
-    assert!(
+    main_assert!(
         app.engine.object_snapshot(clonk).is_some_and(|object| {
             object.action.name == "Push"
                 && object.action.target == Some(balloon)
@@ -2371,14 +2116,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     {
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
         keyboard.release(VirtualKeyCode::KeyX);
-        assert_eq!(
-            keyboard
-                .engine()
-                .object_snapshot(balloon)
-                .expect("BALN after X release")
-                .command_direction,
-            CommandDirection::Stop
-        );
+        main_assert_eq!(keyboard.engine().object_snapshot(balloon).expect("BALN after X release").command_direction => CommandDirection::Stop);
     }
 
     // Release does not clear C4Player::LastCom. Eleven app updates let the
@@ -2388,11 +2126,8 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         app.test_update();
         let clonk_now = app.engine.test_object_snapshot(clonk);
         let balloon_now = app.engine.test_object_snapshot(balloon);
-        assert_eq!(
-            (clonk_now.action.name.as_str(), clonk_now.action.target),
-            ("Push", Some(balloon))
-        );
-        assert!((clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1);
+        main_assert_eq!((clonk_now.action.name.as_str(), clonk_now.action.target) => ("Push", Some(balloon)));
+        main_assert!((clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1);
     }
     advance_app_until(&mut app, "Tutorial02 balloon-release prompt", 30, |app| {
         app_tutorial_message_contains(app, "Let go of the balloon")
@@ -2446,14 +2181,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard.release(VirtualKeyCode::KeyZ);
-            assert_eq!(
-                keyboard
-                    .engine()
-                    .object_snapshot(clonk)
-                    .expect("CLNK before FLAG throw")
-                    .direction,
-                Direction::Left
-            );
+            main_assert_eq!(keyboard.engine().object_snapshot(clonk).expect("CLNK before FLAG throw").direction => Direction::Left);
             keyboard.tap(VirtualKeyCode::KeyA);
         }
         advance_app_until(&mut app, "FLAG leaves CLNK inventory", 30, |app| {
@@ -2536,11 +2264,8 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
             }
         }
     }
-    assert!(app_clonk_carries(&app, clonk, "LOAM"));
-    assert!(
-        app_cursor_inventory_contains(&mut app, clonk, "LOAM"),
-        "the collected LOAM must reach the cursor inventory presentation"
-    );
+    main_assert!(app_clonk_carries(&app, clonk, "LOAM"));
+    main_assert!(app_cursor_inventory_contains(&mut app, clonk, "LOAM"), "the collected LOAM must reach the cursor inventory presentation");
 
     // Script40..42 moves the player to the left bridge position, observes
     // LMMS, and asks for its Diagonal left row. AutoStop Z release already
@@ -2585,7 +2310,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         })
         .and_then(|(menu, index)| menu.items.get(index))
         .map(|item| item.caption.as_str());
-    assert_eq!(selected, Some("Diagonal left"));
+    main_assert_eq!(selected => Some("Diagonal left"));
     let bridge_start = app.engine.test_object_snapshot(clonk).position;
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyA);
     advance_app_until(&mut app, "CLNK starts first LOAM Bridge", 10, |app| {
@@ -2593,11 +2318,11 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Bridge")
     });
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .object_snapshot(clonk)
             .expect("CLNK at first LOAM Bridge start")
-            .position,
+            .position =>
         bridge_start,
         "physical menu inputs must start Bridge without positioning the CLNK"
     );
@@ -2609,29 +2334,17 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         app.test_update();
     }
     let first_bridge_step = app.engine.test_object_snapshot(clonk);
-    assert_eq!(first_bridge_step.action.name, "Bridge");
-    assert_eq!(first_bridge_step.action.time, 6);
-    assert_eq!(
-        first_bridge_step.action.data, 0x0064_0110,
-        "LOAM must request C++'s moving, non-wall Earth bridge"
-    );
-    assert_eq!(
-        first_bridge_step.position,
-        Vector2::new(bridge_start.x - 1, bridge_start.y - 1)
-    );
+    main_assert_eq!(first_bridge_step.action.name => "Bridge");
+    main_assert_eq!(first_bridge_step.action.time => 6);
+    main_assert_eq!(first_bridge_step.action.data => 0x0064_0110, "LOAM must request C++'s moving, non-wall Earth bridge");
+    main_assert_eq!(first_bridge_step.position => Vector2::new(bridge_start.x - 1, bridge_start.y - 1));
     advance_app_until(&mut app, "first UpLeft bridge completes", 114, |app| {
         app.engine
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Walk")
     });
     let first_bridge_end = app.engine.test_object_snapshot(clonk).position;
-    assert_eq!(
-        (
-            first_bridge_end.x - bridge_start.x,
-            first_bridge_end.y - bridge_start.y,
-        ),
-        (-16, -16)
-    );
+    main_assert_eq!((first_bridge_end.x - bridge_start.x, first_bridge_end.y - bridge_start.y,) => (-16, -16));
     advance_app_until(&mut app, "Tutorial02 three-bridge prompt", 180, |app| {
         app_tutorial_message_contains(app, "build three diagonal bridges")
     });
@@ -2668,14 +2381,9 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
             .cursor_object_menu(app.local_owner)
             .is_some_and(|(_, menu)| menu.identification == loam_menu_identification)
     });
-    assert_eq!(
-        app.engine
-            .cursor_object_menu(app.local_owner)
-            .map(|(_, menu)| menu.selection),
-        Some(7)
-    );
+    main_assert_eq!(app.engine.cursor_object_menu(app.local_owner).map(|(_, menu)| menu.selection) => Some(7));
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyZ);
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .cursor_object_menu(app.local_owner)
             .and_then(|(_, menu)| {
@@ -2683,11 +2391,11 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
                     .ok()
                     .and_then(|index| menu.items.get(index))
             })
-            .map(|item| item.caption.as_str()),
+            .map(|item| item.caption.as_str()) =>
         Some("Diagonal left")
     );
     let second_bridge_start = app.engine.test_object_snapshot(clonk).position;
-    assert!(
+    main_assert!(
             (second_bridge_start.x - first_bridge_end.x).abs() <= 1
                 && (second_bridge_start.y - first_bridge_end.y).abs() <= 1,
             "bridge two must continue bridge one; first_end={first_bridge_end:?}, second_start={second_bridge_start:?}"
@@ -2704,13 +2412,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
             .is_some_and(|object| object.action.name == "Walk")
     });
     let second_bridge_end = app.engine.test_object_snapshot(clonk).position;
-    assert_eq!(
-        (
-            second_bridge_end.x - second_bridge_start.x,
-            second_bridge_end.y - second_bridge_start.y,
-        ),
-        (-16, -16)
-    );
+    main_assert_eq!((second_bridge_end.x - second_bridge_start.x, second_bridge_end.y - second_bridge_start.y,) => (-16, -16));
 
     // Cross both spans for LOAM3. FLAG may be encountered first after the
     // earlier Script30 throw; face right with a physical C frame, throw it
@@ -2735,14 +2437,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard.release(VirtualKeyCode::KeyC);
-            assert_eq!(
-                keyboard
-                    .engine()
-                    .object_snapshot(clonk)
-                    .expect("CLNK before rethrowing FLAG")
-                    .direction,
-                Direction::Right
-            );
+            main_assert_eq!(keyboard.engine().object_snapshot(clonk).expect("CLNK before rethrowing FLAG").direction => Direction::Right);
             keyboard.tap(VirtualKeyCode::KeyA);
         }
         advance_app_until(&mut app, "recollected FLAG leaves CLNK", 30, |app| {
@@ -2759,7 +2454,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         });
         AppVirtualKeyboard::new(&mut app).release(VirtualKeyCode::KeyC);
     }
-    assert!(app_clonk_carries(&app, clonk, "LOAM"));
+    main_assert!(app_clonk_carries(&app, clonk, "LOAM"));
     AppVirtualKeyboard::new(&mut app).press(VirtualKeyCode::KeyZ);
     advance_app_until(
         &mut app,
@@ -2784,14 +2479,9 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
             .cursor_object_menu(app.local_owner)
             .is_some_and(|(_, menu)| menu.identification == loam_menu_identification)
     });
-    assert_eq!(
-        app.engine
-            .cursor_object_menu(app.local_owner)
-            .map(|(_, menu)| menu.selection),
-        Some(7)
-    );
+    main_assert_eq!(app.engine.cursor_object_menu(app.local_owner).map(|(_, menu)| menu.selection) => Some(7));
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyZ);
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .cursor_object_menu(app.local_owner)
             .and_then(|(_, menu)| {
@@ -2799,11 +2489,11 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
                     .ok()
                     .and_then(|index| menu.items.get(index))
             })
-            .map(|item| item.caption.as_str()),
+            .map(|item| item.caption.as_str()) =>
         Some("Diagonal left")
     );
     let third_bridge_start = app.engine.test_object_snapshot(clonk).position;
-    assert!(
+    main_assert!(
             (third_bridge_start.x - second_bridge_end.x).abs() <= 1
                 && (third_bridge_start.y - second_bridge_end.y).abs() <= 1,
             "bridge three must continue bridge two; second_end={second_bridge_end:?}, third_start={third_bridge_start:?}"
@@ -2820,18 +2510,12 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
             .is_some_and(|object| object.action.name == "Walk")
     });
     let third_bridge_end = app.engine.test_object_snapshot(clonk).position;
-    assert_eq!(
-        (
-            third_bridge_end.x - third_bridge_start.x,
-            third_bridge_end.y - third_bridge_start.y,
-        ),
-        (-16, -16)
-    );
+    main_assert_eq!((third_bridge_end.x - third_bridge_start.x, third_bridge_end.y - third_bridge_start.y,) => (-16, -16));
     let three_bridge_delta = (
         third_bridge_end.x - bridge_start.x,
         third_bridge_end.y - bridge_start.y,
     );
-    assert!(
+    main_assert!(
             (three_bridge_delta.0 + 48).abs() <= 2
                 && (three_bridge_delta.1 + 48).abs() <= 2
                 && (360..445).contains(&third_bridge_end.x)
@@ -2865,14 +2549,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard.release(VirtualKeyCode::KeyZ);
-            assert_eq!(
-                keyboard
-                    .engine()
-                    .object_snapshot(clonk)
-                    .expect("CLNK before spare LOAM throw")
-                    .direction,
-                Direction::Left
-            );
+            main_assert_eq!(keyboard.engine().object_snapshot(clonk).expect("CLNK before spare LOAM throw").direction => Direction::Left);
             keyboard.tap(VirtualKeyCode::KeyA);
         }
         advance_app_until(&mut app, "spare LOAM leaves CLNK", 30, |app| {
@@ -2896,13 +2573,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         .object_snapshot(clonk)
         .and_then(|object| object.contents.first().copied())
         .test_value();
-    assert_eq!(
-        app.engine
-            .object_snapshot(flag)
-            .expect("carried FLAG")
-            .definition_id,
-        "FLAG"
-    );
+    main_assert_eq!(app.engine.object_snapshot(flag).expect("carried FLAG").definition_id => "FLAG");
 
     // Keep physical Z held over all three bridges and both jumps home. S
     // release must preserve the held Left bit on each jump.
@@ -2921,11 +2592,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     {
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
         keyboard.tap(VirtualKeyCode::KeyS);
-        assert_ne!(
-            keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_LEFT),
-            0,
-            "first S release must preserve held Z"
-        );
+        main_assert_ne!(keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_LEFT) => 0, "first S release must preserve held Z");
     }
     advance_app_until(
         &mut app,
@@ -2952,32 +2619,18 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     // ignored COM_Up_D and turn the intended jump into a walk-off fall.
     while app.engine.frame().saturating_sub(first_return_jump_frame) <= 10 {
         app.test_update();
-        assert_eq!(
-            app.engine
-                .object_snapshot(clonk)
-                .expect("CLNK waits at center-island jump edge")
-                .action
-                .name,
-            "Walk"
-        );
+        main_assert_eq!(app.engine.object_snapshot(clonk).expect("CLNK waits at center-island jump edge").action.name => "Walk");
     }
     let second_jump_start = app.engine.test_object_snapshot(clonk).position;
     {
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
         keyboard.tap(VirtualKeyCode::KeyS);
-        assert_ne!(
-            keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_LEFT),
-            0,
-            "second S release must preserve held Z"
-        );
+        main_assert_ne!(keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_LEFT) => 0, "second S release must preserve held Z");
     }
     app.test_update();
     let launched = app.engine.test_object_snapshot(clonk);
-    assert_eq!(launched.action.name, "Jump");
-    assert!(
-        launched.velocity.y < 0,
-        "second physical S must launch upward; clonk={launched:?}"
-    );
+    main_assert_eq!(launched.action.name => "Jump");
+    main_assert!(launched.velocity.y < 0, "second physical S must launch upward; clonk={launched:?}");
     for _ in 0..160 {
         if app
             .engine
@@ -2989,7 +2642,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         app.test_update();
     }
     let home_landing = app.engine.test_object_snapshot(clonk);
-    assert!(
+    main_assert!(
         home_landing.action.name == "Walk" && home_landing.position.x <= 230,
         "FLAG-carrying CLNK must land from {second_jump_start:?}; clonk={home_landing:?}"
     );
@@ -3007,14 +2660,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         },
     );
     AppVirtualKeyboard::new(&mut app).release(VirtualKeyCode::KeyZ);
-    assert_eq!(
-        app.engine
-            .object_snapshot(hut)
-            .expect("HUT3 before FLAG return")
-            .base,
-        -1,
-        "HUT3 must not be a base while FlyBase FLAG is absent"
-    );
+    main_assert_eq!(app.engine.object_snapshot(hut).expect("HUT3 before FLAG return").base => -1, "HUT3 must not be a base while FlyBase FLAG is absent");
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyS);
     advance_app_until(&mut app, "FLAG-carrying CLNK enters HUT3", 80, |app| {
         app.engine
@@ -3052,16 +2698,9 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
     advance_app_until(&mut app, "Tutorial02 reaches GameOver", 320, |app| {
         app.snapshot.game_over && app.game_over_dialog.is_some()
     });
-    assert!(
-        app.snapshot
-            .round_results
-            .fulfilled_goals
-            .iter()
-            .any(|goal| goal == "SCRG"),
-        "Tutorial02 must fulfill SCRG before GameOver"
-    );
-    assert_eq!(
-        app.engine.next_mission().path,
+    main_assert!(app.snapshot.round_results.fulfilled_goals.iter().any(|goal| goal == "SCRG"), "Tutorial02 must fulfill SCRG before GameOver");
+    main_assert_eq!(
+        app.engine.next_mission().path =>
         r"Tutorial.c4f\Tutorial03.c4s"
     );
     // Typed C4GameMessage rejection has its own regression; isolate this
@@ -3079,14 +2718,11 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
     // C then S through GameApp's physical keyboard boundary so this also
     // covers the real key map and ObjectComUp entrance path.
     let mut app = real_tutorial_app(3, "Tutorial 3 app virtual player");
-    assert!(
+    main_assert!(
             !app.mouse_control,
             "Tutorial03 DisableMouse=1 must suppress player mouse control and the menu close X like C++ (C4Player.cpp:1907-1912; C4Menu.cpp:1270-1276)"
         );
-    assert!(
-        !app.option_flags(app.local_owner).mouse_shown,
-        "DisableMouse must remove the in-game Options entry like C++ (C4MainMenu.cpp:563-571)"
-    );
+    main_assert!(!app.option_flags(app.local_owner).mouse_shown, "DisableMouse must remove the in-game Options entry like C++ (C4MainMenu.cpp:563-571)");
 
     let clonk = app.engine.test_crew_cursor(app.local_owner);
     let hut = app
@@ -3110,13 +2746,13 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         }
         app.test_update();
     }
-    assert!(
+    main_assert!(
         app.engine
             .object_snapshot(hut)
             .is_some_and(|object| { object.base == app.local_owner }),
         "Tutorial03 ready HUT3 must become the local player's base"
     );
-    assert!(
+    main_assert!(
         app.engine
             .object_snapshot(clonk)
             .is_some_and(|object| { object.container.is_none() && object.action.name == "Walk" }),
@@ -3154,14 +2790,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         }
         app.test_update();
     }
-    assert_eq!(
-        app.engine
-            .object_snapshot(clonk)
-            .expect("CLNK after physical S")
-            .container,
-        Some(hut),
-        "physical C/S route must enter HUT3 through GameApp"
-    );
+    main_assert_eq!(app.engine.object_snapshot(clonk).expect("CLNK after physical S").container => Some(hut), "physical C/S route must enter HUT3 through GameApp");
 
     for _ in 0..20 {
         if app.engine.cursor_object_menu(app.local_owner).is_some() {
@@ -3175,18 +2804,9 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
     let buy_identification = serde_json::from_value(serde_json::json!({ "Int": 4 })).test_value();
     let contents_identification =
         serde_json::from_value(serde_json::json!({ "Int": 18 })).test_value();
-    assert_eq!(menu.identification, context_identification);
-    assert_eq!(
-            menu.caption, "Cabin",
-            "C4Def::Load must replace HUT3's DefCore fallback with Names.txt US localization (C4Def.cpp:635-639)"
-        );
-    assert_eq!(
-        menu.items
-            .iter()
-            .map(|item| item.caption.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Contents", "Buy", "Sell", "Info", "Exit"]
-    );
+    main_assert_eq!(menu.identification => context_identification);
+    main_assert_eq!(menu.caption => "Cabin", "C4Def::Load must replace HUT3's DefCore fallback with Names.txt US localization (C4Def.cpp:635-639)");
+    main_assert_eq!(menu.items.iter().map(|item| item.caption.as_str()).collect::<Vec<_>>() => vec!["Contents", "Buy", "Sell", "Info", "Exit"]);
     let mut rendered = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut rendered);
     advance_app_until(&mut app, "Tutorial03 Buy-menu prompt", 240, |app| {
@@ -3215,9 +2835,9 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         app.test_update();
     }
     let (_, buy_menu) = app.engine.cursor_object_menu(app.local_owner).test_value();
-    assert_eq!(buy_menu.identification, buy_identification);
-    assert_eq!(
-        buy_menu.title_symbol,
+    main_assert_eq!(buy_menu.identification => buy_identification);
+    main_assert_eq!(
+        buy_menu.title_symbol =>
         clonk_engine::ObjectMenuSymbol::Buy {
             owner: app
                 .engine
@@ -3227,21 +2847,10 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         },
         "C4MN_Buy title uses the contained building owner (C4Object.cpp:1919-1928)"
     );
-    assert_eq!(
-        buy_menu.extra,
-        clonk_engine::ObjectMenuExtra::Value,
-        "C4MN_Buy exposes selected value in its footer"
-    );
-    assert_eq!(
-        buy_menu
-            .items
-            .iter()
-            .map(|item| (item.caption.as_str(), item.count, item.value))
-            .collect::<Vec<_>>(),
-        vec![("Buy Lorry", 1, Some(20))]
-    );
-    assert_eq!(
-            buy_menu.items[0].info_caption,
+    main_assert_eq!(buy_menu.extra => clonk_engine::ObjectMenuExtra::Value, "C4MN_Buy exposes selected value in its footer");
+    main_assert_eq!(buy_menu.items.iter().map(|item| (item.caption.as_str(), item.count, item.value)).collect::<Vec<_>>() => vec![("Buy Lorry", 1, Some(20))]);
+    main_assert_eq!(
+            buy_menu.items[0].info_caption =>
             "Useful to transport large amounts of material. Holds up to 50 items.",
             "C4ObjectMenu::Refill passes each Buy definition's localized description to C4MenuItem (C4ObjectMenu.cpp:219-233)"
         );
@@ -3284,19 +2893,13 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         .find(|object| object.definition_id == "LORY")
         .test_value()
         .id;
-    assert_eq!(
-        app.engine
-            .object_snapshot(lorry)
-            .expect("bought LORY")
-            .container,
-        Some(hut)
-    );
+    main_assert_eq!(app.engine.object_snapshot(lorry).expect("bought LORY").container => Some(hut));
     let player = app.engine.test_player(app.local_owner);
-    assert_eq!(player.wealth(), 5);
-    assert_eq!(player.home_base_material().get("LORY"), Some(&0));
+    main_assert_eq!(player.wealth() => 5);
+    main_assert_eq!(player.home_base_material().get("LORY") => Some(&0));
     let (_, buy_menu) = app.engine.cursor_object_menu(app.local_owner).test_value();
-    assert_eq!(buy_menu.identification, buy_identification);
-    assert_eq!(buy_menu.items[0].count, 0);
+    main_assert_eq!(buy_menu.identification => buy_identification);
+    main_assert_eq!(buy_menu.items[0].count => 0);
     advance_app_until(&mut app, "Tutorial03 close-Buy prompt", 240, |app| {
         app_tutorial_message_contains(app, "close the buy menu")
     });
@@ -3337,14 +2940,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         app.test_update();
     }
     let (_, contents_menu) = app.engine.cursor_object_menu(app.local_owner).test_value();
-    assert_eq!(
-        contents_menu
-            .items
-            .iter()
-            .map(|item| (item.caption.as_str(), item.item_id.as_str()))
-            .collect::<Vec<_>>(),
-        vec![("Activate Lorry", "LORY")]
-    );
+    main_assert_eq!(contents_menu.items.iter().map(|item| (item.caption.as_str(), item.item_id.as_str())).collect::<Vec<_>>() => vec![("Activate Lorry", "LORY")]);
     // Typed C4GameMessage rejection has its own regression; isolate this
     // Contents-render assertion from that unported overlay.
     app.snapshot.hud.messages.clear();
@@ -3366,12 +2962,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         }
         app.test_update();
     }
-    assert!(
-        app.engine
-            .object_snapshot(lorry)
-            .is_some_and(|object| object.container.is_none()),
-        "Contents activation must exit LORY from HUT3"
-    );
+    main_assert!(app.engine.object_snapshot(lorry).is_some_and(|object| object.container.is_none()), "Contents activation must exit LORY from HUT3");
     advance_app_until(&mut app, "Tutorial03 leave-HUT3 prompt", 240, |app| {
         app_tutorial_message_contains(app, "exit the hut")
     });
@@ -3408,12 +2999,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         }
         app.test_update();
     }
-    assert!(
-        app.engine
-            .object_snapshot(clonk)
-            .is_some_and(|object| object.container.is_none()),
-        "physical D/D route must exit CLNK from HUT3"
-    );
+    main_assert!(app.engine.object_snapshot(clonk).is_some_and(|object| object.container.is_none()), "physical D/D route must exit CLNK from HUT3");
 
     // Once both objects are outside, Tutorial03 teaches the complete real
     // production route: LORY to SAWM, TRE2 through SAWM, ORE1 into LORY,
@@ -3427,14 +3013,8 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         20,
         |app| app.engine.cursor_object_menu(app.local_owner).is_none(),
     );
-    assert!(
-        app.engine.cursor_object_menu(app.local_owner).is_none(),
-        "no engine cursor menu may intercept the first world X"
-    );
-    assert!(
-        !app.menu_controls_active_for(app.local_owner),
-        "no app menu may intercept the first world X"
-    );
+    main_assert!(app.engine.cursor_object_menu(app.local_owner).is_none(), "no engine cursor menu may intercept the first world X");
+    main_assert!(!app.menu_controls_active_for(app.local_owner), "no app menu may intercept the first world X");
     let sawmill = app_object_with_definition(&app, "SAWM").test_value();
     let foundry = app_object_with_definition(&app, "FNDR").test_value();
     let tree = app
@@ -3553,10 +3133,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
             .count()
             >= 5
     });
-    assert!(
-        app.engine.object_snapshot(sawmill).is_some(),
-        "SAWM must survive after consuming TRE2"
-    );
+    main_assert!(app.engine.object_snapshot(sawmill).is_some(), "SAWM must survive after consuming TRE2");
 
     advance_app_until(&mut app, "Tutorial03 creates ORE1", 180, |app| {
         app_tutorial_message_contains(app, "dig out the chunk of ore")
@@ -3615,14 +3192,8 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
             })
     });
     AppVirtualKeyboard::new(&mut app).release(VirtualKeyCode::KeyZ);
-    assert!(
-        app.engine.cursor_object_menu(app.local_owner).is_none(),
-        "no engine cursor menu may intercept the world A throw"
-    );
-    assert!(
-        !app.menu_controls_active_for(app.local_owner),
-        "no app menu may intercept the world A throw"
-    );
+    main_assert!(app.engine.cursor_object_menu(app.local_owner).is_none(), "no engine cursor menu may intercept the world A throw");
+    main_assert!(!app.menu_controls_active_for(app.local_owner), "no app menu may intercept the world A throw");
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyA);
     advance_app_until(&mut app, "ORE1 enters LORY", 180, |app| {
         app.engine
@@ -3687,19 +3258,12 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
     advance_app_until(&mut app, "Tutorial03 reaches GameOver", 320, |app| {
         app.snapshot.game_over && app.game_over_dialog.is_some()
     });
-    assert!(
-        app.snapshot
-            .round_results
-            .fulfilled_goals
-            .iter()
-            .any(|goal| goal == "SCRG"),
-        "Tutorial03 must fulfill SCRG before GameOver"
-    );
-    assert_eq!(
-        app.engine.next_mission().path,
+    main_assert!(app.snapshot.round_results.fulfilled_goals.iter().any(|goal| goal == "SCRG"), "Tutorial03 must fulfill SCRG before GameOver");
+    main_assert_eq!(
+        app.engine.next_mission().path =>
         r"Tutorial.c4f\Tutorial04.c4s"
     );
-    assert!(
+    main_assert!(
         resolve_next_mission_scenario(&app.scenario_catalog, &app.engine.next_mission().path,)
             .is_some(),
         "the focused real-scenario catalog retains Tutorial04 navigation"

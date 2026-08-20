@@ -1408,7 +1408,7 @@
 
         let mut classifier = crate::scenario::MapPixelClassifier::from_runtime_state(texmap);
         let mut setup_rng = LcgRng::new(1);
-        let retained = crate::map_creator_s2::create_s2_map_with_state(
+        let retained = crate::map_creator_s2::create_s2_map_with_state_and_functions(
             "overlay Named { mat = Earth; tex = Rough; wdt = 50; seed = 7; }; \
              map Original { seed = 5; Named; }; \
              overlay Half { mat = Earth; tex = Rough; wdt = 50; }; \
@@ -1422,6 +1422,7 @@
             false,
             1,
             &mut setup_rng,
+            &std::collections::HashSet::new(),
         )
         .creator;
         let texmap = classifier.into_runtime_state();

@@ -9,13 +9,8 @@
 // Pointer-backed strings/arrays/maps compare by raw identity below STRICT2,
 // by content at STRICT2, and with matching outer types at STRICT3.
 
-use clonk_script::{C4VType, Engine, Script, Value, ValueMap};
-
-fn eval(source: &str) -> Value {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("loads");
-    engine.call("Test", &[]).expect("call")
-}
+use crate::support::eval;
+use clonk_script::{C4VType, Engine, Value, ValueMap};
 
 fn eval_with_format(source: &str) -> Value {
     let mut engine = Engine::new();
@@ -24,22 +19,15 @@ fn eval_with_format(source: &str) -> Value {
     engine.call("Test", &[]).expect("call")
 }
 
-#[test]
-fn nonstrict_treats_zero_and_nil_as_equal() {
-    assert_eq!(
-        eval("func Test() { var empty; return (1 - 1) == empty; }"),
-        Value::Bool(true)
-    );
+eval_cases! {
+    nonstrict_treats_zero_and_nil_as_equal:
+        "func Test() { var empty; return (1 - 1) == empty; }" => Value::Bool(true);
 }
 
-#[test]
-fn nonstrict_treats_one_and_true_as_equal() {
-    assert_eq!(eval("func Test() { return 1 == true; }"), Value::Bool(true));
-    assert_eq!(
-        eval("func Test() { return 0 == false; }"),
-        Value::Bool(true)
-    );
-}
+eval_test! { nonstrict_treats_one_and_true_as_equal {
+    "func Test() { return 1 == true; }" => Value::Bool(true);
+    "func Test() { return 0 == false; }" => Value::Bool(true);
+} }
 
 #[test]
 fn strict1_strings_compare_raw_identity() {
@@ -178,12 +166,7 @@ fn strict1_shared_cells_and_string_constants_keep_identity() {
     engine.set_global_variables(globals);
     engine.set_global_constants(constants);
     engine.register_host_function("Format", |_| Ok(Value::String("a".into())));
-    engine.add_script(
-        Script::compile(
-            "#strict\nstatic s; static const S = \"a\";\nfunc Test() { s = Format(\"%s\", \"a\"); var t = s; return [s == s, s == t, S == \"a\", S() == \"a\"]; }",
-        )
-        .expect("compiles"),
-    );
+    crate::support::load_script(&mut engine, "#strict\nstatic s; static const S = \"a\";\nfunc Test() { s = Format(\"%s\", \"a\"); var t = s; return [s == s, s == t, S == \"a\", S() == \"a\"]; }");
     engine.adopt_statics_into_globals();
 
     assert_eq!(
@@ -197,24 +180,14 @@ fn strict1_shared_cells_and_string_constants_keep_identity() {
     );
 }
 
-#[test]
-fn strict3_distinguishes_types() {
-    assert_eq!(
-        eval("#strict 3\nfunc Test() { return 0 == nil; }"),
-        Value::Bool(false)
-    );
-    assert_eq!(
-        eval("#strict 3\nfunc Test() { return 1 == true; }"),
-        Value::Bool(false)
-    );
-}
+eval_test! { strict3_distinguishes_types {
+    "#strict 3\nfunc Test() { return 0 == nil; }" => Value::Bool(false);
+    "#strict 3\nfunc Test() { return 1 == true; }" => Value::Bool(false);
+} }
 
-#[test]
-fn strict3_not_equal_is_inverse() {
-    assert_eq!(
-        eval("#strict 3\nfunc Test() { return 0 != nil; }"),
-        Value::Bool(true)
-    );
+eval_cases! {
+    strict3_not_equal_is_inverse:
+        "#strict 3\nfunc Test() { return 0 != nil; }" => Value::Bool(true);
 }
 
 #[test]
@@ -555,19 +528,9 @@ fn strict_three_zero_c4id_remains_typed_for_equality() {
     );
 }
 
-#[test]
-fn same_type_equality_holds_at_all_levels() {
-    assert_eq!(eval("func Test() { return 5 == 5; }"), Value::Bool(true));
-    assert_eq!(
-        eval("#strict 3\nfunc Test() { return 5 == 5; }"),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        eval("func Test() { var left, right; return left == right; }"),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        eval("#strict 3\nfunc Test() { return 7 != 8; }"),
-        Value::Bool(true)
-    );
-}
+eval_test! { same_type_equality_holds_at_all_levels {
+    "func Test() { return 5 == 5; }" => Value::Bool(true);
+    "#strict 3\nfunc Test() { return 5 == 5; }" => Value::Bool(true);
+    "func Test() { var left, right; return left == right; }" => Value::Bool(true);
+    "#strict 3\nfunc Test() { return 7 != 8; }" => Value::Bool(true);
+} }

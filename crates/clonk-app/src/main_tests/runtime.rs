@@ -1,6 +1,144 @@
 // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
+macro_rules! runtime_fixture {
+    (network_connection: $connection_id:expr, $client_id:expr, $usage:expr, $protocol:expr, $packet_loss:expr, $ping_ms:expr, $lag_ms:expr $(,)?) => {
+        clonk_network::RuntimeNetworkConnection {
+            connection_id: $connection_id,
+            client_id: $client_id,
+            usage: $usage,
+            protocol: $protocol,
+            peer_address: None,
+            packet_loss: $packet_loss,
+            ping_ms: $ping_ms,
+            lag_ms: $lag_ms,
+        }
+    };
+    (gpu_profile_renderer_surface_capture: $renderer:expr, $surface:expr, $capture:expr $(,)?) => {
+        RetainedGpuFrameProfile {
+            frame_preparation: Duration::from_nanos(2),
+            renderer: $renderer,
+            surface: $surface,
+            capture: $capture,
+            context: RetainedGpuFrameContext::default(),
+        }
+    };
+    (player_control_defaults $(,)?) => {
+        clonk_engine::PlayerControlData {
+            player: 2,
+            command: i32::from(clonk_engine::COM_LEFT),
+            data: 0,
+            by_client: 1,
+        }
+    };
+    (client: $client_id:expr, $activated:expr $(,)?) => {
+        clonk_engine::ClientCoreControlData {
+            client_id: $client_id,
+            activated: $activated,
+            ..Default::default()
+        }
+    };
+    (player_selection: $name:expr, $comment:expr $(,)?) => {
+        clonk_frontend::startup_plrsel::PlrSelPlayer {
+            name: $name,
+            activated: false,
+            big_icon: None,
+            portrait: None,
+            color_dw: 0xff,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            comment: $comment,
+        }
+    };
+}
+
+macro_rules! runtime_assert_eq {
+    ($actual:expr => $expected:expr, $($message:tt)+) => {
+        assert_eq!($actual, $expected, $($message)+);
+    };
+    ($($actual:expr => $expected:expr);+ $(;)?) => {
+        $(assert_eq!($actual, $expected);)+
+    };
+}
+
+macro_rules! runtime_assert {
+    ($condition:expr, $($message:tt)+) => {
+        assert!($condition, $($message)+);
+    };
+    ($($condition:expr);+ $(;)?) => {
+        $(assert!($condition);)+
+    };
+}
+
+macro_rules! runtime_assert_ne {
+    ($actual:expr => $unexpected:expr, $($message:tt)+) => {
+        assert_ne!($actual, $unexpected, $($message)+);
+    };
+    ($($actual:expr => $unexpected:expr);+ $(;)?) => {
+        $(assert_ne!($actual, $unexpected);)+
+    };
+}
+
+fn tap_runtime_key(app: &mut GameApp, key: VirtualKeyCode) {
+    app.test_key(key, ElementState::Pressed);
+    app.test_key(key, ElementState::Released);
+}
+
+fn startup_player_focus(app: &GameApp) -> clonk_frontend::startup_plrsel::PlrSelControl {
+    app.startup_player_dialog
+        .as_ref()
+        .expect("player dialog")
+        .focused_control()
+}
+
+fn selected_options_control_set(
+    app: &GameApp,
+    device: clonk_frontend::startup_options_controls::ControlDevice,
+) -> usize {
+    app.startup_options_dialog
+        .as_ref()
+        .unwrap()
+        .controls()
+        .selected_set(device)
+}
+
+fn install_runtime_key_config(
+    app: &mut GameApp,
+    config: std::result::Result<RuntimeKeyConfig, String>,
+) {
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache.set(config).test_value();
+}
+
+fn open_test_console_viewport(app: &mut GameApp, player: Option<i32>) -> u64 {
+    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(player)])
+        .test_value();
+    app.physical_viewports.last().test_value().physical_identity
+}
+
+fn open_local_test_console_viewport(app: &mut GameApp) -> u64 {
+    open_test_console_viewport(app, Some(app.local_owner))
+}
+
+fn runtime_console_network_fixture(
+    mode: ConsoleEditMode,
+) -> (
+    GameApp,
+    network::NetworkEventSender,
+    network::TestNetworkCommands,
+    u64,
+) {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = mode;
+    let (events, commands) = install_running_network_stub(&mut app, 7, 0, 2);
+    let identity = open_test_console_viewport(&mut app, None);
+    (app, events, commands, identity)
+}
+
 fn runtime_scenario_app(
     user_data: &Path,
     player_name: &str,
@@ -11,20 +149,9 @@ fn runtime_scenario_app(
     let mut app = GameApp::new(
         320,
         200,
-        AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        },
+        disabled_audio_options(),
         Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: player_name.to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with(player_name.to_string(), false),
     )
     .test_value();
     wait_for_menu(&mut app);
@@ -53,11 +180,7 @@ fn runtime_config_value<T>(body: Option<&str>, load: impl FnOnce(&AppPaths) -> T
     let root = tempdir();
     let user_data = tempdir();
     fs::create_dir_all(root.path().join("planet/System.c4g")).test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(root.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(root.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     if let Some(body) = body {
         fs::write(paths.config_file(), body).test_value();
@@ -78,11 +201,7 @@ fn runtime_install_fixture(config: Option<&str>) -> RuntimeInstallFixture {
     let user_data = tempdir();
     let system = install.path().join("planet/System.c4g");
     fs::create_dir_all(&system).test_value();
-    let guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     if let Some(config) = config {
         fs::write(paths.config_file(), config).test_value();
@@ -123,30 +242,12 @@ fn classic_command_line_keeps_rust_option_values_out_of_legacy_scanning() {
 
 #[test]
 fn debug_hud_requires_developer_interactive_launch() {
-    assert!(debug_hud_enabled(
-        Some("1"),
-        true,
-        DebugHudLaunch::Interactive,
-        false,
-    ));
-    assert!(!debug_hud_enabled(
-        None,
-        true,
-        DebugHudLaunch::Interactive,
-        false,
-    ));
-    assert!(!debug_hud_enabled(
-        Some("true"),
-        true,
-        DebugHudLaunch::Interactive,
-        false,
-    ));
-    assert!(!debug_hud_enabled(
-        Some("1"),
-        false,
-        DebugHudLaunch::Interactive,
-        false,
-    ));
+    runtime_assert!(
+        debug_hud_enabled(Some("1"), true, DebugHudLaunch::Interactive, false,);
+        !debug_hud_enabled(None, true, DebugHudLaunch::Interactive, false,);
+        !debug_hud_enabled(Some("true"), true, DebugHudLaunch::Interactive, false,);
+        !debug_hud_enabled(Some("1"), false, DebugHudLaunch::Interactive, false,);
+    );
 }
 
 #[test]
@@ -154,7 +255,7 @@ fn debug_hud_is_suppressed_for_parity_and_compatibility_launches() {
     for launch in [DebugHudLaunch::ParityCapture, DebugHudLaunch::Compatibility] {
         assert!(!debug_hud_enabled(Some("1"), true, launch, false));
     }
-    assert!(!debug_hud_enabled(
+    runtime_assert!(!debug_hud_enabled(
         Some("1"),
         true,
         DebugHudLaunch::Interactive,
@@ -182,10 +283,7 @@ fn debug_hud_launch_classification_is_fail_closed() {
     }
 
     let compatibility = Cli::try_parse_from(["clonk-app", "Scenario.c4s"]).test_value();
-    assert_eq!(
-        debug_hud_launch(&compatibility),
-        DebugHudLaunch::Compatibility
-    );
+    runtime_assert_eq!(debug_hud_launch(&compatibility) => DebugHudLaunch::Compatibility);
 
     let interactive = Cli::try_parse_from(["clonk-app"]).test_value();
     assert_eq!(debug_hud_launch(&interactive), DebugHudLaunch::Interactive);
@@ -200,7 +298,7 @@ fn debug_hud_launch_classification_is_fail_closed() {
 /// `/open` command.
 #[test]
 fn headless_is_a_process_lifetime_switch_not_a_classic_argument() {
-    assert!(
+    runtime_assert!(
         !Cli::try_parse_from(["clonk-app"])
             .expect("a bare invocation parses")
             .headless
@@ -222,10 +320,7 @@ fn headless_is_a_process_lifetime_switch_not_a_classic_argument() {
     // Deliberately not a classic switch: `/open <params>` re-parses a
     // classic command line into the running process, so a classic spelling
     // would let a client-visible command turn headlessness on or off.
-    assert_eq!(
-        parse_classic_command_line(&[OsString::from("/headless")]),
-        ClassicCommandLine::default()
-    );
+    runtime_assert_eq!(parse_classic_command_line(&[OsString::from("/headless")]) => ClassicCommandLine::default());
 }
 
 #[test]
@@ -237,11 +332,8 @@ fn headed_surface_smoke_is_an_explicit_process_lifetime_diagnostic() {
     ])
     .test_value();
 
-    assert_eq!(
-        cli.headed_surface_smoke,
-        Some(PathBuf::from("headed-surface-report.json"))
-    );
-    assert!(
+    runtime_assert_eq!(cli.headed_surface_smoke => Some(PathBuf::from("headed-surface-report.json")));
+    runtime_assert!(
         Cli::try_parse_from([
             "clonk-app",
             "--headless",
@@ -249,9 +341,9 @@ fn headed_surface_smoke_is_an_explicit_process_lifetime_diagnostic() {
             "headed-surface-report.json",
         ])
         .is_err(),
-        "the diagnostic must reach a real event loop, window and GPU surface"
+        "the diagnostic must reach a real event loop, window and GPU surface",
     );
-    assert!(
+    runtime_assert!(
         Cli::try_parse_from([
             "clonk-app",
             "--headed-surface-smoke",
@@ -259,14 +351,14 @@ fn headed_surface_smoke_is_an_explicit_process_lifetime_diagnostic() {
             "HarpoonRace.c4s",
         ])
         .is_err(),
-        "the diagnostic must not launch classic command-line work first"
+        "the diagnostic must not launch classic command-line work first",
     );
-    assert!(
+    runtime_assert!(
         !<Cli as clap::CommandFactory>::command()
             .render_long_help()
             .to_string()
             .contains("--headed-surface-smoke"),
-        "the hardware diagnostic is deliberately absent from ordinary user help"
+        "the hardware diagnostic is deliberately absent from ordinary user help",
     );
 }
 
@@ -283,42 +375,18 @@ fn classic_command_line_preserves_file_and_definition_order() {
         OsString::from("Round.c4r"),
     ]);
 
-    assert_eq!(classic.scenario, Some(PathBuf::from("Missions/Last")));
-    assert_eq!(
-        classic.player_files,
-        vec![
-            PathBuf::from("Players/Alice.C4P"),
-            PathBuf::from("Players/Bob.c4p")
-        ]
+    runtime_assert_eq!(
+        classic.scenario => Some(PathBuf::from("Missions/Last"));
+        classic.player_files => vec![ PathBuf::from("Players/Alice.C4P"), PathBuf::from("Players/Bob.c4p") ];
+        classic.definition_files => vec![ PathBuf::from("Defs/ExtraOne.c4d"), PathBuf::from("Defs/ExtraTwo.C4D") ];
+        classic.incoming_update => Some(PathBuf::from("Patch.c4u"));
+        classic.record_stream => Some(PathBuf::from("Round.c4r"));
+        classic_command_line_definition_modules( b"[General]\nDefinitions=Base.c4d;Second.c4d\n", &classic.definition_files, ) =>
+            vec![ "Base.c4d", "Second.c4d", "Defs/ExtraOne.c4d", "Defs/ExtraTwo.C4D", ];
     );
-    assert_eq!(
-        classic.definition_files,
-        vec![
-            PathBuf::from("Defs/ExtraOne.c4d"),
-            PathBuf::from("Defs/ExtraTwo.C4D")
-        ]
-    );
-    assert_eq!(classic.incoming_update, Some(PathBuf::from("Patch.c4u")));
-    assert_eq!(classic.record_stream, Some(PathBuf::from("Round.c4r")));
-    assert_eq!(
-        classic_command_line_definition_modules(
-            b"[General]\nDefinitions=Base.c4d;Second.c4d\n",
-            &classic.definition_files,
-        ),
-        vec![
-            "Base.c4d",
-            "Second.c4d",
-            "Defs/ExtraOne.c4d",
-            "Defs/ExtraTwo.C4D",
-        ]
-    );
-    assert_eq!(
-        classic_command_line_definition_modules(
-            b"[General]\nDefinitions=;Base.c4d;;Second.c4d;\n",
-            &[],
-        ),
-        vec!["", "Base.c4d", "", "Second.c4d"],
-        "std::getline preserves leading/interior empty modules but not a trailing delimiter"
+    runtime_assert_eq!(
+        classic_command_line_definition_modules(b"[General]\nDefinitions=;Base.c4d;;Second.c4d;\n", &[],) => vec!["", "Base.c4d", "", "Second.c4d"],
+        "std::getline preserves leading/interior empty modules but not a trailing delimiter",
     );
 }
 
@@ -360,18 +428,17 @@ fn classic_command_line_maps_process_local_overrides_in_argument_order() {
     assert_eq!(classic.league_server_signup, Some(false));
     assert_eq!(classic.lobby_timeout, Some(Some(0)));
     assert!(classic.observe);
-    assert_eq!(classic.runtime_join, Some(false));
-    assert_eq!(classic.tcp_port, Some(2222));
-    assert_eq!(classic.udp_port, Some(3333));
-    assert_eq!(classic.password.as_deref(), Some("secret"));
-    assert_eq!(classic.comment.as_deref(), Some("launch comment"));
-    assert_eq!(classic.record_dump.as_deref(), Some("dump.TXT"));
-    assert_eq!(
-        classic.record_stream,
-        Some(PathBuf::from("record.example:11114"))
+    runtime_assert_eq!(
+        classic.runtime_join => Some(false);
+        classic.tcp_port => Some(2222);
+        classic.udp_port => Some(3333);
+        classic.password.as_deref() => Some("secret");
+        classic.comment.as_deref() => Some("launch comment");
+        classic.record_dump.as_deref() => Some("dump.TXT");
+        classic.record_stream => Some(PathBuf::from("record.example:11114"));
+        classic.fair_crew => Some(false);
+        classic.config_file => Some(PathBuf::from("portable.cfg"));
     );
-    assert_eq!(classic.fair_crew, Some(false));
-    assert_eq!(classic.config_file, Some(PathBuf::from("portable.cfg")));
     assert!(classic.verbose);
     assert_eq!(classic.language.as_deref(), Some("DE,US"));
 
@@ -439,27 +506,16 @@ fn console_open_real_scenario_reaches_running() {
         if matches!(app.mode, AppMode::Running) {
             break;
         }
-        assert_ne!(
-            app.mode,
-            AppMode::Menu,
-            "startup menu must stay suppressed; status={:?}; loader_error={:?}",
-            app.status_text,
-            app.loader_error,
-        );
-        assert!(
+        runtime_assert_ne!(app.mode => AppMode::Menu, "startup menu must stay suppressed; status={:?}; loader_error={:?}", app.status_text, app.loader_error);
+        runtime_assert!(
             Instant::now() < deadline,
             "direct scenario did not finish loading; status={:?}",
-            app.status_text,
+            app.status_text
         );
         app.test_update();
         thread::sleep(Duration::from_millis(2));
     }
-    assert_eq!(
-        app.active_scenario
-            .as_ref()
-            .and_then(|scenario| scenario.path.as_deref()),
-        Some(scenario_path.as_path())
-    );
+    runtime_assert_eq!(app.active_scenario.as_ref().and_then(|scenario| scenario.path.as_deref()) => Some(scenario_path.as_path()));
     assert!(app.startup_dialog_fade.is_none());
     reset_cached_app_paths();
 }
@@ -469,25 +525,14 @@ fn command_and_hash_routes_bypass_plain_script_control() {
     let mut app = new_state_only_running_sandbox_app();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
 
-    assert!(app
-        .process_developer_console_input("/help", false)
-        .expect("slash input reaches ProcessCommand"));
-
-    assert!(app
-        .process_developer_console_input("#/sound Bell", false)
-        .expect("hash input reaches ProcessInput"));
+    runtime_assert!(
+        app.process_developer_console_input("/help", false).expect("slash input reaches ProcessCommand");
+        app.process_developer_console_input("#/sound Bell", false).expect("hash input reaches ProcessInput");
+    );
     let (controls, messages) = commands.take_submitted_decided_controls_and_messages();
     assert!(controls.is_empty());
-    assert_eq!(
-        messages,
-        vec![MessageControlData {
-            message_type: MESSAGE_TYPE_SOUND,
-            player: app.local_owner,
-            to_player: -1,
-            message: LegacyCString::from_bytes(b"Bell".to_vec())
-                .expect("fixture message has no NUL"),
-            by_client: 0,
-        }]
+    runtime_assert_eq!(
+        messages => vec![MessageControlData { message_type: MESSAGE_TYPE_SOUND, player: app.local_owner, to_player: -1, message: legacy_cstring(b"Bell"), by_client: 0, }];
     );
 }
 
@@ -504,15 +549,14 @@ fn plain_script_checks_editing_and_emits_decide_console_scope() {
     app.app_paths = Some(paths);
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
 
-    assert!(!app
+    runtime_assert!(!app
         .process_developer_console_input("SetGravity(41)", false)
         .expect("replay editing gate refuses plain script"));
     assert_eq!(app.status_text, "No editing while replaying.");
-    assert!(commands.take_submitted_decided_controls().is_empty());
-
-    assert!(app
-        .process_developer_console_input("SetGravity(42)", true)
-        .expect("editable console accepts plain script"));
+    runtime_assert!(
+        commands.take_submitted_decided_controls().is_empty();
+        app.process_developer_console_input("SetGravity(42)", true).expect("editable console accepts plain script");
+    );
     let decided = commands.take_submitted_decided_controls();
     let [(_, clonk_engine::ControlPacket::Script(script), false)] = decided.as_slice() else {
         panic!("expected one queued console script, got {decided:?}");
@@ -559,10 +603,8 @@ fn draw_tool_gesture_queues_a_decided_em_draw_tool_control() {
         y: 34,
         grade: 5,
         ift: true,
-        material: clonk_engine::LegacyCString::from_bytes(b"Earth".to_vec())
-            .expect("fixture material is NUL-free"),
-        texture: clonk_engine::LegacyCString::from_bytes(b"Rough".to_vec())
-            .expect("fixture texture is NUL-free"),
+        material: legacy_cstring(b"Earth"),
+        texture: legacy_cstring(b"Rough"),
         ..Default::default()
     })
     .test_value();
@@ -584,10 +626,7 @@ fn draw_tool_gesture_queues_a_decided_em_draw_tool_control() {
 
 #[test]
 fn classic_command_line_config_and_language_override_are_process_local() {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
+    let repository = test_repository_root();
     let user_data = tempdir();
     let custom_config = user_data.path().join("portable/custom.cfg");
     fs::create_dir_all(custom_config.parent().test_value()).test_value();
@@ -608,21 +647,13 @@ fn classic_command_line_config_and_language_override_are_process_local() {
     install_classic_language_override(&classic);
     let paths = AppPaths::discover_with_config_file(classic.config_file.as_deref()).test_value();
 
-    assert_eq!(paths.config_file(), custom_config);
-    assert_eq!(paths.language_override(), Some("DE,US"));
-    assert_eq!(scenario_title_language(Some(&paths)), "US");
-    assert_eq!(
-        classic_direct_reference_endpoint("127.0.0.1", Some(&paths))
-            .expect("custom reference port"),
-        clonk_network::ReferenceEndpoint::Address(SocketAddr::from(([127, 0, 0, 1], 23_456,)))
-    );
-    assert_eq!(
-        classic_loader_language_sequence(&paths).expect("command-line language sequence"),
-        vec!["DE", "US"]
-    );
-    assert_eq!(
-        fs::read(paths.config_file()).expect("read unchanged custom config"),
-        original
+    runtime_assert_eq!(
+        paths.config_file() => custom_config;
+        paths.language_override() => Some("DE,US");
+        scenario_title_language(Some(&paths)) => "US";
+        classic_direct_reference_endpoint("127.0.0.1", Some(&paths)) .expect("custom reference port") => clonk_network::ReferenceEndpoint::Address(SocketAddr::from(([127, 0, 0, 1], 23_456,)));
+        classic_loader_language_sequence(&paths).expect("command-line language sequence") => vec!["DE", "US"];
+        fs::read(paths.config_file()).expect("read unchanged custom config") => original;
     );
 }
 
@@ -631,40 +662,19 @@ fn offline_seed_resolution_matches_cpp_time_pin_and_parameters() {
     let first_second = 1_700_000_000_u64;
     let next_second = first_second + 1;
 
-    assert_ne!(
-        resolve_offline_round_random_seed(None, first_second, None),
-        resolve_offline_round_random_seed(None, next_second, None),
+    runtime_assert_ne!(
+        resolve_offline_round_random_seed(None, first_second, None) => resolve_offline_round_random_seed(None, next_second, None),
         "different C++ time(nullptr) seconds produce different fresh rounds",
     );
-    assert_eq!(
-        resolve_offline_round_random_seed(None, first_second, Some("")),
-        first_second,
-        "an empty LC_PIN_SEED is ignored",
-    );
-    assert_eq!(
-        resolve_offline_round_random_seed(None, first_second, Some("0")),
-        0,
-    );
-    assert_eq!(
-        resolve_offline_round_random_seed(None, first_second, Some(" \t-7tail")),
-        u64::from((-7_i32) as u32),
-        "atoi accepts whitespace, sign, and a decimal prefix",
-    );
-    assert_eq!(
-        resolve_offline_round_random_seed(None, first_second, Some("not-a-number")),
-        0,
-        "a nonempty malformed atoi input pins zero instead of falling back to time",
-    );
-    assert_eq!(
-        resolve_offline_round_random_seed(None, first_second, Some("73")),
-        resolve_offline_round_random_seed(None, next_second, Some("73")),
+    runtime_assert_eq!(resolve_offline_round_random_seed(None, first_second, Some("")) => first_second, "an empty LC_PIN_SEED is ignored");
+    runtime_assert_eq!(resolve_offline_round_random_seed(None, first_second, Some("0")) => 0);
+    runtime_assert_eq!(resolve_offline_round_random_seed(None, first_second, Some(" \t-7tail")) => u64::from((-7_i32) as u32), "atoi accepts whitespace, sign, and a decimal prefix");
+    runtime_assert_eq!(resolve_offline_round_random_seed(None, first_second, Some("not-a-number")) => 0, "a nonempty malformed atoi input pins zero instead of falling back to time");
+    runtime_assert_eq!(
+        resolve_offline_round_random_seed(None, first_second, Some("73")) => resolve_offline_round_random_seed(None, next_second, Some("73")),
         "a pin reproduces the same round across different start times",
     );
-    assert_eq!(
-        resolve_offline_round_random_seed(Some(44), first_second, Some("73")),
-        44,
-        "compiled Parameters.txt wins and bypasses LC_PIN_SEED",
-    );
+    runtime_assert_eq!(resolve_offline_round_random_seed(Some(44), first_second, Some("73")) => 44, "compiled Parameters.txt wins and bypasses LC_PIN_SEED");
 }
 
 #[test]
@@ -682,26 +692,13 @@ fn pinned_offline_seed_reaches_dynamic_map_and_engine() {
     );
 
     app.start_scenario(scenario).test_value();
-    assert_eq!(
-        app.loading_state
-            .as_ref()
-            .and_then(|loading| loading.offline_random_seed),
-        Some(7),
-        "the main thread freezes LC_PIN_SEED before spawning the loader",
-    );
+    runtime_assert_eq!(app.loading_state.as_ref().and_then(|loading| loading.offline_random_seed) => Some(7), "the main thread freezes LC_PIN_SEED before spawning the loader");
     // This loads the shipped definition tree and dynamic landscape. Give
     // the loader thread room to run alongside the parallel full suite.
     wait_for_running_with_attempts(&mut app, 2_400);
 
     assert_eq!(app.engine.random_seed(), 7);
-    assert_eq!(
-        app.engine
-            .landscape()
-            .expect("Tutorial07 dynamic landscape")
-            .map_seed(),
-        42_711,
-        "the dynamic map consumes seed 7 before activation (seed 0 would yield 59,893)",
-    );
+    runtime_assert_eq!(app.engine.landscape().expect("Tutorial07 dynamic landscape").map_seed() => 42_711, "the dynamic map consumes seed 7 before activation (seed 0 would yield 59,893)");
 }
 
 /// Drachenfels ships `SavePlayerInfos.txt` without `Head.SaveGame`, so
@@ -753,9 +750,9 @@ fn arso_morf_runs_its_constructor_after_restoring_its_script_player() {
         .find(|object| object.custom_name.as_deref() == Some("Mad Scientist"))
         .test_value();
     let owner = app.engine.test_player(scientist.owner);
-    assert!(
+    runtime_assert!(
         owner.is_script_player(),
-        "the constructor ran after the restore row joined",
+        "the constructor ran after the restore row joined"
     );
 }
 
@@ -774,20 +771,10 @@ fn fresh_offline_skyparcour_retries_and_activates_the_accepted_seed() {
     );
 
     app.start_scenario(scenario).test_value();
-    assert_eq!(
-        app.loading_state
-            .as_ref()
-            .and_then(|loading| loading.offline_random_seed),
-        Some(1_784_903_470),
-        "the candidate seed is frozen before asynchronous validation",
-    );
+    runtime_assert_eq!(app.loading_state.as_ref().and_then(|loading| loading.offline_random_seed) => Some(1_784_903_470), "the candidate seed is frozen before asynchronous validation");
     wait_for_running_with_attempts(&mut app, 4_800);
 
-    assert_eq!(
-        app.engine.random_seed(),
-        1_784_903_471,
-        "activation, saves, and recordings must use the accepted seed"
-    );
+    runtime_assert_eq!(app.engine.random_seed() => 1_784_903_471, "activation, saves, and recordings must use the accepted seed");
 }
 
 fn app_default_rank_promotion_name(app: &GameApp) -> String {
@@ -877,10 +864,7 @@ fn new_game_and_teardown_reset_transient_speed_state() {
 
 #[test]
 fn presentation_benchmark_parser_requires_positive_integer_seconds() {
-    assert_eq!(
-        parse_presentation_benchmark_window("5"),
-        Some(Duration::from_secs(5))
-    );
+    runtime_assert_eq!(parse_presentation_benchmark_window("5") => Some(Duration::from_secs(5)));
     for rejected in ["", "0", "-1", "1.5", "five"] {
         assert_eq!(parse_presentation_benchmark_window(rejected), None);
     }
@@ -888,12 +872,9 @@ fn presentation_benchmark_parser_requires_positive_integer_seconds() {
 
 #[test]
 fn presentation_benchmark_player_team_parser_is_ordered_and_fail_closed() {
-    assert_eq!(
-        parse_presentation_benchmark_player_teams("1,2"),
-        Ok(vec![1, 2])
-    );
+    runtime_assert_eq!(parse_presentation_benchmark_player_teams("1,2") => Ok(vec![1, 2]));
     for rejected in ["", "0", "-1", "1,", ",1", "1, 2", "one,2"] {
-        assert!(
+        runtime_assert!(
             parse_presentation_benchmark_player_teams(rejected).is_err(),
             "`{rejected}` must not silently change the benchmark workload"
         );
@@ -902,30 +883,13 @@ fn presentation_benchmark_player_team_parser_is_ordered_and_fail_closed() {
 
 #[test]
 fn presentation_benchmark_team_controls_preserve_player_order_and_scope() {
-    assert_eq!(
-        presentation_benchmark_team_selection_controls(true, false, &[7, 3], Some("1,2")),
-        Ok(vec![
-            clonk_engine::InitScenarioPlayerControlData {
-                team: 1,
-                player: 7,
-                by_client: 0,
-            },
-            clonk_engine::InitScenarioPlayerControlData {
-                team: 2,
-                player: 3,
-                by_client: 0,
-            },
-        ])
+    runtime_assert_eq!(
+        presentation_benchmark_team_selection_controls(true, false, &[7, 3], Some("1,2")) =>
+            Ok(vec![clonk_engine::InitScenarioPlayerControlData { team: 1, player: 7, by_client: 0, }, clonk_engine::InitScenarioPlayerControlData { team: 2, player: 3, by_client: 0, },]);
+        presentation_benchmark_team_selection_controls(false, false, &[7, 3], Some("invalid")) => Ok(Vec::new());
+        presentation_benchmark_team_selection_controls(true, true, &[7, 3], Some("invalid")) => Ok(Vec::new());
     );
-    assert_eq!(
-        presentation_benchmark_team_selection_controls(false, false, &[7, 3], Some("invalid")),
-        Ok(Vec::new())
-    );
-    assert_eq!(
-        presentation_benchmark_team_selection_controls(true, true, &[7, 3], Some("invalid")),
-        Ok(Vec::new())
-    );
-    assert!(
+    runtime_assert!(
         presentation_benchmark_team_selection_controls(true, false, &[7], Some("1,2")).is_err()
     );
 }
@@ -976,20 +940,12 @@ fn presentation_benchmark_team_controls_resume_existing_pending_players() {
     app.execute_presentation_benchmark_team_selection_controls(&controls)
         .test_value();
 
-    assert_eq!(
-        app.engine
-            .player(players[0])
-            .and_then(|player| player.team()),
-        Some(1)
-    );
-    assert_eq!(
-        app.engine
-            .player(players[1])
-            .and_then(|player| player.team()),
-        Some(2)
+    runtime_assert_eq!(
+        app.engine.player(players[0]).and_then(|player| player.team()) => Some(1);
+        app.engine .player(players[1]) .and_then(|player| player.team()) => Some(2);
     );
     for player in players {
-        assert!(!matches!(
+        runtime_assert!(!matches!(
             app.engine.player(player).map(|player| player.status()),
             Some(PlayerStatus::TeamSelection | PlayerStatus::TeamSelectionPending)
         ));
@@ -1015,10 +971,7 @@ fn presentation_benchmark_team_controls_reject_an_unavailable_team() {
         .expect_err("an unavailable benchmark team must abort activation");
 
     assert!(error.contains("team 9"), "unexpected error: {error}");
-    assert_eq!(
-        app.engine.player(player).map(|player| player.status()),
-        Some(PlayerStatus::TeamSelection)
-    );
+    runtime_assert_eq!(app.engine.player(player).map(|player| player.status()) => Some(PlayerStatus::TeamSelection));
 }
 
 #[test]
@@ -1028,17 +981,9 @@ fn graphics_pass_percentiles_use_nearest_rank() {
         .map(Duration::from_millis)
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        graphics_pass_percentiles(&samples),
-        (
-            Duration::from_millis(10),
-            Duration::from_millis(19),
-            Duration::from_millis(20),
-        )
-    );
-    assert_eq!(
-        graphics_pass_percentiles(&[]),
-        (Duration::ZERO, Duration::ZERO, Duration::ZERO)
+    runtime_assert_eq!(
+        graphics_pass_percentiles(&samples) => (Duration::from_millis(10), Duration::from_millis(19), Duration::from_millis(20),);
+        graphics_pass_percentiles(&[]) => (Duration::ZERO, Duration::ZERO, Duration::ZERO);
     );
 }
 
@@ -1053,36 +998,36 @@ fn presentation_benchmark_context_reports_actual_network_players() {
 #[test]
 fn presentation_benchmark_network_evidence_uses_unique_preferred_message_routes() {
     let connections = vec![
-        clonk_network::RuntimeNetworkConnection {
-            connection_id: 1,
-            client_id: 0,
-            usage: "Data/Msg".to_string(),
-            protocol: clonk_network::NetworkProtocol::Tcp,
-            peer_address: None,
-            packet_loss: 0,
-            ping_ms: 7,
-            lag_ms: 9,
-        },
-        clonk_network::RuntimeNetworkConnection {
-            connection_id: 2,
-            client_id: 2,
-            usage: "Msg".to_string(),
-            protocol: clonk_network::NetworkProtocol::Udp,
-            peer_address: None,
-            packet_loss: 3,
-            ping_ms: -1,
-            lag_ms: 12,
-        },
-        clonk_network::RuntimeNetworkConnection {
-            connection_id: 3,
-            client_id: 2,
-            usage: "Data".to_string(),
-            protocol: clonk_network::NetworkProtocol::Tcp,
-            peer_address: None,
-            packet_loss: 99,
-            ping_ms: 100,
-            lag_ms: 101,
-        },
+        runtime_fixture!(
+            network_connection:
+                1,
+                0,
+                "Data/Msg".to_string(),
+                clonk_network::NetworkProtocol::Tcp,
+                0,
+                7,
+                9,
+        ),
+        runtime_fixture!(
+            network_connection:
+                2,
+                2,
+                "Msg".to_string(),
+                clonk_network::NetworkProtocol::Udp,
+                3,
+                -1,
+                12,
+        ),
+        runtime_fixture!(
+            network_connection:
+                3,
+                2,
+                "Data".to_string(),
+                clonk_network::NetworkProtocol::Tcp,
+                99,
+                100,
+                101,
+        ),
     ];
 
     let evidence = summarize_presentation_benchmark_network(1, &connections, 4, 26_813);
@@ -1180,10 +1125,9 @@ fn presentation_benchmark_requires_one_live_sf5b_in_each_players_crew() {
     second_player.crew.clear();
     app.snapshot.players.push(second_player);
 
-    assert_eq!(runtime_crew_object_count(&app.snapshot), 2);
-    assert_eq!(
-        runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot),
-        0
+    runtime_assert_eq!(
+        runtime_crew_object_count(&app.snapshot) => 2;
+        runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot) => 0;
     );
 
     let second_crew = app.snapshot.players[0].crew.pop().test_value();
@@ -1194,10 +1138,7 @@ fn presentation_benchmark_requires_one_live_sf5b_in_each_players_crew() {
         .test_value()
         .owner = app.snapshot.players[1].id;
     app.snapshot.players[1].crew.push(second_crew);
-    assert_eq!(
-        runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot),
-        2
-    );
+    runtime_assert_eq!(runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot) => 2);
 
     app.snapshot
         .objects
@@ -1205,10 +1146,7 @@ fn presentation_benchmark_requires_one_live_sf5b_in_each_players_crew() {
         .find(|object| object.id == second_crew)
         .test_value()
         .alive = false;
-    assert_eq!(
-        runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot),
-        1
-    );
+    runtime_assert_eq!(runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot) => 1);
 }
 
 #[test]
@@ -1239,34 +1177,18 @@ fn presentation_benchmark_readiness_waits_for_one_executed_simulation_frame() {
 
     let base = Instant::now();
     let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
-    assert_eq!(
-        benchmark.poll(readiness.ready(AppMode::Running), base, 0),
-        None
-    );
-    assert_eq!(
-        benchmark.poll(
-            readiness.ready(AppMode::Running),
-            base + Duration::from_secs(10),
-            0,
-        ),
-        None
+    runtime_assert_eq!(
+        benchmark.poll(readiness.ready(AppMode::Running), base, 0) => None;
+        benchmark.poll(readiness.ready(AppMode::Running), base + Duration::from_secs(10), 0,) => None;
     );
 
     readiness.observe(AppMode::Running, 1);
     let ready_at = base + Duration::from_secs(10);
-    assert_eq!(
-        benchmark.poll(readiness.ready(AppMode::Running), ready_at, 1),
-        None
+    runtime_assert_eq!(
+        benchmark.poll(readiness.ready(AppMode::Running), ready_at, 1) => None;
+        benchmark.poll(readiness.ready(AppMode::Running), ready_at + PRESENTATION_BENCHMARK_WARMUP, 1,) => None;
     );
-    assert_eq!(
-        benchmark.poll(
-            readiness.ready(AppMode::Running),
-            ready_at + PRESENTATION_BENCHMARK_WARMUP,
-            1,
-        ),
-        None
-    );
-    assert!(
+    runtime_assert!(
         benchmark
             .poll(
                 readiness.ready(AppMode::Running),
@@ -1274,32 +1196,31 @@ fn presentation_benchmark_readiness_waits_for_one_executed_simulation_frame() {
                 116,
             )
             .is_some(),
-        "the window starts only after one frame and the complete warmup"
+        "the window starts only after one frame and the complete warmup",
     );
 }
 
 #[test]
 fn retained_gpu_cpu_profile_reconciles_named_stages_with_the_outer_graphics_pass() {
-    let raw = RetainedGpuFrameProfile {
-        frame_preparation: Duration::from_nanos(2),
-        renderer: gpu_renderer::GpuRendererStats {
-            cpu_stages: gpu_renderer::GpuRendererCpuStages {
-                validation: Duration::from_nanos(3),
-                texture_synchronization: Duration::from_nanos(5),
-                stream_packing_upload: Duration::from_nanos(7),
-                command_encoding: Duration::from_nanos(11),
-            },
-            ..gpu_renderer::GpuRendererStats::default()
-        },
-        surface: clonk_surface::WindowSurfaceCpuStages {
-            drawable_acquisition: Duration::from_nanos(13),
-            command_encoder_finalization: Duration::from_nanos(17),
-            queue_submission: Duration::from_nanos(19),
-            presentation: Duration::from_nanos(23),
-        },
-        capture: clonk_graphics::GpuSceneCaptureStats::default(),
-        context: RetainedGpuFrameContext::default(),
-    };
+    let raw = runtime_fixture!(
+        gpu_profile_renderer_surface_capture:
+            gpu_renderer::GpuRendererStats {
+                        cpu_stages: gpu_renderer::GpuRendererCpuStages {
+                            validation: Duration::from_nanos(3),
+                            texture_synchronization: Duration::from_nanos(5),
+                            stream_packing_upload: Duration::from_nanos(7),
+                            command_encoding: Duration::from_nanos(11),
+                        },
+                        ..gpu_renderer::GpuRendererStats::default()
+                    },
+            clonk_surface::WindowSurfaceCpuStages {
+                        drawable_acquisition: Duration::from_nanos(13),
+                        command_encoder_finalization: Duration::from_nanos(17),
+                        queue_submission: Duration::from_nanos(19),
+                        presentation: Duration::from_nanos(23),
+                    },
+            clonk_graphics::GpuSceneCaptureStats::default(),
+    );
 
     let residual = raw.reconcile(Duration::from_nanos(84));
     assert_eq!(residual.named_cpu, Duration::from_nanos(100));
@@ -1316,33 +1237,32 @@ fn retained_gpu_cpu_profile_reconciles_named_stages_with_the_outer_graphics_pass
 
 #[test]
 fn retained_gpu_artifact_frame_preserves_raw_structural_and_cpu_samples() {
-    let raw = RetainedGpuFrameProfile {
-        frame_preparation: Duration::from_nanos(2),
-        renderer: gpu_renderer::GpuRendererStats {
-            cpu_stages: gpu_renderer::GpuRendererCpuStages {
-                validation: Duration::from_nanos(3),
-                texture_synchronization: Duration::from_nanos(5),
-                stream_packing_upload: Duration::from_nanos(7),
-                command_encoding: Duration::from_nanos(11),
-            },
-            object_sprite_instances: 13,
-            object_sprite_upload_bytes: 17,
-            landscape_instances: 19,
-            landscape_instance_upload_bytes: 1_368,
-            ..gpu_renderer::GpuRendererStats::default()
-        },
-        surface: clonk_surface::WindowSurfaceCpuStages {
-            drawable_acquisition: Duration::from_nanos(19),
-            command_encoder_finalization: Duration::from_nanos(23),
-            queue_submission: Duration::from_nanos(29),
-            presentation: Duration::from_nanos(31),
-        },
-        capture: clonk_graphics::GpuSceneCaptureStats {
-            owner_mask_fallbacks: 1,
-            ..clonk_graphics::GpuSceneCaptureStats::default()
-        },
-        context: RetainedGpuFrameContext::default(),
-    };
+    let raw = runtime_fixture!(
+        gpu_profile_renderer_surface_capture:
+            gpu_renderer::GpuRendererStats {
+                        cpu_stages: gpu_renderer::GpuRendererCpuStages {
+                            validation: Duration::from_nanos(3),
+                            texture_synchronization: Duration::from_nanos(5),
+                            stream_packing_upload: Duration::from_nanos(7),
+                            command_encoding: Duration::from_nanos(11),
+                        },
+                        object_sprite_instances: 13,
+                        object_sprite_upload_bytes: 17,
+                        landscape_instances: 19,
+                        landscape_instance_upload_bytes: 1_368,
+                        ..gpu_renderer::GpuRendererStats::default()
+                    },
+            clonk_surface::WindowSurfaceCpuStages {
+                        drawable_acquisition: Duration::from_nanos(19),
+                        command_encoder_finalization: Duration::from_nanos(23),
+                        queue_submission: Duration::from_nanos(29),
+                        presentation: Duration::from_nanos(31),
+                    },
+            clonk_graphics::GpuSceneCaptureStats {
+                        owner_mask_fallbacks: 1,
+                        ..clonk_graphics::GpuSceneCaptureStats::default()
+                    },
+    );
     let reconciled = raw.reconcile(Duration::from_nanos(137));
 
     let frame = RetainedGpuProfileFrame::from_reconciled(4, reconciled).unwrap();
@@ -1377,12 +1297,11 @@ fn retained_gpu_profile_rejects_a_surface_context_change_during_measurement() {
     }
     .reconcile(Duration::ZERO);
 
-    assert!(retained_gpu_profile_context_is_stable(&[first], original));
-    assert!(!retained_gpu_profile_context_is_stable(
-        &[first, second],
-        resized
-    ));
-    assert!(!retained_gpu_profile_context_is_stable(&[first], resized));
+    runtime_assert!(
+        retained_gpu_profile_context_is_stable(&[first], original);
+        !retained_gpu_profile_context_is_stable(&[first, second], resized);
+        !retained_gpu_profile_context_is_stable(&[first], resized);
+    );
 }
 
 #[test]
@@ -1445,18 +1364,10 @@ fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
         PresentationPath::RetainedGpu,
     );
     benchmark.record_automatic_graphics_skip();
-    assert_eq!(benchmark.poll(true, base, 10), None);
-    assert_eq!(
-        benchmark.poll(
-            true,
-            base + PRESENTATION_BENCHMARK_WARMUP - Duration::from_millis(1),
-            69,
-        ),
-        None
-    );
-    assert_eq!(
-        benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP, 70),
-        None
+    runtime_assert_eq!(
+        benchmark.poll(true, base, 10) => None;
+        benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP - Duration::from_millis(1), 69,) => None;
+        benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP, 70) => None;
     );
     benchmark.record_automatic_graphics_skip();
     benchmark.record_successful_presentation(
@@ -1471,14 +1382,7 @@ fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
         false,
         PresentationPath::Cpu,
     );
-    assert_eq!(
-        benchmark.poll(
-            true,
-            base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(2_999),
-            174,
-        ),
-        None
-    );
+    runtime_assert_eq!(benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(2_999), 174,) => None);
 
     let report = benchmark
         .poll(
@@ -1487,29 +1391,23 @@ fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
             175,
         )
         .test_value();
-    assert_eq!(report.elapsed, Duration::from_secs(3));
-    assert_eq!(report.submissions, 2);
-    assert_eq!(report.retained_gpu_submissions, 1);
-    assert_eq!(report.cpu_submissions, 1);
-    assert_eq!(report.refreshed_frames, 1);
-    assert_eq!(report.simulation_frames, 105);
-    assert_eq!(report.automatic_graphics_skips, 1);
-    assert_eq!(report.graphics_average, Duration::from_millis(15));
-    assert_eq!(report.graphics_max, Duration::from_millis(20));
-    assert_eq!(report.graphics_p50, Duration::from_millis(10));
-    assert_eq!(report.graphics_p95, Duration::from_millis(20));
-    assert_eq!(report.graphics_p99, Duration::from_millis(20));
-    assert_eq!(
-        report.graphics_samples,
-        vec![Duration::from_millis(10), Duration::from_millis(20)]
-    );
-    assert_eq!(
-                report.machine_line(),
-                "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 retained_gpu_present_submissions=1 cpu_present_submissions=1 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 graphics_pass_samples_ns=[10000000,20000000]"
-            );
-    assert_eq!(
-        benchmark.poll(true, base + Duration::from_secs(10), 999),
-        None
+    runtime_assert_eq!(
+        report.elapsed => Duration::from_secs(3);
+        report.submissions => 2;
+        report.retained_gpu_submissions => 1;
+        report.cpu_submissions => 1;
+        report.refreshed_frames => 1;
+        report.simulation_frames => 105;
+        report.automatic_graphics_skips => 1;
+        report.graphics_average => Duration::from_millis(15);
+        report.graphics_max => Duration::from_millis(20);
+        report.graphics_p50 => Duration::from_millis(10);
+        report.graphics_p95 => Duration::from_millis(20);
+        report.graphics_p99 => Duration::from_millis(20);
+        report.graphics_samples => vec![Duration::from_millis(10), Duration::from_millis(20)];
+        report.machine_line() =>
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 retained_gpu_present_submissions=1 cpu_present_submissions=1 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 graphics_pass_samples_ns=[10000000,20000000]";
+        benchmark.poll(true, base + Duration::from_secs(10), 999) => None;
     );
 }
 
@@ -1518,15 +1416,9 @@ fn presentation_benchmark_captures_stippels_at_measurement_boundaries() {
     let base = Instant::now();
     let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
 
-    assert_eq!(benchmark.poll(true, base, 10), None);
-    assert_eq!(
-        benchmark.poll_with_runtime_stippel_census(
-            true,
-            base + PRESENTATION_BENCHMARK_WARMUP,
-            70,
-            || 1_000,
-        ),
-        None
+    runtime_assert_eq!(
+        benchmark.poll(true, base, 10) => None;
+        benchmark.poll_with_runtime_stippel_census(true, base + PRESENTATION_BENCHMARK_WARMUP, 70, || 1_000,) => None;
     );
     let report = benchmark
         .poll_with_runtime_stippel_census(
@@ -1546,10 +1438,9 @@ fn runtime_benchmark_window_does_not_require_a_visible_surface() {
     let base = Instant::now();
     let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
 
-    assert_eq!(benchmark.poll(true, base, 10), None);
-    assert_eq!(
-        benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP, 70),
-        None
+    runtime_assert_eq!(
+        benchmark.poll(true, base, 10) => None;
+        benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP, 70) => None;
     );
     let deadline = base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(3);
     benchmark.record_successful_presentation(
@@ -1619,14 +1510,7 @@ fn presentation_benchmark_consumes_timestamp_results_only_while_measuring() {
     benchmark.record_gpu_timestamp_frames(vec![frame(2)]);
     let report = benchmark.poll(true, deadline, 71).test_value();
 
-    assert_eq!(
-        report
-            .gpu_timestamp_frames
-            .iter()
-            .map(|frame| frame.frame_id)
-            .collect::<Vec<_>>(),
-        vec![2]
-    );
+    runtime_assert_eq!(report.gpu_timestamp_frames.iter().map(|frame| frame.frame_id).collect::<Vec<_>>() => vec![2]);
 }
 
 #[test]
@@ -1634,18 +1518,10 @@ fn runtime_benchmark_does_not_reselect_a_window_after_runtime_stops() {
     let base = Instant::now();
     let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
 
-    assert_eq!(benchmark.poll(true, base, 70), None);
-    assert_eq!(
-        benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP, 70),
-        None
-    );
-    assert_eq!(
-        benchmark.poll(
-            false,
-            base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(1),
-            70,
-        ),
-        None
+    runtime_assert_eq!(
+        benchmark.poll(true, base, 70) => None;
+        benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP, 70) => None;
+        benchmark.poll(false, base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(1), 70,) => None;
     );
     let report = benchmark
         .poll(
@@ -1675,12 +1551,7 @@ fn input_latency_benchmark_starts_with_the_measurement_and_keeps_its_interval() 
 fn input_latency_benchmark_resets_when_a_new_measurement_window_starts() {
     let base = Instant::now();
     let mut benchmark = InputLatencyBenchmark::new(Duration::from_millis(500));
-    let control = clonk_engine::PlayerControlData {
-        player: 2,
-        command: i32::from(clonk_engine::COM_LEFT),
-        data: 0,
-        by_client: 1,
-    };
+    let control = runtime_fixture!(player_control_defaults);
     benchmark.start(base);
     assert!(benchmark.pair_due(base));
     benchmark.record_submission(7, &control, base);
@@ -1696,10 +1567,7 @@ fn input_latency_benchmark_resets_when_a_new_measurement_window_starts() {
 
 #[test]
 fn input_latency_benchmark_interval_requires_positive_milliseconds() {
-    assert_eq!(
-        parse_input_latency_benchmark_interval("500"),
-        Some(Duration::from_millis(500))
-    );
+    runtime_assert_eq!(parse_input_latency_benchmark_interval("500") => Some(Duration::from_millis(500)));
     for value in ["", "0", "-1", "no"] {
         assert_eq!(parse_input_latency_benchmark_interval(value), None);
     }
@@ -1709,12 +1577,7 @@ fn input_latency_benchmark_interval_requires_positive_milliseconds() {
 fn input_latency_benchmark_matches_the_exact_local_control_fifo() {
     let base = Instant::now();
     let mut benchmark = InputLatencyBenchmark::new(Duration::from_millis(500));
-    let press = clonk_engine::PlayerControlData {
-        player: 2,
-        command: i32::from(clonk_engine::COM_LEFT),
-        data: 0,
-        by_client: 1,
-    };
+    let press = runtime_fixture!(player_control_defaults);
     let release = clonk_engine::PlayerControlData {
         command: i32::from(clonk_engine::COM_LEFT + clonk_engine::COM_RELEASE_OFFSET),
         ..press
@@ -1722,58 +1585,40 @@ fn input_latency_benchmark_matches_the_exact_local_control_fifo() {
 
     benchmark.record_submission(7, &press, base);
     benchmark.record_submission(7, &release, base);
-    assert!(!benchmark.record_execution(
-        7,
-        &clonk_engine::PlayerControlData {
-            by_client: 3,
-            ..press
-        },
-        base + Duration::from_millis(20),
-    ));
-    assert!(benchmark.record_execution(7, &press, base + Duration::from_millis(100)));
-    assert!(benchmark.record_execution(7, &release, base + Duration::from_millis(101)));
+    runtime_assert!(
+        !benchmark.record_execution(7, &clonk_engine::PlayerControlData { by_client: 3,..press }, base + Duration::from_millis(20),);
+        benchmark.record_execution(7, &press, base + Duration::from_millis(100));
+        benchmark.record_execution(7, &release, base + Duration::from_millis(101));
+    );
 
     let report = benchmark.report(Duration::from_secs(5));
-    assert_eq!(report.submitted_inputs, 2);
-    assert_eq!(report.executed_inputs, 2);
-    assert_eq!(report.pending_inputs, 0);
-    assert_eq!(
-        report.latency_samples,
-        vec![Duration::from_millis(100), Duration::from_millis(101)]
+    runtime_assert_eq!(
+        report.submitted_inputs => 2;
+        report.executed_inputs => 2;
+        report.pending_inputs => 0;
+        report.latency_samples => vec![Duration::from_millis(100), Duration::from_millis(101)];
+        report.p50 => Duration::from_millis(100);
+        report.p95 => Duration::from_millis(101);
+        report.p99 => Duration::from_millis(101);
+        report.max => Duration::from_millis(101);
+        report.players.len() => 1;
+        report.players[0].player => 2;
+        report.players[0].submitted_inputs => 2;
+        report.players[0].executed_inputs => 2;
+        report.players[0].pending_inputs => 0;
+        report.players[0].latency_samples => vec![Duration::from_millis(100), Duration::from_millis(101)];
+        report.players[0].machine_line(report.elapsed) =>
+            "LC_APP_PRESENTATION_BENCHMARK_INPUT_PLAYER player=2 elapsed_seconds=5.000000 submitted_inputs=2 executed_inputs=2 pending_inputs=0 input_latency_sample_count=2 input_latency_p50_ms=100.000000 input_latency_p95_ms=101.000000 input_latency_p99_ms=101.000000 input_latency_max_ms=101.000000 input_latency_samples_ns=[100000000,101000000]";
+        report.machine_line() =>
+            "LC_APP_PRESENTATION_BENCHMARK_INPUT elapsed_seconds=5.000000 submitted_inputs=2 executed_inputs=2 pending_inputs=0 input_latency_sample_count=2 input_latency_p50_ms=100.000000 input_latency_p95_ms=101.000000 input_latency_p99_ms=101.000000 input_latency_max_ms=101.000000 input_latency_samples_ns=[100000000,101000000]";
     );
-    assert_eq!(report.p50, Duration::from_millis(100));
-    assert_eq!(report.p95, Duration::from_millis(101));
-    assert_eq!(report.p99, Duration::from_millis(101));
-    assert_eq!(report.max, Duration::from_millis(101));
-    assert_eq!(report.players.len(), 1);
-    assert_eq!(report.players[0].player, 2);
-    assert_eq!(report.players[0].submitted_inputs, 2);
-    assert_eq!(report.players[0].executed_inputs, 2);
-    assert_eq!(report.players[0].pending_inputs, 0);
-    assert_eq!(
-        report.players[0].latency_samples,
-        vec![Duration::from_millis(100), Duration::from_millis(101)]
-    );
-    assert_eq!(
-            report.players[0].machine_line(report.elapsed),
-            "LC_APP_PRESENTATION_BENCHMARK_INPUT_PLAYER player=2 elapsed_seconds=5.000000 submitted_inputs=2 executed_inputs=2 pending_inputs=0 input_latency_sample_count=2 input_latency_p50_ms=100.000000 input_latency_p95_ms=101.000000 input_latency_p99_ms=101.000000 input_latency_max_ms=101.000000 input_latency_samples_ns=[100000000,101000000]"
-        );
-    assert_eq!(
-                report.machine_line(),
-                "LC_APP_PRESENTATION_BENCHMARK_INPUT elapsed_seconds=5.000000 submitted_inputs=2 executed_inputs=2 pending_inputs=0 input_latency_sample_count=2 input_latency_p50_ms=100.000000 input_latency_p95_ms=101.000000 input_latency_p99_ms=101.000000 input_latency_max_ms=101.000000 input_latency_samples_ns=[100000000,101000000]"
-        );
 }
 
 #[test]
 fn input_latency_benchmark_does_not_let_one_drop_poison_later_matches() {
     let base = Instant::now();
     let mut benchmark = InputLatencyBenchmark::new(Duration::from_millis(500));
-    let press = clonk_engine::PlayerControlData {
-        player: 2,
-        command: i32::from(clonk_engine::COM_LEFT),
-        data: 0,
-        by_client: 1,
-    };
+    let press = runtime_fixture!(player_control_defaults);
     let release = clonk_engine::PlayerControlData {
         command: i32::from(clonk_engine::COM_LEFT + clonk_engine::COM_RELEASE_OFFSET),
         ..press
@@ -1811,14 +1656,8 @@ fn input_latency_benchmark_submits_two_unmatched_releases_for_each_local_player(
     second_player.id = second_owner;
     second_player.crew = vec![second_crew_id];
     app.snapshot.players.push(second_player);
-    app.local_controls.initialize(LocalControlInit {
-        owner: second_owner,
-        preferred_set: 1,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
+    app.local_controls
+        .initialize(test_local_control_init(second_owner, 1, false, false));
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(network);
     app.input_latency_benchmark = Some(InputLatencyBenchmark::new(Duration::from_millis(500)));
@@ -1826,22 +1665,9 @@ fn input_latency_benchmark_submits_two_unmatched_releases_for_each_local_player(
     let tick = app.local_control_submission_tick();
 
     app.submit_due_input_latency_benchmark_pair(started, started);
-    assert_eq!(
-        commands.take_submitted_local(),
-        vec![
-            (owner, ControlEvent::Release(ControlButton::Left), tick),
-            (owner, ControlEvent::Release(ControlButton::Right), tick),
-            (
-                second_owner,
-                ControlEvent::Release(ControlButton::Left),
-                tick,
-            ),
-            (
-                second_owner,
-                ControlEvent::Release(ControlButton::Right),
-                tick,
-            ),
-        ]
+    runtime_assert_eq!(
+        commands.take_submitted_local() =>
+            vec![(owner, ControlEvent::Release(ControlButton::Left), tick), (owner, ControlEvent::Release(ControlButton::Right), tick), (second_owner, ControlEvent::Release(ControlButton::Left), tick,), (second_owner, ControlEvent::Release(ControlButton::Right), tick,),];
     );
     app.submit_due_input_latency_benchmark_pair(started, started + Duration::from_millis(499));
     assert!(commands.take_submitted_local().is_empty());
@@ -1850,15 +1676,10 @@ fn input_latency_benchmark_submits_two_unmatched_releases_for_each_local_player(
         .as_ref()
         .map(|benchmark| benchmark.report(Duration::from_secs(1)))
         .test_value();
-    assert_eq!(report.submitted_inputs, 4);
-    assert_eq!(report.pending_inputs, 4);
-    assert_eq!(
-        report
-            .players
-            .iter()
-            .map(|player| (player.player, player.submitted_inputs))
-            .collect::<Vec<_>>(),
-        vec![(owner, 2), (second_owner, 2)]
+    runtime_assert_eq!(
+        report.submitted_inputs => 4;
+        report.pending_inputs => 4;
+        report.players.iter().map(|player| (player.player, player.submitted_inputs)).collect::<Vec<_>>() => vec![(owner, 2), (second_owner, 2)];
     );
 }
 
@@ -1911,27 +1732,24 @@ fn the_remaster_switch_supplies_a_default_that_each_key_can_override() {
     assert!(!configured_smooth_landscape(b""));
 
     let remastered = b"[Graphics]\nRemaster=1\n";
-    assert!(configured_high_dpi_cursor(remastered));
-    assert!(configured_sky_dither(remastered));
-    assert!(configured_mipmaps(remastered));
-    assert!(configured_smooth_landscape(remastered));
-
-    assert!(!configured_sky_dither(
-        b"[Graphics]\nRemaster=1\nSkyDither=0\n"
-    ));
-    assert!(configured_mipmaps(b"[Graphics]\nRemaster=0\nMipmaps=1\n"));
+    runtime_assert!(
+        configured_high_dpi_cursor(remastered);
+        configured_sky_dither(remastered);
+        configured_mipmaps(remastered);
+        configured_smooth_landscape(remastered);
+        !configured_sky_dither(b"[Graphics]\nRemaster=1\nSkyDither=0\n");
+        configured_mipmaps(b"[Graphics]\nRemaster=0\nMipmaps=1\n");
+    );
 
     // ShaderLandscape joins the same set. It deliberately has no advanced
     // settings row, so `Graphics.Remaster` keeps reaching it after a config
     // repair writes every editor row back out.
-    assert!(!configured_shader_landscape(b""));
-    assert!(configured_shader_landscape(remastered));
-    assert!(!configured_shader_landscape(
-        b"[Graphics]\nRemaster=1\nShaderLandscape=0\n"
-    ));
-    assert!(configured_shader_landscape(
-        b"[Graphics]\nRemaster=0\nShaderLandscape=1\n"
-    ));
+    runtime_assert!(
+        !configured_shader_landscape(b"");
+        configured_shader_landscape(remastered);
+        !configured_shader_landscape(b"[Graphics]\nRemaster=1\nShaderLandscape=0\n");
+        configured_shader_landscape(b"[Graphics]\nRemaster=0\nShaderLandscape=1\n");
+    );
 }
 
 #[test]
@@ -1940,29 +1758,20 @@ fn landscape_detail_defaults_to_the_cpp_exact_level_and_clamps_hand_edits() {
     // leave the composition C++-exact. Everything else is clamped HERE
     // rather than only in the editor: a hand-edited config reaches this
     // reader directly, and the composer rejects 0 outright.
-    assert_eq!(configured_landscape_detail(b""), 1);
-    assert_eq!(configured_landscape_detail(b"[Graphics]\nRemaster=1\n"), 1);
-    assert_eq!(
-        configured_landscape_detail(b"[Graphics]\nLandscapeDetail=3\n"),
-        3
+    runtime_assert_eq!(
+        configured_landscape_detail(b"") => 1;
+        configured_landscape_detail(b"[Graphics]\nRemaster=1\n") => 1;
+        configured_landscape_detail(b"[Graphics]\nLandscapeDetail=3\n") => 3;
     );
     for (written, clamped) in [("0", 1), ("-2", 1), ("9", 4), ("400", 4)] {
         let config = format!("[Graphics]\nLandscapeDetail={written}\n");
-        assert_eq!(
-            configured_landscape_detail(config.as_bytes()),
-            clamped,
-            "LandscapeDetail={written} must clamp to {clamped}"
-        );
+        runtime_assert_eq!(configured_landscape_detail(config.as_bytes()) => clamped, "LandscapeDetail={written} must clamp to {clamped}");
     }
     // The reader is the C++ strtol mirror, so hex and trailing junk parse
     // the way StdCompilerINIRead::ReadNum does.
-    assert_eq!(
-        configured_landscape_detail(b"[Graphics]\nLandscapeDetail=0x2\n"),
-        2
-    );
-    assert_eq!(
-        configured_landscape_detail(b"[Graphics]\nLandscapeDetail=2junk\n"),
-        2
+    runtime_assert_eq!(
+        configured_landscape_detail(b"[Graphics]\nLandscapeDetail=0x2\n") => 2;
+        configured_landscape_detail(b"[Graphics]\nLandscapeDetail=2junk\n") => 2;
     );
 }
 
@@ -1981,18 +1790,11 @@ fn max_refresh_delay_defaults_to_cpp_30_ms_and_honors_positive_config() {
     // 28 ms game timer remains one 28 ms graphics opportunity instead of
     // being divided into two 14 ms redraws (src/C4Config.cpp:481-485;
     // src/C4Application.cpp:510-520).
-    assert_eq!(configured_max_refresh_delay_ms(b""), 30);
-    assert_eq!(
-        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=0\n"),
-        30
-    );
-    assert_eq!(
-        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=-5\n"),
-        30
-    );
-    assert_eq!(
-        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=30\n"),
-        30
+    runtime_assert_eq!(
+        configured_max_refresh_delay_ms(b"") => 30;
+        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=0\n") => 30;
+        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=-5\n") => 30;
+        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=30\n") => 30;
     );
 }
 
@@ -2013,28 +1815,16 @@ fn max_refresh_delay_missing_or_invalid_matches_cpp_thirty_ms() {
         b"[Graphics]\nMaxRefreshDelay=0\n",
         b"[Graphics]\nMaxRefreshDelay=-1\n",
     ] {
-        assert_eq!(
-            configured_max_refresh_delay_ms(config),
-            30,
-            "{:?} must resolve to the native default",
-            String::from_utf8_lossy(config)
-        );
+        runtime_assert_eq!(configured_max_refresh_delay_ms(config) => 30, "{:?} must resolve to the native default", String::from_utf8_lossy(config));
     }
     // A trailing suffix is not invalid: StdCompiler reads the numeric
     // prefix and ignores the rest, so `16ms` is the positive value 16.
-    assert_eq!(
-        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=16ms\n"),
-        16
-    );
+    runtime_assert_eq!(configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=16ms\n") => 16);
 
     // A valid positive value is kept verbatim.
-    assert_eq!(
-        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=50\n"),
-        50
-    );
-    assert_eq!(
-        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=16\n"),
-        16
+    runtime_assert_eq!(
+        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=50\n") => 50;
+        configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=16\n") => 16;
     );
 
     // The advanced-config editor materializes the same default rather than
@@ -2048,13 +1838,9 @@ fn max_refresh_delay_missing_or_invalid_matches_cpp_thirty_ms() {
 
     // The retained value still feeds the divisor: 30 leaves the 28 ms game
     // timer as one graphics opportunity, a smaller ceiling splits it.
-    assert_eq!(
-        frame_schedule_for_mode(AppMode::Running, 28, 1, 30).refresh_interval,
-        Duration::from_millis(28)
-    );
-    assert_eq!(
-        frame_schedule_for_mode(AppMode::Running, 28, 1, 16).refresh_interval,
-        Duration::from_millis(14)
+    runtime_assert_eq!(
+        frame_schedule_for_mode(AppMode::Running, 28, 1, 30).refresh_interval => Duration::from_millis(28);
+        frame_schedule_for_mode(AppMode::Running, 28, 1, 16).refresh_interval => Duration::from_millis(14);
     );
 }
 
@@ -2065,13 +1851,9 @@ fn max_refresh_delay_uses_cpp_divisor_without_speeding_simulation() {
     assert_eq!(default.refresh_interval, Duration::from_millis(14));
 
     let explicit_native_default = frame_schedule_for_mode(AppMode::Running, 28, 1, 30);
-    assert_eq!(
-        explicit_native_default.simulation_interval,
-        Duration::from_millis(28)
-    );
-    assert_eq!(
-        explicit_native_default.refresh_interval,
-        Duration::from_millis(28)
+    runtime_assert_eq!(
+        explicit_native_default.simulation_interval => Duration::from_millis(28);
+        explicit_native_default.refresh_interval => Duration::from_millis(28);
     );
 
     let slow = frame_schedule_for_mode(AppMode::Running, 1_000, 1, 16);
@@ -2090,37 +1872,22 @@ fn smooth_presentation_substitutes_the_display_period_for_the_native_ceiling() {
 
     // The remaster master switch supplies the default, exactly like every
     // other presentation-only divergence.
-    assert_eq!(
-        effective_max_refresh_delay_ms(b"[Graphics]\nRemaster=1\n", Some(8)),
-        8
-    );
-    assert_eq!(
-        effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", Some(8)),
-        8
+    runtime_assert_eq!(
+        effective_max_refresh_delay_ms(b"[Graphics]\nRemaster=1\n", Some(8)) => 8;
+        effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", Some(8)) => 8;
     );
 
     // A key the player wrote explicitly wins in both directions.
-    assert_eq!(
-        effective_max_refresh_delay_ms(b"[Graphics]\nRemaster=1\nSmoothPresentation=0\n", Some(8)),
-        30
-    );
-    assert_eq!(
-        effective_max_refresh_delay_ms(
-            b"[Graphics]\nSmoothPresentation=1\nMaxRefreshDelay=30\n",
-            Some(8)
-        ),
-        30
+    runtime_assert_eq!(
+        effective_max_refresh_delay_ms(b"[Graphics]\nRemaster=1\nSmoothPresentation=0\n", Some(8)) => 30;
+        effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\nMaxRefreshDelay=30\n", Some(8)) => 30;
     );
 
     // An unknown or slower-than-native panel must never make presentation
     // slower than the oracle default.
-    assert_eq!(
-        effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", None),
-        16
-    );
-    assert_eq!(
-        effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", Some(100)),
-        30
+    runtime_assert_eq!(
+        effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", None) => 16;
+        effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", Some(100)) => 30;
     );
 }
 
@@ -2147,18 +1914,11 @@ fn smooth_presentation_subdivides_only_the_startup_timer() {
 
     let running = frame_schedule_for_mode(AppMode::Running, 28, 1, ceilings);
     assert_eq!(running.simulation_interval, Duration::from_millis(28));
-    assert_eq!(
-        running.refresh_interval,
-        Duration::from_millis(28),
-        "the game timer keeps the oracle ceiling even while the menu is subdivided"
-    );
+    runtime_assert_eq!(running.refresh_interval => Duration::from_millis(28), "the game timer keeps the oracle ceiling even while the menu is subdivided");
 
     // A bare ceiling still means "both", so every existing caller and the
     // explicit `Graphics.MaxRefreshDelay` path are unchanged.
-    assert_eq!(
-        frame_schedule_for_mode(AppMode::Running, 28, 1, 16).refresh_interval,
-        Duration::from_millis(14)
-    );
+    runtime_assert_eq!(frame_schedule_for_mode(AppMode::Running, 28, 1, 16).refresh_interval => Duration::from_millis(14));
 }
 
 #[test]
@@ -2229,11 +1989,7 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
     };
     write_player("Alice.c4p", "Alice", 0, false);
     write_player("Bob.c4p", "Bob", 1, true);
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(
         paths.config_file(),
@@ -2256,13 +2012,8 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
     app.start_scenario(scenario).test_value();
     wait_for_running(&mut app);
 
-    assert_eq!(
-        app.snapshot
-            .players
-            .iter()
-            .map(|player| (player.id, player.player_info_id, player.name.as_str()))
-            .collect::<Vec<_>>(),
-        vec![(0, 1, "Alice"), (1, 2, "Bob")],
+    runtime_assert_eq!(
+        app.snapshot.players.iter().map(|player| (player.id, player.player_info_id, player.name.as_str())).collect::<Vec<_>>() => vec![(0, 1, "Alice"), (1, 2, "Bob")];
     );
     assert_eq!(app.snapshot.frame, 0, "joins precede the first game tick");
     assert_eq!(app.snapshot.hud.local_players, vec![0, 1]);
@@ -2273,10 +2024,9 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
         (3, b"Alice.c4p".as_slice()),
     ] {
         let info = app.control_player_infos.get(info_id).test_value();
-        assert_eq!(info.filename.as_bytes(), filename);
-        assert_eq!(
-            info.flags & clonk_engine::PLAYER_INFO_FLAG_JOINED != 0,
-            info_id != 3,
+        runtime_assert_eq!(
+            info.filename.as_bytes() => filename;
+            info.flags & clonk_engine::PLAYER_INFO_FLAG_JOINED != 0 => info_id != 3;
         );
     }
 
@@ -2294,19 +2044,10 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
             .test_value()
             .control
     };
-    assert_eq!(
-        control(&app, 0).pressed_coms & (1 << clonk_engine::COM_DOWN),
-        0
-    );
-    assert_ne!(
-        control(&app, 1).pressed_coms & (1 << clonk_engine::COM_DOWN),
-        0
-    );
+    runtime_assert_eq!(control(&app, 0).pressed_coms & (1 << clonk_engine::COM_DOWN) => 0);
+    runtime_assert_ne!(control(&app, 1).pressed_coms & (1 << clonk_engine::COM_DOWN) => 0);
     app.test_key(bob_down, ElementState::Released);
-    assert_eq!(
-        control(&app, 1).pressed_coms & (1 << clonk_engine::COM_DOWN),
-        0
-    );
+    runtime_assert_eq!(control(&app, 1).pressed_coms & (1 << clonk_engine::COM_DOWN) => 0);
 
     let alice_left = app
         .bindings
@@ -2382,12 +2123,7 @@ fn fresh_player_default_up_key_jumps_and_releases_like_cpp() {
         200,
         AudioOptions::default(),
         None,
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Fresh player".to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with("Fresh player".to_string(), false),
     )
     .test_value();
     install_classic_test_assets(&mut app);
@@ -2423,20 +2159,17 @@ fn fresh_player_default_up_key_jumps_and_releases_like_cpp() {
     app.mode = AppMode::Running;
 
     let cursor = app.engine.test_crew_cursor(app.local_owner);
-    assert!(
+    runtime_assert!(
         app.engine
             .player(app.local_owner)
             .expect("fresh player")
             .control_style(),
         "new players default to AutoStopControl like C++"
     );
-    assert_eq!(
-        app.bindings.key_for(ControlBindingId::Up),
-        Some(VirtualKeyCode::KeyS)
-    );
+    runtime_assert_eq!(app.bindings.key_for(ControlBindingId::Up) => Some(VirtualKeyCode::KeyS));
 
     app.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
-    assert!(
+    runtime_assert!(
         app.engine
             .object_snapshot(cursor)
             .expect("cursor after arrow press")
@@ -2447,50 +2180,29 @@ fn fresh_player_default_up_key_jumps_and_releases_like_cpp() {
     );
 
     app.test_key(VirtualKeyCode::KeyS, ElementState::Pressed);
-    assert_eq!(
-        app.engine
-            .object_snapshot(cursor)
-            .expect("cursor after S press")
-            .command_stack
-            .command_names(),
-        vec!["Jump".to_string()],
-        "S must traverse GameApp input and queue C4CMD_Jump"
+    runtime_assert_eq!(
+        app.engine.object_snapshot(cursor).expect("cursor after S press").command_stack.command_names() => vec!["Jump".to_string()],
+        "S must traverse GameApp input and queue C4CMD_Jump",
     );
-    assert_ne!(
-        app.engine
-            .snapshot()
-            .players
-            .into_iter()
-            .find(|player| player.id == app.local_owner)
-            .expect("player after S press")
-            .control
-            .pressed_coms
-            & (1 << clonk_engine::COM_UP),
-        0,
-        "the Up press must be registered before release"
+    runtime_assert_ne!(
+        app.engine.snapshot().players.into_iter().find(|player| player.id == app.local_owner).expect("player after S press").control.pressed_coms & (1 << clonk_engine::COM_UP) =>
+            0,
+        "the Up press must be registered before release",
     );
 
     app.engine.test_tick();
     let jumping = app.engine.test_object_snapshot(cursor);
     assert_eq!(jumping.action.name, "Jump");
-    assert!(
+    runtime_assert!(
         jumping.velocity.y < 0,
         "ObjectComJump launches upward (C4ObjectCom.cpp:280-307)"
     );
 
     app.test_key(VirtualKeyCode::KeyS, ElementState::Released);
-    assert_eq!(
-        app.engine
-            .snapshot()
-            .players
-            .into_iter()
-            .find(|player| player.id == app.local_owner)
-            .expect("player after S release")
-            .control
-            .pressed_coms
-            & (1 << clonk_engine::COM_UP),
-        0,
-        "AutoStop key-up clears the registered Up press"
+    runtime_assert_eq!(
+        app.engine.snapshot().players.into_iter().find(|player| player.id == app.local_owner).expect("player after S release").control.pressed_coms & (1 << clonk_engine::COM_UP) =>
+            0,
+        "AutoStop key-up clears the registered Up press",
     );
 }
 
@@ -2507,7 +2219,7 @@ fn invalid_script_output_in_controls_is_non_fatal_like_cpp() {
         detail: "control function `ControlDig` returned garbage".into(),
     };
     let status = control_script_error_to_status(output_error).test_value();
-    assert!(
+    runtime_assert!(
         status.contains("COWB"),
         "status names the definition: {status}"
     );
@@ -2519,11 +2231,9 @@ fn engine_errors_remain_recoverable_during_scenario_activation() {
         "Broken scenario",
         EngineError::UnknownDefinition("MISS".into()),
     );
-    assert!(matches!(
-        recoverable,
-        ScenarioActivationError::Recoverable(ref message)
-            if message.contains("Broken scenario")
-    ));
+    runtime_assert!(
+        matches!(recoverable, ScenarioActivationError::Recoverable(ref message) if message.contains("Broken scenario"))
+    );
 }
 
 #[cfg(unix)]
@@ -2541,12 +2251,7 @@ fn writable_config_repairs_when_parent_forbids_staging() {
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).test_value();
 
     assert!(repair.expect("repair writable config in place"));
-    assert_eq!(
-        Config::load(&path)
-            .expect("reload in-place repaired config")
-            .get_in(Some("General"), "ConfigResetSafety"),
-        Some("42")
-    );
+    runtime_assert_eq!(Config::load(&path).expect("reload in-place repaired config").get_in(Some("General"), "ConfigResetSafety") => Some("42"));
 }
 
 #[test]
@@ -2568,10 +2273,9 @@ fn custom_corrupt_config_aborts_without_default_replacement() {
     let error =
         discover_validated_startup_paths(Some(&path)).expect_err("custom corruption must abort");
 
-    assert_eq!(error.to_string(), CUSTOM_CONFIG_CORRUPTED_ERROR);
-    assert_eq!(
-        fs::read(&path).expect("read untouched custom config"),
-        original
+    runtime_assert_eq!(
+        error.to_string() => CUSTOM_CONFIG_CORRUPTED_ERROR;
+        fs::read(&path).expect("read untouched custom config") => original;
     );
 }
 
@@ -2602,10 +2306,7 @@ fn standard_macos_entrypoint_recovers_planet_before_validated_path_discovery() {
     fs::create_dir_all(&work).test_value();
     journal.save(&work).test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(resources.as_path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
+    let _guard = test_env_guard(resources.as_path(), user_data.path());
 
     assert!(!resources.join("planet/System.c4g").exists());
     let outcome =
@@ -2615,15 +2316,9 @@ fn standard_macos_entrypoint_recovers_planet_before_validated_path_discovery() {
         .expect("validate recovered paths")
         .test_value();
 
-    assert_eq!(
-        outcome,
-        clonk_update::ResumeOutcome::RolledBack {
-            version: "0.7.0".to_string()
-        }
-    );
-    assert_eq!(
-        fs::read(paths.system_group_path()).expect("read restored system group"),
-        b"stub"
+    runtime_assert_eq!(
+        outcome => clonk_update::ResumeOutcome::RolledBack { version: "0.7.0".to_string() };
+        fs::read(paths.system_group_path()).expect("read restored system group") => b"stub";
     );
 }
 
@@ -2640,11 +2335,7 @@ fn launcher_recovery_marker_skips_a_second_exclusive_recovery() {
         ("LC_GAME_UPDATE_RECOVERY_COMPLETE", Some(Path::new("1"))),
     ]);
 
-    assert_eq!(
-        recover_interrupted_update_before_path_discovery()
-            .expect("the launcher already completed recovery"),
-        clonk_update::ResumeOutcome::NothingToDo
-    );
+    runtime_assert_eq!(recover_interrupted_update_before_path_discovery().expect("the launcher already completed recovery") => clonk_update::ResumeOutcome::NothingToDo);
 }
 
 #[test]
@@ -2668,10 +2359,7 @@ fn environment_config_repairs_instead_of_custom_abort() {
 
     assert_eq!(paths.config_file(), path);
     let repaired = Config::load(paths.config_file()).test_value();
-    assert_eq!(
-        repaired.get_in(Some("General"), "ConfigResetSafety"),
-        Some("42")
-    );
+    runtime_assert_eq!(repaired.get_in(Some("General"), "ConfigResetSafety") => Some("42"));
 }
 
 #[test]
@@ -2681,7 +2369,7 @@ fn missing_integrity_fields_use_typed_defaults() {
     let original = b"[General]\nName=Keep\n\n[Graphics]\nResolutionY=0\n";
     fs::write(&path, original).test_value();
 
-    assert!(!validate_or_repair_startup_config(&path, false)
+    runtime_assert!(!validate_or_repair_startup_config(&path, false)
         .expect("missing integrity fields are defaults"));
     assert_eq!(fs::read(&path).expect("read unchanged config"), original);
 }
@@ -2728,15 +2416,9 @@ fn default_repair_discards_cached_corrupt_user_path() {
 
     assert_eq!(repaired.config_file(), config_path);
     assert_ne!(repaired.user_data_dir(), poison.path());
-    assert_eq!(
-        classic_loader_language_sequence(&repaired).expect("post-repair language default"),
-        vec![expected_language.to_string()]
-    );
-    assert_eq!(
-        cached_app_paths_with_config_file(None)
-            .expect("cache repaired paths")
-            .user_data_dir(),
-        repaired.user_data_dir()
+    runtime_assert_eq!(
+        classic_loader_language_sequence(&repaired).expect("post-repair language default") => vec![expected_language.to_string()];
+        cached_app_paths_with_config_file(None).expect("cache repaired paths").user_data_dir() => repaired.user_data_dir();
     );
 }
 
@@ -2795,17 +2477,10 @@ fn environment_config_file_routes_app_reads_and_writes() {
     display.persist_if_dirty(&paths);
 
     let persisted = Config::load(&environment_file).test_value();
-    assert_eq!(
-        persisted.get_in(Some("Graphics"), "ResolutionX"),
-        Some("888")
-    );
-    assert_eq!(
-        persisted.get_in(Some("Graphics"), "ResolutionY"),
-        Some("666")
-    );
-    assert_eq!(
-        fs::read(&command_line_file).expect("read untouched command-line config"),
-        command_line_sentinel
+    runtime_assert_eq!(
+        persisted.get_in(Some("Graphics"), "ResolutionX") => Some("888");
+        persisted.get_in(Some("Graphics"), "ResolutionY") => Some("666");
+        fs::read(&command_line_file).expect("read untouched command-line config") => command_line_sentinel;
     );
 }
 
@@ -2925,19 +2600,14 @@ fn collect_player_overlay_marks_focus_and_energy() {
     assert!(player.show_startup, "startup hint owner matches");
     assert_eq!(player.control_set, 6, "runtime GamePad3 set is projected");
     assert!(player.mouse_control, "any nonzero MouseControl is true");
-    assert_eq!(player.show_control, 1 | 1 << 10);
-    assert_eq!(player.show_control_position, 3);
-    assert_eq!(player.last_com, 5);
-    assert_eq!(player.control_key_labels.len(), 10);
-    assert_eq!(
-        player.control_key_labels[3],
-        gamepad_bindings.key_label_for_set(2, ControlBindingId::Throw)
+    runtime_assert_eq!(
+        player.show_control => 1 | 1 << 10;
+        player.show_control_position => 3;
+        player.last_com => 5;
+        player.control_key_labels.len() => 10;
+        player.control_key_labels[3] => gamepad_bindings.key_label_for_set(2, ControlBindingId::Throw);
     );
-    assert_eq!(
-        player.control_key_labels[9],
-        gamepad_bindings.key_label_for_set(2, ControlBindingId::PlayerMenu),
-        "the viewport menu hint follows the player's live Gamepad3 set"
-    );
+    runtime_assert_eq!(player.control_key_labels[9] => gamepad_bindings.key_label_for_set(2, ControlBindingId::PlayerMenu), "the viewport menu hint follows the player's live Gamepad3 set");
 
     snapshot.players[0].control_set = 2;
     let keyboard3 = collect_player_overlays(
@@ -2947,11 +2617,7 @@ fn collect_player_overlay_marks_focus_and_energy() {
         &bindings,
         &gamepad_bindings,
     );
-    assert_eq!(
-        keyboard3[0].control_key_labels[9],
-        format_key_label(VirtualKeyCode::F8),
-        "the viewport menu hint follows the player's live Keyboard3 set"
-    );
+    runtime_assert_eq!(keyboard3[0].control_key_labels[9] => format_key_label(VirtualKeyCode::F8), "the viewport menu hint follows the player's live Keyboard3 set");
     snapshot.players[0].control_set = 4;
     let unassigned_gamepad = collect_player_overlays(
         &mut engine,
@@ -2960,7 +2626,7 @@ fn collect_player_overlay_marks_focus_and_energy() {
         &bindings,
         &GamepadBindings::default(),
     );
-    assert!(
+    runtime_assert!(
         unassigned_gamepad[0].control_key_labels[9].is_empty(),
         "an undefined gamepad menu button draws no key text"
     );
@@ -2974,7 +2640,7 @@ fn collect_player_overlay_marks_focus_and_energy() {
         &bindings,
         &gamepad_bindings,
     );
-    assert!(
+    runtime_assert!(
         !remote_overlay[0].show_startup,
         "C++ suppresses startup hints for non-local players"
     );
@@ -2988,16 +2654,15 @@ fn collect_player_overlay_marks_focus_and_energy() {
     assert_eq!(focused.len(), 1, "only cursor object highlighted");
     let focus_entry = focused.pop().test_value();
     assert!(focus_entry.label.contains("Clonk"));
-    assert_eq!((focus_entry.energy, focus_entry.energy_capacity), (80, 100));
-    assert_eq!(focus_entry.magic_energy, 25_000);
-    assert_eq!(focus_entry.magic_capacity, 50_000);
-    assert_eq!(focus_entry.breath, 50);
-    assert_eq!(focus_entry.breath_capacity, 100);
-    assert_eq!(focus_entry.object_id, focus);
-    assert_eq!(focus_entry.hide_hud_elements, 0x3f);
-    assert_eq!(
-        focus_entry.hide_hud_bars,
-        clonk_engine::HIDE_HUD_BAR_ENERGY | clonk_engine::HIDE_HUD_BAR_BREATH
+    runtime_assert_eq!(
+        (focus_entry.energy, focus_entry.energy_capacity) => (80, 100);
+        focus_entry.magic_energy => 25_000;
+        focus_entry.magic_capacity => 50_000;
+        focus_entry.breath => 50;
+        focus_entry.breath_capacity => 100;
+        focus_entry.object_id => focus;
+        focus_entry.hide_hud_elements => 0x3f;
+        focus_entry.hide_hud_bars => clonk_engine::HIDE_HUD_BAR_ENERGY | clonk_engine::HIDE_HUD_BAR_BREATH;
     );
     assert!(focus_entry.portrait.is_none());
 
@@ -3023,11 +2688,7 @@ fn collect_player_overlay_marks_focus_and_energy() {
         &gamepad_bindings,
     );
     assert_eq!(overlay[0].name, "\u{e9}");
-    assert_eq!(
-        clonk_script::c4_string_bytes(&snapshot.players[0].name),
-        [0xe9],
-        "presentation decoding does not rewrite synchronized player state"
-    );
+    runtime_assert_eq!(clonk_script::c4_string_bytes(&snapshot.players[0].name) => [0xe9], "presentation decoding does not rewrite synchronized player state");
 
     snapshot.hud.players[0].crew = vec![focus];
     snapshot.players[0].view_cursor = Some(teammate);
@@ -3040,19 +2701,8 @@ fn collect_player_overlay_marks_focus_and_energy() {
     );
     assert_eq!(overlay[0].cursor, Some(teammate));
     assert_eq!(overlay[0].crew_count, 1, "ViewCursor is not roster crew");
-    assert_eq!(
-        overlay[0].crew.len(),
-        2,
-        "non-roster ViewCursor is projected"
-    );
-    assert_eq!(
-        overlay[0]
-            .crew
-            .iter()
-            .find(|crew| crew.object_id == teammate)
-            .map(|crew| (crew.hide_hud_elements, crew.hide_hud_bars)),
-        Some((0, 0))
-    );
+    runtime_assert_eq!(overlay[0].crew.len() => 2, "non-roster ViewCursor is projected");
+    runtime_assert_eq!(overlay[0].crew.iter().find(|crew| crew.object_id == teammate).map(|crew| (crew.hide_hud_elements, crew.hide_hud_bars)) => Some((0, 0)));
 }
 
 #[test]
@@ -3061,11 +2711,7 @@ fn participant_module_count_matches_cpp_smodulecount() {
     assert_eq!(c4_module_count("   ;  ;; "), 0);
     assert_eq!(c4_module_count("Alice.c4p;; Bob.c4p"), 2);
     assert_eq!(c4_module_count(" Alice.c4p ; Bob.c4p ;"), 2);
-    assert_eq!(
-        c4_module_count("\t"),
-        1,
-        "C++ SModuleCount ignores ASCII spaces only"
-    );
+    runtime_assert_eq!(c4_module_count("\t") => 1, "C++ SModuleCount ignores ASCII spaces only");
 }
 
 #[test]
@@ -3092,45 +2738,19 @@ fn configured_mission_access_reaches_fresh_engines_and_survives_replacement() {
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let probe = install_probe(&mut app.engine);
     for password in ["alpha", "BETA"] {
-        assert_eq!(
-            app.engine
-                .call_object_function(
-                    probe,
-                    "Has",
-                    vec![Value::String(password.to_string().into())],
-                )
-                .expect("configured access query executes"),
-            Value::Bool(true)
+        runtime_assert_eq!(
+            app.engine.call_object_function(probe, "Has", vec![Value::String(password.to_string().into())],).expect("configured access query executes") => Value::Bool(true);
         );
     }
-    assert_eq!(
-        app.engine
-            .call_object_function(probe, "Has", vec![Value::Nil])
-            .expect("nil access query executes"),
-        Value::Bool(false)
-    );
-    assert_eq!(
-        app.engine
-            .call_object_function(
-                probe,
-                "Grant",
-                vec![Value::String("Runtime".to_string().into())],
-            )
-            .expect("runtime access grant executes"),
-        Value::Bool(true)
+    runtime_assert_eq!(
+        app.engine.call_object_function(probe, "Has", vec![Value::Nil]).expect("nil access query executes") => Value::Bool(false);
+        app.engine .call_object_function( probe, "Grant", vec![Value::String("Runtime".to_string().into())], ) .expect("runtime access grant executes") => Value::Bool(true);
     );
 
     app.return_to_menu();
     let probe = install_probe(&mut app.engine);
-    assert_eq!(
-        app.engine
-            .call_object_function(
-                probe,
-                "Has",
-                vec![Value::String("runtime".to_string().into())],
-            )
-            .expect("replacement engine sees process-local access"),
-        Value::Bool(true)
+    runtime_assert_eq!(
+        app.engine.call_object_function(probe, "Has", vec![Value::String("runtime".to_string().into())],).expect("replacement engine sees process-local access") => Value::Bool(true);
     );
 }
 
@@ -3151,26 +2771,11 @@ fn team_options_submit_exact_sets_and_refresh_from_echoes() {
     app.submit_classic_lobby_team_setting(LobbyOptionKind::TeamDistribution, 4);
     app.submit_classic_lobby_team_setting(LobbyOptionKind::TeamColors, 1);
     let sets = commands.take_submitted_control_sets();
-    assert_eq!(
-        sets,
-        [
-            clonk_network::LegacyControlSet {
-                value_type: 3,
-                data: 4,
-                by_client: 0,
-            },
-            clonk_network::LegacyControlSet {
-                value_type: 4,
-                data: 1,
-                by_client: 0,
-            },
-        ]
+    runtime_assert_eq!(
+        sets => [clonk_network::LegacyControlSet { value_type: 3, data: 4, by_client: 0, }, clonk_network::LegacyControlSet { value_type: 4, data: 1, by_client: 0, },];
     );
     let teams = app.network_team_assignment.as_ref().test_value().teams();
-    assert_eq!(
-        teams.team_distribution,
-        clonk_engine::InitialNetworkTeamDistribution::Free
-    );
+    runtime_assert_eq!(teams.team_distribution => clonk_engine::InitialNetworkTeamDistribution::Free);
     assert!(!teams.team_colors, "menu selections wait for host echoes");
 
     app.execute_control_set(sets[0]);
@@ -3181,18 +2786,14 @@ fn team_options_submit_exact_sets_and_refresh_from_echoes() {
         .test_value()
         .controller
         .option_rows();
-    assert!(options.iter().any(|row| {
-        row.kind == LobbyOptionKind::TeamDistribution && row.value == "surprise random!"
-    }));
-    assert!(options
-        .iter()
-        .any(|row| { row.kind == LobbyOptionKind::TeamColors && row.value == "enabled" }));
-    assert!(options
-        .iter()
-        .any(|row| row.kind == LobbyOptionKind::RandomTeamCount));
+    runtime_assert!(
+        options.iter().any(|row| { row.kind == LobbyOptionKind::TeamDistribution && row.value == "surprise random!" });
+        options.iter().any(|row| { row.kind == LobbyOptionKind::TeamColors && row.value == "enabled" });
+        options.iter().any(|row| row.kind == LobbyOptionKind::RandomTeamCount);
+    );
 
     app.submit_classic_lobby_team_setting(LobbyOptionKind::TeamDistribution, 2);
-    assert!(
+    runtime_assert!(
         commands.take_submitted_control_sets().is_empty(),
         "None is not offered for predefined teams"
     );
@@ -3202,21 +2803,9 @@ fn team_options_submit_exact_sets_and_refresh_from_echoes() {
 fn teams_sheet_groups_in_team_member_order_and_filters_inactive_or_invisible_players() {
     let mut clients = ControlClientRegistry::default();
     clients.replace_snapshot([
-        clonk_engine::ClientCoreControlData {
-            client_id: 0,
-            activated: true,
-            ..Default::default()
-        },
-        clonk_engine::ClientCoreControlData {
-            client_id: 7,
-            activated: false,
-            ..Default::default()
-        },
-        clonk_engine::ClientCoreControlData {
-            client_id: 8,
-            activated: true,
-            ..Default::default()
-        },
+        runtime_fixture!(client: 0, true),
+        runtime_fixture!(client: 7, false),
+        runtime_fixture!(client: 8, true),
     ]);
     let player = |id, team, flags, player_type| clonk_engine::ControlPlayerInfoEntry {
         id,
@@ -3230,9 +2819,10 @@ fn teams_sheet_groups_in_team_member_order_and_filters_inactive_or_invisible_pla
     infos.replace_snapshot(
         1,
         [
-            clonk_engine::PlayerInfoControlData {
-                client_id: 0,
-                players: vec![
+            clonk_engine::PlayerInfoControlData::new(
+                0,
+                0,
+                vec![
                     player(10, 1, 0, clonk_engine::PLAYER_INFO_TYPE_USER),
                     player(
                         11,
@@ -3242,21 +2832,23 @@ fn teams_sheet_groups_in_team_member_order_and_filters_inactive_or_invisible_pla
                     ),
                     player(99, 0, 0, clonk_engine::PLAYER_INFO_TYPE_USER),
                 ],
-                ..Default::default()
-            },
-            clonk_engine::PlayerInfoControlData {
-                client_id: 7,
-                players: vec![player(20, 2, 0, clonk_engine::PLAYER_INFO_TYPE_USER)],
-                ..Default::default()
-            },
-            clonk_engine::PlayerInfoControlData {
-                client_id: 8,
-                players: vec![
+                -1,
+            ),
+            clonk_engine::PlayerInfoControlData::new(
+                7,
+                0,
+                vec![player(20, 2, 0, clonk_engine::PLAYER_INFO_TYPE_USER)],
+                -1,
+            ),
+            clonk_engine::PlayerInfoControlData::new(
+                8,
+                0,
+                vec![
                     player(30, 2, 0, clonk_engine::PLAYER_INFO_TYPE_USER),
                     player(31, 1, 0, clonk_engine::PLAYER_INFO_TYPE_SCRIPT),
                 ],
-                ..Default::default()
-            },
+                -1,
+            ),
         ],
     );
     let team = |id, name: &[u8], player_ids| clonk_engine::InitialNetworkTeam {
@@ -3289,18 +2881,11 @@ fn teams_sheet_groups_in_team_member_order_and_filters_inactive_or_invisible_pla
 
     let rows =
         classic_lobby_roster_projection(&clients, &infos, Some(&metadata), 0, LobbySheet::Teams).0;
-    assert_eq!(
-        rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>(),
-        vec![
-            LobbyRosterId::Header(LobbyRosterHeader::Team(2)),
-            LobbyRosterId::Player(30),
-            LobbyRosterId::Header(LobbyRosterHeader::Team(1)),
-            LobbyRosterId::Player(31),
-            LobbyRosterId::Player(10),
-            LobbyRosterId::Header(LobbyRosterHeader::Team(3)),
-        ]
+    runtime_assert_eq!(
+        rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>() =>
+            vec![LobbyRosterId::Header(LobbyRosterHeader::Team(2)), LobbyRosterId::Player(30), LobbyRosterId::Header(LobbyRosterHeader::Team(1)), LobbyRosterId::Player(31), LobbyRosterId::Player(10), LobbyRosterId::Header(LobbyRosterHeader::Team(3)),];
     );
-    assert!(rows
+    runtime_assert!(rows
         .iter()
         .all(|row| !matches!(row, LobbyRosterRow::Client(_))));
 
@@ -3308,7 +2893,7 @@ fn teams_sheet_groups_in_team_member_order_and_filters_inactive_or_invisible_pla
     generated.auto_generate_teams = true;
     let generated =
         classic_lobby_roster_projection(&clients, &infos, Some(&generated), 0, LobbySheet::Teams).0;
-    assert!(!generated.iter().any(|row| matches!(
+    runtime_assert!(!generated.iter().any(|row| matches!(
         row,
         LobbyRosterRow::Header(LobbyHeaderRow {
             kind: LobbyRosterHeader::Team(3),
@@ -3379,35 +2964,14 @@ fn player_shift_tab_wraps_and_continues_backwards() {
     app.replace_startup_view(StartupView::PlayerSelection);
     app.test_modifiers(ModifiersState::SHIFT);
 
-    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .expect("player dialog")
-            .focused_control(),
-        PlrSelControl::Crew
-    );
-    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .expect("player dialog")
-            .focused_control(),
-        PlrSelControl::Properties
-    );
+    tap_runtime_key(&mut app, VirtualKeyCode::Tab);
+    runtime_assert_eq!(startup_player_focus(&app) => PlrSelControl::Crew);
+    tap_runtime_key(&mut app, VirtualKeyCode::Tab);
+    runtime_assert_eq!(startup_player_focus(&app) => PlrSelControl::Properties);
 
     app.test_modifiers(ModifiersState::empty());
-    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .expect("player dialog")
-            .focused_control(),
-        PlrSelControl::Crew
-    );
+    tap_runtime_key(&mut app, VirtualKeyCode::Tab);
+    runtime_assert_eq!(startup_player_focus(&app) => PlrSelControl::Crew);
 }
 
 #[test]
@@ -3420,66 +2984,27 @@ fn player_shift_tab_covers_back_list_and_crew_edges() {
     app.startup_player_dialog = Some(dialog);
     app.replace_startup_view(StartupView::PlayerSelection);
 
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .expect("player dialog")
-            .focused_control(),
-        PlrSelControl::PlayerList
-    );
-    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .expect("player dialog")
-            .focused_control(),
-        PlrSelControl::Back
-    );
+    runtime_assert_eq!(startup_player_focus(&app) => PlrSelControl::PlayerList);
+    tap_runtime_key(&mut app, VirtualKeyCode::Tab);
+    runtime_assert_eq!(startup_player_focus(&app) => PlrSelControl::Back);
 
     app.test_modifiers(ModifiersState::SHIFT);
     for (expected, _description) in [
         (PlrSelControl::PlayerList, "Back to PlayerList"),
         (PlrSelControl::Crew, "PlayerList to Crew"),
     ] {
-        app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-        app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-        assert_eq!(
-            app.startup_player_dialog
-                .as_ref()
-                .expect("player dialog")
-                .focused_control(),
-            expected
-        );
+        tap_runtime_key(&mut app, VirtualKeyCode::Tab);
+        runtime_assert_eq!(startup_player_focus(&app) => expected);
     }
 
     app.test_modifiers(ModifiersState::empty());
-    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .expect("player dialog")
-            .focused_control(),
-        PlrSelControl::PlayerList
-    );
+    tap_runtime_key(&mut app, VirtualKeyCode::Tab);
+    runtime_assert_eq!(startup_player_focus(&app) => PlrSelControl::PlayerList);
 }
 
 #[test]
 fn player_typeahead_and_apps_route_through_selected_row() {
-    let player = |name: &str| clonk_frontend::startup_plrsel::PlrSelPlayer {
-        name: name.to_string(),
-        activated: false,
-        big_icon: None,
-        portrait: None,
-        color_dw: 0xff,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        comment: String::new(),
-    };
+    let player = |name: &str| runtime_fixture!(player_selection: name.to_string(), String::new());
     let mut app = new_classic_menu_app(640, 480);
     app.startup_player_models = ["Thomas", "Ada", "tina", "Tori"]
         .map(player)
@@ -3489,13 +3014,7 @@ fn player_typeahead_and_apps_route_through_selected_row() {
 
     for (character, expected) in [('T', 2), ('T', 3), ('t', 0)] {
         app.test_text_input(character);
-        assert_eq!(
-            app.startup_player_dialog
-                .as_ref()
-                .expect("player dialog")
-                .selected_index(),
-            Some(expected)
-        );
+        runtime_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").selected_index() => Some(expected));
     }
     app.test_text_input('T');
     let (selected, anchor) = app
@@ -3511,16 +3030,14 @@ fn player_typeahead_and_apps_route_through_selected_row() {
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     let popup = app.context_menu.test_ref();
     let panel = &popup.layout().panels[0];
-    assert_eq!(panel.rows.len(), 2);
-    assert_eq!(panel.selected, None);
-    assert_eq!(
-        (panel.bounds.x, panel.bounds.y),
-        (anchor.x as i32, anchor.y as i32)
+    runtime_assert_eq!(
+        panel.rows.len() => 2;
+        panel.selected => None;
+        (panel.bounds.x, panel.bounds.y) => (anchor.x as i32, anchor.y as i32);
     );
     app.close_context_menu_silently();
 
-    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
+    tap_runtime_key(&mut app, VirtualKeyCode::Tab);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     assert!(app.context_menu.is_none());
 }
@@ -3554,13 +3071,8 @@ fn new_player_properties_defaults_match_classic_choices() {
     assert!(player.pref_mouse);
     assert!(player.pref_control_style);
     assert!(player.pref_auto_context_menu);
-    assert_eq!(
-        controller
-            .portrait_preview()
-            .map(|image| (image.width(), image.height())),
-        Some((150, 150))
-    );
-    assert!(controller
+    runtime_assert_eq!(controller.portrait_preview().map(|image| (image.width(), image.height())) => Some((150, 150)));
+    runtime_assert!(controller
         .big_icon_preview()
         .is_some_and(|image| { image.width() <= 64 && image.height() <= 64 }));
 }
@@ -3580,12 +3092,7 @@ fn new_player_dialog_seeds_the_name_from_the_localized_first_player_rank() {
         "Novice|Beginner|Adept".to_string(),
     );
 
-    assert_eq!(
-        app.new_startup_player_properties_controller(0, 0)
-            .player()
-            .name,
-        "Novice"
-    );
+    runtime_assert_eq!(app.new_startup_player_properties_controller(0, 0).player().name => "Novice");
 }
 
 #[test]
@@ -3599,12 +3106,7 @@ fn new_player_dialog_still_seeds_neuling_from_the_german_rank_ladder() {
         "Neuling|Anfänger|Tunichtgut".to_string(),
     );
 
-    assert_eq!(
-        app.new_startup_player_properties_controller(0, 0)
-            .player()
-            .name,
-        "Neuling"
-    );
+    runtime_assert_eq!(app.new_startup_player_properties_controller(0, 0).player().name => "Neuling");
 }
 
 #[test]
@@ -3614,11 +3116,7 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
     let program_data = tempdir();
     let user_data = tempdir();
     fs::create_dir_all(program_data.path().join("planet/System.c4g")).test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(program_data.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(program_data.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     write_preview_image(
         &paths.user_data_dir().join("Custom.PNG"),
@@ -3652,7 +3150,7 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
         .and_then(|pending| pending.controller.portrait_selector())
         .test_value();
     assert_eq!(selector.current_location_index(), 1);
-    assert!(selector
+    runtime_assert!(selector
         .items()
         .iter()
         .any(|item| item.filename() == Some("Program.BMP")));
@@ -3688,21 +3186,15 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
         .and_then(|pending| pending.controller.portrait_selector())
         .test_value();
     assert_eq!(selector.current_location_index(), 0);
-    assert!(selector
+    runtime_assert!(selector
         .items()
         .iter()
         .any(|item| item.filename() == Some("Custom.PNG")));
     // C4FileSelDlg.cpp:189-194 changes the active path immediately, while
     // C4FileSelDlg.cpp:575-580 remembers its row only from OnClosed.
-    assert_eq!(
-        clonk_app_netplay::configured_native_value(
-            &fs::read(paths.config_file()).expect("read portrait config"),
-            "Startup",
-            "LastPortraitFolderIdx",
-        )
-        .expect("portrait location is not persisted before close")
-        .as_bytes(),
-        b"1"
+    runtime_assert_eq!(
+        clonk_app_netplay::configured_native_value(&fs::read(paths.config_file()).expect("read portrait config"), "Startup", "LastPortraitFolderIdx",).expect("portrait location is not persisted before close").as_bytes() =>
+            b"1";
     );
 
     let actions = app
@@ -3710,25 +3202,14 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
         .test_mut()
         .controller
         .handle_key_down(KeyCode::Escape);
-    assert_eq!(
-        actions,
-        vec![
-            clonk_frontend::startup_plrproperties::PlayerPropertiesAction::PortraitSelectorClosed {
-                location_index: 0
-            }
-        ],
-        "C4FileSelDlg.cpp:209-228 and 575-580 remember the current row on Cancel"
+    runtime_assert_eq!(
+        actions => vec![clonk_frontend::startup_plrproperties::PlayerPropertiesAction::PortraitSelectorClosed { location_index: 0 }],
+        "C4FileSelDlg.cpp:209-228 and 575-580 remember the current row on Cancel",
     );
     app.process_startup_player_properties_actions(actions);
-    assert_eq!(
-        clonk_app_netplay::configured_native_value(
-            &fs::read(paths.config_file()).expect("read portrait config after close"),
-            "Startup",
-            "LastPortraitFolderIdx",
-        )
-        .expect("persisted portrait location after close")
-        .as_bytes(),
-        b"0"
+    runtime_assert_eq!(
+        clonk_app_netplay::configured_native_value(&fs::read(paths.config_file()).expect("read portrait config after close"), "Startup", "LastPortraitFolderIdx",).expect("persisted portrait location after close").as_bytes() =>
+            b"0";
     );
     persist_native_config_values(
         &paths,
@@ -3742,15 +3223,11 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
     ]);
-    assert_eq!(
-        app.startup_player_properties_dialog
-            .as_ref()
-            .and_then(|pending| pending.controller.portrait_selector())
-            .expect("selector reopens at the persisted location")
-            .current_location_index(),
-        0,
+    runtime_assert_eq!(
+        app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).expect("selector reopens at the persisted location").current_location_index() =>
+            0,
         "C++ keeps the close-time config row in memory even when disk persistence fails \
-             (`C4FileSelDlg.cpp:575-580`)"
+             (`C4FileSelDlg.cpp:575-580`)",
     );
     reset_cached_app_paths();
 }
@@ -3758,19 +3235,7 @@ fn portrait_selector_uses_and_persists_last_folder_index() {
 #[test]
 fn player_new_properties_enter_f2_and_insert_open_the_modal() {
     let mut app = new_real_classic_menu_app(640, 480);
-    let model = clonk_frontend::startup_plrsel::PlrSelPlayer {
-        name: "Entry Player".to_string(),
-        activated: false,
-        big_icon: None,
-        portrait: None,
-        color_dw: 0xff,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        comment: "entry".to_string(),
-    };
+    let model = runtime_fixture!(player_selection: "Entry Player".to_string(), "entry".to_string());
     app.startup_player_files.push(StartupPlayerFile {
         path: PathBuf::from("Entry Player.c4p"),
         file_name: "Entry Player.c4p".to_string(),
@@ -3787,35 +3252,26 @@ fn player_new_properties_enter_f2_and_insert_open_the_modal() {
         clonk_frontend::startup_plrsel::PlrSelAction::NewPlayer,
     ])
     .test_value();
-    assert!(matches!(
-        app.startup_player_properties_dialog
-            .as_ref()
-            .map(|pending| pending.controller.mode()),
-        Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New)
-    ));
+    runtime_assert!(
+        matches!(app.startup_player_properties_dialog.as_ref().map(|pending| pending.controller.mode()), Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New));
+    );
     let mut frame = vec![0; 640 * 480 * 4];
     app.test_render(&mut frame);
     app.startup_player_properties_dialog = None;
 
     for key in [VirtualKeyCode::Enter, VirtualKeyCode::F2] {
         app.test_key(key, ElementState::Pressed);
-        assert!(matches!(
-            app.startup_player_properties_dialog
-                .as_ref()
-                .map(|pending| pending.controller.mode()),
-            Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
-        ));
+        runtime_assert!(
+            matches!(app.startup_player_properties_dialog.as_ref().map(|pending| pending.controller.mode()), Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 }));
+        );
         app.startup_player_properties_dialog = None;
         app.test_key(key, ElementState::Released);
     }
 
     app.test_key(VirtualKeyCode::Insert, ElementState::Pressed);
-    assert!(matches!(
-        app.startup_player_properties_dialog
-            .as_ref()
-            .map(|pending| pending.controller.mode()),
-        Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New)
-    ));
+    runtime_assert!(
+        matches!(app.startup_player_properties_dialog.as_ref().map(|pending| pending.controller.mode()), Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New));
+    );
 }
 
 #[test]
@@ -3842,13 +3298,7 @@ fn options_program_focus_traverses_every_control_without_a_boundary() {
             ElementState::Pressed,
         )
         .unwrap_or_else(|error| panic!("focus {target:?}: {error}"));
-        assert_eq!(
-            app.startup_options_dialog
-                .as_ref()
-                .expect("options state")
-                .focused_program_control(),
-            Some(target)
-        );
+        runtime_assert_eq!(app.startup_options_dialog.as_ref().expect("options state").focused_program_control() => Some(target));
     }
 
     app.handle_gamepad_direction(
@@ -3857,26 +3307,14 @@ fn options_program_focus_traverses_every_control_without_a_boundary() {
         ElementState::Pressed,
     )
     .test_value();
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .focused_program_control(),
-        None
-    );
+    runtime_assert_eq!(app.startup_options_dialog.as_ref().unwrap().focused_program_control() => None);
     app.handle_gamepad_direction(
         GamepadSlot::new(0),
         ControlButton::Left,
         ElementState::Pressed,
     )
     .test_value();
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .focused_program_control(),
-        Some(OptionsProgramFocusTarget::AdvancedButton)
-    );
+    runtime_assert_eq!(app.startup_options_dialog.as_ref().unwrap().focused_program_control() => Some(OptionsProgramFocusTarget::AdvancedButton));
 }
 
 #[test]
@@ -3920,17 +3358,14 @@ fn packed_logical_folder_map_uses_case_insensitive_group_traversal() {
     let mut state = MenuState::new(menu, entries);
     state.enter_folder("Outer.c4f");
     state.enter_folder(&inner_entry.identifier);
-    assert!(state.configure_current_folder_map(
+    runtime_assert!(state.configure_current_folder_map(
         true,
         640,
         480,
         &MissionAccessStore::default(),
         &["US".to_string()],
     ));
-    assert_eq!(
-        state.current_map().expect("packed map").source_path,
-        logical_inner
-    );
+    runtime_assert_eq!(state.current_map().expect("packed map").source_path => logical_inner);
 }
 
 #[test]
@@ -3954,17 +3389,13 @@ fn editor_kind_and_edit_action_return_typed_boundaries() {
         StartupMenuAction::OpenEntry(summary.clone()),
         StartupMenuAction::StartScenario(summary.clone()),
     ] {
-        assert!(matches!(
-            app.process_menu_actions(vec![action]),
-            Err(ClassicParityBoundary::EditorScenario { ref identifier })
-                if identifier == &editor.identifier
-        ));
+        runtime_assert!(
+            matches!(app.process_menu_actions(vec![action]), Err(ClassicParityBoundary::EditorScenario { ref identifier }) if identifier == &editor.identifier)
+        );
     }
-    assert!(matches!(
-        app.process_menu_actions(vec![StartupMenuAction::EditEntry(summary)]),
-        Err(ClassicParityBoundary::EditScenario { ref identifier })
-            if identifier == &editor.identifier
-    ));
+    runtime_assert!(
+        matches!(app.process_menu_actions(vec![StartupMenuAction::EditEntry(summary)]), Err(ClassicParityBoundary::EditScenario { ref identifier }) if identifier == &editor.identifier);
+    );
 }
 
 #[test]
@@ -3986,16 +3417,8 @@ fn game_init_preserves_raw_cpp_participant_config() {
     // (pristine 9ffa0a5d src/C4StartupMainDlg.cpp:174-199;
     // src/C4Game.cpp:361-364).
     let _lock = env_lock().lock();
-    let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_root)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     paths.ensure_user_dirs().test_value();
     let player = user_data.path().join("Players/Alice.c4p");
     fs::create_dir_all(&player).test_value();
@@ -4007,20 +3430,9 @@ fn game_init_preserves_raw_cpp_participant_config() {
     let mut app = GameApp::new(
         320,
         200,
-        AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        },
+        disabled_audio_options(),
         Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Player".to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with("Player".to_string(), false),
     )
     .test_value();
     wait_for_menu(&mut app);
@@ -4036,16 +3448,8 @@ fn options_reset_confirmation_replaces_config_and_requests_clean_exit() {
     use clonk_frontend::startup_options_dlg::OptionsDlgAction;
 
     let _lock = env_lock().lock();
-    let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_root)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[General]\nFontName=Endeavour\nFontSize=28\nVendorResetKey=remove\n[Graphics]\nScale=250\n").test_value();
     let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
@@ -4061,14 +3465,13 @@ fn options_reset_confirmation_replaces_config_and_requests_clean_exit() {
     app.process_options_dialog_actions(vec![OptionsDlgAction::ResetConfiguration])
         .test_value();
     let modal = app.message_dialogs.last().test_value();
-    assert_eq!(modal.state.caption(), "Reset configuration");
-    assert_eq!(
-                modal.state.message(),
-                "Are you sure you want to reset all configuration values?|For changes to take effect the program has to be restarted."
-            );
-    assert_eq!(modal.state.buttons(), MessageDialogButtons::YES_NO);
-    assert_eq!(modal.state.icon(), MessageDialogIcon::NOTIFY);
-    assert_eq!(modal.state.focused_button(), Some(MessageDialogButton::Yes));
+    runtime_assert_eq!(
+        modal.state.caption() => "Reset configuration";
+        modal.state.message() => "Are you sure you want to reset all configuration values?|For changes to take effect the program has to be restarted.";
+        modal.state.buttons() => MessageDialogButtons::YES_NO;
+        modal.state.icon() => MessageDialogIcon::NOTIFY;
+        modal.state.focused_button() => Some(MessageDialogButton::Yes);
+    );
     app.finish_message_dialog(MessageDialogResult::No)
         .test_value();
     assert_eq!(fs::read(paths.config_file()).unwrap(), before_cancel);
@@ -4106,13 +3509,7 @@ fn options_ctrl_tab_traverses_all_six_live_sheets_without_a_boundary() {
         app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("open {expected:?}: {error}"));
         app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-        assert_eq!(
-            app.startup_options_dialog
-                .as_ref()
-                .expect("options dialog")
-                .active_sheet(),
-            expected
-        );
+        runtime_assert_eq!(app.startup_options_dialog.as_ref().expect("options dialog").active_sheet() => expected);
     }
 }
 
@@ -4133,58 +3530,21 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
     *dialog.controls_mut() = controls;
     dialog.restore_sheet(OptionsSheet::Keyboard);
 
-    app.test_key(VirtualKeyCode::Digit2, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Digit2, ElementState::Released);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .controls()
-            .selected_set(ControlDevice::Keyboard),
-        0
-    );
+    tap_runtime_key(&mut app, VirtualKeyCode::Digit2);
+    runtime_assert_eq!(selected_options_control_set(&app, ControlDevice::Keyboard) => 0);
 
     app.test_modifiers(ModifiersState::ALT);
-    app.test_key(VirtualKeyCode::Digit2, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Digit2, ElementState::Released);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .controls()
-            .selected_set(ControlDevice::Keyboard),
-        1
-    );
+    tap_runtime_key(&mut app, VirtualKeyCode::Digit2);
+    runtime_assert_eq!(selected_options_control_set(&app, ControlDevice::Keyboard) => 1);
     app.test_key(VirtualKeyCode::Numpad1, ElementState::Pressed);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .controls()
-            .selected_set(ControlDevice::Keyboard),
-        1
-    );
+    runtime_assert_eq!(selected_options_control_set(&app, ControlDevice::Keyboard) => 1);
 
     app.test_modifiers(ModifiersState::ALT | ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::Digit4, ElementState::Pressed);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .controls()
-            .selected_set(ControlDevice::Keyboard),
-        3
-    );
+    runtime_assert_eq!(selected_options_control_set(&app, ControlDevice::Keyboard) => 3);
     app.test_modifiers(ModifiersState::ALT | ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::Digit1, ElementState::Pressed);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .controls()
-            .selected_set(ControlDevice::Keyboard),
-        3
-    );
+    runtime_assert_eq!(selected_options_control_set(&app, ControlDevice::Keyboard) => 3);
 
     app.startup_options_dialog
         .as_mut()
@@ -4194,28 +3554,18 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
         .test_value();
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Digit3, ElementState::Pressed);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .controls()
-            .selected_set(ControlDevice::Gamepad),
-        2
+    runtime_assert_eq!(
+        selected_options_control_set(&app, ControlDevice::Gamepad) => 2;
+        app.gamepads.options_open_slot() => Some(GamepadSlot::new(2));
     );
-    assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(2)));
 
     for key in [VirtualKeyCode::Digit4, VirtualKeyCode::Digit0] {
         app.test_key(key, ElementState::Pressed);
     }
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .controls()
-            .selected_set(ControlDevice::Gamepad),
-        2
+    runtime_assert_eq!(
+        selected_options_control_set(&app, ControlDevice::Gamepad) => 2;
+        app.gamepads.options_open_slot() => Some(GamepadSlot::new(2));
     );
-    assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(2)));
 }
 
 #[test]
@@ -4234,28 +3584,14 @@ fn options_control_set_hotkeys_do_not_leak_through_modals() {
     app.process_options_dialog_actions(vec![OptionsDlgAction::ResetConfiguration])
         .test_value();
     app.test_key(VirtualKeyCode::Digit2, ElementState::Pressed);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .controls()
-            .selected_set(ControlDevice::Keyboard),
-        3
-    );
+    runtime_assert_eq!(selected_options_control_set(&app, ControlDevice::Keyboard) => 3);
     app.finish_message_dialog(MessageDialogResult::No)
         .test_value();
 
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenGraphicsScaleText])
         .test_value();
     app.test_key(VirtualKeyCode::Digit2, ElementState::Pressed);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .controls()
-            .selected_set(ControlDevice::Keyboard),
-        3
-    );
+    runtime_assert_eq!(selected_options_control_set(&app, ControlDevice::Keyboard) => 3);
 }
 
 #[test]
@@ -4271,13 +3607,12 @@ fn options_close_reports_disk_write_failure() {
 
     assert_eq!(app.startup_view, StartupView::MainMenu);
     let error = app.message_dialogs.last().test_value();
-    assert_eq!(error.state.caption(), "Configuration error");
-    assert_eq!(
-        error.state.message(),
-        "Could not save configuration: simulated config write failure"
+    runtime_assert_eq!(
+        error.state.caption() => "Configuration error";
+        error.state.message() => "Could not save configuration: simulated config write failure";
+        error.state.icon() => MessageDialogIcon::ERROR;
     );
-    assert_eq!(error.state.icon(), MessageDialogIcon::ERROR);
-    assert!(matches!(
+    runtime_assert!(matches!(
         error.continuation,
         MessageDialogContinuation::None
     ));
@@ -4285,16 +3620,8 @@ fn options_close_reports_disk_write_failure() {
 
 #[test]
 fn options_language_loads_real_de_and_selection_reloads_and_persists() {
-    let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_root)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(
         paths.config_file(),
@@ -4307,14 +3634,10 @@ fn options_language_loads_real_de_and_selection_reloads_and_persists() {
     app.open_options_menu();
 
     let program = app.startup_options_dialog.test_ref().program();
-    assert_eq!(program.language_text, "DE - Deutsch");
-    assert_eq!(
-        program.language_info,
-        "Original-Sprachpaket von RedWolf Design."
-    );
-    assert_eq!(
-        program.no_language_info,
-        "Sprachpaket nicht verf\u{00fc}gbar."
+    runtime_assert_eq!(
+        program.language_text => "DE - Deutsch";
+        program.language_info => "Original-Sprachpaket von RedWolf Design.";
+        program.no_language_info => "Sprachpaket nicht verf\u{00fc}gbar.";
     );
     let mut codes = program
         .language_infos
@@ -4322,18 +3645,14 @@ fn options_language_loads_real_de_and_selection_reloads_and_persists() {
         .map(|info| info.code.as_str())
         .collect::<Vec<_>>();
     codes.sort_unstable();
-    assert_eq!(codes, vec!["DE", "US"]);
-    assert_eq!(app.needed_material_need, "%s|braucht noch");
-    assert_eq!(app.object_no_dig, "%s kann|nicht graben.");
-    assert_eq!(
-        app.default_rank_names
-            .as_deref()
-            .and_then(|names| names.get(1))
-            .map(String::as_str),
-        Some("Fähnrich")
+    runtime_assert_eq!(
+        codes => vec!["DE", "US"];
+        app.needed_material_need => "%s|braucht noch";
+        app.object_no_dig => "%s kann|nicht graben.";
+        app.default_rank_names.as_deref().and_then(|names| names.get(1)).map(String::as_str) => Some("Fähnrich");
+        app.loaded_default_rank_names => app.default_rank_names;
+        app_default_rank_promotion_name(&app) => "Fähnrich";
     );
-    assert_eq!(app.loaded_default_rank_names, app.default_rank_names);
-    assert_eq!(app_default_rank_promotion_name(&app), "Fähnrich");
 
     app.process_options_dialog_actions(vec![
         clonk_frontend::startup_options_dlg::OptionsDlgAction::OpenLanguageCombo,
@@ -4352,26 +3671,16 @@ fn options_language_loads_real_de_and_selection_reloads_and_persists() {
     .test_value();
 
     let program = app.startup_options_dialog.test_ref().program();
-    assert_eq!(program.language, "US");
-    assert_eq!(program.language_text, "US - English");
-    assert_eq!(program.language_ex, "US,DE");
-    assert_eq!(app.needed_material_need, "%s|needs");
-    assert_eq!(app.object_no_dig, "%s cannot dig.");
-    assert_eq!(
-        app.default_rank_names
-            .as_deref()
-            .and_then(|names| names.get(1))
-            .map(String::as_str),
-        Some("Fähnrich")
+    runtime_assert_eq!(
+        program.language => "US";
+        program.language_text => "US - English";
+        program.language_ex => "US,DE";
+        app.needed_material_need => "%s|needs";
+        app.object_no_dig => "%s cannot dig.";
+        app.default_rank_names.as_deref().and_then(|names| names.get(1)).map(String::as_str) => Some("Fähnrich");
+        app.loaded_default_rank_names .as_deref() .and_then(|names| names.get(1)) .map(String::as_str) => Some("Ensign");
+        app_default_rank_promotion_name(&app) => "Fähnrich";
     );
-    assert_eq!(
-        app.loaded_default_rank_names
-            .as_deref()
-            .and_then(|names| names.get(1))
-            .map(String::as_str),
-        Some("Ensign")
-    );
-    assert_eq!(app_default_rank_promotion_name(&app), "Fähnrich");
 
     app.return_to_menu();
     assert_eq!(app.default_rank_names, app.loaded_default_rank_names);
@@ -4421,30 +3730,13 @@ fn options_non_tab_gui_bindings_require_the_exact_bare_modifier_mask() {
                 .unwrap_or_else(|error| panic!("modified {key:?} up: {error}"));
         }
         assert_eq!(checkbox.startup_view, StartupView::Options);
-        assert_eq!(
-            checkbox
-                .startup_options_dialog
-                .as_ref()
-                .expect("Options model")
-                .active_sheet(),
-            OptionsSheet::Sound,
-            "modified Up/Down must not switch sheets"
-        );
+        runtime_assert_eq!(checkbox.startup_options_dialog.as_ref().expect("Options model").active_sheet() => OptionsSheet::Sound, "modified Up/Down must not switch sheets");
     }
 
     checkbox.test_modifiers(ModifiersState::empty());
-    checkbox.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    checkbox.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    checkbox.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    checkbox.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    assert_eq!(
-        checkbox
-            .startup_options_dialog
-            .as_ref()
-            .expect("Options model")
-            .focused_sound_checkbox(),
-        Some(SoundCheckboxId::FrontendSoundEffects)
-    );
+    tap_runtime_key(&mut checkbox, VirtualKeyCode::Tab);
+    tap_runtime_key(&mut checkbox, VirtualKeyCode::Tab);
+    runtime_assert_eq!(checkbox.startup_options_dialog.as_ref().expect("Options model").focused_sound_checkbox() => Some(SoundCheckboxId::FrontendSoundEffects));
     let before_checkbox = checkbox.startup_options_dialog.test_ref().sound().clone();
     for modifiers in modifier_masks {
         checkbox.test_modifiers(modifiers);
@@ -4462,27 +3754,12 @@ fn options_non_tab_gui_bindings_require_the_exact_bare_modifier_mask() {
                 .unwrap_or_else(|error| panic!("modified {key:?} up: {error}"));
         }
         assert_eq!(checkbox.startup_view, StartupView::Options);
-        assert_eq!(
-            checkbox
-                .startup_options_dialog
-                .as_ref()
-                .expect("Options model")
-                .sound(),
-            &before_checkbox,
-            "modified Space must not toggle the focused checkbox"
-        );
+        runtime_assert_eq!(checkbox.startup_options_dialog.as_ref().expect("Options model").sound() => &before_checkbox, "modified Space must not toggle the focused checkbox");
     }
 
     checkbox.test_modifiers(ModifiersState::SUPER);
     checkbox.test_key(VirtualKeyCode::Space, ElementState::Pressed);
-    assert_ne!(
-        checkbox
-            .startup_options_dialog
-            .as_ref()
-            .expect("Options model")
-            .sound(),
-        &before_checkbox
-    );
+    runtime_assert_ne!(checkbox.startup_options_dialog.as_ref().expect("Options model").sound() => &before_checkbox);
 
     let mut back = new_running_sandbox_app();
     back.return_to_menu();
@@ -4491,8 +3768,7 @@ fn options_non_tab_gui_bindings_require_the_exact_bare_modifier_mask() {
         ClassicStartupSubscreen::Options(OptionsSheet::Sound),
     );
     back.test_modifiers(ModifiersState::SHIFT);
-    back.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    back.test_key(VirtualKeyCode::Tab, ElementState::Released);
+    tap_runtime_key(&mut back, VirtualKeyCode::Tab);
     for modifiers in modifier_masks {
         back.test_modifiers(modifiers);
         for key in [
@@ -4505,11 +3781,7 @@ fn options_non_tab_gui_bindings_require_the_exact_bare_modifier_mask() {
             back.handle_key(key, ElementState::Released)
                 .unwrap_or_else(|error| panic!("modified Back {key:?} up: {error}"));
         }
-        assert_eq!(
-            back.startup_view,
-            StartupView::Options,
-            "modified Enter/Space must not activate Back"
-        );
+        runtime_assert_eq!(back.startup_view => StartupView::Options, "modified Enter/Space must not activate Back");
     }
 }
 
@@ -4570,28 +3842,14 @@ fn scenario_preset_replaces_seed_while_fixed_selection_wins_publication() {
     .test_value()
     .prepare()
     .expect_err("host preparation rejects a changed staged definition vector");
-    assert!(matches!(
-        mismatch,
-        prepared_host_bootstrap::PrepareHostBootstrapError::StagedDefinitionResourcesChanged {
-            staged,
-            prepared,
-        } if staged.is_empty()
-            && prepared
-                == vec![
-                    custom_root.join("Preset.c4d"),
-                    content_root.join("Preset.c4d"),
-                    outer.clone(),
-                ]
-    ));
+    runtime_assert!(
+
+            matches!(mismatch, prepared_host_bootstrap::PrepareHostBootstrapError::StagedDefinitionResourcesChanged { staged, prepared, } if staged.is_empty() && prepared == vec![custom_root.join("Preset.c4d"), content_root.join("Preset.c4d"), outer.clone(),]);
+    );
     let seed_prepared = prepare_staged_network_host(&app, &seed);
-    assert_eq!(
-        published_definition_wire_names(&seed_prepared),
-        vec![
-            b"Custom/./Preset.c4d".to_vec(),
-            b"./Preset.c4d".to_vec(),
-            b"Outer.c4f".to_vec(),
-        ],
-        "a nonempty scenario preset replaces the seed before rooted/local expansion"
+    runtime_assert_eq!(
+        published_definition_wire_names(&seed_prepared) => vec![b"Custom/./Preset.c4d".to_vec(), b"./Preset.c4d".to_vec(), b"Outer.c4f".to_vec(),],
+        "a nonempty scenario preset replaces the seed before rooted/local expansion",
     );
     fs::write(scenario_path.join("Scenario.txt"), "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Preset.c4d\n").test_value();
     let changed_spelling = build_network_host_preparation(
@@ -4606,13 +3864,9 @@ fn scenario_preset_replaces_seed_while_fixed_selection_wins_publication() {
     .test_value()
     .prepare()
     .expect_err("host preparation rejects changed staged publication spellings");
-    assert!(matches!(
-        changed_spelling,
-        prepared_host_bootstrap::PrepareHostBootstrapError::StagedDefinitionPublicationChanged {
-            staged,
-            prepared,
-        } if staged != prepared
-    ));
+    runtime_assert!(
+        matches!(changed_spelling, prepared_host_bootstrap::PrepareHostBootstrapError::StagedDefinitionPublicationChanged { staged, prepared, } if staged != prepared);
+    );
     fs::write(scenario_path.join("Scenario.txt"), "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Seed.c4d\n").test_value();
     let changed_selection = build_network_host_preparation(
         &app,
@@ -4626,14 +3880,10 @@ fn scenario_preset_replaces_seed_while_fixed_selection_wins_publication() {
     .test_value()
     .prepare()
     .expect_err("host preparation rejects changed staged selection semantics");
-    assert!(matches!(
-        changed_selection,
-        prepared_host_bootstrap::PrepareHostBootstrapError::StagedDefinitionSelectionChanged {
-            staged,
-            prepared,
-        } if staged == vec!["Preset.c4d".to_owned()]
-            && prepared == vec!["Seed.c4d".to_owned()]
-    ));
+    runtime_assert!(
+
+            matches!(changed_selection, prepared_host_bootstrap::PrepareHostBootstrapError::StagedDefinitionSelectionChanged { staged, prepared, } if staged == vec!["Preset.c4d".to_owned()] && prepared == vec!["Seed.c4d".to_owned()]);
+    );
 
     let fixed = app
         .prepare_network_host_scenario(
@@ -4645,47 +3895,19 @@ fn scenario_preset_replaces_seed_while_fixed_selection_wins_publication() {
         )
         .test_value();
     let fixed_prepared = prepare_staged_network_host(&app, &fixed);
-    assert_eq!(
-        published_definition_wire_names(&fixed_prepared),
-        vec![
-            b"Custom/FixedB.c4d".to_vec(),
-            b"Custom/./FixedA.c4d".to_vec(),
-            b"FixedB.c4d".to_vec(),
-            b"./FixedA.c4d".to_vec(),
-            b"Outer.c4f".to_vec(),
-        ],
-        "fixed selection stays authoritative and folder locals append exactly once"
+    runtime_assert_eq!(
+        published_definition_wire_names(&fixed_prepared) =>
+            vec![b"Custom/FixedB.c4d".to_vec(), b"Custom/./FixedA.c4d".to_vec(), b"FixedB.c4d".to_vec(), b"./FixedA.c4d".to_vec(), b"Outer.c4f".to_vec(),],
+        "fixed selection stays authoritative and folder locals append exactly once",
     );
-    assert_eq!(
-        fixed_prepared.definition_modules(),
-        [
-            "Custom/FixedB.c4d",
-            "Custom/./FixedA.c4d",
-            "FixedB.c4d",
-            "./FixedA.c4d",
-            "Outer.c4f",
-        ],
-        "the pre-SetModules vector remains available after publication"
+    runtime_assert_eq!(
+        fixed_prepared.definition_modules() => ["Custom/FixedB.c4d", "Custom/./FixedA.c4d", "FixedB.c4d", "./FixedA.c4d", "Outer.c4f",],
+        "the pre-SetModules vector remains available after publication",
     );
-    assert_eq!(
-        activated_definition_load(
-            Some(fixed_prepared.definition_modules().to_vec()),
-            ScenarioDefinitionLoad::Fixed {
-                modules: vec!["final/retyped/paths.c4d".to_owned()],
-                definition_root: None,
-            },
-        ),
-        ScenarioDefinitionLoad::Fixed {
-            modules: vec![
-                "Custom/FixedB.c4d".to_owned(),
-                "Custom/./FixedA.c4d".to_owned(),
-                "FixedB.c4d".to_owned(),
-                "./FixedA.c4d".to_owned(),
-                "Outer.c4f".to_owned(),
-            ],
-            definition_root: None,
-        },
-        "activation retains Game.DefinitionFilenames instead of retyped resource paths"
+    runtime_assert_eq!(
+        activated_definition_load(Some(fixed_prepared.definition_modules().to_vec()), ScenarioDefinitionLoad::Fixed { modules: vec!["final/retyped/paths.c4d".to_owned()], definition_root: None, },) =>
+            ScenarioDefinitionLoad::Fixed { modules: vec!["Custom/FixedB.c4d".to_owned(), "Custom/./FixedA.c4d".to_owned(), "FixedB.c4d".to_owned(), "./FixedA.c4d".to_owned(), "Outer.c4f".to_owned(),], definition_root: None, },
+        "activation retains Game.DefinitionFilenames instead of retyped resource paths",
     );
     let dynamic = fixed_prepared
         .host_config()
@@ -4700,7 +3922,7 @@ fn scenario_preset_replaces_seed_while_fixed_selection_wins_publication() {
         .read_file("Scenario.txt")
         .test_value();
     let expected = b"Definitions=\"FixedB.c4d\",\"./FixedA.c4d\",\"FixedB.c4d\",\"./FixedA.c4d\",\"Outer.c4f\"";
-    assert!(scenario
+    runtime_assert!(scenario
         .windows(expected.len())
         .any(|window| window == expected));
 
@@ -4714,20 +3936,13 @@ fn scenario_preset_replaces_seed_while_fixed_selection_wins_publication() {
         )
         .test_value();
     let fixed_empty_prepared = prepare_staged_network_host(&app, &fixed_empty);
-    assert_eq!(
-        published_definition_wire_names(&fixed_empty_prepared),
-        vec![b"Outer.c4f".to_vec()],
-        "fixed-empty suppresses the nonempty preset while folder locals still append"
-    );
+    runtime_assert_eq!(published_definition_wire_names(&fixed_empty_prepared) => vec![b"Outer.c4f".to_vec()], "fixed-empty suppresses the nonempty preset while folder locals still append");
 }
 
 #[test]
 fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
     let _lock = env_lock().lock();
-    let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
+    let install_root = test_repository_root();
     let user_data = tempdir();
     let player_root = user_data.path().join("Players");
     let ada = player_root.join("Ada.c4p");
@@ -4737,11 +3952,7 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
         "[Player]\nName=Ada\nTotalPlayingTime=36001\n\n[Preferences]\nColorDw=255\n",
     )
     .test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_root)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install_root), user_data.path());
     let mut config = Config::new();
     config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
     config.set_in(Some("General"), "Participants", ada.to_string_lossy());
@@ -4751,20 +3962,9 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
     let mut app = GameApp::new(
         1280,
         720,
-        AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        },
+        disabled_audio_options(),
         Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Player".to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with("Player".to_string(), false),
     )
     .test_value();
     wait_for_menu(&mut app);
@@ -4775,22 +3975,12 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
     .test_value();
 
     let confirm = &app.message_dialogs[0].state;
-    assert_eq!(confirm.caption(), "Delete");
-    assert_eq!(
-                confirm.message(),
-                "Do you really want to delete player Ada? - this player has a total playing time of 10:00:01!"
-            );
-    assert_eq!(
-        confirm.buttons(),
-        clonk_frontend::message_dialog::MessageDialogButtons::YES_NO
-    );
-    assert_eq!(
-        confirm.icon(),
-        clonk_frontend::message_dialog::MessageDialogIcon::CONFIRM
-    );
-    assert_eq!(
-        confirm.focused_button(),
-        Some(clonk_frontend::message_dialog::MessageDialogButton::Yes)
+    runtime_assert_eq!(
+        confirm.caption() => "Delete";
+        confirm.message() => "Do you really want to delete player Ada? - this player has a total playing time of 10:00:01!";
+        confirm.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_NO;
+        confirm.icon() => clonk_frontend::message_dialog::MessageDialogIcon::CONFIRM;
+        confirm.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Yes);
     );
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
@@ -4808,18 +3998,9 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
     assert!(app.message_dialogs.is_empty());
     assert!(app.startup_player_files.is_empty());
     assert!(app.startup_player_models.is_empty());
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .expect("player controller")
-            .selected_index(),
-        None
-    );
-    assert_eq!(
-        Config::load(paths.config_file())
-            .expect("reload player config")
-            .get_in(Some("General"), "Participants"),
-        Some("")
+    runtime_assert_eq!(
+        app.startup_player_dialog.as_ref().expect("player controller").selected_index() => None;
+        Config::load(paths.config_file()).expect("reload player config").get_in(Some("General"), "Participants") => Some("");
     );
 
     let broken = player_root.join("Broken.c4p");
@@ -4839,15 +4020,11 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
         .test_value();
     assert_eq!(app.message_dialogs.len(), 1);
     let failure = &app.message_dialogs[0].state;
-    assert_eq!(failure.caption(), "Clear");
-    assert_eq!(failure.message(), "Delete failure.");
-    assert_eq!(
-        failure.buttons(),
-        clonk_frontend::message_dialog::MessageDialogButtons::OK
-    );
-    assert_eq!(
-        failure.icon(),
-        clonk_frontend::message_dialog::MessageDialogIcon::ERROR
+    runtime_assert_eq!(
+        failure.caption() => "Clear";
+        failure.message() => "Delete failure.";
+        failure.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK;
+        failure.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR;
     );
     assert!(app.startup_player_files.is_empty());
     reset_cached_app_paths();
@@ -4858,52 +4035,30 @@ fn unconfigured_stick_and_hat_emit_no_gameplay_controls() {
     let mut app = new_running_sandbox_app();
     app.gamepad_bindings = GamepadBindings::from_config(&Config::new());
     app.local_controls = LocalControlRegistry::default();
-    app.local_controls.initialize(LocalControlInit {
-        owner: app.local_owner,
-        preferred_set: 4,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
+    app.local_controls
+        .initialize(test_local_control_init(app.local_owner, 4, false, false));
     let slot = GamepadSlot::new(0);
 
-    app.test_gamepad_events([GamepadEvent::Direction {
+    app.test_gamepad_events([gamepad_direction_event(
         slot,
-        button: ControlButton::Left,
-        state: ElementState::Pressed,
-    }]);
-    assert_eq!(
-        app.engine
-            .player(app.local_owner)
-            .expect("control-set four player")
-            .control
-            .pressed_coms,
-        0,
-        "semantic direction alone must not restore the hardwired gameplay path"
-    );
+        ControlButton::Left,
+        ElementState::Pressed,
+    )]);
+    runtime_assert_eq!(app.engine.player(app.local_owner).expect("control-set four player").control.pressed_coms => 0, "semantic direction alone must not restore the hardwired gameplay path");
 
     app.test_gamepad_events([
-        GamepadEvent::Axis {
+        gamepad_axis_event(
             slot,
-            axis: LegacyGamepadAxis::new(0, false),
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Direction {
+            LegacyGamepadAxis::new(0, false),
+            ElementState::Pressed,
+        ),
+        gamepad_direction_event(slot, ControlButton::Left, ElementState::Pressed),
+        gamepad_axis_event(
             slot,
-            button: ControlButton::Left,
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Axis {
-            slot,
-            axis: LegacyGamepadAxis::new(6, false),
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Direction {
-            slot,
-            button: ControlButton::Left,
-            state: ElementState::Pressed,
-        },
+            LegacyGamepadAxis::new(6, false),
+            ElementState::Pressed,
+        ),
+        gamepad_direction_event(slot, ControlButton::Left, ElementState::Pressed),
     ]);
 
     let pressed = app.engine.test_player(app.local_owner).control.pressed_coms;
@@ -4930,37 +4085,23 @@ fn axis_up_fires_dig_and_hat_zero_fires_configured_left() {
     let mut app = new_running_sandbox_app();
     app.gamepad_bindings = GamepadBindings::from_config(&config);
     app.local_controls = LocalControlRegistry::default();
-    app.local_controls.initialize(LocalControlInit {
-        owner: app.local_owner,
-        preferred_set: 4,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
+    app.local_controls
+        .initialize(test_local_control_init(app.local_owner, 4, false, false));
     let slot = GamepadSlot::new(0);
 
     app.test_gamepad_events([
-        GamepadEvent::Axis {
+        gamepad_axis_event(
             slot,
-            axis: LegacyGamepadAxis::new(1, false),
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Direction {
+            LegacyGamepadAxis::new(1, false),
+            ElementState::Pressed,
+        ),
+        gamepad_direction_event(slot, ControlButton::Up, ElementState::Pressed),
+        gamepad_axis_event(
             slot,
-            button: ControlButton::Up,
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Axis {
-            slot,
-            axis: LegacyGamepadAxis::new(6, false),
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Direction {
-            slot,
-            button: ControlButton::Left,
-            state: ElementState::Pressed,
-        },
+            LegacyGamepadAxis::new(6, false),
+            ElementState::Pressed,
+        ),
+        gamepad_direction_event(slot, ControlButton::Left, ElementState::Pressed),
     ]);
 
     let pressed = app.engine.test_player(app.local_owner).control.pressed_coms;
@@ -4973,11 +4114,7 @@ fn runtime_status_report_failure_remains_stopped_and_unreached() {
     let mut app = new_state_only_running_sandbox_app();
     let (events, commands) = install_running_network_stub(&mut app, 7, 0, 1);
     drop(commands);
-    let pause = clonk_network::NetworkStatus {
-        state: clonk_network::NETWORK_STATE_PAUSE,
-        control_mode: 1,
-        target_tick: 0,
-    };
+    let pause = clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_PAUSE, 1, 0);
     events
         .send(NetworkEvent::StatusRequested(pause))
         .test_value();
@@ -4985,14 +4122,7 @@ fn runtime_status_report_failure_remains_stopped_and_unreached() {
     app.test_network_events();
 
     assert!(!app.network_control_running);
-    assert_eq!(
-        app.runtime_network_status_barrier,
-        Some(RuntimeNetworkStatusBarrier {
-            status: pause,
-            local_reached: false,
-            actual_control_tick: None,
-        })
-    );
+    runtime_assert_eq!(app.runtime_network_status_barrier => Some(RuntimeNetworkStatusBarrier { status: pause, local_reached: false, actual_control_tick: None, }));
 }
 
 #[test]
@@ -5000,85 +4130,60 @@ fn chart_toggle_key_is_default_unbound_configurable_and_escape_owned() {
     assert!(RuntimeKeyConfig::default().chart_toggle.is_empty());
     let parsed =
         parse_runtime_key_config(b"[Keys]\nChartToggle=F8\n[Keys]\nChartToggle=F7\n").test_value();
-    assert_eq!(
-        parsed.chart_toggle,
-        vec![RuntimeKeyChord::keyboard(
-            VirtualKeyCode::F8,
-            ModifiersState::empty(),
-        )],
-        "StdCompilerINIRead keeps the first action value"
-    );
+    runtime_assert_eq!(parsed.chart_toggle => vec![RuntimeKeyChord::keyboard(VirtualKeyCode::F8, ModifiersState::empty(),)], "StdCompilerINIRead keeps the first action value");
 
     let mut app = new_running_sandbox_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache.set(Ok(parsed)).test_value();
+    install_runtime_key_config(&mut app, Ok(parsed));
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     assert!(app.network_chart_dialog.is_some());
     app.test_key(VirtualKeyCode::F8, ElementState::Released);
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(app.network_chart_dialog.is_none());
-    assert!(
+    runtime_assert!(
         app.message_dialogs.is_empty(),
         "chart Escape must not also open the abort dialog"
     );
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 
-    app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::F8, ElementState::Released);
+    tap_runtime_key(&mut app, VirtualKeyCode::F8);
 
-    assert!(
+    runtime_assert!(
         !app.handle_network_chart_key(VirtualKeyCode::ArrowUp, ElementState::Pressed),
         "the non-exclusive chart must not invent GUI-scope arrow navigation"
     );
-    assert_eq!(
-        app.network_chart_dialog
-            .as_ref()
-            .expect("chart remains open")
-            .active_tab_index(),
-        0
-    );
+    runtime_assert_eq!(app.network_chart_dialog.as_ref().expect("chart remains open").active_tab_index() => 0);
 
     app.start_running_chat(RunningChatMode::All);
     assert!(app.running_chat_active());
-    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+    tap_runtime_key(&mut app, VirtualKeyCode::Escape);
     assert!(app.running_chat_controller().is_none());
-    assert!(
+    runtime_assert!(
         app.network_chart_dialog.is_some(),
         "closing foreground chat must retain the background chart"
     );
-    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+    tap_runtime_key(&mut app, VirtualKeyCode::Escape);
     assert!(app.network_chart_dialog.is_none());
     assert!(app.message_dialogs.is_empty());
 
-    app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::F8, ElementState::Released);
+    tap_runtime_key(&mut app, VirtualKeyCode::F8);
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     assert!(app.network_chart_dialog.is_none());
 
     let mut priority = new_running_sandbox_app();
-    priority.runtime_key_config_cache = OnceLock::new();
-    priority
-        .runtime_key_config_cache
-        .set(Ok(
-            parse_runtime_key_config(b"[Keys]\nChartToggle=F2\n").test_value()
-        ))
-        .test_value();
+    install_runtime_key_config(
+        &mut priority,
+        Ok(parse_runtime_key_config(b"[Keys]\nChartToggle=F2\n").test_value()),
+    );
     priority.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     assert!(priority.running_chat_active());
     assert!(priority.network_chart_dialog.is_none());
 
     let mut remapped_priority = new_running_sandbox_app();
-    remapped_priority.runtime_key_config_cache = OnceLock::new();
-    remapped_priority
-        .runtime_key_config_cache
-        .set(Ok(parse_runtime_key_config(
-            b"[Keys]\nChatOpen=F8\nChartToggle=F8\n",
-        )
-        .test_value()))
-        .test_value();
+    install_runtime_key_config(
+        &mut remapped_priority,
+        Ok(parse_runtime_key_config(b"[Keys]\nChatOpen=F8\nChartToggle=F8\n").test_value()),
+    );
     remapped_priority.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     assert!(remapped_priority.running_chat_active());
     assert!(remapped_priority.network_chart_dialog.is_none());
@@ -5115,86 +4220,40 @@ fn runtime_key_config_compiles_lists_modifiers_raw_joy_and_disable_codes() {
     let parsed = parse_runtime_key_config(
                 b"[Keys]\nNetObsNextPlayer=F5\nChatOpen=Ctrl+Shift+F2,Return\nScoreboardToggle=None\nGameAbort=Joy2A\nKbd1Key1=\\x0042010a\nUnknownAction=F9\n[Keys]\nNetObsNextPlayer=F6\n",
             ).test_value();
-    assert_eq!(
-        parsed.net_observer_next_player,
-        vec![RuntimeKeyChord::keyboard(
-            VirtualKeyCode::F5,
-            ModifiersState::empty(),
-        )]
+    runtime_assert_eq!(
+        parsed.net_observer_next_player => vec![RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty(),)];
+        parsed.override_for("ChatOpen") =>
+            Some([RuntimeKeyChord::keyboard(VirtualKeyCode::F2, ModifiersState::CONTROL | ModifiersState::SHIFT,), RuntimeKeyChord::keyboard(VirtualKeyCode::Enter, ModifiersState::empty(),),].as_slice());
+        parsed.override_for("ScoreboardToggle").unwrap()[0].physical => RuntimePhysicalKey::Disabled;
     );
-    assert_eq!(
-        parsed.override_for("ChatOpen"),
-        Some(
-            [
-                RuntimeKeyChord::keyboard(
-                    VirtualKeyCode::F2,
-                    ModifiersState::CONTROL | ModifiersState::SHIFT,
-                ),
-                RuntimeKeyChord::keyboard(VirtualKeyCode::Enter, ModifiersState::empty(),),
-            ]
-            .as_slice()
-        )
-    );
-    assert_eq!(
-        parsed.override_for("ScoreboardToggle").unwrap()[0].physical,
-        RuntimePhysicalKey::Disabled
-    );
-    assert_eq!(
-        parsed.override_for("GameAbort").unwrap()[0].physical,
-        RuntimePhysicalKey::Gamepad { slot: 1, button: 1 },
-        "the first sscanf Joy branch owns every canonical JoyN suffix"
-    );
-    assert_eq!(
-        parsed.override_for("Kbd1Key1").unwrap()[0].physical,
-        RuntimePhysicalKey::Gamepad {
-            slot: 1,
-            button: 10
-        }
-    );
+    runtime_assert_eq!(parsed.override_for("GameAbort").unwrap()[0].physical => RuntimePhysicalKey::Gamepad { slot: 1, button: 1 }, "the first sscanf Joy branch owns every canonical JoyN suffix");
+    runtime_assert_eq!(parsed.override_for("Kbd1Key1").unwrap()[0].physical => RuntimePhysicalKey::Gamepad { slot: 1, button: 10 });
     assert!(parsed.override_for("UnknownAction").is_none());
 
     let unknown = parse_runtime_key_config(b"[Keys]\nNetObsNextPlayer=F01\n").test_value();
-    assert_eq!(
-        unknown.net_observer_next_player[0].physical,
-        RuntimePhysicalKey::Disabled
-    );
+    runtime_assert_eq!(unknown.net_observer_next_player[0].physical => RuntimePhysicalKey::Disabled);
 
     let partial = parse_runtime_key_config(
         b"[Keys] ; comment\nChatOpen=CapsLock,F2 ; trailing,Bogus+Q\nGameAbort=Keypad Enter\n",
     )
     .test_value();
-    assert_eq!(
-        partial.override_for("ChatOpen"),
-        Some(
-            [
-                RuntimeKeyChord::keyboard(VirtualKeyCode::CapsLock, ModifiersState::empty(),),
-                RuntimeKeyChord::keyboard(VirtualKeyCode::F2, ModifiersState::empty(),),
-            ]
-            .as_slice()
-        )
+    runtime_assert_eq!(
+        partial.override_for("ChatOpen") =>
+            Some([RuntimeKeyChord::keyboard(VirtualKeyCode::CapsLock, ModifiersState::empty(),), RuntimeKeyChord::keyboard(VirtualKeyCode::F2, ModifiersState::empty(),),].as_slice());
     );
-    assert!(
+    runtime_assert!(
         partial.override_for("GameAbort").is_none(),
         "the corrupt lexicographically earlier registration aborts later compilation"
     );
     let keypad = parse_runtime_key_config(b"[Keys]\nGameAbort=Keypad Enter\n").test_value();
-    assert_eq!(
-        keypad.override_for("GameAbort").unwrap()[0].physical,
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::NumpadEnter)
-    );
+    runtime_assert_eq!(keypad.override_for("GameAbort").unwrap()[0].physical => RuntimePhysicalKey::Keyboard(VirtualKeyCode::NumpadEnter));
     let lowercase_keypad = parse_runtime_key_config(b"[Keys]\nGameAbort=keypad 1\n").test_value();
-    assert_eq!(
-        lowercase_keypad.override_for("GameAbort").unwrap()[0].physical,
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::Numpad1)
-    );
+    runtime_assert_eq!(lowercase_keypad.override_for("GameAbort").unwrap()[0].physical => RuntimePhysicalKey::Keyboard(VirtualKeyCode::Numpad1));
 
     let caps_raw = input::encode_virtual_key_code(VirtualKeyCode::CapsLock).test_value();
     let raw_caps = format!("[Keys]\nToggleChat=\\x{caps_raw:x}\n");
     let raw_caps = parse_runtime_key_config(raw_caps.as_bytes()).test_value();
-    assert_eq!(
-        raw_caps.override_for("ToggleChat").unwrap()[0].physical,
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::CapsLock)
-    );
+    runtime_assert_eq!(raw_caps.override_for("ToggleChat").unwrap()[0].physical => RuntimePhysicalKey::Keyboard(VirtualKeyCode::CapsLock));
 
     let noncanonical = parse_runtime_key_config(b"[Keys]\nKbd01Key01=F2\n").test_value();
     assert!(noncanonical.override_for("Kbd01Key01").is_none());
@@ -5230,15 +4289,12 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     assert_eq!(production_left.target_x, initial.target_x - 5);
     assert_eq!(production_left.target_y, initial.target_y);
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Released);
-    assert_eq!(
-        app.graphics.active_viewport_projections()[0].target_x,
-        production_left.target_x
-    );
+    runtime_assert_eq!(app.graphics.active_viewport_projections()[0].target_x => production_left.target_x);
 
     app.free_view_scroll_momentum = FreeViewScrollMomentum::default();
     let start = app.graphics.active_viewport_projections()[0];
     let now = Instant::now();
-    assert!(app.handle_viewport_player_cycle_key_at(
+    runtime_assert!(app.handle_viewport_player_cycle_key_at(
         VirtualKeyCode::ArrowLeft,
         ElementState::Pressed,
         now,
@@ -5247,14 +4303,14 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     assert_eq!(first_left.target_x, start.target_x - 5);
     assert_eq!(first_left.target_y, start.target_y);
 
-    assert!(!app.handle_viewport_player_cycle_key_at(
+    runtime_assert!(!app.handle_viewport_player_cycle_key_at(
         VirtualKeyCode::ArrowLeft,
         ElementState::Released,
         now + Duration::from_millis(25),
     ));
     assert_eq!(app.graphics.active_viewport_projections()[0], first_left);
 
-    assert!(app.handle_viewport_player_cycle_key_at(
+    runtime_assert!(app.handle_viewport_player_cycle_key_at(
         VirtualKeyCode::ArrowLeft,
         ElementState::Pressed,
         now + Duration::from_millis(50),
@@ -5263,7 +4319,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     assert_eq!(second_left.target_x, start.target_x - 15);
     assert_eq!(second_left.target_y, start.target_y);
 
-    assert!(app.handle_viewport_player_cycle_key_at(
+    runtime_assert!(app.handle_viewport_player_cycle_key_at(
         VirtualKeyCode::ArrowUp,
         ElementState::Pressed,
         now + Duration::from_millis(75),
@@ -5272,7 +4328,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     assert_eq!(cross_axis.target_x, start.target_x - 25);
     assert_eq!(cross_axis.target_y, start.target_y - 5);
 
-    assert!(app.handle_viewport_player_cycle_key_at(
+    runtime_assert!(app.handle_viewport_player_cycle_key_at(
         VirtualKeyCode::ArrowRight,
         ElementState::Pressed,
         now + Duration::from_millis(175),
@@ -5281,7 +4337,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     assert_eq!(reset_right.target_x, start.target_x - 20);
     assert_eq!(reset_right.target_y, start.target_y - 5);
 
-    assert!(app.handle_viewport_player_cycle_key_at(
+    runtime_assert!(app.handle_viewport_player_cycle_key_at(
         VirtualKeyCode::ArrowDown,
         ElementState::Pressed,
         now + Duration::from_millis(275),
@@ -5326,33 +4382,12 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     ] {
         owned.bindings.rebind(binding, key);
         owned.test_key(key, ElementState::Pressed);
-        assert_ne!(
-            owned
-                .engine
-                .player(owned.local_owner)
-                .expect("local player")
-                .control
-                .pressed_coms
-                & (1 << command),
-            0,
-        );
+        runtime_assert_ne!(owned.engine.player(owned.local_owner).expect("local player").control.pressed_coms & (1 << command) => 0);
         owned.test_key(key, ElementState::Released);
-        assert_eq!(
-            owned
-                .engine
-                .player(owned.local_owner)
-                .expect("local player")
-                .control
-                .pressed_coms
-                & (1 << command),
-            0,
-        );
+        runtime_assert_eq!(owned.engine.player(owned.local_owner).expect("local player").control.pressed_coms & (1 << command) => 0);
     }
     let owned_after = owned.graphics.active_viewport_projections()[0];
-    assert_eq!(
-        (owned_after.target_x, owned_after.target_y),
-        (owned_camera.target_x, owned_camera.target_y)
-    );
+    runtime_assert_eq!((owned_after.target_x, owned_after.target_y) => (owned_camera.target_x, owned_camera.target_y));
     assert!(owned.free_view_scroll_momentum.most_recent.is_none());
 }
 
@@ -5368,14 +4403,15 @@ fn offline_negative_set_max_player_preserves_cap_and_rejects_queued_script_playe
     app.engine.set_max_players(1);
     app.control_player_infos.replace_snapshot(
         1,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        [clonk_engine::PlayerInfoControlData::new(
+            0,
+            0,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 1,
                 ..Default::default()
             }],
-            ..Default::default()
-        }],
+            -1,
+        )],
     );
     app.engine
         .install_scenario_script_with_convention(
@@ -5398,25 +4434,21 @@ fn offline_negative_set_max_player_preserves_cap_and_rejects_queued_script_playe
         .test_value();
 
     let globals = app.engine.snapshot().script_globals.named;
-    assert_eq!(
-        globals.get("set_result"),
-        Some(&Value::Int(0)),
-        "FnSetMaxPlayer has the C4ValueInt false result"
-    );
+    runtime_assert_eq!(globals.get("set_result") => Some(&Value::Int(0)), "FnSetMaxPlayer has the C4ValueInt false result");
     assert_eq!(app.engine.max_players(), Some(1));
 
     app.handle_script_player_info_updates().test_value();
 
     assert_eq!(app.network_max_players, 1);
-    assert!(
+    runtime_assert!(
         app.control_player_infos
             .client_info_ids(0)
             .into_iter()
             .filter_map(|id| app.control_player_infos.get(id))
             .all(|info| info.name.as_bytes() != b"Rejected Bot"),
-        "the unchanged full cap rejects the PlayerInfo"
+        "the unchanged full cap rejects the PlayerInfo",
     );
-    assert!(
+    runtime_assert!(
         app.engine
             .snapshot()
             .players
@@ -5434,14 +4466,9 @@ fn retargeted_primary_survives_its_original_local_player() {
     app.engine
         .register_player(PlayerConfig::new(target, "Film target"))
         .test_value();
-    let target_control = app.local_controls.initialize(LocalControlInit {
-        owner: target,
-        preferred_set: 1,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
+    let target_control = app
+        .local_controls
+        .initialize(test_local_control_init(target, 1, false, false));
     app.engine
         .set_player_runtime_control(target, target_control.runtime_control())
         .test_value();
@@ -5465,24 +4492,17 @@ fn retargeted_primary_survives_its_original_local_player() {
         .call_scenario_script_function("Probe", Vec::new())
         .test_value();
     let _ = app.apply_pending_viewport_presentation_requests();
-    assert_eq!(
-        app.physical_viewports
-            .iter()
-            .map(|viewport| viewport.displayed_player)
-            .collect::<Vec<_>>(),
-        vec![target, target]
-    );
-    assert_eq!(app.physical_viewports[0].preserved_zoom, 1.75);
-    assert_eq!(
-        app.physical_viewports[0].preserved_offset,
-        Vector2::new(17, 19)
+    runtime_assert_eq!(
+        app.physical_viewports.iter().map(|viewport| viewport.displayed_player).collect::<Vec<_>>() => vec![target, target];
+        app.physical_viewports[0].preserved_zoom => 1.75;
+        app.physical_viewports[0].preserved_offset => Vector2::new(17, 19);
     );
 
     app.ui_sound_log.clear();
     app.remove_runtime_player_with_viewport_feedback(original)
         .test_value();
     assert_eq!(app.physical_viewports.len(), 2);
-    assert!(app
+    runtime_assert!(app
         .physical_viewports
         .iter()
         .all(|viewport| viewport.displayed_player == target));
@@ -5499,14 +4519,7 @@ fn retargeted_primary_survives_its_original_local_player() {
 
     app.remove_runtime_player_with_viewport_feedback(target)
         .test_value();
-    assert_eq!(
-        app.ui_sound_log
-            .iter()
-            .filter(|sound| sound.as_str() == "CloseViewport")
-            .count(),
-        1,
-        "closing both matching physical viewports requests one sound"
-    );
+    runtime_assert_eq!(app.ui_sound_log.iter().filter(|sound| sound.as_str() == "CloseViewport").count() => 1, "closing both matching physical viewports requests one sound");
     assert_eq!(app.physical_viewports.len(), 1);
     assert!(app.physical_viewports[0].is_no_owner_viewport);
 }
@@ -5552,11 +4565,7 @@ fn console_viewport_creation_announces_itself_and_keeps_list_order() {
     app.ui_sound_log.clear();
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
         .test_value();
-    assert_eq!(
-        app.ui_sound_log,
-        ["CloseViewport"],
-        "the console's ownerless viewport is not silent"
-    );
+    runtime_assert_eq!(app.ui_sound_log => ["CloseViewport"], "the console's ownerless viewport is not silent");
 
     let before = app
         .physical_viewports
@@ -5572,14 +4581,7 @@ fn console_viewport_creation_announces_itself_and_keeps_list_order() {
     }
     let mut expected = before;
     expected.extend([late_layout, early_layout]);
-    assert_eq!(
-        app.physical_viewports
-            .iter()
-            .map(|viewport| viewport.displayed_player)
-            .collect::<Vec<_>>(),
-        expected,
-        "console mode never runs SortViewportsByPlayerControl"
-    );
+    runtime_assert_eq!(app.physical_viewports.iter().map(|viewport| viewport.displayed_player).collect::<Vec<_>>() => expected, "console mode never runs SortViewportsByPlayerControl");
 }
 
 // C4Viewport.cpp:1126-1155 — a windowed viewport draws the one viewport
@@ -5633,15 +4635,13 @@ fn console_viewport_render_applies_the_live_pxs_graphics_flag() {
     // (src/C4GraphicsSystem.cpp:167-169; src/C4PXS.cpp:259-260,279-281).
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let identity = open_test_console_viewport(&mut app, None);
     app.display_flags.pxs_gfx = false;
     assert!(app.graphics.pxs_graphics_enabled());
 
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
-    assert!(
+    runtime_assert!(
         !app.graphics.pxs_graphics_enabled(),
         "the detached viewport must honor the same live flag as the main PXS draw"
     );
@@ -5662,7 +4662,7 @@ fn console_shell_render_applies_the_live_pxs_graphics_flag() {
 
     assert!(app.test_render(&mut frame));
 
-    assert!(
+    runtime_assert!(
         !app.graphics.pxs_graphics_enabled(),
         "the console shell must synchronize the flag before its early return"
     );
@@ -5684,11 +4684,7 @@ fn a_selected_object_draws_its_mark_into_the_viewport_frame() {
     // An owned viewport follows the player, so the crew object it follows
     // is inside the view — an ownerless one is centred on the map and the
     // mark would legitimately fall outside it.
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(Some(
-        app.local_owner,
-    ))])
-    .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let identity = open_local_test_console_viewport(&mut app);
 
     let unmarked = app.render_console_viewport(identity, 320, 200).test_value();
     let projection = app.console_viewport_projections[&identity];
@@ -5711,22 +4707,14 @@ fn a_selected_object_draws_its_mark_into_the_viewport_frame() {
     );
 
     let marked = app.render_console_viewport(identity, 320, 200).test_value();
-    assert_ne!(
-        marked.pixels(),
-        unmarked.pixels(),
-        "the select mark is drawn into the frame"
-    );
+    runtime_assert_ne!(marked.pixels() => unmarked.pixels(), "the select mark is drawn into the frame");
 
     // And it goes away again, so the difference is the mark and not some
     // unrelated per-frame drift.
     app.developer_selection
         .clear(clonk_engine::developer_selection::SelectionWriter::EditCursor);
     let cleared = app.render_console_viewport(identity, 320, 200).test_value();
-    assert_eq!(
-        cleared.pixels(),
-        unmarked.pixels(),
-        "clearing the selection restores the unmarked frame"
-    );
+    runtime_assert_eq!(cleared.pixels() => unmarked.pixels(), "clearing the selection restores the unmarked frame");
 }
 
 // C4Game.cpp:2413-2424,2738 + :2306-2320 — the monitor arms only in a
@@ -5763,17 +4751,14 @@ fn developer_file_monitor_arms_registers_then_dispatches_definition_reloads() {
     app.arm_developer_file_monitor(true);
     let monitor = app.file_monitor.test_ref();
     assert_eq!(monitor.watched(), std::slice::from_ref(&group));
-    assert!(
+    runtime_assert!(
         monitor.started(),
         "registration closes before the first poll"
     );
 
     // Arming twice does not replace a running monitor.
     app.arm_developer_file_monitor(true);
-    assert_eq!(
-        app.file_monitor.as_ref().expect("still armed").watched(),
-        std::slice::from_ref(&group)
-    );
+    runtime_assert_eq!(app.file_monitor.as_ref().expect("still armed").watched() => std::slice::from_ref(&group));
 
     // A quiet tree dispatches nothing.
     app.poll_developer_file_monitor();
@@ -5785,7 +4770,7 @@ fn developer_file_monitor_arms_registers_then_dispatches_definition_reloads() {
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
     let _ = std::fs::File::open(group.join("DefCore.txt")).map(|file| file.set_modified(later));
     app.poll_developer_file_monitor();
-    assert!(
+    runtime_assert!(
         app.engine.definition("ROCK").is_none(),
         "a watched change reached ReloadDef and its failure arm"
     );
@@ -5796,9 +4781,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
     app.developer_console_edit_mode = ConsoleEditMode::Edit;
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let identity = open_test_console_viewport(&mut app, None);
     // Drawing is what publishes this window's own projection.
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
     let projection = app.console_viewport_projections[&identity];
@@ -5810,12 +4793,9 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
         position.y - projection.target_y,
     );
 
-    assert_eq!(
-        app.console_viewport_press(identity, local, 1.0, false, false)
-            .expect("the click changed the selection")
-            .objects,
-        vec![id],
-        "a plain click selects the object under the cursor"
+    runtime_assert_eq!(
+        app.console_viewport_press(identity, local, 1.0, false, false).expect("the click changed the selection").objects => vec![id],
+        "a plain click selects the object under the cursor",
     );
     assert!(app.edit_cursor_hold, "a press always holds");
 
@@ -5834,14 +4814,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
     // zero-offset re-issue is `Execute`'s per-tick path, not this one.
     let settled = app.engine.snapshot().object(id).test_value().position;
     app.console_viewport_motion(identity, (local.0 + 7, local.1 - 3), 1.0, false, false);
-    assert_eq!(
-        app.engine
-            .snapshot()
-            .object(id)
-            .map(|object| object.position),
-        Some(settled),
-        "a zero-delta motion emits no move"
-    );
+    runtime_assert_eq!(app.engine.snapshot().object(id).map(|object| object.position) => Some(settled), "a zero-delta motion emits no move");
 
     // The mark frames the object's *live* shape, which
     // `ObjectSnapshot::current_shape` carries only when it is not
@@ -5850,7 +4823,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
     let shape = clonk_engine::EditCursorHitTest::new(&app.snapshot)
         .shape_rect(id)
         .test_value();
-    assert!(
+    runtime_assert!(
         shape.width > 0 && shape.height > 0,
         "a clickable object has a shape to frame"
     );
@@ -5860,11 +4833,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
     // side in world coordinates, so the mark is the shape minus ViewX/ViewY
     // — adding the object's position again would double-count it, which is
     // exactly the bug this pins.
-    assert_eq!(
-        (shape.x, shape.y),
-        (position.x, position.y),
-        "the live shape rect is in world coordinates, not object-relative"
-    );
+    runtime_assert_eq!((shape.x, shape.y) => (position.x, position.y), "the live shape rect is in world coordinates, not object-relative");
 
     // Drawn into a viewport whose origin is the object's own position, the
     // mark lands at the frame origin rather than one object-width away.
@@ -5878,7 +4847,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
     // The corner Ls point outward, so they reach one pixel beyond the
     // shape on each side — but no further. This is what catches a mark
     // computed an object-width away from where it belongs.
-    assert!(
+    runtime_assert!(
         marks
             .iter()
             .all(|(x, y)| (-1..=shape.width).contains(x) && (-1..=shape.height).contains(y)),
@@ -5887,14 +4856,14 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
 
     // Clicking the same object again changes nothing, which is what keeps
     // a selection draggable rather than collapsing it.
-    assert!(app
+    runtime_assert!(app
         .console_viewport_press(identity, local, 1.0, false, false)
         .is_none());
 
     // A plain click on empty space clears and arms the rubber band, and
     // the anchor is in world coordinates.
     let empty = (local.0 + 100_000, local.1 + 100_000);
-    assert!(app
+    runtime_assert!(app
         .console_viewport_press(identity, empty, 1.0, false, false)
         .expect("clearing the selection is a change")
         .objects
@@ -5912,10 +4881,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
     let ticked = app.edit_cursor_tick_frame;
     assert!(ticked.is_some(), "a held selection ticks");
     app.console_edit_cursor_tick();
-    assert_eq!(
-        app.edit_cursor_tick_frame, ticked,
-        "a second wake in the same tick emits nothing further"
-    );
+    runtime_assert_eq!(app.edit_cursor_tick_frame => ticked, "a second wake in the same tick emits nothing further");
 
     // A rubber band drawn over the object frames it on release.
     // C4EditCursor::LeftButtonUp runs FrameSelection() then clears Hold and
@@ -5923,33 +4889,26 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
     let corner = (local.0 + 40, local.1 + 40);
     app.console_viewport_motion(identity, corner, 1.0, false, false);
     let (anchor, live) = app.edit_cursor_drag_frame.test_value();
-    assert_eq!(
-        live,
-        (
-            projection.target_x + corner.0,
-            projection.target_y + corner.1
-        ),
-        "the band's live corner follows the pointer"
-    );
+    runtime_assert_eq!(live => (projection.target_x + corner.0, projection.target_y + corner.1), "the band's live corner follows the pointer");
     assert_ne!(anchor, live, "the anchor stays at the press");
 
     // Drag the band back so it spans the object, then release.
     app.console_viewport_motion(identity, (local.0 - 40, local.1 - 40), 1.0, false, false);
     let framed = app.console_viewport_release().test_value();
-    assert!(
+    runtime_assert!(
         framed.objects.contains(&id),
         "an object inside the band is framed: {:?}",
         framed.objects
     );
     assert!(!app.edit_cursor_hold, "the release always clears Hold");
-    assert!(
+    runtime_assert!(
         app.edit_cursor_drag_frame.is_none(),
         "the release always clears DragFrame"
     );
 
     // Play mode is ordinary mouse control, not the editor sink.
     app.developer_console_edit_mode = ConsoleEditMode::Play;
-    assert!(app
+    runtime_assert!(app
         .console_viewport_press(identity, local, 1.0, false, false)
         .is_none());
 }
@@ -5962,13 +4921,8 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
 fn console_viewport_context_menu_emits_the_object_commands() {
     use clonk_frontend::developer_context_menu::{ViewportContextEntry, ViewportContextItem};
 
-    let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
-    let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let (mut app, _events, mut commands, identity) =
+        runtime_console_network_fixture(ConsoleEditMode::Edit);
     // Drawing is what publishes this window's own projection.
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
     let projection = app.console_viewport_projections[&identity];
@@ -5983,16 +4937,11 @@ fn console_viewport_context_menu_emits_the_object_commands() {
 
     // `RightButtonDown` off the selection and over an object selects it,
     // exactly as a plain left click would.
-    assert_eq!(
-        app.console_viewport_right_press(identity, local, 1.0, false)
-            .expect("the right press changed the selection")
-            .objects,
-        vec![id]
-    );
+    runtime_assert_eq!(app.console_viewport_right_press(identity, local, 1.0, false).expect("the right press changed the selection").objects => vec![id]);
     // A second right press *on* that selection leaves it alone — this is
     // `fCursorIsOnSelection`, and it is what lets a multi-object selection
     // survive the click that opens the menu.
-    assert!(app
+    runtime_assert!(app
         .console_viewport_right_press(identity, local, 1.0, false)
         .is_none());
 
@@ -6014,15 +4963,7 @@ fn console_viewport_context_menu_emits_the_object_commands() {
             })
             .collect::<Vec<_>>()
     };
-    assert_eq!(
-        live(menu),
-        vec![
-            ViewportContextItem::Delete,
-            ViewportContextItem::Duplicate,
-            ViewportContextItem::Properties,
-        ],
-        "an empty container greys Grab contents alone"
-    );
+    runtime_assert_eq!(live(menu) => vec![ViewportContextItem::Delete, ViewportContextItem::Duplicate, ViewportContextItem::Properties,], "an empty container greys Grab contents alone");
     // The popup is drawn onto the viewport's own frame, so rendering it
     // must stay clean at the extent the window presents.
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
@@ -6039,7 +4980,7 @@ fn console_viewport_context_menu_emits_the_object_commands() {
         (rect.x + rect.w / 2, rect.y + rect.h / 2)
     };
     assert!(app.console_viewport_context_menu_click(identity, center(1), (320, 200)));
-    assert!(
+    runtime_assert!(
         app.console_viewport_context_menu.is_none(),
         "a chosen item closes the menu"
     );
@@ -6068,20 +5009,20 @@ fn console_viewport_context_menu_emits_the_object_commands() {
     // nothing.
     app.open_console_viewport_context_menu(identity, local);
     assert!(app.console_viewport_context_menu_click(identity, center(2), (320, 200)));
-    assert!(
+    runtime_assert!(
         app.console_viewport_context_menu.is_some(),
         "a greyed row does not dismiss the menu"
     );
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "a greyed item runs nothing"
     );
-    assert!(app.console_viewport_context_menu_click(
+    runtime_assert!(app.console_viewport_context_menu_click(
         identity,
         (rows[0].rect.x - 4, rows[0].rect.y - 4),
         (320, 200)
     ));
-    assert!(
+    runtime_assert!(
         app.console_viewport_context_menu.is_none(),
         "a click outside cancels it"
     );
@@ -6092,7 +5033,7 @@ fn console_viewport_context_menu_emits_the_object_commands() {
     assert!(!app.dismiss_console_viewport_context_menu_for(identity ^ 0xff));
     assert!(app.dismiss_console_viewport_context_menu_for(identity));
     assert!(!app.dismiss_console_viewport_context_menu());
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "a dismissed menu runs nothing"
     );
@@ -6100,19 +5041,11 @@ fn console_viewport_context_menu_emits_the_object_commands() {
     // A right-click on empty space drops the selection, which greys every
     // object command and leaves Properties as the only live row.
     app.console_viewport_right_press(identity, local, 1.0, false);
-    assert!(app
+    runtime_assert!(app
         .console_viewport_right_press(identity, empty, 1.0, false)
         .is_some_and(|snapshot| snapshot.objects.is_empty()));
     app.open_console_viewport_context_menu(identity, empty);
-    assert_eq!(
-        live(
-            &app.console_viewport_context_menu
-                .as_ref()
-                .expect("the menu opened over nothing")
-                .1
-        ),
-        vec![ViewportContextItem::Properties]
-    );
+    runtime_assert_eq!(live(&app.console_viewport_context_menu.as_ref().expect("the menu opened over nothing").1) => vec![ViewportContextItem::Properties]);
 }
 
 // C4Console.cpp:1328-1351 and C4ComponentHost.cpp:231-236,330-334 — the
@@ -6160,13 +5093,7 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     let [host] = app.developer_component_hosts.as_slice() else {
         panic!("expected one committed host");
     };
-    assert_eq!(
-        host.save_action(),
-        ComponentSaveAction::Write {
-            filename: "Info.txt".to_owned(),
-            data: b"hello".to_vec(),
-        }
-    );
+    runtime_assert_eq!(host.save_action() => ComponentSaveAction::Write { filename: "Info.txt".to_owned(), data: b"hello".to_vec(), });
 
     // Emptying a component deletes it rather than writing zero bytes.
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])
@@ -6177,15 +5104,7 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
             .key(crate::developer_component_editor::ComponentEditorKey::Delete);
     }
     app.commit_developer_component_editor();
-    assert_eq!(
-        app.developer_component_hosts
-            .last()
-            .expect("the emptied host")
-            .save_action(),
-        ComponentSaveAction::Delete {
-            filename: "Title.txt".to_owned(),
-        }
-    );
+    runtime_assert_eq!(app.developer_component_hosts.last().expect("the emptied host").save_action() => ComponentSaveAction::Delete { filename: "Title.txt".to_owned(), });
 
     // Reopening a component edited earlier this round shows **its** bytes,
     // not the stale ones still on disk — C++ never has to think about
@@ -6200,24 +5119,10 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
         .key(crate::developer_component_editor::ComponentEditorKey::End);
     edit.text.insert('!');
     app.commit_developer_component_editor();
-    assert_eq!(
-        app.developer_component_hosts
-            .iter()
-            .filter(|host| host.filename() == "Info.txt")
-            .count(),
-        1,
-        "one host per component, however many times it was edited"
-    );
-    assert_eq!(
-        app.developer_component_hosts
-            .iter()
-            .find(|host| host.filename() == "Info.txt")
-            .expect("the info host")
-            .save_action(),
-        ComponentSaveAction::Write {
-            filename: "Info.txt".to_owned(),
-            data: b"hello!".to_vec(),
-        }
+    runtime_assert_eq!(app.developer_component_hosts.iter().filter(|host| host.filename() == "Info.txt").count() => 1, "one host per component, however many times it was edited");
+    runtime_assert_eq!(
+        app.developer_component_hosts.iter().find(|host| host.filename() == "Info.txt").expect("the info host").save_action() =>
+            ComponentSaveAction::Write { filename: "Info.txt".to_owned(), data: b"hello!".to_vec(), };
     );
 
     // A second editor cannot open over the first: `ShowDialog` is modal,
@@ -6227,14 +5132,7 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     let open = app.developer_component_editor.test_ref().component;
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
         .test_value();
-    assert_eq!(
-        app.developer_component_editor
-            .as_ref()
-            .expect("the first editor survives")
-            .component,
-        open,
-        "the open editor is not replaced"
-    );
+    runtime_assert_eq!(app.developer_component_editor.as_ref().expect("the first editor survives").component => open, "the open editor is not replaced");
     app.cancel_developer_component_editor();
 
     // A network game refuses all three outright.
@@ -6247,7 +5145,7 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     ] {
         app.dispatch_developer_console_actions(vec![action])
             .test_value();
-        assert!(
+        runtime_assert!(
             app.developer_component_editor.is_none(),
             "a network game opens no component editor"
         );
@@ -6316,11 +5214,7 @@ fn developer_object_list_opens_and_binds_the_selection_both_ways() {
     app.developer_selection
         .replace(SelectionWriter::EditCursor, subject);
     let mirrored = app.render_developer_object_list(extent.0, extent.1);
-    assert_ne!(
-        mirrored.pixels(),
-        surface.pixels(),
-        "the selected row is drawn differently from an unselected one"
-    );
+    runtime_assert_ne!(mirrored.pixels() => surface.pixels(), "the selected row is drawn differently from an unselected one");
 
     // Closing destroys it rather than hiding it, so the next Objects click
     // builds a new window.
@@ -6346,47 +5240,30 @@ fn viewport_window_geometry_round_trips_through_the_console_subkey() {
     let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
 
-    assert!(
+    runtime_assert!(
         load_viewport_window_position(Some(&paths), clonk_engine::OWNER_NONE).is_none(),
         "nothing is remembered before a viewport stores anything"
     );
 
     // The ownerless viewport is `Viewport0`.
-    store_viewport_window_position(&paths, clonk_engine::OWNER_NONE, 12, 34, 400, 250)
-        .test_value();
-    assert_eq!(
-        load_viewport_window_position(Some(&paths), clonk_engine::OWNER_NONE),
-        Some(ConsoleWindowPlacement::PositionAndSize {
-            x: 12,
-            y: 34,
-            width: 400,
-            height: 250,
-        }),
-        "storeSize is set, so the size survives with the position"
+    store_viewport_window_position(&paths, clonk_engine::OWNER_NONE, 12, 34, 400, 250).test_value();
+    runtime_assert_eq!(
+        load_viewport_window_position(Some(&paths), clonk_engine::OWNER_NONE) => Some(ConsoleWindowPlacement::PositionAndSize { x: 12, y: 34, width: 400, height: 250, }),
+        "storeSize is set, so the size survives with the position",
     );
 
     // Player 0 is `Viewport1` — a different slot, which is the point of keying
     // on the player.
     assert!(load_viewport_window_position(Some(&paths), 0).is_none());
     store_viewport_window_position(&paths, 0, 5, 6, 320, 200).test_value();
-    assert_eq!(
-        load_viewport_window_position(Some(&paths), 0),
-        Some(ConsoleWindowPlacement::PositionAndSize {
-            x: 5,
-            y: 6,
-            width: 320,
-            height: 200,
-        })
-    );
-    assert_eq!(
-        load_viewport_window_position(Some(&paths), clonk_engine::OWNER_NONE)
-            .and_then(ConsoleWindowPlacement::position),
-        Some((12, 34)),
-        "and it did not disturb the ownerless viewport's slot"
+    runtime_assert_eq!(load_viewport_window_position(Some(&paths), 0) => Some(ConsoleWindowPlacement::PositionAndSize { x: 5, y: 6, width: 320, height: 200, }));
+    runtime_assert_eq!(
+        load_viewport_window_position(Some(&paths), clonk_engine::OWNER_NONE).and_then(ConsoleWindowPlacement::position) => Some((12, 34)),
+        "and it did not disturb the ownerless viewport's slot",
     );
 
     // The section is shared with the console, whose own entry is separate.
-    assert!(
+    runtime_assert!(
         load_console_window_position(Some(&paths)).is_none(),
         "a viewport must not land on the console's `Main` key"
     );
@@ -6404,9 +5281,7 @@ fn console_viewport_draws_scroll_bars_only_while_unlocked() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
     app.developer_console_edit_mode = ConsoleEditMode::Edit;
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let identity = open_test_console_viewport(&mut app, None);
 
     // The thumb grey `draw_console_scroll_bars` paints. Counting it is enough:
     // the scene behind is the sandbox landscape, and the assertion that matters
@@ -6424,21 +5299,20 @@ fn console_viewport_draws_scroll_bars_only_while_unlocked() {
         seen
     };
 
-    assert!(
+    runtime_assert!(
         app.console_viewport_player_lock(identity),
         "a fresh viewport starts locked, which is what makes the next assertion meaningful"
     );
     let locked = app.render_console_viewport(identity, 320, 200).test_value();
-    assert_eq!(
-        thumb_pixels(&locked),
-        0,
-        "a locked viewport draws no bars at all"
-    );
+    runtime_assert_eq!(thumb_pixels(&locked) => 0, "a locked viewport draws no bars at all");
 
     app.toggle_console_viewport_player_lock(identity);
-    assert!(!app.console_viewport_player_lock(identity), "unlocking always succeeds");
+    runtime_assert!(
+        !app.console_viewport_player_lock(identity),
+        "unlocking always succeeds"
+    );
     let unlocked = app.render_console_viewport(identity, 320, 200).test_value();
-    assert!(
+    runtime_assert!(
         thumb_pixels(&unlocked) > 0,
         "an unlocked viewport draws both thumbs"
     );
@@ -6446,13 +5320,8 @@ fn console_viewport_draws_scroll_bars_only_while_unlocked() {
 
 #[test]
 fn console_viewport_file_drop_emits_a_definition_drop_control() {
-    let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
-    let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let (mut app, _events, mut commands, identity) =
+        runtime_console_network_fixture(ConsoleEditMode::Edit);
     // Drawing is what publishes this window's own projection.
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
     let projection = app.console_viewport_projections[&identity];
@@ -6485,16 +5354,15 @@ fn console_viewport_file_drop_emits_a_definition_drop_control() {
     };
     assert_eq!(drop.id, definition.as_bytes());
     // The drop point is the viewport's own, added to the view origin.
-    assert_eq!(
-        (drop.x, drop.y),
-        (projection.target_x + local.0, projection.target_y + local.1)
+    runtime_assert_eq!(
+        (drop.x, drop.y) => (projection.target_x + local.0, projection.target_y + local.1);
+        drop.by_client => 7;
     );
-    assert_eq!(drop.by_client, 7);
 
     // Anything that is not a `.c4d` is ignored in silence — C++'s failure
     // text lives inside that branch.
     app.drop_file_on_console_viewport(identity, std::path::Path::new("/tmp/Round.c4s"), local);
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "a scenario file is not a definition drop"
     );
@@ -6503,7 +5371,7 @@ fn console_viewport_file_drop_emits_a_definition_drop_control() {
     app.developer_console.clear_log();
     app.drop_file_on_console_viewport(identity, std::path::Path::new("/tmp/Missing.c4d"), local);
     assert!(commands.take_submitted_decided_controls().is_empty());
-    assert!(
+    runtime_assert!(
         app.developer_console.log().text().contains("Missing.c4d"),
         "the failure names the file: {:?}",
         app.developer_console.log().text()
@@ -6530,19 +5398,14 @@ fn console_viewport_file_drop_emits_a_definition_drop_control() {
 /// the drop actually reaches it.
 #[test]
 fn console_viewport_file_drop_loads_a_definition_outside_the_loaded_set() {
-    let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
-    let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let (mut app, _events, mut commands, identity) =
+        runtime_console_network_fixture(ConsoleEditMode::Edit);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
     // Deliberately never registered, so the first `C4Id2Def` misses and the
     // load is the only way the id can resolve.
     let definition = "DRPD".to_owned();
-    assert!(
+    runtime_assert!(
         app.engine.definition(&definition).is_none(),
         "the id must start outside the loaded set for this to test anything"
     );
@@ -6566,7 +5429,7 @@ fn console_viewport_file_drop_loads_a_definition_outside_the_loaded_set() {
         );
     };
     assert_eq!(drop.id, definition.as_bytes());
-    assert!(
+    runtime_assert!(
         app.engine.definition(&definition).is_some(),
         "the dropped group was loaded, which is what lets the second lookup resolve"
     );
@@ -6596,21 +5459,14 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
     // Open`'s tail sets Active even with no dialog of its own.
     app.open_developer_prop_tools();
     assert!(app.developer_tools.active());
-    assert_eq!(
-        app.developer_toolbox.current_page(),
-        Some(ToolboxPage::Tools)
-    );
-    assert_eq!(
-        app.developer_toolbox.pages(),
-        &[ToolboxPage::Tools, ToolboxPage::Property],
-        "both pages are appended, whichever is switched to"
-    );
+    runtime_assert_eq!(app.developer_toolbox.current_page() => Some(ToolboxPage::Tools));
+    runtime_assert_eq!(app.developer_toolbox.pages() => &[ToolboxPage::Tools, ToolboxPage::Property], "both pages are appended, whichever is switched to");
     let effects = std::mem::take(&mut app.developer_toolbox_effects);
-    assert!(
+    runtime_assert!(
         matches!(effects.first(), Some(ToolboxEffect::Create(_))),
         "the first page creates the window: {effects:?}"
     );
-    assert!(
+    runtime_assert!(
         effects.iter().any(|effect| matches!(
             effect,
             ToolboxEffect::Show {
@@ -6628,10 +5484,7 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
     )])
     .test_value();
     assert!(!app.developer_tools.active(), "Clear drops Active");
-    assert_eq!(
-        app.developer_toolbox.current_page(),
-        Some(ToolboxPage::Property)
-    );
+    runtime_assert_eq!(app.developer_toolbox.current_page() => Some(ToolboxPage::Property));
 
     // The page's own controls: everything but the landscape mode is local
     // dialog state, and only the mode leaves as a control.
@@ -6657,20 +5510,14 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
     // live at all — everything but the mode buttons is dead below Static.
     let exact = center(&app, ToolsControl::ModeExact);
     app.developer_toolbox_click(exact, extent);
-    assert_eq!(
-        app.developer_tools_page_model().mode,
-        clonk_engine::developer_tools::LandscapeMode::Exact
-    );
+    runtime_assert_eq!(app.developer_tools_page_model().mode => clonk_engine::developer_tools::LandscapeMode::Exact);
 
     let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
     app.developer_toolbox_click(center(&app, ToolsControl::Line), extent);
-    assert_eq!(
-        app.developer_tools.tool(),
-        clonk_engine::developer_tools::Tool::Line
-    );
+    runtime_assert_eq!(app.developer_tools.tool() => clonk_engine::developer_tools::Tool::Line);
     app.developer_toolbox_click(center(&app, ToolsControl::NoIft), extent);
     assert!(!app.developer_tools.ift());
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "the tool and IFT are dialog state, not synchronized state"
     );
@@ -6688,14 +5535,7 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
     };
     assert_eq!(set_mode.action, clonk_engine::EMDT_SET_MODE);
     assert_eq!(set_mode.mode, clonk_engine::landscape::LANDSCAPE_MODE_EXACT);
-    assert_eq!(
-        app.engine
-            .landscape()
-            .expect("the sandbox landscape")
-            .mode(),
-        before,
-        "the local request changes nothing until the control executes"
-    );
+    runtime_assert_eq!(app.engine.landscape().expect("the sandbox landscape").mode() => before, "the local request changes nothing until the control executes");
 
     // Exact -> Static is the one destructive transition, and it is
     // **refused**: `SetLandscapeMode` returns false unless
@@ -6703,26 +5543,19 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
     // function is a bare `return false` (`C4Console.cpp:841-853`). So
     // nothing is enqueued.
     let model = app.developer_tools_page_model();
-    assert_eq!(
-        model.mode,
-        clonk_engine::developer_tools::LandscapeMode::Exact
-    );
+    runtime_assert_eq!(model.mode => clonk_engine::developer_tools::LandscapeMode::Exact);
     // Driven at the seam rather than through the button, because the
     // button carries a second gate — Static needs `Game.Landscape.Map`,
     // which this fixture's landscape may not have.
     app.submit_editor_landscape_mode(clonk_engine::developer_tools::LandscapeMode::Static);
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "a refused Exact -> Static enqueues nothing"
     );
     // Every other transition still goes out, so the refusal is the
     // confirmation's and not a blanket block.
     app.submit_editor_landscape_mode(clonk_engine::developer_tools::LandscapeMode::Dynamic);
-    assert_eq!(
-        commands.take_submitted_decided_controls().len(),
-        1,
-        "only the destructive transition is refused"
-    );
+    runtime_assert_eq!(commands.take_submitted_decided_controls().len() => 1, "only the destructive transition is refused");
 
     // Closing the toolbox clears `ToolsDlg.Active` — C++ connects the
     // shared devmode window's "hide" to `OnWindowHide`, whose body is
@@ -6738,7 +5571,7 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
         ConsoleEditMode::Play,
     )])
     .test_value();
-    assert!(
+    runtime_assert!(
         app.developer_toolbox_effects.is_empty(),
         "a closed toolbox is not reopened by a mode change"
     );
@@ -6748,7 +5581,7 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
     )])
     .test_value();
     app.open_developer_prop_tools();
-    assert!(app.developer_toolbox_effects.iter().any(|effect| matches!(
+    runtime_assert!(app.developer_toolbox_effects.iter().any(|effect| matches!(
         effect,
         ToolboxEffect::Show {
             position: Some((120, 80)),
@@ -6763,10 +5596,7 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
         ConsoleEditMode::Edit,
     )])
     .test_value();
-    assert_eq!(
-        app.developer_toolbox.current_page(),
-        Some(ToolboxPage::Property)
-    );
+    runtime_assert_eq!(app.developer_toolbox.current_page() => Some(ToolboxPage::Property));
     app.developer_toolbox_click(center(&app, ToolsControl::ModeExact), extent);
     assert!(commands.take_submitted_decided_controls().is_empty());
 
@@ -6788,9 +5618,7 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
     app.developer_console_edit_mode = ConsoleEditMode::Edit;
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let identity = open_test_console_viewport(&mut app, None);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
     // Give one object a Contents list to grab.
@@ -6800,13 +5628,7 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
         .engine
         .spawn_test_object(clonk_engine::SpawnConfig::new(definition).with_container(container));
     app.snapshot = app.engine.snapshot();
-    assert_eq!(
-        app.snapshot
-            .object(container)
-            .expect("the container is live")
-            .contents,
-        vec![held]
-    );
+    runtime_assert_eq!(app.snapshot.object(container).expect("the container is live").contents => vec![held]);
 
     let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
     app.developer_selection.replace(
@@ -6821,7 +5643,7 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
         .position(|entry| entry.item() == Some(ViewportContextItem::GrabContents))
         .test_value();
     let rect = menu.layout(320, 200)[contents_row].rect;
-    assert!(app.console_viewport_context_menu_click(
+    runtime_assert!(app.console_viewport_context_menu_click(
         identity,
         (rect.x + rect.w / 2, rect.y + rect.h / 2),
         (320, 200)
@@ -6837,22 +5659,18 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
         panic!("expected one exit control, got {decided:?}");
     };
     assert_eq!(exit.action, clonk_engine::EMMO_EXIT);
-    assert_eq!(
-        exit.objects,
-        vec![held.as_u64() as i32],
-        "EMMO_Exit carries the contents, never the container"
-    );
+    runtime_assert_eq!(exit.objects => vec![held.as_u64() as i32], "EMMO_Exit carries the contents, never the container");
 
     // The release completing that click belongs to the menu: C++'s popup
     // is modal, so `LeftButtonUp` never runs, and letting it through here
     // would clear the `Hold` the command set one line before its control
     // went out.
-    assert!(
+    runtime_assert!(
         app.take_console_viewport_pointer_grab(identity),
         "the popup grabbed the pointer for the whole click"
     );
     assert!(app.edit_cursor_hold, "and Hold survives it");
-    assert!(
+    runtime_assert!(
         !app.take_console_viewport_pointer_grab(identity),
         "exactly one release is swallowed"
     );
@@ -6865,13 +5683,8 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
 fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
     use clonk_engine::developer_tools::Tool;
 
-    let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Draw;
-    let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let (mut app, _events, mut commands, identity) =
+        runtime_console_network_fixture(ConsoleEditMode::Draw);
     // Drawing is what publishes this window's own projection.
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
     let projection = app.console_viewport_projections[&identity];
@@ -6881,7 +5694,7 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
     // `LeftButtonDown`'s Brush arm applies on the click itself (`:224`).
     let pressed = (40, 10);
     app.console_viewport_press(identity, pressed, 1.0, false, false);
-    assert!(
+    runtime_assert!(
         app.developer_tools.holding(),
         "a draw press arms Hold like every other gesture"
     );
@@ -6912,7 +5725,7 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
 
     app.console_viewport_release();
     assert!(!app.developer_tools.holding(), "the release clears Hold");
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "the brush emits nothing on release"
     );
@@ -6924,13 +5737,13 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
     app.developer_tools.set_tool(Tool::Line, false);
     let anchor = (12, 34);
     app.console_viewport_press(identity, anchor, 1.0, false, false);
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "a line draws nothing until it is released"
     );
     let released = (56, 78);
     app.console_viewport_motion(identity, released, 1.0, false, false);
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "a line draws nothing while it is dragged"
     );
@@ -6951,13 +5764,8 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
 fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() {
     use clonk_engine::developer_tools::Tool;
 
-    let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Draw;
-    let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let (mut app, _events, mut commands, identity) =
+        runtime_console_network_fixture(ConsoleEditMode::Draw);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
     let projection = app.console_viewport_projections[&identity];
     let world = |local: (i32, i32)| (projection.target_x + local.0, projection.target_y + local.1);
@@ -6968,7 +5776,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     app.network_control_running = false;
     app.console_viewport_press(identity, (40, 10), 1.0, false, false);
     assert!(!app.developer_tools.holding(), "a halted fill never holds");
-    assert!(app
+    runtime_assert!(app
         .developer_console
         .log()
         .text()
@@ -6981,7 +5789,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     let pressed = (40, 10);
     app.console_viewport_press(identity, pressed, 1.0, false, false);
     assert!(app.developer_tools.holding());
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "fill emits nothing on the click itself"
     );
@@ -6999,7 +5807,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
 
     // Once per engine tick, not once per event-loop wake.
     app.console_edit_cursor_tick();
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "a second wake inside the same frame emits nothing"
     );
@@ -7008,7 +5816,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     // same live X/Y every other tool does (`:579`).
     let moved = (90, 60);
     app.console_viewport_motion(identity, moved, 1.0, false, false);
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "fill emits nothing on the drag itself"
     );
@@ -7025,7 +5833,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     app.console_viewport_release();
     app.edit_cursor_tick_frame = None;
     app.console_edit_cursor_tick();
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "releasing stops the repeat"
     );
@@ -7037,13 +5845,8 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
 // mode's finish ran, because C++ has one shared flag.
 #[test]
 fn a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture() {
-    let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Draw;
-    let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let (mut app, _events, mut commands, identity) =
+        runtime_console_network_fixture(ConsoleEditMode::Draw);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
     // A console that cannot edit refuses the brush, says so, and drops the
@@ -7052,13 +5855,13 @@ fn a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture() {
     app.console_viewport_press(identity, (40, 10), 1.0, false, false);
     assert!(commands.take_submitted_decided_controls().is_empty());
     assert!(!app.developer_tools.holding(), "EditingOK clears Hold");
-    assert!(app
+    runtime_assert!(app
         .developer_console
         .log()
         .text()
         .contains("No editing while replaying."));
     app.console_viewport_motion(identity, (70, 10), 1.0, false, false);
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "a refused stroke does not resume on the next motion"
     );
@@ -7071,7 +5874,7 @@ fn a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture() {
     let _ = commands.take_submitted_decided_controls();
     app.developer_console_edit_mode = ConsoleEditMode::Edit;
     app.console_viewport_release();
-    assert!(
+    runtime_assert!(
         !app.developer_tools.holding(),
         "the release clears Hold even though the Draw finish did not run"
     );
@@ -7099,9 +5902,7 @@ fn console_draw_alt_picks_the_landscape_into_the_tools_without_drawing() {
     )
     .test_value();
     let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
-        .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let identity = open_test_console_viewport(&mut app, None);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
     // Alt overrides the tool only while it is held, and only in Draw mode
@@ -7116,11 +5917,11 @@ fn console_draw_alt_picks_the_landscape_into_the_tools_without_drawing() {
     app.console_viewport_press(identity, (40, 10), 1.0, false, false);
     assert_eq!(app.developer_tools.material(), "Sky");
     assert_eq!(app.developer_tools.texture(), "Smooth");
-    assert!(
+    runtime_assert!(
         !app.developer_tools.holding(),
         "ApplyToolPicker ends with Hold = false (`:731`)"
     );
-    assert!(
+    runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "the picker never draws"
     );
@@ -7142,11 +5943,7 @@ fn console_draw_alt_picks_the_landscape_into_the_tools_without_drawing() {
 fn console_viewport_scrolls_only_once_its_player_lock_is_off() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(Some(
-        app.local_owner,
-    ))])
-    .test_value();
-    let identity = app.physical_viewports.last().test_value().physical_identity;
+    let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
     // `C4Viewport::Default` starts locked, so a scroll request is refused
@@ -7165,11 +5962,7 @@ fn console_viewport_scrolls_only_once_its_player_lock_is_off() {
     // it as this window's projection (`cvp->Execute()` after the scroll).
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
     let after = app.console_viewport_projections[&identity];
-    assert_ne!(
-        (before.target_x, before.target_y),
-        (after.target_x, after.target_y),
-        "an unlocked viewport keeps where the scroll put it"
-    );
+    runtime_assert_ne!((before.target_x, before.target_y) => (after.target_x, after.target_y), "an unlocked viewport keeps where the scroll put it");
 
     // `UpdateViewPosition`'s clamp is gated on `fIsNoOwnerViewport`
     // (`:1234-1254`): an *owned* viewport keeps whatever view position it
@@ -7178,16 +5971,9 @@ fn console_viewport_scrolls_only_once_its_player_lock_is_off() {
     // scrolling far past the landscape edge and finding it still there is
     // what pins the lock actually being off.
     let (view_x, ..) = app.graphics.detached_viewport_view(identity).test_value();
-    assert_eq!(
-        app.graphics
-            .scroll_detached_viewport(identity, -(view_x + 400), 0),
-        Some((-400, after.target_y))
-    );
+    runtime_assert_eq!(app.graphics.scroll_detached_viewport(identity, -(view_x + 400), 0) => Some((-400, after.target_y)));
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
-    assert_eq!(
-        app.console_viewport_projections[&identity].target_x, -400,
-        "an owned viewport keeps a view position outside the landscape"
-    );
+    runtime_assert_eq!(app.console_viewport_projections[&identity].target_x => -400, "an owned viewport keeps a view position outside the landscape");
     // And the next step moves relative to it rather than snapping back:
     // the line buttons apply their step unclamped (`:127-128`).
     assert!(app.scroll_console_viewport(identity, 4, 0));
@@ -7234,14 +6020,7 @@ fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
 
     app.test_network_events();
 
-    assert_eq!(
-        app.admission_resources.status(core.id),
-        Some(&AdmissionResourceState::Complete {
-            path: mutable_path,
-            removed: false,
-            local: false,
-        })
-    );
+    runtime_assert_eq!(app.admission_resources.status(core.id) => Some(&AdmissionResourceState::Complete { path: mutable_path, removed: false, local: false, }));
 }
 
 #[test]
@@ -7271,25 +6050,8 @@ fn player_command_submission_queues_the_open_tick_without_local_execution() {
 
     app.submit_or_execute_player_command(command).test_value();
 
-    assert_eq!(
-        commands.take_submitted_player_commands(),
-        vec![(
-            tick,
-            PlayerCommandControlData {
-                by_client: 7,
-                ..command
-            }
-        )]
-    );
-    assert_eq!(
-        app.engine
-            .object_snapshot(crew)
-            .expect("cursor survives")
-            .command_stack
-            .command_names(),
-        before,
-        "the command executes only when the synchronized tick returns"
-    );
+    runtime_assert_eq!(commands.take_submitted_player_commands() => vec![(tick, PlayerCommandControlData { by_client: 7,..command })]);
+    runtime_assert_eq!(app.engine.object_snapshot(crew).expect("cursor survives").command_stack.command_names() => before, "the command executes only when the synchronized tick returns");
 }
 
 #[test]
@@ -7319,21 +6081,8 @@ fn player_select_submission_queues_the_open_tick_without_local_execution() {
     app.submit_or_execute_player_select(selection.clone())
         .test_value();
 
-    assert_eq!(
-        commands.take_submitted_player_selects(),
-        vec![(
-            tick,
-            PlayerSelectControlData {
-                by_client: 7,
-                ..selection
-            }
-        )]
-    );
-    assert_eq!(
-        app.engine.selected_crew(owner),
-        before,
-        "selection executes only when the synchronized tick returns"
-    );
+    runtime_assert_eq!(commands.take_submitted_player_selects() => vec![(tick, PlayerSelectControlData { by_client: 7,..selection })]);
+    runtime_assert_eq!(app.engine.selected_crew(owner) => before, "selection executes only when the synchronized tick returns");
 }
 
 #[test]
@@ -7359,7 +6108,7 @@ fn runtime_flash_storage_uses_classic_bytes_and_snapshots_placement() {
         .test_value();
     assert_eq!(unicode.text, "\u{100}");
     assert_eq!(unicode.remaining_draws, 4);
-    assert!(
+    runtime_assert!(
         app.prepare_runtime_flash_message("\u{100}", RuntimeHelpCharset::Windows1252,)
             .is_err(),
         "the classic CP1252 encoder still rejects an unrepresentable scalar"
@@ -7421,11 +6170,7 @@ fn runtime_flash_storage_uses_classic_bytes_and_snapshots_placement() {
         .test_value()
         .viewports
         .truncate(1);
-    assert_eq!(
-        app.runtime_flash_message.as_ref().expect("frozen flash").y,
-        124,
-        "later board/viewport changes do not reposition an active flash"
-    );
+    runtime_assert_eq!(app.runtime_flash_message.as_ref().expect("frozen flash").y => 124, "later board/viewport changes do not reposition an active flash");
 
     app.set_runtime_flash_message("", RuntimeHelpCharset::Windows1252)
         .test_value();
@@ -7447,22 +6192,12 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
         .control_style = true;
     modified_first.test_modifiers(ModifiersState::ALT);
     modified_first.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    assert!(modified_first
+    runtime_assert!(modified_first
         .pressed_engine_keys
         .contains(&VirtualKeyCode::F3));
     modified_first.test_modifiers(ModifiersState::empty());
     modified_first.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    assert_eq!(
-        modified_first
-            .engine
-            .player(modified_first.local_owner)
-            .expect("local player")
-            .control
-            .pressed_coms
-            & left_mask,
-        0,
-        "AutoStop must discard a held F3 repeat"
-    );
+    runtime_assert_eq!(modified_first.engine.player(modified_first.local_owner).expect("local player").control.pressed_coms & left_mask => 0, "AutoStop must discard a held F3 repeat");
     assert!(modified_first.runtime_flash_message.is_none());
 
     let mut game_over = new_game_over_keyboard_app();
@@ -7478,17 +6213,10 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     let global_flash = game_over.runtime_flash_message.clone();
     game_over.dismiss_game_over_dialog();
     game_over.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    assert_eq!(
-        game_over
-            .engine
-            .player(game_over.local_owner)
-            .expect("local player")
-            .control
-            .pressed_coms
-            & left_mask,
-        0
+    runtime_assert_eq!(
+        game_over.engine.player(game_over.local_owner).expect("local player").control.pressed_coms & left_mask => 0;
+        game_over.runtime_flash_message => global_flash;
     );
-    assert_eq!(game_over.runtime_flash_message, global_flash);
 
     let mut changed_on_release = new_running_sandbox_app();
     changed_on_release
@@ -7502,7 +6230,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     changed_on_release.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     changed_on_release.test_modifiers(ModifiersState::CONTROL);
     changed_on_release.test_key(VirtualKeyCode::F3, ElementState::Released);
-    assert!(!changed_on_release
+    runtime_assert!(!changed_on_release
         .pressed_engine_keys
         .contains(&VirtualKeyCode::F3));
     changed_on_release
@@ -7512,16 +6240,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
         .pressed_coms = 0;
     changed_on_release.test_modifiers(ModifiersState::empty());
     changed_on_release.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    assert_ne!(
-        changed_on_release
-            .engine
-            .player(changed_on_release.local_owner)
-            .expect("local player")
-            .control
-            .pressed_coms
-            & left_mask,
-        0
-    );
+    runtime_assert_ne!(changed_on_release.engine.player(changed_on_release.local_owner).expect("local player").control.pressed_coms & left_mask => 0);
 
     let mut focus = new_running_sandbox_app();
     let sound_before = focus.audio.test_ref().options.sound_enabled;
@@ -7529,15 +6248,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     focus.handle_focus_lost().test_value();
     assert!(focus.keyboard_modifiers.is_empty());
     focus.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    assert_eq!(
-        focus
-            .audio
-            .as_ref()
-            .expect("test audio")
-            .options
-            .sound_enabled,
-        sound_before
-    );
+    runtime_assert_eq!(focus.audio.as_ref().expect("test audio").options.sound_enabled => sound_before);
     assert!(focus.runtime_flash_message.is_some());
 }
 
@@ -7547,12 +6258,9 @@ fn speed_keys_flash_clamp_and_honor_keyconfig_priority() {
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::NumpadAdd, ElementState::Pressed);
     assert!(app.full_speed);
-    assert_eq!(app.frame_skip, 2);
-    assert_eq!(
-        app.runtime_flash_message
-            .as_ref()
-            .map(|message| message.text.as_str()),
-        Some("Speed: 2x")
+    runtime_assert_eq!(
+        app.frame_skip => 2;
+        runtime_flash_text(&app) => Some("Speed: 2x");
     );
     app.test_key(VirtualKeyCode::NumpadAdd, ElementState::Released);
     app.test_key(VirtualKeyCode::NumpadAdd, ElementState::Pressed);
@@ -7563,34 +6271,23 @@ fn speed_keys_flash_clamp_and_honor_keyconfig_priority() {
         assert_eq!(app.frame_skip, expected);
     }
     assert!(!app.full_speed);
-    assert_eq!(
-        app.runtime_flash_message
-            .as_ref()
-            .map(|message| message.text.as_str()),
-        Some("Speed: 1x")
-    );
+    runtime_assert_eq!(runtime_flash_text(&app) => Some("Speed: 1x"));
 
     app.frame_skip = 50;
     app.full_speed = false;
     app.test_key(VirtualKeyCode::NumpadAdd, ElementState::Pressed);
     assert_eq!(app.frame_skip, 50);
     assert!(app.full_speed);
-    assert_eq!(
-        app.runtime_flash_message
-            .as_ref()
-            .map(|message| message.text.as_str()),
-        Some("Speed: 50x")
-    );
+    runtime_assert_eq!(runtime_flash_text(&app) => Some("Speed: 50x"));
 
     let mut rebound = new_running_sandbox_app();
-    rebound.runtime_key_config_cache = OnceLock::new();
-    rebound
-        .runtime_key_config_cache
-        .set(Ok(parse_runtime_key_config(
-            b"[Keys]\nGameSpeedUp=G\nGameSlowDown=H\n",
-        )
-        .expect("parse rebound speed keys")))
-        .test_value();
+    install_runtime_key_config(
+        &mut rebound,
+        Ok(
+            parse_runtime_key_config(b"[Keys]\nGameSpeedUp=G\nGameSlowDown=H\n")
+                .expect("parse rebound speed keys"),
+        ),
+    );
     rebound.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     assert_eq!(rebound.frame_skip, 2);
     rebound.test_key(VirtualKeyCode::KeyH, ElementState::Pressed);
@@ -7599,38 +6296,30 @@ fn speed_keys_flash_clamp_and_honor_keyconfig_priority() {
 
     let mut global_collision = new_running_sandbox_app();
     global_collision.app_paths = None;
-    global_collision.runtime_key_config_cache = OnceLock::new();
-    global_collision
-        .runtime_key_config_cache
-        .set(Ok(parse_runtime_key_config(
-            b"[Keys]\nSoundToggle=G\nGameSpeedUp=G\n",
-        )
-        .expect("parse earlier-global collision")))
-        .test_value();
+    install_runtime_key_config(
+        &mut global_collision,
+        Ok(
+            parse_runtime_key_config(b"[Keys]\nSoundToggle=G\nGameSpeedUp=G\n")
+                .expect("parse earlier-global collision"),
+        ),
+    );
     let sound_enabled = global_collision.audio.test_ref().options.sound_enabled;
     global_collision.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
-    assert_eq!(
-        global_collision
-            .audio
-            .as_ref()
-            .expect("sandbox audio context")
-            .options
-            .sound_enabled,
-        !sound_enabled
+    runtime_assert_eq!(
+        global_collision.audio.as_ref().expect("sandbox audio context").options.sound_enabled => !sound_enabled;
+        global_collision.frame_skip => 1;
     );
-    assert_eq!(global_collision.frame_skip, 1);
     assert!(!global_collision.full_speed);
     assert!(global_collision.runtime_flash_message.is_none());
 
     let mut collision = new_running_sandbox_app();
-    collision.runtime_key_config_cache = OnceLock::new();
-    collision
-        .runtime_key_config_cache
-        .set(Ok(parse_runtime_key_config(
-            b"[Keys]\nKbd1Key1=G\nGameSpeedUp=G\n",
-        )
-        .expect("parse player/global collision")))
-        .test_value();
+    install_runtime_key_config(
+        &mut collision,
+        Ok(
+            parse_runtime_key_config(b"[Keys]\nKbd1Key1=G\nGameSpeedUp=G\n")
+                .expect("parse player/global collision"),
+        ),
+    );
     collision.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     assert_eq!(collision.frame_skip, 1);
     assert!(!collision.full_speed);
@@ -7736,14 +6425,7 @@ fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
             default_app
                 .render(&mut frame)
                 .unwrap_or_else(|error| panic!("render F3 on {layer:?}: {error:#}"));
-            assert_eq!(
-                default_app
-                    .runtime_flash_message
-                    .as_ref()
-                    .expect("music text lasts more than one draw")
-                    .remaining_draws,
-                before - 1
-            );
+            runtime_assert_eq!(default_app.runtime_flash_message.as_ref().expect("music text lasts more than one draw").remaining_draws => before - 1);
         }
 
         let mut rebound = make_layer(layer);
@@ -7756,11 +6438,7 @@ fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
         rebound
             .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("rebound F3 on {layer:?}: {error}"));
-        assert_eq!(
-            rebound.runtime_flash_message.is_none(),
-            player_scope,
-            "{layer:?}"
-        );
+        runtime_assert_eq!(rebound.runtime_flash_message.is_none() => player_scope, "{layer:?}");
 
         let mut sound = make_layer(layer);
         let before = sound.audio.test_ref().options.sound_enabled;
@@ -7768,16 +6446,7 @@ fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
         sound
             .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("Ctrl+F3 on {layer:?}: {error}"));
-        assert_eq!(
-            sound
-                .audio
-                .as_ref()
-                .expect("test audio")
-                .options
-                .sound_enabled,
-            !before,
-            "{layer:?}"
-        );
+        runtime_assert_eq!(sound.audio.as_ref().expect("test audio").options.sound_enabled => !before, "{layer:?}");
         assert!(sound.runtime_flash_message.is_none(), "{layer:?}");
     }
 }
@@ -7788,19 +6457,13 @@ fn generated_team_name_template_preserves_the_runtime_table_charset() {
         charset: RuntimeHelpCharset::Windows1252,
         entries: HashMap::from([("IDS_MSG_TEAM".to_string(), "Équipe %d".to_string())]),
     };
-    assert_eq!(
-        generated_team_name_template(&cp1252).as_bytes(),
-        b"\xc9quipe %d"
-    );
+    runtime_assert_eq!(generated_team_name_template(&cp1252).as_bytes() => b"\xc9quipe %d");
 
     let utf8 = RuntimeLanguageTable {
         charset: RuntimeHelpCharset::Utf8,
         entries: cp1252.entries,
     };
-    assert_eq!(
-        generated_team_name_template(&utf8).as_bytes(),
-        "Équipe %d".as_bytes()
-    );
+    runtime_assert_eq!(generated_team_name_template(&utf8).as_bytes() => "Équipe %d".as_bytes());
 }
 
 #[test]
@@ -7815,13 +6478,9 @@ fn runtime_resource_lookup_uses_the_process_loaded_language_table() {
     );
     app.runtime_language_charset = RuntimeHelpCharset::Windows1252;
 
-    assert_eq!(
-        app.runtime_resource_text("IDS_TEST_PROCESS_RESOURCE", "fallback"),
-        "process cached É"
-    );
-    assert_eq!(
-        app.runtime_resource_bytes("IDS_TEST_PROCESS_RESOURCE"),
-        b"process cached \xc9"
+    runtime_assert_eq!(
+        app.runtime_resource_text("IDS_TEST_PROCESS_RESOURCE", "fallback") => "process cached É";
+        app.runtime_resource_bytes("IDS_TEST_PROCESS_RESOURCE") => b"process cached \xc9";
     );
 }
 
@@ -7856,22 +6515,14 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
     let mut app = new_real_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
     app.reload_application_language_resources().test_value();
-    assert_eq!(
-        app.runtime_language_charset,
-        RuntimeHelpCharset::Windows1252
-    );
+    runtime_assert_eq!(app.runtime_language_charset => RuntimeHelpCharset::Windows1252);
 
     fs::write(&language, table("Mutated", "UTF-8")).test_value();
     let disk = load_runtime_language_table(Some(paths)).test_value();
-    assert_eq!(
-        disk.entries.get("IDS_MSG_SELECT").map(String::as_str),
-        Some("Mutated select %s")
-    );
-    assert_eq!(disk.charset, RuntimeHelpCharset::Utf8);
-    assert_eq!(
-        load_options_program_state(Some(paths), Some(&app.startup_tooltip_resources),)
-            .no_language_info,
-        "Loaded no language info"
+    runtime_assert_eq!(
+        disk.entries.get("IDS_MSG_SELECT").map(String::as_str) => Some("Mutated select %s");
+        disk.charset => RuntimeHelpCharset::Utf8;
+        load_options_program_state(Some(paths), Some(&app.startup_tooltip_resources),) .no_language_info => "Loaded no language info";
     );
 
     attach_l040_network_dialog(&mut app);
@@ -7883,7 +6534,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
         ..Default::default()
     }];
     let loads_before_browser = runtime_language_table_load_count(paths.system_group_path());
-    assert!(
+    runtime_assert!(
         loads_before_browser >= 2,
         "the probe observes the initial process load and explicit disk inspection"
     );
@@ -7894,40 +6545,26 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
         let mut frame = vec![0_u8; 640 * 480 * 4];
         app.test_render(&mut frame);
     }
-    assert_eq!(
-        runtime_language_table_load_count(paths.system_group_path()),
-        loads_before_browser,
-        "network-browser row projection and rendering must not reopen System.c4g"
-    );
+    runtime_assert_eq!(runtime_language_table_load_count(paths.system_group_path()) => loads_before_browser, "network-browser row projection and rendering must not reopen System.c4g");
 
-    assert_eq!(
-        app.runtime_resource_text("IDS_MSG_SELECT", "fallback"),
-        "Loaded select %s"
-    );
-    assert_eq!(
-        app.runtime_resource_bytes("IDS_MSG_NOSPLITSCREENINLEAGUE"),
-        b"Loaded players %s and %s"
-    );
-    assert_eq!(
-        app.new_startup_player_properties_controller(0, 0).comment(),
-        "Loaded new player"
+    runtime_assert_eq!(
+        app.runtime_resource_text("IDS_MSG_SELECT", "fallback") => "Loaded select %s";
+        app.runtime_resource_bytes("IDS_MSG_NOSPLITSCREENINLEAGUE") => b"Loaded players %s and %s";
+        app.new_startup_player_properties_controller(0, 0).comment() => "Loaded new player";
     );
 
     app.control_clients
         .replace_snapshot([message_client(7, b"Remote")]);
-    app.append_remote_lobby_ready_log(clonk_network::ReadyCheckPacket {
-        client_id: 7,
-        data: clonk_network::ReadyCheckData::Ready,
-    });
-    assert_eq!(
-        latest_message_board_logical_entry(&app).as_deref(),
-        Some("Loaded ready Remote.")
-    );
+    app.append_remote_lobby_ready_log(clonk_network::ReadyCheckPacket::new(
+        7,
+        clonk_network::ReadyCheckData::Ready,
+    ));
+    runtime_assert_eq!(latest_message_board_logical_entry(&app).as_deref() => Some("Loaded ready Remote."));
 
     install_test_classic_host_team_lobby(&mut app);
     app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/help".to_string()))
         .test_value();
-    assert!(app
+    runtime_assert!(app
         .classic_host_lobby
         .as_ref()
         .expect("classic host lobby")
@@ -7942,10 +6579,10 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
     let menu = app.context_menu.test_mut();
     let first = menu.layout().panels[0].rows[0].rect;
     menu.handle_pointer_move(GuiPoint::new((first.x + 1) as f32, (first.y + 1) as f32));
-    assert!(
+    runtime_assert!(
         menu.hovered_tooltip_at(Instant::now() + Duration::from_secs(1))
             .is_some_and(|tooltip| tooltip.starts_with("Loaded select ")),
-        "team selector tooltip must not observe the on-disk edit"
+        "team selector tooltip must not observe the on-disk edit",
     );
     app.close_context_menu_silently();
 
@@ -7957,11 +6594,10 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
     }])
     .test_value();
     let league = app.message_dialogs.last().test_value();
-    assert_eq!(
-        league.state.message(),
-        "Loaded players Chooser and Companion"
+    runtime_assert_eq!(
+        league.state.message() => "Loaded players Chooser and Companion";
+        league.state.caption() => "Loaded league error";
     );
-    assert_eq!(league.state.caption(), "Loaded league error");
     app.message_dialogs.clear();
     app.network_is_league = false;
 
@@ -7976,19 +6612,11 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
     assert_eq!(confirmation.state.caption(), "Loaded player assignment");
 
     app.reload_application_language_resources().test_value();
-    assert_eq!(app.runtime_language_charset, RuntimeHelpCharset::Utf8);
-    assert_eq!(
-        app.runtime_resource_text("IDS_MSG_SELECT", "fallback"),
-        "Mutated select %s"
-    );
-    assert_eq!(
-        app.new_startup_player_properties_controller(0, 0).comment(),
-        "Mutated new player"
-    );
-    assert_eq!(
-        load_options_program_state(Some(paths), Some(&app.startup_tooltip_resources),)
-            .no_language_info,
-        "Mutated no language info"
+    runtime_assert_eq!(
+        app.runtime_language_charset => RuntimeHelpCharset::Utf8;
+        app.runtime_resource_text("IDS_MSG_SELECT", "fallback") => "Mutated select %s";
+        app.new_startup_player_properties_controller(0, 0).comment() => "Mutated new player";
+        load_options_program_state(Some(paths), Some(&app.startup_tooltip_resources),).no_language_info => "Mutated no language info";
     );
 }
 
@@ -8015,7 +6643,7 @@ fn runtime_join_flash_keeps_the_process_language_charset_until_reload() {
     .test_value();
 
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
-    assert!(matches!(
+    runtime_assert!(matches!(
         app.runtime_network_role(),
         RuntimeNetworkRole::Host
     ));
@@ -8032,22 +6660,14 @@ fn runtime_join_flash_keeps_the_process_language_charset_until_reload() {
     acknowledgement.test_join();
 
     let flash = app.runtime_flash_message.test_ref();
-    assert_eq!(
-        flash.text.chars().count(),
-        300,
-        "the retained CP1252 table keeps all 300 one-byte characters"
-    );
+    runtime_assert_eq!(flash.text.chars().count() => 300, "the retained CP1252 table keeps all 300 one-byte characters");
     assert!(flash.text.chars().all(|character| character == '\u{e9}'));
-    assert_eq!(
-        app.runtime_language_charset,
-        RuntimeHelpCharset::Windows1252
-    );
+    runtime_assert_eq!(app.runtime_language_charset => RuntimeHelpCharset::Windows1252);
 
     app.reload_application_language_resources().test_value();
-    assert_eq!(app.runtime_language_charset, RuntimeHelpCharset::Utf8);
-    assert_eq!(
-        app.classic_lobby_option_labels().runtime_join_free,
-        "Reloaded free"
+    runtime_assert_eq!(
+        app.runtime_language_charset => RuntimeHelpCharset::Utf8;
+        app.classic_lobby_option_labels().runtime_join_free => "Reloaded free";
     );
 }
 
@@ -8064,13 +6684,12 @@ fn runtime_f1_language_lookup_is_case_insensitive_and_skips_empty_candidates() {
 
     let table = load_runtime_language_table(Some(&fixture.paths)).test_value();
     let (need, none) = needed_material_resource_strings(&table);
-    assert_eq!(need, "%s|braucht noch");
-    assert_eq!(none, "%s braucht kein|weiteres Baumaterial.");
-    assert_eq!(
-        object_no_dig_resource_string(&table),
-        "%s kann|nicht graben."
+    runtime_assert_eq!(
+        need => "%s|braucht noch";
+        none => "%s braucht kein|weiteres Baumaterial.";
+        object_no_dig_resource_string(&table) => "%s kann|nicht graben.";
+        default_rank_resource_names(&table)[1] => "Fähnrich";
     );
-    assert_eq!(default_rank_resource_names(&table)[1], "Fähnrich");
     let columns = build_runtime_help_columns(&table.entries).test_value();
     assert!(columns.left.starts_with("[Spielfunktionen]\n"));
     assert!(columns.left.contains("F1</c> - Hilfe"));
@@ -8088,26 +6707,16 @@ fn runtime_definition_overload_uses_the_active_language_resource() {
     .test_value();
 
     let table = load_runtime_language_table(Some(&fixture.paths)).test_value();
-    assert_eq!(
-        definition_overload_resource_string(&table),
-        "   %s (%s) überladen."
-    );
+    runtime_assert_eq!(definition_overload_resource_string(&table) => "   %s (%s) überladen.");
 
     let mut app = new_real_menu_app(320, 240);
     app.app_paths = Some(fixture.paths.clone());
     app.reload_application_language_resources().test_value();
     let template = clonk_engine::scenario::verbose_loading::definition_overload_template();
-    assert_eq!(template.as_ref(), "   %s (%s) überladen.");
-    assert_eq!(
-        clonk_engine::scenario::verbose_loading::definition_overload_lines(
-            1,
-            template.as_ref(),
-            "Stein",
-            "ROCK",
-            "Objects.c4d/Rock.c4d",
-            "Mods.c4d/Rock.c4d",
-        ),
-        vec!["   Stein (ROCK) überladen.".to_owned()]
+    runtime_assert_eq!(
+        template.as_ref() => "   %s (%s) überladen.";
+        clonk_engine::scenario::verbose_loading::definition_overload_lines(1, template.as_ref(), "Stein", "ROCK", "Objects.c4d/Rock.c4d", "Mods.c4d/Rock.c4d",) =>
+            vec!["   Stein (ROCK) überladen.".to_owned()];
     );
     clonk_engine::scenario::verbose_loading::set_definition_overload_template(
         clonk_engine::scenario::verbose_loading::DEFAULT_DEFINITION_OVERLOAD_TEMPLATE,
@@ -8126,12 +6735,10 @@ fn runtime_f1_help_displays_live_remapped_key_names() {
     assert!(default_columns.left.contains("F1</c> - "));
     assert!(default_columns.left.contains("Tab</c> - "));
 
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
-            .set(Ok(parse_runtime_key_config(
-                b"[Keys]\nToggleShowHelp=Shift+H\nScoreboardToggle=Escape,Return\n                  MusicToggle=Joy1A\nDbgModeToggle=Ctrl+Alt+D\n",
-            )
-            .expect("parse remapped help chords"))).test_value();
+    install_runtime_key_config(
+        &mut app,
+        Ok(parse_runtime_key_config(b"[Keys]\nToggleShowHelp=Shift+H\nScoreboardToggle=Escape,Return\n                  MusicToggle=Joy1A\nDbgModeToggle=Ctrl+Alt+D\n",).expect("parse remapped help chords")),
+    );
     // The columns are rebuilt lazily, so drop the memoized text.
     app.runtime_help_text_cache = OnceLock::new();
     let columns = app.runtime_help_columns().test_value().clone();
@@ -8144,13 +6751,13 @@ fn runtime_f1_help_displays_live_remapped_key_names() {
     assert!(!columns.left.contains("Tab</c> - "), "{}", columns.left);
     // A gamepad override has no keyboard name, exactly like an
     // unresolvable code.
-    assert!(
+    runtime_assert!(
         columns.left.contains("<c ffff00></c> - "),
         "{}",
         columns.left
     );
     // Modifier order follows C4KeyCodeEx::ToString.
-    assert!(
+    runtime_assert!(
         columns.right.contains("Ctrl+Alt+D</c> - "),
         "{}",
         columns.right
@@ -8158,10 +6765,7 @@ fn runtime_f1_help_displays_live_remapped_key_names() {
 
     // Draw order and the localized right-hand column are untouched.
     assert!(columns.left.starts_with('['));
-    assert_eq!(
-        columns.right.lines().count(),
-        default_columns.right.lines().count()
-    );
+    runtime_assert_eq!(columns.right.lines().count() => default_columns.right.lines().count());
 }
 
 #[test]
@@ -8187,28 +6791,19 @@ fn runtime_language_table_loads_from_language_pack() {
         "IDS_LANG_CHARSET=UTF-8\nProbe=wrong namespace\n",
     )
     .test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[General]\nLanguageEx=US, FI\n").test_value();
 
-    assert_eq!(
-        classic_loader_language_sequence(&paths).expect("component language sequence"),
-        vec!["US".to_string(), " F".to_string()]
-    );
-    assert_eq!(
-        classic_runtime_language_sequence(&paths).expect("LoadLanguage sequence"),
-        vec!["US".to_string(), "FI".to_string()]
+    runtime_assert_eq!(
+        classic_loader_language_sequence(&paths).expect("component language sequence") => vec!["US".to_string(), " F".to_string()];
+        classic_runtime_language_sequence(&paths).expect("LoadLanguage sequence") => vec!["US".to_string(), "FI".to_string()];
     );
 
     let table = load_runtime_language_table(Some(&paths)).test_value();
-    assert_eq!(table.charset, RuntimeHelpCharset::Utf8);
-    assert_eq!(
-        table.entries.get("Probe").map(String::as_str),
-        Some("paketti")
+    runtime_assert_eq!(
+        table.charset => RuntimeHelpCharset::Utf8;
+        table.entries.get("Probe").map(String::as_str) => Some("paketti");
     );
 }
 
@@ -8233,11 +6828,7 @@ fn global_system_scripts_use_pack_only_string_table() {
         "PackProbe=Pack-localized global\n",
     )
     .test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
 
@@ -8260,11 +6851,7 @@ fn global_system_scripts_do_not_hide_invalid_explicit_language_config() {
         "global func Probe() { return true; }\n",
     )
     .test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(
         paths.config_file(),
@@ -8308,11 +6895,7 @@ fn runtime_key_config_loads_known_remaps_from_directory_and_packed_groups() {
         system.join("LanguageUS.txt"),
     )
     .test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
 
@@ -8323,12 +6906,9 @@ fn runtime_key_config_loads_known_remaps_from_directory_and_packed_groups() {
     )
     .test_value();
     let loaded = load_runtime_global_key_config(Some(&paths)).test_value();
-    assert_eq!(
-        loaded.net_observer_next_player,
-        vec![
-            RuntimeKeyChord::keyboard(VirtualKeyCode::ArrowRight, ModifiersState::empty()),
-            RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty()),
-        ]
+    runtime_assert_eq!(
+        loaded.net_observer_next_player =>
+            vec![RuntimeKeyChord::keyboard(VirtualKeyCode::ArrowRight, ModifiersState::empty()), RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty()),];
     );
     fs::write(
         extra.join("kEyCoNfIg.TxT"),
@@ -8336,16 +6916,7 @@ fn runtime_key_config_loads_known_remaps_from_directory_and_packed_groups() {
     )
     .test_value();
     let loaded = load_runtime_global_key_config(Some(&paths)).test_value();
-    assert_eq!(
-        loaded.override_for("ToggleShowHelp"),
-        Some(
-            [RuntimeKeyChord::keyboard(
-                VirtualKeyCode::F2,
-                ModifiersState::SHIFT,
-            )]
-            .as_slice()
-        )
-    );
+    runtime_assert_eq!(loaded.override_for("ToggleShowHelp") => Some([RuntimeKeyChord::keyboard(VirtualKeyCode::F2, ModifiersState::SHIFT,)].as_slice()));
     assert!(loaded.override_for("UnknownAction").is_none());
     guard_runtime_global_key_config(Some(&paths)).test_value();
 
@@ -8360,12 +6931,9 @@ fn runtime_key_config_loads_known_remaps_from_directory_and_packed_groups() {
     )
     .test_value();
     let loaded = load_runtime_global_key_config(Some(&paths)).test_value();
-    assert_eq!(
-        loaded.net_observer_next_player,
-        vec![
-            RuntimeKeyChord::keyboard(VirtualKeyCode::ArrowRight, ModifiersState::empty()),
-            RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty()),
-        ]
+    runtime_assert_eq!(
+        loaded.net_observer_next_player =>
+            vec![RuntimeKeyChord::keyboard(VirtualKeyCode::ArrowRight, ModifiersState::empty()), RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty()),];
     );
     fs::write(
         &extra,
@@ -8377,16 +6945,7 @@ fn runtime_key_config_loads_known_remaps_from_directory_and_packed_groups() {
     )
     .test_value();
     let loaded = load_runtime_global_key_config(Some(&paths)).test_value();
-    assert_eq!(
-        loaded.override_for("ToggleShowHelp"),
-        Some(
-            [RuntimeKeyChord::keyboard(
-                VirtualKeyCode::F2,
-                ModifiersState::empty(),
-            )]
-            .as_slice()
-        )
-    );
+    runtime_assert_eq!(loaded.override_for("ToggleShowHelp") => Some([RuntimeKeyChord::keyboard(VirtualKeyCode::F2, ModifiersState::empty(),)].as_slice()));
     guard_runtime_global_key_config(Some(&paths)).test_value();
 
     fs::write(&extra, b"not a C4Group archive").test_value();
@@ -8402,11 +6961,7 @@ fn runtime_f1_key_config_ownership_is_snapshotted_once_per_game() {
     let install = tempdir();
     let user_data = tempdir();
     fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     app.app_paths = Some(paths);
     app.configure_running_state("First game".to_string(), DEFAULT_GROUND_HEIGHT);
@@ -8430,18 +6985,10 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
     let install = tempdir();
     let user_data = tempdir();
     fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[Graphics]\nUpperBoard=Small\n").test_value();
-    assert_eq!(
-        load_display_flags(Some(&paths)).upper_board,
-        UpperBoardMode::Small,
-        "the production guard must see the persisted mode"
-    );
+    runtime_assert_eq!(load_display_flags(Some(&paths)).upper_board => UpperBoardMode::Small, "the production guard must see the persisted mode");
 
     for (mode, expected_top) in [
         (UpperBoardMode::Hide, 0),
@@ -8455,11 +7002,7 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
         assert!(app.runtime_help_visible, "mode {mode:?}");
         let mut frame = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut frame);
-        assert_eq!(
-            app.graphics.preferred_dialog_rect(None).y,
-            expected_top,
-            "mode {mode:?}"
-        );
+        runtime_assert_eq!(app.graphics.preferred_dialog_rect(None).y => expected_top, "mode {mode:?}");
     }
 
     let mut missing_board = new_running_sandbox_app();
@@ -8560,23 +7103,15 @@ fn upper_board_display_toggle_reinitializes_geometry_synchronously() {
         .test_value();
 
     assert_eq!(app.display_flags.upper_board, UpperBoardMode::Small);
-    assert!(
+    runtime_assert!(
         app.graphics.upper_board_text_strip_width() > initial_strip_width,
         "the synchronous reinitialization latches the current 100-hour game time"
     );
-    assert_eq!(
-        app.graphics.preferred_dialog_rect(None).y,
-        25,
-        "Display:UpperBoard reinitializes viewport/dialog geometry before the next render"
-    );
-    assert_eq!(app.graphics.viewport_rect(owner).expect("viewport").y, 25);
-    assert_eq!(app.graphics.preferred_dialog_rect(Some(owner)).y, 25);
-    assert_eq!(
-        app.active_ingame_mouse_viewport()
-            .expect("active mouse viewport")
-            .rect
-            .y,
-        25
+    runtime_assert_eq!(app.graphics.preferred_dialog_rect(None).y => 25, "Display:UpperBoard reinitializes viewport/dialog geometry before the next render");
+    runtime_assert_eq!(
+        app.graphics.viewport_rect(owner).expect("viewport").y => 25;
+        app.graphics.preferred_dialog_rect(Some(owner)).y => 25;
+        app.active_ingame_mouse_viewport().expect("active mouse viewport").rect.y => 25;
     );
 }
 
@@ -8640,15 +7175,7 @@ fn custom_player_f1_binding_outranks_help_when_control_scope_is_active() {
         .control_style = true;
     app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     assert!(!app.runtime_help_visible);
-    assert_ne!(
-        app.engine
-            .player(app.local_owner)
-            .expect("local player")
-            .control
-            .pressed_coms
-            & (1 << clonk_engine::COM_LEFT),
-        0,
-    );
+    runtime_assert_ne!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     app.test_key(VirtualKeyCode::F1, ElementState::Released);
     assert!(!app.runtime_help_visible);
 
@@ -8676,56 +7203,24 @@ fn secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
         (VirtualKeyCode::F1, b"[Keys]\nKbd2Key7=F1\n".as_slice()),
         (VirtualKeyCode::F3, b"[Keys]\nKbd2Key7=F3\n".as_slice()),
     ] {
-        app.runtime_key_config_cache = OnceLock::new();
-        app.runtime_key_config_cache
-            .set(Ok(
-                parse_runtime_key_config(source).expect("parse secondary player remap")
-            ))
-            .test_value();
+        install_runtime_key_config(
+            &mut app,
+            Ok(parse_runtime_key_config(source).expect("parse secondary player remap")),
+        );
 
         app.test_key(key, ElementState::Pressed);
-        assert_eq!(
-            app.engine
-                .player(primary)
-                .expect("primary local player")
-                .control
-                .pressed_coms
-                & left_mask,
-            0,
-        );
-        assert_ne!(
-            app.engine
-                .player(secondary)
-                .expect("secondary local player")
-                .control
-                .pressed_coms
-                & left_mask,
-            0,
-        );
+        runtime_assert_eq!(app.engine.player(primary).expect("primary local player").control.pressed_coms & left_mask => 0);
+        runtime_assert_ne!(app.engine.player(secondary).expect("secondary local player").control.pressed_coms & left_mask => 0);
         assert!(app.pressed_engine_keys.contains(&key));
         assert!(!app.runtime_help_visible);
         assert!(app.runtime_flash_message.is_none());
 
         app.test_key(key, ElementState::Released);
-        assert_eq!(
-            app.engine
-                .player(secondary)
-                .expect("secondary local player")
-                .control
-                .pressed_coms
-                & left_mask,
-            0,
+        runtime_assert_eq!(
+            app.engine.player(secondary).expect("secondary local player").control.pressed_coms & left_mask => 0,
             "{key:?} release must use the matching secondary owner's auto-stop style",
         );
-        assert_eq!(
-            app.engine
-                .player(primary)
-                .expect("primary local player")
-                .control
-                .pressed_coms
-                & left_mask,
-            0,
-        );
+        runtime_assert_eq!(app.engine.player(primary).expect("primary local player").control.pressed_coms & left_mask => 0);
         assert!(!app.pressed_engine_keys.contains(&key));
         assert!(!app.runtime_help_visible);
         assert!(app.runtime_flash_message.is_none());
@@ -8759,15 +7254,7 @@ fn modified_f1_does_not_match_an_unmodified_player_binding() {
         for state in [ElementState::Pressed, ElementState::Released] {
             app.test_key(VirtualKeyCode::F1, state);
             assert!(!app.runtime_help_visible, "modifiers {modifiers:?}");
-            assert_eq!(
-                app.engine
-                    .player(app.local_owner)
-                    .expect("local player")
-                    .control
-                    .pressed_coms,
-                pressed_coms,
-                "modifiers {modifiers:?}, state {state:?}",
-            );
+            runtime_assert_eq!(app.engine.player(app.local_owner).expect("local player").control.pressed_coms => pressed_coms, "modifiers {modifiers:?}, state {state:?}");
             let mut expected_raw_keys = pressed_engine_keys.clone();
             match state {
                 ElementState::Pressed => {
@@ -8777,11 +7264,8 @@ fn modified_f1_does_not_match_an_unmodified_player_binding() {
                     expected_raw_keys.remove(&VirtualKeyCode::F1);
                 }
             }
-            assert_eq!(
-                        app.pressed_engine_keys, expected_raw_keys,
-                        "raw physical state precedes modified priority dispatch: modifiers {modifiers:?}, state {state:?}",
-                    );
-            assert!(
+            runtime_assert_eq!(app.pressed_engine_keys => expected_raw_keys, "raw physical state precedes modified priority dispatch: modifiers {modifiers:?}, state {state:?}");
+            runtime_assert!(
                 app.show_startup_hint,
                 "modifiers {modifiers:?}, state {state:?}"
             );
@@ -8792,40 +7276,37 @@ fn modified_f1_does_not_match_an_unmodified_player_binding() {
 #[test]
 fn modified_f1_refuses_an_unrepresented_key_config_on_both_edges() {
     let mut app = new_running_sandbox_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
-        .set(Err("Extra.c4g/KeyConfig.txt override".to_string()))
-        .test_value();
+    install_runtime_key_config(
+        &mut app,
+        Err("Extra.c4g/KeyConfig.txt override".to_string()),
+    );
     app.test_modifiers(ModifiersState::ALT);
 
     for state in [ElementState::Pressed, ElementState::Released] {
         let error = app
             .handle_key(VirtualKeyCode::F1, state)
             .expect_err("custom global-key ownership must precede modifier fallthrough");
-        assert!(matches!(
-            error,
-            EngineError::ClassicMenuParityBoundary { .. }
-        ));
-        assert!(!app.runtime_help_visible);
+        runtime_assert!(
+            matches!(error, EngineError::ClassicMenuParityBoundary {..});
+            !app.runtime_help_visible;
+        );
     }
 }
 
 #[test]
 fn unresolved_runtime_help_language_fails_typed_before_pixels() {
     let mut input_app = new_running_sandbox_app();
-    input_app.runtime_key_config_cache = OnceLock::new();
-    input_app
-        .runtime_key_config_cache
-        .set(Err("Extra.c4g/KeyConfig.txt override".to_string()))
-        .test_value();
+    install_runtime_key_config(
+        &mut input_app,
+        Err("Extra.c4g/KeyConfig.txt override".to_string()),
+    );
     let error = input_app
         .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
         .expect_err("unrepresented key config must fail before toggling");
-    assert!(matches!(
-        error,
-        EngineError::ClassicMenuParityBoundary { .. }
-    ));
-    assert!(!input_app.runtime_help_visible);
+    runtime_assert!(
+        matches!(error, EngineError::ClassicMenuParityBoundary {..});
+        !input_app.runtime_help_visible;
+    );
 
     let mut app = new_classic_running_sandbox_app();
     app.runtime_help_visible = true;
@@ -8866,21 +7347,19 @@ fn modified_f1_retains_downstream_priority_without_toggling_help() {
         let mut before_pixels = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut before_pixels);
 
-        app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-        app.test_key(VirtualKeyCode::F1, ElementState::Released);
+        tap_runtime_key(&mut app, VirtualKeyCode::F1);
 
         let after = runtime_global_ui_snapshot(&app);
-        assert_eq!(after.status_text, before.status_text);
-        assert_eq!(after.message_dialogs, before.message_dialogs);
-        assert_eq!(after.game_over_open, before.game_over_open);
-        assert_eq!(after.ingame_page, before.ingame_page);
-        assert_eq!(after.object_menu_open, before.object_menu_open);
-        assert_eq!(after.context_menu_open, before.context_menu_open);
-        assert_eq!(after.runtime_help_visible, before.runtime_help_visible);
-        assert_eq!(after.pressed_engine_keys, before.pressed_engine_keys);
-        assert_eq!(
-            after.message_dialog_consumed_keys,
-            before.message_dialog_consumed_keys
+        runtime_assert_eq!(
+            after.status_text => before.status_text;
+            after.message_dialogs => before.message_dialogs;
+            after.game_over_open => before.game_over_open;
+            after.ingame_page => before.ingame_page;
+            after.object_menu_open => before.object_menu_open;
+            after.context_menu_open => before.context_menu_open;
+            after.runtime_help_visible => before.runtime_help_visible;
+            after.pressed_engine_keys => before.pressed_engine_keys;
+            after.message_dialog_consumed_keys => before.message_dialog_consumed_keys;
         );
         let mut after_pixels = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut after_pixels);
@@ -8896,45 +7375,35 @@ fn f4_player_tooltip_names_follow_retained_visibility_and_effective_name() {
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
     app.control_player_infos.replace_snapshot(
         3,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 7,
-            players: vec![
+        [clonk_engine::PlayerInfoControlData::new(
+            7,
+            0,
+            vec![
                 clonk_engine::ControlPlayerInfoEntry {
                     id: 1,
-                    name: clonk_engine::LegacyCString::from_bytes(b"Raw".to_vec())
-                        .expect("raw player name"),
-                    league_account: clonk_engine::LegacyCString::from_bytes(
-                        b"Visible account".to_vec(),
-                    )
-                    .expect("league account"),
+                    name: legacy_cstring(b"Raw"),
+                    league_account: legacy_cstring(b"Visible account"),
                     ..Default::default()
                 },
                 clonk_engine::ControlPlayerInfoEntry {
                     id: 2,
-                    name: clonk_engine::LegacyCString::from_bytes(b"Removed".to_vec())
-                        .expect("removed player name"),
+                    name: legacy_cstring(b"Removed"),
                     flags: clonk_engine::PLAYER_INFO_FLAG_REMOVED,
                     ..Default::default()
                 },
                 clonk_engine::ControlPlayerInfoEntry {
                     id: 3,
-                    name: clonk_engine::LegacyCString::from_bytes(b"Invisible".to_vec())
-                        .expect("invisible player name"),
+                    name: legacy_cstring(b"Invisible"),
                     flags: clonk_engine::PLAYER_INFO_FLAG_INVISIBLE,
                     ..Default::default()
                 },
             ],
-            ..Default::default()
-        }],
+            -1,
+        )],
     );
 
     let (_, rows, _) = app.runtime_client_list_snapshot();
-    assert_eq!(
-        rows.iter()
-            .find(|row| row.client_id == 7)
-            .map(|row| row.player_names.clone()),
-        Some(vec!["Visible account".to_string()])
-    );
+    runtime_assert_eq!(rows.iter().find(|row| row.client_id == 7).map(|row| row.player_names.clone()) => Some(vec!["Visible account".to_string()]));
 }
 
 #[test]
@@ -8950,66 +7419,40 @@ fn f4_control_mode_waits_for_status_commit() {
 
     app.apply_runtime_client_list_option(LobbyOptionKind::ControlMode, 1)
         .test_value();
-    assert_eq!(app.runtime_network_control_mode, Some(1));
-    assert_eq!(app.runtime_network_committed_control_mode, Some(0));
-    assert_eq!(
-        app.runtime_client_list
-            .as_ref()
-            .expect("F4 dialog remains open")
-            .option_rows()
-            .iter()
-            .find(|row| row.kind == LobbyOptionKind::ControlMode)
-            .map(|row| row.value.as_str()),
-        Some(labels.control_mode_decentral.as_str())
+    runtime_assert_eq!(
+        app.runtime_network_control_mode => Some(1);
+        app.runtime_network_committed_control_mode => Some(0);
+        app.runtime_client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
+            Some(labels.control_mode_decentral.as_str());
     );
 
-    let expected = clonk_network::NetworkStatus {
-        state: clonk_network::NETWORK_STATE_GO,
-        control_mode: 1,
-        target_tick: 40,
-    };
-    assert!(commands
+    let expected = clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 1, 40);
+    runtime_assert!(commands
         .take_runtime_status_commands()
         .iter()
         .any(|command| command == &network::TestRuntimeStatusCommand::Change(expected)));
     app.handle_status_committed(expected).test_value();
     app.refresh_runtime_client_list();
-    assert_eq!(app.runtime_network_committed_control_mode, Some(1));
-    assert_eq!(
-        app.runtime_client_list
-            .as_ref()
-            .expect("F4 dialog remains open")
-            .option_rows()
-            .iter()
-            .find(|row| row.kind == LobbyOptionKind::ControlMode)
-            .map(|row| row.value.as_str()),
-        Some(labels.control_mode_central.as_str())
+    runtime_assert_eq!(
+        app.runtime_network_committed_control_mode => Some(1);
+        app.runtime_client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
+            Some(labels.control_mode_central.as_str());
     );
 
     app.host_reference_paused = true;
     app.apply_runtime_client_list_option(LobbyOptionKind::ControlMode, 0)
         .test_value();
-    let paused = clonk_network::NetworkStatus {
-        state: clonk_network::NETWORK_STATE_PAUSE,
-        control_mode: 0,
-        target_tick: 40,
-    };
-    assert!(commands
+    let paused = clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_PAUSE, 0, 40);
+    runtime_assert!(commands
         .take_runtime_status_commands()
         .iter()
         .any(|command| command == &network::TestRuntimeStatusCommand::Change(paused)));
     app.handle_status_committed(paused).test_value();
     app.refresh_runtime_client_list();
-    assert_eq!(app.runtime_network_committed_control_mode, Some(1));
-    assert_eq!(
-        app.runtime_client_list
-            .as_ref()
-            .expect("F4 dialog remains open")
-            .option_rows()
-            .iter()
-            .find(|row| row.kind == LobbyOptionKind::ControlMode)
-            .map(|row| row.value.as_str()),
-        Some(labels.control_mode_central.as_str())
+    runtime_assert_eq!(
+        app.runtime_network_committed_control_mode => Some(1);
+        app.runtime_client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
+            Some(labels.control_mode_central.as_str());
     );
 
     let resumed = clonk_network::NetworkStatus {
@@ -9018,16 +7461,10 @@ fn f4_control_mode_waits_for_status_commit() {
     };
     app.handle_status_committed(resumed).test_value();
     app.refresh_runtime_client_list();
-    assert_eq!(app.runtime_network_committed_control_mode, Some(0));
-    assert_eq!(
-        app.runtime_client_list
-            .as_ref()
-            .expect("F4 dialog remains open")
-            .option_rows()
-            .iter()
-            .find(|row| row.kind == LobbyOptionKind::ControlMode)
-            .map(|row| row.value.as_str()),
-        Some(labels.control_mode_decentral.as_str())
+    runtime_assert_eq!(
+        app.runtime_network_committed_control_mode => Some(0);
+        app.runtime_client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
+            Some(labels.control_mode_decentral.as_str());
     );
 }
 
@@ -9084,10 +7521,7 @@ fn runtime_pause_applies_direct_script_halt_and_toggle_requests() {
         .call_scenario_script_function("Toggle", Vec::new())
         .test_value();
     game_over.test_update();
-    assert_eq!(
-        game_over.offline_halt_count, 1,
-        "evaluation keeps the halt acquired by C4GameOverDlg::OnShown"
-    );
+    runtime_assert_eq!(game_over.offline_halt_count => 1, "evaluation keeps the halt acquired by C4GameOverDlg::OnShown");
     game_over.test_modifiers(ModifiersState::ALT);
     game_over.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     assert!(game_over.game_over_dialog.is_none());
@@ -9107,11 +7541,7 @@ fn runtime_pause_sync_control_inside_go_commit_observes_running_status() {
         let (_events, mut commands) = install_running_network_stub(&mut app, local_client_id, 0, 1);
         app.network_is_league = true;
         app.network_control_running = false;
-        let go = clonk_network::NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 0,
-        };
+        let go = clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 1, 0);
         app.runtime_network_status_barrier = Some(RuntimeNetworkStatusBarrier {
             status: go,
             local_reached: true,
@@ -9123,8 +7553,7 @@ fn runtime_pause_sync_control_inside_go_commit_observes_running_status() {
             vec![NetworkControl::Script(clonk_engine::ScriptControlData {
                 target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
                 strictness: clonk_engine::ScriptStrictness::Strict3,
-                script: clonk_engine::LegacyCString::from_bytes(script.to_vec())
-                    .expect("script is NUL-free"),
+                script: legacy_cstring(script),
                 by_client: 0,
             })],
         );
@@ -9135,7 +7564,7 @@ fn runtime_pause_sync_control_inside_go_commit_observes_running_status() {
             assert_eq!(pause.state, clonk_network::NETWORK_STATE_PAUSE);
             assert!(app.league_votes.paused_for_vote);
         } else {
-            assert!(
+            runtime_assert!(
                 app.runtime_network_status_barrier.is_none(),
                 "client {local_client_id} left an unexpected barrier for {script:?}: {:?}",
                 app.runtime_network_status_barrier
@@ -9151,11 +7580,7 @@ fn runtime_pause_sync_control_inside_go_commit_observes_running_status() {
                 by_client: i32::try_from(local_client_id).test_value(),
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            commands.take_submitted_votes(),
-            expected_votes,
-            "client {local_client_id} observes the native status ordering for {script:?}"
-        );
+        runtime_assert_eq!(commands.take_submitted_votes() => expected_votes, "client {local_client_id} observes the native status ordering for {script:?}");
         assert!(!app.take_exit_request());
     }
 }
@@ -9193,11 +7618,7 @@ fn runtime_config_booleans_follow_stdcompiler_grammar_and_preserve_defaults() {
         ("", None),
         ("wobble", None),
     ] {
-        assert_eq!(
-            parse_native_config_bool(raw),
-            expected,
-            "{raw:?} must follow the native Boolean grammar"
-        );
+        runtime_assert_eq!(parse_native_config_bool(raw) => expected, "{raw:?} must follow the native Boolean grammar");
     }
 
     // Invalid input keeps each key's adapted default, in both directions.
@@ -9224,11 +7645,11 @@ fn runtime_config_booleans_follow_stdcompiler_grammar_and_preserve_defaults() {
         let kept = flags(&format!(
             "[Graphics]\nShowCrewNames={invalid}\nShowClock={invalid}\n"
         ));
-        assert!(
+        runtime_assert!(
             kept.player_names,
             "{invalid:?} must leave the default-true ShowCrewNames alone"
         );
-        assert!(
+        runtime_assert!(
             !kept.clock,
             "{invalid:?} must leave the default-false ShowClock alone"
         );
@@ -9244,15 +7665,8 @@ fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
     // save-site audits and must not be written as a side effect.
     let mut app = new_state_only_lightweight_running_sandbox_app();
     let user_data = tempdir();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let repository = test_repository_root();
+    let (_guard, paths) = guarded_test_app_paths(Some(repository), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(
         paths.config_file(),
@@ -9288,13 +7702,7 @@ fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
             .test_value();
     }
 
-    assert_eq!(
-        app.ingame_menu
-            .get(app.local_owner)
-            .test_value()
-            .selection(),
-        1
-    );
+    runtime_assert_eq!(app.ingame_menu.get(app.local_owner).test_value().selection() => 1);
     assert!(!app.display_flags.player_names);
     assert!(!app.display_flags.clonk_names);
     assert!(app.display_flags.clock);
@@ -9302,37 +7710,17 @@ fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
     assert_eq!(app.display_flags.upper_board, UpperBoardMode::Small);
     assert_eq!(app.deferred_config.len(), 5);
 
-    assert_eq!(
-        fs::read(paths.config_file()).test_value(),
-        initial_config,
-        "Display toggles mutate the process-local config only until shutdown"
-    );
+    runtime_assert_eq!(fs::read(paths.config_file()).test_value() => initial_config, "Display toggles mutate the process-local config only until shutdown");
     app.flush_deferred_config();
     let after_flush = Config::load(paths.config_file()).test_value();
-    assert_eq!(
-        after_flush.get_in(Some("Graphics"), "ShowCrewNames"),
-        Some("false")
-    );
-    assert_eq!(
-        after_flush.get_in(Some("Graphics"), "ShowCrewCNames"),
-        Some("false")
-    );
-    assert_eq!(
-        after_flush.get_in(Some("Graphics"), "ShowClock"),
-        Some("true")
-    );
-    assert_eq!(
-        after_flush.get_in(Some("Graphics"), "UpperBoard"),
-        Some("Small")
-    );
-    assert_eq!(after_flush.get_in(Some("General"), "FPS"), Some("true"));
-    assert_eq!(
-        after_flush.get_in(Some("General"), "UnrelatedGeneral"),
-        Some("keep")
-    );
-    assert_eq!(
-        after_flush.get_in(Some("Graphics"), "UnrelatedGraphics"),
-        Some("keep")
+    runtime_assert_eq!(
+        after_flush.get_in(Some("Graphics"), "ShowCrewNames") => Some("false");
+        after_flush.get_in(Some("Graphics"), "ShowCrewCNames") => Some("false");
+        after_flush.get_in(Some("Graphics"), "ShowClock") => Some("true");
+        after_flush.get_in(Some("Graphics"), "UpperBoard") => Some("Small");
+        after_flush.get_in(Some("General"), "FPS") => Some("true");
+        after_flush.get_in(Some("General"), "UnrelatedGeneral") => Some("keep");
+        after_flush.get_in(Some("Graphics"), "UnrelatedGraphics") => Some("keep");
     );
 
     let reopened = load_display_flags(Some(&paths));
@@ -9354,14 +7742,14 @@ fn show_stats_is_opt_in_and_follows_the_native_boolean_grammar() {
     let flags =
         |body: &str| runtime_config_value(Some(body), |paths| load_display_flags(Some(paths)));
 
-    assert!(
+    runtime_assert!(
         !flags("[Graphics]\nShowClock=1\n").show_stats,
         "an untouched key leaves the overlay off"
     );
     assert!(flags("[Graphics]\nShowStats=1\n").show_stats);
     assert!(!flags("[Graphics]\nShowStats=0\n").show_stats);
     for invalid in ["TRUE", "yes", "on", "wobble"] {
-        assert!(
+        runtime_assert!(
             !flags(&format!("[Graphics]\nShowStats={invalid}\n")).show_stats,
             "{invalid:?} must leave the default-false ShowStats alone"
         );
@@ -9471,7 +7859,7 @@ fn render_inactive_bitmask_gates_unfocused_fullscreen_and_console_redraw() {
     // An active window always draws, whatever the mask says.
     for shell_is_console in [false, true] {
         for configured in [0, 1, 2, 3] {
-            assert!(
+            runtime_assert!(
                 render_inactive_allows_drawing(configured, true, shell_is_console, true, false),
                 "an active window always draws (mask={configured}, console={shell_is_console})"
             );
@@ -9526,16 +7914,12 @@ fn the_shipped_default_keeps_an_unfocused_game_window_drawing() {
     let mask = |body| runtime_config_value(body, |paths| load_render_inactive_mask(Some(paths)));
 
     let shipped = mask(None);
-    assert_eq!(
-        shipped,
-        RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE,
-        "both shells draw while inactive unless the player says otherwise"
-    );
-    assert!(
+    runtime_assert_eq!(shipped => RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE, "both shells draw while inactive unless the player says otherwise");
+    runtime_assert!(
         render_inactive_allows_drawing(shipped, false, false, true, false),
         "an Alt-Tabbed game window keeps its picture current"
     );
-    assert!(
+    runtime_assert!(
         render_inactive_allows_drawing(shipped, false, true, true, false),
         "the developer console keeps repainting exactly as C++ does"
     );
@@ -9543,7 +7927,7 @@ fn the_shipped_default_keeps_an_unfocused_game_window_drawing() {
     // The oracle default remains reachable, and still withholds the game.
     let oracle = mask(Some("[Graphics]\nRenderInactive=2\n"));
     assert_eq!(oracle, RENDER_INACTIVE_CONSOLE);
-    assert!(!render_inactive_allows_drawing(
+    runtime_assert!(!render_inactive_allows_drawing(
         oracle, false, false, true, false
     ));
 
@@ -9571,7 +7955,7 @@ fn the_shipped_default_keeps_an_unfocused_game_window_drawing() {
 fn the_inactive_gate_never_withholds_the_first_frame() {
     for shell_is_console in [false, true] {
         for configured in [0, 1, 2, 3] {
-            assert!(
+            runtime_assert!(
                 render_inactive_allows_drawing(configured, false, shell_is_console, false, false),
                 "frame one maps the window (mask={configured}, console={shell_is_console})"
             );
@@ -9579,7 +7963,7 @@ fn the_inactive_gate_never_withholds_the_first_frame() {
     }
 
     // Once a frame is on screen the configured mask governs again.
-    assert!(!render_inactive_allows_drawing(
+    runtime_assert!(!render_inactive_allows_drawing(
         RENDER_INACTIVE_CONSOLE,
         false,
         false,
@@ -9622,7 +8006,7 @@ fn a_hidden_window_draws_no_frames_however_the_mask_is_set() {
     assert!(render_inactive_allows_drawing(0, false, false, false, true));
 
     // Revealing it draws again on the very next opportunity.
-    assert!(render_inactive_allows_drawing(
+    runtime_assert!(render_inactive_allows_drawing(
         RENDER_INACTIVE_FULLSCREEN,
         false,
         false,
@@ -9638,14 +8022,10 @@ fn a_hidden_window_draws_no_frames_however_the_mask_is_set() {
 /// focus before it has committed its first buffer.
 #[test]
 fn startup_activity_matches_native_rather_than_the_windowing_systems_focus_report() {
-    assert!(initial_window_active());
-    assert!(render_inactive_allows_drawing(
-        RENDER_INACTIVE_CONSOLE,
-        initial_window_active(),
-        false,
-        true,
-        false
-    ));
+    runtime_assert!(
+        initial_window_active();
+        render_inactive_allows_drawing(RENDER_INACTIVE_CONSOLE, initial_window_active(), false, true, false);
+    );
 }
 
 /// `C4ConfigLogging` (C4Config.cpp:699-718) carries a stdout level plus one
@@ -9658,40 +8038,24 @@ fn logging_section_sets_stdout_level_and_per_component_overrides() {
         |body| runtime_config_value(body, |paths| load_logging_config_directive(Some(paths)));
 
     // Nothing configured leaves the caller's default in force.
-    assert_eq!(directive(None), None);
-    assert_eq!(directive(Some("[General]\nName=Tester\n")), None);
-    assert_eq!(
-        directive(Some("[Logging]\nLogLevelStdout=nonsense\n")),
-        None
+    runtime_assert_eq!(
+        directive(None) => None;
+        directive(Some("[General]\nName=Tester\n")) => None;
+        directive(Some("[Logging]\nLogLevelStdout=nonsense\n")) => None;
     );
 
     // LogLevelStdout raises the global level.
-    assert_eq!(
-        directive(Some("[Logging]\nLogLevelStdout=debug\n")),
-        Some("debug".to_string())
-    );
+    runtime_assert_eq!(directive(Some("[Logging]\nLogLevelStdout=debug\n")) => Some("debug".to_string()));
     // spdlog spellings the port accepts.
-    assert_eq!(
-        directive(Some("[Logging]\nLogLevelStdout=warning\n")),
-        Some("warn".to_string())
-    );
-    assert_eq!(
-        directive(Some("[Logging]\nLogLevelStdout=off\n")),
-        Some("off".to_string())
+    runtime_assert_eq!(
+        directive(Some("[Logging]\nLogLevelStdout=warning\n")) => Some("warn".to_string());
+        directive(Some("[Logging]\nLogLevelStdout=off\n")) => Some("off".to_string());
     );
 
     // A per-component override changes only that component.
-    assert_eq!(
-        directive(Some("[Network]\nLogLevel=trace\n")),
-        Some("clonk_network=trace".to_string())
-    );
+    runtime_assert_eq!(directive(Some("[Network]\nLogLevel=trace\n")) => Some("clonk_network=trace".to_string()));
     // With both, the global level leads and the component follows.
-    assert_eq!(
-        directive(Some(
-            "[Logging]\nLogLevelStdout=info\n[Network]\nLogLevel=trace\n"
-        )),
-        Some("info,clonk_network=trace".to_string())
-    );
+    runtime_assert_eq!(directive(Some("[Logging]\nLogLevelStdout=info\n[Network]\nLogLevel=trace\n")) => Some("info,clonk_network=trace".to_string()));
     // An unknown component name is ignored rather than pinning a target
     // that does not exist.
     assert_eq!(directive(Some("[Nonsense]\nLogLevel=trace\n")), None);

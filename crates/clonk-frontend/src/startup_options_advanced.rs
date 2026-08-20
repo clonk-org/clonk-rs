@@ -1583,12 +1583,7 @@ impl AdvancedConfigScreen {
                     },
                     TextAlign::Left,
                     gamma,
-                    IntRect {
-                        x: rect.x + 3,
-                        y: rect.y,
-                        w: (rect.w - 6).max(0),
-                        h: rect.h,
-                    },
+                    IntRect::new(rect.x + 3, rect.y, (rect.w - 6).max(0), rect.h),
                 );
             }
         }
@@ -1925,60 +1920,55 @@ fn advanced_config_layout_with_offset(
     let screen_height = screen_height.max(1);
     let width = (screen_width * 3 / 4).max(1);
     let height = (screen_height * 3 / 4).max(1);
-    let bounds = IntRect {
-        x: (screen_width - width) / 2 + dialog_offset.0,
-        y: (screen_height - height) / 2 + dialog_offset.1,
-        w: width,
-        h: height,
-    };
-    let caption = IntRect {
-        x: bounds.x + 2,
-        y: bounds.y + 2,
-        w: (bounds.w - 4).max(1),
-        h: CAPTION_HEIGHT.min((bounds.h - 4).max(1)),
-    };
+    let bounds = IntRect::new(
+        (screen_width - width) / 2 + dialog_offset.0,
+        (screen_height - height) / 2 + dialog_offset.1,
+        width,
+        height,
+    );
+    let caption = IntRect::new(
+        bounds.x + 2,
+        bounds.y + 2,
+        (bounds.w - 4).max(1),
+        CAPTION_HEIGHT.min((bounds.h - 4).max(1)),
+    );
     let close_size = 16.min((caption.w - 8).max(1)).min((caption.h - 8).max(1));
-    let close_button = IntRect {
-        x: caption.x + caption.w - close_size - 4,
-        y: caption.y + 4,
-        w: close_size,
-        h: close_size,
-    };
-    let client = IntRect {
-        x: bounds.x + OUTER_MARGIN,
-        y: caption.y + caption.h + OUTER_MARGIN,
-        w: (bounds.w - OUTER_MARGIN * 2).max(1),
-        h: (bounds.y + bounds.h - OUTER_MARGIN - (caption.y + caption.h + OUTER_MARGIN)).max(1),
-    };
+    let close_button = IntRect::new(
+        caption.x + caption.w - close_size - 4,
+        caption.y + 4,
+        close_size,
+        close_size,
+    );
+    let client = IntRect::new(
+        bounds.x + OUTER_MARGIN,
+        caption.y + caption.h + OUTER_MARGIN,
+        (bounds.w - OUTER_MARGIN * 2).max(1),
+        (bounds.y + bounds.h - OUTER_MARGIN - (caption.y + caption.h + OUTER_MARGIN)).max(1),
+    );
     let button_y = client.y + client.h - BUTTON_HEIGHT;
     let list_height = (button_y - BUTTON_GAP - client.y).max(1);
     let section_width = (client.w / 4)
         .clamp(1, 180)
         .min((client.w - TAB_GAP - 1).max(1));
-    let section_list = IntRect {
-        x: client.x,
-        y: client.y,
-        w: section_width,
-        h: list_height,
-    };
-    let settings_list = IntRect {
-        x: section_list.x + section_list.w + TAB_GAP,
-        y: client.y,
-        w: (client.x + client.w - (section_list.x + section_list.w + TAB_GAP)).max(1),
-        h: list_height,
-    };
-    let scrollbar = IntRect {
-        x: settings_list.x + settings_list.w - SCROLLBAR_WIDTH - 2,
-        y: settings_list.y + 2,
-        w: SCROLLBAR_WIDTH.min((settings_list.w - 4).max(1)),
-        h: (settings_list.h - 4).max(1),
-    };
-    let list_client = IntRect {
-        x: settings_list.x + 3,
-        y: settings_list.y + 3,
-        w: (scrollbar.x - 3 - (settings_list.x + 3)).max(1),
-        h: (settings_list.h - 6).max(1),
-    };
+    let section_list = IntRect::new(client.x, client.y, section_width, list_height);
+    let settings_list = IntRect::new(
+        section_list.x + section_list.w + TAB_GAP,
+        client.y,
+        (client.x + client.w - (section_list.x + section_list.w + TAB_GAP)).max(1),
+        list_height,
+    );
+    let scrollbar = IntRect::new(
+        settings_list.x + settings_list.w - SCROLLBAR_WIDTH - 2,
+        settings_list.y + 2,
+        SCROLLBAR_WIDTH.min((settings_list.w - 4).max(1)),
+        (settings_list.h - 4).max(1),
+    );
+    let list_client = IntRect::new(
+        settings_list.x + 3,
+        settings_list.y + 3,
+        (scrollbar.x - 3 - (settings_list.x + 3)).max(1),
+        (settings_list.h - 6).max(1),
+    );
     let section_pitch = if sections.is_empty() {
         TAB_HEIGHT
     } else {
@@ -1987,11 +1977,13 @@ fn advanced_config_layout_with_offset(
     let section_tabs = sections
         .iter()
         .enumerate()
-        .map(|(index, _)| IntRect {
-            x: section_list.x + 2,
-            y: section_list.y + 2 + index as i32 * section_pitch,
-            w: (section_list.w - 4).max(1),
-            h: (section_pitch - 1).max(1),
+        .map(|(index, _)| {
+            IntRect::new(
+                section_list.x + 2,
+                section_list.y + 2 + index as i32 * section_pitch,
+                (section_list.w - 4).max(1),
+                (section_pitch - 1).max(1),
+            )
         })
         .collect();
     let rows = sections
@@ -2021,28 +2013,20 @@ fn advanced_config_layout_with_offset(
         } else {
             travel * scroll_y.clamp(0, maximum_scroll) / maximum_scroll
         };
-    let scrollbar_thumb = IntRect {
-        x: scrollbar.x,
-        y: thumb_y,
-        w: scrollbar.w,
-        h: thumb_height,
-    };
+    let scrollbar_thumb = IntRect::new(scrollbar.x, thumb_y, scrollbar.w, thumb_height);
     let available_buttons = settings_list.w.max(1);
     let button_width = ((available_buttons - BUTTON_GAP) / 2)
         .max(1)
         .min(MAX_BUTTON_WIDTH);
     let buttons_width = button_width * 2 + BUTTON_GAP;
     let button_x = settings_list.x + (settings_list.w - buttons_width) / 2;
-    let save_button = IntRect {
-        x: button_x,
-        y: button_y,
-        w: button_width,
-        h: BUTTON_HEIGHT.min(client.h.max(1)),
-    };
-    let cancel_button = IntRect {
-        x: button_x + button_width + BUTTON_GAP,
-        ..save_button
-    };
+    let save_button = IntRect::new(
+        button_x,
+        button_y,
+        button_width,
+        BUTTON_HEIGHT.min(client.h.max(1)),
+    );
+    let cancel_button = save_button.with_x(button_x + button_width + BUTTON_GAP);
     AdvancedConfigLayout {
         bounds,
         caption,
@@ -2068,33 +2052,23 @@ fn row_layout(
     list_client: IntRect,
     scroll_y: i32,
 ) -> AdvancedConfigRowLayout {
-    let bounds = IntRect {
-        x: list_client.x,
-        y: list_client.y + index as i32 * ROW_PITCH - scroll_y,
-        w: list_client.w,
-        h: ROW_HEIGHT,
-    };
+    let bounds = IntRect::new(
+        list_client.x,
+        list_client.y + index as i32 * ROW_PITCH - scroll_y,
+        list_client.w,
+        ROW_HEIGHT,
+    );
     let label_width = (bounds.w * 42 / 100).max(1);
-    let label = IntRect {
-        x: bounds.x + 3,
-        y: bounds.y,
-        w: (label_width - 6).max(1),
-        h: bounds.h,
-    };
-    let control = IntRect {
-        x: bounds.x + label_width,
-        y: bounds.y + 2,
-        w: (bounds.w - label_width - 3).max(1),
-        h: (bounds.h - 4).max(1),
-    };
+    let label = IntRect::new(bounds.x + 3, bounds.y, (label_width - 6).max(1), bounds.h);
+    let control = IntRect::new(
+        bounds.x + label_width,
+        bounds.y + 2,
+        (bounds.w - label_width - 3).max(1),
+        (bounds.h - 4).max(1),
+    );
     let checkbox = matches!(row.value, AdvancedConfigValue::Bool(_)).then(|| {
         let size = control.h.min(control.w).max(1);
-        IntRect {
-            x: control.x,
-            y: control.y,
-            w: size,
-            h: size,
-        }
+        IntRect::new(control.x, control.y, size, size)
     });
     let has_step_buttons = matches!(row.value, AdvancedConfigValue::Integer { .. })
         || matches!(
@@ -2116,24 +2090,24 @@ fn row_layout(
         0
     };
     let upper_step_height = (control.h / 2).max(1);
-    let decrement_button = has_step_buttons.then_some(IntRect {
-        x: control.x + control.w - step_width,
-        y: control.y + upper_step_height,
-        w: step_width,
-        h: (control.h - upper_step_height).max(1),
-    });
-    let increment_button = has_step_buttons.then_some(IntRect {
-        x: control.x + control.w - step_width,
-        y: control.y,
-        w: step_width,
-        h: upper_step_height,
-    });
-    let edit = is_edit.then_some(IntRect {
-        x: control.x,
-        y: control.y,
-        w: (control.w - step_width).max(1),
-        h: control.h,
-    });
+    let decrement_button = has_step_buttons.then_some(IntRect::new(
+        control.x + control.w - step_width,
+        control.y + upper_step_height,
+        step_width,
+        (control.h - upper_step_height).max(1),
+    ));
+    let increment_button = has_step_buttons.then_some(IntRect::new(
+        control.x + control.w - step_width,
+        control.y,
+        step_width,
+        upper_step_height,
+    ));
+    let edit = is_edit.then_some(IntRect::new(
+        control.x,
+        control.y,
+        (control.w - step_width).max(1),
+        control.h,
+    ));
     AdvancedConfigRowLayout {
         index,
         bounds,
@@ -2199,12 +2173,12 @@ fn draw_edit_box(
         color,
         TextAlign::Left,
         gamma,
-        IntRect {
-            x: rect.x + 2,
-            y: rect.y + 1,
-            w: (rect.w - 4).max(0),
-            h: (rect.h - 2).max(0),
-        },
+        IntRect::new(
+            rect.x + 2,
+            rect.y + 1,
+            (rect.w - 4).max(0),
+            (rect.h - 2).max(0),
+        ),
     );
 }
 
@@ -2263,12 +2237,7 @@ fn intersect_rect(left: IntRect, right: IntRect) -> IntRect {
     let y1 = left.y.max(right.y);
     let x2 = (left.x + left.w).min(right.x + right.w);
     let y2 = (left.y + left.h).min(right.y + right.h);
-    IntRect {
-        x: x1,
-        y: y1,
-        w: (x2 - x1).max(0),
-        h: (y2 - y1).max(0),
-    }
+    IntRect::new(x1, y1, (x2 - x1).max(0), (y2 - y1).max(0))
 }
 
 fn truncate_utf8(mut value: String, maximum: usize) -> String {
@@ -2341,15 +2310,7 @@ mod tests {
     fn advanced_config_sections_are_dynamic_and_selectable() {
         let mut state = controller();
         state.resize(800, 600);
-        assert_eq!(
-            state.layout().bounds,
-            IntRect {
-                x: 100,
-                y: 75,
-                w: 600,
-                h: 450
-            }
-        );
+        assert_eq!(state.layout().bounds, IntRect::new(100, 75, 600, 450));
         assert_eq!(state.sections().len(), 2);
         assert_eq!(
             state.current_section().map(|section| section.name.as_str()),
@@ -2993,12 +2954,12 @@ mod tests {
         let layout = state.layout();
         assert_eq!(
             layout.close_button,
-            IntRect {
-                x: layout.caption.x + layout.caption.w - 20,
-                y: layout.caption.y + 4,
-                w: 16,
-                h: 16,
-            },
+            IntRect::new(
+                layout.caption.x + layout.caption.w - 20,
+                layout.caption.y + 4,
+                16,
+                16
+            ),
             "Dialog::SetTitle uses a 16px close button inset four pixels"
         );
         let title_point = GuiPoint::new(

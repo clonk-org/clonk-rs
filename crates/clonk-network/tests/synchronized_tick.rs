@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use clonk_engine::{
     ClientRemoveControlData, ClientUpdateControlData, ControlPacket as EngineControlPacket,
-    ControlPlayerInfoEntry, LegacyCString, PlayerControlData, SynchronizeControlData,
-    CLIENT_UPDATE_ACTIVATE, CLIENT_UPDATE_SET_OBSERVER,
+    ControlPlayerInfoEntry, PlayerControlData, SynchronizeControlData, CLIENT_UPDATE_ACTIVATE,
+    CLIENT_UPDATE_SET_OBSERVER,
 };
 use clonk_network::{
     connect_client, decode_control_entry_payload, decode_control_packet,
@@ -185,11 +185,7 @@ async fn running_host_with_join_allowed_completes_late_join_after_fresh_snapshot
     let address = listener.local_addr().expect("running host address");
     let config = HostConfig {
         start_tick: START_TICK,
-        initial_status: NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: START_TICK as i32,
-        },
+        initial_status: NetworkStatus::new(NETWORK_STATE_GO, 0, START_TICK as i32),
         allow_join: true,
         ..Default::default()
     };
@@ -197,10 +193,7 @@ async fn running_host_with_join_allowed_completes_late_join_after_fresh_snapshot
     // mode survive, while iTargetTick is omitted and decodes to -1
     // (src/C4Network2.cpp:54-55,108-123;
     // src/C4Network2IO.cpp:1683-1692).
-    let expected_status = NetworkStatus {
-        target_tick: -1,
-        ..config.initial_status
-    };
+    let expected_status = config.initial_status.with_target_tick(-1);
     let mut fresh_snapshot = config
         .initial_join_snapshot
         .clone()
@@ -241,8 +234,7 @@ async fn running_host_with_join_allowed_completes_late_join_after_fresh_snapshot
     fresh_snapshot.dynamic.id = START_TICK as i32;
     fresh_snapshot.dynamic.file_crc = START_TICK;
     fresh_snapshot.dynamic.contents_crc = START_TICK;
-    fresh_snapshot.dynamic.filename =
-        LegacyCString::from_bytes(b"FreshDynamic.c4d".to_vec()).expect("static dynamic name");
+    fresh_snapshot.dynamic.filename = crate::c4(b"FreshDynamic.c4d");
     assert_ne!(fresh_snapshot.dynamic, stale_dynamic);
     host.publish_join_snapshot(fresh_snapshot.clone())
         .await
@@ -303,27 +295,27 @@ async fn deactivation_observer_and_remove_release_waiting_host_controls() {
     for (tick, control) in [
         (
             0,
-            EngineControlPacket::ClientUpdate(ClientUpdateControlData {
-                update_type: CLIENT_UPDATE_ACTIVATE,
-                client_id: client_id as i32,
-                data: 0,
-                by_client: 0,
-            }),
+            EngineControlPacket::ClientUpdate(ClientUpdateControlData::new(
+                CLIENT_UPDATE_ACTIVATE,
+                client_id as i32,
+                0,
+                0,
+            )),
         ),
         (
             1,
-            EngineControlPacket::ClientUpdate(ClientUpdateControlData {
-                update_type: CLIENT_UPDATE_SET_OBSERVER,
-                client_id: client_id as i32,
-                data: 0,
-                by_client: 0,
-            }),
+            EngineControlPacket::ClientUpdate(ClientUpdateControlData::new(
+                CLIENT_UPDATE_SET_OBSERVER,
+                client_id as i32,
+                0,
+                0,
+            )),
         ),
         (
             2,
             EngineControlPacket::ClientRemove(ClientRemoveControlData {
                 client_id: client_id as i32,
-                reason: LegacyCString::from_bytes(b"Removed".to_vec()).unwrap(),
+                reason: crate::c4(b"Removed"),
                 by_client: 0,
             }),
         ),
@@ -371,17 +363,17 @@ async fn player_info_update_request_reaches_host_with_transport_origin() {
     let mut host_events = host.take_event_receiver();
     wait_for_join(&mut host_events, client_id).await;
 
-    let request = PlayerInfoUpdateRequest {
-        client_id: 3,
-        flags: 1,
-        players: vec![ControlPlayerInfoEntry {
+    let request = PlayerInfoUpdateRequest::new(
+        3,
+        1,
+        vec![ControlPlayerInfoEntry {
             id: 0,
             // C4PlayerInfo compilation always writes this StdStrBuf as a
             // C-string, so decode materializes even an empty value.
             league_progress_data_is_null: false,
             ..Default::default()
         }],
-    };
+    );
     client
         .submit_player_info_update(request.clone())
         .await
@@ -396,8 +388,7 @@ async fn player_info_update_request_reaches_host_with_transport_origin() {
             let mut expected = request;
             // C4PlayerInfo's binary reader applies VAL_NameNoEmpty even when
             // the sender encoded an empty default Name.
-            expected.players[0].name =
-                clonk_engine::LegacyCString::from_bytes(b"empty".to_vec()).unwrap();
+            expected.players[0].name = crate::c4(b"empty");
             assert_eq!(actual_request, expected);
         }
         Ok(Some(event)) => panic!("unexpected host event: {event:?}"),
@@ -498,12 +489,7 @@ async fn activation_request_reaches_host_with_transport_origin() {
 }
 
 fn player_control(player: i32, command: i32, data: i32, by_client: i32) -> EngineControlPacket {
-    EngineControlPacket::PlayerControl(PlayerControlData {
-        player,
-        command,
-        data,
-        by_client,
-    })
+    EngineControlPacket::PlayerControl(PlayerControlData::new(player, command, data, by_client))
 }
 
 fn legacy_packet(client_id: u32, control: EngineControlPacket) -> ControlPacket {
@@ -558,12 +544,7 @@ async fn activate_client(
     events: &mut mpsc::Receiver<HostEvent>,
     client_id: u32,
 ) {
-    let update = ClientUpdateControlData {
-        update_type: CLIENT_UPDATE_ACTIVATE,
-        client_id: client_id as i32,
-        data: 1,
-        by_client: 0,
-    };
+    let update = ClientUpdateControlData::new(CLIENT_UPDATE_ACTIVATE, client_id as i32, 1, 0);
     let encoded = encode_control_entry_payload(&EngineControlPacket::ClientUpdate(update.clone()))
         .expect("encode host activation control");
     host.submit_packet(ControlDelivery::Sync, encoded)

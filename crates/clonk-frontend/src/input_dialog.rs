@@ -588,12 +588,12 @@ impl InputDialogController {
                 font.line_height - 2,
             )
         };
-        IntRect {
-            x: caret_x.clamp(client.x, client.x + client.w),
-            y: text_y0,
-            w: 1,
-            h: height.max(1),
-        }
+        IntRect::new(
+            caret_x.clamp(client.x, client.x + client.w),
+            text_y0,
+            1,
+            height.max(1),
+        )
     }
 
     /// The composition's byte range within [`Self::displayed_text`], which is
@@ -669,36 +669,21 @@ impl InputDialogController {
             let x = base_x + self.dialog_offset.0;
             let y = base_y + self.dialog_offset.1;
             let label_width = font.measure(&self.message, true).0 + 4;
-            let empty = IntRect { x, y, w: 0, h: 0 };
+            let empty = IntRect::new(x, y, 0, 0);
             return InputDialogLayout {
-                bounds: IntRect {
-                    x,
-                    y,
-                    w: width,
-                    h: height,
-                },
+                bounds: IntRect::new(x, y, width, height),
                 caption: None,
-                client: IntRect {
-                    x,
-                    y,
-                    w: width,
-                    h: height,
-                },
+                client: IntRect::new(x, y, width, height),
                 close_button: None,
                 icon: empty,
-                message: IntRect {
-                    x: x + 1,
-                    y: y + 1,
-                    w: label_width,
-                    h: edit_height,
-                },
+                message: IntRect::new(x + 1, y + 1, label_width, edit_height),
                 message_text: self.message.clone(),
-                edit: IntRect {
-                    x: x + label_width + 1,
-                    y: y + 1,
-                    w: width - label_width - 2,
-                    h: edit_height,
-                },
+                edit: IntRect::new(
+                    x + label_width + 1,
+                    y + 1,
+                    width - label_width - 2,
+                    edit_height,
+                ),
                 ok_button: empty,
                 cancel_button: empty,
             };
@@ -728,82 +713,62 @@ impl InputDialogController {
         };
         let x = base_x + self.dialog_offset.0;
         let y = base_y + self.dialog_offset.1;
-        let client = IntRect {
-            x,
-            y: y + title_height,
-            w: DIALOG_WIDTH,
-            h: height - title_height,
-        };
+        let client = IntRect::new(x, y + title_height, DIALOG_WIDTH, height - title_height);
 
         // ComponentAligner(GetClientRect(), 10, 10, true).
         let mut remaining_height = client.h;
-        let button_area = IntRect {
-            x: client.x + DIALOG_INDENT,
-            y: client.y + remaining_height - BUTTON_AREA_HEIGHT - DIALOG_INDENT,
-            w: client.w - 2 * DIALOG_INDENT,
-            h: BUTTON_AREA_HEIGHT,
-        };
+        let button_area = IntRect::new(
+            client.x + DIALOG_INDENT,
+            client.y + remaining_height - BUTTON_AREA_HEIGHT - DIALOG_INDENT,
+            client.w - 2 * DIALOG_INDENT,
+            BUTTON_AREA_HEIGHT,
+        );
         remaining_height -= BUTTON_AREA_HEIGHT + 2 * DIALOG_INDENT;
         let edit_height = (font.line_height + 3).max(MIN_WOOD_BAR_HEIGHT);
-        let edit = IntRect {
-            x: client.x + DIALOG_INDENT,
-            y: client.y + remaining_height - edit_height - DIALOG_INDENT,
-            w: client.w - 2 * DIALOG_INDENT,
-            h: edit_height,
-        };
+        let edit = IntRect::new(
+            client.x + DIALOG_INDENT,
+            client.y + remaining_height - edit_height - DIALOG_INDENT,
+            client.w - 2 * DIALOG_INDENT,
+            edit_height,
+        );
         remaining_height -= edit_height + 2 * DIALOG_INDENT;
-        let icon = IntRect {
-            x: client.x + DIALOG_INDENT,
-            y: client.y + DIALOG_INDENT,
-            w: ICON_SIZE,
-            h: ICON_SIZE,
-        };
-        let message = IntRect {
-            x: client.x + ICON_SIZE + 3 * DIALOG_INDENT,
-            y: client.y + DIALOG_INDENT,
-            w: client.w - ICON_SIZE - 4 * DIALOG_INDENT,
-            h: remaining_height - 2 * DIALOG_INDENT,
-        };
+        let icon = IntRect::new(
+            client.x + DIALOG_INDENT,
+            client.y + DIALOG_INDENT,
+            ICON_SIZE,
+            ICON_SIZE,
+        );
+        let message = IntRect::new(
+            client.x + ICON_SIZE + 3 * DIALOG_INDENT,
+            client.y + DIALOG_INDENT,
+            client.w - ICON_SIZE - 4 * DIALOG_INDENT,
+            remaining_height - 2 * DIALOG_INDENT,
+        );
         let group_width = 2 * BUTTON_WIDTH + BUTTON_GAP;
         let first_button_x = button_area.x + button_area.w / 2 - group_width / 2;
         let button_y = button_area.y + button_area.h / 2 - BUTTON_HEIGHT / 2;
 
         InputDialogLayout {
-            bounds: IntRect {
-                x,
-                y,
-                w: DIALOG_WIDTH,
-                h: height,
-            },
-            caption: (title_height > 0).then_some(IntRect {
-                x,
-                y,
-                w: DIALOG_WIDTH,
-                h: title_height,
-            }),
+            bounds: IntRect::new(x, y, DIALOG_WIDTH, height),
+            caption: (title_height > 0).then_some(IntRect::new(x, y, DIALOG_WIDTH, title_height)),
             client,
-            close_button: (title_height > 0).then_some(IntRect {
-                x: x + DIALOG_WIDTH - 20,
-                y: y + 4,
-                w: 16,
-                h: 16,
-            }),
+            close_button: (title_height > 0).then_some(IntRect::new(
+                x + DIALOG_WIDTH - 20,
+                y + 4,
+                16,
+                16,
+            )),
             icon,
             message,
             message_text,
             edit,
-            ok_button: IntRect {
-                x: first_button_x,
-                y: button_y,
-                w: BUTTON_WIDTH,
-                h: BUTTON_HEIGHT,
-            },
-            cancel_button: IntRect {
-                x: first_button_x + BUTTON_WIDTH + BUTTON_GAP,
-                y: button_y,
-                w: BUTTON_WIDTH,
-                h: BUTTON_HEIGHT,
-            },
+            ok_button: IntRect::new(first_button_x, button_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            cancel_button: IntRect::new(
+                first_button_x + BUTTON_WIDTH + BUTTON_GAP,
+                button_y,
+                BUTTON_WIDTH,
+                BUTTON_HEIGHT,
+            ),
         }
     }
 
@@ -1770,12 +1735,7 @@ impl InputDialogController {
                 font.line_height - 2,
             )
         };
-        let clip = IntRect {
-            x: client.x - 2,
-            y: client.y,
-            w: client.w + 4,
-            h: client.h + 1,
-        };
+        let clip = IntRect::new(client.x - 2, client.y, client.w + 4, client.h + 1);
         if let Some((start, end)) = self.selected_range() {
             let x1 = client.x + font.measure(&self.text[..start], false).0 - self.horizontal_scroll;
             let x2 = client.x + font.measure(&self.text[..end], false).0 - self.horizontal_scroll;
@@ -2200,12 +2160,12 @@ impl InputDialogController {
 }
 
 fn edit_client(rect: IntRect) -> IntRect {
-    IntRect {
-        x: rect.x + 4,
-        y: rect.y + 2,
-        w: (rect.w - 8).max(0),
-        h: (rect.h - 4).max(0),
-    }
+    IntRect::new(
+        rect.x + 4,
+        rect.y + 2,
+        (rect.w - 8).max(0),
+        (rect.h - 4).max(0),
+    )
 }
 
 fn center(rect: IntRect) -> GuiPoint {
@@ -2444,87 +2404,15 @@ mod tests {
         let fonts = endeavour_font_set();
         let layout = controller().layout(1280, 720, &fonts.text);
         assert_eq!(fonts.text.line_height, 22);
-        assert_eq!(
-            layout.bounds,
-            IntRect {
-                x: 490,
-                y: 265,
-                w: 300,
-                h: 190
-            }
-        );
-        assert_eq!(
-            layout.caption,
-            Some(IntRect {
-                x: 490,
-                y: 265,
-                w: 300,
-                h: 23
-            })
-        );
-        assert_eq!(
-            layout.client,
-            IntRect {
-                x: 490,
-                y: 288,
-                w: 300,
-                h: 167
-            }
-        );
-        assert_eq!(
-            layout.close_button,
-            Some(IntRect {
-                x: 770,
-                y: 269,
-                w: 16,
-                h: 16
-            })
-        );
-        assert_eq!(
-            layout.icon,
-            IntRect {
-                x: 500,
-                y: 298,
-                w: 40,
-                h: 40
-            }
-        );
-        assert_eq!(
-            layout.message,
-            IntRect {
-                x: 560,
-                y: 298,
-                w: 220,
-                h: 42
-            }
-        );
-        assert_eq!(
-            layout.edit,
-            IntRect {
-                x: 500,
-                y: 360,
-                w: 280,
-                h: 25
-            }
-        );
-        assert_eq!(
-            layout.ok_button,
-            IntRect {
-                x: 515,
-                y: 409,
-                w: 120,
-                h: 32
-            }
-        );
-        assert_eq!(
-            layout.cancel_button,
-            IntRect {
-                x: 645,
-                y: 409,
-                w: 120,
-                h: 32
-            }
-        );
+        assert_eq!(layout.bounds, IntRect::new(490, 265, 300, 190));
+        assert_eq!(layout.caption, Some(IntRect::new(490, 265, 300, 23)));
+        assert_eq!(layout.client, IntRect::new(490, 288, 300, 167));
+        assert_eq!(layout.close_button, Some(IntRect::new(770, 269, 16, 16)));
+        assert_eq!(layout.icon, IntRect::new(500, 298, 40, 40));
+        assert_eq!(layout.message, IntRect::new(560, 298, 220, 42));
+        assert_eq!(layout.edit, IntRect::new(500, 360, 280, 25));
+        assert_eq!(layout.ok_button, IntRect::new(515, 409, 120, 32));
+        assert_eq!(layout.cancel_button, IntRect::new(645, 409, 120, 32));
     }
 
     #[test]
@@ -2541,34 +2429,16 @@ mod tests {
         assert_eq!(state.focused_control(), InputDialogControl::Edit);
         assert_eq!(state.caret(), "alpha beta".len());
         assert_eq!(state.selection(), None);
-        assert_eq!(
-            layout.bounds,
-            IntRect {
-                x: 128,
-                y: 586,
-                w: 1024,
-                h: edit_height + 2,
-            }
-        );
+        assert_eq!(layout.bounds, IntRect::new(128, 586, 1024, edit_height + 2));
         assert_eq!(layout.caption, None);
         assert_eq!(layout.close_button, None);
         assert_eq!(
             layout.message,
-            IntRect {
-                x: 129,
-                y: 587,
-                w: label_width,
-                h: edit_height,
-            }
+            IntRect::new(129, 587, label_width, edit_height)
         );
         assert_eq!(
             layout.edit,
-            IntRect {
-                x: 129 + label_width,
-                y: 587,
-                w: 1024 - label_width - 2,
-                h: edit_height,
-            }
+            IntRect::new(129 + label_width, 587, 1024 - label_width - 2, edit_height)
         );
 
         let label = point_in(layout.message);
@@ -3119,12 +2989,7 @@ mod tests {
             .render_with_cursor_at(&mut without_selection, &resources, false, false, None, now)
             .expect("unselected render");
         let edit = layout.edit;
-        let clip = IntRect {
-            x: edit.x + 2,
-            y: edit.y + 2,
-            w: edit.w - 4,
-            h: edit.h - 3,
-        };
+        let clip = IntRect::new(edit.x + 2, edit.y + 2, edit.w - 4, edit.h - 3);
         let mut inside_difference = false;
         let mut difference_x = (u32::MAX, 0_u32);
         for y in 0..720 {
@@ -3226,12 +3091,7 @@ mod tests {
                 &fonts.text,
                 10,
                 8,
-                IntRect {
-                    x: 0,
-                    y: 0,
-                    w: 80,
-                    h: 40,
-                },
+                IntRect::new(0, 0, 80, 40),
                 None,
             );
             surface

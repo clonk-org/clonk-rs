@@ -1,11 +1,14 @@
 use std::error::Error;
 
 use clonk_engine::{
-    math::C4Fixed, CommandDirection, Engine, JoinPlayerConfig, Landscape, ObjectId, COM_DIG,
-    COM_DOWN, COM_RIGHT, COM_UP,
+    math::C4Fixed, CommandDirection, Engine, Landscape, ObjectId, COM_DIG, COM_DOWN, COM_RIGHT,
+    COM_UP,
 };
 
-use crate::support::real_scenario::load_tutorial;
+use crate::support::real_scenario::{
+    load_tutorial, load_tutorial_with_local_player, object_with_definition,
+    tutorial_message_contains,
+};
 use crate::support::virtual_player::VirtualPlayer;
 
 const DOWN_POSITION_PREFIX: [i32; 21] = [
@@ -20,34 +23,7 @@ const UP_POSITION_PREFIX: [i32; 23] = [
 ];
 
 fn load_tutorial07() -> (Engine, i32) {
-    let mut engine = load_tutorial(7, 0);
-    let owner = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-        name: "Tutorial 7 elevator oracle".to_owned(),
-        player_info_id: 0,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff_00_00,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: true,
-        auto_context_menu: true,
-        startup_player_count: 1,
-    }))
-    .number();
-    (engine, owner)
-}
-
-fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine.message_line_contains(needle)
-}
-
-fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine.first_object_for_definition(definition)
+    load_tutorial_with_local_player(7, 0, "Tutorial 7 elevator oracle", true, true)
 }
 
 fn raw_fixed(value: Option<C4Fixed>, pixels: i32) -> i32 {

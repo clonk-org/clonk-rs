@@ -92,8 +92,8 @@ fn cpp_resource_derive_vector_is_the_complete_resource_core() {
         derived_id: 0x0102_0304,
         loadable: false,
         contents_crc: 0x1122_3344,
-        filename: LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
-        author: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+        filename: crate::c4(b"Scenario.c4s"),
+        author: crate::c4(b"Alice"),
         ..NetworkResourceCore::default()
     };
     let packet = ResourcePacket::Derive(core);
@@ -122,7 +122,7 @@ fn cpp_resource_core_sha_vector_contains_raw_and_hex_forms() {
         chunk_size: 102_400,
         contents_crc: 0x99aa_bbcc,
         file_sha: Some([0xab; 20]),
-        filename: LegacyCString::from_bytes(b"Defs.c4d".to_vec()).unwrap(),
+        filename: crate::c4(b"Defs.c4d"),
         author: LegacyCString::default(),
     };
     let packet = ResourcePacket::Derive(core);
@@ -327,8 +327,8 @@ fn network_filenames_translate_native_slashes_like_cpp() {
     // C4NetFilenameAdapt changes '/' to '\\' before binary write and reverses
     // it after read on non-Windows platforms (src/C4PacketBase.h:43-64).
     let core = NetworkResourceCore {
-        filename: LegacyCString::from_bytes(b"dir/file.c4d".to_vec()).unwrap(),
-        author: LegacyCString::from_bytes(b"team/name".to_vec()).unwrap(),
+        filename: crate::c4(b"dir/file.c4d"),
+        author: crate::c4(b"team/name"),
         ..NetworkResourceCore::default()
     };
     let payload = encode_resource_core_payload(&core).unwrap();

@@ -1,4 +1,4 @@
-use clonk_engine::{LegacyCString, NetworkResourceCore};
+use clonk_engine::NetworkResourceCore;
 use clonk_network::{
     ChunkWriteOutcome, ResourceFileOwnership, ResourceFileStore, ResourceFileStoreError,
 };
@@ -12,7 +12,7 @@ fn core(id: i32, filename: &[u8], file_size: u32, chunk_size: u32) -> NetworkRes
         loadable: true,
         file_size,
         chunk_size,
-        filename: LegacyCString::from_bytes(filename.to_vec()).unwrap(),
+        filename: crate::c4(filename),
         ..NetworkResourceCore::default()
     }
 }

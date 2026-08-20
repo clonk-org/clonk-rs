@@ -125,18 +125,10 @@ fn removal_clears_a_preexisting_nested_effect_variable_before_returning() {
         "Arm",
         vec![object_reference_value(target)],
     );
-    assert_eq!(
-        call_effects_object(
-            &mut engine,
-            carrier,
-            "RemoveThenRead",
-            vec![object_reference_value(target)],
-        ),
-        Value::Nil
-    );
+    unit_assert_eq!(call_effects_object(&mut engine, carrier, "RemoveThenRead", vec![object_reference_value(target)],) => Value::Nil);
     let carrier_index = engine.test_object_index(carrier);
-    assert_eq!(
-        engine.objects[carrier_index].state.effects[0].var(0),
+    unit_assert_eq!(
+        engine.objects[carrier_index].state.effects[0].var(0) =>
         EffectVarValue::Proplist(clonk_script::ValueMap::from([(
             "inner",
             Value::Array(vec![Value::Nil])
@@ -170,8 +162,7 @@ fn removal_clears_an_untouched_objects_nested_local_and_effect_variable() {
             return holder->Read();
         }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("HOLD", "Holder", holder_script);
+    let mut engine = script_engine(7, "HOLD", "Holder", holder_script);
     engine.register_test_script_definition("RMVR", "Remover", remover_script);
     engine.register_test_definition(simple_definition("TRGT"));
     let holder = engine.spawn_test_object(SpawnConfig::new("HOLD"));
@@ -185,7 +176,7 @@ fn removal_clears_an_untouched_objects_nested_local_and_effect_variable() {
             vec![object_reference_value(target)],
         )
         .expect("persistent holder values are armed");
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 engine.test_object_index(remover),
@@ -195,13 +186,13 @@ fn removal_clears_an_untouched_objects_nested_local_and_effect_variable() {
                     object_reference_value(holder),
                 ],
             )
-            .expect("untouched holder reference sweep completes"),
+            .expect("untouched holder reference sweep completes") =>
         Value::Array(vec![Value::Nil, Value::Nil])
     );
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(engine.test_object_index(holder), "Read", Vec::new())
-            .expect("cleared holder values persist after the removal outcome folds"),
+            .expect("cleared holder values persist after the removal outcome folds") =>
         Value::Array(vec![Value::Nil, Value::Nil])
     );
 }
@@ -242,13 +233,13 @@ fn call_effects_object(
     engine.call_test_object_function(index, function, args)
 }
 
-fn tick_effects_object(engine: &mut Engine, id: ObjectId) -> ObjectSnapshot {
+fn tick_test_object(engine: &mut Engine, id: ObjectId) -> ObjectSnapshot {
     engine.test_tick().object(id).test_value().clone()
 }
 
 fn advance_effects_object(engine: &mut Engine, id: ObjectId, prior_ticks: usize) -> ObjectSnapshot {
     effects_advance(engine, prior_ticks);
-    tick_effects_object(engine, id)
+    tick_test_object(engine, id)
 }
 
 // FnGetCommand (C4Script.cpp:918-945): element 0 returns the C++
@@ -264,15 +255,11 @@ fn get_command_returns_command_name_like_cpp() {
         "#;
     let (mut engine, id) = effects_script_fixture(9, "Actor", "Actor", script);
     let before = call_effects_object(&mut engine, id, "Ask", Vec::new());
-    assert_eq!(before, Value::Nil, "no command -> nil (C4Script.cpp:926)");
+    unit_assert_eq!(before => Value::Nil, "no command -> nil (C4Script.cpp:926)");
 
     call_effects_object(&mut engine, id, "Arm", Vec::new());
     let after = call_effects_object(&mut engine, id, "Ask", Vec::new());
-    assert_eq!(
-        after,
-        Value::String("Wait".to_string().into()),
-        "element 0 is the CommandName string (C4Script.cpp:931)"
-    );
+    unit_assert_eq!(after => Value::String("Wait".to_string().into()), "element 0 is the CommandName string (C4Script.cpp:931)");
 }
 
 // C++ runs Fx* callbacks with fPassErrors=false: a script error in an
@@ -304,14 +291,7 @@ fn effect_callback_script_error_is_fail_safe_like_cpp() {
     // The erroring callback yields nil each interval — the effect is
     // NOT killed (C++ gets 0 back, not C4Fx_Execute_Kill).
     let idx = engine.test_object_index(id);
-    assert!(
-        engine.objects[idx]
-            .state
-            .effects
-            .iter()
-            .any(|effect| effect.name == "Broken"),
-        "the erroring effect stays installed"
-    );
+    unit_assert!(engine.objects[idx].state.effects.iter().any(|effect| effect.name == "Broken"), "the erroring effect stays installed");
 }
 
 // Effect callbacks run through the same C4AulExec as any other call:
@@ -334,8 +314,7 @@ func FxProbeTimer(pThis, iNumber) {
     let item_script = r#"#strict
 public func Consume() { RemoveObject(); return(7); }
 "#;
-    let mut engine = Engine::with_seed(3);
-    engine.register_test_script_definition("HOLD", "Holder", holder_script);
+    let mut engine = script_engine(3, "HOLD", "Holder", holder_script);
     engine.register_test_script_definition("ITEM", "Item", item_script);
 
     let holder = engine.spawn_test_object(effects_object_config("HOLD"));
@@ -345,12 +324,8 @@ public func Consume() { RemoveObject(); return(7); }
     effects_advance(&mut engine, 6);
 
     let idx = engine.test_object_index(holder);
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("iGot"),
-        Some(&Value::Int(7)),
-        "the nested call's return value reaches the effect callback"
-    );
-    assert!(
+    unit_assert_eq!(engine.objects[idx].state.local_vars.get("iGot") => Some(&Value::Int(7)), "the nested call's return value reaches the effect callback");
+    unit_assert!(
         engine.find_object_index(item).is_none(),
         "the foreign object's self-RemoveObject inside the effect \
              timer's nested call folds (C4Effect.cpp:342-360 exec)"
@@ -386,9 +361,10 @@ public func Poke(pClonk) {
 "#;
     let mut engine = Engine::with_seed(3);
     let mut holder = effects_definition("HOLD", "Holder", holder_script);
-    holder.configure_actions(
+    set_test_actions(
+        &mut holder,
         None,
-        HashMap::from([("Rise".to_string(), ActionSpec::default().with_length(10))]),
+        [("Rise", ActionSpec::default().with_length(10))],
     );
     engine.register_test_definition(holder);
     engine.register_test_script_definition("ITEM", "Item", item_script);
@@ -400,16 +376,12 @@ public func Poke(pClonk) {
     effects_advance(&mut engine, 6);
 
     let idx = engine.test_object_index(holder_id);
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("sSeen"),
+    unit_assert_eq!(
+        engine.objects[idx].state.local_vars.get("sSeen") =>
         Some(&Value::String("Rise".to_string().into())),
         "GetAction(pTarget) reads the in-flight action (C++ live state)"
     );
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("iSeenPhase"),
-        Some(&Value::Int(6)),
-        "GetPhase(pTarget) reads the in-flight phase (C++ live state)"
-    );
+    unit_assert_eq!(engine.objects[idx].state.local_vars.get("iSeenPhase") => Some(&Value::Int(6)), "GetPhase(pTarget) reads the in-flight phase (C++ live state)");
 }
 
 // One live object (C4AulExec): the outer effect callback's own local
@@ -433,8 +405,7 @@ func FxProbeTimer(pThis, iNumber) {
     let item_script = r#"#strict
 public func Tag(pClonk) { LocalN("iFromItem", pClonk) = 7; return(1); }
 "#;
-    let mut engine = Engine::with_seed(3);
-    engine.register_test_script_definition("HOLD", "Holder", holder_script);
+    let mut engine = script_engine(3, "HOLD", "Holder", holder_script);
     engine.register_test_script_definition("ITEM", "Item", item_script);
 
     let holder = engine.spawn_test_object(effects_object_config("HOLD"));
@@ -445,18 +416,10 @@ public func Tag(pClonk) { LocalN("iFromItem", pClonk) = 7; return(1); }
 
     let idx = engine.test_object_index(holder);
     let locals = &engine.objects[idx].state.local_vars;
-    assert_eq!(
-        locals.get("iBefore"),
-        Some(&Value::Int(1)),
-        "the outer callback's own pre-nested write persists"
-    );
-    assert_eq!(
-        locals.get("iFromItem"),
-        Some(&Value::Int(7)),
-        "the nested call's write-back to the caller persists"
-    );
-    assert_eq!(
-        locals.get("iAfter"),
+    unit_assert_eq!(locals.get("iBefore") => Some(&Value::Int(1)), "the outer callback's own pre-nested write persists");
+    unit_assert_eq!(locals.get("iFromItem") => Some(&Value::Int(7)), "the nested call's write-back to the caller persists");
+    unit_assert_eq!(
+        locals.get("iAfter") =>
         Some(&Value::Int(8)),
         "the outer callback READS the nested write-back live \
              (C++ mutates the one live object mid-call)"
@@ -483,16 +446,15 @@ public func Boot() {
     let helper_script = r#"#strict
 public func ReadDir(pClonk) { return(GetDir(pClonk)); }
 "#;
-    let mut engine = Engine::with_seed(3);
-    engine.register_test_script_definition("Actr", "Actor", actor_script);
+    let mut engine = script_engine(3, "Actr", "Actor", actor_script);
     engine.register_test_script_definition("HELP", "Helper", helper_script);
     let id =
         engine.spawn_test_object(effects_object_config("Actr").with_direction(Direction::Right));
     call_effects_object(&mut engine, id, "Boot", Vec::new());
 
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("iDir"),
+    unit_assert_eq!(
+        engine.objects[idx].state.local_vars.get("iDir") =>
         Some(&Value::Int(1)),
         "GetDir(pObj) resolves the explicit target even from a \
              definition-call scope (C4Script.cpp:1120)"
@@ -513,8 +475,7 @@ fn enter_transfer_mobilizes_and_copies_the_containers_motion_like_cpp() {
     let holder_script = r#"#strict
 public func Stash(pItem, pBox) { Enter(pBox, pItem); return(1); }
 "#;
-    let mut engine = Engine::with_seed(3);
-    engine.register_test_script_definition("HOLD", "Holder", holder_script);
+    let mut engine = script_engine(3, "HOLD", "Holder", holder_script);
     engine.register_test_definition(simple_definition("ITEM"));
     engine.register_test_definition(simple_definition("BOXX"));
 
@@ -522,7 +483,7 @@ public func Stash(pItem, pBox) { Enter(pBox, pItem); return(1); }
         .spawn_test_object(effects_object_config("HOLD").with_position(Vector2::new(100, 50)));
     let item = engine.spawn_test_object(effects_contained_config("ITEM", holder));
     let idx = engine.test_object_index(item);
-    assert!(
+    unit_assert!(
         !engine.objects[idx].state.mobile,
         "a FIRST Enter (CreateContents birth) has no Exit — Mobile \
              stays 0 (C4Object::Init, C4Object.cpp:182-185)"
@@ -538,17 +499,10 @@ public func Stash(pItem, pBox) { Enter(pBox, pItem); return(1); }
     );
 
     let idx = engine.test_object_index(item);
-    assert_eq!(
-        engine.objects[idx].state.container,
-        Some(boxx),
-        "the transfer landed"
-    );
-    assert!(
-        engine.objects[idx].state.mobile,
-        "the transfer's internal Exit mobilizes (C4Object.cpp:1540)"
-    );
-    assert_eq!(
-        engine.objects[idx].state.position,
+    unit_assert_eq!(engine.objects[idx].state.container => Some(boxx), "the transfer landed");
+    unit_assert!(engine.objects[idx].state.mobile, "the transfer's internal Exit mobilizes (C4Object.cpp:1540)");
+    unit_assert_eq!(
+        engine.objects[idx].state.position =>
         Vector2::new(300, 80),
         "fCopyMotion snaps the position to the NEW container \
              immediately (C4Object.cpp:1598-1606)"
@@ -627,69 +581,41 @@ protected func RejectEntrance(pTarget) { return(1); }
     let driver_index = engine.test_object_index(driver);
 
     let self_veto_index = engine.test_object_index(self_veto);
-    assert_eq!(
+    unit_assert_eq!(
         engine.call_object_function(
             self_veto_index,
             "TryEnter",
             vec![object_reference_value(new)],
-        )?,
+        )? =>
         Value::Bool(false),
         "one-argument Enter defaults the subject to the calling object"
     );
     let self_veto_index = engine.test_object_index(self_veto);
-    assert_eq!(engine.objects[self_veto_index].state.container, None);
+    unit_assert_eq!(engine.objects[self_veto_index].state.container => None);
 
-    assert_eq!(
+    unit_assert_eq!(
         engine.call_object_function(
             driver_index,
             "Put",
             vec![object_reference_value(deny), object_reference_value(item)],
-        )?,
+        )? =>
         Value::Bool(false),
         "RejectEntrance vetoes before the old containment is changed"
     );
     let item_index = engine.test_object_index(item);
-    assert_eq!(engine.objects[item_index].state.container, Some(old));
-    assert_eq!(
-        engine.objects[item_index]
-            .state
-            .local_vars
-            .get("callback_order"),
-        Some(&Value::Nil),
-        "a veto fires no transfer or entry callbacks"
-    );
+    unit_assert_eq!(engine.objects[item_index].state.container => Some(old));
+    unit_assert_eq!(engine.objects[item_index].state.local_vars.get("callback_order") => Some(&Value::Nil), "a veto fires no transfer or entry callbacks");
 
     let driver_index = engine.test_object_index(driver);
-    assert_eq!(
-        engine.call_object_function(
-            driver_index,
-            "Put",
-            vec![object_reference_value(new), object_reference_value(item)],
-        )?,
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(driver_index, "Put", vec![object_reference_value(new), object_reference_value(item)],)? => Value::Bool(true));
     let item_index = engine.test_object_index(item);
     let item_state = &engine.objects[item_index].state;
-    assert_eq!(item_state.container, Some(new));
-    assert_eq!(item_state.controller, 7, "nonliving entrants adopt control");
-    assert_eq!(
-        item_state.local_vars.get("callback_order"),
-        Some(&Value::Int(1234)),
-        "Ejection -> Departure -> Collection2 -> Entrance"
-    );
-    assert_eq!(
-        item_state.local_vars.get("departure_target"),
-        Some(&object_reference_value(old))
-    );
-    assert_eq!(
-        item_state.local_vars.get("entrance_target"),
-        Some(&object_reference_value(new))
-    );
-    assert_eq!(
-        item_state.local_vars.get("shadow_called"),
-        Some(&Value::Nil),
-        "the explicit subject's script function named Enter is not called"
-    );
+    unit_assert_eq!(item_state.container => Some(new));
+    unit_assert_eq!(item_state.controller => 7, "nonliving entrants adopt control");
+    unit_assert_eq!(item_state.local_vars.get("callback_order") => Some(&Value::Int(1234)), "Ejection -> Departure -> Collection2 -> Entrance");
+    unit_assert_eq!(item_state.local_vars.get("departure_target") => Some(&object_reference_value(old)));
+    unit_assert_eq!(item_state.local_vars.get("entrance_target") => Some(&object_reference_value(new)));
+    unit_assert_eq!(item_state.local_vars.get("shadow_called") => Some(&Value::Nil), "the explicit subject's script function named Enter is not called");
     Ok(())
 }
 
@@ -742,7 +668,7 @@ protected func Collection2(pObject)
     )?;
 
     let driver_index = engine.test_object_index(driver);
-    assert_eq!(
+    unit_assert_eq!(
         engine.call_object_function(
             driver_index,
             "Put",
@@ -750,28 +676,24 @@ protected func Collection2(pObject)
                 object_reference_value(redirect),
                 object_reference_value(item),
             ],
-        )?,
+        )? =>
         Value::Bool(true),
         "a callback-driven move after the initial link does not undo Enter's success"
     );
     let item_index = engine.test_object_index(item);
     let item_state = &engine.objects[item_index].state;
-    assert_eq!(item_state.container, Some(destination));
-    assert_eq!(
-        item_state.local_vars.get("entrance_target"),
+    unit_assert_eq!(item_state.container => Some(destination));
+    unit_assert_eq!(
+        item_state.local_vars.get("entrance_target") =>
         Some(&object_reference_value(destination)),
         "the outer Entrance callback receives the container left by Collection2"
     );
-    assert_eq!(
-        item_state.local_vars.get("entrance_count"),
-        Some(&Value::Int(2)),
-        "the nested Enter and then the original Enter each run Entrance"
-    );
+    unit_assert_eq!(item_state.local_vars.get("entrance_count") => Some(&Value::Int(2)), "the nested Enter and then the original Enter each run Entrance");
 
     let parent = engine.spawn_object(SpawnConfig::new("ITEM"))?;
     let child = engine.spawn_object(SpawnConfig::new("CHLD").with_container(parent))?;
     let driver_index = engine.test_object_index(driver);
-    assert_eq!(
+    unit_assert_eq!(
         engine.call_object_function(
             driver_index,
             "Put",
@@ -779,14 +701,14 @@ protected func Collection2(pObject)
                 object_reference_value(child),
                 object_reference_value(parent)
             ],
-        )?,
+        )? =>
         Value::Bool(false),
         "a containment cycle is a quiet false"
     );
     let parent_index = engine.test_object_index(parent);
     let child_index = engine.test_object_index(child);
-    assert_eq!(engine.objects[parent_index].state.container, None);
-    assert_eq!(engine.objects[child_index].state.container, Some(parent));
+    unit_assert_eq!(engine.objects[parent_index].state.container => None);
+    unit_assert_eq!(engine.objects[child_index].state.container => Some(parent));
 
     let deleted = engine.spawn_object(SpawnConfig::new("DEST"))?;
     engine.apply_object_update(
@@ -794,7 +716,7 @@ protected func Collection2(pObject)
         ObjectUpdate::new().with_status(ObjectStatus::Deleted),
     )?;
     let driver_index = engine.test_object_index(driver);
-    assert_eq!(
+    unit_assert_eq!(
         engine.call_object_function(
             driver_index,
             "Put",
@@ -802,15 +724,12 @@ protected func Collection2(pObject)
                 object_reference_value(deleted),
                 object_reference_value(child)
             ],
-        )?,
+        )? =>
         Value::Bool(false),
         "a deleted target returns false after the entering object exits its old container"
     );
     let child_index = engine.test_object_index(child);
-    assert_eq!(
-        engine.objects[child_index].state.container, None,
-        "C4Object::Enter delays its raw Status gate until after Exit(x,y)"
-    );
+    unit_assert_eq!(engine.objects[child_index].state.container => None, "C4Object::Enter delays its raw Status gate until after Exit(x,y)");
     Ok(())
 }
 
@@ -852,8 +771,7 @@ public func Make(pClonk) {
   return(1);
 }
 "#;
-    let mut engine = Engine::with_seed(3);
-    engine.register_test_script_definition("Actr", "Actor", script);
+    let mut engine = script_engine(3, "Actr", "Actor", script);
     engine.register_test_script_definition("ITEM", "Item", item_script);
     engine.register_test_definition(simple_definition("MARK"));
     let id = engine.spawn_test_object(effects_object_config("Actr"));
@@ -867,15 +785,15 @@ public func Make(pClonk) {
         .iter()
         .position(|object| object.definition_id == "MARK")
         .test_value();
-    assert_eq!(
-        engine.objects[marker_idx].state.local_vars.get("__local_0"),
+    unit_assert_eq!(
+        engine.objects[marker_idx].state.local_vars.get("__local_0") =>
         Some(&Value::Int(84)),
         "the write to the pending object's slot 0 landed on the \
              materialized object"
     );
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("iGot"),
+    unit_assert_eq!(
+        engine.objects[idx].state.local_vars.get("iGot") =>
         Some(&Value::Int(84)),
         "a later callback reads the stored slot back \
              (FnLocal by-reference, C4Script.cpp:3423-3433)"
@@ -902,12 +820,10 @@ func FxProbeTimer(pThis, iNumber) {
 "#;
     let mut engine = Engine::with_seed(3);
     let mut actor = effects_definition("Actr", "Actor", script);
-    actor.configure_actions(
+    set_test_actions(
+        &mut actor,
         None,
-        HashMap::from([(
-            "Load".to_string(),
-            ActionSpec::default().with_length(10).with_delay(3),
-        )]),
+        [("Load", ActionSpec::default().with_length(10).with_delay(3))],
     );
     engine.register_test_definition(actor);
     let id = engine.spawn_test_object(effects_object_config("Actr"));
@@ -918,9 +834,9 @@ func FxProbeTimer(pThis, iNumber) {
     // 1 and 2 (< Delay 3) — phase stays 0.
     effects_advance(&mut engine, 7);
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].state.action.name, "Load");
-    assert_eq!(
-        engine.objects[idx].state.action.phase, 0,
+    unit_assert_eq!(engine.objects[idx].state.action.name => "Load");
+    unit_assert_eq!(
+        engine.objects[idx].state.action.phase => 0,
         "two frames after the effect-timer SetAction the phase is \
              still 0 (first increment lands the FRAME AFTER entry — \
              pEffects->Execute follows ExecAction, C4Object.cpp:1073,1085)"
@@ -930,10 +846,7 @@ func FxProbeTimer(pThis, iNumber) {
     // the phase advances (C4Object.cpp:5458-5466).
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.action.phase, 1,
-        "the third post-entry exec advances the phase"
-    );
+    unit_assert_eq!(engine.objects[idx].state.action.phase => 1, "the third post-entry exec advances the phase");
 }
 
 // C4Object::SetAction zeroes the phase UNCONDITIONALLY on every
@@ -957,12 +870,13 @@ func FxProbeTimer(pThis, iNumber) {
 "#;
     let mut engine = Engine::with_seed(3);
     let mut actor = effects_definition("Actr", "Actor", script);
-    actor.configure_actions(
+    set_test_actions(
+        &mut actor,
         None,
-        HashMap::from([
-            ("Aim".to_string(), ActionSpec::default().with_length(10)),
-            ("Load".to_string(), ActionSpec::default().with_length(10)),
-        ]),
+        [
+            ("Aim", ActionSpec::default().with_length(10)),
+            ("Load", ActionSpec::default().with_length(10)),
+        ],
     );
     engine.register_test_definition(actor);
     let id = engine.spawn_test_object(effects_object_config("Actr"));
@@ -971,12 +885,9 @@ func FxProbeTimer(pThis, iNumber) {
     effects_advance(&mut engine, 6);
 
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.action.name, "Load",
-        "the second SetAction landed"
-    );
-    assert_eq!(
-        engine.objects[idx].state.action.phase, 0,
+    unit_assert_eq!(engine.objects[idx].state.action.name => "Load", "the second SetAction landed");
+    unit_assert_eq!(
+        engine.objects[idx].state.action.phase => 0,
         "SetAction zeroes the phase (C4Object.cpp:4132) — the \
              pre-change SetPhase(6) must not leak into the new action"
     );
@@ -1000,29 +911,25 @@ func FxNegativeTimer(pThis, iNumber, iTime)
   return 0;
 }
 "#;
-    let mut engine = Engine::with_seed(143);
-    engine.register_test_script_definition("NEG", "Negative interval", script);
-    let id = engine.spawn_test_object(effects_object_config("NEG"));
+    let (mut engine, id) = script_object_fixture(
+        143,
+        "NEG",
+        "Negative interval",
+        script,
+        effects_object_config("NEG"),
+    );
     let index = engine.test_object_index(id);
 
-    assert_eq!(
-        engine.call_test_object_function(index, "Arm", Vec::new()),
-        Value::Int(1)
-    );
-    assert_eq!(engine.objects[index].state.effects[0].interval, -3);
+    unit_assert_eq!(engine.call_test_object_function(index, "Arm", Vec::new()) => Value::Int(1));
+    unit_assert_eq!(engine.objects[index].state.effects[0].interval => -3);
 
     for (frame, expected) in [0, 0, 3, 3, 3, 36, 36, 36, 369].into_iter().enumerate() {
         engine.tick_without_snapshot().test_value();
         let index = engine.test_object_index(id);
-        assert_eq!(
-            engine.objects[index].state.local_vars.get("iTimes"),
-            Some(&Value::Int(expected)),
-            "timer callback history after frame {}",
-            frame + 1
-        );
+        unit_assert_eq!(engine.objects[index].state.local_vars.get("iTimes") => Some(&Value::Int(expected)), "timer callback history after frame {}", frame + 1);
     }
     let index = engine.test_object_index(id);
-    assert_eq!(engine.objects[index].state.effects[0].timer, 9);
+    unit_assert_eq!(engine.objects[index].state.effects[0].timer => 9);
 }
 
 #[test]
@@ -1070,12 +977,8 @@ fn effect_timer_kill_semantics_follow_cpp() {
     let snapshot = last.test_value();
     let object = snapshot.object(id).test_value();
     let names = effects_names(&object.effects);
-    assert_eq!(
-        names,
-        vec!["Inert"],
-        "Doomed killed by -1 at iTime 4, Mute killed at its first \
-             timerless gate, zero-interval Inert survives"
-    );
+    unit_assert_eq!(names => vec!["Inert"], "Doomed killed by -1 at iTime 4, Mute killed at its first \
+             timerless gate, zero-interval Inert survives");
     let calls = call_log.lock().test_value().clone();
     let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
     // The C++ list orders new-before-equal ([Inert, Mute, Doomed],
@@ -1083,17 +986,14 @@ fn effect_timer_kill_semantics_follow_cpp() {
     // temp-removes the upper Doomed — FxDoomedStop(fTemp) fires there
     // (C4Effect.cpp:370-374,489) — and Doomed's own -1 kill fires the
     // real Stop later.
-    assert_eq!(
-        stop_calls, 2,
-        "one temp stop from Mute's kill bracket, one real stop from \
-             Doomed's own kill"
-    );
-    assert_eq!(
+    unit_assert_eq!(stop_calls => 2, "one temp stop from Mute's kill bracket, one real stop from \
+             Doomed's own kill");
+    unit_assert_eq!(
         engine
             .snapshot()
             .script_globals
             .named
-            .get("normal_stop_reason"),
+            .get("normal_stop_reason") =>
         Some(&Value::Int(1)),
         "C4Effect::Kill omits iReason, and a strict-3 typed integer \
              parameter observes that missing slot as C4FxCall_Normal (0)"
@@ -1135,26 +1035,16 @@ fn effect_timer_walk_exposes_old_time_and_removes_later_effect_inline() {
     engine.tick_without_snapshot().test_value();
 
     let object = engine.test_object_snapshot(id);
-    assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(123)));
-    assert_eq!(
-        object.local_vars.get("iSeenB"),
-        Some(&Value::Int(0)),
-        "A runs before C4Effect::Execute increments the later B"
-    );
-    assert!(
-        !object
-            .effects
-            .iter()
-            .any(|effect| effect.name == "B" && effect.priority != 0),
-        "B's inline removal prevents its already-eligible timer"
-    );
+    unit_assert_eq!(object.local_vars.get("iOrder") => Some(&Value::Int(123)));
+    unit_assert_eq!(object.local_vars.get("iSeenB") => Some(&Value::Int(0)), "A runs before C4Effect::Execute increments the later B");
+    unit_assert!(!object.effects.iter().any(|effect| effect.name == "B" && effect.priority != 0), "B's inline removal prevents its already-eligible timer");
     for name in ["A", "C"] {
-        assert_eq!(
+        unit_assert_eq!(
             object
                 .effects
                 .iter()
                 .find(|effect| effect.name == name && effect.priority != 0)
-                .map(|effect| effect.timer),
+                .map(|effect| effect.timer) =>
             Some(1),
             "the surviving effect advances exactly once"
         );
@@ -1195,14 +1085,14 @@ fn effect_timer_walk_executes_new_higher_effect_same_frame() {
     engine.tick_without_snapshot().test_value();
 
     let object = engine.test_object_snapshot(id);
-    assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(12)));
-    assert_eq!(object.local_vars.get("iNewTime"), Some(&Value::Int(1)));
-    assert_eq!(
+    unit_assert_eq!(object.local_vars.get("iOrder") => Some(&Value::Int(12)));
+    unit_assert_eq!(object.local_vars.get("iNewTime") => Some(&Value::Int(1)));
+    unit_assert_eq!(
         object
             .effects
             .iter()
             .find(|effect| effect.name == "New" && effect.priority != 0)
-            .map(|effect| effect.timer),
+            .map(|effect| effect.timer) =>
         Some(1),
         "the newly inserted node advances in the frame that created it"
     );
@@ -1243,14 +1133,14 @@ fn effect_timer_walk_executes_replacement_after_current_unlinks() {
     engine.tick_without_snapshot().test_value();
 
     let object = engine.test_object_snapshot(id);
-    assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(12)));
-    assert_eq!(object.local_vars.get("iNewTime"), Some(&Value::Int(1)));
-    assert_eq!(
+    unit_assert_eq!(object.local_vars.get("iOrder") => Some(&Value::Int(12)));
+    unit_assert_eq!(object.local_vars.get("iNewTime") => Some(&Value::Int(1)));
+    unit_assert_eq!(
         object
             .effects
             .iter()
             .find(|effect| effect.name == "New" && effect.priority != 0)
-            .map(|effect| effect.timer),
+            .map(|effect| effect.timer) =>
         Some(1),
         "the replacement is reached even when it reuses the removed cursor's number"
     );
@@ -1313,10 +1203,10 @@ fn effect_timer_kill_drops_removed_upper_readd_event() {
     engine.tick_without_snapshot().test_value();
 
     let object = engine.test_object_snapshot(id);
-    assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(1234)));
-    assert_eq!(object.local_vars.get("iUpperTimers"), Some(&Value::Int(0)));
-    assert_eq!(object.local_vars.get("iStaleReadds"), Some(&Value::Int(0)));
-    assert!(
+    unit_assert_eq!(object.local_vars.get("iOrder") => Some(&Value::Int(1234)));
+    unit_assert_eq!(object.local_vars.get("iUpperTimers") => Some(&Value::Int(0)));
+    unit_assert_eq!(object.local_vars.get("iStaleReadds") => Some(&Value::Int(0)));
+    unit_assert!(
         !object
             .effects
             .iter()
@@ -1376,15 +1266,15 @@ fn effect_timer_object_removal_aborts_walk_after_inline_clear_stops() {
 
     engine.tick_without_snapshot().test_value();
 
-    assert!(engine.object_snapshot(id).is_none());
+    unit_assert!(engine.object_snapshot(id).is_none());
     let globals = engine.snapshot().script_globals.named;
-    assert_eq!(globals.get("iOrder"), Some(&Value::Int(1234)));
-    assert_eq!(globals.get("iATimers"), Some(&Value::Int(1)));
-    assert_eq!(globals.get("iBTimers"), Some(&Value::Int(0)));
-    assert_eq!(globals.get("iAStops"), Some(&Value::Int(1)));
-    assert_eq!(globals.get("iBStops"), Some(&Value::Int(1)));
-    assert_eq!(globals.get("iAReason"), Some(&Value::Int(3)));
-    assert_eq!(globals.get("iBReason"), Some(&Value::Int(3)));
+    unit_assert_eq!(globals.get("iOrder") => Some(&Value::Int(1234)));
+    unit_assert_eq!(globals.get("iATimers") => Some(&Value::Int(1)));
+    unit_assert_eq!(globals.get("iBTimers") => Some(&Value::Int(0)));
+    unit_assert_eq!(globals.get("iAStops") => Some(&Value::Int(1)));
+    unit_assert_eq!(globals.get("iBStops") => Some(&Value::Int(1)));
+    unit_assert_eq!(globals.get("iAReason") => Some(&Value::Int(3)));
+    unit_assert_eq!(globals.get("iBReason") => Some(&Value::Int(3)));
 }
 
 #[test]
@@ -1425,9 +1315,9 @@ fn effect_callback_docon_removal_clears_effects_tail_first() {
 
     engine.tick_without_snapshot().test_value();
 
-    assert!(engine.object_snapshot(id).is_none());
-    assert_eq!(
-        engine.snapshot().script_globals.named.get("iStopOrder"),
+    unit_assert!(engine.object_snapshot(id).is_none());
+    unit_assert_eq!(
+        engine.snapshot().script_globals.named.get("iStopOrder") =>
         Some(&Value::Int(21)),
         "ClearAll stops the highest-priority effect before the lower one"
     );
@@ -1456,21 +1346,17 @@ fn effect_death_stop_receives_reason_four_and_can_revive_target() {
         });
     definition.set_c4_callback_convention(true);
     definition.set_category(CATEGORY_OBJECT | CATEGORY_LIVING);
-    definition.configure_actions(
-        Some("Idle".to_string()),
-        HashMap::from([
-            ("Idle".to_string(), ActionSpec::default()),
-            ("Dead".to_string(), ActionSpec::default()),
-        ]),
+    set_test_actions(
+        &mut definition,
+        Some("Idle"),
+        [
+            ("Idle", ActionSpec::default()),
+            ("Dead", ActionSpec::default()),
+        ],
     );
 
     let mut engine = effects_engine(7, definition);
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("LIVG")
-            .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-            .with_alive(true)
-            .add_effect(EffectState::new("Reprieve").with_priority(100)),
-    );
+    let id = spawn_fixture!(engine, "LIVG", with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_alive: true, add_effect: EffectState::new("Reprieve").with_priority(100));
     let idx = engine.test_object_index(id);
     let command_target = i32::try_from(id.as_u64()).test_value();
     engine.objects[idx].state.effects[0].command_target = Some(command_target);
@@ -1478,22 +1364,14 @@ fn effect_death_stop_receives_reason_four_and_can_revive_target() {
     engine.assign_death(idx, false).test_value();
 
     let object = engine.test_object_snapshot(id);
-    assert!(object.alive, "SetAlive in Fx*Stop aborts ordinary death");
+    unit_assert!(object.alive, "SetAlive in Fx*Stop aborts ordinary death");
     let calls = call_log.lock().test_value();
     let stop_args = calls
         .iter()
         .find_map(|(name, args)| (name == "FxReprieveStop").then_some(args))
         .test_value();
-    assert_eq!(
-        stop_args.get(2),
-        Some(&Value::Int(4)),
-        "Fx*Stop receives C4FxCall_RemoveDeath"
-    );
-    assert_eq!(
-        effects_names(&object.effects),
-        vec!["Reprieve"],
-        "returning -1 restores the death-cleared effect"
-    );
+    unit_assert_eq!(stop_args.get(2) => Some(&Value::Int(4)), "Fx*Stop receives C4FxCall_RemoveDeath");
+    unit_assert_eq!(effects_names(&object.effects) => vec!["Reprieve"], "returning -1 restores the death-cleared effect");
 }
 
 #[test]
@@ -1524,23 +1402,15 @@ fn global_effect_timer_fires_with_nil_target_like_c4effect_execute() {
 
     let (mut engine, _) = effects_script_fixture(7, "Actor", "Actor", script);
 
-    assert_eq!(engine.global_effects().len(), 1);
+    unit_assert_eq!(engine.global_effects().len() => 1);
 
     engine.tick_without_snapshot().test_value();
-    assert_eq!(
-        engine.global_effects()[0].timer,
-        1,
-        "iTime advances every frame (C4Effect.cpp:340)"
-    );
-    assert_eq!(
-        engine.global_effects()[0].var(0),
-        EffectVarValue::Nil,
-        "interval 2 has not elapsed at iTime 1 (C4Effect.cpp:342)"
-    );
+    unit_assert_eq!(engine.global_effects()[0].timer => 1, "iTime advances every frame (C4Effect.cpp:340)");
+    unit_assert_eq!(engine.global_effects()[0].var(0) => EffectVarValue::Nil, "interval 2 has not elapsed at iTime 1 (C4Effect.cpp:342)");
 
     engine.tick_without_snapshot().test_value();
-    assert_eq!(
-        engine.global_effects()[0].var(0),
+    unit_assert_eq!(
+        engine.global_effects()[0].var(0) =>
         EffectVarValue::Int(2),
         "Fx*Timer(nil, iNumber, iTime) fired at the elapsed interval \
              and its EffectVar write folded back"
@@ -1548,11 +1418,7 @@ fn global_effect_timer_fires_with_nil_target_like_c4effect_execute() {
 
     engine.tick_without_snapshot().test_value();
     engine.tick_without_snapshot().test_value();
-    assert_eq!(
-        engine.global_effects()[0].var(0),
-        EffectVarValue::Int(4),
-        "the timer keeps firing on every elapsed interval"
-    );
+    unit_assert_eq!(engine.global_effects()[0].var(0) => EffectVarValue::Int(4), "the timer keeps firing on every elapsed interval");
 }
 
 #[test]
@@ -1602,29 +1468,27 @@ global func Helper(target)
 "#;
 
     let mut definition = effects_c4_definition("FXGS", "Global scope probe", definition_script);
-    definition.configure_actions(
-        Some("Probe".to_string()),
-        HashMap::from([(
-            "Probe".to_string(),
+    set_test_actions(
+        &mut definition,
+        Some("Probe"),
+        [(
+            "Probe",
             ActionSpec {
                 length: Some(23),
                 ..ActionSpec::default()
             },
-        )]),
+        )],
     );
 
     let mut engine = effects_engine(7, definition);
-    assert_eq!(
-        install_effects_global_script(&mut engine, "System.c4g/EffectScope.c", global_script,),
-        1
-    );
+    unit_assert_eq!(install_effects_global_script(&mut engine, "System.c4g/EffectScope.c", global_script,) => 1);
     let id = engine.spawn_test_object(SpawnConfig::new("FXGS"));
     call_effects_object(&mut engine, id, "Arm", Vec::new());
 
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.call_test_object_function(idx, "Read", Vec::new()),
+    unit_assert_eq!(
+        engine.call_test_object_function(idx, "Read", Vec::new()) =>
         Value::Int(17),
         "the global callback used its exact Helper and no implicit definition"
     );
@@ -1660,23 +1524,20 @@ global func Helper() { return 17; }
 "#;
     let definition = effects_c4_definition("FXCT", "Command-target probe", definition_script);
     let mut engine = effects_engine(11, definition);
-    assert_eq!(
-        install_effects_global_script(&mut engine, "System.c4g/CommandedEffect.c", global_script,),
-        1
-    );
+    unit_assert_eq!(install_effects_global_script(&mut engine, "System.c4g/CommandedEffect.c", global_script,) => 1);
     let id = engine.spawn_test_object(SpawnConfig::new("FXCT"));
     call_effects_object(&mut engine, id, "Arm", Vec::new());
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.call_test_object_function(idx, "Read", Vec::new()),
+    unit_assert_eq!(
+        engine.call_test_object_function(idx, "Read", Vec::new()) =>
         Value::Int(17),
         "synchronous Fx*Start retained its System helper and command-target this"
     );
 
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.call_test_object_function(idx, "Read", Vec::new()),
+    unit_assert_eq!(
+        engine.call_test_object_function(idx, "Read", Vec::new()) =>
         Value::Int(17),
         "the global SFunc retained its System helper and command-target this"
     );
@@ -1713,29 +1574,15 @@ global func FxIntScheduleTimer(target, number, time)
 "#;
     let definition = effects_c4_definition("FXEV", "Scheduled eval target", definition_script);
     let mut engine = effects_engine(13, definition);
-    assert_eq!(
-        install_effects_global_script(&mut engine, "System.c4g/Helpers.c", global_script),
-        1
-    );
+    unit_assert_eq!(install_effects_global_script(&mut engine, "System.c4g/Helpers.c", global_script) => 1);
     let id = engine.spawn_test_object(SpawnConfig::new("FXEV"));
     call_effects_object(&mut engine, id, "Arm", Vec::new());
 
     engine.tick_without_snapshot().test_value();
 
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.call_test_object_function(idx, "Read", Vec::new()),
-        Value::Int(50),
-        "eval resolves the target definition's local and function"
-    );
-    assert!(
-        engine.objects[idx]
-            .state
-            .effects
-            .iter()
-            .all(|effect| effect.priority == 0),
-        "the successful one-shot schedule removes its timer"
-    );
+    unit_assert_eq!(engine.call_test_object_function(idx, "Read", Vec::new()) => Value::Int(50), "eval resolves the target definition's local and function");
+    unit_assert!(engine.objects[idx].state.effects.iter().all(|effect| effect.priority == 0), "the successful one-shot schedule removes its timer");
 }
 
 #[test]
@@ -1749,18 +1596,14 @@ func Probe() { return global->eval("ScenarioHelper()"); }
     let scenario_script = r#"#strict 3
 func ScenarioHelper() { return 73; }
 "#;
-    let mut engine = Engine::with_seed(17);
-    engine.register_test_script_definition("GEVL", "Global eval caller", definition_script);
+    let mut engine = script_engine(17, "GEVL", "Global eval caller", definition_script);
     engine
         .install_scenario_script_with_convention("Scenario", scenario_script, true)
         .test_value();
     let id = engine.spawn_test_object(SpawnConfig::new("GEVL"));
     let idx = engine.test_object_index(id);
 
-    assert_eq!(
-        engine.call_test_object_function(idx, "Probe", Vec::new()),
-        Value::Int(73)
-    );
+    unit_assert_eq!(engine.call_test_object_function(idx, "Probe", Vec::new()) => Value::Int(73));
 }
 
 #[test]
@@ -1808,8 +1651,8 @@ func FxForeignObjectBTimer(target, number, time)
 
     engine.tick_without_snapshot().test_value();
     let command_index = engine.test_object_index(command_target);
-    assert_eq!(
-        engine.call_test_object_function(command_index, "ReadCounter", Vec::new()),
+    unit_assert_eq!(
+        engine.call_test_object_function(command_index, "ReadCounter", Vec::new()) =>
         Value::Int(42),
         "the second same-tick callback observes the first callback's live local write"
     );
@@ -1861,8 +1704,8 @@ func FxForeignObjectAfterErrorTimer(target, number, time)
 
     engine.tick_without_snapshot().test_value();
     let command_index = engine.test_object_index(command_target);
-    assert_eq!(
-        engine.call_test_object_function(command_index, "ReadCounter", Vec::new()),
+    unit_assert_eq!(
+        engine.call_test_object_function(command_index, "ReadCounter", Vec::new()) =>
         Value::Int(42),
         "the errored callback's pre-error local write remains live for the next callback"
     );
@@ -1915,8 +1758,8 @@ func FxForeignGlobalCTimer(target, number, time)
 
     engine.tick_without_snapshot().test_value();
     let command_index = engine.test_object_index(command_target);
-    assert_eq!(
-        engine.call_test_object_function(command_index, "ReadCounter", Vec::new()),
+    unit_assert_eq!(
+        engine.call_test_object_function(command_index, "ReadCounter", Vec::new()) =>
         Value::Int(53),
         "each carrier-less callback observes earlier same-tick local writes"
     );
@@ -1968,8 +1811,8 @@ func FxForeignGlobalAfterErrorTimer(target, number, time)
 
     engine.tick_without_snapshot().test_value();
     let command_index = engine.test_object_index(command_target);
-    assert_eq!(
-        engine.call_test_object_function(command_index, "ReadCounter", Vec::new()),
+    unit_assert_eq!(
+        engine.call_test_object_function(command_index, "ReadCounter", Vec::new()) =>
         Value::Int(52),
         "the errored global callback's pre-error local write remains live"
     );
@@ -2033,27 +1876,21 @@ func FxGlobalErrorCommitTimer(target, number, time)
         .find_object_index(command_target)
         .expect("command target remains");
     let target = &engine.objects[target_index];
-    assert_eq!(target.state.local_vars.get("marker"), Some(&Value::Int(51)));
+    unit_assert_eq!(target.state.local_vars.get("marker") => Some(&Value::Int(51)));
     let effect = engine
         .global_effects()
         .iter()
         .find(|effect| effect.name == "GlobalErrorCommit")
         .expect("erroring global effect remains installed");
-    assert_eq!(
-        (effect.var(0), effect.var(1)),
-        (EffectVarValue::Int(88), EffectVarValue::Int(expected_draw))
-    );
-    assert_eq!(engine.rng.count, count_before + 1, "the draw count commits");
-    assert_eq!(
-        engine.rng, expected_rng,
-        "the synchronized RNG state commits"
-    );
-    assert_eq!(
+    unit_assert_eq!((effect.var(0), effect.var(1)) => (EffectVarValue::Int(88), EffectVarValue::Int(expected_draw)));
+    unit_assert_eq!(engine.rng.count => count_before + 1, "the draw count commits");
+    unit_assert_eq!(engine.rng => expected_rng, "the synchronized RNG state commits");
+    unit_assert_eq!(
         (
             target.state.position,
             target.fixed_position,
             presentation.audio,
-        ),
+        ) =>
         (
             Vector2::new(31, 37),
             FixedVec2::new(itofix(31), itofix(37)),
@@ -2073,12 +1910,12 @@ func FxGlobalErrorCommitTimer(target, number, time)
 #[test]
 fn global_effect_timer_runs_without_any_registered_definition() {
     let mut engine = Engine::with_seed(13);
-    assert_eq!(
+    unit_assert_eq!(
             install_effects_global_script(
                 &mut engine,
                 "System.c4g/SoloEffect.c",
                 "global func FxSoloTimer(target, number, time) { var no_target; EffectVar(0, no_target, number) = time; return 0; }\n",
-            ),
+            ) =>
             1
         );
     let mut effect = EffectState::new("Solo").with_interval(1);
@@ -2088,35 +1925,29 @@ fn global_effect_timer_runs_without_any_registered_definition() {
     engine.restore_state(&state).test_value();
 
     engine.tick_without_snapshot().test_value();
-    assert_eq!(engine.global_effects().len(), 1);
-    assert_eq!(engine.global_effects()[0].var(0), EffectVarValue::Int(1));
+    unit_assert_eq!(engine.global_effects().len() => 1);
+    unit_assert_eq!(engine.global_effects()[0].var(0) => EffectVarValue::Int(1));
 }
 
 #[test]
 fn invalid_command_id_damage_falls_back_to_engine_global() {
     let mut engine = Engine::with_seed(17);
-    assert_eq!(
+    unit_assert_eq!(
         install_effects_global_script(
             &mut engine,
             "System.c4g/DamageEffect.c",
             "global func FxInvalidDamage(target, number, change, cause, caused_by) { return 0; }\n",
-        ),
+        ) =>
         1
     );
     engine.register_test_definition(simple_definition("DMGI"));
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("DMGI")
-            .add_effect(EffectState::new("Invalid").with_command_id(Some("MISS"))),
-    );
+    let id = spawn_fixture!(engine, "DMGI", add_effect: EffectState::new("Invalid").with_command_id(Some("MISS")));
     let idx = engine.test_object_index(id);
 
     engine
         .change_object_damage(idx, 10, 0, OWNER_NONE)
         .test_value();
-    assert_eq!(
-        engine.object_snapshot(id).expect("target remains").damage,
-        0
-    );
+    unit_assert_eq!(engine.object_snapshot(id).expect("target remains").damage => 0);
 }
 
 #[test]
@@ -2140,12 +1971,9 @@ func Read() { return result; }
 
     engine.tick_without_snapshot().test_value();
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.definition_id, "FXNW");
+    unit_assert_eq!(snapshot.definition_id => "FXNW");
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.call_test_object_function(idx, "Read", Vec::new()),
-        Value::Int(17)
-    );
+    unit_assert_eq!(engine.call_test_object_function(idx, "Read", Vec::new()) => Value::Int(17));
 }
 
 #[test]
@@ -2177,23 +2005,17 @@ fn scheduled_global_set_fow_kills_after_one_tick_and_persists_flags() {
     engine.register_test_player(PlayerConfig::new(0, "Player"));
     engine.register_test_definition(definition);
     engine.spawn_test_object(SpawnConfig::new("ELEV"));
-    assert_eq!(engine.global_effects().len(), 1);
+    unit_assert_eq!(engine.global_effects().len() => 1);
 
     engine.tick_without_snapshot().test_value();
 
-    assert!(
-        engine
-            .global_effects()
-            .iter()
-            .all(|effect| effect.priority == 0),
-        "the successful one-shot callback removes its schedule effect"
-    );
+    unit_assert!(engine.global_effects().iter().all(|effect| effect.priority == 0), "the successful one-shot callback removes its schedule effect");
     let player = engine.player(0).test_value();
-    assert!(player.fog_of_war());
-    assert!(player.force_fog_of_war());
+    unit_assert!(player.fog_of_war());
+    unit_assert!(player.force_fog_of_war());
     let persisted = player.to_state();
-    assert!(persisted.fog_of_war);
-    assert!(persisted.force_fog_of_war);
+    unit_assert!(persisted.fog_of_war);
+    unit_assert!(persisted.force_fog_of_war);
 }
 
 #[test]
@@ -2235,8 +2057,8 @@ func Probe(target) {
     let caller_index = engine.test_object_index(caller);
     let result =
         engine.call_object_function(caller_index, "Probe", vec![Value::Object(target.as_u64())])?;
-    assert_eq!(
-        result,
+    unit_assert_eq!(
+        result =>
         Value::Array(vec![
             Value::Int(1),
             Value::Int(128),
@@ -2249,14 +2071,8 @@ func Probe(target) {
     );
 
     let snapshot = engine.snapshot();
-    assert_eq!(
-        snapshot.object(caller).map(|object| object.plr_view_range),
-        Some(-1)
-    );
-    assert_eq!(
-        snapshot.object(target).map(|object| object.plr_view_range),
-        Some(50)
-    );
+    unit_assert_eq!(snapshot.object(caller).map(|object| object.plr_view_range) => Some(-1));
+    unit_assert_eq!(snapshot.object(target).map(|object| object.plr_view_range) => Some(50));
 
     engine.install_scenario_script_with_convention(
         "Global view-range probe",
@@ -2264,11 +2080,11 @@ func Probe(target) {
         true,
     )?;
     engine.call_scenario_script_function("Probe", vec![Value::Object(target.as_u64())])?;
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .snapshot()
             .object(target)
-            .map(|object| object.plr_view_range),
+            .map(|object| object.plr_view_range) =>
         Some(77),
         "strict-2 GetType reports C4V_Any for the falsy integer result"
     );
@@ -2307,22 +2123,15 @@ fn global_effect_timer_kill_semantics_follow_cpp() {
 
     let (mut engine, _, call_log) = effects_named_debug_fixture(7, script);
 
-    assert_eq!(engine.global_effects().len(), 3);
+    unit_assert_eq!(engine.global_effects().len() => 3);
     effects_advance(&mut engine, 8);
 
     let names = effects_names(engine.global_effects());
-    assert_eq!(
-        names,
-        vec!["Inert"],
-        "Doomed killed by -1 at iTime 4, Mute killed at its first \
-             timerless gate, zero-interval Inert survives"
-    );
+    unit_assert_eq!(names => vec!["Inert"], "Doomed killed by -1 at iTime 4, Mute killed at its first \
+             timerless gate, zero-interval Inert survives");
     let calls = call_log.lock().test_value().clone();
     let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
-    assert_eq!(
-        stop_calls, 1,
-        "C4Effect::Kill fires the real Fx*Stop(nil, iNumber) once"
-    );
+    unit_assert_eq!(stop_calls => 1, "C4Effect::Kill fires the real Fx*Stop(nil, iNumber) once");
 }
 
 #[test]
@@ -2359,16 +2168,9 @@ fn global_effect_timer_walk_exposes_old_time_and_removes_later_effect_inline() {
     engine.tick_without_snapshot().test_value();
 
     let snapshot = engine.snapshot();
-    assert_eq!(
-        snapshot.script_globals.named.get("iOrder"),
-        Some(&Value::Int(123))
-    );
-    assert_eq!(
-        snapshot.script_globals.named.get("iSeenB"),
-        Some(&Value::Int(0)),
-        "GA runs before C4Effect::Execute increments the later GB"
-    );
-    assert!(
+    unit_assert_eq!(snapshot.script_globals.named.get("iOrder") => Some(&Value::Int(123)));
+    unit_assert_eq!(snapshot.script_globals.named.get("iSeenB") => Some(&Value::Int(0)), "GA runs before C4Effect::Execute increments the later GB");
+    unit_assert!(
         !engine
             .global_effects()
             .iter()
@@ -2376,12 +2178,12 @@ fn global_effect_timer_walk_exposes_old_time_and_removes_later_effect_inline() {
         "GB's inline removal prevents its already-eligible timer"
     );
     for name in ["GA", "GC"] {
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .global_effects()
                 .iter()
                 .find(|effect| effect.name == name && effect.priority != 0)
-                .map(|effect| effect.timer),
+                .map(|effect| effect.timer) =>
             Some(1),
             "the surviving global effect advances exactly once"
         );
@@ -2421,20 +2223,14 @@ fn global_effect_timer_walk_executes_new_higher_effect_same_frame() {
     engine.tick_without_snapshot().test_value();
 
     let snapshot = engine.snapshot();
-    assert_eq!(
-        snapshot.script_globals.named.get("iOrder"),
-        Some(&Value::Int(12))
-    );
-    assert_eq!(
-        snapshot.script_globals.named.get("iNewTime"),
-        Some(&Value::Int(1))
-    );
-    assert_eq!(
+    unit_assert_eq!(snapshot.script_globals.named.get("iOrder") => Some(&Value::Int(12)));
+    unit_assert_eq!(snapshot.script_globals.named.get("iNewTime") => Some(&Value::Int(1)));
+    unit_assert_eq!(
         engine
             .global_effects()
             .iter()
             .find(|effect| effect.name == "GNew" && effect.priority != 0)
-            .map(|effect| effect.timer),
+            .map(|effect| effect.timer) =>
         Some(1),
         "the newly inserted global node advances in its creation frame"
     );
@@ -2496,19 +2292,10 @@ fn global_effect_timer_kill_drops_removed_upper_readd_event() {
     engine.tick_without_snapshot().test_value();
 
     let snapshot = engine.snapshot();
-    assert_eq!(
-        snapshot.script_globals.named.get("iOrder"),
-        Some(&Value::Int(1234))
-    );
-    assert_eq!(
-        snapshot.script_globals.named.get("iUpperTimers"),
-        Some(&Value::Int(0))
-    );
-    assert_eq!(
-        snapshot.script_globals.named.get("iStaleReadds"),
-        Some(&Value::Int(0))
-    );
-    assert!(
+    unit_assert_eq!(snapshot.script_globals.named.get("iOrder") => Some(&Value::Int(1234)));
+    unit_assert_eq!(snapshot.script_globals.named.get("iUpperTimers") => Some(&Value::Int(0)));
+    unit_assert_eq!(snapshot.script_globals.named.get("iStaleReadds") => Some(&Value::Int(0)));
+    unit_assert!(
         !engine
             .global_effects()
             .iter()
@@ -2544,17 +2331,9 @@ fn global_effect_stop_deny_recovers_like_cpp() {
     let (mut engine, _) = effects_script_fixture(7, "Actor", "Actor", script);
 
     effects_advance(&mut engine, 6);
-    assert_eq!(
-        engine.global_effects().len(),
-        1,
-        "the denied removal keeps the effect alive through repeated kills"
-    );
-    assert_eq!(engine.global_effects()[0].name, "Stubborn");
-    assert_eq!(
-        engine.global_effects()[0].timer,
-        6,
-        "iTime keeps advancing on the recovered effect"
-    );
+    unit_assert_eq!(engine.global_effects().len() => 1, "the denied removal keeps the effect alive through repeated kills");
+    unit_assert_eq!(engine.global_effects()[0].name => "Stubborn");
+    unit_assert_eq!(engine.global_effects()[0].timer => 6, "iTime keeps advancing on the recovered effect");
 }
 
 #[test]
@@ -2584,20 +2363,13 @@ fn global_effect_kill_brackets_upper_effects_like_cpp() {
     effects_advance(&mut engine, 4);
 
     let names = effects_names(engine.global_effects());
-    assert_eq!(
-        names,
-        vec!["Upper"],
-        "Mute dies at its timerless gate; the bracketed Upper survives"
-    );
+    unit_assert_eq!(names => vec!["Upper"], "Mute dies at its timerless gate; the bracketed Upper survives");
     let calls = call_log.lock().test_value().clone();
     let stop_calls = calls.iter().filter(|name| *name == "FxUpperStop").count();
     let start_calls = calls.iter().filter(|name| *name == "FxUpperStart").count();
-    assert_eq!(
-        stop_calls, 1,
-        "Mute's kill temp-removes the upper effect (Fx*Stop fTemp)"
-    );
-    assert_eq!(
-        start_calls, 2,
+    unit_assert_eq!(stop_calls => 1, "Mute's kill temp-removes the upper effect (Fx*Stop fTemp)");
+    unit_assert_eq!(
+        start_calls => 2,
         "one Fx*Start from the C4Effect ctor inside AddEffect \
              (C4Effect.cpp:128-129), one temp reactivation after the kill \
              (TempReaddUpperEffects, C4Effect.cpp:505)"
@@ -2649,28 +2421,21 @@ fn nil_target_add_effect_dispatches_fx_start_like_c4effect_ctor() {
 
     let (mut engine, _) = effects_script_fixture(7, "Actor", "Actor", script);
 
-    assert!(engine
-        .global_effects()
-        .iter()
-        .any(|effect| effect.name == "Vetoed" && effect.priority == 0));
+    unit_assert!(engine.global_effects().iter().any(|effect| effect.name == "Vetoed" && effect.priority == 0));
     let flash = engine
         .global_effects()
         .iter()
         .find(|effect| effect.name == "Flash")
         .test_value();
-    assert_eq!(
-        flash.var(0),
+    unit_assert_eq!(
+        flash.var(0) =>
         EffectVarValue::Int(43),
         "Fx*Start(nil, iNumber, 0, rVal1, rVal2) ran synchronously \
              inside AddEffect and saw both constructor values"
     );
-    assert_eq!(
-        flash.vars(),
-        &[EffectVarValue::Int(43)],
-        "constructor rVals are transient; only the explicit EffectVar write persists"
-    );
+    unit_assert_eq!(flash.vars() => &[EffectVarValue::Int(43)], "constructor rVals are transient; only the explicit EffectVar write persists");
     engine.tick_without_snapshot().test_value();
-    assert_eq!(effects_names(engine.global_effects()), vec!["Flash"]);
+    unit_assert_eq!(effects_names(engine.global_effects()) => vec!["Flash"]);
 }
 
 #[test]
@@ -2696,9 +2461,9 @@ fn effect_list_orders_ascending_by_priority_magnitude() {
 
     let (mut engine, id) = effects_script_fixture(7, "Actor", "Actor", script);
 
-    let object = tick_effects_object(&mut engine, id);
+    let object = tick_test_object(&mut engine, id);
     let names = effects_names(&object.effects);
-    assert_eq!(names, vec!["Low", "Mid2", "Mid", "High"]);
+    unit_assert_eq!(names => vec!["Low", "Mid2", "Mid", "High"]);
 }
 
 #[test]
@@ -2739,18 +2504,18 @@ fn effect_callbacks_resolve_via_command_target_definition() {
     let spell = effects_definition("SPEL", "Spell", spell_script);
     let mut engine = effects_engine(7, host);
     engine.register_test_definition(spell);
-    let id = engine.spawn_test_object(SpawnConfig::new("HOST").with_energy(50_000));
+    let id = spawn_fixture!(engine, "HOST", with_energy: 50_000);
 
     effects_advance(&mut engine, 4);
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.effects.len(),
+    unit_assert_eq!(
+        engine.objects[idx].state.effects.len() =>
         1,
         "the spell-script timer keeps the effect alive (a miss would \
              kill it as timerless)"
     );
-    assert_eq!(
-        engine.objects[idx].state.energy, 50_000,
+    unit_assert_eq!(
+        engine.objects[idx].state.energy => 50_000,
         "its bare DoEnergy has no object: FnDoEnergy falls back to the \
              null cthr->Obj and returns without a change (C4Script.cpp:\
              1299-1303)"
@@ -2788,8 +2553,7 @@ func FxOriginTimer(object target, int number, int time)
 
     let mut engine = effects_engine(7, carrier);
     engine.register_test_definition(callback);
-    let carrier =
-        engine.spawn_test_object(SpawnConfig::new("CARR").with_position(Vector2::new(320, -50)));
+    let carrier = spawn_fixture!(engine, "CARR", with_position: Vector2::new(320, -50));
 
     engine.tick_without_snapshot().test_value();
 
@@ -2800,14 +2564,14 @@ func FxOriginTimer(object target, int number, int time)
         .iter()
         .find(|effect| effect.name == "Origin")
         .test_value();
-    assert_eq!(
+    unit_assert_eq!(
         (
             effect.var(0),
             effect.var(1),
             effect.var(2),
             effect.var(3),
             effect.var(4)
-        ),
+        ) =>
         (
             EffectVarValue::Nil,
             EffectVarValue::Nil,
@@ -2880,12 +2644,12 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
     let target_id = engine.spawn_test_object(SpawnConfig::new("CMND"));
     let carrier_idx = engine.test_object_index(carrier_id);
 
-    assert_eq!(
+    unit_assert_eq!(
         engine.call_test_object_function(
             carrier_idx,
             "Arm",
             vec![object_reference_value(target_id)],
-        ),
+        ) =>
         Value::Array(vec![Value::Int(2), Value::Int(1), Value::Int(1)])
     );
     effects_advance(&mut engine, 5);
@@ -2896,25 +2660,18 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             "FxGlobalBoundTimer",
             "FxDefinitionBoundTimer",
         ] {
-            assert_eq!(
-                calls
-                    .iter()
-                    .filter(|name| name.as_str() == callback)
-                    .count(),
-                1,
-                "{callback} is live before its object target is removed"
-            );
+            unit_assert_eq!(calls.iter().filter(|name| name.as_str() == callback).count() => 1, "{callback} is live before its object target is removed");
         }
     }
     calls.lock().test_value().clear();
 
     let carrier_idx = engine.test_object_index(carrier_id);
-    assert_eq!(
+    unit_assert_eq!(
         engine.call_test_object_function(
             carrier_idx,
             "RemoveAndInspect",
             vec![object_reference_value(target_id)],
-        ),
+        ) =>
         Value::Array(vec![
             Value::Nil,
             Value::Int(0),
@@ -2946,35 +2703,21 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         "FxGlobalBoundTimer",
         "FxGlobalBoundStop",
     ] {
-        assert_eq!(
-            calls
-                .iter()
-                .filter(|name| name.as_str() == callback)
-                .count(),
-            0,
-            "removed command target must suppress {callback}"
-        );
+        unit_assert_eq!(calls.iter().filter(|name| name.as_str() == callback).count() => 0, "removed command target must suppress {callback}");
     }
-    assert_eq!(
+    unit_assert_eq!(
         calls
             .iter()
             .filter(|name| name.as_str() == "FxDefinitionBoundTimer")
-            .count(),
+            .count() =>
         2,
         "the C4ID-only command target remains scheduled across two intervals"
     );
     drop(calls);
 
     let carrier_idx = engine.test_object_index(carrier_id);
-    assert_eq!(
-        effects_names(&engine.objects[carrier_idx].state.effects),
-        vec!["DefinitionBound"],
-        "the next object Execute silently unlinks its dead node"
-    );
-    assert!(
-        engine.global_effects().is_empty(),
-        "the next global Execute silently unlinks its dead node"
-    );
+    unit_assert_eq!(effects_names(&engine.objects[carrier_idx].state.effects) => vec!["DefinitionBound"], "the next object Execute silently unlinks its dead node");
+    unit_assert!(engine.global_effects().is_empty(), "the next global Execute silently unlinks its dead node");
 }
 
 #[test]
@@ -3017,20 +2760,12 @@ fn effect_check_chain_denies_new_effects() {
     let (mut engine, id) = effects_script_fixture(7, "Actor", "Actor", script);
 
     engine.tick_without_snapshot().test_value();
-    let snapshot = engine.test_tick();
-    let object = snapshot.object(id).test_value();
+    let object = tick_test_object(&mut engine, id);
     let names = effects_names(&object.effects);
-    assert_eq!(
-        names,
-        vec!["Buff", "Armor"],
-        "Armor denies Fire; Buff passes the chain"
-    );
+    unit_assert_eq!(names => vec!["Buff", "Armor"], "Armor denies Fire; Buff passes the chain");
 
-    let object = tick_effects_object(&mut engine, id);
-    assert!(
-        object.effects.iter().any(|effect| effect.name == "Fire"),
-        "priority-1 effects skip the check chain (C4Effect.cpp:170)"
-    );
+    let object = tick_test_object(&mut engine, id);
+    unit_assert!(object.effects.iter().any(|effect| effect.name == "Fire"), "priority-1 effects skip the check chain (C4Effect.cpp:170)");
 }
 
 #[test]
@@ -3069,19 +2804,13 @@ fn effect_check_deny_short_circuits_remaining_checkers() {
     let (mut engine, id, call_log) = effects_named_debug_fixture(7, script);
 
     let object = advance_effects_object(&mut engine, id, 2);
-    assert!(
-        !object.effects.iter().any(|effect| effect.name == "Fire"),
-        "Armor denies Fire"
-    );
+    unit_assert!(!object.effects.iter().any(|effect| effect.name == "Fire"), "Armor denies Fire");
 
     let calls = call_log.lock().test_value().clone();
     // Adding Fire asks Armor (100) first in ascending list order; its
     // deny must stop the chain before Watcher (200) is reached.
-    assert!(
-        calls.iter().any(|name| name == "FxArmorEffect"),
-        "Armor is asked about Fire"
-    );
-    assert!(
+    unit_assert!(calls.iter().any(|name| name == "FxArmorEffect"), "Armor is asked about Fire");
+    unit_assert!(
         !calls.iter().any(|name| name == "FxWatcherEffect"),
         "the deny returns immediately (C4Effect.cpp:283-285) — Watcher \
              is never asked about the already-denied Fire"
@@ -3116,11 +2845,11 @@ fn effect_check_chain_asks_same_name_effects() {
 
     let object = advance_effects_object(&mut engine, id, 1);
     let names = effects_names(&object.effects);
-    assert_eq!(names, vec!["Guard", "Guard"], "same-name effects coexist");
+    unit_assert_eq!(names => vec!["Guard", "Guard"], "same-name effects coexist");
 
     let calls = call_log.lock().test_value().clone();
-    assert_eq!(
-        calls.iter().filter(|name| *name == "FxGuardEffect").count(),
+    unit_assert_eq!(
+        calls.iter().filter(|name| *name == "FxGuardEffect").count() =>
         1,
         "the pre-existing Guard is asked about the new same-name Guard \
              (C4Effect.cpp:278-282 filters by priority only, not name)"
@@ -3162,17 +2891,11 @@ fn effect_start_deny_drops_effect_without_stop() {
     }
     let snapshot = last.test_value();
     let object = snapshot.object(id).test_value();
-    assert!(object.effects.is_empty(), "denied effect never validates");
+    unit_assert!(object.effects.is_empty(), "denied effect never validates");
 
     let calls = call_log.lock().test_value().clone();
-    assert!(
-        !calls.iter().any(|name| name == "FxDeniedTimer"),
-        "denied effects never tick"
-    );
-    assert!(
-        !calls.iter().any(|name| name == "FxDeniedStop"),
-        "dead effects are deleted without the Stop callback"
-    );
+    unit_assert!(!calls.iter().any(|name| name == "FxDeniedTimer"), "denied effects never tick");
+    unit_assert!(!calls.iter().any(|name| name == "FxDeniedStop"), "dead effects are deleted without the Stop callback");
 }
 
 #[test]
@@ -3218,9 +2941,9 @@ fn new_effect_start_temp_removes_and_readds_upper_effects() {
     engine.tick_without_snapshot().test_value();
     call_log.lock().test_value().clear();
 
-    let object = tick_effects_object(&mut engine, id);
+    let object = tick_test_object(&mut engine, id);
     let names = effects_names(&object.effects);
-    assert_eq!(names, vec!["Lower", "Upper"], "both effects survive");
+    unit_assert_eq!(names => vec!["Lower", "Upper"], "both effects survive");
 
     let calls: Vec<(String, Vec<Value>)> = call_log
         .lock()
@@ -3230,40 +2953,29 @@ fn new_effect_start_temp_removes_and_readds_upper_effects() {
         .cloned()
         .collect();
     let call_names: Vec<&str> = calls.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(
-        call_names,
+    unit_assert_eq!(
+        call_names =>
         vec!["FxUpperStop", "FxLowerStart", "FxUpperStart"],
         "the validating Start is bracketed by the upper effect's temp \
              stop and temp readd (C4Effect.cpp:122-133)"
     );
     let (_, stop_args) = &calls[0];
-    assert_eq!(
-        stop_args.get(2),
-        Some(&Value::Int(1)),
-        "the temp stop's reason is C4FxCall_Temp (C4Effect.cpp:489)"
-    );
-    assert_eq!(
-        stop_args.get(3),
-        Some(&Value::Bool(true)),
-        "fTemp = true (C4Effect.cpp:489)"
-    );
+    unit_assert_eq!(stop_args.get(2) => Some(&Value::Int(1)), "the temp stop's reason is C4FxCall_Temp (C4Effect.cpp:489)");
+    unit_assert_eq!(stop_args.get(3) => Some(&Value::Bool(true)), "fTemp = true (C4Effect.cpp:489)");
     let (_, readd_args) = &calls[2];
-    assert_eq!(
-        readd_args.get(2),
+    unit_assert_eq!(
+        readd_args.get(2) =>
         Some(&Value::Int(1)),
         "the temp readd's Start gets iTemp = C4FxCall_Temp \
              (C4Effect.cpp:505, C4Effects.h:47)"
     );
 
     call_log.lock().test_value().clear();
-    let object = tick_effects_object(&mut engine, id);
-    assert_eq!(object.effects.len(), 3, "Plain registers too");
+    let object = tick_test_object(&mut engine, id);
+    unit_assert_eq!(object.effects.len() => 3, "Plain registers too");
     let calls = call_log.lock().test_value().clone();
-    assert!(
-        !calls.iter().any(|(name, _)| name == "FxUpperStop"),
-        "an effect without Fx*Start skips the temp bracket \
-             (C4Effect.cpp:123)"
-    );
+    unit_assert!(!calls.iter().any(|(name, _)| name == "FxUpperStop"), "an effect without Fx*Start skips the temp bracket \
+             (C4Effect.cpp:123)");
 }
 
 #[test]
@@ -3306,13 +3018,10 @@ fn effect_kill_temp_removes_and_readds_upper_effects() {
     effects_advance(&mut engine, 2);
     call_log.lock().test_value().clear();
 
-    let object = tick_effects_object(&mut engine, id);
+    let object = tick_test_object(&mut engine, id);
     let names = active_effect_names(&object.effects);
-    assert_eq!(names, vec!["Upper"], "only Lower is killed");
-    assert!(object
-        .effects
-        .iter()
-        .any(|effect| effect.name == "Lower" && effect.priority == 0));
+    unit_assert_eq!(names => vec!["Upper"], "only Lower is killed");
+    unit_assert!(object.effects.iter().any(|effect| effect.name == "Lower" && effect.priority == 0));
 
     let calls: Vec<(String, Vec<Value>)> = call_log
         .lock()
@@ -3322,33 +3031,25 @@ fn effect_kill_temp_removes_and_readds_upper_effects() {
         .cloned()
         .collect();
     let call_names: Vec<&str> = calls.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(
-        call_names,
+    unit_assert_eq!(
+        call_names =>
         vec!["FxUpperStop", "FxLowerStop", "FxUpperStart"],
         "the kill is bracketed by the upper effect's temp stop and \
              temp readd (C4Effect.cpp:370-374,404)"
     );
     let (_, temp_stop_args) = &calls[0];
-    assert_eq!(
-        temp_stop_args.get(2),
-        Some(&Value::Int(1)),
-        "the bracket stop receives C4FxCall_Temp"
-    );
-    assert_eq!(
-        temp_stop_args.get(3),
-        Some(&Value::Bool(true)),
-        "the bracket stop is temporary (fTemp, C4Effect.cpp:489)"
-    );
+    unit_assert_eq!(temp_stop_args.get(2) => Some(&Value::Int(1)), "the bracket stop receives C4FxCall_Temp");
+    unit_assert_eq!(temp_stop_args.get(3) => Some(&Value::Bool(true)), "the bracket stop is temporary (fTemp, C4Effect.cpp:489)");
     let (_, kill_stop_args) = &calls[1];
-    assert_eq!(
-        kill_stop_args.get(2),
+    unit_assert_eq!(
+        kill_stop_args.get(2) =>
         Some(&Value::Int(0)),
         "C4Effect::Kill omits the raw reason slot; strict-3 typed int \
              conversion exposes it as C4FxCall_Normal (0)"
     );
 
-    let object = tick_effects_object(&mut engine, id);
-    assert_eq!(effects_names(&object.effects), vec!["Upper"]);
+    let object = tick_test_object(&mut engine, id);
+    unit_assert_eq!(effects_names(&object.effects) => vec!["Upper"]);
 }
 
 #[test]
@@ -3395,15 +3096,8 @@ fn effect_check_annul_merges_into_accepting_effect() {
 
     let object = advance_effects_object(&mut engine, id, 1);
     let names = active_effect_names(&object.effects);
-    assert_eq!(
-        names,
-        vec!["Shield"],
-        "the annulled Fire merges into Shield instead of registering"
-    );
-    assert!(object
-        .effects
-        .iter()
-        .any(|effect| effect.name == "Fire" && effect.priority == 0));
+    unit_assert_eq!(names => vec!["Shield"], "the annulled Fire merges into Shield instead of registering");
+    unit_assert!(object.effects.iter().any(|effect| effect.name == "Fire" && effect.priority == 0));
 
     let calls = call_log.lock().test_value().clone();
     let add_calls: Vec<&Vec<Value>> = calls
@@ -3411,31 +3105,13 @@ fn effect_check_annul_merges_into_accepting_effect() {
         .filter(|(name, _)| name == "FxShieldAdd")
         .map(|(_, args)| args)
         .collect();
-    assert_eq!(add_calls.len(), 1, "the acceptor's Fx*Add runs once");
+    unit_assert_eq!(add_calls.len() => 1, "the acceptor's Fx*Add runs once");
     let args = add_calls[0];
-    assert_eq!(
-        args.get(2),
-        Some(&Value::String("Fire".to_string().into())),
-        "Par1 is the new effect's name (C4Effect.cpp:300)"
-    );
-    assert_eq!(
-        args.get(3),
-        Some(&Value::Int(7)),
-        "Par2 is the new effect's timer interval (C4Effect.cpp:300)"
-    );
-    assert_eq!(
-        args.get(4),
-        Some(&Value::Int(42)),
-        "rVal1 carries the AddEffect parameter (C4Effect.cpp:301)"
-    );
-    assert!(
-        !calls.iter().any(|(name, _)| name == "FxFireStart"),
-        "the annulled effect never starts (it stays dead, C4Effect.cpp:108-115)"
-    );
-    assert!(
-        !calls.iter().any(|(name, _)| name == "FxFireStop"),
-        "the annulled effect dies without a Stop callback"
-    );
+    unit_assert_eq!(args.get(2) => Some(&Value::String("Fire".to_string().into())), "Par1 is the new effect's name (C4Effect.cpp:300)");
+    unit_assert_eq!(args.get(3) => Some(&Value::Int(7)), "Par2 is the new effect's timer interval (C4Effect.cpp:300)");
+    unit_assert_eq!(args.get(4) => Some(&Value::Int(42)), "rVal1 carries the AddEffect parameter (C4Effect.cpp:301)");
+    unit_assert!(!calls.iter().any(|(name, _)| name == "FxFireStart"), "the annulled effect never starts (it stays dead, C4Effect.cpp:108-115)");
+    unit_assert!(!calls.iter().any(|(name, _)| name == "FxFireStop"), "the annulled effect dies without a Stop callback");
 }
 
 #[test]
@@ -3478,8 +3154,8 @@ fn effect_check_callback_receives_new_effect_parameters() {
 
     let object = advance_effects_object(&mut engine, id, 2);
     let names = effects_names(&object.effects);
-    assert_eq!(
-        names,
+    unit_assert_eq!(
+        names =>
         vec!["Frost", "Shield"],
         "the checker saw strength 42 on Fire (denied) and 5 on Frost \
              (passed) — C4Effect.cpp:282 forwards rVal1-4"
@@ -3489,20 +3165,17 @@ fn effect_check_callback_receives_new_effect_parameters() {
         .iter()
         .find(|effect| effect.name == "Frost")
         .test_value();
-    assert!(
-        frost.vars().is_empty(),
-        "the rVal strength reaches Fx*Effect without becoming an EffectVar"
-    );
+    unit_assert!(frost.vars().is_empty(), "the rVal strength reaches Fx*Effect without becoming an EffectVar");
 
-    let object = tick_effects_object(&mut engine, id);
-    assert!(object.on_fire, "native FxFireStart ignites the carrier");
+    let object = tick_test_object(&mut engine, id);
+    unit_assert!(object.on_fire, "native FxFireStart ignites the carrier");
     let fire = object
         .effects
         .iter()
         .find(|effect| effect.name == "Fire")
         .test_value();
-    assert_eq!(
-        fire.vars(),
+    unit_assert_eq!(
+        fire.vars() =>
         &[
             EffectVarValue::Int(2),
             EffectVarValue::Int(5),
@@ -3532,26 +3205,15 @@ fn deferred_fire_effect_command_runs_native_start_before_its_first_timer() {
 
     let (engine, id) = effects_script_fixture(19, "Actor", "Actor", script);
     let object = engine.test_object_snapshot(id);
-    assert!(object.on_fire, "native Start ran during command folding");
+    unit_assert!(object.on_fire, "native Start ran during command folding");
     let fire = object
         .effects
         .iter()
         .find(|effect| effect.name == "Fire")
         .test_value();
-    assert_eq!(fire.timer, 0, "no timer frame has elapsed yet");
-    assert!(
-        fire.start_dispatched,
-        "Start is complete before the first timer"
-    );
-    assert_eq!(
-        fire.vars(),
-        &[
-            EffectVarValue::Int(2),
-            EffectVarValue::Int(0),
-            EffectVarValue::Bool(false),
-            EffectVarValue::Nil,
-        ]
-    );
+    unit_assert_eq!(fire.timer => 0, "no timer frame has elapsed yet");
+    unit_assert!(fire.start_dispatched, "Start is complete before the first timer");
+    unit_assert_eq!(fire.vars() => &[EffectVarValue::Int(2), EffectVarValue::Int(0), EffectVarValue::Bool(false), EffectVarValue::Nil,]);
 }
 
 #[test]
@@ -3580,9 +3242,9 @@ fn queued_effect_constructor_values_reach_start_callback() {
 
     let snapshot = engine.test_tick();
     let calls = calls.lock().test_value();
-    assert_eq!(calls.len(), 1, "FxProbeStart runs exactly once");
-    assert_eq!(calls[0].get(2), Some(&Value::Int(0)), "iTemp is false");
-    assert_eq!(calls[0].get(3..7), Some(constructor_values.as_slice()));
+    unit_assert_eq!(calls.len() => 1, "FxProbeStart runs exactly once");
+    unit_assert_eq!(calls[0].get(2) => Some(&Value::Int(0)), "iTemp is false");
+    unit_assert_eq!(calls[0].get(3..7) => Some(constructor_values.as_slice()));
     let effect = snapshot
         .object(id)
         .test_value()
@@ -3590,11 +3252,8 @@ fn queued_effect_constructor_values_reach_start_callback() {
         .iter()
         .find(|effect| effect.name == "Probe")
         .test_value();
-    assert!(effect.start_dispatched);
-    assert!(
-        effect.vars().is_empty(),
-        "constructor rVals never become persistent EffectVars"
-    );
+    unit_assert!(effect.start_dispatched);
+    unit_assert!(effect.vars().is_empty(), "constructor rVals never become persistent EffectVars");
 }
 
 #[test]
@@ -3643,17 +3302,10 @@ fn effect_annul_calls_temp_brackets_the_add_call() {
     effects_advance(&mut engine, 2);
     call_log.lock().test_value().clear();
 
-    let object = tick_effects_object(&mut engine, id);
+    let object = tick_test_object(&mut engine, id);
     let names = active_effect_names(&object.effects);
-    assert_eq!(
-        names,
-        vec!["Shield", "Upper"],
-        "Fire merges into Shield; Upper is only temp-cycled"
-    );
-    assert!(object
-        .effects
-        .iter()
-        .any(|effect| effect.name == "Fire" && effect.priority == 0));
+    unit_assert_eq!(names => vec!["Shield", "Upper"], "Fire merges into Shield; Upper is only temp-cycled");
+    unit_assert!(object.effects.iter().any(|effect| effect.name == "Fire" && effect.priority == 0));
 
     let calls: Vec<(String, Vec<Value>)> = call_log
         .lock()
@@ -3663,18 +3315,14 @@ fn effect_annul_calls_temp_brackets_the_add_call() {
         .cloned()
         .collect();
     let call_names: Vec<&str> = calls.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(
-        call_names,
+    unit_assert_eq!(
+        call_names =>
         vec!["FxUpperStop", "FxShieldAdd", "FxUpperStart"],
         "AnnulCalls brackets the Add with the acceptor's upper effects \
              (C4Effect.cpp:297-304)"
     );
     let (_, temp_stop_args) = &calls[0];
-    assert_eq!(
-        temp_stop_args.get(3),
-        Some(&Value::Bool(true)),
-        "the bracket stop is temporary (fTemp, C4Effect.cpp:489)"
-    );
+    unit_assert_eq!(temp_stop_args.get(3) => Some(&Value::Bool(true)), "the bracket stop is temporary (fTemp, C4Effect.cpp:489)");
 }
 
 #[test]
@@ -3718,23 +3366,16 @@ fn effect_add_returning_start_deny_kills_the_acceptor() {
     let (mut engine, id, call_log) = effects_named_debug_fixture(7, script);
 
     let object = advance_effects_object(&mut engine, id, 1);
-    assert!(
+    unit_assert!(
         object.effects.iter().all(|effect| effect.priority == 0),
         "the Fire is annulled and Shield killed itself in its Add call; \
              both dead nodes remain linked until Execute (C4Effect.cpp:306-309,328-336)"
     );
-    assert_eq!(effects_names(&object.effects), vec!["Fire", "Shield"]);
+    unit_assert_eq!(effects_names(&object.effects) => vec!["Fire", "Shield"]);
 
     let calls = call_log.lock().test_value().clone();
-    assert_eq!(
-        calls.iter().filter(|name| *name == "FxShieldStop").count(),
-        1,
-        "the acceptor's Kill runs its Stop callback (C4Effect.cpp:390-392)"
-    );
-    assert!(
-        !calls.iter().any(|name| name == "FxFireStart"),
-        "the annulled effect still never starts"
-    );
+    unit_assert_eq!(calls.iter().filter(|name| *name == "FxShieldStop").count() => 1, "the acceptor's Kill runs its Stop callback (C4Effect.cpp:390-392)");
+    unit_assert!(!calls.iter().any(|name| name == "FxFireStart"), "the annulled effect still never starts");
 }
 
 #[test]
@@ -3763,18 +3404,10 @@ fn effect_stop_deny_recovers_the_effect() {
 
     let object = advance_effects_object(&mut engine, id, 2);
     let names = effects_names(&object.effects);
-    assert_eq!(
-        names,
-        vec!["Sticky"],
-        "the denied removal recovers the effect (C4Effect.cpp:393-396)"
-    );
+    unit_assert_eq!(names => vec!["Sticky"], "the denied removal recovers the effect (C4Effect.cpp:393-396)");
 
     let calls = call_log.lock().test_value().clone();
-    assert_eq!(
-        calls.iter().filter(|name| *name == "FxStickyStop").count(),
-        1,
-        "the Stop callback ran exactly once for the refused removal"
-    );
+    unit_assert_eq!(calls.iter().filter(|name| *name == "FxStickyStop").count() => 1, "the Stop callback ran exactly once for the refused removal");
 }
 
 #[test]
@@ -3806,30 +3439,18 @@ fn effect_stop_deny_preserves_vars_and_equal_priority_position() {
 
     let (mut engine, id) = effects_c4_fixture(7, "Actor", "Actor", script);
 
-    assert_eq!(
-        effects_names(&engine.test_object_snapshot(id).effects),
-        vec!["Peer", "Older"],
-        "new equal-priority effects insert before older peers"
-    );
+    unit_assert_eq!(effects_names(&engine.test_object_snapshot(id).effects) => vec!["Peer", "Older"], "new equal-priority effects insert before older peers");
 
     engine.tick_without_snapshot().test_value();
     engine.tick_without_snapshot().test_value();
-    let object = tick_effects_object(&mut engine, id);
-    assert_eq!(
-        effects_names(&object.effects),
-        vec!["Peer", "Older"],
-        "denial restores the existing node without moving it before its equal-priority peer"
-    );
+    let object = tick_test_object(&mut engine, id);
+    unit_assert_eq!(effects_names(&object.effects) => vec!["Peer", "Older"], "denial restores the existing node without moving it before its equal-priority peer");
     let older = object
         .effects
         .iter()
         .find(|effect| effect.name == "Older")
         .test_value();
-    assert_eq!(
-        older.vars().first(),
-        Some(&EffectVarValue::Int(77)),
-        "EffectVar writes made by the denying Stop survive recovery"
-    );
+    unit_assert_eq!(older.vars().first() => Some(&EffectVarValue::Int(77)), "EffectVar writes made by the denying Stop survive recovery");
 }
 
 #[test]
@@ -3873,21 +3494,18 @@ fn remove_effect_no_calls_skips_stop_callback() {
 
     let id = engine.spawn_test_object(SpawnConfig::new("Actor"));
 
-    let object = tick_effects_object(&mut engine, id);
-    assert!(object
-        .effects
-        .iter()
-        .any(|effect| effect.name == "Pulse" && effect.priority == 0));
+    let object = tick_test_object(&mut engine, id);
+    unit_assert!(object.effects.iter().any(|effect| effect.name == "Pulse" && effect.priority == 0));
 
-    let object = tick_effects_object(&mut engine, id);
-    assert!(object.effects.is_empty());
+    let object = tick_test_object(&mut engine, id);
+    unit_assert!(object.effects.is_empty());
 
     let calls = call_log.lock().test_value().clone();
     let timer_calls = calls.iter().filter(|name| *name == "FxPulseTimer").count();
     let stop_calls = calls.iter().filter(|name| *name == "FxPulseStop").count();
 
-    assert!(timer_calls >= 1);
-    assert_eq!(stop_calls, 0);
+    unit_assert!(timer_calls >= 1);
+    unit_assert_eq!(stop_calls => 0);
 }
 
 // FnRemoveEffect's fDoNoCalls is a C++ bool parameter
@@ -3905,23 +3523,15 @@ func FxPulseTimer(pThis, iNumber) {
 }
 func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
 "#;
-    let mut engine = Engine::with_seed(11);
-    engine.register_test_script_definition("Actr", "Actor", script);
-    let id = engine.spawn_test_object(effects_object_config("Actr"));
+    let (mut engine, id) =
+        script_object_fixture(11, "Actr", "Actor", script, effects_object_config("Actr"));
     call_effects_object(&mut engine, id, "Boot", Vec::new());
 
     effects_advance(&mut engine, 2);
 
     let idx = engine.test_object_index(id);
-    assert!(
-        engine.objects[idx].state.effects.is_empty(),
-        "the int flag converts like C++ and the effect is removed"
-    );
-    assert_ne!(
-        engine.objects[idx].state.local_vars.get("iStopped"),
-        Some(&Value::Int(1)),
-        "a truthy no-calls flag skips FxPulseStop"
-    );
+    unit_assert!(engine.objects[idx].state.effects.is_empty(), "the int flag converts like C++ and the effect is removed");
+    unit_assert_ne!(engine.objects[idx].state.local_vars.get("iStopped") => Some(&Value::Int(1)), "a truthy no-calls flag skips FxPulseStop");
 }
 
 #[test]
@@ -3941,38 +3551,21 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
   return 0;
 }
 "#;
-    let mut engine = Engine::with_seed(11);
-    engine.register_test_script_definition("Actr", "Actor", script);
-    let id = engine.spawn_test_object(effects_object_config("Actr"));
+    let (mut engine, id) =
+        script_object_fixture(11, "Actr", "Actor", script, effects_object_config("Actr"));
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.call_test_object_function(idx, "Boot", Vec::new()),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_test_object_function(idx, "Boot", Vec::new()) => Value::Bool(true));
 
     let effect = &engine.objects[idx].state.effects[0];
-    assert_eq!(effect.name, "IntFadeOut");
-    assert_eq!(effect.interval, 2);
-    assert_eq!(effect.timer, 0);
+    unit_assert_eq!(effect.name => "IntFadeOut");
+    unit_assert_eq!(effect.interval => 2);
+    unit_assert_eq!(effect.timer => 0);
 
     engine.tick_without_snapshot().test_value();
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx]
-            .state
-            .local_vars
-            .get("iOldTimerCalls")
-            .cloned()
-            .unwrap_or(Value::Nil),
-        Value::Nil,
-        "the old callback is no longer bound"
-    );
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("iNewTimerCalls"),
-        Some(&Value::Int(1)),
-        "the renamed callback fires at the new interval"
-    );
+    unit_assert_eq!(engine.objects[idx].state.local_vars.get("iOldTimerCalls").cloned().unwrap_or(Value::Nil) => Value::Nil, "the old callback is no longer bound");
+    unit_assert_eq!(engine.objects[idx].state.local_vars.get("iNewTimerCalls") => Some(&Value::Int(1)), "the renamed callback fires at the new interval");
 }
 
 #[test]
@@ -3994,16 +3587,16 @@ fn queued_commands_can_spawn_and_destroy() {
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(snapshot.objects.len(), 1);
-    assert_eq!(object.id, id);
+    unit_assert_eq!(snapshot.objects.len() => 1);
+    unit_assert_eq!(object.id => id);
 
     let snapshot = engine.test_tick();
-    assert!(snapshot.object(id).is_none());
-    assert_eq!(snapshot.objects.len(), 1);
+    unit_assert!(snapshot.object(id).is_none());
+    unit_assert_eq!(snapshot.objects.len() => 1);
     let new_object = &snapshot.objects[0];
-    assert_ne!(new_object.id, id);
-    assert_eq!(new_object.definition_id, "Dummy");
-    assert_eq!(new_object.position, Vector2::new(5, 5));
+    unit_assert_ne!(new_object.id => id);
+    unit_assert_eq!(new_object.definition_id => "Dummy");
+    unit_assert_eq!(new_object.position => Vector2::new(5, 5));
 }
 
 #[test]
@@ -4042,11 +3635,7 @@ fn recorder_playback_roundtrip_matches_engine() {
 #[test]
 fn apply_object_update_overrides_velocity() {
     let mut engine = effects_engine(1, build_definition());
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Test")
-            .with_position(Vector2::new(0, 0))
-            .with_velocity(Vector2::new(0, 0)),
-    );
+    let id = spawn_fixture!(engine, "Test", with_position: Vector2::new(0, 0), with_velocity: Vector2::new(0, 0));
 
     engine
         .apply_object_update(
@@ -4058,8 +3647,8 @@ fn apply_object_update_overrides_velocity() {
         .test_value();
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.velocity, Vector2::new(5, -3));
-    assert_eq!(snapshot.owner, 7);
+    unit_assert_eq!(snapshot.velocity => Vector2::new(5, -3));
+    unit_assert_eq!(snapshot.owner => 7);
 }
 
 #[test]
@@ -4067,16 +3656,16 @@ fn object_update_layer_serde_preserves_clear_vs_unchanged() {
     // Queued/recorded updates must distinguish a missing layer field from
     // an explicit null that clears pLayer.
     let unchanged: ObjectUpdate = serde_json::from_str("{}").test_value();
-    assert_eq!(unchanged.layer, None);
+    unit_assert_eq!(unchanged.layer => None);
 
     let clear_json = serde_json::to_string(&ObjectUpdate::new().clear_layer()).test_value();
     let clear: ObjectUpdate = serde_json::from_str(&clear_json).test_value();
-    assert_eq!(clear.layer, Some(None));
+    unit_assert_eq!(clear.layer => Some(None));
 
     let layer = ObjectId::new(17);
     let set_json = serde_json::to_string(&ObjectUpdate::new().with_layer(layer)).test_value();
     let set: ObjectUpdate = serde_json::from_str(&set_json).test_value();
-    assert_eq!(set.layer, Some(Some(layer)));
+    unit_assert_eq!(set.layer => Some(Some(layer)));
 }
 
 #[test]
@@ -4085,7 +3674,7 @@ fn object_update_blit_mode_round_trips() {
     // modes and must survive queued-update serialization.
     let encoded = serde_json::to_string(&ObjectUpdate::new().with_blit_mode(129)).test_value();
     let decoded: ObjectUpdate = serde_json::from_str(&encoded).test_value();
-    assert_eq!(decoded.blit_mode, Some(129));
+    unit_assert_eq!(decoded.blit_mode => Some(129));
 }
 
 #[test]
@@ -4094,11 +3683,7 @@ fn object_blit_mode_survives_spawn_update_and_state_restore() {
     definition.set_blit_mode(2);
     let mut engine = effects_engine(0, definition.clone());
     let id = engine.spawn_test_object(SpawnConfig::new("Test"));
-    assert_eq!(
-        engine.object_snapshot(id).expect("object exists").blit_mode,
-        2,
-        "fresh objects inherit the definition mode"
-    );
+    unit_assert_eq!(engine.object_snapshot(id).expect("object exists").blit_mode => 2, "fresh objects inherit the definition mode");
 
     engine
         .apply_object_update(id, ObjectUpdate::new().with_blit_mode(129))
@@ -4108,22 +3693,20 @@ fn object_blit_mode_survives_spawn_update_and_state_restore() {
     let mut restored = Engine::with_seed(0);
     restored.register_test_definition(definition);
     restored.restore_state(&state).test_value();
-    assert_eq!(
-        restored
-            .object_snapshot(id)
-            .expect("restored object exists")
-            .blit_mode,
-        129
-    );
+    unit_assert_eq!(restored.object_snapshot(id).expect("restored object exists").blit_mode => 129);
 }
 
 #[test]
 fn apply_object_update_unknown_action_falls_back_to_default() {
     let mut definition = build_definition();
-    let mut actions = HashMap::new();
-    actions.insert("Idle".to_string(), ActionSpec::default());
-    actions.insert("Run".to_string(), ActionSpec::default());
-    definition.configure_actions(Some("Idle".to_string()), actions);
+    set_test_actions(
+        &mut definition,
+        Some("Idle"),
+        [
+            ("Idle", ActionSpec::default()),
+            ("Run", ActionSpec::default()),
+        ],
+    );
 
     let mut engine = effects_engine(3, definition);
     let id = engine.spawn_test_object(SpawnConfig::new("Test"));
@@ -4139,9 +3722,9 @@ fn apply_object_update_unknown_action_falls_back_to_default() {
         .test_value();
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.action.name, "Run");
-    assert_eq!(snapshot.action.phase, 2);
-    assert_eq!(snapshot.action.ticks, 5);
+    unit_assert_eq!(snapshot.action.name => "Run");
+    unit_assert_eq!(snapshot.action.phase => 2);
+    unit_assert_eq!(snapshot.action.ticks => 5);
 
     engine
         .apply_object_update(
@@ -4154,17 +3737,19 @@ fn apply_object_update_unknown_action_falls_back_to_default() {
         .test_value();
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.action.name, "Idle");
-    assert_eq!(snapshot.action.phase, 0);
-    assert_eq!(snapshot.action.ticks, 0);
+    unit_assert_eq!(snapshot.action.name => "Idle");
+    unit_assert_eq!(snapshot.action.phase => 0);
+    unit_assert_eq!(snapshot.action.ticks => 0);
 }
 
 #[test]
 fn spawn_config_unknown_action_falls_back_to_default() {
     let mut definition = build_definition();
-    let mut actions = HashMap::new();
-    actions.insert("Idle".to_string(), ActionSpec::default());
-    definition.configure_actions(Some("Idle".to_string()), actions);
+    set_test_actions(
+        &mut definition,
+        Some("Idle"),
+        [("Idle", ActionSpec::default())],
+    );
 
     let mut engine = effects_engine(4, definition);
 
@@ -4172,12 +3757,12 @@ fn spawn_config_unknown_action_falls_back_to_default() {
     requested.phase = 3;
     requested.ticks = 7;
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Test").with_action(requested));
+    let id = spawn_fixture!(engine, "Test", with_action: requested);
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.action.name, "Idle");
-    assert_eq!(snapshot.action.phase, 0);
-    assert_eq!(snapshot.action.ticks, 0);
+    unit_assert_eq!(snapshot.action.name => "Idle");
+    unit_assert_eq!(snapshot.action.phase => 0);
+    unit_assert_eq!(snapshot.action.ticks => 0);
 }
 
 #[test]
@@ -4193,19 +3778,23 @@ fn initialize_with_unknown_action_falls_back_to_default() {
         "#;
 
     let mut definition = effects_definition("Actor", "Actor", source);
-    let mut actions = HashMap::new();
-    actions.insert("Walk".to_string(), ActionSpec::default());
-    actions.insert("Idle".to_string(), ActionSpec::default());
-    definition.configure_actions(Some("Walk".to_string()), actions);
+    set_test_actions(
+        &mut definition,
+        Some("Walk"),
+        [
+            ("Walk", ActionSpec::default()),
+            ("Idle", ActionSpec::default()),
+        ],
+    );
 
     let mut engine = effects_engine(5, definition);
 
     let id = engine.spawn_test_object(SpawnConfig::new("Actor"));
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.action.name, "Walk");
-    assert_eq!(snapshot.action.phase, 0);
-    assert_eq!(snapshot.action.ticks, 0);
+    unit_assert_eq!(snapshot.action.name => "Walk");
+    unit_assert_eq!(snapshot.action.phase => 0);
+    unit_assert_eq!(snapshot.action.ticks => 0);
 }
 
 #[test]
@@ -4215,7 +3804,7 @@ fn apply_object_update_unknown_object_errors() {
         .apply_object_update(ObjectId::new(999), ObjectUpdate::default())
         .expect_err("update fails");
     match error {
-        EngineError::UnknownObject(id) => assert_eq!(id.as_u64(), 999),
+        EngineError::UnknownObject(id) => unit_assert_eq!(id.as_u64() => 999),
         other => panic!("unexpected error: {other:?}"),
     }
 }
@@ -4236,25 +3825,11 @@ fn custom_physics_settings_affect_integration() {
     let idx = engine.test_object_index(id);
     engine.objects[idx].state.mobile = true;
 
-    let object = tick_effects_object(&mut engine, id);
-    assert_eq!(object.velocity.y, 0);
-    assert_eq!(object.position.y, 0);
-    assert_eq!(
-        object
-            .fixed_velocity
-            .expect("custom gravity should remain sub-pixel")
-            .y
-            .val(),
-        262
-    );
-    assert_eq!(
-        object
-            .fixed_position
-            .expect("custom gravity movement should remain sub-pixel")
-            .y
-            .val(),
-        262
-    );
+    let object = tick_test_object(&mut engine, id);
+    unit_assert_eq!(object.velocity.y => 0);
+    unit_assert_eq!(object.position.y => 0);
+    unit_assert_eq!(object.fixed_velocity.expect("custom gravity should remain sub-pixel").y.val() => 262);
+    unit_assert_eq!(object.fixed_position.expect("custom gravity movement should remain sub-pixel").y.val() => 262);
 }
 
 #[test]
@@ -4278,12 +3853,10 @@ fn movement_out_of_bounds_removal_uses_strict_boundaries_and_cpp_exemptions() {
     parallax.set_category(CATEGORY_OBJECT | CATEGORY_PARALLAX);
     let mut attached = simple_definition("ATCH");
     attached.set_category(CATEGORY_LIVING);
-    attached.configure_actions(
-        Some("Attach".to_string()),
-        HashMap::from([(
-            "Attach".to_string(),
-            ActionSpec::default().with_procedure("Attach"),
-        )]),
+    set_test_actions(
+        &mut attached,
+        Some("Attach"),
+        [("Attach", ActionSpec::default().with_procedure("Attach"))],
     );
     let mut engine = effects_engine(42, definition);
     engine.register_test_definition(bounded);
@@ -4297,191 +3870,58 @@ fn movement_out_of_bounds_removal_uses_strict_boundaries_and_cpp_exemptions() {
     landscape.set_border_open(0, 0, true, true);
     engine.set_landscape(landscape);
 
-    let boundary = engine.spawn_test_object(
-        SpawnConfig::new("FALL")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(8, 20))
-            .with_mobile(true),
-    );
-    let below = engine.spawn_test_object(
-        SpawnConfig::new("FALL")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(8, 21))
-            .with_mobile(true),
-    );
-    let left_boundary = engine.spawn_test_object(
-        SpawnConfig::new("FALL")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(0, 8)),
-    );
-    let right_boundary = engine.spawn_test_object(
-        SpawnConfig::new("FALL")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(16, 8)),
-    );
-    let left_out = engine.spawn_test_object(
-        SpawnConfig::new("FALL")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(-1, 8)),
-    );
-    let right_out = engine.spawn_test_object(
-        SpawnConfig::new("FALL")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(17, 8)),
-    );
-    let crossing = engine.spawn_test_object(
-        SpawnConfig::new("FALL")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(10, 20))
-            .with_velocity(Vector2::new(0, 1))
-            .with_mobile(true),
-    );
-    let bounded = engine.spawn_test_object(
-        SpawnConfig::new("BNDD")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(6, 21))
-            .with_mobile(true),
-    );
-    let side_bounded = engine.spawn_test_object(
-        SpawnConfig::new("SNDB")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(-1, 8)),
-    );
-    let contained = engine.spawn_test_object(
-        SpawnConfig::new("FALL")
-            .with_category(CATEGORY_LIVING)
-            .with_container(bounded),
-    );
-    let static_back = engine.spawn_test_object(
-        SpawnConfig::new("STAT")
-            .with_category(CATEGORY_STATIC_BACK)
-            .with_position(Vector2::new(4, 21))
-            .with_mobile(true),
-    );
+    let boundary = spawn_fixture!(engine, "FALL", with_category: CATEGORY_LIVING, with_position: Vector2::new(8, 20), with_mobile: true);
+    let below = spawn_fixture!(engine, "FALL", with_category: CATEGORY_LIVING, with_position: Vector2::new(8, 21), with_mobile: true);
+    let left_boundary = spawn_fixture!(engine, "FALL", with_category: CATEGORY_LIVING, with_position: Vector2::new(0, 8));
+    let right_boundary = spawn_fixture!(engine, "FALL", with_category: CATEGORY_LIVING, with_position: Vector2::new(16, 8));
+    let left_out = spawn_fixture!(engine, "FALL", with_category: CATEGORY_LIVING, with_position: Vector2::new(-1, 8));
+    let right_out = spawn_fixture!(engine, "FALL", with_category: CATEGORY_LIVING, with_position: Vector2::new(17, 8));
+    let crossing = spawn_fixture!(engine, "FALL", with_category: CATEGORY_LIVING, with_position: Vector2::new(10, 20), with_velocity: Vector2::new(0, 1), with_mobile: true);
+    let bounded = spawn_fixture!(engine, "BNDD", with_category: CATEGORY_LIVING, with_position: Vector2::new(6, 21), with_mobile: true);
+    let side_bounded = spawn_fixture!(engine, "SNDB", with_category: CATEGORY_LIVING, with_position: Vector2::new(-1, 8));
+    let contained =
+        spawn_fixture!(engine, "FALL", with_category: CATEGORY_LIVING, with_container: bounded);
+    let static_back = spawn_fixture!(engine, "STAT", with_category: CATEGORY_STATIC_BACK, with_position: Vector2::new(4, 21), with_mobile: true);
     let mut attach_action = ActionState::new("Attach");
     attach_action.target = Some(bounded);
-    let attached = engine.spawn_test_object(
-        SpawnConfig::new("ATCH")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(6, 21))
-            .with_action(attach_action)
-            .with_mobile(true),
-    );
+    let attached = spawn_fixture!(engine, "ATCH", with_category: CATEGORY_LIVING, with_position: Vector2::new(6, 21), with_action: attach_action, with_mobile: true);
     let mut side_attach_action = ActionState::new("Attach");
     side_attach_action.target = Some(bounded);
-    let side_attached = engine.spawn_test_object(
-        SpawnConfig::new("ATCH")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(-1, 8))
-            .with_action(side_attach_action)
-            .with_mobile(true),
-    );
-    let hud_left = engine.spawn_test_object(
-        SpawnConfig::new("PARA")
-            .with_category(CATEGORY_OBJECT | CATEGORY_PARALLAX)
-            .with_position(Vector2::new(-1, 8)),
-    );
-    let hud_far_left = engine.spawn_test_object(
-        SpawnConfig::new("PARA")
-            .with_category(CATEGORY_OBJECT | CATEGORY_PARALLAX)
-            .with_position(Vector2::new(-17, 8)),
-    );
-    let world_parallax_left = engine.spawn_test_object(
-        SpawnConfig::new("PARA")
-            .with_category(CATEGORY_OBJECT | CATEGORY_PARALLAX)
-            .with_position(Vector2::new(-1, 8))
-            .with_local_vars(HashMap::from([(
-                "__local_0".to_string(),
-                Value::String(String::new().into()),
-            )])),
-    );
-    let hud_right = engine.spawn_test_object(
-        SpawnConfig::new("PARA")
-            .with_category(CATEGORY_OBJECT | CATEGORY_PARALLAX)
-            .with_position(Vector2::new(17, 8)),
-    );
-    let hud_bottom = engine.spawn_test_object(
-        SpawnConfig::new("PARA")
-            .with_category(CATEGORY_OBJECT | CATEGORY_PARALLAX)
-            .with_position(Vector2::new(8, 21)),
-    );
+    let side_attached = spawn_fixture!(engine, "ATCH", with_category: CATEGORY_LIVING, with_position: Vector2::new(-1, 8), with_action: side_attach_action, with_mobile: true);
+    let hud_left = spawn_fixture!(engine, "PARA", with_category: CATEGORY_OBJECT | CATEGORY_PARALLAX, with_position: Vector2::new(-1, 8));
+    let hud_far_left = spawn_fixture!(engine, "PARA", with_category: CATEGORY_OBJECT | CATEGORY_PARALLAX, with_position: Vector2::new(-17, 8));
+    let world_parallax_left = spawn_fixture!(engine, "PARA", with_category: CATEGORY_OBJECT | CATEGORY_PARALLAX, with_position: Vector2::new(-1, 8), with_local_vars: HashMap::from([(
+        "__local_0".to_string(),
+        Value::String(String::new().into()),
+    )]));
+    let hud_right = spawn_fixture!(engine, "PARA", with_category: CATEGORY_OBJECT | CATEGORY_PARALLAX, with_position: Vector2::new(17, 8));
+    let hud_bottom = spawn_fixture!(engine, "PARA", with_category: CATEGORY_OBJECT | CATEGORY_PARALLAX, with_position: Vector2::new(8, 21));
 
     engine.tick_without_snapshot().test_value();
 
     let boundary = engine.test_object_snapshot(boundary);
-    assert!(boundary.alive);
-    assert_eq!(boundary.status, ObjectStatus::Normal);
-    assert!(
-        engine.object_snapshot(below).is_none(),
-        "AssignDeath and AssignRemoval complete in the out-of-bounds tick"
-    );
-    assert!(
-        engine.object_snapshot(crossing).is_none(),
-        "crossing from y == GBackHgt is removed in that movement tick"
-    );
-    assert!(engine.object_snapshot(left_boundary).is_some());
-    assert!(engine.object_snapshot(right_boundary).is_some());
-    assert!(
-        engine.object_snapshot(left_out).is_none(),
-        "ordinary x < 0 is removed"
-    );
-    assert!(
-        engine.object_snapshot(right_out).is_none(),
-        "ordinary x > GBackWdt is removed"
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(bounded)
-            .expect("Border_Bottom object remains")
-            .status,
-        ObjectStatus::Normal
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(contained)
-            .expect("contained object remains")
-            .container,
-        Some(bounded)
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(side_bounded)
-            .expect("Border_Sides object remains")
-            .status,
-        ObjectStatus::Normal
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(static_back)
-            .expect("StaticBack object remains")
-            .status,
-        ObjectStatus::Normal
-    );
+    unit_assert!(boundary.alive);
+    unit_assert_eq!(boundary.status => ObjectStatus::Normal);
+    unit_assert!(engine.object_snapshot(below).is_none(), "AssignDeath and AssignRemoval complete in the out-of-bounds tick");
+    unit_assert!(engine.object_snapshot(crossing).is_none(), "crossing from y == GBackHgt is removed in that movement tick");
+    unit_assert!(engine.object_snapshot(left_boundary).is_some());
+    unit_assert!(engine.object_snapshot(right_boundary).is_some());
+    unit_assert!(engine.object_snapshot(left_out).is_none(), "ordinary x < 0 is removed");
+    unit_assert!(engine.object_snapshot(right_out).is_none(), "ordinary x > GBackWdt is removed");
+    unit_assert_eq!(engine.object_snapshot(bounded).expect("Border_Bottom object remains").status => ObjectStatus::Normal);
+    unit_assert_eq!(engine.object_snapshot(contained).expect("contained object remains").container => Some(bounded));
+    unit_assert_eq!(engine.object_snapshot(side_bounded).expect("Border_Sides object remains").status => ObjectStatus::Normal);
+    unit_assert_eq!(engine.object_snapshot(static_back).expect("StaticBack object remains").status => ObjectStatus::Normal);
     let attached = engine.test_object_snapshot(attached);
-    assert_eq!(attached.action.name, "Attach");
-    assert_eq!(attached.action.target, Some(bounded));
+    unit_assert_eq!(attached.action.name => "Attach");
+    unit_assert_eq!(attached.action.target => Some(bounded));
     let side_attached = engine.test_object_snapshot(side_attached);
-    assert_eq!(side_attached.action.target, Some(bounded));
-    assert!(
-        engine.object_snapshot(hud_left).is_some(),
-        "Local[0] == 0 HUD parallax survives the near left side"
-    );
-    assert!(
-        engine.object_snapshot(hud_far_left).is_none(),
-        "HUD parallax is removed beyond one landscape width left"
-    );
-    assert!(
-        engine.object_snapshot(world_parallax_left).is_none(),
-        "raw-nonzero Local[0] parallax is removed immediately at x < 0"
-    );
-    assert!(
-        engine.object_snapshot(hud_right).is_none(),
-        "all parallax objects are removed at x > GBackWdt"
-    );
-    assert!(
-        engine.object_snapshot(hud_bottom).is_none(),
-        "all parallax objects are removed at y > GBackHgt"
-    );
+    unit_assert_eq!(side_attached.action.target => Some(bounded));
+    unit_assert!(engine.object_snapshot(hud_left).is_some(), "Local[0] == 0 HUD parallax survives the near left side");
+    unit_assert!(engine.object_snapshot(hud_far_left).is_none(), "HUD parallax is removed beyond one landscape width left");
+    unit_assert!(engine.object_snapshot(world_parallax_left).is_none(), "raw-nonzero Local[0] parallax is removed immediately at x < 0");
+    unit_assert!(engine.object_snapshot(hud_right).is_none(), "all parallax objects are removed at x > GBackWdt");
+    unit_assert!(engine.object_snapshot(hud_bottom).is_none(), "all parallax objects are removed at y > GBackHgt");
 }
 
 #[test]
@@ -4514,12 +3954,13 @@ fn out_of_bounds_callbacks_run_before_timer_and_step_despite_death_error() {
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
     definition.set_timer(1);
     definition.set_timer_call(Some("After".to_string()));
-    definition.configure_actions(
-        Some("Idle".to_string()),
-        HashMap::from([
-            ("Idle".to_string(), ActionSpec::default()),
-            ("Dead".to_string(), ActionSpec::default()),
-        ]),
+    set_test_actions(
+        &mut definition,
+        Some("Idle"),
+        [
+            ("Idle", ActionSpec::default()),
+            ("Dead", ActionSpec::default()),
+        ],
     );
 
     let mut engine = effects_engine(43, definition);
@@ -4528,15 +3969,7 @@ fn out_of_bounds_callbacks_run_before_timer_and_step_despite_death_error() {
     landscape.set_world_height(20);
     landscape.set_border_open(0, 0, true, true);
     engine.set_landscape(landscape);
-    let object = engine.spawn_test_object(
-        SpawnConfig::new("HOOK")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(8, 20))
-            .with_velocity(Vector2::new(0, 1))
-            .add_effect(EffectState::new("Low").with_priority(10))
-            .add_effect(EffectState::new("High").with_priority(100))
-            .with_mobile(true),
-    );
+    let object = spawn_fixture!(engine, "HOOK", with_category: CATEGORY_LIVING, with_position: Vector2::new(8, 20), with_velocity: Vector2::new(0, 1), add_effect: EffectState::new("Low").with_priority(10), add_effect: EffectState::new("High").with_priority(100), with_mobile: true);
     let object_idx = engine.test_object_index(object);
     let command_target = i32::try_from(object.as_u64()).test_value();
     for effect in &mut engine.objects[object_idx].state.effects {
@@ -4545,21 +3978,13 @@ fn out_of_bounds_callbacks_run_before_timer_and_step_despite_death_error() {
 
     engine.tick_without_snapshot().test_value();
 
-    assert!(engine.object_snapshot(object).is_none());
+    unit_assert!(engine.object_snapshot(object).is_none());
     let globals = engine.snapshot().script_globals.named;
-    assert_eq!(globals.get("iOrder"), Some(&Value::Int(12)));
-    assert_eq!(
-        globals.get("iDeathEffectOrder"),
-        Some(&Value::Int(21)),
-        "AssignDeath clears effects from high to low before Death"
-    );
-    assert_eq!(
-        globals.get("iEffectOrder"),
-        Some(&Value::Nil),
-        "AssignRemoval skips the already-dead effect nodes after Death"
-    );
-    assert_eq!(globals.get("iTimer"), Some(&Value::Nil));
-    assert_eq!(globals.get("iStep"), Some(&Value::Nil));
+    unit_assert_eq!(globals.get("iOrder") => Some(&Value::Int(12)));
+    unit_assert_eq!(globals.get("iDeathEffectOrder") => Some(&Value::Int(21)), "AssignDeath clears effects from high to low before Death");
+    unit_assert_eq!(globals.get("iEffectOrder") => Some(&Value::Nil), "AssignRemoval skips the already-dead effect nodes after Death");
+    unit_assert_eq!(globals.get("iTimer") => Some(&Value::Nil));
+    unit_assert_eq!(globals.get("iStep") => Some(&Value::Nil));
 }
 
 #[test]
@@ -4596,12 +4021,8 @@ fn out_of_bounds_assign_removal_passes_clear_reason_to_effect_stop() {
 
     engine.tick_without_snapshot().test_value();
 
-    assert!(engine.object_snapshot(object).is_none());
-    assert_eq!(
-        engine.snapshot().script_globals.named.get("stop_reason"),
-        Some(&Value::Int(3)),
-        "AssignRemoval's Fx*Stop receives C4FxCall_RemoveClear"
-    );
+    unit_assert!(engine.object_snapshot(object).is_none());
+    unit_assert_eq!(engine.snapshot().script_globals.named.get("stop_reason") => Some(&Value::Int(3)), "AssignRemoval's Fx*Stop receives C4FxCall_RemoveClear");
 }
 
 #[test]
@@ -4617,14 +4038,14 @@ fn fixed_point_velocity_accumulates_sub_pixel_motion() {
     engine.objects[idx].state.mobile = true;
 
     for _ in 0..109 {
-        let object = tick_effects_object(&mut engine, id);
-        assert_eq!(object.position.x, 0);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.position.x => 0);
     }
 
-    let object = tick_effects_object(&mut engine, id);
+    let object = tick_test_object(&mut engine, id);
     // `fixtoi` rounds to nearest: 110 * 300 = 33000, just over 0.5px.
-    assert_eq!(object.position.x, 1);
-    assert_eq!(object.velocity.x, 0);
+    unit_assert_eq!(object.position.x => 1);
+    unit_assert_eq!(object.velocity.x => 0);
 }
 
 #[test]
@@ -4646,7 +4067,7 @@ fn gravity_accumulates_as_c4fixed_matching_cpp_golden() {
     for raw_ydir in expected_ydir {
         engine.tick_without_snapshot().test_value();
         let idx = engine.test_object_index(id);
-        assert_eq!(engine.objects[idx].fixed_velocity.y.val(), raw_ydir);
+        unit_assert_eq!(engine.objects[idx].fixed_velocity.y.val() => raw_ydir);
     }
 }
 
@@ -4690,15 +4111,11 @@ fn spawn_landscape_friction_applies_to_fixed_velocity() -> Result<(), EngineErro
     // and keeps the script-set velocity; contacts resolve in movement
     // (C4Game.cpp:1085-1127). The old spawn-time snap+friction was a
     // port-ism (it displaced the GoldRush wagon by 20px).
-    assert_eq!(engine.objects[idx].state.position.y, 12);
+    unit_assert_eq!(engine.objects[idx].state.position.y => 12);
     // SetXDir's default precision is 10 (FnSetXDir, C4Script.cpp:705):
     // 15 -> 1.5 px/frame.
-    assert_eq!(
-        engine.objects[idx].fixed_velocity.x.val(),
-        98_304,
-        "SetXDir(15) survives the spawn untouched"
-    );
-    assert_eq!(engine.objects[idx].state.velocity.x, 2);
+    unit_assert_eq!(engine.objects[idx].fixed_velocity.x.val() => 98_304, "SetXDir(15) survives the spawn untouched");
+    unit_assert_eq!(engine.objects[idx].state.velocity.x => 2);
     Ok(())
 }
 
@@ -4735,16 +4152,13 @@ fn per_pixel_horizontal_movement_stops_at_first_solid_column() {
     // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
     engine.objects[idx].state.mobile = true;
 
-    let object = tick_effects_object(&mut engine, id);
+    let object = tick_test_object(&mut engine, id);
 
-    assert_eq!(object.position, Vector2::new(5, 10));
+    unit_assert_eq!(object.position => Vector2::new(5, 10));
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
-    assert_eq!(
-        engine.objects[idx].fixed_velocity.x,
-        itofix(4) - fixed100(50)
-    );
-    assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+    unit_assert_eq!(engine.objects[idx].fixed_position.x => itofix(5));
+    unit_assert_eq!(engine.objects[idx].fixed_velocity.x => itofix(4) - fixed100(50));
+    unit_assert_eq!(engine.objects[idx].fixed_velocity.y => -fixed100(50));
 }
 
 #[test]
@@ -4871,66 +4285,43 @@ fn zero_vertex_objects_use_vertex_contact_and_border_bound_semantics() {
     let snapshot = engine.test_tick();
 
     let terrain_snapshot = snapshot.object(terrain).test_value();
-    assert!(terrain_snapshot.vertices.is_empty());
-    assert_eq!(terrain_snapshot.position, Vector2::new(7, 12));
-    assert_eq!(terrain_snapshot.velocity, Vector2::new(2, 4));
+    unit_assert!(terrain_snapshot.vertices.is_empty());
+    unit_assert_eq!(terrain_snapshot.position => Vector2::new(7, 12));
+    unit_assert_eq!(terrain_snapshot.velocity => Vector2::new(2, 4));
     let terrain_idx = engine.test_object_index(terrain);
-    assert_eq!(
-        engine.objects[terrain_idx].fixed_position,
-        FixedVec2::from_ints(7, 12)
-    );
-    assert_eq!(
-        engine.objects[terrain_idx].fixed_velocity,
-        FixedVec2::from_ints(2, 4),
-        "solid material friction must not be synthesized without vertices"
-    );
-    assert_eq!(engine.objects[terrain_idx].motion_x, 2);
-    assert_eq!(engine.objects[terrain_idx].motion_y, 4);
-    assert_eq!(engine.objects[terrain_idx].frame_t_contact, CNAT_NONE);
-    assert!(
-        terrain_calls.lock().unwrap().is_empty(),
-        "empty terrain probes must not synthesize Contact* or Hit calls"
-    );
+    unit_assert_eq!(engine.objects[terrain_idx].fixed_position => FixedVec2::from_ints(7, 12));
+    unit_assert_eq!(engine.objects[terrain_idx].fixed_velocity => FixedVec2::from_ints(2, 4), "solid material friction must not be synthesized without vertices");
+    unit_assert_eq!(engine.objects[terrain_idx].motion_x => 2);
+    unit_assert_eq!(engine.objects[terrain_idx].motion_y => 4);
+    unit_assert_eq!(engine.objects[terrain_idx].frame_t_contact => CNAT_NONE);
+    unit_assert!(terrain_calls.lock().unwrap().is_empty(), "empty terrain probes must not synthesize Contact* or Hit calls");
 
     let world_low_snapshot = snapshot.object(world_low).test_value();
-    assert_eq!(world_low_snapshot.position, Vector2::new(2, 3));
-    assert_eq!(world_low_snapshot.velocity, Vector2::ZERO);
+    unit_assert_eq!(world_low_snapshot.position => Vector2::new(2, 3));
+    unit_assert_eq!(world_low_snapshot.velocity => Vector2::ZERO);
     let world_low_idx = engine.test_object_index(world_low);
-    assert_eq!(
-        engine.objects[world_low_idx].fixed_position,
-        FixedVec2::from_ints(-3, -2),
-        "TargetBounds clamps only the integer target"
-    );
+    unit_assert_eq!(engine.objects[world_low_idx].fixed_position => FixedVec2::from_ints(-3, -2), "TargetBounds clamps only the integer target");
 
     let world_high_snapshot = snapshot.object(world_high).test_value();
-    assert_eq!(world_high_snapshot.position, Vector2::new(18, 27));
-    assert_eq!(world_high_snapshot.velocity, Vector2::ZERO);
+    unit_assert_eq!(world_high_snapshot.position => Vector2::new(18, 27));
+    unit_assert_eq!(world_high_snapshot.velocity => Vector2::ZERO);
     let world_high_idx = engine.test_object_index(world_high);
-    assert_eq!(
-        engine.objects[world_high_idx].fixed_position,
-        FixedVec2::from_ints(23, 32)
-    );
+    unit_assert_eq!(engine.objects[world_high_idx].fixed_position => FixedVec2::from_ints(23, 32));
 
     let layer_high_snapshot = snapshot.object(layer_high_mover).test_value();
-    assert_eq!(layer_high_snapshot.position, Vector2::new(17, 17));
-    assert_eq!(layer_high_snapshot.velocity, Vector2::ZERO);
+    unit_assert_eq!(layer_high_snapshot.position => Vector2::new(17, 17));
+    unit_assert_eq!(layer_high_snapshot.velocity => Vector2::ZERO);
     let layer_high_idx = engine.test_object_index(layer_high_mover);
-    assert_eq!(
-        engine.objects[layer_high_idx].fixed_position,
-        FixedVec2::from_ints(21, 21)
-    );
+    unit_assert_eq!(engine.objects[layer_high_idx].fixed_position => FixedVec2::from_ints(21, 21));
 
     let layer_low_snapshot = snapshot.object(layer_low_mover).test_value();
-    assert_eq!(layer_low_snapshot.position, Vector2::new(11, 11));
-    assert_eq!(layer_low_snapshot.velocity, Vector2::ZERO);
+    unit_assert_eq!(layer_low_snapshot.position => Vector2::new(11, 11));
+    unit_assert_eq!(layer_low_snapshot.velocity => Vector2::ZERO);
     let layer_low_idx = engine.test_object_index(layer_low_mover);
-    assert_eq!(
-        engine.objects[layer_low_idx].fixed_position,
-        FixedVec2::from_ints(7, 7)
-    );
+    unit_assert_eq!(engine.objects[layer_low_idx].fixed_position => FixedVec2::from_ints(7, 7));
 
-    assert_eq!(
-        *world_bound_calls.lock().unwrap(),
+    unit_assert_eq!(
+        *world_bound_calls.lock().unwrap() =>
         vec![
             "ContactLeft".to_string(),
             "ContactTop".to_string(),
@@ -4939,13 +4330,13 @@ fn zero_vertex_objects_use_vertex_contact_and_border_bound_semantics() {
         ],
         "world bounds retain native movement and directional callback order"
     );
-    assert_eq!(
-        *layer_high_bound_calls.lock().unwrap(),
+    unit_assert_eq!(
+        *layer_high_bound_calls.lock().unwrap() =>
         vec!["ContactRight".to_string(), "ContactBottom".to_string()],
         "high layer bounds retain their native directional callbacks"
     );
-    assert_eq!(
-        *layer_low_bound_calls.lock().unwrap(),
+    unit_assert_eq!(
+        *layer_low_bound_calls.lock().unwrap() =>
         vec!["ContactLeft".to_string(), "ContactTop".to_string()],
         "low layer bounds retain their native directional callbacks"
     );
@@ -4963,21 +4354,19 @@ fn zero_vertex_attached_movement_runs_attachment_loss_action() {
         |name, _| matches!(name, "OnJumpStart" | "OnSlideAbort").then(|| name.to_owned()),
     );
     definition.set_shape_vertices(Vec::new());
-    definition.configure_actions(
-        Some("Idle".to_string()),
-        HashMap::from([
-            ("Idle".to_string(), ActionSpec::default()),
+    set_test_actions(
+        &mut definition,
+        Some("Idle"),
+        [
+            ("Idle", ActionSpec::default()),
             (
-                "Slide".to_string(),
+                "Slide",
                 ActionSpec::default()
                     .with_attach(CNAT_BOTTOM)
                     .with_abort_call("OnSlideAbort"),
             ),
-            (
-                "Jump".to_string(),
-                ActionSpec::default().with_start_call("OnJumpStart"),
-            ),
-        ]),
+            ("Jump", ActionSpec::default().with_start_call("OnJumpStart")),
+        ],
     );
 
     let mut engine = Engine::with_seed(29);
@@ -5001,21 +4390,15 @@ fn zero_vertex_attached_movement_runs_attachment_loss_action() {
     };
 
     let snapshot = engine.test_tick();
-    assert_eq!(
-        snapshot.object(object).expect("object remains").action.name,
-        "Jump"
-    );
-    assert_eq!(
-        *calls.lock().unwrap(),
-        vec!["OnJumpStart".to_string(), "OnSlideAbort".to_string()]
-    );
+    unit_assert_eq!(snapshot.object(object).expect("object remains").action.name => "Jump");
+    unit_assert_eq!(*calls.lock().unwrap() => vec!["OnJumpStart".to_string(), "OnSlideAbort".to_string()]);
     let index = engine.test_object_index(object);
-    assert_eq!(engine.objects[index].frame_t_contact, CNAT_NONE);
-    assert!(!engine.objects[index].state.shape_attach.mat_valid);
-    assert!(!engine.objects[index].state.shape_attach.mat_vehicle);
-    assert_eq!(engine.objects[index].state.shape_attach.x, 9);
-    assert_eq!(engine.objects[index].state.shape_attach.y, 10);
-    assert_eq!(engine.objects[index].state.shape_attach.vtx, 3);
+    unit_assert_eq!(engine.objects[index].frame_t_contact => CNAT_NONE);
+    unit_assert!(!engine.objects[index].state.shape_attach.mat_valid);
+    unit_assert!(!engine.objects[index].state.shape_attach.mat_vehicle);
+    unit_assert_eq!(engine.objects[index].state.shape_attach.x => 9);
+    unit_assert_eq!(engine.objects[index].state.shape_attach.y => 10);
+    unit_assert_eq!(engine.objects[index].state.shape_attach.vtx => 3);
 }
 
 #[test]
@@ -5040,9 +4423,9 @@ fn zero_vertex_rotation_uses_empty_contact_checks() {
     engine.tick_without_snapshot().test_value();
 
     let index = engine.test_object_index(object);
-    assert_eq!(engine.objects[index].state.rotation, 5);
-    assert_eq!(engine.objects[index].fixed_rotation, itofix(5));
-    assert_eq!(engine.objects[index].frame_t_contact, CNAT_NONE);
+    unit_assert_eq!(engine.objects[index].state.rotation => 5);
+    unit_assert_eq!(engine.objects[index].fixed_rotation => itofix(5));
+    unit_assert_eq!(engine.objects[index].frame_t_contact => CNAT_NONE);
 }
 
 #[test]
@@ -5061,10 +4444,10 @@ fn spawn_initializes_vertices_from_definition_shape() {
     let id = engine.spawn_test_object(SpawnConfig::new("Rock"));
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.vertices.len(), 2);
-    assert_eq!(snapshot.vertices[0].x, -1);
-    assert_eq!(snapshot.vertices[0].cnat, CNAT_BOTTOM);
-    assert_eq!(snapshot.vertices[0].friction, 80);
+    unit_assert_eq!(snapshot.vertices.len() => 2);
+    unit_assert_eq!(snapshot.vertices[0].x => -1);
+    unit_assert_eq!(snapshot.vertices[0].cnat => CNAT_BOTTOM);
+    unit_assert_eq!(snapshot.vertices[0].friction => 80);
 }
 
 // An effect whose name resolves no Fx* callback at all is still a valid
@@ -5109,12 +4492,16 @@ func Probe()
     return [GetOwner(), added, GetEffect("OwnerlessTeam", this()), GetTeam()];
 }
 "#;
-    let mut engine = Engine::with_seed(11);
-    engine.register_test_script_definition("SHT1", "Shot", script);
-    let id = engine.spawn_test_object(SpawnConfig::new("SHT1").with_owner(-1));
+    let (mut engine, id) = script_object_fixture(
+        11,
+        "SHT1",
+        "Shot",
+        script,
+        SpawnConfig::new("SHT1").with_owner(-1),
+    );
     let probe = call_effects_object(&mut engine, id, "Probe", Vec::new());
-    assert_eq!(
-        probe,
+    unit_assert_eq!(
+        probe =>
         Value::Array(vec![
             Value::Int(-1),
             Value::Int(1),

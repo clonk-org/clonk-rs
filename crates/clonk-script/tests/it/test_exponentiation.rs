@@ -1,37 +1,19 @@
 // Test for exponentiation operator (**)
 
-use clonk_script::{Engine, ScriptError, Value};
+use clonk_script::{Engine, Value};
 
 fn eval(expression: &str) -> Value {
-    let mut engine = Engine::new();
-    engine
-        .load_script(&format!("func Test() {{ return {expression}; }}"))
-        .expect("exponentiation script loads");
-    engine.call("Test", &[]).expect("script call succeeds")
+    crate::support::eval(&format!("func Test() {{ return {expression}; }}"))
 }
 
 fn eval_strict1(expression: &str) -> Value {
-    let mut engine = Engine::new();
-    engine
-        .load_script(&format!(
-            "#strict\nfunc Test() {{ var empty; return {expression}; }}"
-        ))
-        .expect("STRICT1 exponentiation script loads");
-    engine.call("Test", &[]).expect("script call succeeds")
+    crate::support::eval(&format!(
+        "#strict\nfunc Test() {{ var empty; return {expression}; }}"
+    ))
 }
 
 fn runtime_error(expression: &str) -> String {
-    let mut engine = Engine::new();
-    engine
-        .load_script(&format!("func Test() {{ return {expression}; }}"))
-        .expect("exponentiation script loads");
-    match engine
-        .call("Test", &[])
-        .expect_err("non-integer exponentiation operand must fail")
-    {
-        ScriptError::Runtime(error) => error.message().to_string(),
-        other => panic!("expected runtime error, got {other}"),
-    }
+    crate::support::runtime_error(&format!("func Test() {{ return {expression}; }}"), &[])
 }
 
 crate::support::compile_case!(simple_exponentiation, r#"func Test() { return 2**3; }"#);

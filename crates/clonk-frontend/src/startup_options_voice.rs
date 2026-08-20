@@ -131,33 +131,15 @@ impl VoiceGroupLayout {
             return None;
         }
         let height = Self::preferred_height(metrics, indent_y2).min(available);
-        let group = IntRect {
-            x: volume_group.x,
-            y: top,
-            w: volume_group.w,
-            h: height,
-        };
-        let client = IntRect {
-            x: group.x + 4,
-            y: group.y + 4 + metrics.title_line_height,
-            w: group.w - 8,
-            h: group.h - 8 - metrics.title_line_height,
-        };
-        let rows = Aligner::new(
-            IntRect {
-                x: 0,
-                y: 0,
-                w: client.w,
-                h: client.h,
-            },
-            indent_x1,
-            indent_y2,
+        let group = IntRect::new(volume_group.x, top, volume_group.w, height);
+        let client = IntRect::new(
+            group.x + 4,
+            group.y + 4 + metrics.title_line_height,
+            group.w - 8,
+            group.h - 8 - metrics.title_line_height,
         );
-        let child_abs = |rect: IntRect| IntRect {
-            x: client.x + rect.x,
-            y: client.y + rect.y,
-            ..rect
-        };
+        let rows = Aligner::new(IntRect::new(0, 0, client.w, client.h), indent_x1, indent_y2);
+        let child_abs = |rect: IntRect| rect.with_position(client.x + rect.x, client.y + rect.y);
         let row = |index: i32| {
             child_abs(rows.get_grid_cell(0, 1, index, ROWS, -1, metrics.row_height, true, 1, 1))
         };

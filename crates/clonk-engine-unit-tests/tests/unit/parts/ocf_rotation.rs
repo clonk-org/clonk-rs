@@ -33,48 +33,17 @@ fn multi_attach_matches_single_attach_on_rect_solid_mask() {
     engine.set_physics(PhysicsSettings::new(0, 20, -20));
     engine.register_test_definition(platform);
     engine.register_test_definition(rect_mask_attach_definition(false));
-    engine.spawn_test_object(
-        SpawnConfig::new("Platform")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(4, 7))
-            .with_loaded(true),
-    );
-    let single = engine.spawn_test_object(
-        SpawnConfig::new("Climber")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(5, 5))
-            .with_action(ActionState::new("Single"))
-            .with_mobile(true)
-            .with_loaded(true),
-    );
-    let multi = engine.spawn_test_object(
-        SpawnConfig::new("Climber")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(10, 5))
-            .with_action(ActionState::new("Multi"))
-            .with_mobile(true)
-            .with_loaded(true),
-    );
+    spawn_fixture!(engine, "Platform", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 7), with_loaded: true);
+    let single = spawn_fixture!(engine, "Climber", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 5), with_action: ActionState::new("Single"), with_mobile: true, with_loaded: true);
+    let multi = spawn_fixture!(engine, "Climber", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 5), with_action: ActionState::new("Multi"), with_mobile: true, with_loaded: true);
 
     engine.tick_without_snapshot().test_value();
     for (id, action, x) in [(single, "Single", 5), (multi, "Multi", 10)] {
         let index = engine.test_object_index(id);
         let object = &engine.objects[index];
-        assert_eq!(
-            object.state.action.name, action,
-            "must not run NoAttachAction"
-        );
-        assert_eq!(object.state.position, Vector2::new(x, 5));
-        assert_eq!(
-            object.state.shape_attach,
-            ShapeAttachRecord {
-                mat_valid: true,
-                mat_vehicle: true,
-                x,
-                y: 7,
-                vtx: 0,
-            }
-        );
+        unit_assert_eq!(object.state.action.name => action, "must not run NoAttachAction");
+        unit_assert_eq!(object.state.position => Vector2::new(x, 5));
+        unit_assert_eq!(object.state.shape_attach => ShapeAttachRecord {mat_valid: true, mat_vehicle: true, x, y: 7, vtx: 0,});
     }
 }
 
@@ -85,18 +54,7 @@ fn multi_attach_excludes_own_rect_solid_mask_after_first_motion() {
     engine.set_physics(PhysicsSettings::new(0, 20, -20));
     engine.register_test_definition(rect_mask_attach_definition(true));
 
-    let spawn = |engine: &mut Engine, x, action| {
-        engine.spawn_test_object(
-            SpawnConfig::new("Climber")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(x, 5))
-                .with_fixed_position(FixedVec2::from_ints(x, 5))
-                .with_action(ActionState::new(action))
-                .with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO))
-                .with_mobile(true)
-                .with_loaded(true),
-        )
-    };
+    let spawn = |engine: &mut Engine, x, action| spawn_fixture!(engine, "Climber", with_category: CATEGORY_OBJECT, with_position: Vector2::new(x, 5), with_fixed_position: FixedVec2::from_ints(x, 5), with_action: ActionState::new(action), with_fixed_velocity: FixedVec2::new(itofix(2), C4Fixed::ZERO), with_mobile: true, with_loaded: true);
     let single = spawn(&mut engine, 5, "Single");
     let multi = spawn(&mut engine, 12, "Multi");
 
@@ -123,11 +81,8 @@ fn multi_attach_excludes_own_rect_solid_mask_after_first_motion() {
     for (id, expected_x) in [(single, 7), (multi, 14)] {
         let index = engine.test_object_index(id);
         let object = &engine.objects[index];
-        assert_eq!(object.state.position, Vector2::new(expected_x, 5));
-        assert_eq!(
-            object.state.action.name, "Jump",
-            "the second pixel must exclude the mover's stale own mask"
-        );
+        unit_assert_eq!(object.state.position => Vector2::new(expected_x, 5));
+        unit_assert_eq!(object.state.action.name => "Jump", "the second pixel must exclude the mover's stale own mask");
     }
 }
 
@@ -145,24 +100,9 @@ fn free_rotation_preserves_fractional_translation_accumulator() {
     let half_pixel = fixed100(50);
     let velocity = FixedVec2::new(half_pixel, half_pixel);
     let spinning_start = FixedVec2::from_ints(10, 10);
-    let spinning_id = engine.spawn_test_object(
-        SpawnConfig::new("Spinner")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(10, 10))
-            .with_fixed_position(spinning_start)
-            .with_fixed_velocity(velocity)
-            .with_rotation_velocity(itofix(1))
-            .with_mobile(true),
-    );
+    let spinning_id = spawn_fixture!(engine, "Spinner", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10), with_fixed_position: spinning_start, with_fixed_velocity: velocity, with_rotation_velocity: itofix(1), with_mobile: true);
     let control_start = FixedVec2::from_ints(40, 10);
-    let control_id = engine.spawn_test_object(
-        SpawnConfig::new("Spinner")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(40, 10))
-            .with_fixed_position(control_start)
-            .with_fixed_velocity(velocity)
-            .with_mobile(true),
-    );
+    let control_id = spawn_fixture!(engine, "Spinner", with_category: CATEGORY_OBJECT, with_position: Vector2::new(40, 10), with_fixed_position: control_start, with_fixed_velocity: velocity, with_mobile: true);
 
     let mut expected_spinning = spinning_start;
     let mut expected_control = control_start;
@@ -174,20 +114,11 @@ fn free_rotation_preserves_fractional_translation_accumulator() {
 
     let spinning_idx = engine.test_object_index(spinning_id);
     let control_idx = engine.test_object_index(control_id);
-    assert_ne!(engine.objects[spinning_idx].state.rotation, 0);
-    assert_eq!(
-        engine.objects[spinning_idx].fixed_position,
-        expected_spinning
-    );
-    assert_eq!(engine.objects[control_idx].fixed_position, expected_control);
-    assert_eq!(
-        engine.objects[spinning_idx].fixed_position.x - spinning_start.x,
-        engine.objects[control_idx].fixed_position.x - control_start.x
-    );
-    assert_eq!(
-        engine.objects[spinning_idx].fixed_position.y - spinning_start.y,
-        engine.objects[control_idx].fixed_position.y - control_start.y
-    );
+    unit_assert_ne!(engine.objects[spinning_idx].state.rotation => 0);
+    unit_assert_eq!(engine.objects[spinning_idx].fixed_position => expected_spinning);
+    unit_assert_eq!(engine.objects[control_idx].fixed_position => expected_control);
+    unit_assert_eq!(engine.objects[spinning_idx].fixed_position.x - spinning_start.x => engine.objects[control_idx].fixed_position.x - control_start.x);
+    unit_assert_eq!(engine.objects[spinning_idx].fixed_position.y - spinning_start.y => engine.objects[control_idx].fixed_position.y - control_start.y);
 }
 
 #[test]
@@ -215,15 +146,16 @@ fn attached_rotation_shifts_only_integer_position() {
     engine.register_test_definition(definition);
 
     let fixed_position = FixedVec2::new(itofix(50) + fixed100(25), itofix(10) + fixed100(25));
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("AttachedSpinner")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(50, 10))
-            .with_fixed_position(fixed_position)
-            // DoMovement multiplies rdir by five; 0.2 yields one
-            // contact-aware integer rotation step.
-            .with_rotation_velocity(fixed100(20))
-            .with_mobile(true),
+    // DoMovement multiplies rdir by five; 0.2 yields one
+    // contact-aware integer rotation step.
+    let id = spawn_fixture!(
+        engine,
+        "AttachedSpinner",
+        with_category: CATEGORY_OBJECT,
+        with_position: Vector2::new(50, 10),
+        with_fixed_position: fixed_position,
+        with_rotation_velocity: fixed100(20),
+        with_mobile: true,
     );
     let idx = engine.test_object_index(id);
     engine.objects[idx].frame_t_attach = CNAT_BOTTOM;
@@ -237,9 +169,9 @@ fn attached_rotation_shifts_only_integer_position() {
     engine
         .exec_object_movement(idx, &actions, &definition_id, &[])
         .test_value();
-    assert_eq!(engine.objects[idx].state.rotation, 1);
-    assert_eq!(engine.objects[idx].state.position, Vector2::new(50, 11));
-    assert_eq!(engine.objects[idx].fixed_position, fixed_position);
+    unit_assert_eq!(engine.objects[idx].state.rotation => 1);
+    unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(50, 11));
+    unit_assert_eq!(engine.objects[idx].fixed_position => fixed_position);
 
     // Without another attachment override, the following frame walks the
     // integer position back toward fixtoi(fix_y), proving that rotation
@@ -249,8 +181,8 @@ fn attached_rotation_shifts_only_integer_position() {
     engine
         .exec_object_movement(idx, &actions, &definition_id, &[])
         .test_value();
-    assert_eq!(engine.objects[idx].state.position, Vector2::new(50, 10));
-    assert_eq!(engine.objects[idx].fixed_position, fixed_position);
+    unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(50, 10));
+    unit_assert_eq!(engine.objects[idx].fixed_position => fixed_position);
 }
 
 #[test]
@@ -261,16 +193,7 @@ fn movement_rotation_entry_uses_cached_ocf_rotate_con_gate() {
     let mut engine = Engine::with_seed(61);
     engine.set_physics(PhysicsSettings::new(0, 20, -20));
     engine.register_test_definition(definition);
-    let spawn = |engine: &mut Engine, x, construction| {
-        engine.spawn_test_object(
-            SpawnConfig::new("ConstructionWheel")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(x, 5))
-                .with_construction(construction)
-                .with_rotation_velocity(itofix(1))
-                .with_mobile(true),
-        )
-    };
+    let spawn = |engine: &mut Engine, x, construction| spawn_fixture!(engine, "ConstructionWheel", with_category: CATEGORY_OBJECT, with_position: Vector2::new(x, 5), with_construction: construction, with_rotation_velocity: itofix(1), with_mobile: true);
     let minimum = spawn(&mut engine, 5, 100);
     let rotateable = spawn(&mut engine, 15, 101);
 
@@ -280,19 +203,19 @@ fn movement_rotation_entry_uses_cached_ocf_rotate_con_gate() {
         .objects
         .get(engine.test_object_index(minimum))
         .test_value();
-    assert_eq!(minimum.state.ocf & ocf::ROTATE, 0);
-    assert_eq!(minimum.state.rotation, 0);
-    assert_eq!(minimum.fixed_rotation, C4Fixed::ZERO);
-    assert_eq!(minimum.rotation_velocity, itofix(1));
+    unit_assert_eq!(minimum.state.ocf & ocf::ROTATE => 0);
+    unit_assert_eq!(minimum.state.rotation => 0);
+    unit_assert_eq!(minimum.fixed_rotation => C4Fixed::ZERO);
+    unit_assert_eq!(minimum.rotation_velocity => itofix(1));
 
     let rotateable = engine
         .objects
         .get(engine.test_object_index(rotateable))
         .test_value();
-    assert_ne!(rotateable.state.ocf & ocf::ROTATE, 0);
-    assert_eq!(rotateable.state.rotation, 5);
-    assert_eq!(rotateable.fixed_rotation, itofix(5));
-    assert_eq!(rotateable.rotation_velocity, itofix(1));
+    unit_assert_ne!(rotateable.state.ocf & ocf::ROTATE => 0);
+    unit_assert_eq!(rotateable.state.rotation => 5);
+    unit_assert_eq!(rotateable.fixed_rotation => itofix(5));
+    unit_assert_eq!(rotateable.rotation_velocity => itofix(1));
 }
 
 fn rotation_redirect_fixture_at_con(
@@ -328,11 +251,8 @@ fn rotation_redirect_fixture_at_con(
             .with_loaded(true),
     );
     let idx = engine.test_object_index(id);
-    assert!(!engine.objects[idx].state.alive);
-    assert_eq!(
-        engine.objects[idx].state.ocf & ocf::ROTATE != 0,
-        construction > 100
-    );
+    unit_assert!(!engine.objects[idx].state.alive);
+    unit_assert_eq!(engine.objects[idx].state.ocf & ocf::ROTATE != 0 => construction > 100);
     (engine, id)
 }
 
@@ -367,11 +287,11 @@ fn vertical_redirect_suppresses_same_movement_rotation_redirect() {
 
     let idx = engine.test_object_index(id);
     let object = &engine.objects[idx];
-    assert_eq!(object.state.position, Vector2::new(30, 11));
-    assert_eq!(object.state.rotation, 0, "contact rolls rotation back");
-    assert_eq!(object.fixed_rotation, C4Fixed::ZERO);
-    assert_eq!(object.fixed_velocity.y, C4Fixed::ZERO);
-    assert_eq!(object.rotation_velocity, C4Fixed::ZERO);
+    unit_assert_eq!(object.state.position => Vector2::new(30, 11));
+    unit_assert_eq!(object.state.rotation => 0, "contact rolls rotation back");
+    unit_assert_eq!(object.fixed_rotation => C4Fixed::ZERO);
+    unit_assert_eq!(object.fixed_velocity.y => C4Fixed::ZERO);
+    unit_assert_eq!(object.rotation_velocity => C4Fixed::ZERO);
 }
 
 #[test]
@@ -379,19 +299,19 @@ fn vertical_redirect_uses_cached_ocf_rotate_con_gate() {
     let (mut minimum, minimum_id) = rotation_redirect_fixture_at_con(-itofix(1), fixed100(25), 100);
     exec_redirect_wheel_movement(&mut minimum, minimum_id);
     let minimum = &minimum.objects[minimum.test_object_index(minimum_id)];
-    assert_eq!(minimum.fixed_velocity.y, C4Fixed::ZERO);
-    assert_eq!(minimum.rotation_velocity, fixed100(25));
-    assert_eq!(minimum.fixed_rotation, C4Fixed::ZERO);
-    assert_eq!(minimum.state.rotation, 0);
+    unit_assert_eq!(minimum.fixed_velocity.y => C4Fixed::ZERO);
+    unit_assert_eq!(minimum.rotation_velocity => fixed100(25));
+    unit_assert_eq!(minimum.fixed_rotation => C4Fixed::ZERO);
+    unit_assert_eq!(minimum.state.rotation => 0);
 
     let (mut rotateable, rotateable_id) =
         rotation_redirect_fixture_at_con(-itofix(1), fixed100(25), 101);
     exec_redirect_wheel_movement(&mut rotateable, rotateable_id);
     let rotateable = &rotateable.objects[rotateable.test_object_index(rotateable_id)];
-    assert_eq!(rotateable.fixed_velocity.y, C4Fixed::ZERO);
-    assert_eq!(rotateable.rotation_velocity, C4Fixed::ZERO);
-    assert_eq!(rotateable.fixed_rotation, C4Fixed::ZERO);
-    assert_eq!(rotateable.state.rotation, 0);
+    unit_assert_eq!(rotateable.fixed_velocity.y => C4Fixed::ZERO);
+    unit_assert_eq!(rotateable.rotation_velocity => C4Fixed::ZERO);
+    unit_assert_eq!(rotateable.fixed_rotation => C4Fixed::ZERO);
+    unit_assert_eq!(rotateable.state.rotation => 0);
 }
 
 #[test]
@@ -402,10 +322,10 @@ fn rotation_contact_without_vertical_redirect_transfers_rdir_to_ydir() {
 
     let idx = engine.test_object_index(id);
     let object = &engine.objects[idx];
-    assert_eq!(object.state.rotation, 0);
-    assert_eq!(object.fixed_rotation, C4Fixed::ZERO);
-    assert_eq!(object.fixed_velocity.y, -fixed100(50));
-    assert_eq!(object.rotation_velocity, C4Fixed::ZERO);
+    unit_assert_eq!(object.state.rotation => 0);
+    unit_assert_eq!(object.fixed_rotation => C4Fixed::ZERO);
+    unit_assert_eq!(object.fixed_velocity.y => -fixed100(50));
+    unit_assert_eq!(object.rotation_velocity => C4Fixed::ZERO);
 }
 
 #[test]
@@ -413,8 +333,8 @@ fn vertical_rotation_redirect_guard_resets_each_movement() {
     let (mut engine, id) = rotation_redirect_fixture(-itofix(1), fixed100(25));
     exec_redirect_wheel_movement(&mut engine, id);
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
-    assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
+    unit_assert_eq!(engine.objects[idx].fixed_velocity.y => C4Fixed::ZERO);
+    unit_assert_eq!(engine.objects[idx].rotation_velocity => C4Fixed::ZERO);
 
     // A fresh DoMovement has no vertical step. Its identical rotation
     // contact must therefore perform the normal rdir -> ydir transfer;
@@ -423,8 +343,8 @@ fn vertical_rotation_redirect_guard_resets_each_movement() {
     exec_redirect_wheel_movement(&mut engine, id);
 
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
-    assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
+    unit_assert_eq!(engine.objects[idx].fixed_velocity.y => -fixed100(50));
+    unit_assert_eq!(engine.objects[idx].rotation_velocity => C4Fixed::ZERO);
 }
 
 #[test]
@@ -456,12 +376,7 @@ fn rotation_steps_rollback_on_shape_contact() {
     engine.register_test_definition(definition);
 
     let fixed_position = FixedVec2::new(itofix(4) + fixed100(25), itofix(10) + fixed100(25));
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Wheel")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(4, 10))
-            .with_fixed_position(fixed_position),
-    );
+    let id = spawn_fixture!(engine, "Wheel", with_category: CATEGORY_OBJECT, with_position: Vector2::new(4, 10), with_fixed_position: fixed_position);
     let idx = engine.test_object_index(id);
     engine.objects[idx].rotation_velocity = itofix(1);
     // SetRDir mobilizes (C4Script.cpp:718)
@@ -469,12 +384,12 @@ fn rotation_steps_rollback_on_shape_contact() {
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(object.rotation, 0);
+    unit_assert_eq!(object.rotation => 0);
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].fixed_rotation, itofix(0));
-    assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
-    assert_eq!(engine.objects[idx].state.vertices[0].x, 2);
-    assert_eq!(engine.objects[idx].fixed_position, fixed_position);
+    unit_assert_eq!(engine.objects[idx].fixed_rotation => itofix(0));
+    unit_assert_eq!(engine.objects[idx].rotation_velocity => C4Fixed::ZERO);
+    unit_assert_eq!(engine.objects[idx].state.vertices[0].x => 2);
+    unit_assert_eq!(engine.objects[idx].fixed_position => fixed_position);
 }
 
 #[test]
@@ -492,25 +407,16 @@ func Arm()
     let mut engine = Engine::with_seed(67);
     engine.set_physics(PhysicsSettings::new(0, 0, 0));
     engine.register_test_definition(definition);
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("RailMover")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(10, 10))
-            .with_fixed_position(FixedVec2::from_ints(10, 10))
-            .with_loaded(true),
-    );
+    let id = spawn_fixture!(engine, "RailMover", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_loaded: true);
     let idx = engine.test_object_index(id);
     engine.call_test_object_function(idx, "Arm", Vec::new());
-    assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
-    assert!(engine.objects[idx].state.mobile);
+    unit_assert_eq!(engine.objects[idx].fixed_velocity.x => itofix(1));
+    unit_assert!(engine.objects[idx].state.mobile);
     // Give the same object independent vertical momentum; HorizontalFix
     // must restrict only the script-written xdir at movement entry.
     let xdir = engine.objects[idx].fixed_velocity.x;
     engine.objects[idx].set_fixed_velocity(FixedVec2::new(xdir, itofix(2)));
-    assert_eq!(
-        engine.objects[idx].fixed_velocity,
-        FixedVec2::new(itofix(1), itofix(2))
-    );
+    unit_assert_eq!(engine.objects[idx].fixed_velocity => FixedVec2::new(itofix(1), itofix(2)));
 
     let definition_id = engine.objects[idx].definition_id.clone();
     let actions = engine
@@ -523,12 +429,12 @@ func Arm()
         .test_value();
 
     let object = &engine.objects[idx];
-    assert_eq!(object.state.position, Vector2::new(10, 12));
-    assert_eq!(object.fixed_position, FixedVec2::from_ints(10, 12));
-    assert_eq!(object.fixed_velocity.x, C4Fixed::ZERO);
-    assert_eq!(object.state.velocity.x, 0);
-    assert_eq!(object.fixed_velocity.y, itofix(2));
-    assert_eq!(object.state.velocity.y, 2);
+    unit_assert_eq!(object.state.position => Vector2::new(10, 12));
+    unit_assert_eq!(object.fixed_position => FixedVec2::from_ints(10, 12));
+    unit_assert_eq!(object.fixed_velocity.x => C4Fixed::ZERO);
+    unit_assert_eq!(object.state.velocity.x => 0);
+    unit_assert_eq!(object.fixed_velocity.y => itofix(2));
+    unit_assert_eq!(object.state.velocity.y => 2);
 }
 
 #[test]
@@ -548,20 +454,12 @@ fn horizontal_fix_hit_callbacks_receive_zero_old_xdir() {
     engine.set_landscape(landscape);
     engine.set_physics(PhysicsSettings::new(0, 20, -20));
     engine.register_test_definition(definition);
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("HorizontalFixHitProbe")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(10, 10))
-            .with_fixed_position(FixedVec2::from_ints(10, 10))
-            .with_fixed_velocity(FixedVec2::new(itofix(1), itofix(2)))
-            .with_mobile(true)
-            .with_loaded(true),
-    );
+    let id = spawn_fixture!(engine, "HorizontalFixHitProbe", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_fixed_velocity: FixedVec2::new(itofix(1), itofix(2)), with_mobile: true, with_loaded: true);
     let idx = engine.test_object_index(id);
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED1, 0);
-    assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED2, 0);
-    assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED3, 0);
+    unit_assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED1 => 0);
+    unit_assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED2 => 0);
+    unit_assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED3 => 0);
 
     let definition_id = engine.objects[idx].definition_id.clone();
     let actions = engine
@@ -573,10 +471,10 @@ fn horizontal_fix_hit_callbacks_receive_zero_old_xdir() {
         .exec_object_movement(idx, &actions, &definition_id, &[])
         .test_value();
 
-    assert_eq!(engine.objects[idx].state.position, Vector2::new(10, 10));
-    assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
-    assert_eq!(
-        calls.lock().unwrap().as_slice(),
+    unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(10, 10));
+    unit_assert_eq!(engine.objects[idx].fixed_velocity.x => C4Fixed::ZERO);
+    unit_assert_eq!(
+        calls.lock().unwrap().as_slice() =>
         [
             (
                 "Hit".to_string(),
@@ -609,26 +507,22 @@ fn set_x_dir_script_applies_subpixel_velocity_end_to_end() {
     engine.register_test_definition(definition);
     engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Mover")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(0, 0)),
-    );
+    let id = spawn_fixture!(engine, "Mover", with_category: CATEGORY_OBJECT, with_position: Vector2::new(0, 0));
 
     // Initialize ran at spawn: the live object holds true sub-pixel velocity.
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 98304);
+    unit_assert_eq!(engine.objects[idx].fixed_velocity.x.val() => 98304);
 
     // One frame advances 1.5 px; fixtoi(1.5) = 2 (the old bug produced 15).
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(object.position.x, 2);
-    assert_eq!(object.velocity.x, 2);
+    unit_assert_eq!(object.position.x => 2);
+    unit_assert_eq!(object.velocity.x => 2);
 
     // A second frame accumulates to 3.0 px; fixtoi(3.0) = 3.
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(object.position.x, 3);
+    unit_assert_eq!(object.position.x => 3);
 }
 
 #[test]
@@ -649,20 +543,16 @@ fn set_r_dir_script_rotates_object_like_cpp() {
     engine.register_test_definition(definition);
     engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Spinner")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(0, 0)),
-    );
+    let id = spawn_fixture!(engine, "Spinner", with_category: CATEGORY_OBJECT, with_position: Vector2::new(0, 0));
 
     // Initialize ran at spawn: rdir = itofix(10, 10) = 1.0 deg/frame (raw 65536).
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].rotation_velocity.val(), 65536);
+    unit_assert_eq!(engine.objects[idx].rotation_velocity.val() => 65536);
 
     let snapshot = engine.test_tick();
-    assert_eq!(snapshot.object(id).expect("object present").rotation, 5);
+    unit_assert_eq!(snapshot.object(id).expect("object present").rotation => 5);
     let snapshot = engine.test_tick();
-    assert_eq!(snapshot.object(id).expect("object present").rotation, 10);
+    unit_assert_eq!(snapshot.object(id).expect("object present").rotation => 10);
 }
 
 #[test]
@@ -680,39 +570,26 @@ fn set_r_dir_persists_for_non_rotateable_definition() {
     engine.register_test_definition(definition);
     engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Fixed")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(0, 0)),
-    );
+    let id = spawn_fixture!(engine, "Fixed", with_category: CATEGORY_OBJECT, with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
     let expected_rdir = math::itofix_prec(10, 10);
     let saved_fix_r = C4Fixed::from_raw(123_456);
     engine.objects[idx].fixed_rotation = saved_fix_r;
-    assert_eq!(engine.objects[idx].rotation_velocity, expected_rdir);
-    assert!(engine.objects[idx].state.mobile);
+    unit_assert_eq!(engine.objects[idx].rotation_velocity => expected_rdir);
+    unit_assert!(engine.objects[idx].state.mobile);
 
     for frame in 1..=12 {
         let snapshot = engine.test_tick();
-        assert_eq!(
-            snapshot.object(id).expect("object present").rotation,
-            0,
-            "frame {frame}"
-        );
+        unit_assert_eq!(snapshot.object(id).expect("object present").rotation => 0, "frame {frame}");
         let idx = engine.test_object_index(id);
         let object = &engine.objects[idx];
-        assert_eq!(object.rotation_velocity, expected_rdir, "frame {frame}");
-        assert_eq!(object.fixed_rotation, saved_fix_r, "frame {frame}");
-        assert!(object.state.mobile, "frame {frame}");
+        unit_assert_eq!(object.rotation_velocity => expected_rdir, "frame {frame}");
+        unit_assert_eq!(object.fixed_rotation => saved_fix_r, "frame {frame}");
+        unit_assert!(object.state.mobile, "frame {frame}");
     }
 
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine
-            .call_object_function(idx, "ReadRDir", Vec::new())
-            .expect("GetRDir executes"),
-        Value::Int(10)
-    );
+    unit_assert_eq!(engine.call_object_function(idx, "ReadRDir", Vec::new()).expect("GetRDir executes") => Value::Int(10));
 }
 
 #[test]
@@ -725,27 +602,19 @@ fn non_rotateable_static_movement_zeroes_rotation_without_resetting_fixed_state(
 
     let saved_fix_r = C4Fixed::from_raw(4_654_321);
     let saved_rdir = math::itofix_prec(30, 10);
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("FixedStatic")
-            .with_loaded(true)
-            .with_category(CATEGORY_OBJECT)
-            .with_rotation(23)
-            .with_fixed_rotation(saved_fix_r)
-            .with_rotation_velocity(saved_rdir)
-            .with_mobile(false),
-    );
+    let id = spawn_fixture!(engine, "FixedStatic", with_loaded: true, with_category: CATEGORY_OBJECT, with_rotation: 23, with_fixed_rotation: saved_fix_r, with_rotation_velocity: saved_rdir, with_mobile: false);
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].state.rotation, 23);
-    assert_eq!(engine.objects[idx].fixed_rotation, saved_fix_r);
-    assert_eq!(engine.objects[idx].rotation_velocity, saved_rdir);
-    assert!(!engine.objects[idx].state.mobile);
+    unit_assert_eq!(engine.objects[idx].state.rotation => 23);
+    unit_assert_eq!(engine.objects[idx].fixed_rotation => saved_fix_r);
+    unit_assert_eq!(engine.objects[idx].rotation_velocity => saved_rdir);
+    unit_assert!(!engine.objects[idx].state.mobile);
 
     let snapshot = engine.test_tick();
-    assert_eq!(snapshot.object(id).expect("object present").rotation, 0);
+    unit_assert_eq!(snapshot.object(id).expect("object present").rotation => 0);
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].fixed_rotation, saved_fix_r);
-    assert_eq!(engine.objects[idx].rotation_velocity, saved_rdir);
-    assert!(!engine.objects[idx].state.mobile);
+    unit_assert_eq!(engine.objects[idx].fixed_rotation => saved_fix_r);
+    unit_assert_eq!(engine.objects[idx].rotation_velocity => saved_rdir);
+    unit_assert!(!engine.objects[idx].state.mobile);
 }
 
 #[test]
@@ -768,17 +637,13 @@ fn finite_rotateable_range_clamps_fixed_rotation_and_stops_rdir() {
     engine.register_test_definition(definition);
     engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Limited")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(0, 0)),
-    );
+    let id = spawn_fixture!(engine, "Limited", with_category: CATEGORY_OBJECT, with_position: Vector2::new(0, 0));
 
     let snapshot = engine.test_tick();
-    assert_eq!(snapshot.object(id).expect("object present").rotation, 4);
+    unit_assert_eq!(snapshot.object(id).expect("object present").rotation => 4);
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].fixed_rotation, itofix(4));
-    assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
+    unit_assert_eq!(engine.objects[idx].fixed_rotation => itofix(4));
+    unit_assert_eq!(engine.objects[idx].rotation_velocity => C4Fixed::ZERO);
 }
 
 #[test]
@@ -797,34 +662,22 @@ fn ocf_reads_use_the_cached_field_refreshed_at_events_like_cpp() {
     engine.register_test_definition(definition);
     engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Crew").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Crew", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
 
     engine
         .apply_object_update(id, ObjectUpdate::new().with_alive(true))
         .test_value();
-    assert_ne!(
-        engine.object_ocf_at_index(idx) & ocf::ALIVE,
-        0,
-        "SetAlive-style updates refresh the cache (C4Object.h:361)"
-    );
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::ALIVE => 0, "SetAlive-style updates refresh the cache (C4Object.h:361)");
 
     // A raw poke is no event: the cache stays stale like C++.
     engine.objects[idx].state.alive = false;
-    assert_ne!(
-        engine.object_ocf_at_index(idx) & ocf::ALIVE,
-        0,
-        "no event, no refresh — readers see the stale mask"
-    );
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::ALIVE => 0, "no event, no refresh — readers see the stale mask");
 
     // The next frame's Execute-start refresh picks it up.
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::ALIVE,
-        0,
-        "UpdateOCF at Execute-start sees the new state"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::ALIVE => 0, "UpdateOCF at Execute-start sees the new state");
 }
 
 #[test]
@@ -834,10 +687,10 @@ fn rotateable_definition_reports_ocf_rotate() {
     definition.set_rotateable(1);
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Wheel").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Wheel", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
 
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::ROTATE, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::ROTATE => 0);
 }
 
 #[test]
@@ -849,24 +702,16 @@ fn ocf_rotate_requires_con_above_100() {
     definition.set_rotateable(1);
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Wheel").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Wheel", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
 
     engine.objects[idx].state.construction = 100;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::ROTATE,
-        0,
-        "Con == 100 fails the Con > 100 gate (C4Object.cpp:579)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::ROTATE => 0, "Con == 100 fails the Con > 100 gate (C4Object.cpp:579)");
 
     engine.objects[idx].state.construction = 101;
     engine.refresh_object_ocf(idx);
-    assert_ne!(
-        engine.object_ocf_at_index(idx) & ocf::ROTATE,
-        0,
-        "Con 101 passes the gate"
-    );
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::ROTATE => 0, "Con 101 passes the gate");
 }
 
 #[test]
@@ -878,22 +723,13 @@ fn ocf_grab_requires_non_static_back_category() {
     definition.set_grab(1);
     engine.register_test_definition(definition);
 
-    let static_back =
-        engine.spawn_test_object(SpawnConfig::new("Cart").with_position(Vector2::new(0, 0)));
+    let static_back = spawn_fixture!(engine, "Cart", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(static_back);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::GRAB,
-        0,
-        "StaticBack objects are never grabbable (C4Object.cpp:554)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::GRAB => 0, "StaticBack objects are never grabbable (C4Object.cpp:554)");
 
-    let vehicle = engine.spawn_test_object(
-        SpawnConfig::new("Cart")
-            .with_category(CATEGORY_VEHICLE)
-            .with_position(Vector2::new(0, 0)),
-    );
+    let vehicle = spawn_fixture!(engine, "Cart", with_category: CATEGORY_VEHICLE, with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(vehicle);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::GRAB, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::GRAB => 0);
 }
 
 #[test]
@@ -905,34 +741,22 @@ fn ocf_construct_requires_incomplete_unrotated_unburning_constructable() {
     definition.set_constructable(true);
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Site").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Site", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::CONSTRUCT,
-        0,
-        "a completed object is not a construction site (Con < FullCon fails)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::CONSTRUCT => 0, "a completed object is not a construction site (Con < FullCon fails)");
 
     engine.objects[idx].state.construction = FULL_CON / 2;
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::CONSTRUCT, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::CONSTRUCT => 0);
 
     engine.objects[idx].state.rotation = 10;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::CONSTRUCT,
-        0,
-        "rotated objects cannot be built (r == 0 fails)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::CONSTRUCT => 0, "rotated objects cannot be built (r == 0 fails)");
     engine.objects[idx].state.rotation = 0;
 
     engine.objects[idx].state.on_fire = true;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::CONSTRUCT,
-        0,
-        "burning objects cannot be built (!OnFire fails)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::CONSTRUCT => 0, "burning objects cannot be built (!OnFire fails)");
 }
 
 #[test]
@@ -946,35 +770,22 @@ fn ocf_living_and_alive_require_living_category() {
     engine.register_test_definition(definition);
 
     // Default StaticBack category: alive or not, no Living/Alive bits.
-    let static_back =
-        engine.spawn_test_object(SpawnConfig::new("Beast").with_position(Vector2::new(0, 0)));
+    let static_back = spawn_fixture!(engine, "Beast", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(static_back);
     engine.objects[idx].state.alive = true;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & (ocf::LIVING | ocf::ALIVE),
-        0,
-        "non-Living categories never get OCF_Living/OCF_Alive"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & (ocf::LIVING | ocf::ALIVE) => 0, "non-Living categories never get OCF_Living/OCF_Alive");
 
-    let living = engine.spawn_test_object(
-        SpawnConfig::new("Beast")
-            .with_category(CATEGORY_LIVING)
-            .with_position(Vector2::new(0, 0)),
-    );
+    let living = spawn_fixture!(engine, "Beast", with_category: CATEGORY_LIVING, with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(living);
     engine.objects[idx].state.alive = false;
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::LIVING, 0);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::ALIVE,
-        0,
-        "dead livings keep OCF_Living but lose OCF_Alive"
-    );
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::LIVING => 0);
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::ALIVE => 0, "dead livings keep OCF_Living but lose OCF_Alive");
 
     engine.objects[idx].state.alive = true;
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::ALIVE, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::ALIVE => 0);
 }
 
 #[test]
@@ -987,9 +798,9 @@ fn ocf_exclusive_comes_from_the_def_flag() {
     definition.set_exclusive(true);
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Gate").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Gate", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::EXCLUSIVE, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::EXCLUSIVE => 0);
 }
 
 #[test]
@@ -1001,9 +812,9 @@ fn ocf_edible_comes_from_the_def_flag() {
     definition.set_edible(true);
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Loaf").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Loaf", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::EDIBLE, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::EDIBLE => 0);
 }
 
 #[test]
@@ -1015,20 +826,16 @@ fn ocf_prey_requires_def_flag_and_raw_alive() {
     definition.set_prey(true);
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Sheep").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Sheep", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
 
     engine.objects[idx].state.alive = false;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::PREY,
-        0,
-        "dead prey is no prey (C4Object.cpp:617)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::PREY => 0, "dead prey is no prey (C4Object.cpp:617)");
 
     engine.objects[idx].state.alive = true;
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::PREY, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::PREY => 0);
 }
 
 #[test]
@@ -1040,17 +847,13 @@ fn ocf_attract_lightning_requires_full_con() {
     definition.set_attract_lightning(true);
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Mast").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Mast", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::ATTRACT_LIGHTNING, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::ATTRACT_LIGHTNING => 0);
 
     engine.objects[idx].state.construction = FULL_CON - 1;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::ATTRACT_LIGHTNING,
-        0,
-        "incomplete objects do not attract lightning (C4Object.cpp:625)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::ATTRACT_LIGHTNING => 0, "incomplete objects do not attract lightning (C4Object.cpp:625)");
 }
 
 #[test]
@@ -1063,31 +866,19 @@ fn ocf_entrance_requires_area_full_con_and_rotation_gate() {
     definition.set_entrance_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Hut").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Hut", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
-    assert_ne!(
-        engine.object_ocf_at_index(idx) & ocf::CONTAINER,
-        0,
-        "an entrance makes a container (C4Object.cpp:658-660)"
-    );
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE => 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::CONTAINER => 0, "an entrance makes a container (C4Object.cpp:658-660)");
 
     engine.objects[idx].state.construction = FULL_CON - 1;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & (ocf::ENTRANCE | ocf::CONTAINER),
-        0,
-        "incomplete buildings cannot be entered (OCF_FullCon gate)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & (ocf::ENTRANCE | ocf::CONTAINER) => 0, "incomplete buildings cannot be entered (OCF_FullCon gate)");
     engine.objects[idx].state.construction = FULL_CON;
 
     engine.objects[idx].state.rotation = 10;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::ENTRANCE,
-        0,
-        "RotatedEntrance defaults 0: rotated objects close (r <= 0 fails)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE => 0, "RotatedEntrance defaults 0: rotated objects close (r <= 0 fails)");
 }
 
 #[test]
@@ -1104,22 +895,20 @@ fn ocf_entrance_rotation_thresholds_match_cpp() {
     threshold.set_rotated_entrance(45);
     engine.register_test_definition(threshold);
 
-    let spinner =
-        engine.spawn_test_object(SpawnConfig::new("Windmill").with_position(Vector2::new(0, 0)));
+    let spinner = spawn_fixture!(engine, "Windmill", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(spinner);
     engine.objects[idx].state.rotation = 270;
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE => 0);
 
-    let tower =
-        engine.spawn_test_object(SpawnConfig::new("Tower").with_position(Vector2::new(0, 0)));
+    let tower = spawn_fixture!(engine, "Tower", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(tower);
     engine.objects[idx].state.rotation = 45;
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE => 0);
     engine.objects[idx].state.rotation = 46;
     engine.refresh_object_ocf(idx);
-    assert_eq!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE => 0);
 }
 
 #[test]
@@ -1131,10 +920,10 @@ fn ocf_container_comes_from_grab_put_get_without_entrance() {
     definition.set_grab_put_get(1); // C4D_Grab_Put
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Chest").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Chest", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::CONTAINER, 0);
-    assert_eq!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::CONTAINER => 0);
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE => 0);
 }
 
 #[test]
@@ -1149,27 +938,17 @@ fn ocf_line_construct_requires_non_energy_holder_line_connect() {
     holder_only.set_line_connect(LINE_CONNECT_ENERGY_HOLDER);
     engine.register_test_definition(holder_only);
 
-    let plant =
-        engine.spawn_test_object(SpawnConfig::new("Plant").with_position(Vector2::new(0, 0)));
+    let plant = spawn_fixture!(engine, "Plant", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(plant);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT => 0);
 
     engine.objects[idx].state.construction = FULL_CON - 1;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT,
-        0,
-        "line construction needs OCF_FullCon (C4Object.cpp:612)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT => 0, "line construction needs OCF_FullCon (C4Object.cpp:612)");
 
-    let lorry =
-        engine.spawn_test_object(SpawnConfig::new("Lorry").with_position(Vector2::new(0, 0)));
+    let lorry = spawn_fixture!(engine, "Lorry", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(lorry);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT,
-        0,
-        "a pure C4D_EnergyHolder is no line target (C4Object.cpp:613)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT => 0, "a pure C4D_EnergyHolder is no line target (C4Object.cpp:613)");
 }
 
 #[test]
@@ -1181,14 +960,13 @@ fn ocf_power_consumer_requires_line_connect_bit_and_full_con() {
     definition.set_line_connect(LINE_CONNECT_POWER_CONSUMER);
     engine.register_test_definition(definition);
 
-    let id =
-        engine.spawn_test_object(SpawnConfig::new("Elevator").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Elevator", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::POWER_CONSUMER, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::POWER_CONSUMER => 0);
 
     engine.objects[idx].state.construction = FULL_CON - 1;
     engine.refresh_object_ocf(idx);
-    assert_eq!(engine.object_ocf_at_index(idx) & ocf::POWER_CONSUMER, 0);
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::POWER_CONSUMER => 0);
 }
 
 #[test]
@@ -1204,30 +982,20 @@ fn ocf_power_supply_from_generator_or_energized_output() {
     output.set_line_connect(LINE_CONNECT_POWER_OUTPUT);
     engine.register_test_definition(output);
 
-    let windbag =
-        engine.spawn_test_object(SpawnConfig::new("Windbag").with_position(Vector2::new(0, 0)));
+    let windbag = spawn_fixture!(engine, "Windbag", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(windbag);
     engine.objects[idx].state.energy = 0;
     engine.refresh_object_ocf(idx);
-    assert_ne!(
-        engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY,
-        0,
-        "generators supply power regardless of stored energy"
-    );
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY => 0, "generators supply power regardless of stored energy");
 
-    let battery =
-        engine.spawn_test_object(SpawnConfig::new("Battery").with_position(Vector2::new(0, 0)));
+    let battery = spawn_fixture!(engine, "Battery", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(battery);
     engine.objects[idx].state.energy = 0;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY,
-        0,
-        "an empty power output supplies nothing (Energy > 0 fails)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY => 0, "an empty power output supplies nothing (Energy > 0 fails)");
     engine.objects[idx].state.energy = 50;
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY => 0);
 }
 
 #[test]
@@ -1247,41 +1015,29 @@ fn ocf_collection_gates_on_con_action_and_collect_delay() {
     definition.configure_actions(None, specs);
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Kiln").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Kiln", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION => 0);
 
     // Below FullCon without IncompleteActivity: no collection.
     engine.objects[idx].state.construction = FULL_CON - 1;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::COLLECTION,
-        0,
-        "incomplete objects without IncompleteActivity collect nothing (C4Object.cpp:594)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::COLLECTION => 0, "incomplete objects without IncompleteActivity collect nothing (C4Object.cpp:594)");
     engine.objects[idx].state.construction = FULL_CON;
 
     // An ObjectDisabled action suspends collection.
     engine.objects[idx].state.action.name = "Build".to_string();
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::COLLECTION,
-        0,
-        "ObjectDisabled actions veto collection (C4Object.cpp:597)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::COLLECTION => 0, "ObjectDisabled actions veto collection (C4Object.cpp:597)");
     engine.objects[idx].state.action.name = "Idle".to_string();
 
     // A fresh drop delay suspends collection.
     engine.objects[idx].state.no_collect_delay = 2;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::COLLECTION,
-        0,
-        "NoCollectDelay != 0 vetoes collection (C4Object.cpp:598)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::COLLECTION => 0, "NoCollectDelay != 0 vetoes collection (C4Object.cpp:598)");
     engine.objects[idx].state.no_collect_delay = 0;
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION => 0);
 }
 
 #[test]
@@ -1294,11 +1050,11 @@ fn ocf_collection_incomplete_activity_overrides_full_con_gate() {
     definition.set_incomplete_activity(true);
     engine.register_test_definition(definition);
 
-    let id = engine.spawn_test_object(SpawnConfig::new("Hive").with_position(Vector2::new(0, 0)));
+    let id = spawn_fixture!(engine, "Hive", with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(id);
     engine.objects[idx].state.construction = FULL_CON / 2;
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION => 0);
 }
 
 #[test]
@@ -1320,33 +1076,18 @@ fn ocf_fight_ready_respects_no_fight_and_disabled_actions() {
     fighter.configure_actions(None, specs);
     engine.register_test_definition(fighter);
 
-    let monk = engine.spawn_test_object(
-        SpawnConfig::new("Monk")
-            .with_alive(true)
-            .with_position(Vector2::new(0, 0)),
-    );
+    let monk = spawn_fixture!(engine, "Monk", with_alive: true, with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(monk);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::FIGHT_READY,
-        0,
-        "NoFight defs never become fight-ready (C4Object.cpp:609)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::FIGHT_READY => 0, "NoFight defs never become fight-ready (C4Object.cpp:609)");
 
-    let knight = engine.spawn_test_object(
-        SpawnConfig::new("Knight")
-            .with_alive(true)
-            .with_position(Vector2::new(0, 0)),
-    );
+    let knight =
+        spawn_fixture!(engine, "Knight", with_alive: true, with_position: Vector2::new(0, 0));
     let idx = engine.test_object_index(knight);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::FIGHT_READY, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::FIGHT_READY => 0);
 
     engine.objects[idx].state.action.name = "Build".to_string();
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::FIGHT_READY,
-        0,
-        "ObjectDisabled actions veto fight readiness (C4Object.cpp:608)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::FIGHT_READY => 0, "ObjectDisabled actions veto fight readiness (C4Object.cpp:608)");
 }
 
 #[test]
@@ -1365,30 +1106,21 @@ fn ocf_chop_requires_static_back_and_clear_center() {
     engine.register_test_definition(gate);
 
     // Spawn y is the con-0 bottom: 60 - (40 - 20) puts the center at 40.
-    let standing =
-        engine.spawn_test_object(SpawnConfig::new("Tree").with_position(Vector2::new(40, 60)));
+    let standing = spawn_fixture!(engine, "Tree", with_position: Vector2::new(40, 60));
     let idx = engine.test_object_index(standing);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::CHOP, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::CHOP => 0);
 
     // A felled tree loses StaticBack — and the Chop bit.
     engine.objects[idx].state.category = CATEGORY_OBJECT;
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::CHOP,
-        0,
-        "non-StaticBack chopables are already felled (C4Object.cpp:573)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::CHOP => 0, "non-StaticBack chopables are already felled (C4Object.cpp:573)");
     engine.objects[idx].state.category = CATEGORY_STATIC_BACK;
     engine.refresh_object_ocf(idx);
 
     // An exclusive object over the trunk center blocks chopping.
-    engine.spawn_test_object(SpawnConfig::new("Gate").with_position(Vector2::new(40, 60)));
+    spawn_fixture!(engine, "Gate", with_position: Vector2::new(40, 60));
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::CHOP,
-        0,
-        "an exclusive blocker at the center vetoes Chop (C4Object.cpp:574)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::CHOP => 0, "an exclusive blocker at the center vetoes Chop (C4Object.cpp:574)");
 }
 
 #[test]
@@ -1402,25 +1134,24 @@ fn ocf_in_solid_and_in_free_follow_the_landscape() {
     engine.register_test_definition(simple_definition("Rock"));
 
     // Center in free air: InFree, not InSolid.
-    let airborne =
-        engine.spawn_test_object(SpawnConfig::new("Rock").with_position(Vector2::new(40, 20)));
+    let airborne = spawn_fixture!(engine, "Rock", with_position: Vector2::new(40, 20));
     let idx = engine.test_object_index(airborne);
-    assert_eq!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID, 0);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_FREE, 0);
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID => 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_FREE => 0);
 
     // Center buried in the ground: InSolid, and the pixel above is
     // semi-solid, so not InFree.
     engine.objects[idx].state.position = Vector2::new(40, 80);
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID, 0);
-    assert_eq!(engine.object_ocf_at_index(idx) & ocf::IN_FREE, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID => 0);
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::IN_FREE => 0);
 
     // Standing ON the surface (y = 60 solid, y - 1 = 59 free): the
     // center pixel is solid AND the pixel above is free.
     engine.objects[idx].state.position = Vector2::new(40, 60);
     engine.refresh_object_ocf(idx);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID, 0);
-    assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_FREE, 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID => 0);
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_FREE => 0);
 }
 
 #[test]
@@ -1452,43 +1183,26 @@ fn ocf_available_follows_the_burial_probe() {
     engine.set_landscape(landscape);
     engine.register_test_definition(simple_definition("Rock"));
 
-    let rock =
-        engine.spawn_test_object(SpawnConfig::new("Rock").with_position(Vector2::new(40, 20)));
+    let rock = spawn_fixture!(engine, "Rock", with_position: Vector2::new(40, 20));
     let idx = engine.test_object_index(rock);
-    assert_ne!(
-        engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
-        0,
-        "free air above: available"
-    );
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::AVAILABLE => 0, "free air above: available");
 
     // Buried: y-1 is solid ground and y-8 is still underground.
     engine.objects[idx].state.position = Vector2::new(40, 80);
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
-        0,
-        "buried objects are not available (C4Object.cpp:647)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::AVAILABLE => 0, "buried objects are not available (C4Object.cpp:647)");
 
     // Under 2 px of shallow water (y = 57): y-1 = 56 is water
     // (semi-solid) but not solid, and y-8 = 49 is above the surface.
     engine.objects[idx].state.position = Vector2::new(80, 57);
     engine.refresh_object_ocf(idx);
-    assert_ne!(
-        engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
-        0,
-        "thin liquid cover keeps the object available"
-    );
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::AVAILABLE => 0, "thin liquid cover keeps the object available");
 
     // Deep under water (y = 55 at the 40..60 column): y-8 = 47 is
     // still water.
     engine.objects[idx].state.position = Vector2::new(100, 55);
     engine.refresh_object_ocf(idx);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
-        0,
-        "deep-sunk objects are not available (C4Object.cpp:647)"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::AVAILABLE => 0, "deep-sunk objects are not available (C4Object.cpp:647)");
 }
 
 #[test]
@@ -1505,31 +1219,17 @@ fn ocf_available_inside_containers_needs_get_access_or_entrance() {
     engine.register_test_definition(safe);
     engine.register_test_definition(simple_definition("Rock"));
 
-    let chest_id =
-        engine.spawn_test_object(SpawnConfig::new("Chest").with_position(Vector2::new(40, 20)));
-    let safe_id =
-        engine.spawn_test_object(SpawnConfig::new("Safe").with_position(Vector2::new(80, 20)));
-    let rock = engine.spawn_test_object(
-        SpawnConfig::new("Rock")
-            .with_position(Vector2::new(40, 20))
-            .with_container(chest_id),
-    );
+    let chest_id = spawn_fixture!(engine, "Chest", with_position: Vector2::new(40, 20));
+    let safe_id = spawn_fixture!(engine, "Safe", with_position: Vector2::new(80, 20));
+    let rock = spawn_fixture!(engine, "Rock", with_position: Vector2::new(40, 20), with_container: chest_id);
     let idx = engine.test_object_index(rock);
-    assert_ne!(
-        engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
-        0,
-        "contents of a Grab_Get container stay available"
-    );
+    unit_assert_ne!(engine.object_ocf_at_index(idx) & ocf::AVAILABLE => 0, "contents of a Grab_Get container stay available");
 
     engine
         .apply_object_update(rock, ObjectUpdate::new().with_container(safe_id))
         .test_value();
     let idx = engine.test_object_index(rock);
-    assert_eq!(
-        engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
-        0,
-        "a put-only container without entrance hides its contents"
-    );
+    unit_assert_eq!(engine.object_ocf_at_index(idx) & ocf::AVAILABLE => 0, "a put-only container without entrance hides its contents");
 }
 
 #[test]
@@ -1547,21 +1247,13 @@ fn at_object_verifies_entrance_and_collection_areas_like_get_ocf_for_pos() {
     engine.register_test_definition(hut);
 
     // Spawn y is the con-0 bottom: 60 - (40 - 20) puts the center at 40.
-    engine.spawn_test_object(SpawnConfig::new("Hut").with_position(Vector2::new(40, 60)));
+    spawn_fixture!(engine, "Hut", with_position: Vector2::new(40, 60));
 
     let inside_entrance = engine.at_object(Vector2::new(30, 40), ocf::ENTRANCE, None);
-    assert!(
-        inside_entrance.is_some(),
-        "probe inside the entrance area keeps OCF_Entrance"
-    );
-    assert_ne!(inside_entrance.expect("hit").2 & ocf::ENTRANCE, 0);
+    unit_assert!(inside_entrance.is_some(), "probe inside the entrance area keeps OCF_Entrance");
+    unit_assert_ne!(inside_entrance.expect("hit").2 & ocf::ENTRANCE => 0);
 
-    assert!(
-        engine
-            .at_object(Vector2::new(50, 40), ocf::ENTRANCE, None)
-            .is_none(),
-        "probe inside the shape but outside the entrance area strips the bit"
-    );
+    unit_assert!(engine.at_object(Vector2::new(50, 40), ocf::ENTRANCE, None).is_none(), "probe inside the shape but outside the entrance area strips the bit");
 }
 
 #[test]
@@ -1582,25 +1274,21 @@ fn physics_clamps_horizontal_velocity() {
         .test_value();
     engine.set_physics(physics);
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Actor")
-            .with_position(Vector2::new(0, 0))
-            .with_velocity(Vector2::new(20, 0)),
-    );
+    let id = spawn_fixture!(engine, "Actor", with_position: Vector2::new(0, 0), with_velocity: Vector2::new(20, 0));
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.velocity.x, 4);
+    unit_assert_eq!(snapshot.velocity.x => 4);
 
     engine
         .apply_object_update(id, ObjectUpdate::new().with_velocity(Vector2::new(-9, 0)))
         .test_value();
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.velocity.x, -4);
+    unit_assert_eq!(snapshot.velocity.x => -4);
 
     let tick_snapshot = engine.test_tick();
     let object = tick_snapshot.object(id).test_value();
-    assert_eq!(object.velocity.x, -4);
+    unit_assert_eq!(object.velocity.x => -4);
 }
 
 #[test]
@@ -1621,12 +1309,7 @@ fn queued_commands_apply_on_next_tick() {
     engine.register_test_definition(definition);
     engine.set_physics(PhysicsSettings::new(0, 20, -20));
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Actor")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(0, 0))
-            .with_velocity(Vector2::new(0, 0)),
-    );
+    let id = spawn_fixture!(engine, "Actor", with_category: CATEGORY_OBJECT, with_position: Vector2::new(0, 0), with_velocity: Vector2::new(0, 0));
 
     engine
         .queue_object_command(
@@ -1641,13 +1324,13 @@ fn queued_commands_apply_on_next_tick() {
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(object.action.name, "Jump");
-    assert_eq!(object.velocity, Vector2::new(3, -5));
-    assert_eq!(object.position, Vector2::new(3, -5));
+    unit_assert_eq!(object.action.name => "Jump");
+    unit_assert_eq!(object.velocity => Vector2::new(3, -5));
+    unit_assert_eq!(object.position => Vector2::new(3, -5));
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(object.position, Vector2::new(6, -10));
+    unit_assert_eq!(object.position => Vector2::new(6, -10));
 }
 
 #[test]
@@ -1682,13 +1365,13 @@ fn queued_commands_lower_landscape_columns() {
 
     engine.tick_without_snapshot().test_value();
     let surface = engine.landscape().test_value().surface().to_vec();
-    assert_eq!(surface[4], 10);
-    assert_eq!(surface[6], 10);
+    unit_assert_eq!(surface[4] => 10);
+    unit_assert_eq!(surface[6] => 10);
 
     engine.tick_without_snapshot().test_value();
     let surface = engine.landscape().test_value().surface().to_vec();
-    assert_eq!(&surface[4..7], &[18, 18, 18]);
-    assert_eq!(surface[7], 10);
+    unit_assert_eq!(&surface[4..7] => &[18, 18, 18]);
+    unit_assert_eq!(surface[7] => 10);
 }
 
 #[test]
@@ -1732,26 +1415,19 @@ fn queued_commands_set_and_clear_liquid_columns() {
 
     let diver_id = engine.spawn_test_object(SpawnConfig::new("Diver"));
 
-    assert_eq!(engine.frame(), 0);
+    unit_assert_eq!(engine.frame() => 0);
 
     engine.tick_without_snapshot().test_value();
-    assert!(engine.landscape().expect("landscape present").liquids()[3]
-        .segments()
-        .is_empty());
+    unit_assert!(engine.landscape().expect("landscape present").liquids()[3].segments().is_empty());
 
     engine.tick_without_snapshot().test_value();
-    assert_eq!(
-        engine.landscape().expect("landscape present").liquids()[3].segments(),
-        &[LiquidSegment::new(5, 8)]
-    );
+    unit_assert_eq!(engine.landscape().expect("landscape present").liquids()[3].segments() => &[LiquidSegment::new(5, 8)]);
 
     engine.tick_without_snapshot().test_value();
-    assert!(engine.landscape().expect("landscape present").liquids()[3]
-        .segments()
-        .is_empty());
+    unit_assert!(engine.landscape().expect("landscape present").liquids()[3].segments().is_empty());
 
     // Ensure object persistence unaffected by landscape edits
-    assert!(engine.object_snapshot(diver_id).is_some());
+    unit_assert!(engine.object_snapshot(diver_id).is_some());
 }
 
 #[test]
@@ -1788,12 +1464,12 @@ fn scenario_script_applies_landscape_commands() -> Result<(), EngineError> {
         .test_value();
 
     let surface = engine.landscape().test_value().surface().to_vec();
-    assert_eq!(&surface[0..2], &[8, 8]);
-    assert_eq!(&surface[2..4], &[12, 12]);
+    unit_assert_eq!(&surface[0..2] => &[8, 8]);
+    unit_assert_eq!(&surface[2..4] => &[12, 12]);
 
     let _snapshot = engine.tick()?;
     let surface = engine.landscape().test_value().surface().to_vec();
-    assert_eq!(&surface[5..7], &[16, 16]);
+    unit_assert_eq!(&surface[5..7] => &[16, 16]);
 
     Ok(())
 }
@@ -1853,7 +1529,7 @@ fn register_player_invokes_scenario_callbacks() -> Result<(), EngineError> {
 
     engine.register_player(PlayerConfig::new(1, "Player"))?;
 
-    assert_eq!(engine.physics().gravity, 100);
+    unit_assert_eq!(engine.physics().gravity => 100);
 
     let snapshot = engine.snapshot();
     let flag_snapshot = snapshot
@@ -1861,8 +1537,8 @@ fn register_player_invokes_scenario_callbacks() -> Result<(), EngineError> {
         .iter()
         .find(|object| object.definition_id == "Flag")
         .test_value();
-    assert_eq!(flag_snapshot.owner, 1);
-    assert_eq!(flag_snapshot.position, Vector2::new(100, 200));
+    unit_assert_eq!(flag_snapshot.owner => 1);
+    unit_assert_eq!(flag_snapshot.position => Vector2::new(100, 200));
 
     Ok(())
 }
@@ -1920,28 +1596,22 @@ fn no_scenario_init_script_player_skips_broadcasts_and_runs_its_extra_callback(
     let joined = engine.join_player_with_info(config, &info)?.number();
     let snapshot = engine.snapshot();
 
-    assert_eq!(
-        snapshot.rng, rng_before,
-        "NoScenarioInit burns no setup RNG"
-    );
+    unit_assert_eq!(snapshot.rng => rng_before, "NoScenarioInit burns no setup RNG");
     let player = snapshot
         .players
         .iter()
         .find(|player| player.id == joined)
         .test_value();
-    assert_eq!(player.team, Some(2));
-    assert_eq!(player.color, Some(RgbColor::new(0x44, 0x55, 0x66)));
-    assert!(snapshot
-        .objects
-        .iter()
-        .all(|object| { object.definition_id != "PREI" && object.definition_id != "INIT" }));
+    unit_assert_eq!(player.team => Some(2));
+    unit_assert_eq!(player.color => Some(RgbColor::new(0x44, 0x55, 0x66)));
+    unit_assert!(snapshot.objects.iter().all(|object| { object.definition_id != "PREI" && object.definition_id != "INIT" }));
     let marker = snapshot
         .objects
         .iter()
         .find(|object| object.definition_id == "MARK")
         .test_value();
-    assert_eq!(marker.owner, joined);
-    assert_eq!(marker.position.x, 2);
+    unit_assert_eq!(marker.owner => joined);
+    unit_assert_eq!(marker.position.x => 2);
     Ok(())
 }
 
@@ -1980,11 +1650,7 @@ fn ordinary_script_player_forwards_extra_id_to_initialize_player() -> Result<(),
     .test_value();
     let joined = engine.join_player_with_info(config, &info)?.number();
 
-    assert!(engine
-        .snapshot()
-        .objects
-        .iter()
-        .any(|object| { object.definition_id == "MARK" && object.owner == joined }));
+    unit_assert!(engine.snapshot().objects.iter().any(|object| { object.definition_id == "MARK" && object.owner == joined }));
     Ok(())
 }
 
@@ -2014,29 +1680,16 @@ public func QueryTypes(int user_player, int script_player)
 
     let user = engine
         .join_player(JoinPlayerConfig {
-            name: "User".to_string(),
-            player_info_id: 1,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0x00ff_0000,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
             startup_player_count: 2,
+            ..join_player_config("User")
         })?
         .number();
-    assert_eq!(
+    unit_assert_eq!(
         engine.call_object_function(
             probe_index,
             "QueryTypes",
             vec![Value::Int(user), Value::Int(99)],
-        )?,
+        )? =>
         Value::Array(vec![
             Value::Int(1),
             Value::Nil,
@@ -2071,12 +1724,12 @@ public func QueryTypes(int user_player, int script_player)
     .test_value();
     let script_player = engine.join_player_with_info(config, &info)?.number();
 
-    assert_eq!(
+    unit_assert_eq!(
         engine.call_object_function(
             probe_index,
             "QueryTypes",
             vec![Value::Int(user), Value::Int(script_player)],
-        )?,
+        )? =>
         Value::Array(vec![
             Value::Int(1),
             Value::Int(2),
@@ -2113,31 +1766,16 @@ fn scenario_scoreboard_writes_preserve_cpp_row_column_order_and_header_keys(
     engine.install_scenario_script_with_convention("Scoreboard", SCRIPT, true)?;
     let scoreboard = engine.snapshot().hud.scoreboard;
 
-    assert_eq!(scoreboard.row_count(), 2);
-    assert_eq!(scoreboard.column_count(), 2);
-    assert_eq!(
-        scoreboard.cell(0, 0).and_then(ScoreboardCell::text),
-        Some("Race")
-    );
-    assert_eq!(scoreboard.cell(0, 0).map(ScoreboardCell::value), Some(-1));
-    assert_eq!(
-        scoreboard.cell(0, 1).and_then(ScoreboardCell::text),
-        Some("{{RACE}}")
-    );
-    assert_eq!(
-        scoreboard.cell(0, 1).map(ScoreboardCell::value),
-        Some(i32::from_le_bytes(*b"RACE"))
-    );
-    assert_eq!(
-        scoreboard.cell(1, 0).and_then(ScoreboardCell::text),
-        Some("Team")
-    );
-    assert_eq!(scoreboard.cell(1, 0).map(ScoreboardCell::value), Some(7));
-    assert_eq!(
-        scoreboard.cell(1, 1).and_then(ScoreboardCell::text),
-        Some("75%")
-    );
-    assert_eq!(scoreboard.cell(1, 1).map(ScoreboardCell::value), Some(75));
+    unit_assert_eq!(scoreboard.row_count() => 2);
+    unit_assert_eq!(scoreboard.column_count() => 2);
+    unit_assert_eq!(scoreboard.cell(0, 0).and_then(ScoreboardCell::text) => Some("Race"));
+    unit_assert_eq!(scoreboard.cell(0, 0).map(ScoreboardCell::value) => Some(-1));
+    unit_assert_eq!(scoreboard.cell(0, 1).and_then(ScoreboardCell::text) => Some("{{RACE}}"));
+    unit_assert_eq!(scoreboard.cell(0, 1).map(ScoreboardCell::value) => Some(i32::from_le_bytes(*b"RACE")));
+    unit_assert_eq!(scoreboard.cell(1, 0).and_then(ScoreboardCell::text) => Some("Team"));
+    unit_assert_eq!(scoreboard.cell(1, 0).map(ScoreboardCell::value) => Some(7));
+    unit_assert_eq!(scoreboard.cell(1, 1).and_then(ScoreboardCell::text) => Some("75%"));
+    unit_assert_eq!(scoreboard.cell(1, 1).map(ScoreboardCell::value) => Some(75));
     Ok(())
 }
 
@@ -2163,10 +1801,10 @@ func Probe() {
     let object = engine.spawn_test_object(SpawnConfig::new("TEAM"));
     let index = engine.test_object_index(object);
 
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(index, "Probe", Vec::new())
-            .expect("team queries run"),
+            .expect("team queries run") =>
         Value::Array(vec![
             Value::Int(2),
             Value::Int(2),
@@ -2206,7 +1844,7 @@ fn scenario_scoreboard_sort_is_stable_and_keeps_the_caption_row() -> Result<(), 
     let row_keys = (0..scoreboard.row_count())
         .filter_map(|row| scoreboard.cell(row, 0).map(ScoreboardCell::value))
         .collect::<Vec<_>>();
-    assert_eq!(row_keys, vec![SCOREBOARD_CAPTION, 1, 3, 2]);
+    unit_assert_eq!(row_keys => vec![SCOREBOARD_CAPTION, 1, 3, 2]);
     Ok(())
 }
 
@@ -2233,29 +1871,22 @@ fn scoreboard_nil_prunes_but_empty_string_persists_through_save_restore() -> Res
 
     let mut engine = Engine::new();
     engine.install_scenario_script_with_convention("Scoreboard", SCRIPT, true)?;
-    assert_eq!(
-        engine.snapshot().hud.scoreboard.show_count(),
-        0,
-        "exclusive initialization returns before mutating iDlgShow"
-    );
+    unit_assert_eq!(engine.snapshot().hud.scoreboard.show_count() => 0, "exclusive initialization returns before mutating iDlgShow");
     engine.begin_scoreboard_presentation_capture();
     engine.call_scenario_script_function("Show", Vec::new())?;
     let scoreboard = engine.snapshot().hud.scoreboard;
-    assert_eq!(scoreboard.row_count(), 2);
-    assert_eq!(scoreboard.column_count(), 2);
-    assert_eq!(scoreboard.cell(1, 0).map(ScoreboardCell::value), Some(20));
-    assert_eq!(scoreboard.cell(0, 1).map(ScoreboardCell::value), Some(2));
-    assert_eq!(
-        scoreboard.cell(1, 1).and_then(ScoreboardCell::text),
-        Some("")
-    );
-    assert_eq!(scoreboard.show_count(), 3);
+    unit_assert_eq!(scoreboard.row_count() => 2);
+    unit_assert_eq!(scoreboard.column_count() => 2);
+    unit_assert_eq!(scoreboard.cell(1, 0).map(ScoreboardCell::value) => Some(20));
+    unit_assert_eq!(scoreboard.cell(0, 1).map(ScoreboardCell::value) => Some(2));
+    unit_assert_eq!(scoreboard.cell(1, 1).and_then(ScoreboardCell::text) => Some(""));
+    unit_assert_eq!(scoreboard.show_count() => 3);
 
     let encoded = engine.capture_state().to_json_string().test_value();
     let decoded = EngineState::from_json_str(&encoded).test_value();
     let mut restored = Engine::new();
     restored.restore_state(&decoded)?;
-    assert_eq!(restored.snapshot().hud.scoreboard, scoreboard);
+    unit_assert_eq!(restored.snapshot().hud.scoreboard => scoreboard);
     Ok(())
 }
 
@@ -2280,7 +1911,7 @@ fn scenario_scoreboard_show_respects_the_engine_local_player_set() -> Result<(),
     engine.install_scenario_script_with_convention("Scoreboard", SCRIPT, true)?;
     engine.begin_scoreboard_presentation_capture();
     engine.call_scenario_script_function("Show", Vec::new())?;
-    assert_eq!(engine.snapshot().hud.scoreboard.show_count(), 0);
+    unit_assert_eq!(engine.snapshot().hud.scoreboard.show_count() => 0);
     Ok(())
 }
 
@@ -2307,29 +1938,29 @@ fn runtime_scoreboard_requests_capture_call_time_dimensions_and_order() -> Resul
     engine.begin_scoreboard_presentation_capture();
     engine.call_scenario_script_function("EmptyThenCell", Vec::new())?;
     let empty_then_cell = engine.tick()?;
-    assert_eq!(empty_then_cell.hud.scoreboard.show_count(), 1);
-    assert_eq!(empty_then_cell.hud.scoreboard.row_count(), 1);
+    unit_assert_eq!(empty_then_cell.hud.scoreboard.show_count() => 1);
+    unit_assert_eq!(empty_then_cell.hud.scoreboard.row_count() => 1);
     let requests = &empty_then_cell.hud.scoreboard_presentations;
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
+    unit_assert_eq!(requests.len() => 1);
+    unit_assert_eq!(
         (
             requests[0].rows,
             requests[0].columns,
             requests[0].show_count,
             requests[0].layout_revision,
             requests[0].title_widget_present,
-        ),
+        ) =>
         (0, 0, 1, 0, false),
     );
-    assert_eq!(requests[0].scoreboard.row_count(), 0);
-    assert_eq!(requests[0].scoreboard.column_count(), 0);
-    assert_eq!(requests[0].scoreboard.show_count(), 1);
+    unit_assert_eq!(requests[0].scoreboard.row_count() => 0);
+    unit_assert_eq!(requests[0].scoreboard.column_count() => 0);
+    unit_assert_eq!(requests[0].scoreboard.show_count() => 1);
 
     engine.call_scenario_script_function("OpenThenClose", Vec::new())?;
     let open_then_close = engine.tick()?;
     let requests = &open_then_close.hud.scoreboard_presentations;
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
+    unit_assert_eq!(requests.len() => 2);
+    unit_assert_eq!(
         requests
             .iter()
             .map(|request| {
@@ -2342,7 +1973,7 @@ fn runtime_scoreboard_requests_capture_call_time_dimensions_and_order() -> Resul
                     request.scoreboard.show_count(),
                 )
             })
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![(1, 1, 2, 1, true, 2), (1, 1, 0, 1, true, 0)],
     );
     Ok(())
@@ -2370,15 +2001,15 @@ fn tutorial_show_control_mask_reaches_snapshots_and_save_state() -> Result<(), E
         .iter()
         .find(|player| player.id == 0)
         .test_value();
-    assert_eq!(player.show_control, 9);
+    unit_assert_eq!(player.show_control => 9);
 
     let encoded = engine.capture_state().to_json_string().test_value();
     let decoded = EngineState::from_json_str(&encoded).test_value();
-    assert_eq!(decoded.players[0].show_control, 9);
+    unit_assert_eq!(decoded.players[0].show_control => 9);
 
     let mut restored = Engine::with_seed(0);
     restored.restore_state(&decoded)?;
-    assert_eq!(restored.snapshot().players[0].show_control, 9);
+    unit_assert_eq!(restored.snapshot().players[0].show_control => 9);
     Ok(())
 }
 
@@ -2398,7 +2029,7 @@ fn register_player_survives_initialize_player_script_error() -> Result<(), Engin
     let mut engine = Engine::with_seed(5);
     engine.install_scenario_script("Scenario", SCRIPT)?;
     engine.register_player(PlayerConfig::new(1, "Player"))?;
-    assert!(engine.players().any(|player| player.id() == 1));
+    unit_assert!(engine.players().any(|player| player.id() == 1));
     Ok(())
 }
 
@@ -2433,13 +2064,13 @@ fn scenario_cast_particles_creates_and_executes_system_particles() -> Result<(),
     engine.install_scenario_script("Scenario", SCRIPT)?;
 
     let system = engine.particle_system();
-    assert_eq!(system.particles().len(), 5, "cast created 5 particles");
-    assert_eq!(system.get_def("Flame").unwrap().count, 5);
+    unit_assert_eq!(system.particles().len() => 5, "cast created 5 particles");
+    unit_assert_eq!(system.get_def("Flame").unwrap().count => 5);
     for particle in system.particles() {
-        assert_eq!(particle.x.to_bits(), 60.0f32.to_bits());
-        assert_eq!(particle.y.to_bits(), 40.0f32.to_bits());
-        assert_eq!(particle.xdir.to_bits(), 1.0f32.to_bits(), "pushed");
-        assert_eq!(particle.ydir.to_bits(), 0.0f32.to_bits());
+        unit_assert_eq!(particle.x.to_bits() => 60.0f32.to_bits());
+        unit_assert_eq!(particle.y.to_bits() => 40.0f32.to_bits());
+        unit_assert_eq!(particle.xdir.to_bits() => 1.0f32.to_bits(), "pushed");
+        unit_assert_eq!(particle.ydir.to_bits() => 0.0f32.to_bits());
     }
 
     engine.tick_without_snapshot()?;
@@ -2447,21 +2078,13 @@ fn scenario_cast_particles_creates_and_executes_system_particles() -> Result<(),
     let expected_ydir =
         math::fixtof(math::C4Fixed::from_raw(gravity.val().wrapping_mul(100))) / 100.0;
     for particle in engine.particle_system().particles() {
-        assert_eq!(particle.x.to_bits(), 61.0f32.to_bits(), "moved by xdir");
-        assert_eq!(particle.ydir.to_bits(), expected_ydir.to_bits(), "gravity");
-        assert_eq!(particle.life, 1, "delay lifetime advanced");
+        unit_assert_eq!(particle.x.to_bits() => 61.0f32.to_bits(), "moved by xdir");
+        unit_assert_eq!(particle.ydir.to_bits() => expected_ydir.to_bits(), "gravity");
+        unit_assert_eq!(particle.life => 1, "delay lifetime advanced");
     }
 
     let snapshot = engine.snapshot();
-    assert_eq!(
-        snapshot
-            .particles
-            .iter()
-            .filter(|particle| particle.definition_id == "Flame")
-            .count(),
-        5,
-        "system particles appear in the snapshot"
-    );
+    unit_assert_eq!(snapshot.particles.iter().filter(|particle| particle.definition_id == "Flame").count() => 5, "system particles appear in the snapshot");
     Ok(())
 }
 
@@ -2506,18 +2129,10 @@ fn particle_wind_is_suppressed_by_tunnel_background_like_cpp() -> Result<(), Eng
     engine.tick_without_snapshot()?;
 
     let particles = engine.particle_system().particles();
-    assert_eq!(particles.len(), 2);
-    assert_eq!(
-        particles[0].xdir.to_bits(),
-        0.0f32.to_bits(),
-        "IFT tunnel background blocks wind"
-    );
+    unit_assert_eq!(particles.len() => 2);
+    unit_assert_eq!(particles[0].xdir.to_bits() => 0.0f32.to_bits(), "IFT tunnel background blocks wind");
     let expected_open_xdir = ((60.0f32 / 15.0) * 80.0) / 800.0;
-    assert_eq!(
-        particles[1].xdir.to_bits(),
-        expected_open_xdir.to_bits(),
-        "adjacent sky receives Weather.Wind"
-    );
+    unit_assert_eq!(particles[1].xdir.to_bits() => expected_open_xdir.to_bits(), "adjacent sky receives Weather.Wind");
     Ok(())
 }
 
@@ -2547,7 +2162,7 @@ fn remove_player_triggers_on_game_over() -> Result<(), EngineError> {
 
     let _ = engine.remove_player(1)?;
 
-    assert_eq!(engine.physics().gravity, 77);
+    unit_assert_eq!(engine.physics().gravity => 77);
 
     Ok(())
 }
@@ -2564,33 +2179,14 @@ fn pending_team_selection_counts_as_not_eliminated_for_game_over() -> Result<(),
         TeamInfo::new(2, "Right", 0x0000_c800),
     ]);
     engine.set_runtime_join_team_choice(true);
-    let joined = engine.join_player(JoinPlayerConfig {
-        name: "Chooser".to_string(),
-        player_info_id: 1,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff0000,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: false,
-        auto_context_menu: false,
-        startup_player_count: 1,
-    })?;
-    assert_eq!(
-        joined,
-        JoinPlayerOutcome::AwaitingTeamSelection { number: 0 }
-    );
+    let joined = engine.join_player(join_player_config("Chooser"))?;
+    unit_assert_eq!(joined => JoinPlayerOutcome::AwaitingTeamSelection { number: 0 });
 
     let selection = engine.tick()?;
-    assert!(!selection.game_over);
+    unit_assert!(!selection.game_over);
     engine.mark_team_selection_pending(0)?;
     let pending = engine.tick()?;
-    assert!(!pending.game_over);
+    unit_assert!(!pending.game_over);
     Ok(())
 }
 
@@ -2605,11 +2201,8 @@ fn team_selection_join_obeys_player_maximum_before_registration() {
     let result =
         engine.join_player_for_team_selection(lifecycle_join_config("Blocked chooser", Vec::new()));
 
-    assert!(matches!(
-        result,
-        Err(EngineError::TooManyPlayers { maximum: 0 })
-    ));
-    assert_eq!(engine.players().count(), 0);
+    unit_assert!(matches!(result, Err(EngineError::TooManyPlayers { maximum: 0 })));
+    unit_assert_eq!(engine.players().count() => 0);
 }
 
 #[test]
@@ -2630,23 +2223,20 @@ func ReadTeam(int player) { return GetPlayerTeam(player); }
     engine.set_runtime_join_team_choice(true);
 
     let outcome = engine.join_player(lifecycle_join_config("Chooser", Vec::new()))?;
-    assert_eq!(
-        outcome,
-        JoinPlayerOutcome::AwaitingTeamSelection { number: 0 }
-    );
+    unit_assert_eq!(outcome => JoinPlayerOutcome::AwaitingTeamSelection { number: 0 });
     let number = outcome.number();
     let read_team = |engine: &mut Engine, player| {
         let index = engine.test_object_index(reader);
         engine.call_object_function(index, "ReadTeam", vec![Value::Int(player)])
     };
 
-    assert_eq!(read_team(&mut engine, number)?, Value::Int(-1));
+    unit_assert_eq!(read_team(&mut engine, number)? => Value::Int(-1));
     engine.mark_team_selection_pending(number)?;
-    assert_eq!(read_team(&mut engine, number)?, Value::Int(-1));
+    unit_assert_eq!(read_team(&mut engine, number)? => Value::Int(-1));
 
     engine.initialize_scenario_player(number, 2)?.test_value();
-    assert_eq!(read_team(&mut engine, number)?, Value::Int(2));
-    assert_eq!(read_team(&mut engine, 99)?, Value::Nil);
+    unit_assert_eq!(read_team(&mut engine, number)? => Value::Int(2));
+    unit_assert_eq!(read_team(&mut engine, 99)? => Value::Nil);
     Ok(())
 }
 
@@ -2670,57 +2260,31 @@ func ReadTeam(int player) { return GetPlayerTeam(player); }
     ]);
     engine.set_runtime_join_team_choice(true);
     let outcome = engine.join_player(lifecycle_join_config("Chooser", Vec::new()))?;
-    assert_eq!(
-        outcome,
-        JoinPlayerOutcome::AwaitingTeamSelection { number: 0 }
-    );
+    unit_assert_eq!(outcome => JoinPlayerOutcome::AwaitingTeamSelection { number: 0 });
     let number = outcome.number();
     let call = |engine: &mut Engine, function: &str, args| {
         let index = engine.test_object_index(caller);
         engine.call_object_function(index, function, args)
     };
 
-    assert_eq!(
-        call(
-            &mut engine,
-            "InitPlayer",
-            vec![Value::Int(99), Value::Int(2)]
-        )?,
-        Value::Bool(false),
-        "missing player is rejected"
-    );
+    unit_assert_eq!(call(&mut engine, "InitPlayer", vec![Value::Int(99), Value::Int(2)])? => Value::Bool(false), "missing player is rejected");
 
     engine.mark_team_selection_pending(number)?;
-    assert_eq!(
+    unit_assert_eq!(
         call(
             &mut engine,
             "InitPlayer",
             vec![Value::Int(number), Value::Int(99)]
-        )?,
+        )? =>
         Value::Bool(false),
         "missing team returns ScenarioAndTeamInit's false result"
     );
-    assert_eq!(
-        engine.player(number).map(Player::status),
-        Some(PlayerStatus::TeamSelection),
-        "OnTeamSelectionFailed reopens the selection"
-    );
+    unit_assert_eq!(engine.player(number).map(Player::status) => Some(PlayerStatus::TeamSelection), "OnTeamSelectionFailed reopens the selection");
 
     engine.mark_team_selection_pending(number)?;
-    assert_eq!(
-        call(
-            &mut engine,
-            "InitPlayer",
-            vec![Value::Int(number), Value::Int(2)]
-        )?,
-        Value::Bool(true)
-    );
-    assert_eq!(engine.player(number).and_then(Player::team), Some(2));
-    assert_eq!(
-        call(&mut engine, "ReadTeam", vec![Value::Int(number)])?,
-        Value::Int(2),
-        "the script-visible player now carries the selected team"
-    );
+    unit_assert_eq!(call(&mut engine, "InitPlayer", vec![Value::Int(number), Value::Int(2)])? => Value::Bool(true));
+    unit_assert_eq!(engine.player(number).and_then(Player::team) => Some(2));
+    unit_assert_eq!(call(&mut engine, "ReadTeam", vec![Value::Int(number)])? => Value::Int(2), "the script-visible player now carries the selected team");
     Ok(())
 }
 
@@ -2790,17 +2354,13 @@ protected func Departure(object old_container) { departure_calls++; return true;
             .with_position(Vector2::new(40, 50)),
     )?;
     let item = engine.spawn_object(SpawnConfig::new("ITEM").with_container(crew))?;
-    assert_eq!(
-        engine.player(7).expect("player exists").crew(),
-        &[crew],
-        "the removal cascade follows the stored player Crew list"
-    );
+    unit_assert_eq!(engine.player(7).expect("player exists").crew() => &[crew], "the removal cascade follows the stored player Crew list");
     engine.select_crew(7, [crew])?;
     engine.set_crew_cursor(7, Some(crew))?;
     let caller_index = engine.test_object_index(caller);
 
-    assert_eq!(
-        engine.call_object_function(caller_index, "Probe", vec![Value::Int(7), Value::Int(8)],)?,
+    unit_assert_eq!(
+        engine.call_object_function(caller_index, "Probe", vec![Value::Int(7), Value::Int(8)],)? =>
         Value::Array(vec![
             Value::Bool(false),
             Value::Bool(false),
@@ -2813,62 +2373,42 @@ protected func Departure(object old_container) { departure_calls++; return true;
         ])
     );
     let surrendered = engine.player(7).test_value();
-    assert_eq!(surrendered.status(), PlayerStatus::Surrendered);
-    assert!(surrendered.surrendered());
-    assert!(engine.is_owner_eliminated(7));
+    unit_assert_eq!(surrendered.status() => PlayerStatus::Surrendered);
+    unit_assert!(surrendered.surrendered());
+    unit_assert!(engine.is_owner_eliminated(7));
 
     // ObjectCom/ObjectCommand reject the eliminated flag immediately,
     // before hiding ShowStartup or mutating the selected crew object.
-    assert!(surrendered.show_startup());
+    unit_assert!(surrendered.show_startup());
     engine.player_direct_com(7, COM_UP, 0)?;
-    assert!(engine.player(7).expect("player remains").show_startup());
-    assert!(!engine.player_object_command(7, CommandId::Wait, None, 0, 0)?);
-    assert!(engine.player(7).expect("player remains").show_startup());
-    assert!(engine
-        .object_snapshot(crew)
-        .expect("crew remains")
-        .command_stack
-        .is_empty());
+    unit_assert!(engine.player(7).expect("player remains").show_startup());
+    unit_assert!(!engine.player_object_command(7, CommandId::Wait, None, 0, 0)?);
+    unit_assert!(engine.player(7).expect("player remains").show_startup());
+    unit_assert!(engine.object_snapshot(crew).expect("crew remains").command_stack.is_empty());
 
     for _ in 0..59 {
         engine.tick_player_systems()?;
     }
-    assert!(engine.player(7).is_some(), "retirement waits for frame 60");
-    assert_eq!(
-        engine.object_snapshot(item).and_then(|item| item.container),
-        Some(crew),
-        "crew contents stay contained until retirement"
-    );
+    unit_assert!(engine.player(7).is_some(), "retirement waits for frame 60");
+    unit_assert_eq!(engine.object_snapshot(item).and_then(|item| item.container) => Some(crew), "crew contents stay contained until retirement");
     engine.tick_player_systems()?;
-    assert!(engine.player(7).is_none(), "player retires on frame 60");
-    assert_eq!(
-        engine.physics().gravity,
-        73,
-        "Evaluate precedes RemovePlayer while the player and Crew stay live"
-    );
+    unit_assert!(engine.player(7).is_none(), "player retires on frame 60");
+    unit_assert_eq!(engine.physics().gravity => 73, "Evaluate precedes RemovePlayer while the player and Crew stay live");
 
     let removed_crew = engine.test_object_snapshot(crew);
-    assert_eq!(removed_crew.status, ObjectStatus::Deleted);
-    assert_eq!(
-        removed_crew.local_vars.get("destruction_calls"),
-        Some(&Value::Int(1)),
-        "RemoveCrewObjects uses the full AssignRemoval callback path"
-    );
+    unit_assert_eq!(removed_crew.status => ObjectStatus::Deleted);
+    unit_assert_eq!(removed_crew.local_vars.get("destruction_calls") => Some(&Value::Int(1)), "RemoveCrewObjects uses the full AssignRemoval callback path");
     let ejected_item = engine.test_object_snapshot(item);
-    assert_eq!(ejected_item.container, None);
-    assert_eq!(ejected_item.position, Vector2::new(40, 50));
-    assert_eq!(
-        ejected_item.local_vars.get("departure_calls"),
-        Some(&Value::Int(1)),
-        "AssignRemoval(true) exits rather than recursively deleting contents"
-    );
+    unit_assert_eq!(ejected_item.container => None);
+    unit_assert_eq!(ejected_item.position => Vector2::new(40, 50));
+    unit_assert_eq!(ejected_item.local_vars.get("departure_calls") => Some(&Value::Int(1)), "AssignRemoval(true) exits rather than recursively deleting contents");
     let result = engine
         .round_results
         .players
         .iter()
         .find(|result| result.player_info_id == 41)
         .test_value();
-    assert_eq!((result.score_old, result.score_new), (250, Some(250)));
+    unit_assert_eq!((result.score_old, result.score_new) => (250, Some(250)));
     Ok(())
 }
 
@@ -2966,31 +2506,13 @@ protected func OnOwnerChanged(int new_owner, int old_owner)
     let caller = engine.spawn_object(SpawnConfig::new("CALL").with_owner(1))?;
     let caller_index = engine.test_object_index(caller);
 
-    assert_eq!(
-        engine.call_object_function(
-            caller_index,
-            "Prepare",
-            vec![object_reference_value(flag), object_reference_value(base)],
-        )?,
-        Value::Bool(true)
-    );
-    assert_eq!(
-        engine.call_object_function(
-            caller_index,
-            "Change",
-            vec![object_reference_value(flag), Value::Int(2)],
-        )?,
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(caller_index, "Prepare", vec![object_reference_value(flag), object_reference_value(base)],)? => Value::Bool(true));
+    unit_assert_eq!(engine.call_object_function(caller_index, "Change", vec![object_reference_value(flag), Value::Int(2)],)? => Value::Bool(true));
 
     let changed = engine.test_object_snapshot(flag);
-    assert_eq!((changed.owner, changed.controller), (2, 2));
-    assert_eq!(changed.color, 0x0044_5566);
-    assert_eq!(
-        engine.object_snapshot(base).map(|object| object.base),
-        Some(2),
-        "inactive FlyBase targets still have nonzero C++ Status"
-    );
+    unit_assert_eq!((changed.owner, changed.controller) => (2, 2));
+    unit_assert_eq!(changed.color => 0x0044_5566);
+    unit_assert_eq!(engine.object_snapshot(base).map(|object| object.base) => Some(2), "inactive FlyBase targets still have nonzero C++ Status");
     for (name, value) in [
         ("owner_changes", Value::Int(1)),
         ("seen_new", Value::Int(2)),
@@ -3001,54 +2523,31 @@ protected func OnOwnerChanged(int new_owner, int old_owner)
         ("seen_base", Value::Int(2)),
         ("shadow_calls", Value::Nil),
     ] {
-        assert_eq!(changed.local_vars.get(name), Some(&value), "local {name}");
+        unit_assert_eq!(changed.local_vars.get(name) => Some(&value), "local {name}");
     }
 
     // Invalid owners are a true no-op and do not fire the callback.
-    assert_eq!(
-        engine.call_object_function(
-            caller_index,
-            "Change",
-            vec![object_reference_value(flag), Value::Int(99)],
-        )?,
-        Value::Bool(false)
-    );
+    unit_assert_eq!(engine.call_object_function(caller_index, "Change", vec![object_reference_value(flag), Value::Int(99)],)? => Value::Bool(false));
     let invalid = engine.test_object_snapshot(flag);
-    assert_eq!(
-        (invalid.owner, invalid.controller, invalid.color),
-        (2, 2, 0x0044_5566)
-    );
-    assert_eq!(
-        invalid.local_vars.get("owner_changes"),
-        Some(&Value::Int(1))
-    );
-    assert_eq!(
-        engine.object_snapshot(base).map(|object| object.base),
-        Some(2)
-    );
+    unit_assert_eq!((invalid.owner, invalid.controller, invalid.color) => (2, 2, 0x0044_5566));
+    unit_assert_eq!(invalid.local_vars.get("owner_changes") => Some(&Value::Int(1)));
+    unit_assert_eq!(engine.object_snapshot(base).map(|object| object.base) => Some(2));
 
     // Same-owner refresh occurs before the early return, but Controller
     // and callback state stay untouched.
-    assert_eq!(
-        engine.call_object_function(
-            caller_index,
-            "RefreshSame",
-            vec![object_reference_value(flag)],
-        )?,
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(caller_index, "RefreshSame", vec![object_reference_value(flag)],)? => Value::Bool(true));
     let same = engine.test_object_snapshot(flag);
-    assert_eq!((same.owner, same.controller), (2, 1));
-    assert_eq!(same.color, 0x0044_5566);
-    assert_eq!(same.local_vars.get("owner_changes"), Some(&Value::Int(1)));
-    assert_eq!(same.local_vars.get("shadow_calls"), Some(&Value::Nil));
+    unit_assert_eq!((same.owner, same.controller) => (2, 1));
+    unit_assert_eq!(same.color => 0x0044_5566);
+    unit_assert_eq!(same.local_vars.get("owner_changes") => Some(&Value::Int(1)));
+    unit_assert_eq!(same.local_vars.get("shadow_calls") => Some(&Value::Nil));
 
     // Plain engine spawns run Construction before joining self.objects;
     // SetOwner must still enter the callback synchronously so the rest
     // of Construction observes its local writes.
     let born = engine.spawn_object(SpawnConfig::new("BORN").with_owner(1))?;
     let born = engine.test_object_snapshot(born);
-    assert_eq!((born.owner, born.controller), (2, 2));
+    unit_assert_eq!((born.owner, born.controller) => (2, 2));
     for (name, value) in [
         ("owner_changes", Value::Int(1)),
         ("seen_after", Value::Int(1)),
@@ -3056,7 +2555,7 @@ protected func OnOwnerChanged(int new_owner, int old_owner)
         ("seen_old", Value::Int(1)),
         ("seen_controller", Value::Int(2)),
     ] {
-        assert_eq!(born.local_vars.get(name), Some(&value), "local {name}");
+        unit_assert_eq!(born.local_vars.get(name) => Some(&value), "local {name}");
     }
     Ok(())
 }
@@ -3079,10 +2578,7 @@ fn remove_player_assigns_departing_crew_removal() -> Result<(), EngineError> {
 
     let _ = engine.remove_player(1)?;
 
-    assert_eq!(
-        engine.object_snapshot(crew).map(|object| object.status),
-        Some(ObjectStatus::Deleted)
-    );
+    unit_assert_eq!(engine.object_snapshot(crew).map(|object| object.status) => Some(ObjectStatus::Deleted));
     Ok(())
 }
 
@@ -3188,78 +2684,38 @@ func RemovePlayer(int player, int team)
                     .is_some_and(|snapshot| snapshot.status == status)
         }));
     }
-    assert_eq!(expected_callback_order.len(), 4);
-    assert_eq!(
-        expected_callback_order
-            .iter()
-            .copied()
-            .collect::<HashSet<_>>(),
-        transferable
-    );
+    unit_assert_eq!(expected_callback_order.len() => 4);
+    unit_assert_eq!(expected_callback_order.iter().copied().collect::<HashSet<_>>() => transferable);
 
     let _ = engine.remove_player(1)?;
 
     for (position, object) in expected_callback_order.iter().enumerate() {
         let snapshot = engine.test_object_snapshot(*object);
-        assert_eq!((snapshot.owner, snapshot.controller), (3, 3));
-        assert_eq!(
-            snapshot.local_vars.get("callback_order"),
-            Some(&Value::Int(40 + position as i32)),
-            "main-list objects precede inactive-list objects"
-        );
-        assert_eq!(
-            snapshot.local_vars.get("callback_crew"),
-            Some(&Value::Int(2)),
-            "the departing player and complete Crew list are still live"
-        );
-        assert_eq!(
-            snapshot.local_vars.get("callback_owner"),
-            Some(&Value::Int(3)),
-            "SetOwner writes owner before OnOwnerChanged"
-        );
-        assert!(matches!(
-            snapshot.local_vars.get("removed_hook"),
-            None | Some(Value::Nil)
-        ));
+        unit_assert_eq!((snapshot.owner, snapshot.controller) => (3, 3));
+        unit_assert_eq!(snapshot.local_vars.get("callback_order") => Some(&Value::Int(40 + position as i32)), "main-list objects precede inactive-list objects");
+        unit_assert_eq!(snapshot.local_vars.get("callback_crew") => Some(&Value::Int(2)), "the departing player and complete Crew list are still live");
+        unit_assert_eq!(snapshot.local_vars.get("callback_owner") => Some(&Value::Int(3)), "SetOwner writes owner before OnOwnerChanged");
+        unit_assert!(matches!(snapshot.local_vars.get("removed_hook"), None | Some(Value::Nil)));
     }
     for object in [movable_a, movable_b, inactive] {
-        assert_eq!(
-            engine
-                .object_snapshot(object)
-                .map(|snapshot| snapshot.color),
-            Some(0x0000_00ff),
-            "ColorByOwner follows the first ordered teammate"
-        );
+        unit_assert_eq!(engine.object_snapshot(object).map(|snapshot| snapshot.color) => Some(0x0000_00ff), "ColorByOwner follows the first ordered teammate");
     }
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .object_snapshot(flag)
-            .map(|snapshot| (snapshot.owner, snapshot.controller)),
+            .map(|snapshot| (snapshot.owner, snapshot.controller)) =>
         Some((3, 3)),
         "FLAG transfers despite its StaticBack category"
     );
     let background = engine.test_object_snapshot(background);
-    assert_eq!(
-        (background.owner, background.controller),
-        (OWNER_NONE, OWNER_NONE),
-        "StaticBack skips the fallback and is orphaned by validation"
-    );
-    assert!(matches!(
-        background.local_vars.get("callback_order"),
-        None | Some(Value::Nil)
-    ));
+    unit_assert_eq!((background.owner, background.controller) => (OWNER_NONE, OWNER_NONE), "StaticBack skips the fallback and is orphaned by validation");
+    unit_assert!(matches!(background.local_vars.get("callback_order"), None | Some(Value::Nil)));
     for crew in [active_crew, inactive_crew] {
         let crew = engine.test_object_snapshot(crew);
-        assert_eq!(crew.status, ObjectStatus::Deleted);
-        assert!(matches!(
-            crew.local_vars.get("callback_order"),
-            None | Some(Value::Nil)
-        ));
+        unit_assert_eq!(crew.status => ObjectStatus::Deleted);
+        unit_assert!(matches!(crew.local_vars.get("callback_order"), None | Some(Value::Nil)));
     }
-    assert_eq!(
-        engine.physics().gravity,
-        40 + expected_callback_order.len() as i32
-    );
+    unit_assert_eq!(engine.physics().gravity => 40 + expected_callback_order.len() as i32);
     Ok(())
 }
 
@@ -3308,18 +2764,8 @@ func OnOwnerChanged()
 
     let _ = engine.remove_player(1)?;
 
-    assert_eq!(
-        engine
-            .object_snapshot(a)
-            .and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()),
-        Some(Value::Int(70))
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(b)
-            .and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()),
-        Some(Value::Int(71))
-    );
+    unit_assert_eq!(engine.object_snapshot(a).and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()) => Some(Value::Int(70)));
+    unit_assert_eq!(engine.object_snapshot(b).and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()) => Some(Value::Int(71)));
     Ok(())
 }
 
@@ -3363,18 +2809,8 @@ func OnOwnerChanged()
 
     let _ = engine.remove_player(1)?;
 
-    assert_eq!(
-        engine
-            .object_snapshot(a)
-            .and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()),
-        Some(Value::Int(80))
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(b)
-            .and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()),
-        Some(Value::Int(81))
-    );
+    unit_assert_eq!(engine.object_snapshot(a).and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()) => Some(Value::Int(80)));
+    unit_assert_eq!(engine.object_snapshot(b).and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()) => Some(Value::Int(81)));
     Ok(())
 }
 
@@ -3403,7 +2839,7 @@ fn remove_player_uses_last_eligible_non_hostile_fallback_owner() -> Result<(), E
     let _ = engine.remove_player(1)?;
 
     let object = engine.test_object_snapshot(object);
-    assert_eq!((object.owner, object.controller), (3, 3));
+    unit_assert_eq!((object.owner, object.controller) => (3, 3));
     Ok(())
 }
 
@@ -3421,7 +2857,7 @@ fn remove_player_clears_invalid_static_back_owner_and_controller() -> Result<(),
     let _ = engine.remove_player(1)?;
 
     let object = engine.test_object_snapshot(object);
-    assert_eq!((object.owner, object.controller), (OWNER_NONE, OWNER_NONE));
+    unit_assert_eq!((object.owner, object.controller) => (OWNER_NONE, OWNER_NONE));
     Ok(())
 }
 
@@ -3451,19 +2887,16 @@ fn skipped_restored_player_is_orphaned_without_removing_objects() -> Result<(), 
 
     engine.retain_restored_players([2]);
 
-    assert!(engine.player(1).is_none());
-    assert!(engine.player(2).is_some());
+    unit_assert!(engine.player(1).is_none());
+    unit_assert!(engine.player(2).is_some());
     for (object, status, color) in [
         (normal, ObjectStatus::Normal, 0xff12_3456),
         (inactive, ObjectStatus::Inactive, 0xff65_4321),
     ] {
         let object = engine.test_object_snapshot(object);
-        assert_eq!(object.status, status);
-        assert_eq!(object.color, color);
-        assert_eq!(
-            (object.owner, object.base, object.controller),
-            (OWNER_NONE, OWNER_NONE, OWNER_NONE)
-        );
+        unit_assert_eq!(object.status => status);
+        unit_assert_eq!(object.color => color);
+        unit_assert_eq!((object.owner, object.base, object.controller) => (OWNER_NONE, OWNER_NONE, OWNER_NONE));
     }
     Ok(())
 }
@@ -3544,39 +2977,33 @@ fn script_game_over_triggers_on_game_over() -> Result<(), EngineError> {
     ];
 
     let first = engine.tick()?;
-    assert!(first.game_over);
-    assert_eq!(engine.physics().gravity, 42);
+    unit_assert!(first.game_over);
+    unit_assert_eq!(engine.physics().gravity => 42);
     let player = first
         .players
         .iter()
         .find(|player| player.id == 0)
         .test_value();
-    assert!(player.won, "post-OnGameOver survivor is a winner");
-    assert!(player.evaluated);
-    assert_eq!(player.score, 415, "65 gain + 100 winner bonus");
-    assert_eq!(
-        (player.rounds, player.rounds_won, player.rounds_lost),
-        (12, 8, 4)
-    );
-    assert_eq!(player.total_playing_time, 1_253);
+    unit_assert!(player.won, "post-OnGameOver survivor is a winner");
+    unit_assert!(player.evaluated);
+    unit_assert_eq!(player.score => 415, "65 gain + 100 winner bonus");
+    unit_assert_eq!((player.rounds, player.rounds_won, player.rounds_lost) => (12, 8, 4));
+    unit_assert_eq!(player.total_playing_time => 1_253);
     let last_round = &player.player_info_core.as_ref().test_value().last_round;
-    assert_eq!(last_round.title, "Default Title");
-    assert!(last_round.date > 0);
-    assert_eq!(last_round.duration, 19);
-    assert_eq!(last_round.won, 1);
-    assert_eq!(last_round.score, 65);
-    assert_eq!(last_round.bonus, 100);
-    assert_eq!(last_round.final_score, 165);
-    assert_eq!(last_round.total_score, 415);
-    assert_eq!(last_round.level, 0);
-    assert_eq!(first.round_results.goals, vec![DefinitionId::from("GOAL")]);
-    assert_eq!(
-        first.round_results.fulfilled_goals,
-        vec![DefinitionId::from("GOAL")]
-    );
-    assert_eq!(first.round_results.playing_time_seconds, 19);
-    assert_eq!(
-        first.round_results.players,
+    unit_assert_eq!(last_round.title => "Default Title");
+    unit_assert!(last_round.date > 0);
+    unit_assert_eq!(last_round.duration => 19);
+    unit_assert_eq!(last_round.won => 1);
+    unit_assert_eq!(last_round.score => 65);
+    unit_assert_eq!(last_round.bonus => 100);
+    unit_assert_eq!(last_round.final_score => 165);
+    unit_assert_eq!(last_round.total_score => 415);
+    unit_assert_eq!(last_round.level => 0);
+    unit_assert_eq!(first.round_results.goals => vec![DefinitionId::from("GOAL")]);
+    unit_assert_eq!(first.round_results.fulfilled_goals => vec![DefinitionId::from("GOAL")]);
+    unit_assert_eq!(first.round_results.playing_time_seconds => 19);
+    unit_assert_eq!(
+        first.round_results.players =>
         vec![
             RoundResultsPlayerState {
                 player_info_id: 99,
@@ -3598,25 +3025,16 @@ fn script_game_over_triggers_on_game_over() -> Result<(), EngineError> {
 
     engine.replace_player_info_league_progress_data([(41, Some(b"changed".to_vec()))]);
     let second = engine.tick()?;
-    assert_eq!(second.round_results, first.round_results);
+    unit_assert_eq!(second.round_results => first.round_results);
     let player = second
         .players
         .iter()
         .find(|player| player.id == 0)
         .test_value();
-    assert_eq!(player.score, 415, "second tick must not score again");
-    assert_eq!(
-        (player.rounds, player.rounds_won, player.rounds_lost),
-        (12, 8, 4)
-    );
-    assert_eq!(player.total_playing_time, 1_253);
-    assert_eq!(
-        second
-            .object(goal)
-            .and_then(|goal| goal.local_vars.get("calls")),
-        Some(&Value::Int(1)),
-        "goal callback runs once"
-    );
+    unit_assert_eq!(player.score => 415, "second tick must not score again");
+    unit_assert_eq!((player.rounds, player.rounds_won, player.rounds_lost) => (12, 8, 4));
+    unit_assert_eq!(player.total_playing_time => 1_253);
+    unit_assert_eq!(second.object(goal).and_then(|goal| goal.local_vars.get("calls")) => Some(&Value::Int(1)), "goal callback runs once");
 
     Ok(())
 }
@@ -3684,33 +3102,22 @@ fn round_goal_evaluation_recomputes_master_order_and_uses_rivalry_callback(
     engine.set_local_players([7]);
 
     let (goals, fulfilled) = engine.evaluate_round_goals()?;
-    assert_eq!(
-        goals,
-        vec![DefinitionId::from("GOLB"), DefinitionId::from("GOLC")]
-    );
-    assert_eq!(fulfilled, goals);
+    unit_assert_eq!(goals => vec![DefinitionId::from("GOLB"), DefinitionId::from("GOLC")]);
+    unit_assert_eq!(fulfilled => goals);
 
     let local = |id, name: &str| {
         engine
             .object_snapshot(id)
             .and_then(|object| object.local_vars.get(name).cloned())
     };
-    assert_eq!(local(goal_b, "per_player_calls"), Some(Value::Int(1)));
-    assert_eq!(local(goal_b, "seen_player"), Some(Value::Int(7)));
-    assert_eq!(local(goal_b, "generic_calls"), Some(Value::Nil));
-    assert_eq!(local(goal_a, "per_player_calls"), None, "A is skipped");
-    assert_eq!(
-        local(goal_c_first, "per_player_calls"),
-        Some(Value::Int(1)),
-        "first live C instance handles the callback"
-    );
-    assert_eq!(local(goal_c_first, "seen_player"), Some(Value::Int(7)));
-    assert_eq!(local(goal_c_first, "generic_calls"), Some(Value::Nil));
-    assert_eq!(
-        local(goal_c_second, "per_player_calls"),
-        None,
-        "duplicate goal instance is not called"
-    );
+    unit_assert_eq!(local(goal_b, "per_player_calls") => Some(Value::Int(1)));
+    unit_assert_eq!(local(goal_b, "seen_player") => Some(Value::Int(7)));
+    unit_assert_eq!(local(goal_b, "generic_calls") => Some(Value::Nil));
+    unit_assert_eq!(local(goal_a, "per_player_calls") => None, "A is skipped");
+    unit_assert_eq!(local(goal_c_first, "per_player_calls") => Some(Value::Int(1)), "first live C instance handles the callback");
+    unit_assert_eq!(local(goal_c_first, "seen_player") => Some(Value::Int(7)));
+    unit_assert_eq!(local(goal_c_first, "generic_calls") => Some(Value::Nil));
+    unit_assert_eq!(local(goal_c_second, "per_player_calls") => None, "duplicate goal instance is not called");
     Ok(())
 }
 
@@ -3735,8 +3142,8 @@ fn scenario_set_next_mission_survives_a_later_initialize_error() -> Result<(), E
 
     engine.initialize_scenario_script()?;
 
-    assert_eq!(
-        engine.next_mission(),
+    unit_assert_eq!(
+        engine.next_mission() =>
         &NextMissionState {
             path: "Tutorial.c4f\\Tutorial01.c4s".to_string(),
             text: "Repeat".to_string(),
@@ -3762,12 +3169,12 @@ fn is_network_reads_the_active_engine_session_like_cpp() -> Result<(), EngineErr
     let mut local = Engine::with_seed(0);
     local.set_network_game(false);
     local.install_scenario_script_with_convention("Script.c", SCRIPT, true)?;
-    assert_eq!(local.physics().gravity, 23);
+    unit_assert_eq!(local.physics().gravity => 23);
 
     let mut network = Engine::with_seed(0);
     network.set_network_game(true);
     network.install_scenario_script_with_convention("Script.c", SCRIPT, true)?;
-    assert_eq!(network.physics().gravity, 77);
+    unit_assert_eq!(network.physics().gravity => 77);
     Ok(())
 }
 
@@ -3788,25 +3195,18 @@ fn next_mission_clear_and_save_restore_match_cpp() -> Result<(), EngineError> {
             "#,
         true,
     )?;
-    assert_eq!(
-        engine.next_mission(),
-        &NextMissionState {
-            path: String::new(),
-            text: String::new(),
-            description: "Keep this description".to_string(),
-        }
-    );
+    unit_assert_eq!(engine.next_mission() => &NextMissionState {path: String::new(), text: String::new(), description: "Keep this description".to_string(),});
 
     let encoded = engine.capture_state().to_json_string().test_value();
     let state = EngineState::from_json_str(&encoded).test_value();
     let mut restored = Engine::with_seed(1);
     restored.restore_state(&state)?;
-    assert_eq!(restored.next_mission(), engine.next_mission());
+    unit_assert_eq!(restored.next_mission() => engine.next_mission());
 
     let mut legacy: serde_json::Value = serde_json::from_str(&encoded).test_value();
     legacy.as_object_mut().test_value().remove("next_mission");
     let legacy: EngineState = serde_json::from_value(legacy).test_value();
-    assert_eq!(legacy.next_mission, NextMissionState::default());
+    unit_assert_eq!(legacy.next_mission => NextMissionState::default());
     Ok(())
 }
 
@@ -3852,7 +3252,7 @@ fn legacy_create_object_objective_triggers_game_over() -> Result<(), EngineError
         }
     }
 
-    assert!(triggered, "expected game over once required object exists");
+    unit_assert!(triggered, "expected game over once required object exists");
     Ok(())
 }
 
@@ -3887,10 +3287,7 @@ fn legacy_clear_object_objective_triggers_after_removal() -> Result<(), EngineEr
 
     for _ in 0..5 {
         let snapshot = engine.tick()?;
-        assert!(
-            !snapshot.game_over,
-            "game over should not trigger before removal"
-        );
+        unit_assert!(!snapshot.game_over, "game over should not trigger before removal");
     }
 
     engine.apply_object_update(
@@ -3910,10 +3307,7 @@ fn legacy_clear_object_objective_triggers_after_removal() -> Result<(), EngineEr
         }
     }
 
-    assert!(
-        triggered,
-        "expected game over once disallowed objects are cleared"
-    );
+    unit_assert!(triggered, "expected game over once disallowed objects are cleared");
     Ok(())
 }
 
@@ -3962,10 +3356,8 @@ public func Probe(object target) {
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(caller);
     engine.register_test_definition(target);
-    let caller_id =
-        engine.spawn_test_object(SpawnConfig::new("CALL").with_position(Vector2::new(100, 200)));
-    let target_id =
-        engine.spawn_test_object(SpawnConfig::new("TARG").with_position(Vector2::new(300, 400)));
+    let caller_id = spawn_fixture!(engine, "CALL", with_position: Vector2::new(100, 200));
+    let target_id = spawn_fixture!(engine, "TARG", with_position: Vector2::new(300, 400));
     let caller_index = engine.test_object_index(caller_id);
     let self_bottom = engine.objects[caller_index]
         .state
@@ -3981,36 +3373,21 @@ public func Probe(object target) {
         .wrapping_add(-4)
         .wrapping_add(9);
 
-    assert_eq!(
-        engine
-            .call_object_function(
-                caller_index,
-                "Probe",
-                vec![Value::Object(target_id.as_u64())],
-            )
-            .expect("shape hosts run"),
-        Value::Int(1)
-    );
+    unit_assert_eq!(engine.call_object_function(caller_index, "Probe", vec![Value::Object(target_id.as_u64())],).expect("shape hosts run") => Value::Int(1));
     let caller_index = engine.test_object_index(caller_id);
     let locals = &engine.objects[caller_index].state.local_vars;
-    assert_eq!(locals.get("add_self"), Some(&Value::Bool(true)));
-    assert_eq!(locals.get("add_foreign"), Some(&Value::Bool(true)));
-    assert_eq!(locals.get("add_overflow"), Some(&Value::Bool(false)));
-    assert_eq!(locals.get("self_count"), Some(&Value::Int(2)));
-    assert_eq!(locals.get("self_bottom"), Some(&Value::Int(self_bottom)));
-    assert_eq!(
-        locals.get("foreign_bottom"),
-        Some(&Value::Int(foreign_bottom))
-    );
-    assert_eq!(engine.objects[caller_index].state.vertices.len(), 2);
-    assert!(engine.objects[caller_index].own_shape_vertices.is_none());
+    unit_assert_eq!(locals.get("add_self") => Some(&Value::Bool(true)));
+    unit_assert_eq!(locals.get("add_foreign") => Some(&Value::Bool(true)));
+    unit_assert_eq!(locals.get("add_overflow") => Some(&Value::Bool(false)));
+    unit_assert_eq!(locals.get("self_count") => Some(&Value::Int(2)));
+    unit_assert_eq!(locals.get("self_bottom") => Some(&Value::Int(self_bottom)));
+    unit_assert_eq!(locals.get("foreign_bottom") => Some(&Value::Int(foreign_bottom)));
+    unit_assert_eq!(engine.objects[caller_index].state.vertices.len() => 2);
+    unit_assert!(engine.objects[caller_index].own_shape_vertices.is_none());
     let target_index = engine.test_object_index(target_id);
-    assert_eq!(engine.objects[target_index].state.vertices.len(), 30);
-    assert_eq!(
-        engine.objects[target_index].state.vertices[29],
-        ObjectVertex::new(500, 900)
-    );
-    assert!(engine.objects[target_index].own_shape_vertices.is_none());
+    unit_assert_eq!(engine.objects[target_index].state.vertices.len() => 30);
+    unit_assert_eq!(engine.objects[target_index].state.vertices[29] => ObjectVertex::new(500, 900));
+    unit_assert!(engine.objects[target_index].own_shape_vertices.is_none());
 
     // A later UpdateShape restores definition vertices because AddVertex
     // did not switch on C4Object::fOwnVertices (C4Object.cpp:322-329).
@@ -4021,8 +3398,8 @@ public func Probe(object target) {
         )
         .test_value();
     let target_index = engine.test_object_index(target_id);
-    assert_eq!(engine.objects[target_index].state.vertices.len(), 29);
-    assert!(engine.objects[target_index].own_shape_vertices.is_none());
+    unit_assert_eq!(engine.objects[target_index].state.vertices.len() => 29);
+    unit_assert!(engine.objects[target_index].own_shape_vertices.is_none());
 }
 
 #[test]
@@ -4046,14 +3423,9 @@ fn disabled_flight_flats_on_low_speed_bottom_contact() {
 
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(definition);
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("FLAT")
-            .with_action(ActionState::new("Jump"))
-            .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
-            .with_loaded(true),
-    );
+    let id = spawn_fixture!(engine, "FLAT", with_action: ActionState::new("Jump"), with_fixed_velocity: FixedVec2::new(itofix(1), C4Fixed::ZERO), with_loaded: true);
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED4, 0);
+    unit_assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED4 => 0);
     let definition_id = engine.objects[idx].definition_id.clone();
 
     engine
@@ -4061,9 +3433,9 @@ fn disabled_flight_flats_on_low_speed_bottom_contact() {
         .test_value();
 
     let object = &engine.objects[idx];
-    assert_eq!(object.state.action.name, "FlatUp");
-    assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
-    assert_eq!(object.state.velocity, Vector2::ZERO);
+    unit_assert_eq!(object.state.action.name => "FlatUp");
+    unit_assert_eq!(object.fixed_velocity => FixedVec2::ZERO);
+    unit_assert_eq!(object.state.velocity => Vector2::ZERO);
 }
 
 #[test]
@@ -4123,24 +3495,15 @@ fn disabled_tumble_reenters_on_top_and_side_contacts() {
 
         let mut engine = Engine::with_seed(0);
         engine.register_test_definition(definition);
-        let id = engine.spawn_test_object(
-            SpawnConfig::new("TMBL")
-                .with_position(Vector2::new(10, 10))
-                .with_fixed_position(FixedVec2::from_ints(10, 10))
-                .with_action(ActionState::new("Tumble"))
-                .with_direction(Direction::Right)
-                .with_local_vars(HashMap::from([(
-                    "callback_order".to_string(),
-                    Value::Int(0),
-                )]))
-                .with_fixed_velocity(FixedVec2::new(
-                    C4Fixed::from_raw(32_768),
-                    C4Fixed::from_raw(6_553),
-                ))
-                .with_loaded(true),
-        );
+        let id = spawn_fixture!(engine, "TMBL", with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_action: ActionState::new("Tumble"), with_direction: Direction::Right, with_local_vars: HashMap::from([(
+            "callback_order".to_string(),
+            Value::Int(0),
+        )]), with_fixed_velocity: FixedVec2::new(
+            C4Fixed::from_raw(32_768),
+            C4Fixed::from_raw(6_553),
+        ), with_loaded: true);
         let idx = engine.test_object_index(id);
-        assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED3, 0);
+        unit_assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED3 => 0);
         let definition_id = engine.objects[idx].definition_id.clone();
 
         engine
@@ -4148,20 +3511,13 @@ fn disabled_tumble_reenters_on_top_and_side_contacts() {
             .test_value();
 
         let object = &engine.objects[idx];
-        assert_eq!(object.state.action.name, "Tumble");
-        assert_eq!(
-            object.state.local_vars.get("callback_order"),
-            Some(&Value::Int(12)),
-            "Tumble Start/Abort must run without a Scale/Hangle StartCall"
-        );
-        assert_eq!(object.state.direction, expected_direction);
-        assert_eq!(object.state.position, expected_position);
-        assert_eq!(
-            object.fixed_position,
-            FixedVec2::from_ints(expected_position.x, expected_position.y,)
-        );
-        assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
-        assert_eq!(object.state.velocity, Vector2::ZERO);
+        unit_assert_eq!(object.state.action.name => "Tumble");
+        unit_assert_eq!(object.state.local_vars.get("callback_order") => Some(&Value::Int(12)), "Tumble Start/Abort must run without a Scale/Hangle StartCall");
+        unit_assert_eq!(object.state.direction => expected_direction);
+        unit_assert_eq!(object.state.position => expected_position);
+        unit_assert_eq!(object.fixed_position => FixedVec2::from_ints(expected_position.x, expected_position.y,));
+        unit_assert_eq!(object.fixed_velocity => FixedVec2::ZERO);
+        unit_assert_eq!(object.state.velocity => Vector2::ZERO);
     }
 }
 
@@ -4182,13 +3538,7 @@ fn flight_slide_free_uses_live_position_for_each_contact() {
 
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(definition);
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("MONS")
-            .with_position(Vector2::new(10, 10))
-            .with_fixed_position(FixedVec2::from_ints(10, 10))
-            .with_action(ActionState::new("Jump"))
-            .with_loaded(true),
-    );
+    let id = spawn_fixture!(engine, "MONS", with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_action: ActionState::new("Jump"), with_loaded: true);
     let idx = engine.test_object_index(id);
     let definition_id = engine.objects[idx].definition_id.clone();
 
@@ -4197,10 +3547,10 @@ fn flight_slide_free_uses_live_position_for_each_contact() {
         .test_value();
 
     let object = &engine.objects[idx];
-    assert_eq!(object.state.position, Vector2::new(10, 13));
-    assert_eq!(object.fixed_position, FixedVec2::from_ints(10, 13));
-    assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
-    assert_eq!(object.state.velocity, Vector2::ZERO);
+    unit_assert_eq!(object.state.position => Vector2::new(10, 13));
+    unit_assert_eq!(object.fixed_position => FixedVec2::from_ints(10, 13));
+    unit_assert_eq!(object.fixed_velocity => FixedVec2::ZERO);
+    unit_assert_eq!(object.state.velocity => Vector2::ZERO);
 }
 
 #[test]
@@ -4210,12 +3560,7 @@ fn force_position_preserves_velocity_like_cpp() {
     // (C4Movement.cpp:531-539).
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(simple_definition("Rock"));
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Rock")
-            .with_position(Vector2::new(10, 10))
-            .with_fixed_position(FixedVec2::from_ints(10, 10))
-            .with_loaded(true),
-    );
+    let id = spawn_fixture!(engine, "Rock", with_position: Vector2::new(10, 10), with_fixed_position: FixedVec2::from_ints(10, 10), with_loaded: true);
     let idx = engine.test_object_index(id);
     let velocity = FixedVec2::new(itofix(2), itofix(-3));
     engine.objects[idx].set_fixed_velocity(velocity);
@@ -4223,26 +3568,26 @@ fn force_position_preserves_velocity_like_cpp() {
     engine.force_object_position(idx, Vector2::new(12, 14));
 
     let object = &engine.objects[idx];
-    assert_eq!(object.state.position, Vector2::new(12, 14));
-    assert_eq!(object.fixed_position, FixedVec2::from_ints(12, 14));
-    assert_eq!(object.fixed_velocity, velocity);
-    assert_eq!(object.state.velocity, Vector2::new(2, -3));
+    unit_assert_eq!(object.state.position => Vector2::new(12, 14));
+    unit_assert_eq!(object.fixed_position => FixedVec2::from_ints(12, 14));
+    unit_assert_eq!(object.fixed_velocity => velocity);
+    unit_assert_eq!(object.state.velocity => Vector2::new(2, -3));
 }
 
 #[test]
 fn loaded_rotation_without_fix_r_stays_independent_until_sync_clearance() {
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(simple_definition("Rock"));
-    let id = engine.spawn_test_object(SpawnConfig::new("Rock").with_rotation(-9).with_loaded(true));
+    let id = spawn_fixture!(engine, "Rock", with_rotation: -9, with_loaded: true);
 
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].state.rotation, -9);
-    assert_eq!(engine.objects[idx].fixed_rotation, C4Fixed::ZERO);
+    unit_assert_eq!(engine.objects[idx].state.rotation => -9);
+    unit_assert_eq!(engine.objects[idx].fixed_rotation => C4Fixed::ZERO);
 
     engine.game_start_synchronize().test_value();
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].state.rotation, -9);
-    assert_eq!(engine.objects[idx].fixed_rotation, itofix(-9));
+    unit_assert_eq!(engine.objects[idx].state.rotation => -9);
+    unit_assert_eq!(engine.objects[idx].fixed_rotation => itofix(-9));
 }
 
 // Mirrors C4Object::Init (C4Object.cpp:183-185): a freshly created
@@ -4255,23 +3600,10 @@ fn initial_mobility_follows_init_velocity_rule_like_cpp() {
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(simple_definition("Rock"));
 
-    let resting = engine.spawn_test_object(SpawnConfig::new("Rock").with_category(CATEGORY_OBJECT));
-    let moving = engine.spawn_test_object(
-        SpawnConfig::new("Rock")
-            .with_velocity(Vector2::new(1, 0))
-            .with_category(CATEGORY_OBJECT),
-    );
-    let static_back = engine.spawn_test_object(
-        SpawnConfig::new("Rock")
-            .with_velocity(Vector2::new(1, 0))
-            .with_category(CATEGORY_STATIC_BACK),
-    );
-    let loaded = engine.spawn_test_object(
-        SpawnConfig::new("Rock")
-            .with_velocity(Vector2::new(1, 0))
-            .with_category(CATEGORY_OBJECT)
-            .with_loaded(true),
-    );
+    let resting = spawn_fixture!(engine, "Rock", with_category: CATEGORY_OBJECT);
+    let moving = spawn_fixture!(engine, "Rock", with_velocity: Vector2::new(1, 0), with_category: CATEGORY_OBJECT);
+    let static_back = spawn_fixture!(engine, "Rock", with_velocity: Vector2::new(1, 0), with_category: CATEGORY_STATIC_BACK);
+    let loaded = spawn_fixture!(engine, "Rock", with_velocity: Vector2::new(1, 0), with_category: CATEGORY_OBJECT, with_loaded: true);
 
     let mobile_of = |engine: &Engine, id| {
         engine
@@ -4279,22 +3611,10 @@ fn initial_mobility_follows_init_velocity_rule_like_cpp() {
             .map(|idx| engine.objects[idx].state.mobile)
             .test_value()
     };
-    assert!(
-        !mobile_of(&engine, resting),
-        "zero-dir spawn stays immobile (C4Object.cpp:184)"
-    );
-    assert!(
-        mobile_of(&engine, moving),
-        "nonzero xdir mobilizes a fresh spawn (C4Object.cpp:185)"
-    );
-    assert!(
-        !mobile_of(&engine, static_back),
-        "Category == C4D_StaticBack skips Init mobilization (C4Object.cpp:183)"
-    );
-    assert!(
-        !mobile_of(&engine, loaded),
-        "loaded objects keep the serialized default false (C4Object.cpp:2772)"
-    );
+    unit_assert!(!mobile_of(&engine, resting), "zero-dir spawn stays immobile (C4Object.cpp:184)");
+    unit_assert!(mobile_of(&engine, moving), "nonzero xdir mobilizes a fresh spawn (C4Object.cpp:185)");
+    unit_assert!(!mobile_of(&engine, static_back), "Category == C4D_StaticBack skips Init mobilization (C4Object.cpp:183)");
+    unit_assert!(!mobile_of(&engine, loaded), "loaded objects keep the serialized default false (C4Object.cpp:2772)");
 }
 
 // Mirrors C4Movement.cpp:566-587 + C4Object.cpp:4708-4712: a resting
@@ -4348,18 +3668,8 @@ EnergyUsage=10
     let group = clonk_resources::Group::open(&def_dir).test_value();
     let resource = ResourceDefinitionData::load(&group).test_value();
     let mut definition = Definition::from_resource(&resource).test_value();
-    assert_eq!(
-        definition.action_library().energy_usage_for_action("Work"),
-        10,
-        "ActMap EnergyUsage reaches the runtime action library"
-    );
-    assert_eq!(
-        definition
-            .action_library()
-            .energy_usage_for_action("Refund"),
-        -3,
-        "EnergyUsage remains signed like C4ActionDef::EnergyUsage"
-    );
+    unit_assert_eq!(definition.action_library().energy_usage_for_action("Work") => 10, "ActMap EnergyUsage reaches the runtime action library");
+    unit_assert_eq!(definition.action_library().energy_usage_for_action("Refund") => -3, "EnergyUsage remains signed like C4ActionDef::EnergyUsage");
     // Definition::from_resource's older conversion seam does not yet
     // carry InLiquidAction. Add that pre-existing field synthetically so
     // this regression can pin the EnergyUsage ordering without expanding
@@ -4408,46 +3718,34 @@ EnergyUsage=10
             .with_mobile(true)
             .with_loaded(true),
     );
-    let stalled_connect = engine.spawn_test_object(
-        SpawnConfig::new("PWRD")
-            .with_action(ActionState::new("ConnectWork"))
-            .with_energy(0)
-            .with_loaded(true),
-    );
+    let stalled_connect = spawn_fixture!(engine, "PWRD", with_action: ActionState::new("ConnectWork"), with_energy: 0, with_loaded: true);
 
     engine.tick_without_snapshot().test_value();
     let stalled_idx = engine.test_object_index(stalled);
     let stalled_object = &engine.objects[stalled_idx];
-    assert_eq!(stalled_object.state.energy, 5);
-    assert!(stalled_object.state.need_energy);
-    assert_eq!(stalled_object.state.action.name, "Work");
-    assert_eq!(stalled_object.state.action.time, 4);
-    assert_eq!(stalled_object.state.action.phase, 2);
-    assert_eq!(stalled_object.state.action.ticks, 0);
-    assert_eq!(
-        stalled_object.fixed_velocity.x,
-        itofix(1),
-        "insufficient energy skips WALK steering"
-    );
-    assert_eq!(
-        stalled_object.fixed_velocity.y,
+    unit_assert_eq!(stalled_object.state.energy => 5);
+    unit_assert!(stalled_object.state.need_energy);
+    unit_assert_eq!(stalled_object.state.action.name => "Work");
+    unit_assert_eq!(stalled_object.state.action.time => 4);
+    unit_assert_eq!(stalled_object.state.action.phase => 2);
+    unit_assert_eq!(stalled_object.state.action.ticks => 0);
+    unit_assert_eq!(stalled_object.fixed_velocity.x => itofix(1), "insufficient energy skips WALK steering");
+    unit_assert_eq!(
+        stalled_object.fixed_velocity.y =>
         PhysicsSettings::new(100, 200, -200).gravity_as_c4fixed(),
         "a Mobile stalled action still receives raw DoGravity"
     );
 
     let powered_idx = engine.test_object_index(powered);
     let powered_object = &engine.objects[powered_idx];
-    assert_eq!(powered_object.state.energy, 0, "equality is sufficient");
-    assert!(
-        powered_object.state.alive,
-        "direct EnergyUsage subtraction does not run DoEnergy death"
-    );
-    assert!(!powered_object.state.need_energy);
-    assert_eq!(powered_object.state.action.time, 5);
-    assert_eq!(powered_object.state.action.phase, 3);
+    unit_assert_eq!(powered_object.state.energy => 0, "equality is sufficient");
+    unit_assert!(powered_object.state.alive, "direct EnergyUsage subtraction does not run DoEnergy death");
+    unit_assert!(!powered_object.state.need_energy);
+    unit_assert_eq!(powered_object.state.action.time => 5);
+    unit_assert_eq!(powered_object.state.action.phase => 3);
     let stalled_connect_idx = engine.test_object_index(stalled_connect);
-    assert!(engine.objects[stalled_connect_idx].state.need_energy);
-    assert_eq!(engine.objects[stalled_connect_idx].state.action.time, 0);
+    unit_assert!(engine.objects[stalled_connect_idx].state.need_energy);
+    unit_assert_eq!(engine.objects[stalled_connect_idx].state.action.time => 0);
 
     // ExecMovement's no-landscape liquid probe clears InLiquid after the
     // first action. Re-arm the saved flag to exercise the next ExecAction.
@@ -4457,22 +3755,13 @@ EnergyUsage=10
     let stalled_idx = engine.test_object_index(stalled);
     let powered_idx = engine.test_object_index(powered);
     let stalled_object = &engine.objects[stalled_idx];
-    assert_eq!(stalled_object.state.energy, 5, "rule-off skips the drain");
-    assert!(
-        stalled_object.state.need_energy,
-        "rule-off leaves the stale NeedEnergy bit untouched"
-    );
-    assert_eq!(
-        stalled_object.state.action.name, "Wet",
-        "rule-off resumes later InLiquidAction work"
-    );
+    unit_assert_eq!(stalled_object.state.energy => 5, "rule-off skips the drain");
+    unit_assert!(stalled_object.state.need_energy, "rule-off leaves the stale NeedEnergy bit untouched");
+    unit_assert_eq!(stalled_object.state.action.name => "Wet", "rule-off resumes later InLiquidAction work");
     let powered_object = &engine.objects[powered_idx];
-    assert_eq!(powered_object.state.energy, 0, "rule-off skips the drain");
-    assert_eq!(powered_object.state.action.time, 6);
-    assert!(
-        engine.find_object_index(stalled_connect).is_none(),
-        "once ungated, CONNECT reaches its missing-target LineBreak removal"
-    );
+    unit_assert_eq!(powered_object.state.energy => 0, "rule-off skips the drain");
+    unit_assert_eq!(powered_object.state.action.time => 6);
+    unit_assert!(engine.find_object_index(stalled_connect).is_none(), "once ungated, CONNECT reaches its missing-target LineBreak removal");
 }
 
 #[test]
@@ -4575,53 +3864,28 @@ protected func WetStart()
 
     for id in [reset, keep] {
         let idx = engine.test_object_index(id);
-        assert_eq!(
-            engine.objects[idx].state.ocf & ocf::FULL_CON,
-            0,
-            "fixture must exercise the live OCF_FullCon gate"
-        );
+        unit_assert_eq!(engine.objects[idx].state.ocf & ocf::FULL_CON => 0, "fixture must exercise the live OCF_FullCon gate");
     }
 
     engine.tick_without_snapshot().test_value();
     let reset_idx = engine.test_object_index(reset);
     let reset_object = &engine.objects[reset_idx];
-    assert_eq!(reset_object.state.action, ActionState::new("Idle"));
-    assert_eq!(reset_object.state.energy, 20);
-    assert!(
-        reset_object.state.need_energy,
-        "incomplete reset precedes and therefore skips EnergyUsage"
-    );
-    assert_eq!(reset_object.fixed_velocity.x, itofix(1));
-    assert_eq!(
-        reset_object.fixed_velocity.y,
-        C4Fixed::ZERO,
-        "the reset frame returns before both WALK steering and idle gravity"
-    );
-    assert_eq!(
-        reset_object.state.local_vars.get("abort_count"),
-        Some(&Value::Int(1))
-    );
-    assert_eq!(
-        reset_object.state.local_vars.get("abort_phase"),
-        Some(&Value::Int(3)),
-        "ordinary SetAction supplies the previous phase to AbortCall"
-    );
-    assert_eq!(
-        reset_object.state.local_vars.get("wet_start_count"),
-        Some(&Value::Int(0)),
-        "incomplete reset precedes InLiquidAction"
-    );
+    unit_assert_eq!(reset_object.state.action => ActionState::new("Idle"));
+    unit_assert_eq!(reset_object.state.energy => 20);
+    unit_assert!(reset_object.state.need_energy, "incomplete reset precedes and therefore skips EnergyUsage");
+    unit_assert_eq!(reset_object.fixed_velocity.x => itofix(1));
+    unit_assert_eq!(reset_object.fixed_velocity.y => C4Fixed::ZERO, "the reset frame returns before both WALK steering and idle gravity");
+    unit_assert_eq!(reset_object.state.local_vars.get("abort_count") => Some(&Value::Int(1)));
+    unit_assert_eq!(reset_object.state.local_vars.get("abort_phase") => Some(&Value::Int(3)), "ordinary SetAction supplies the previous phase to AbortCall");
+    unit_assert_eq!(reset_object.state.local_vars.get("wet_start_count") => Some(&Value::Int(0)), "incomplete reset precedes InLiquidAction");
 
     let keep_idx = engine.test_object_index(keep);
     let keep_object = &engine.objects[keep_idx];
-    assert_eq!(keep_object.state.action.name, "Walk");
-    assert_eq!(keep_object.state.action.time, 8);
-    assert_eq!(keep_object.state.energy, 10);
-    assert!(!keep_object.state.need_energy);
-    assert_eq!(
-        keep_object.state.local_vars.get("abort_count"),
-        Some(&Value::Int(0))
-    );
+    unit_assert_eq!(keep_object.state.action.name => "Walk");
+    unit_assert_eq!(keep_object.state.action.time => 8);
+    unit_assert_eq!(keep_object.state.energy => 10);
+    unit_assert!(!keep_object.state.need_energy);
+    unit_assert_eq!(keep_object.state.local_vars.get("abort_count") => Some(&Value::Int(0)));
 }
 
 #[test]
@@ -4631,26 +3895,15 @@ fn resting_object_freezes_until_tick10_mobilization_like_cpp() {
     engine.set_physics(PhysicsSettings::new(100, 200, -200));
     engine.set_environment(EnvironmentSettings::new(0));
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Test")
-            .with_position(Vector2::new(0, 0))
-            .with_category(CATEGORY_OBJECT),
-    );
+    let id = spawn_fixture!(engine, "Test", with_position: Vector2::new(0, 0), with_category: CATEGORY_OBJECT);
 
     for frame in 1..=9 {
         engine.tick_without_snapshot().test_value();
         let idx = engine.test_object_index(id);
         let object = &engine.objects[idx];
-        assert_eq!(
-            object.fixed_velocity.y.val(),
-            0,
-            "no idle gravity while immobile (frame {frame}, C4Object.cpp:4710)"
-        );
-        assert!(
-            !object.state.mobile,
-            "iTick10 != 0 keeps the object demobilized (frame {frame})"
-        );
-        assert_eq!(object.state.position, Vector2::new(0, 0));
+        unit_assert_eq!(object.fixed_velocity.y.val() => 0, "no idle gravity while immobile (frame {frame}, C4Object.cpp:4710)");
+        unit_assert!(!object.state.mobile, "iTick10 != 0 keeps the object demobilized (frame {frame})");
+        unit_assert_eq!(object.state.position => Vector2::new(0, 0));
     }
 
     // Frame 10: the pulse mobilizes with zeroed dirs
@@ -4658,17 +3911,14 @@ fn resting_object_freezes_until_tick10_mobilization_like_cpp() {
     // without Mobile, so ydir is still zero.
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(id);
-    assert!(
-        engine.objects[idx].state.mobile,
-        "Tick10 re-mobilizes resting objects (C4Movement.cpp:586)"
-    );
-    assert_eq!(engine.objects[idx].fixed_velocity.y.val(), 0);
+    unit_assert!(engine.objects[idx].state.mobile, "Tick10 re-mobilizes resting objects (C4Movement.cpp:586)");
+    unit_assert_eq!(engine.objects[idx].fixed_velocity.y.val() => 0);
 
     // Frame 11: first gravity probe (ydir += GravAccel, raw 13107 for
     // Gravity=100 — parity/golden/parity_golden.json movement[0]).
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].fixed_velocity.y.val(), 13107);
+    unit_assert_eq!(engine.objects[idx].fixed_velocity.y.val() => 13107);
 }
 
 // Mirrors C4Object::CopyMotion via ExecMovement's containment gate
@@ -4684,38 +3934,18 @@ fn contained_object_copies_container_motion_like_cpp() {
     engine.register_test_definition(simple_definition("Wagon"));
     engine.register_test_definition(simple_definition("Gem"));
 
-    let wagon = engine.spawn_test_object(
-        SpawnConfig::new("Wagon")
-            .with_category(CATEGORY_VEHICLE)
-            .with_position(Vector2::new(10, 10))
-            .with_velocity(Vector2::new(2, 0)),
-    );
-    let gem = engine.spawn_test_object(
-        SpawnConfig::new("Gem")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(0, 0))
-            .with_container(wagon),
-    );
+    let wagon = spawn_fixture!(engine, "Wagon", with_category: CATEGORY_VEHICLE, with_position: Vector2::new(10, 10), with_velocity: Vector2::new(2, 0));
+    let gem = spawn_fixture!(engine, "Gem", with_category: CATEGORY_OBJECT, with_position: Vector2::new(0, 0), with_container: wagon);
 
     engine.tick_without_snapshot().test_value();
     let wagon_idx = engine.test_object_index(wagon);
     let gem_idx = engine.test_object_index(gem);
     let wagon_position = engine.objects[wagon_idx].state.position;
-    assert_ne!(
-        wagon_position,
-        Vector2::new(10, 10),
-        "the mobile wagon moves"
-    );
-    assert_eq!(
-        engine.objects[gem_idx].state.position, wagon_position,
-        "content follows the container (C4Movement.cpp:556-561)"
-    );
-    assert_eq!(
-        engine.objects[gem_idx].fixed_velocity, engine.objects[wagon_idx].fixed_velocity,
-        "dirs copied from the container (C4Movement.cpp:528)"
-    );
-    assert_eq!(
-        engine.objects[gem_idx].fixed_position.x.val(),
+    unit_assert_ne!(wagon_position => Vector2::new(10, 10), "the mobile wagon moves");
+    unit_assert_eq!(engine.objects[gem_idx].state.position => wagon_position, "content follows the container (C4Movement.cpp:556-561)");
+    unit_assert_eq!(engine.objects[gem_idx].fixed_velocity => engine.objects[wagon_idx].fixed_velocity, "dirs copied from the container (C4Movement.cpp:528)");
+    unit_assert_eq!(
+        engine.objects[gem_idx].fixed_position.x.val() =>
         itofix(wagon_position.x).val(),
         "fix snapped to itofix(x), not the container's sub-pixel fix (C4Movement.cpp:527)"
     );
@@ -4736,47 +3966,22 @@ fn created_objects_grow_from_the_given_bottom_like_cpp() {
     engine.register_test_definition(bandit);
     engine.register_test_definition(simple_definition("MARK"));
 
-    let created = engine.spawn_test_object(
-        SpawnConfig::new("BNDT")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(100, 560)),
-    );
+    let created = spawn_fixture!(engine, "BNDT", with_category: CATEGORY_OBJECT, with_position: Vector2::new(100, 560));
     let idx = engine.test_object_index(created);
-    assert_eq!(
-        engine.objects[idx].state.position,
-        Vector2::new(100, 550),
-        "created objects: y - (Hgt + Shape.y) = 560 - (20 - 10) (C4Object.cpp:1467)"
-    );
+    unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(100, 550), "created objects: y - (Hgt + Shape.y) = 560 - (20 - 10) (C4Object.cpp:1467)");
     // DoCon's initial adjust moves the INT y only — C++ leaves fix_y
     // at the GIVEN center until a SetAction or the Tick10 rearm
     // resyncs it (C4Object.cpp:4144, C4Movement.cpp:581-586).
-    assert_eq!(
-        engine.objects[idx].fixed_position.y.val(),
-        itofix(560).val(),
-        "fix keeps the given center (the DoCon y/fix split)"
-    );
+    unit_assert_eq!(engine.objects[idx].fixed_position.y.val() => itofix(560).val(), "fix keeps the given center (the DoCon y/fix split)");
 
-    let loaded = engine.spawn_test_object(
-        SpawnConfig::new("BNDT")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(100, 560))
-            .with_loaded(true),
-    );
+    let loaded = spawn_fixture!(engine, "BNDT", with_category: CATEGORY_OBJECT, with_position: Vector2::new(100, 560), with_loaded: true);
     let idx = engine.test_object_index(loaded);
-    assert_eq!(
-        engine.objects[idx].state.position,
-        Vector2::new(100, 560),
-        "loaded objects keep the saved center"
-    );
+    unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(100, 560), "loaded objects keep the saved center");
 
     // Shapeless fixture defs shift by nothing.
-    let marker = engine.spawn_test_object(
-        SpawnConfig::new("MARK")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(5, 5)),
-    );
+    let marker = spawn_fixture!(engine, "MARK", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 5));
     let idx = engine.test_object_index(marker);
-    assert_eq!(engine.objects[idx].state.position, Vector2::new(5, 5));
+    unit_assert_eq!(engine.objects[idx].state.position => Vector2::new(5, 5));
 }
 
 // Mirrors C4Object::Stabilize (C4Movement.cpp:488-516) at the
@@ -4818,42 +4023,17 @@ fn stabilize_snaps_small_tilts_upright_like_cpp() {
     engine.register_test_definition(stiff);
 
     // Rotation-0 vertex lands at y=9 (air): free, snaps upright.
-    let free = engine.spawn_test_object(
-        SpawnConfig::new("Tilt")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(5, 3))
-            .with_rotation(356),
-    );
+    let free = spawn_fixture!(engine, "Tilt", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 3), with_rotation: 356);
     // Rotation-0 vertex lands at y=13 (solid): contact, tilt kept.
-    let blocked = engine.spawn_test_object(
-        SpawnConfig::new("Tilt")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(20, 7))
-            .with_rotation(356),
-    );
+    let blocked = spawn_fixture!(engine, "Tilt", with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 7), with_rotation: 356);
     // Tilt outside ±StableRange: untouched.
-    let leaning = engine.spawn_test_object(
-        SpawnConfig::new("Tilt")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(35, 3))
-            .with_rotation(340),
-    );
+    let leaning = spawn_fixture!(engine, "Tilt", with_category: CATEGORY_OBJECT, with_position: Vector2::new(35, 3), with_rotation: 340);
     // NoStabilize def: untouched (C4Movement.cpp:491).
-    let stiff_id = engine.spawn_test_object(
-        SpawnConfig::new("Stiff")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(50, 3))
-            .with_rotation(356),
-    );
+    let stiff_id = spawn_fixture!(engine, "Stiff", with_category: CATEGORY_OBJECT, with_position: Vector2::new(50, 3), with_rotation: 356);
     // Stabilize normalizes with repeated +/-360 steps, not a single
     // wrap (C4Movement.cpp:493-494). A raw saved r=716 is therefore -4
     // and falls inside StableRange.
-    let multi_wrapped = engine.spawn_test_object(
-        SpawnConfig::new("Tilt")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(55, 3))
-            .with_rotation(716),
-    );
+    let multi_wrapped = spawn_fixture!(engine, "Tilt", with_category: CATEGORY_OBJECT, with_position: Vector2::new(55, 3), with_rotation: 716);
 
     engine.tick_without_snapshot().test_value();
     let rotation_of = |engine: &Engine, id| {
@@ -4862,37 +4042,13 @@ fn stabilize_snaps_small_tilts_upright_like_cpp() {
             .map(|idx| engine.objects[idx].state.rotation)
             .test_value()
     };
-    assert_eq!(
-        rotation_of(&engine, free),
-        0,
-        "small tilt snaps upright when rotation 0 is contact-free (C4Movement.cpp:509-514)"
-    );
+    unit_assert_eq!(rotation_of(&engine, free) => 0, "small tilt snaps upright when rotation 0 is contact-free (C4Movement.cpp:509-514)");
     let free_idx = engine.test_object_index(free);
-    assert_eq!(
-        engine.objects[free_idx].fixed_rotation.val(),
-        0,
-        "fix_r follows the stabilization (C4Movement.cpp:512)"
-    );
-    assert_eq!(
-        rotation_of(&engine, blocked),
-        356,
-        "contact at rotation 0 keeps the tilt (C4Movement.cpp:503-508)"
-    );
-    assert_eq!(
-        rotation_of(&engine, leaning),
-        340,
-        "tilts beyond ±StableRange stay (C4Movement.cpp:495)"
-    );
-    assert_eq!(
-        rotation_of(&engine, stiff_id),
-        356,
-        "NoStabilize opts out (C4Movement.cpp:491)"
-    );
-    assert_eq!(
-        rotation_of(&engine, multi_wrapped),
-        0,
-        "repeated angle normalization brings 716 degrees to -4"
-    );
+    unit_assert_eq!(engine.objects[free_idx].fixed_rotation.val() => 0, "fix_r follows the stabilization (C4Movement.cpp:512)");
+    unit_assert_eq!(rotation_of(&engine, blocked) => 356, "contact at rotation 0 keeps the tilt (C4Movement.cpp:503-508)");
+    unit_assert_eq!(rotation_of(&engine, leaning) => 340, "tilts beyond ±StableRange stay (C4Movement.cpp:495)");
+    unit_assert_eq!(rotation_of(&engine, stiff_id) => 356, "NoStabilize opts out (C4Movement.cpp:491)");
+    unit_assert_eq!(rotation_of(&engine, multi_wrapped) => 0, "repeated angle normalization brings 716 degrees to -4");
 }
 
 #[test]
@@ -4936,23 +4092,15 @@ fn stabilize_contact_probe_dispatches_contact_callbacks_like_cpp() {
     engine.set_landscape(Landscape::flat_with_material(20, 12, Some(earth)));
     engine.set_physics(PhysicsSettings::new(0, 20, -20));
     engine.register_test_definition(definition);
-    let object = engine.spawn_test_object(
-        SpawnConfig::new("CBST")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(10, 7))
-            .with_rotation(356),
-    );
+    let object = spawn_fixture!(engine, "CBST", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 7), with_rotation: 356);
 
     engine.tick_without_snapshot().test_value();
     let index = engine.test_object_index(object);
-    assert_eq!(
-        engine.objects[index].state.rotation, 356,
-        "contact keeps tilt"
-    );
-    assert_eq!(
+    unit_assert_eq!(engine.objects[index].state.rotation => 356, "contact keeps tilt");
+    unit_assert_eq!(
         engine
             .call_object_function(index, "ReadTouched", Vec::new())
-            .expect("read succeeds"),
+            .expect("read succeeds") =>
         Value::Int(1),
         "Stabilize's ContactCheck dispatches ContactBottom"
     );
@@ -4979,18 +4127,15 @@ fn rejected_stabilize_keeps_the_trial_update_pos_sector_links_like_cpp() {
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 2).with_cnat(CNAT_BOTTOM)]);
     engine.register_test_definition(definition);
 
-    let object_id = engine.spawn_test_object(
-        SpawnConfig::new("SRJT")
-            .with_position(Vector2::new(49, 49))
-            .with_rotation(5),
-    );
+    let object_id =
+        spawn_fixture!(engine, "SRJT", with_position: Vector2::new(49, 49), with_rotation: 5);
     let index = engine.test_object_index(object_id);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .sectors
             .as_ref()
             .expect("sectors exist")
-            .shape_ids(sector::SectorKey::Inside { x: 1, y: 0 }),
+            .shape_ids(sector::SectorKey::Inside { x: 1, y: 0 }) =>
         &[object_id],
         "the rotated entry shape crosses the sector boundary"
     );
@@ -4998,13 +4143,9 @@ fn rejected_stabilize_keeps_the_trial_update_pos_sector_links_like_cpp() {
     engine.stabilize_object(index, &[]).test_value();
 
     let object = &engine.objects[index];
-    assert_eq!(object.state.rotation, 5, "ground contact rejects upright");
-    assert_eq!(
-        object.current_shape_rect(),
-        Some(DefinitionRect::new(-2, -2, 4, 4)),
-        "the rejected trial restores the rotated Shape value"
-    );
-    assert!(
+    unit_assert_eq!(object.state.rotation => 5, "ground contact rejects upright");
+    unit_assert_eq!(object.current_shape_rect() => Some(DefinitionRect::new(-2, -2, 4, 4)), "the rejected trial restores the rotated Shape value");
+    unit_assert!(
         engine
             .sectors
             .as_ref()
@@ -5047,22 +4188,16 @@ public func ContactBottom()
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 2).with_cnat(CNAT_BOTTOM)]);
     engine.register_test_definition(definition);
 
-    let object_id = engine.spawn_test_object(
-        SpawnConfig::new("SACC")
-            .with_position(Vector2::new(49, 49))
-            .with_rotation(5),
-    );
+    let object_id =
+        spawn_fixture!(engine, "SACC", with_position: Vector2::new(49, 49), with_rotation: 5);
     let index = engine.test_object_index(object_id);
 
     engine.stabilize_object(index, &[]).test_value();
 
     let object = &engine.objects[index];
-    assert_eq!(object.state.rotation, 73);
-    assert_eq!(object.fixed_rotation, itofix(73));
-    assert_eq!(
-        object.state.shape_override, None,
-        "the accepted arm's UpdateFace(true) rebuilds the definition shape"
-    );
+    unit_assert_eq!(object.state.rotation => 73);
+    unit_assert_eq!(object.fixed_rotation => itofix(73));
+    unit_assert_eq!(object.state.shape_override => None, "the accepted arm's UpdateFace(true) rebuilds the definition shape");
 }
 
 #[test]
@@ -5094,13 +4229,7 @@ public func ContactBottom()
     victim_definition.set_shape_vertices(vec![ObjectVertex::new(0, 2).with_cnat(CNAT_BOTTOM)]);
     engine.register_test_definition(victim_definition);
 
-    let victim = engine.spawn_test_object(
-        SpawnConfig::new("TOMB")
-            .with_position(Vector2::new(20, 49))
-            .with_rotation(20)
-            .with_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(1)))
-            .with_mobile(true),
-    );
+    let victim = spawn_fixture!(engine, "TOMB", with_position: Vector2::new(20, 49), with_rotation: 20, with_fixed_velocity: FixedVec2::new(C4Fixed::ZERO, itofix(1)), with_mobile: true);
     let victim_index = engine.test_object_index(victim);
     let definition_id = engine.objects[victim_index].definition_id.clone();
     let actions = engine
@@ -5113,9 +4242,9 @@ public func ContactBottom()
         .exec_mobile_object_movement(victim_index, &actions, &definition_id, &[])
         .test_value();
 
-    assert!(!outcome.alive, "ContactBottom removes the victim");
+    unit_assert!(!outcome.alive, "ContactBottom removes the victim");
     let victim_index = engine.test_object_index(victim);
-    assert!(
+    unit_assert!(
         engine.objects[victim_index].destroyed,
         "victim state after movement: position={:?} velocity={:?} contact={} status={:?}",
         engine.objects[victim_index].state.position,
@@ -5123,10 +4252,7 @@ public func ContactBottom()
         engine.objects[victim_index].frame_t_contact,
         engine.objects[victim_index].state.status
     );
-    assert_eq!(
-        engine.objects[victim_index].state.rotation, 0,
-        "non-rotateable ExecMovement tail still runs after Contact removal"
-    );
+    unit_assert_eq!(engine.objects[victim_index].state.rotation => 0, "non-rotateable ExecMovement tail still runs after Contact removal");
 }
 
 // Mirrors the ExecAction upright-attachment check
@@ -5193,11 +4319,7 @@ fn upright_attached_vehicle_on_ground_keeps_its_action_like_cpp() {
     // The DoCon bottom adjust puts the given y=270 center at 250:
     // bottom vertices sit at 265, the road at 270 - inside the
     // 5px attach range.
-    let coach_id = engine.spawn_test_object(
-        SpawnConfig::new("Coch")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(100, 270)),
-    );
+    let coach_id = spawn_fixture!(engine, "Coch", with_category: CATEGORY_OBJECT, with_position: Vector2::new(100, 270));
     engine
         .apply_object_update(
             coach_id,
@@ -5211,23 +4333,13 @@ fn upright_attached_vehicle_on_ground_keeps_its_action_like_cpp() {
     for frame in 0..3 {
         engine.tick_without_snapshot().test_value();
         let idx = engine.test_object_index(coach_id);
-        assert_eq!(
-            engine.objects[idx].state.action.name, "Turn",
-            "no Jump in the ActMap: the failed jump keeps Turn (frame {frame})"
-        );
+        unit_assert_eq!(engine.objects[idx].state.action.name => "Turn", "no Jump in the ActMap: the failed jump keeps Turn (frame {frame})");
     }
     // Gravity still pulls the unattached wagon (DoGravity per exec):
     // three frames of accumulation stay under two integer pixels.
     let idx = engine.test_object_index(coach_id);
-    assert_eq!(
-        engine.objects[idx].state.position.x, 100,
-        "no horizontal drift"
-    );
-    assert!(
-        (250..=251).contains(&engine.objects[idx].state.position.y),
-        "slow free-fall, not an attach snap: y={}",
-        engine.objects[idx].state.position.y
-    );
+    unit_assert_eq!(engine.objects[idx].state.position.x => 100, "no horizontal drift");
+    unit_assert!((250..=251).contains(&engine.objects[idx].state.position.y), "slow free-fall, not an attach snap: y={}", engine.objects[idx].state.position.y);
 }
 
 #[test]
@@ -5240,17 +4352,8 @@ fn upright_attach_rearms_mobile_every_frame_like_cpp() {
     engine.set_environment(EnvironmentSettings::new(0));
     engine.register_test_definition(definition);
 
-    let upright = engine.spawn_test_object(
-        SpawnConfig::new("Barrel")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(5, 5)),
-    );
-    let tilted = engine.spawn_test_object(
-        SpawnConfig::new("Barrel")
-            .with_category(CATEGORY_OBJECT)
-            .with_position(Vector2::new(20, 5))
-            .with_rotation(340),
-    );
+    let upright = spawn_fixture!(engine, "Barrel", with_category: CATEGORY_OBJECT, with_position: Vector2::new(5, 5));
+    let tilted = spawn_fixture!(engine, "Barrel", with_category: CATEGORY_OBJECT, with_position: Vector2::new(20, 5), with_rotation: 340);
 
     engine.tick_without_snapshot().test_value();
     let mobile_of = |engine: &Engine, id| {
@@ -5259,14 +4362,8 @@ fn upright_attach_rearms_mobile_every_frame_like_cpp() {
             .map(|idx| engine.objects[idx].state.mobile)
             .test_value()
     };
-    assert!(
-        mobile_of(&engine, upright),
-        "UprightAttach re-arms a standing object at frame 1 (C4Object.cpp:4704)"
-    );
-    assert!(
-        !mobile_of(&engine, tilted),
-        "a 340-degree tilt is outside ±StableRange (C4Object.cpp:4701)"
-    );
+    unit_assert!(mobile_of(&engine, upright), "UprightAttach re-arms a standing object at frame 1 (C4Object.cpp:4704)");
+    unit_assert!(!mobile_of(&engine, tilted), "a 340-degree tilt is outside ±StableRange (C4Object.cpp:4701)");
 }
 
 // C4Game::NewObj mints strictly increasing object numbers
@@ -5280,13 +4377,7 @@ fn stale_script_world_counter_never_rewinds_object_ids() {
     let mut engine = Engine::with_seed(0);
     engine.next_object_id = 100;
     engine.sync_next_object_id(90);
-    assert_eq!(
-        engine.next_object_id, 100,
-        "a stale snapshot counter must not rewind the allocator"
-    );
+    unit_assert_eq!(engine.next_object_id => 100, "a stale snapshot counter must not rewind the allocator");
     engine.sync_next_object_id(120);
-    assert_eq!(
-        engine.next_object_id, 120,
-        "world-side allocations advance the engine counter"
-    );
+    unit_assert_eq!(engine.next_object_id => 120, "world-side allocations advance the engine counter");
 }

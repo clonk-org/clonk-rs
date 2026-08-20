@@ -156,10 +156,7 @@ impl StatusBarrier {
         }
 
         if acknowledgement.target_tick > self.status.target_tick {
-            let status = NetworkStatus {
-                target_tick: acknowledgement.target_tick,
-                ..self.status
-            };
+            let status = self.status.with_target_tick(acknowledgement.target_tick);
             let effects = self.change_status(status);
             self.remotes.insert(client_id, RemoteBarrierState::Ready);
             return effects;
@@ -206,10 +203,7 @@ impl StatusBarrier {
         if self.status.state == NETWORK_STATE_LOBBY || self.status.state == NETWORK_STATE_PAUSE {
             return Vec::new();
         }
-        self.change_status(NetworkStatus {
-            target_tick: next_control_tick,
-            ..self.status
-        })
+        self.change_status(self.status.with_target_tick(next_control_tick))
     }
 
     pub fn is_running(&self) -> bool {
@@ -267,19 +261,11 @@ mod tests {
         // target and all such remotes acknowledge; AllClientsReady skips the
         // local list entry, so it deliberately stays NotReady afterward
         // (src/C4Network2.cpp:1994-2014,2062-2110).
-        let mut barrier = StatusBarrier::stable(NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: -1,
-        });
+        let mut barrier = StatusBarrier::stable(NetworkStatus::new(NETWORK_STATE_LOBBY, 1, -1));
         barrier.set_remote_state(1, RemoteBarrierState::Ready);
         barrier.set_remote_state(2, RemoteBarrierState::Ready);
         assert_eq!(barrier.local, RemoteBarrierState::Ready);
-        let go = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 10,
-        };
+        let go = NetworkStatus::new(NETWORK_STATE_GO, 1, 10);
 
         assert_eq!(
             barrier.change_status(go),
@@ -313,16 +299,8 @@ mod tests {
 
     #[test]
     fn go_mode_switch_replays_from_the_hosts_actual_reached_tick() {
-        let lobby = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: -1,
-        };
-        let go = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 10,
-        };
+        let lobby = NetworkStatus::new(NETWORK_STATE_LOBBY, 0, -1);
+        let go = NetworkStatus::new(NETWORK_STATE_GO, 1, 10);
         let mut barrier = StatusBarrier::stable(lobby);
         barrier.change_status(go);
 
@@ -347,17 +325,10 @@ mod tests {
         // Sync changes to the already-active state at getNextControlTick when
         // Go is acknowledged and therefore not frozen
         // (src/C4Network2.cpp:541-555,1982-1991).
-        let mut barrier = StatusBarrier::stable(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 10,
-        });
+        let mut barrier = StatusBarrier::stable(NetworkStatus::new(NETWORK_STATE_GO, 1, 10));
         barrier.set_remote_state(3, RemoteBarrierState::Ready);
 
-        let next = NetworkStatus {
-            target_tick: 11,
-            ..barrier.status
-        };
+        let next = barrier.status.with_target_tick(11);
         assert_eq!(
             barrier.sync(11),
             vec![
@@ -376,28 +347,13 @@ mod tests {
         // A client that reaches a later tick forces the host to rebroadcast
         // the same state at that tick; the ACK's CtrlMode is ignored
         // (src/C4Network2.cpp:1513-1534).
-        let mut barrier = StatusBarrier::stable(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 9,
-        });
+        let mut barrier = StatusBarrier::stable(NetworkStatus::new(NETWORK_STATE_GO, 1, 9));
         barrier.set_remote_state(1, RemoteBarrierState::Ready);
         barrier.set_remote_state(2, RemoteBarrierState::Ready);
-        let current = NetworkStatus {
-            target_tick: 10,
-            ..barrier.status
-        };
+        let current = barrier.status.with_target_tick(10);
         barrier.change_status(current);
-        let later_ack = NetworkStatus {
-            control_mode: 99,
-            target_tick: 12,
-            ..current
-        };
-        let retargeted = NetworkStatus {
-            control_mode: 1,
-            target_tick: 12,
-            ..current
-        };
+        let later_ack = current.with_control_tick(99, 12);
+        let retargeted = current.with_control_tick(1, 12);
 
         assert_eq!(
             barrier.remote_ack(1, later_ack),
@@ -420,21 +376,10 @@ mod tests {
 
     #[test]
     fn stale_local_reach_cannot_complete_a_retargeted_barrier() {
-        let mut barrier = StatusBarrier::stable(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 3,
-        });
-        let original = NetworkStatus {
-            state: NETWORK_STATE_PAUSE,
-            control_mode: 1,
-            target_tick: 10,
-        };
+        let mut barrier = StatusBarrier::stable(NetworkStatus::new(NETWORK_STATE_GO, 1, 3));
+        let original = NetworkStatus::new(NETWORK_STATE_PAUSE, 1, 10);
         barrier.change_status(original);
-        let retargeted = NetworkStatus {
-            target_tick: 12,
-            ..original
-        };
+        let retargeted = original.with_target_tick(12);
         barrier.change_status(retargeted);
 
         assert!(barrier.local_reached_for(original, 10).is_empty());
@@ -456,28 +401,14 @@ mod tests {
 
     #[test]
     fn stale_or_duplicate_status_ack_is_not_an_authoritative_transition() {
-        let lobby = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: -1,
-        };
-        let go = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 20,
-        };
+        let lobby = NetworkStatus::new(NETWORK_STATE_LOBBY, 0, -1);
+        let go = NetworkStatus::new(NETWORK_STATE_GO, 1, 20);
         let mut barrier = StatusBarrier::stable(lobby);
         barrier.set_remote_state(7, RemoteBarrierState::Ready);
         barrier.change_status(go);
 
-        let wrong_state = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            ..go
-        };
-        let stale_tick = NetworkStatus {
-            target_tick: 19,
-            ..go
-        };
+        let wrong_state = go.with_state(NETWORK_STATE_LOBBY);
+        let stale_tick = go.with_target_tick(19);
         assert!(!barrier.remote_ack_is_acceptable(7, wrong_state));
         assert!(!barrier.remote_ack_is_acceptable(7, stale_tick));
         assert!(barrier.remote_ack(7, wrong_state).is_empty());

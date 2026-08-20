@@ -125,12 +125,12 @@ impl MapFolderTransform {
         surface_height: u32,
     ) -> Self {
         let container = if map.fullscreen_background {
-            clonk_frontend::classic_gui::IntRect {
-                x: 0,
-                y: 0,
-                w: surface_width as i32,
-                h: surface_height as i32,
-            }
+            clonk_frontend::classic_gui::IntRect::new(
+                0,
+                0,
+                surface_width as i32,
+                surface_height as i32,
+            )
         } else {
             layout.map_sheet
         };
@@ -350,12 +350,12 @@ fn draw_scensel_map_dynamic(
 
     let info_rect = transform.rect(scenario_info_area);
     let mut info_layout = layout;
-    info_layout.selection_info = clonk_frontend::classic_gui::IntRect {
-        x: info_rect.origin.x.round() as i32,
-        y: info_rect.origin.y.round() as i32,
-        w: info_rect.size.width.round() as i32,
-        h: info_rect.size.height.round() as i32,
-    };
+    info_layout.selection_info = clonk_frontend::classic_gui::IntRect::new(
+        info_rect.origin.x.round() as i32,
+        info_rect.origin.y.round() as i32,
+        info_rect.size.width.round() as i32,
+        info_rect.size.height.round() as i32,
+    );
     let info = scensel_selection_info(scenario_menu);
     let metrics = scensel::draw_selection_info_scrolled(
         surface,
@@ -661,12 +661,12 @@ pub(crate) fn draw_scensel_dynamic(
                     rename.edit.render(
                         surface,
                         &fonts.text,
-                        clonk_frontend::classic_gui::IntRect {
-                            x: edit_x,
-                            y: y + 2,
-                            w: edit_w as i32,
-                            h: edit_h as i32,
-                        },
+                        clonk_frontend::classic_gui::IntRect::new(
+                            edit_x,
+                            y + 2,
+                            edit_w as i32,
+                            edit_h as i32,
+                        ),
                         Some(gamma),
                     );
                 }
@@ -1972,12 +1972,12 @@ pub(crate) fn resolve_scoreboard_font_images(
 }
 
 pub(crate) fn scoreboard_preferred_rect(rect: Rect) -> clonk_frontend::classic_gui::IntRect {
-    clonk_frontend::classic_gui::IntRect {
-        x: rect.x,
-        y: rect.y,
-        w: i32::try_from(rect.width).unwrap_or(i32::MAX),
-        h: i32::try_from(rect.height).unwrap_or(i32::MAX),
-    }
+    clonk_frontend::classic_gui::IntRect::new(
+        rect.x,
+        rect.y,
+        i32::try_from(rect.width).unwrap_or(i32::MAX),
+        i32::try_from(rect.height).unwrap_or(i32::MAX),
+    )
 }
 
 pub(crate) fn collect_player_overlays(

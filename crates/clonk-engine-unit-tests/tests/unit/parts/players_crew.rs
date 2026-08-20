@@ -38,14 +38,10 @@ fn test_crew_config(definition: &str, owner: i32) -> SpawnConfig {
 fn spawn_object_tracks_owner() {
     let mut engine = players_test_engine(99);
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Test")
-            .with_position(Vector2::new(0, 0))
-            .with_owner(2),
-    );
+    let id = spawn_fixture!(engine, "Test", with_position: Vector2::new(0, 0), with_owner: 2);
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.owner, 2);
+    unit_assert_eq!(snapshot.owner => 2);
 }
 
 #[test]
@@ -58,10 +54,10 @@ fn crew_members_enumerates_owned_crew() {
 
     let mut owner_one_members = engine.crew_members(1);
     owner_one_members.sort_by_key(|id| id.as_u64());
-    assert_eq!(owner_one_members, vec![crew_owner_one]);
+    unit_assert_eq!(owner_one_members => vec![crew_owner_one]);
 
-    assert_eq!(engine.crew_members(2), vec![crew_owner_two]);
-    assert!(engine.crew_members(3).is_empty());
+    unit_assert_eq!(engine.crew_members(2) => vec![crew_owner_two]);
+    unit_assert!(engine.crew_members(3).is_empty());
 }
 
 #[test]
@@ -73,15 +69,15 @@ fn select_crew_tracks_selection_and_cursor() {
 
     engine.select_crew(1, vec![first]).test_value();
 
-    assert_eq!(engine.selected_crew(1), vec![first]);
-    assert_eq!(engine.crew_cursor(1), Some(first));
+    unit_assert_eq!(engine.selected_crew(1) => vec![first]);
+    unit_assert_eq!(engine.crew_cursor(1) => Some(first));
 
     engine.select_crew(1, vec![second]).test_value();
 
     let mut selected = engine.selected_crew(1);
     selected.sort_by_key(|id| id.as_u64());
-    assert_eq!(selected, vec![first, second]);
-    assert_eq!(engine.crew_cursor(1), Some(first));
+    unit_assert_eq!(selected => vec![first, second]);
+    unit_assert_eq!(engine.crew_cursor(1) => Some(first));
 }
 
 #[test]
@@ -95,10 +91,7 @@ fn selected_is_persisted_on_the_object_like_cpp() -> Result<(), EngineError> {
     engine.select_crew(1, [crew])?;
 
     let encoded = serde_json::to_value(engine.capture_state()).test_value();
-    assert_eq!(
-        encoded["objects"][0]["snapshot"]["selected"].as_bool(),
-        Some(true)
-    );
+    unit_assert_eq!(encoded["objects"][0]["snapshot"]["selected"].as_bool() => Some(true));
     Ok(())
 }
 
@@ -109,24 +102,12 @@ fn selected_crew_follows_player_roster_not_object_number() -> Result<(), EngineE
     // that ordering in loaded games.
     let mut engine = players_crew_test_engine(0);
     engine.register_test_player(PlayerConfig::new(1, "Roster"));
-    let high = engine.spawn_test_object(
-        SpawnConfig::new("Test")
-            .with_id(ObjectId::new(500))
-            .with_alive(true)
-            .with_owner(1)
-            .with_crew_member(true),
-    );
-    let low = engine.spawn_test_object(
-        SpawnConfig::new("Test")
-            .with_id(ObjectId::new(7))
-            .with_alive(true)
-            .with_owner(1)
-            .with_crew_member(true),
-    );
+    let high = spawn_fixture!(engine, "Test", with_id: ObjectId::new(500), with_alive: true, with_owner: 1, with_crew_member: true);
+    let low = spawn_fixture!(engine, "Test", with_id: ObjectId::new(7), with_alive: true, with_owner: 1, with_crew_member: true);
     engine.select_crew(1, [high, low])?;
 
-    assert_eq!(engine.selected_crew(1), engine.player(1).unwrap().crew());
-    assert_eq!(engine.selected_crew(1), vec![low, high]);
+    unit_assert_eq!(engine.selected_crew(1) => engine.player(1).unwrap().crew());
+    unit_assert_eq!(engine.selected_crew(1) => vec![low, high]);
     Ok(())
 }
 
@@ -209,11 +190,8 @@ func CrewSelection(fUnselect, fCursor)
         ],
     )?;
     let b_index = engine.test_object_index(b);
-    assert_eq!(
-        engine.objects[b_index].state.local_vars.get("iVisibility"),
-        Some(&Value::Int(12))
-    );
-    assert!(!engine.objects[b_index].state.selected);
+    unit_assert_eq!(engine.objects[b_index].state.local_vars.get("iVisibility") => Some(&Value::Int(12)));
+    unit_assert!(!engine.objects[b_index].state.selected);
 
     // Preselect B without adjustment, then normally unselect A. The
     // shared log pins target/old-cursor/new-cursor callback order.
@@ -240,12 +218,9 @@ func CrewSelection(fUnselect, fCursor)
             Value::Bool(false),
         ],
     )?;
-    assert_eq!(
-        call(&mut engine, a, "ReadSelectionLog", Vec::new())?,
-        Value::Int(123)
-    );
-    assert_eq!(engine.crew_cursor(1), Some(b));
-    assert_eq!(engine.selected_crew(1), vec![b]);
+    unit_assert_eq!(call(&mut engine, a, "ReadSelectionLog", Vec::new())? => Value::Int(123));
+    unit_assert_eq!(engine.crew_cursor(1) => Some(b));
+    unit_assert_eq!(engine.selected_crew(1) => vec![b]);
     Ok(())
 }
 
@@ -298,24 +273,17 @@ func CrewSelection(fUnselect, fCursor)
             Value::Bool(true),
         ],
     )?;
-    assert_eq!(engine.crew_cursor(1), Some(helper));
-    assert!(!engine.objects[helper_index].state.selected);
-    assert_eq!(
+    unit_assert_eq!(engine.crew_cursor(1) => Some(helper));
+    unit_assert!(!engine.objects[helper_index].state.selected);
+    unit_assert_eq!(
         engine.objects[mage_index]
             .state
             .local_vars
-            .get("iCursorSeen"),
+            .get("iCursorSeen") =>
         Some(&Value::Int(2)),
         "old cursor observes the already-installed helper cursor"
     );
-    assert_eq!(
-        engine.objects[helper_index]
-            .state
-            .local_vars
-            .get("iCursorSeen"),
-        Some(&Value::Int(1)),
-        "new helper observes itself as cursor"
-    );
+    unit_assert_eq!(engine.objects[helper_index].state.local_vars.get("iCursorSeen") => Some(&Value::Int(1)), "new helper observes itself as cursor");
 
     // Magi's helper then unselects the mage without cursor adjustment.
     engine.call_object_function(
@@ -328,8 +296,8 @@ func CrewSelection(fUnselect, fCursor)
             Value::Bool(true),
         ],
     )?;
-    assert_eq!(engine.crew_cursor(1), Some(helper));
-    assert!(!engine.objects[mage_index].state.selected);
+    unit_assert_eq!(engine.crew_cursor(1) => Some(helper));
+    unit_assert!(!engine.objects[mage_index].state.selected);
     Ok(())
 }
 
@@ -390,54 +358,38 @@ func CrewSelection(fUnselect, fCursor)
         ],
     )?;
     engine.tick_player_systems()?;
-    assert_eq!(engine.player(1).expect("player").select_count(), 2);
+    unit_assert_eq!(engine.player(1).expect("player").select_count() => 2);
     call(&mut engine, a, "ResetCallbacks", Vec::new())?;
     call(&mut engine, b, "ResetCallbacks", Vec::new())?;
 
-    assert_eq!(
+    unit_assert_eq!(
         call(
             &mut engine,
             b,
             "DisableAndCount",
             vec![Value::Int(1), Value::Object(a.as_u64())],
-        )?,
+        )? =>
         Value::Int(2),
         "same-call GetSelectCount retains the cached pre-disable count"
     );
-    assert_eq!(engine.player(1).expect("player").select_count(), 2);
+    unit_assert_eq!(engine.player(1).expect("player").select_count() => 2);
     engine.tick_player_systems()?;
-    assert_eq!(
-        engine.player(1).expect("player").select_count(),
-        1,
-        "the next Player::Execute refreshes the cache"
-    );
+    unit_assert_eq!(engine.player(1).expect("player").select_count() => 1, "the next Player::Execute refreshes the cache");
     let a_index = engine.test_object_index(a);
     let b_index = engine.test_object_index(b);
-    assert!(engine.objects[a_index].state.crew_disabled);
-    assert!(!engine.objects[a_index].state.selected);
-    assert_eq!(engine.crew_cursor(1), Some(b));
-    assert_eq!(
+    unit_assert!(engine.objects[a_index].state.crew_disabled);
+    unit_assert!(!engine.objects[a_index].state.selected);
+    unit_assert_eq!(engine.crew_cursor(1) => Some(b));
+    unit_assert_eq!(engine.objects[a_index].state.local_vars.get("iCursorCallbacks") => Some(&Value::Int(1)));
+    unit_assert_eq!(
         engine.objects[a_index]
             .state
             .local_vars
-            .get("iCursorCallbacks"),
-        Some(&Value::Int(1))
-    );
-    assert_eq!(
-        engine.objects[a_index]
-            .state
-            .local_vars
-            .get("iSelectCallbacks"),
+            .get("iSelectCallbacks") =>
         Some(&Value::Nil),
         "the silent Select clear did not emit a noncursor callback"
     );
-    assert_eq!(
-        engine.objects[b_index]
-            .state
-            .local_vars
-            .get("iSelectCallbacks"),
-        Some(&Value::Int(1))
-    );
+    unit_assert_eq!(engine.objects[b_index].state.local_vars.get("iSelectCallbacks") => Some(&Value::Int(1)));
 
     // Disabled DoSelect is callback-less; UnSelect still calls.
     call(&mut engine, a, "ResetCallbacks", Vec::new())?;
@@ -454,27 +406,13 @@ func CrewSelection(fUnselect, fCursor)
             ],
         )?;
     }
-    assert_eq!(
-        engine.objects[a_index]
-            .state
-            .local_vars
-            .get("iSelectCallbacks"),
-        Some(&Value::Int(1))
-    );
+    unit_assert_eq!(engine.objects[a_index].state.local_vars.get("iSelectCallbacks") => Some(&Value::Int(1)));
 
     // SetCrewEnabled's bool parameter uses C4Value::getBool, so every
     // nonzero integer enables the crew object (C4Script.cpp:4814-4836;
     // C4Value.h:161,325-331).
-    assert_eq!(
-        call(
-            &mut engine,
-            b,
-            "SetEnabled",
-            vec![Value::Int(2), Value::Object(a.as_u64())],
-        )?,
-        Value::Bool(true)
-    );
-    assert!(!engine.objects[a_index].state.crew_disabled);
+    unit_assert_eq!(call(&mut engine, b, "SetEnabled", vec![Value::Int(2), Value::Object(a.as_u64())],)? => Value::Bool(true));
+    unit_assert!(!engine.objects[a_index].state.crew_disabled);
     Ok(())
 }
 
@@ -508,28 +446,12 @@ func CrewSelection()
     let caller = engine.spawn_test_object(test_owned_config("SAFE", 1).with_alive(true));
     let target = engine.spawn_test_object(test_owned_config("SAFE", 1).with_alive(true));
     let caller_index = engine.test_object_index(caller);
-    assert_eq!(
-        engine.call_object_function(
-            caller_index,
-            "Run",
-            vec![Value::Int(1), Value::Object(target.as_u64())],
-        )?,
-        Value::Int(1)
-    );
+    unit_assert_eq!(engine.call_object_function(caller_index, "Run", vec![Value::Int(1), Value::Object(target.as_u64())],)? => Value::Int(1));
     let caller_index = engine.test_object_index(caller);
     let target_index = engine.test_object_index(target);
-    assert!(engine.objects[target_index].state.selected);
-    assert_eq!(
-        engine.objects[target_index]
-            .state
-            .local_vars
-            .get("iCallbackCalls"),
-        Some(&Value::Int(1))
-    );
-    assert_eq!(
-        engine.objects[caller_index].state.local_vars.get("iAfter"),
-        Some(&Value::Int(1))
-    );
+    unit_assert!(engine.objects[target_index].state.selected);
+    unit_assert_eq!(engine.objects[target_index].state.local_vars.get("iCallbackCalls") => Some(&Value::Int(1)));
+    unit_assert_eq!(engine.objects[caller_index].state.local_vars.get("iAfter") => Some(&Value::Int(1)));
     Ok(())
 }
 
@@ -545,17 +467,17 @@ fn register_player_populates_snapshot_state() -> Result<(), EngineError> {
     engine.register_test_definition(definition);
     let crew =
         engine.spawn_test_object(test_crew_config("Walker", 1).with_position(Vector2::new(0, 0)));
-    assert_eq!(engine.player(1).unwrap().crew(), &[crew]);
+    unit_assert_eq!(engine.player(1).unwrap().crew() => &[crew]);
     let snapshot = engine.snapshot();
     let player_state = snapshot
         .players
         .iter()
         .find(|state| state.id == 1)
         .test_value();
-    assert_eq!(player_state.name, "Alice");
-    assert_eq!(player_state.wealth, 75);
-    assert_eq!(player_state.status, PlayerStatus::Active);
-    assert_eq!(player_state.crew, vec![crew]);
+    unit_assert_eq!(player_state.name => "Alice");
+    unit_assert_eq!(player_state.wealth => 75);
+    unit_assert_eq!(player_state.status => PlayerStatus::Active);
+    unit_assert_eq!(player_state.crew => vec![crew]);
     Ok(())
 }
 
@@ -577,13 +499,9 @@ fn player_asset_value_accounts_for_owned_objects() -> Result<(), EngineError> {
     engine.update_player_asset_values()?;
 
     let player = engine.player(1).test_value();
-    assert_eq!(player.value(), 95);
-    assert_eq!(
-        player.value_gain(),
-        60,
-        "the post-FinalInit ore is a real gain over the initial 35"
-    );
-    assert_eq!(player.objects_owned(), 1);
+    unit_assert_eq!(player.value() => 95);
+    unit_assert_eq!(player.value_gain() => 60, "the post-FinalInit ore is a real gain over the initial 35");
+    unit_assert_eq!(player.objects_owned() => 1);
     Ok(())
 }
 
@@ -641,31 +559,28 @@ protected func CalcDefValue(object base, int player)
     for _ in 0..34 {
         engine.tick_without_snapshot()?;
     }
-    assert_eq!(engine.frame(), 34);
+    unit_assert_eq!(engine.frame() => 34);
     let probe_index = engine.test_object_index(value_probe);
-    assert_eq!(
-        engine.call_object_function(probe_index, "ReadCachedValue", vec![Value::Int(1)])?,
+    unit_assert_eq!(
+        engine.call_object_function(probe_index, "ReadCachedValue", vec![Value::Int(1)])? =>
         Value::Int(17),
         "GetPlrValue stays at the FinalInit points-plus-wealth baseline"
     );
     let probe_index = engine.test_object_index(value_probe);
-    assert_eq!(
-        engine.call_object_function(probe_index, "ReadCachedGain", vec![Value::Int(1)])?,
-        Value::Int(0)
-    );
+    unit_assert_eq!(engine.call_object_function(probe_index, "ReadCachedGain", vec![Value::Int(1)])? => Value::Int(0));
 
     engine.tick_without_snapshot()?;
-    assert_eq!(engine.frame(), 35);
+    unit_assert_eq!(engine.frame() => 35);
     let probe_index = engine.test_object_index(value_probe);
-    assert_eq!(
-        engine.call_object_function(probe_index, "ReadCachedValue", vec![Value::Int(1)])?,
+    unit_assert_eq!(
+        engine.call_object_function(probe_index, "ReadCachedValue", vec![Value::Int(1)])? =>
         Value::Int(139),
         "17 baseline + 50 half-built + 41 CalcValue + 31 CalcDefValue"
     );
     let player = engine.player(1).test_value();
-    assert_eq!(player.initial_value(), 17);
-    assert_eq!(player.value_gain(), 122);
-    assert_eq!(player.objects_owned(), 4);
+    unit_assert_eq!(player.initial_value() => 17);
+    unit_assert_eq!(player.value_gain() => 122);
+    unit_assert_eq!(player.objects_owned() => 4);
     Ok(())
 }
 
@@ -699,20 +614,16 @@ protected func CalcValue(object base, int player)
     for _ in 0..35 {
         engine.tick_without_snapshot()?;
     }
-    assert_eq!(engine.player(1).expect("player remains").value(), 34);
+    unit_assert_eq!(engine.player(1).expect("player remains").value() => 34);
 
     for _ in 0..35 {
         engine.tick_without_snapshot()?;
     }
     let player = engine.player(1).test_value();
-    assert_eq!(engine.frame(), 70);
-    assert_eq!(
-        player.value(),
-        34,
-        "each pass resets the live accumulator to points plus wealth before CalcValue"
-    );
-    assert_eq!(player.value_gain(), 17);
-    assert_eq!(player.objects_owned(), 2);
+    unit_assert_eq!(engine.frame() => 70);
+    unit_assert_eq!(player.value() => 34, "each pass resets the live accumulator to points plus wealth before CalcValue");
+    unit_assert_eq!(player.value_gain() => 17);
+    unit_assert_eq!(player.objects_owned() => 2);
     Ok(())
 }
 
@@ -751,29 +662,16 @@ protected func CalcValue(object base, int player)
     }
 
     let player = engine.player(1).test_value();
-    assert_eq!(player.value(), 15);
-    assert_eq!(player.value_gain(), 15);
-    assert_eq!(player.objects_owned(), 2);
+    unit_assert_eq!(player.value() => 15);
+    unit_assert_eq!(player.value_gain() => 15);
+    unit_assert_eq!(player.objects_owned() => 2);
     Ok(())
 }
 
 fn lifecycle_join_config(name: &str, crew: Vec<player_file::CrewInfo>) -> JoinPlayerConfig {
     JoinPlayerConfig {
-        name: name.to_string(),
-        player_info_id: 1,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff0000,
-        pref_color: 0,
-        pref_position: 0,
         crew,
-        control_style: false,
-        auto_context_menu: false,
-        startup_player_count: 1,
+        ..join_player_config(name)
     }
 }
 
@@ -804,17 +702,11 @@ global func PreInitializePlayer(int player)
         .number();
 
     let snapshot = engine.snapshot();
-    assert_eq!(
-        snapshot.script_globals.named.get("pre_control"),
-        Some(&Value::Int(6))
-    );
-    assert_eq!(
-        snapshot.script_globals.named.get("pre_mouse"),
-        Some(&Value::Int(1))
-    );
+    unit_assert_eq!(snapshot.script_globals.named.get("pre_control") => Some(&Value::Int(6)));
+    unit_assert_eq!(snapshot.script_globals.named.get("pre_mouse") => Some(&Value::Int(1)));
     let player = engine.player(joined).test_value();
-    assert_eq!(player.control_set(), 6);
-    assert_eq!(player.mouse_control(), 1);
+    unit_assert_eq!(player.control_set() => 6);
+    unit_assert_eq!(player.mouse_control() => 1);
     Ok(())
 }
 
@@ -849,19 +741,12 @@ global func PreInitializePlayer(int player)
         )?
         .number();
 
-    assert_eq!(
-        engine
-            .snapshot()
-            .script_globals
-            .named
-            .get("pre_profile_value"),
-        Some(&Value::Int(73))
-    );
-    assert_eq!(
+    unit_assert_eq!(engine.snapshot().script_globals.named.get("pre_profile_value") => Some(&Value::Int(73)));
+    unit_assert_eq!(
         engine
             .player(joined)
             .expect("joined player")
-            .player_info_core(),
+            .player_info_core() =>
         Some(&player_file::PlayerInfoCoreState {
             extra_data: vec![("Loaded".to_string(), Value::Int(73))],
             ..player_file::PlayerInfoCoreState::default()
@@ -930,18 +815,14 @@ fn player_file_loads_player_and_crew_extra_data_into_join_state() -> Result<(), 
         ("Legacy".to_string(), Value::Int(7)),
         ("Unknown".to_string(), Value::Int(7)),
     ];
-    assert_eq!(loaded.info_core.extra_data, expected_player);
+    unit_assert_eq!(loaded.info_core.extra_data => expected_player);
     let loaded_crew = loaded
         .crew
         .iter()
         .find(|info| info.id == "CRWD")
         .test_value();
     let expected_crew_energy = loaded_crew.physical.energy;
-    assert_ne!(
-        expected_crew_energy,
-        PhysicalInfo::default().energy,
-        "fixture must distinguish attached info physicals from the definition fallback"
-    );
+    unit_assert_ne!(expected_crew_energy => PhysicalInfo::default().energy, "fixture must distinguish attached info physicals from the definition fallback");
     let expected_crew = vec![
         ("CrewInt".to_string(), Value::Int(41)),
         ("CrewNil".to_string(), Value::Nil),
@@ -950,8 +831,8 @@ fn player_file_loads_player_and_crew_extra_data_into_join_state() -> Result<(), 
         ("CrewBadge".to_string(), Value::C4Id("GOLD".to_string())),
         ("CrewObject".to_string(), Value::Object(marker_number)),
     ];
-    assert_eq!(loaded_crew.extra_data, expected_crew);
-    assert!(
+    unit_assert_eq!(loaded_crew.extra_data => expected_crew);
+    unit_assert!(
         loaded
             .crew
             .iter()
@@ -968,7 +849,7 @@ fn player_file_loads_player_and_crew_extra_data_into_join_state() -> Result<(), 
         "[Player]\nName=Malformed Player\nExtraData=2;Good=i1,Bad Name=i2\n",
     )
     .test_value();
-    assert!(
+    unit_assert!(
         player_file::PlayerFile::load_from_path(&malformed_player_path)
             .expect("malformed default-adapted player map still loads")
             .info_core
@@ -1036,21 +917,18 @@ global func InitializePlayer(int player)
     let joined = engine
         .join_player_with_profile_core(
             JoinPlayerConfig {
-                name: loaded.name.clone(),
-                player_info_id: 1,
                 score: loaded.score,
                 rounds: loaded.rounds,
                 rounds_won: loaded.rounds_won,
                 rounds_lost: loaded.rounds_lost,
                 total_playing_time: loaded.total_playing_time,
-                team: None,
                 color_dw: loaded.normalized_preferred_color(),
                 pref_color: loaded.pref_color,
                 pref_position: loaded.pref_position,
                 crew: loaded.crew.clone(),
                 control_style: loaded.pref_control_style,
                 auto_context_menu: loaded.pref_auto_context_menu,
-                startup_player_count: 1,
+                ..join_player_config(loaded.name.clone())
             },
             PlayerAtClient::HOST,
             "Local",
@@ -1062,19 +940,13 @@ global func InitializePlayer(int player)
 
     let snapshot = engine.snapshot();
     let globals = &snapshot.script_globals.named;
-    assert_eq!(globals.get("pre_nil"), Some(&Value::Nil));
-    assert_eq!(globals.get("pre_int"), Some(&Value::Int(-7)));
-    assert_eq!(globals.get("pre_raw"), Some(&Value::RawBool(7)));
-    assert_eq!(globals.get("pre_flag"), Some(&Value::Bool(true)));
-    assert_eq!(
-        globals.get("pre_badge"),
-        Some(&Value::C4Id("GOLD".to_string()))
-    );
-    assert_eq!(
-        globals.get("pre_target"),
-        Some(&Value::Object(marker_number))
-    );
-    assert_eq!(globals.get("initialize_player_seen"), Some(&Value::Int(99)));
+    unit_assert_eq!(globals.get("pre_nil") => Some(&Value::Nil));
+    unit_assert_eq!(globals.get("pre_int") => Some(&Value::Int(-7)));
+    unit_assert_eq!(globals.get("pre_raw") => Some(&Value::RawBool(7)));
+    unit_assert_eq!(globals.get("pre_flag") => Some(&Value::Bool(true)));
+    unit_assert_eq!(globals.get("pre_badge") => Some(&Value::C4Id("GOLD".to_string())));
+    unit_assert_eq!(globals.get("pre_target") => Some(&Value::Object(marker_number)));
+    unit_assert_eq!(globals.get("initialize_player_seen") => Some(&Value::Int(99)));
 
     let crew = engine.player(joined).test_value().crew()[0];
     let state = engine.capture_state();
@@ -1093,36 +965,13 @@ global func InitializePlayer(int player)
         ("InitializeSeen", Value::Int(99)),
         ("RecruitmentSeen", Value::Int(99)),
     ] {
-        assert_eq!(
-            player_extra_data
-                .iter()
-                .find(|(name, _)| name == slot)
-                .map(|(_, value)| value),
-            Some(&expected),
-            "callback slot {slot}"
-        );
+        unit_assert_eq!(player_extra_data.iter().find(|(name, _)| name == slot).map(|(_, value)| value) => Some(&expected), "callback slot {slot}");
     }
-    assert_eq!(
-        engine.test_object_snapshot(crew).energy,
-        expected_crew_energy
-    );
+    unit_assert_eq!(engine.test_object_snapshot(crew).energy => expected_crew_energy);
     let mut expected_mutated_crew = expected_crew;
     expected_mutated_crew[0].1 = Value::Int(99);
-    assert_eq!(
-        engine
-            .crew_object_info(crew)
-            .expect("ready crew retains info")
-            .extra_data,
-        expected_mutated_crew
-    );
-    assert_eq!(
-        state.crew_info_rosters[&joined]
-            .iter()
-            .find(|info| info.id == "CRWD")
-            .expect("roster entry remains")
-            .extra_data,
-        expected_mutated_crew
-    );
+    unit_assert_eq!(engine.crew_object_info(crew).expect("ready crew retains info").extra_data => expected_mutated_crew);
+    unit_assert_eq!(state.crew_info_rosters[&joined].iter().find(|info| info.id == "CRWD").expect("roster entry remains").extra_data => expected_mutated_crew);
     Ok(())
 }
 
@@ -1159,13 +1008,10 @@ fn player_lifecycle_restore_reapplies_autostop_to_inactive_crew() -> Result<(), 
     )?;
 
     let player = engine.player(1).test_value();
-    assert!(player.control.control_style);
-    assert_eq!(player.control.last_com, 0);
-    assert_eq!(player.control.pressed_coms, 0);
-    assert_eq!(
-        engine.test_object_snapshot(crew).command_direction,
-        CommandDirection::Stop
-    );
+    unit_assert!(player.control.control_style);
+    unit_assert_eq!(player.control.last_com => 0);
+    unit_assert_eq!(player.control.pressed_coms => 0);
+    unit_assert_eq!(engine.test_object_snapshot(crew).command_direction => CommandDirection::Stop);
     Ok(())
 }
 
@@ -1186,12 +1032,9 @@ fn player_lifecycle_repeated_surrender_does_not_restart_retire_delay() -> Result
         engine.tick_player_systems()?;
     }
 
-    assert!(engine.player(1).is_some(), "player retires after frame 60");
+    unit_assert!(engine.player(1).is_some(), "player retires after frame 60");
     engine.tick_player_systems()?;
-    assert!(
-        engine.player(1).is_none(),
-        "repeat surrender must not extend the original retire delay"
-    );
+    unit_assert!(engine.player(1).is_none(), "repeat surrender must not extend the original retire delay");
     Ok(())
 }
 
@@ -1208,11 +1051,8 @@ fn player_lifecycle_eliminate_is_noop_after_surrender() -> Result<(), EngineErro
 
     engine.apply_player_commands(vec![PlayerCommand::Eliminate { player_id: 1 }])?;
 
-    assert_eq!(
-        engine.player(1).map(Player::status),
-        Some(PlayerStatus::Surrendered)
-    );
-    assert!(engine.take_pending_client_updates().is_empty());
+    unit_assert_eq!(engine.player(1).map(Player::status) => Some(PlayerStatus::Surrendered));
+    unit_assert!(engine.take_pending_client_updates().is_empty());
     Ok(())
 }
 
@@ -1250,22 +1090,14 @@ fn player_lifecycle_fresh_autostop_clears_only_owned_inactive_crew_definitions(
     let mut join = lifecycle_join_config("Fresh AutoStop", Vec::new());
     join.control_style = true;
     let player = join_engine.join_player(join)?.number();
-    assert!(join_engine.player(player).unwrap().control.control_style);
-    assert_eq!(
-        join_engine
-            .test_object_snapshot(owned_inactive_crew)
-            .command_direction,
-        CommandDirection::Stop
-    );
+    unit_assert!(join_engine.player(player).unwrap().control.control_style);
+    unit_assert_eq!(join_engine.test_object_snapshot(owned_inactive_crew).command_direction => CommandDirection::Stop);
     for object in [
         owned_active_crew,
         foreign_inactive_crew,
         owned_inactive_noncrew,
     ] {
-        assert_eq!(
-            join_engine.test_object_snapshot(object).command_direction,
-            CommandDirection::Right
-        );
+        unit_assert_eq!(join_engine.test_object_snapshot(object).command_direction => CommandDirection::Right);
     }
 
     let mut register_engine = Engine::new();
@@ -1278,13 +1110,8 @@ fn player_lifecycle_fresh_autostop_clears_only_owned_inactive_crew_definitions(
     );
     register_engine.set_forced_control_style(Some(true));
     register_engine.register_test_player(PlayerConfig::new(7, "Forced AutoStop"));
-    assert!(register_engine.player(7).unwrap().control.control_style);
-    assert_eq!(
-        register_engine
-            .test_object_snapshot(registered_inactive_crew)
-            .command_direction,
-        CommandDirection::Stop
-    );
+    unit_assert!(register_engine.player(7).unwrap().control.control_style);
+    unit_assert_eq!(register_engine.test_object_snapshot(registered_inactive_crew).command_direction => CommandDirection::Stop);
     Ok(())
 }
 
@@ -1335,18 +1162,18 @@ global func InitializePlayer(int player)
         .number();
 
     let globals = &engine.snapshot().script_globals.named;
-    assert_eq!(globals.get("pre_mouse"), Some(&Value::Int(1)));
-    assert_eq!(globals.get("pre_fog"), Some(&Value::Bool(false)));
-    assert_eq!(globals.get("init_fog"), Some(&Value::Bool(true)));
-    assert_eq!(globals.get("forced_pre_fog"), Some(&Value::Bool(false)));
-    assert_eq!(globals.get("forced_init_fog"), Some(&Value::Bool(false)));
+    unit_assert_eq!(globals.get("pre_mouse") => Some(&Value::Int(1)));
+    unit_assert_eq!(globals.get("pre_fog") => Some(&Value::Bool(false)));
+    unit_assert_eq!(globals.get("init_fog") => Some(&Value::Bool(true)));
+    unit_assert_eq!(globals.get("forced_pre_fog") => Some(&Value::Bool(false)));
+    unit_assert_eq!(globals.get("forced_init_fog") => Some(&Value::Bool(false)));
 
     let automatic = engine.player(automatic).test_value();
-    assert!(automatic.fog_of_war());
-    assert!(!automatic.force_fog_of_war());
+    unit_assert!(automatic.fog_of_war());
+    unit_assert!(!automatic.force_fog_of_war());
     let forced = engine.player(forced).test_value();
-    assert!(!forced.fog_of_war());
-    assert!(forced.force_fog_of_war());
+    unit_assert!(!forced.fog_of_war());
+    unit_assert!(forced.force_fog_of_war());
     Ok(())
 }
 
@@ -1418,16 +1245,16 @@ fn player_lifecycle_review_final_init_preserves_or_derives_cursor_in_cpp_order(
     let (explicit, player, low, high) = join(
             "SelectCrew(player, FindObject(HIGH), true, true); SelectCrew(player, FindObject(LOWR), true, true); SetCursor(player, FindObject(LOWR), true, true, true);",
         )?;
-    assert_ne!(low, high);
-    assert_eq!(explicit.selected_crew(player).len(), 2);
-    assert_eq!(explicit.crew_cursor(player), Some(low));
-    assert_eq!(explicit.player(player).expect("player").cursor(), Some(low));
+    unit_assert_ne!(low => high);
+    unit_assert_eq!(explicit.selected_crew(player).len() => 2);
+    unit_assert_eq!(explicit.crew_cursor(player) => Some(low));
+    unit_assert_eq!(explicit.player(player).expect("player").cursor() => Some(low));
 
     let (selected, player, low, high) = join("SelectCrew(player, FindObject(LOWR), true, true);")?;
-    assert_ne!(low, high);
-    assert_eq!(selected.selected_crew(player), vec![low]);
-    assert_eq!(selected.crew_cursor(player), Some(low));
-    assert_eq!(selected.player(player).expect("player").cursor(), Some(low));
+    unit_assert_ne!(low => high);
+    unit_assert_eq!(selected.selected_crew(player) => vec![low]);
+    unit_assert_eq!(selected.crew_cursor(player) => Some(low));
+    unit_assert_eq!(selected.player(player).expect("player").cursor() => Some(low));
     Ok(())
 }
 
@@ -1471,14 +1298,14 @@ global func InitializePlayer(int player)
     let follower = engine.join_player(follower_config)?.number();
 
     let globals = &engine.snapshot().script_globals.named;
-    assert_eq!(globals.get("leader_brick"), Some(&Value::Int(7)));
-    assert_eq!(globals.get("follower_ore"), Some(&Value::Int(3)));
-    assert_eq!(globals.get("follower_brick"), Some(&Value::Int(0)));
+    unit_assert_eq!(globals.get("leader_brick") => Some(&Value::Int(7)));
+    unit_assert_eq!(globals.get("follower_ore") => Some(&Value::Int(3)));
+    unit_assert_eq!(globals.get("follower_brick") => Some(&Value::Int(0)));
     let leader = engine.player(leader).test_value();
     let follower = engine.player(follower).test_value();
-    assert_eq!(leader.home_base_material().get("BRCK"), Some(&7));
-    assert_eq!(follower.home_base_material().get("BRCK"), Some(&7));
-    assert!(!follower.home_base_material().contains_key("ORE1"));
+    unit_assert_eq!(leader.home_base_material().get("BRCK") => Some(&7));
+    unit_assert_eq!(follower.home_base_material().get("BRCK") => Some(&7));
+    unit_assert!(!follower.home_base_material().contains_key("ORE1"));
     Ok(())
 }
 
@@ -1504,31 +1331,23 @@ fn player_lifecycle_view_delays_arm_only_at_cpp_boundaries_and_decay_in_the_same
     for _ in 0..34 {
         engine.tick_without_snapshot()?;
     }
-    assert_eq!(engine.snapshot().frame, 34);
-    assert_eq!(
-        engine.player(1).expect("player remains").view_value(),
-        0,
-        "asset changes do not refresh the cached value before Tick35"
-    );
+    unit_assert_eq!(engine.snapshot().frame => 34);
+    unit_assert_eq!(engine.player(1).expect("player remains").view_value() => 0, "asset changes do not refresh the cached value before Tick35");
 
     engine.tick_without_snapshot()?;
-    assert_eq!(engine.snapshot().frame, 35);
-    assert_eq!(
-        engine.player(1).expect("player remains").view_value(),
-        99,
-        "Tick35 arms to 100 before the same Execute decays to 99"
-    );
+    unit_assert_eq!(engine.snapshot().frame => 35);
+    unit_assert_eq!(engine.player(1).expect("player remains").view_value() => 99, "Tick35 arms to 100 before the same Execute decays to 99");
 
     engine.call_scenario_script_function("AwardScore", vec![Value::Int(1)])?;
     engine.adjust_player_wealth(1, 0)?;
     let player = engine.player(1).test_value();
-    assert_eq!(player.view_value(), 100);
-    assert_eq!(player.view_wealth(), 100);
+    unit_assert_eq!(player.view_value() => 100);
+    unit_assert_eq!(player.view_wealth() => 100);
 
     engine.tick_without_snapshot()?;
     let player = engine.player(1).test_value();
-    assert_eq!(player.view_value(), 99);
-    assert_eq!(player.view_wealth(), 99);
+    unit_assert_eq!(player.view_value() => 99);
+    unit_assert_eq!(player.view_wealth() => 99);
     Ok(())
 }
 
@@ -1565,17 +1384,9 @@ func ControlUpSingle()
     engine.tick_player_systems()?;
 
     let player = engine.player(1).test_value();
-    assert_eq!(player.control.last_com, 0);
-    assert_eq!(player.control.last_com_delay, 0);
-    assert_eq!(
-        player
-            .to_state()
-            .extra_data
-            .iter()
-            .find(|(name, _)| name == "seen_last_com")
-            .map(|(_, value)| value),
-        Some(&Value::Int(i32::from(COM_UP)))
-    );
+    unit_assert_eq!(player.control.last_com => 0);
+    unit_assert_eq!(player.control.last_com_delay => 0);
+    unit_assert_eq!(player.to_state().extra_data.iter().find(|(name, _)| name == "seen_last_com").map(|(_, value)| value) => Some(&Value::Int(i32::from(COM_UP))));
     Ok(())
 }
 
@@ -1592,29 +1403,21 @@ fn player_lifecycle_select_count_is_a_saved_cache_refreshed_at_player_execute(
     let first = engine.spawn_test_object(test_crew_config("SCNT", 1));
     let second = engine.spawn_test_object(test_crew_config("SCNT", 1));
     engine.select_crew(1, [first, second])?;
-    assert_eq!(engine.player(1).expect("player").select_count(), 0);
+    unit_assert_eq!(engine.player(1).expect("player").select_count() => 0);
 
     engine.tick_player_systems()?;
-    assert_eq!(engine.player(1).expect("player").select_count(), 2);
+    unit_assert_eq!(engine.player(1).expect("player").select_count() => 2);
     engine.deselect_crew(1, [first]);
-    assert_eq!(
-        engine.player(1).expect("player").select_count(),
-        2,
-        "selection mutation leaves the cache stale until Player::Execute"
-    );
+    unit_assert_eq!(engine.player(1).expect("player").select_count() => 2, "selection mutation leaves the cache stale until Player::Execute");
 
     let saved = engine.capture_state();
     let mut restored = Engine::with_seed(1);
     restored.register_test_definition(crew_definition);
     restored.restore_state(&saved)?;
-    assert_eq!(restored.selected_crew(1), vec![second]);
-    assert_eq!(
-        restored.player(1).expect("restored player").select_count(),
-        2,
-        "snapshot restore preserves the serialized cache"
-    );
+    unit_assert_eq!(restored.selected_crew(1) => vec![second]);
+    unit_assert_eq!(restored.player(1).expect("restored player").select_count() => 2, "snapshot restore preserves the serialized cache");
     restored.finalize_restored_players(false)?;
-    assert_eq!(restored.player(1).expect("player").select_count(), 1);
+    unit_assert_eq!(restored.player(1).expect("player").select_count() => 1);
     Ok(())
 }
 
@@ -1637,23 +1440,11 @@ fn restored_player_final_init_establishes_initial_value_only_for_non_savegames(
 
     let mut regular_scenario = restored_player()?;
     regular_scenario.finalize_restored_player_initialization(true)?;
-    assert_eq!(
-        regular_scenario
-            .player(1)
-            .expect("regular restored player")
-            .initial_value(),
-        17
-    );
+    unit_assert_eq!(regular_scenario.player(1).expect("regular restored player").initial_value() => 17);
 
     let mut savegame = restored_player()?;
     savegame.finalize_restored_player_initialization(false)?;
-    assert_eq!(
-        savegame
-            .player(1)
-            .expect("savegame restored player")
-            .initial_value(),
-        103
-    );
+    unit_assert_eq!(savegame.player(1).expect("savegame restored player").initial_value() => 103);
     Ok(())
 }
 
@@ -1669,14 +1460,14 @@ fn player_lifecycle_startup_hint_clears_through_object_com_and_object_command(
     let crew = engine.spawn_test_object(test_crew_config("HINT", 1));
     engine.select_crew(1, [crew])?;
     engine.set_crew_cursor(1, Some(crew))?;
-    assert!(engine.player(1).expect("player").show_startup());
+    unit_assert!(engine.player(1).expect("player").show_startup());
 
     engine.player_in_com(1, COM_UP, 0)?;
-    assert!(!engine.player(1).expect("player").show_startup());
+    unit_assert!(!engine.player(1).expect("player").show_startup());
 
     engine.player_mut(1)?.set_show_startup(true);
     engine.player_object_command(1, CommandId::Wait, None, 0, 0)?;
-    assert!(!engine.player(1).expect("player").show_startup());
+    unit_assert!(!engine.player(1).expect("player").show_startup());
     Ok(())
 }
 
@@ -1693,19 +1484,16 @@ fn player_lifecycle_captain_assigns_in_final_init_round_trips_and_clears_with_ob
     let joined = engine
         .join_player(lifecycle_join_config("Captain", Vec::new()))?
         .number();
-    assert_eq!(engine.player(joined).expect("player").captain(), Some(kilc));
+    unit_assert_eq!(engine.player(joined).expect("player").captain() => Some(kilc));
 
     let saved = engine.capture_state();
     let mut restored = Engine::with_seed(1);
     restored.register_test_definition(kilc_definition);
     restored.restore_state(&saved)?;
-    assert_eq!(
-        restored.player(joined).expect("player").captain(),
-        Some(kilc)
-    );
+    unit_assert_eq!(restored.player(joined).expect("player").captain() => Some(kilc));
 
     restored.apply_object_update(kilc, ObjectUpdate::new().with_status(ObjectStatus::Deleted))?;
-    assert_eq!(restored.player(joined).expect("player").captain(), None);
+    unit_assert_eq!(restored.player(joined).expect("player").captain() => None);
     Ok(())
 }
 
@@ -1728,14 +1516,8 @@ fn player_lifecycle_crew_created_counts_new_info_but_not_loaded_info_reuse(
     let created_player = created
         .join_player(lifecycle_join_config("New info", Vec::new()))?
         .number();
-    assert_eq!(
-        created
-            .player(created_player)
-            .expect("player")
-            .crew_created(),
-        1
-    );
-    assert_eq!(created.capture_state().players[0].crew_created, 1);
+    unit_assert_eq!(created.player(created_player).expect("player").crew_created() => 1);
+    unit_assert_eq!(created.capture_state().players[0].crew_created => 1);
 
     let loaded_info = player_file::CrewInfo {
         id: "CRNW".to_string(),
@@ -1747,11 +1529,8 @@ fn player_lifecycle_crew_created_counts_new_info_but_not_loaded_info_reuse(
     let reused_player = reused
         .join_player(lifecycle_join_config("Loaded info", vec![loaded_info]))?
         .number();
-    assert_eq!(
-        reused.player(reused_player).expect("player").crew_created(),
-        0
-    );
-    assert_eq!(reused.capture_state().players[0].crew_created, 0);
+    unit_assert_eq!(reused.player(reused_player).expect("player").crew_created() => 0);
+    unit_assert_eq!(reused.capture_state().players[0].crew_created => 0);
     Ok(())
 }
 
@@ -1783,7 +1562,7 @@ fn shipped_hazard_shuttle_scores_both_driver_owner_transfers_in_order() -> Resul
         vec![object_reference_value(driver)],
     )?;
 
-    assert_eq!(engine.player(0).expect("owner remains").points(), 99_850);
+    unit_assert_eq!(engine.player(0).expect("owner remains").points() => 99_850);
     Ok(())
 }
 
@@ -1801,14 +1580,14 @@ fn player_cursor_tracks_selection_changes() -> Result<(), EngineError> {
             .with_position(Vector2::new(0, 0)),
     );
     engine.select_crew(1, [crew])?;
-    assert_eq!(engine.player(1).unwrap().cursor(), Some(crew));
+    unit_assert_eq!(engine.player(1).unwrap().cursor() => Some(crew));
     let snapshot = engine.snapshot();
     let cursor = snapshot
         .players
         .iter()
         .find(|state| state.id == 1)
         .and_then(|state| state.cursor);
-    assert_eq!(cursor, Some(crew));
+    unit_assert_eq!(cursor => Some(crew));
     Ok(())
 }
 
@@ -1822,15 +1601,15 @@ fn deselect_crew_updates_cursor() {
     engine.select_crew(1, vec![first, second]).test_value();
 
     engine.deselect_crew(1, vec![first]);
-    assert_eq!(engine.selected_crew(1), vec![second]);
-    assert_eq!(engine.crew_cursor(1), Some(second));
+    unit_assert_eq!(engine.selected_crew(1) => vec![second]);
+    unit_assert_eq!(engine.crew_cursor(1) => Some(second));
 
     engine.deselect_crew(1, vec![second]);
     // AdjustCursorCommand never leaves an active crew roster without a
     // selected cursor: if no Select remains it chooses the high-rank
     // active crew and DoSelect()s it (C4Player.cpp:1235-1258).
-    assert_eq!(engine.selected_crew(1), vec![first]);
-    assert_eq!(engine.crew_cursor(1), Some(first));
+    unit_assert_eq!(engine.selected_crew(1) => vec![first]);
+    unit_assert_eq!(engine.crew_cursor(1) => Some(first));
 }
 
 #[test]
@@ -1847,8 +1626,8 @@ fn set_cursor_is_cursor_only_like_cpp() {
     // C4Player::SetCursor calls DoSelect(true): cursor callbacks run but
     // the object's Select bit is untouched (C4Player.cpp:1831-1845;
     // C4Object.cpp:5815-5824).
-    assert_eq!(engine.selected_crew(1), vec![first]);
-    assert_eq!(engine.crew_cursor(1), Some(second));
+    unit_assert_eq!(engine.selected_crew(1) => vec![first]);
+    unit_assert_eq!(engine.crew_cursor(1) => Some(second));
 }
 
 #[test]
@@ -1865,8 +1644,8 @@ fn select_crew_rejects_wrong_owner() {
         .expect_err("selection should fail");
     match error {
         EngineError::CrewSelection { owner, detail } => {
-            assert_eq!(owner, 1);
-            assert!(detail.contains("owned by"));
+            unit_assert_eq!(owner => 1);
+            unit_assert!(detail.contains("owned by"));
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -1889,8 +1668,8 @@ fn selection_pruned_after_object_destroyed() {
 
     engine.tick_without_snapshot().test_value();
 
-    assert!(engine.selected_crew(1).is_empty());
-    assert_eq!(engine.crew_cursor(1), None);
+    unit_assert!(engine.selected_crew(1).is_empty());
+    unit_assert_eq!(engine.crew_cursor(1) => None);
 }
 
 #[test]
@@ -1909,8 +1688,8 @@ fn crew_role_assignment_requires_valid_owner() {
         .expect_err("assignment should fail");
     match error {
         EngineError::CrewRole { owner, detail } => {
-            assert_eq!(owner, 1);
-            assert!(detail.contains("owned"));
+            unit_assert_eq!(owner => 1);
+            unit_assert!(detail.contains("owned"));
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -1935,7 +1714,7 @@ fn crew_roles_removed_when_object_destroyed() {
 
     engine.tick_without_snapshot().test_value();
 
-    assert!(engine.crew_role_assignments(1).is_empty());
+    unit_assert!(engine.crew_role_assignments(1).is_empty());
 }
 
 #[test]
@@ -1960,8 +1739,8 @@ fn apply_command_targets_role_assignments() {
         )
         .test_value();
 
-    assert_eq!(engine.test_object_snapshot(first).energy, 42);
-    assert_eq!(engine.test_object_snapshot(second).energy, 42);
+    unit_assert_eq!(engine.test_object_snapshot(first).energy => 42);
+    unit_assert_eq!(engine.test_object_snapshot(second).energy => 42);
 }
 
 #[test]
@@ -2028,7 +1807,7 @@ fn apply_command_uses_engine_order_for_selection() {
         ("OnWalkStart".to_string(), 100),
         ("OnIdleAbort".to_string(), 100),
     ];
-    assert_eq!(log, expected);
+    unit_assert_eq!(log => expected);
 }
 
 #[test]
@@ -2049,10 +1828,7 @@ fn capture_state_preserves_crew_roles() {
     restored.restore_state(&state).test_value();
 
     let assignments = restored.crew_role_assignments(1);
-    assert_eq!(
-        assignments.get(&crew).map(|role| role.as_str()),
-        Some("pilot")
-    );
+    unit_assert_eq!(assignments.get(&crew).map(|role| role.as_str()) => Some("pilot"));
 }
 
 #[test]
@@ -2062,14 +1838,14 @@ fn round_results_state_defaults_and_round_trips_without_evaluation() {
     // container starts with no goals/players and zero time
     // (C4RoundResults.cpp:249-259).
     let mut engine = Engine::new();
-    assert_eq!(engine.round_results, RoundResultsState::default());
+    unit_assert_eq!(engine.round_results => RoundResultsState::default());
 
     let encoded_default = serde_json::to_value(engine.capture_state())
         .unwrap_or_else(|error| panic!("default state serializes: {error}"));
-    assert!(encoded_default.get("round_results").is_none());
+    unit_assert!(encoded_default.get("round_results").is_none());
     let encoded_snapshot = serde_json::to_value(engine.snapshot())
         .unwrap_or_else(|error| panic!("default snapshot serializes: {error}"));
-    assert!(encoded_snapshot.get("round_results").is_none());
+    unit_assert!(encoded_snapshot.get("round_results").is_none());
 
     let expected = RoundResultsState {
         goals: vec!["GOLD".to_string(), "WIPF".to_string()],
@@ -2093,22 +1869,22 @@ fn round_results_state_defaults_and_round_trips_without_evaluation() {
     engine.round_results = expected.clone();
 
     let snapshot = engine.snapshot();
-    assert_eq!(snapshot.round_results, expected);
+    unit_assert_eq!(snapshot.round_results => expected);
     let state = EngineState::from_snapshot(&snapshot);
-    assert_eq!(state.round_results, expected);
+    unit_assert_eq!(state.round_results => expected);
 
     let json = state
         .to_json_string()
         .unwrap_or_else(|error| panic!("round results serialize: {error}"));
     let decoded = EngineState::from_json_str(&json)
         .unwrap_or_else(|error| panic!("round results deserialize: {error}"));
-    assert_eq!(decoded.round_results, expected);
+    unit_assert_eq!(decoded.round_results => expected);
 
     let mut restored = Engine::new();
     restored
         .restore_state(&decoded)
         .unwrap_or_else(|error| panic!("round results restore: {error}"));
-    assert_eq!(restored.snapshot().round_results, expected);
+    unit_assert_eq!(restored.snapshot().round_results => expected);
 }
 
 #[test]
@@ -2129,19 +1905,16 @@ fn shipped_hazard_teams_do_evaluation_records_both_player_lines() {
     engine.register_test_player(PlayerConfig::new(1, "Hazard evaluator").with_player_info_id(1));
     engine.register_test_definition(Definition::from_resource(&resource).test_value());
 
-    let teams =
-        engine.spawn_test_object(SpawnConfig::new("TEAM").with_loaded(true).with_local_vars(
-            HashMap::from([
-                (
-                    "aKill".to_string(),
-                    Value::Array(vec![Value::Nil, Value::Int(12)]),
-                ),
-                (
-                    "aDeath".to_string(),
-                    Value::Array(vec![Value::Nil, Value::Int(3)]),
-                ),
-            ]),
-        ));
+    let teams = spawn_fixture!(engine, "TEAM", with_loaded: true, with_local_vars: HashMap::from([
+        (
+            "aKill".to_string(),
+            Value::Array(vec![Value::Nil, Value::Int(12)]),
+        ),
+        (
+            "aDeath".to_string(),
+            Value::Array(vec![Value::Nil, Value::Int(3)]),
+        ),
+    ]));
     let teams_index = engine.test_object_index(teams);
     engine.call_test_object_function(teams_index, "DoEvaluation", vec![Value::Int(1)]);
 
@@ -2151,10 +1924,7 @@ fn shipped_hazard_teams_do_evaluation_records_both_player_lines() {
         .iter()
         .find(|result| result.player_info_id == 1)
         .test_value();
-    assert_eq!(
-        result.custom_evaluation_strings,
-        "{{PIWP}}$Kills$: 12   {{KAMB}}$Death$: 3"
-    );
+    unit_assert_eq!(result.custom_evaluation_strings => "{{PIWP}}$Kills$: 12   {{KAMB}}$Death$: 3");
 }
 
 #[test]
@@ -2176,29 +1946,15 @@ fn shipped_hazard_chooser_selects_the_lowest_client_id() {
     let mut engine = Engine::with_seed(0);
     engine.set_network_game(true);
     engine.set_landscape(Landscape::flat(64, 64));
-    assert_eq!(
-        engine.install_global_scripts(&[("planet/System.c4g/GetXVal.c".to_string(), get_x_val,)]),
-        1,
-        "shipped GetXVal wrappers install"
-    );
+    unit_assert_eq!(engine.install_global_scripts(&[("planet/System.c4g/GetXVal.c".to_string(), get_x_val,)]) => 1, "shipped GetXVal wrappers install");
     engine.register_test_definition(Definition::from_resource(&chooser_resource).test_value());
 
     let player_config = |name: &str, player_info_id: i32, pref_color: i32| JoinPlayerConfig {
-        name: name.to_string(),
         player_info_id,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
         color_dw: if pref_color == 0 { 0xff0000 } else { 0x0000ff },
         pref_color,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: false,
-        auto_context_menu: false,
         startup_player_count: 2,
+        ..join_player_config(name)
     };
     let info = ControlPlayerInfoEntry::default();
     let remote = engine
@@ -2217,34 +1973,16 @@ fn shipped_hazard_chooser_selects_the_lowest_client_id() {
             &info,
         )
         .test_value();
-    assert_eq!((remote.number(), host.number()), (0, 1));
-    assert_eq!(
-        engine.player(0).map(Player::at_client_name),
-        Some("Remote Client")
-    );
-    assert_eq!(engine.player(0).map(Player::color_index), Some(0));
-    assert_eq!(
-        engine.player(1).map(Player::at_client_name),
-        Some("Host Client")
-    );
-    assert_eq!(engine.player(1).map(Player::color_index), Some(1));
+    unit_assert_eq!((remote.number(), host.number()) => (0, 1));
+    unit_assert_eq!(engine.player(0).map(Player::at_client_name) => Some("Remote Client"));
+    unit_assert_eq!(engine.player(0).map(Player::color_index) => Some(0));
+    unit_assert_eq!(engine.player(1).map(Player::at_client_name) => Some("Host Client"));
+    unit_assert_eq!(engine.player(1).map(Player::color_index) => Some(1));
 
-    let chooser =
-        engine.spawn_test_object(SpawnConfig::new("CHOS").with_loaded(true).with_local_vars(
-            HashMap::from([("iChoosingPlr".to_string(), Value::Int(-1))]),
-        ));
+    let chooser = spawn_fixture!(engine, "CHOS", with_loaded: true, with_local_vars: HashMap::from([("iChoosingPlr".to_string(), Value::Int(-1))]));
     let chooser_index = engine.test_object_index(chooser);
-    assert_eq!(
-        engine.call_test_object_function(chooser_index, "ChoosePlayer", Vec::new()),
-        Value::Int(1)
-    );
-    assert_eq!(
-        engine.objects[chooser_index]
-            .state
-            .local_vars
-            .get("iChoosingPlr"),
-        Some(&Value::Int(1))
-    );
+    unit_assert_eq!(engine.call_test_object_function(chooser_index, "ChoosePlayer", Vec::new()) => Value::Int(1));
+    unit_assert_eq!(engine.objects[chooser_index].state.local_vars.get("iChoosingPlr") => Some(&Value::Int(1)));
 }
 
 #[test]
@@ -2259,7 +1997,7 @@ fn legacy_state_without_round_results_restores_cpp_defaults() {
 
     let decoded: EngineState = serde_json::from_value(value)
         .unwrap_or_else(|error| panic!("legacy state deserializes: {error}"));
-    assert_eq!(decoded.round_results, RoundResultsState::default());
+    unit_assert_eq!(decoded.round_results => RoundResultsState::default());
 }
 
 #[test]
@@ -2272,21 +2010,21 @@ fn game_clock_and_player_id_counter_round_trip_with_restore_baselines() {
     // (C4PlayerInfo.cpp:1733-1742,1785-1794); removed players can remain
     // represented only in RoundResults (C4PlayerList.cpp:231-242).
     let mut engine = Engine::new();
-    assert_eq!(engine.game_time(), 0);
-    assert!(!engine.time_go);
-    assert_eq!(engine.last_player_info_id, 0);
+    unit_assert_eq!(engine.game_time() => 0);
+    unit_assert!(!engine.time_go);
+    unit_assert_eq!(engine.last_player_info_id => 0);
 
     let default_state = serde_json::to_value(engine.capture_state())
         .unwrap_or_else(|error| panic!("default state serializes: {error}"));
-    assert!(default_state.get("game_time").is_none());
-    assert!(default_state.get("last_player_info_id").is_none());
+    unit_assert!(default_state.get("game_time").is_none());
+    unit_assert!(default_state.get("last_player_info_id").is_none());
     let legacy: EngineState = serde_json::from_value(default_state)
         .unwrap_or_else(|error| panic!("legacy state deserializes: {error}"));
-    assert_eq!(legacy.game_time, 0);
-    assert_eq!(legacy.last_player_info_id, 0);
+    unit_assert_eq!(legacy.game_time => 0);
+    unit_assert_eq!(legacy.last_player_info_id => 0);
     let default_snapshot = serde_json::to_value(engine.snapshot())
         .unwrap_or_else(|error| panic!("default snapshot serializes: {error}"));
-    assert!(default_snapshot.get("game_time").is_none());
+    unit_assert!(default_snapshot.get("game_time").is_none());
 
     engine.game_time = 731;
     engine.time_go = true;
@@ -2303,40 +2041,36 @@ fn game_clock_and_player_id_counter_round_trip_with_restore_baselines() {
             .with_total_playing_time(1_234)
             .build(),
     );
-    assert_eq!(engine.player(2).expect("player").game_join_time(), 0);
+    unit_assert_eq!(engine.player(2).expect("player").game_join_time() => 0);
 
     let snapshot = engine.snapshot();
-    assert_eq!(snapshot.game_time, 731);
+    unit_assert_eq!(snapshot.game_time => 731);
     let from_snapshot = EngineState::from_snapshot(&snapshot);
-    assert_eq!(from_snapshot.game_time, 731);
-    assert_eq!(from_snapshot.last_player_info_id, 57);
+    unit_assert_eq!(from_snapshot.game_time => 731);
+    unit_assert_eq!(from_snapshot.last_player_info_id => 57);
 
     let encoded = engine
         .capture_state()
         .to_json_string()
         .unwrap_or_else(|error| panic!("state serializes: {error}"));
-    assert!(!encoded.contains("game_join_time"));
-    assert!(!encoded.contains("time_go"));
+    unit_assert!(!encoded.contains("game_join_time"));
+    unit_assert!(!encoded.contains("time_go"));
     let decoded = EngineState::from_json_str(&encoded)
         .unwrap_or_else(|error| panic!("state deserializes: {error}"));
-    assert_eq!(decoded.game_time, 731);
-    assert_eq!(decoded.last_player_info_id, 61);
+    unit_assert_eq!(decoded.game_time => 731);
+    unit_assert_eq!(decoded.last_player_info_id => 61);
 
     let mut restored = Engine::new();
     restored
         .restore_state(&decoded)
         .unwrap_or_else(|error| panic!("state restores: {error}"));
-    assert_eq!(restored.game_time(), 731);
-    assert!(!restored.time_go);
-    assert_eq!(restored.last_player_info_id, 61);
+    unit_assert_eq!(restored.game_time() => 731);
+    unit_assert!(!restored.time_go);
+    unit_assert_eq!(restored.last_player_info_id => 61);
     let player = restored.player(2).test_value();
-    assert_eq!(player.game_join_time(), 731);
-    assert_eq!(player.score(), 250);
-    assert_eq!(
-        player.total_playing_time(),
-        1_965,
-        "save projects the 731-second current stint"
-    );
+    unit_assert_eq!(player.game_join_time() => 731);
+    unit_assert_eq!(player.score() => 250);
+    unit_assert_eq!(player.total_playing_time() => 1_965, "save projects the 731-second current stint");
 
     let mut stale_counter = decoded;
     stale_counter.last_player_info_id = 17;
@@ -2344,7 +2078,7 @@ fn game_clock_and_player_id_counter_round_trip_with_restore_baselines() {
     repaired
         .restore_state(&stale_counter)
         .unwrap_or_else(|error| panic!("stale counter state restores: {error}"));
-    assert_eq!(repaired.last_player_info_id, 57);
+    unit_assert_eq!(repaired.last_player_info_id => 57);
 }
 
 #[test]
@@ -2355,38 +2089,23 @@ fn join_config_propagates_existing_player_info_and_profile_values() {
     let mut engine = Engine::new();
     let joined = engine
         .join_player(JoinPlayerConfig {
-            name: "Profile".to_string(),
             player_info_id: 41,
             score: 250,
             rounds: 11,
             rounds_won: 7,
             rounds_lost: 4,
             total_playing_time: 1_234,
-            team: None,
-            color_dw: 0xff0000,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
+            ..join_player_config("Profile")
         })
         .unwrap_or_else(|error| panic!("player joins: {error}"));
 
     let player = engine.player(joined.number()).test_value();
-    assert_eq!(player.player_info_id(), 41);
-    assert_eq!(player.score(), 250);
-    assert_eq!(
-        (player.rounds(), player.rounds_won(), player.rounds_lost()),
-        (11, 7, 4)
-    );
-    assert_eq!(player.total_playing_time(), 1_234);
-    assert_eq!(
-        player.game_join_time(),
-        0,
-        "join baseline uses current game time"
-    );
-    assert_eq!(engine.last_player_info_id, 41);
+    unit_assert_eq!(player.player_info_id() => 41);
+    unit_assert_eq!(player.score() => 250);
+    unit_assert_eq!((player.rounds(), player.rounds_won(), player.rounds_lost()) => (11, 7, 4));
+    unit_assert_eq!(player.total_playing_time() => 1_234);
+    unit_assert_eq!(player.game_join_time() => 0, "join baseline uses current game time");
+    unit_assert_eq!(engine.last_player_info_id => 41);
 }
 
 #[test]
@@ -2406,38 +2125,26 @@ public func ReadIDs(int first, int second)
 }
 "#;
     let config = |name: &str, player_info_id| JoinPlayerConfig {
-        name: name.to_string(),
         player_info_id,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0x00ff_0000,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: false,
-        auto_context_menu: false,
         startup_player_count: 2,
+        ..join_player_config(name)
     };
 
     let mut engine = Engine::new();
     engine.set_landscape(Landscape::flat(64, 48));
     let first = engine.join_player(config("First", 41))?.number();
     let second = engine.join_player(config("Second", 99))?.number();
-    assert_eq!((first, second), (0, 1));
+    unit_assert_eq!((first, second) => (0, 1));
 
     engine.register_test_definition(Definition::from_script("PROB", "Probe", PROBE)?);
-    let probe = engine.spawn_test_object(SpawnConfig::new("PROB").with_loaded(true));
+    let probe = spawn_fixture!(engine, "PROB", with_loaded: true);
     let probe_index = engine.test_object_index(probe);
-    assert_eq!(
+    unit_assert_eq!(
         engine.call_object_function(
             probe_index,
             "ReadIDs",
             vec![Value::Int(first), Value::Int(second)],
-        )?,
+        )? =>
         Value::Array(vec![
             Value::Int(41),
             Value::Int(99),
@@ -2459,19 +2166,19 @@ fn game_ticks_latch_exactly_one_second_increment() {
     // another executed frame.
     let mut engine = Engine::new();
     engine.sec1_timer();
-    assert_eq!(engine.game_time(), 0);
+    unit_assert_eq!(engine.game_time() => 0);
 
     engine.tick_without_snapshot().test_value();
     engine.tick_without_snapshot().test_value();
-    assert_eq!(engine.game_time(), 0, "frames are not seconds");
+    unit_assert_eq!(engine.game_time() => 0, "frames are not seconds");
     engine.sec1_timer();
-    assert_eq!(engine.game_time(), 1);
+    unit_assert_eq!(engine.game_time() => 1);
     engine.sec1_timer();
-    assert_eq!(engine.game_time(), 1, "latch was already consumed");
+    unit_assert_eq!(engine.game_time() => 1, "latch was already consumed");
 
     engine.tick_without_snapshot().test_value();
     engine.sec1_timer();
-    assert_eq!(engine.game_time(), 2);
+    unit_assert_eq!(engine.game_time() => 2);
 }
 
 #[test]
@@ -2483,63 +2190,29 @@ fn register_and_join_allocate_player_info_ids_and_anchor_game_time() {
     let mut registered = Engine::new();
     registered.game_time = 37;
     registered.register_test_player(PlayerConfig::new(7, "First"));
-    assert_eq!(registered.player(7).expect("first").player_info_id(), 1);
-    assert_eq!(registered.player(7).expect("first").game_join_time(), 37);
+    unit_assert_eq!(registered.player(7).expect("first").player_info_id() => 1);
+    unit_assert_eq!(registered.player(7).expect("first").game_join_time() => 37);
 
     registered.register_test_player(PlayerConfig::new(8, "Explicit").with_player_info_id(9));
     registered.register_test_player(PlayerConfig::new(9, "Next"));
-    assert_eq!(registered.player(8).expect("explicit").player_info_id(), 9);
-    assert_eq!(registered.player(9).expect("next").player_info_id(), 10);
-    assert_eq!(registered.last_player_info_id, 10);
+    unit_assert_eq!(registered.player(8).expect("explicit").player_info_id() => 9);
+    unit_assert_eq!(registered.player(9).expect("next").player_info_id() => 10);
+    unit_assert_eq!(registered.last_player_info_id => 10);
 
     let config = |name: &str, player_info_id| JoinPlayerConfig {
-        name: name.to_string(),
         player_info_id,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff0000,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: false,
-        auto_context_menu: false,
-        startup_player_count: 1,
+        ..join_player_config(name)
     };
     let mut joined = Engine::new();
     joined.game_time = 55;
     let first = joined.join_player(config("First", 0)).test_value();
     let explicit = joined.join_player(config("Explicit", 12)).test_value();
     let next = joined.join_player(config("Next", 0)).test_value();
-    assert_eq!(
-        joined
-            .player(first.number())
-            .expect("first")
-            .player_info_id(),
-        1
-    );
-    assert_eq!(
-        joined
-            .player(first.number())
-            .expect("first")
-            .game_join_time(),
-        55
-    );
-    assert_eq!(
-        joined
-            .player(explicit.number())
-            .expect("explicit")
-            .player_info_id(),
-        12
-    );
-    assert_eq!(
-        joined.player(next.number()).expect("next").player_info_id(),
-        13
-    );
-    assert_eq!(joined.last_player_info_id, 13);
+    unit_assert_eq!(joined.player(first.number()).expect("first").player_info_id() => 1);
+    unit_assert_eq!(joined.player(first.number()).expect("first").game_join_time() => 55);
+    unit_assert_eq!(joined.player(explicit.number()).expect("explicit").player_info_id() => 12);
+    unit_assert_eq!(joined.player(next.number()).expect("next").player_info_id() => 13);
+    unit_assert_eq!(joined.last_player_info_id => 13);
 }
 
 #[test]
@@ -2579,31 +2252,26 @@ fn capture_projects_current_stint_without_mutating_live_player() {
             .iter()
             .find(|player| player.id == 2)
             .test_value();
-        assert_eq!(active.total_playing_time, 108);
-        assert_eq!(evaluated.total_playing_time, 200);
+        unit_assert_eq!(active.total_playing_time => 108);
+        unit_assert_eq!(evaluated.total_playing_time => 200);
     }
     let live = engine.player(1).test_value();
-    assert_eq!(live.total_playing_time(), 100);
-    assert_eq!(live.game_join_time(), 7);
+    unit_assert_eq!(live.total_playing_time() => 100);
+    unit_assert_eq!(live.game_join_time() => 7);
 
     let state = engine.capture_state();
     let mut restored = Engine::new();
     restored.restore_state(&state).test_value();
     let restored_player = restored.player(1).test_value();
-    assert_eq!(restored_player.total_playing_time(), 108);
-    assert_eq!(restored_player.game_join_time(), 15);
+    unit_assert_eq!(restored_player.total_playing_time() => 108);
+    unit_assert_eq!(restored_player.game_join_time() => 15);
 }
 
 #[test]
 fn engine_state_from_snapshot_allows_resuming_simulation() {
     let mut engine = players_test_engine(42);
 
-    engine.spawn_test_object(
-        SpawnConfig::new("Test")
-            .with_position(Vector2::new(5, -3))
-            .with_velocity(Vector2::new(2, -1))
-            .with_energy(75),
-    );
+    spawn_fixture!(engine, "Test", with_position: Vector2::new(5, -3), with_velocity: Vector2::new(2, -1), with_energy: 75);
 
     let snapshot = engine.test_tick();
     let expected_next = engine.test_tick();
@@ -2614,25 +2282,16 @@ fn engine_state_from_snapshot_allows_resuming_simulation() {
     restored.restore_state(&state).test_value();
 
     let mut resumed = restored.test_tick();
-    assert_eq!(
-        resumed.audio,
-        vec![
-            AudioCommand::SetMusicPlaylist {
-                playlist: None,
-                restart: false,
-            },
-            AudioCommand::SetMusicLevel { level: 100 },
-        ]
-    );
+    unit_assert_eq!(resumed.audio => vec![AudioCommand::SetMusicPlaylist {playlist: None, restart: false,}, AudioCommand::SetMusicLevel { level: 100 },]);
     resumed.audio.clear();
-    assert_eq!(resumed, expected_next);
+    unit_assert_eq!(resumed => expected_next);
 }
 
 #[test]
 fn restore_snapshot_wrapper_matches_state_restore() {
     let mut engine = players_test_engine(7);
 
-    engine.spawn_test_object(SpawnConfig::new("Test").with_velocity(Vector2::new(1, 0)));
+    spawn_fixture!(engine, "Test", with_velocity: Vector2::new(1, 0));
 
     let snapshot = engine.test_tick();
     let expected_next = engine.test_tick();
@@ -2641,18 +2300,9 @@ fn restore_snapshot_wrapper_matches_state_restore() {
     restored.restore_snapshot(&snapshot).test_value();
 
     let mut resumed = restored.test_tick();
-    assert_eq!(
-        resumed.audio,
-        vec![
-            AudioCommand::SetMusicPlaylist {
-                playlist: None,
-                restart: false,
-            },
-            AudioCommand::SetMusicLevel { level: 100 },
-        ]
-    );
+    unit_assert_eq!(resumed.audio => vec![AudioCommand::SetMusicPlaylist {playlist: None, restart: false,}, AudioCommand::SetMusicLevel { level: 100 },]);
     resumed.audio.clear();
-    assert_eq!(resumed, expected_next);
+    unit_assert_eq!(resumed => expected_next);
 }
 
 #[test]
@@ -2662,7 +2312,7 @@ fn snapshot_round_trip_preserves_sub_pixel_velocity() {
     // and the fixed value (`C4Object.cpp:2742`); the integer-only path would
     // round the velocity to whole pixels (fixtoi) and lose the fraction.
     let mut engine = players_test_engine(7);
-    let id = engine.spawn_test_object(SpawnConfig::new("Test").with_position(Vector2::new(5, 5)));
+    let id = spawn_fixture!(engine, "Test", with_position: Vector2::new(5, 5));
     let idx = engine.test_object_index(id);
     // x: pure sub-pixel (rounds to 0 px); y: 1 px + sub-pixel fraction.
     engine.objects[idx].set_fixed_velocity(FixedVec2::new(
@@ -2678,8 +2328,8 @@ fn snapshot_round_trip_preserves_sub_pixel_velocity() {
     restored.restore_snapshot(&snapshot).test_value();
 
     let ridx = restored.test_object_index(id);
-    assert_eq!(restored.objects[ridx].fixed_velocity.x.val(), 300);
-    assert_eq!(restored.objects[ridx].fixed_velocity.y.val(), 70000);
+    unit_assert_eq!(restored.objects[ridx].fixed_velocity.x.val() => 300);
+    unit_assert_eq!(restored.objects[ridx].fixed_velocity.y.val() => 70000);
 }
 
 #[test]
@@ -2688,7 +2338,7 @@ fn json_save_load_preserves_sub_pixel_velocity() {
     // survive serialize -> deserialize -> restore so a reloaded game stays
     // in lockstep with one that ran continuously.
     let mut engine = players_test_engine(7);
-    let id = engine.spawn_test_object(SpawnConfig::new("Test").with_position(Vector2::new(5, 5)));
+    let id = spawn_fixture!(engine, "Test", with_position: Vector2::new(5, 5));
     let idx = engine.test_object_index(id);
     engine.objects[idx].set_fixed_velocity(FixedVec2::new(
         C4Fixed::from_raw(300),
@@ -2704,8 +2354,8 @@ fn json_save_load_preserves_sub_pixel_velocity() {
     restored.restore_state(&state).test_value();
 
     let ridx = restored.test_object_index(id);
-    assert_eq!(restored.objects[ridx].fixed_velocity.x.val(), 300);
-    assert_eq!(restored.objects[ridx].fixed_velocity.y.val(), 70000);
+    unit_assert_eq!(restored.objects[ridx].fixed_velocity.x.val() => 300);
+    unit_assert_eq!(restored.objects[ridx].fixed_velocity.y.val() => 70000);
 }
 
 #[test]
@@ -2714,38 +2364,25 @@ fn snapshot_round_trip_preserves_raw_signed_and_fractional_rotation() {
     // DoMovement keeps a left lean as a negative angle, and stopping
     // rdir does not discard a remaining sub-degree fix_r fraction.
     let mut engine = players_test_engine(7);
-    let id = engine.spawn_test_object(SpawnConfig::new("Test").with_position(Vector2::new(5, 5)));
+    let id = spawn_fixture!(engine, "Test", with_position: Vector2::new(5, 5));
     let idx = engine.test_object_index(id);
     engine.objects[idx].state.rotation = -9;
     let independent_fix_r = C4Fixed::from_raw(itofix(-10).val() + 300);
-    assert_ne!(
-        fixtoi(independent_fix_r),
-        -9,
-        "test must detect deriving r from fix_r"
-    );
+    unit_assert_ne!(fixtoi(independent_fix_r) => -9, "test must detect deriving r from fix_r");
     engine.objects[idx].fixed_rotation = independent_fix_r;
     engine.objects[idx].rotation_velocity = C4Fixed::ZERO;
 
     let snapshot = engine.snapshot();
     let saved = snapshot.object(id).test_value();
-    assert_eq!(saved.rotation, -9, "raw signed r is not normalized");
-    assert_eq!(
-        saved
-            .fixed_rotation
-            .expect("fractional fix_r is retained")
-            .val(),
-        independent_fix_r.val()
-    );
-    assert_eq!(saved.rotation_velocity, None);
+    unit_assert_eq!(saved.rotation => -9, "raw signed r is not normalized");
+    unit_assert_eq!(saved.fixed_rotation.expect("fractional fix_r is retained").val() => independent_fix_r.val());
+    unit_assert_eq!(saved.rotation_velocity => None);
 
     let mut restored = players_test_engine(0);
     restored.restore_snapshot(&snapshot).test_value();
     let ridx = restored.test_object_index(id);
-    assert_eq!(restored.objects[ridx].state.rotation, -9);
-    assert_eq!(
-        restored.objects[ridx].fixed_rotation.val(),
-        independent_fix_r.val()
-    );
+    unit_assert_eq!(restored.objects[ridx].state.rotation => -9);
+    unit_assert_eq!(restored.objects[ridx].fixed_rotation.val() => independent_fix_r.val());
 }
 
 #[test]
@@ -2754,7 +2391,7 @@ fn snapshot_round_trip_preserves_rotation_velocity() {
     // (fix_r) must survive save/restore so a reloaded game keeps turning in
     // lockstep — mirroring C++ persisting rdir/fix_r.
     let mut engine = players_test_engine(7);
-    let id = engine.spawn_test_object(SpawnConfig::new("Test").with_position(Vector2::new(5, 5)));
+    let id = spawn_fixture!(engine, "Test", with_position: Vector2::new(5, 5));
     let idx = engine.test_object_index(id);
     // 1.0 deg/frame angular velocity, mid-rotation with a sub-degree fix_r.
     engine.objects[idx].rotation_velocity = itofix(1);
@@ -2769,11 +2406,8 @@ fn snapshot_round_trip_preserves_rotation_velocity() {
     restored.restore_state(&state).test_value();
 
     let ridx = restored.test_object_index(id);
-    assert_eq!(
-        restored.objects[ridx].rotation_velocity.val(),
-        itofix(1).val()
-    );
-    assert_eq!(restored.objects[ridx].fixed_rotation.val(), 327680 + 300);
+    unit_assert_eq!(restored.objects[ridx].rotation_velocity.val() => itofix(1).val());
+    unit_assert_eq!(restored.objects[ridx].fixed_rotation.val() => 327680 + 300);
 }
 
 #[test]
@@ -2786,7 +2420,7 @@ fn crew_elimination_marks_owner_after_last_crew_destroyed() {
     let owner_one = engine.spawn_test_object(test_crew_config("Test", 1));
     engine.spawn_test_object(test_crew_config("Test", 2));
 
-    assert!(engine.eliminated_owners().is_empty());
+    unit_assert!(engine.eliminated_owners().is_empty());
 
     engine
         .queue_object_command(
@@ -2799,16 +2433,13 @@ fn crew_elimination_marks_owner_after_last_crew_destroyed() {
     // (C4Player.cpp:225-235): the crewless owner survives frames 1-34
     // (the C++ recruit-in-the-window grace) and eliminates at 35.
     engine.tick_without_snapshot().test_value();
-    assert!(
-        !engine.is_owner_eliminated(1),
-        "no elimination before the Tick35 boundary"
-    );
+    unit_assert!(!engine.is_owner_eliminated(1), "no elimination before the Tick35 boundary");
     for _ in 1..35 {
         engine.tick_without_snapshot().test_value();
     }
-    assert!(engine.is_owner_eliminated(1));
-    assert_eq!(engine.eliminated_owners(), vec![1]);
-    assert!(!engine.is_owner_eliminated(2));
+    unit_assert!(engine.is_owner_eliminated(1));
+    unit_assert_eq!(engine.eliminated_owners() => vec![1]);
+    unit_assert!(!engine.is_owner_eliminated(2));
 }
 
 #[test]
@@ -2832,15 +2463,15 @@ fn crew_elimination_is_one_way_like_cpp() {
     for _ in 0..35 {
         engine.tick_without_snapshot().test_value();
     }
-    assert!(engine.is_owner_eliminated(1));
+    unit_assert!(engine.is_owner_eliminated(1));
 
     engine.spawn_test_object(test_crew_config("Test", 1));
     for _ in 0..35 {
         engine.tick_without_snapshot().test_value();
     }
 
-    assert!(engine.is_owner_eliminated(1), "elimination is one-way");
-    assert_eq!(engine.eliminated_owners(), vec![1]);
+    unit_assert!(engine.is_owner_eliminated(1), "elimination is one-way");
+    unit_assert_eq!(engine.eliminated_owners() => vec![1]);
 }
 
 #[test]
@@ -2854,10 +2485,7 @@ fn capture_state_preserves_crew_selection() {
     engine.set_crew_cursor(1, Some(second)).test_value();
 
     let mut state = engine.capture_state();
-    assert!(
-        state.objects.iter().all(|object| object.snapshot.selected),
-        "C4Object::Select is persisted on every selected object"
-    );
+    unit_assert!(state.objects.iter().all(|object| object.snapshot.selected), "C4Object::Select is persisted on every selected object");
     // Simulate a pre-object-bit state: the old per-player selection list
     // remains a supported import projection.
     for object in &mut state.objects {
@@ -2869,8 +2497,8 @@ fn capture_state_preserves_crew_selection() {
 
     let mut restored_selected = restored.selected_crew(1);
     restored_selected.sort_by_key(|id| id.as_u64());
-    assert_eq!(restored_selected, vec![first, second]);
-    assert_eq!(restored.crew_cursor(1), Some(second));
+    unit_assert_eq!(restored_selected => vec![first, second]);
+    unit_assert_eq!(restored.crew_cursor(1) => Some(second));
 }
 
 #[test]
@@ -2894,8 +2522,8 @@ fn capture_state_preserves_elimination_status() {
         engine.tick_without_snapshot().test_value();
     }
 
-    assert!(engine.is_owner_eliminated(1));
-    assert!(!engine.is_owner_eliminated(2));
+    unit_assert!(engine.is_owner_eliminated(1));
+    unit_assert!(!engine.is_owner_eliminated(2));
 
     let state = engine.capture_state();
 
@@ -2905,13 +2533,13 @@ fn capture_state_preserves_elimination_status() {
     restored.register_test_definition(definition);
     restored.restore_state(&state).test_value();
 
-    assert!(restored.is_owner_eliminated(1));
-    assert!(!restored.is_owner_eliminated(2));
+    unit_assert!(restored.is_owner_eliminated(1));
+    unit_assert!(!restored.is_owner_eliminated(2));
 
     restored.spawn_test_object(test_crew_config("Test", 1));
 
     // One-way like C4Player::Eliminate (C4Player.cpp:2015-2017).
-    assert!(restored.is_owner_eliminated(1));
+    unit_assert!(restored.is_owner_eliminated(1));
 }
 
 #[test]
@@ -2932,7 +2560,7 @@ fn transfer_zone_set_for_a_vanished_owner_drops_instead_of_aborting() {
             },
         }])
         .test_value();
-    assert!(engine.capture_state().transfer_zones.is_empty());
+    unit_assert!(engine.capture_state().transfer_zones.is_empty());
 }
 
 #[test]
@@ -2963,8 +2591,8 @@ fn scenario_batch_transfer_zone_lands_on_an_object_spawned_in_the_same_batch() {
     };
     engine.apply_scenario_batch(batch).test_value();
     let zones = engine.capture_state().transfer_zones;
-    assert_eq!(zones.len(), 1, "the zone must land on the fresh spawn");
-    assert_eq!(zones[0].owner, owner);
+    unit_assert_eq!(zones.len() => 1, "the zone must land on the fresh spawn");
+    unit_assert_eq!(zones[0].owner => owner);
 }
 
 #[test]
@@ -2985,24 +2613,24 @@ fn capture_state_preserves_transfer_zones() {
         .test_value();
 
     let state = engine.capture_state();
-    assert_eq!(state.transfer_zones.len(), 1);
+    unit_assert_eq!(state.transfer_zones.len() => 1);
     let zone = &state.transfer_zones[0];
-    assert_eq!(zone.owner, object_id);
-    assert_eq!(zone.x, 12);
-    assert_eq!(zone.y, -3);
-    assert_eq!(zone.width, 8);
-    assert_eq!(zone.height, 10);
+    unit_assert_eq!(zone.owner => object_id);
+    unit_assert_eq!(zone.x => 12);
+    unit_assert_eq!(zone.y => -3);
+    unit_assert_eq!(zone.width => 8);
+    unit_assert_eq!(zone.height => 10);
 
     let mut restored = players_test_engine(3);
     restored.restore_state(&state).test_value();
     let snapshot = restored.snapshot();
-    assert_eq!(snapshot.transfer_zones.len(), 1);
+    unit_assert_eq!(snapshot.transfer_zones.len() => 1);
     let restored_zone = &snapshot.transfer_zones[0];
-    assert_eq!(restored_zone.owner, object_id);
-    assert_eq!(restored_zone.x, 12);
-    assert_eq!(restored_zone.y, -3);
-    assert_eq!(restored_zone.width, 8);
-    assert_eq!(restored_zone.height, 10);
+    unit_assert_eq!(restored_zone.owner => object_id);
+    unit_assert_eq!(restored_zone.x => 12);
+    unit_assert_eq!(restored_zone.y => -3);
+    unit_assert_eq!(restored_zone.width => 8);
+    unit_assert_eq!(restored_zone.height => 10);
 }
 
 #[test]
@@ -3034,18 +2662,18 @@ fn tracks_action_state_changes() {
     let id = engine.spawn_test_object(SpawnConfig::new("Actor"));
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.action.name, "Walk");
-    assert_eq!(snapshot.action.phase, 0);
+    unit_assert_eq!(snapshot.action.name => "Walk");
+    unit_assert_eq!(snapshot.action.phase => 0);
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(object.action.name, "Jump");
-    assert_eq!(object.action.phase, 3);
+    unit_assert_eq!(object.action.name => "Jump");
+    unit_assert_eq!(object.action.phase => 3);
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(object.action.name, "Jump");
-    assert_eq!(object.action.phase, 4);
+    unit_assert_eq!(object.action.name => "Jump");
+    unit_assert_eq!(object.action.phase => 4);
 }
 
 #[test]
@@ -3074,18 +2702,18 @@ fn spawns_additional_objects_from_step() {
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(object.position, Vector2::new(0, 0));
-    assert_eq!(object.energy, 42);
-    assert_eq!(snapshot.objects.len(), 2, "spawned child should exist");
+    unit_assert_eq!(object.position => Vector2::new(0, 0));
+    unit_assert_eq!(object.energy => 42);
+    unit_assert_eq!(snapshot.objects.len() => 2, "spawned child should exist");
 
     let spawned = snapshot
         .objects
         .iter()
         .find(|obj| obj.id != id)
         .test_value();
-    assert_eq!(spawned.position, Vector2::new(5, 0));
-    assert_eq!(spawned.energy, 42);
-    assert!(!spawned.crew_member);
+    unit_assert_eq!(spawned.position => Vector2::new(5, 0));
+    unit_assert_eq!(spawned.energy => 42);
+    unit_assert!(!spawned.crew_member);
 }
 
 #[test]
@@ -3104,24 +2732,16 @@ fn produces_deterministic_snapshots() {
     engine_b
         .register_test_definition(Definition::from_script("Mover", "Mover", source).test_value());
 
-    let id_a = engine_a.spawn_test_object(
-        SpawnConfig::new("Mover")
-            .with_position(Vector2::new(0, 0))
-            .with_velocity(Vector2::new(1, 0)),
-    );
-    let id_b = engine_b.spawn_test_object(
-        SpawnConfig::new("Mover")
-            .with_position(Vector2::new(0, 0))
-            .with_velocity(Vector2::new(1, 0)),
-    );
+    let id_a = spawn_fixture!(engine_a, "Mover", with_position: Vector2::new(0, 0), with_velocity: Vector2::new(1, 0));
+    let id_b = spawn_fixture!(engine_b, "Mover", with_position: Vector2::new(0, 0), with_velocity: Vector2::new(1, 0));
 
     for _ in 0..5 {
         let snap_a = engine_a.test_tick();
         let snap_b = engine_b.test_tick();
         let obj_a = snap_a.object(id_a).test_value();
         let obj_b = snap_b.object(id_b).test_value();
-        assert_eq!(obj_a.position, obj_b.position);
-        assert_eq!(obj_a.velocity, obj_b.velocity);
+        unit_assert_eq!(obj_a.position => obj_b.position);
+        unit_assert_eq!(obj_a.velocity => obj_b.velocity);
     }
 }
 
@@ -3141,16 +2761,12 @@ fn pixel_less_landscape_does_not_clamp_objects_to_surface() {
     engine.register_test_definition(definition);
     engine.set_landscape(Landscape::flat(16, 5));
 
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("Static")
-            .with_position(Vector2::new(4, 12))
-            .with_velocity(Vector2::new(0, 3)),
-    );
+    let id = spawn_fixture!(engine, "Static", with_position: Vector2::new(4, 12), with_velocity: Vector2::new(0, 3));
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(object.position, Vector2::new(4, 12));
-    assert_eq!(object.velocity, Vector2::new(0, 3));
+    unit_assert_eq!(object.position => Vector2::new(4, 12));
+    unit_assert_eq!(object.velocity => Vector2::new(0, 3));
 }
 
 #[test]
@@ -3186,20 +2802,20 @@ fn applies_effect_stack_operations() {
     let id = engine.spawn_test_object(SpawnConfig::new("Actor"));
 
     let snapshot = engine.test_object_snapshot(id);
-    assert_eq!(snapshot.effects.len(), 1);
-    assert_eq!(snapshot.effects[0].name, "Heal");
-    assert_eq!(snapshot.effects[0].priority, 150);
-    assert_eq!(snapshot.effects[0].interval, 2);
-    assert_eq!(snapshot.effects[0].timer, 0);
+    unit_assert_eq!(snapshot.effects.len() => 1);
+    unit_assert_eq!(snapshot.effects[0].name => "Heal");
+    unit_assert_eq!(snapshot.effects[0].priority => 150);
+    unit_assert_eq!(snapshot.effects[0].interval => 2);
+    unit_assert_eq!(snapshot.effects[0].timer => 0);
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
     // C++ list order ascends by |priority| (C4Effect.cpp:80-94).
-    assert_eq!(object.effects.len(), 2);
-    assert_eq!(object.effects[0].name, "Boost");
-    assert_eq!(object.effects[0].timer, 1);
-    assert_eq!(object.effects[1].name, "Heal");
-    assert_eq!(object.effects[1].timer, 1);
+    unit_assert_eq!(object.effects.len() => 2);
+    unit_assert_eq!(object.effects[0].name => "Boost");
+    unit_assert_eq!(object.effects[0].timer => 1);
+    unit_assert_eq!(object.effects[1].name => "Heal");
+    unit_assert_eq!(object.effects[1].timer => 1);
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
@@ -3208,24 +2824,13 @@ fn applies_effect_stack_operations() {
         .iter()
         .find(|effect| effect.name == "Boost")
         .test_value();
-    assert_eq!(boost.priority, 50);
-    assert_eq!(boost.timer, 2);
-    assert!(object
-        .effects
-        .iter()
-        .any(|effect| effect.name == "Heal" && effect.priority == 0));
+    unit_assert_eq!(boost.priority => 50);
+    unit_assert_eq!(boost.timer => 2);
+    unit_assert!(object.effects.iter().any(|effect| effect.name == "Heal" && effect.priority == 0));
 
     let snapshot = engine.test_tick();
     let object = snapshot.object(id).test_value();
-    assert_eq!(
-        object
-            .effects
-            .iter()
-            .map(|effect| effect.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Boost"],
-        "the next Execute unlinks the dead Heal node"
-    );
+    unit_assert_eq!(object.effects.iter().map(|effect| effect.name.as_str()).collect::<Vec<_>>() => vec!["Boost"], "the next Execute unlinks the dead Heal node");
 }
 
 // The AmmoHud pair: AHUD#1's Initialize counts its own def
@@ -3275,10 +2880,7 @@ protected func HudCount() { return(ObjectCount(GetID(),0,0,0,0,0,0,0,0,GetOwner(
         .iter()
         .filter(|object| object.definition_id == "AHUD")
         .count();
-    assert_eq!(
-        count, 2,
-        "one spawn yields the pair, no more (AmmoHud.c4d:17)"
-    );
+    unit_assert_eq!(count => 2, "one spawn yields the pair, no more (AmmoHud.c4d:17)");
 }
 
 // C4Object::Init: `if (Category & C4D_Living) Alive = 1; if (Alive)
@@ -3297,31 +2899,18 @@ fn alive_spawns_start_at_the_physical_energy_like_cpp() {
     engine.register_test_definition(living);
     engine.register_test_definition(simple_definition("ROCK"));
 
-    let clonk = engine.spawn_test_object(
-        SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING),
-    );
+    let clonk = spawn_fixture!(engine, "CLNK", with_category: CATEGORY_OBJECT | CATEGORY_LIVING);
     let idx = engine.test_object_index(clonk);
-    assert_eq!(
-        engine.objects[idx].state.energy, 50_000,
-        "alive spawn: Energy = GetPhysical()->Energy (C4Object.cpp:192)"
-    );
+    unit_assert_eq!(engine.objects[idx].state.energy => 50_000, "alive spawn: Energy = GetPhysical()->Energy (C4Object.cpp:192)");
 
     let rock = engine.spawn_test_object(test_object_config("ROCK"));
     let idx = engine.test_object_index(rock);
-    assert_eq!(
-        engine.objects[idx].state.energy, 0,
-        "non-living: Energy stays 0"
-    );
+    unit_assert_eq!(engine.objects[idx].state.energy => 0, "non-living: Energy stays 0");
 
     // Loaded objects compile Energy= verbatim (C4Object.cpp:2754).
-    let loaded = engine.spawn_test_object(
-        SpawnConfig::new("CLNK")
-            .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-            .with_energy(23_456)
-            .with_loaded(true),
-    );
+    let loaded = spawn_fixture!(engine, "CLNK", with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_energy: 23_456, with_loaded: true);
     let idx = engine.test_object_index(loaded);
-    assert_eq!(engine.objects[idx].state.energy, 23_456);
+    unit_assert_eq!(engine.objects[idx].state.energy => 23_456);
 }
 
 // FnDoEnergy: `if (!fExact) iChange *= C4MaxPhysical/100` (=1000,
@@ -3354,36 +2943,21 @@ func Overheal() {
         ..PhysicalInfo::default()
     });
     engine.register_test_definition(living);
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING),
-    );
+    let id = spawn_fixture!(engine, "CLNK", with_category: CATEGORY_OBJECT | CATEGORY_LIVING);
     let idx = engine.test_object_index(id);
 
     engine.call_test_object_function(idx, "Hurt", Vec::new());
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.energy, 47_000,
-        "DoEnergy(-3) removes 3% = 3000 raw (C4Object.cpp:1347)"
-    );
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("iRead"),
-        Some(&Value::Int(47)),
-        "GetEnergy returns 100*E/C4MaxPhysical"
-    );
+    unit_assert_eq!(engine.objects[idx].state.energy => 47_000, "DoEnergy(-3) removes 3% = 3000 raw (C4Object.cpp:1347)");
+    unit_assert_eq!(engine.objects[idx].state.local_vars.get("iRead") => Some(&Value::Int(47)), "GetEnergy returns 100*E/C4MaxPhysical");
 
     engine.call_test_object_function(idx, "HurtExact", Vec::new());
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.energy, 46_500,
-        "fExact skips the percent conversion"
-    );
+    unit_assert_eq!(engine.objects[idx].state.energy => 46_500, "fExact skips the percent conversion");
 
     engine.call_test_object_function(idx, "Overheal", Vec::new());
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.energy, 50_000,
-        "clamped to GetPhysical()->Energy (C4Object.cpp:1361)"
-    );
+    unit_assert_eq!(engine.objects[idx].state.energy => 50_000, "clamped to GetPhysical()->Energy (C4Object.cpp:1361)");
 }
 
 // FnDoBreath defaults a nil target to cthr->Obj, scales script points by
@@ -3412,8 +2986,8 @@ func Refill() {
     let result = engine.call_test_object_function(clonk_idx, "Refill", Vec::new());
 
     let clonk_idx = engine.test_object_index(clonk);
-    assert_eq!(result, Value::Int(50), "same-call GetBreath sees the cap");
-    assert_eq!(engine.objects[clonk_idx].state.breath, 50_000);
+    unit_assert_eq!(result => Value::Int(50), "same-call GetBreath sees the cap");
+    unit_assert_eq!(engine.objects[clonk_idx].state.breath => 50_000);
 }
 
 // FnDoBreath honors an explicit foreign pObj instead of cthr->Obj
@@ -3445,8 +3019,8 @@ func RefillOther() {
     let result = engine.call_test_object_function(actor_idx, "RefillOther", Vec::new());
 
     let victim_idx = engine.test_object_index(victim);
-    assert_eq!(result, Value::Int(30), "foreign live read sees 30000");
-    assert_eq!(engine.objects[victim_idx].state.breath, 30_000);
+    unit_assert_eq!(result => Value::Int(30), "foreign live read sees 30000");
+    unit_assert_eq!(engine.objects[victim_idx].state.breath => 30_000);
 }
 
 #[test]
@@ -3466,13 +3040,10 @@ func NeedsPower() {
     let mut consumer = Definition::from_script("ELEV", "Elevator", script).test_value();
     consumer.set_line_connect(LINE_CONNECT_POWER_CONSUMER);
     engine.register_test_definition(consumer);
-    let id = engine.spawn_test_object(SpawnConfig::new("ELEV").with_category(CATEGORY_STRUCTURE));
+    let id = spawn_fixture!(engine, "ELEV", with_category: CATEGORY_STRUCTURE);
     let idx = engine.test_object_index(id);
 
-    assert_eq!(
-        engine.call_test_object_function(idx, "NeedsPower", Vec::new()),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_test_object_function(idx, "NeedsPower", Vec::new()) => Value::Bool(true));
 }
 
 #[test]
@@ -3517,12 +3088,9 @@ fn check_energy_need_chain_follows_power_lines_and_breaks_cycles_like_cpp() {
     );
     engine.register_test_definition(wire);
 
-    let plant =
-        engine.spawn_test_object(SpawnConfig::new("POWR").with_category(CATEGORY_STRUCTURE));
-    let relay =
-        engine.spawn_test_object(SpawnConfig::new("RELY").with_category(CATEGORY_STRUCTURE));
-    let consumer =
-        engine.spawn_test_object(SpawnConfig::new("ELEV").with_category(CATEGORY_STRUCTURE));
+    let plant = spawn_fixture!(engine, "POWR", with_category: CATEGORY_STRUCTURE);
+    let relay = spawn_fixture!(engine, "RELY", with_category: CATEGORY_STRUCTURE);
+    let consumer = spawn_fixture!(engine, "ELEV", with_category: CATEGORY_STRUCTURE);
     let connect = |definition: &str, from, to| {
         let mut action = ActionState::new("Connect");
         action.target = Some(from);
@@ -3535,51 +3103,35 @@ fn check_energy_need_chain_follows_power_lines_and_breaks_cycles_like_cpp() {
     engine.spawn_test_object(connect("WIRE", plant, consumer));
 
     let consumer_idx = engine.test_object_index(consumer);
-    assert_eq!(
-        engine.call_test_object_function(consumer_idx, "Arm", Vec::new()),
-        Value::Bool(false)
-    );
+    unit_assert_eq!(engine.call_test_object_function(consumer_idx, "Arm", Vec::new()) => Value::Bool(false));
     let plant_idx = engine.test_object_index(plant);
-    assert_eq!(
-        engine.call_test_object_function(plant_idx, "Probe", Vec::new()),
-        Value::Bool(false),
-        "inactive PWRL and active non-PWRL objects are ignored"
-    );
+    unit_assert_eq!(engine.call_test_object_function(plant_idx, "Probe", Vec::new()) => Value::Bool(false), "inactive PWRL and active non-PWRL objects are ignored");
     engine.spawn_test_object(connect("PWRL", plant, consumer));
-    assert_eq!(
-        engine.call_test_object_function(plant_idx, "Probe", Vec::new()),
-        Value::Bool(true)
-    );
-    assert_eq!(
+    unit_assert_eq!(engine.call_test_object_function(plant_idx, "Probe", Vec::new()) => Value::Bool(true));
+    unit_assert_eq!(
         engine.call_test_object_function(
             plant_idx,
             "ProbeTarget",
             vec![Value::Object(consumer.as_u64())],
-        ),
+        ) =>
         Value::Bool(true),
         "the declared object parameter is honored and surplus args are ignored"
     );
-    assert_eq!(
-        engine.call_test_object_function(plant_idx, "ProbeNil", Vec::new()),
+    unit_assert_eq!(
+        engine.call_test_object_function(plant_idx, "ProbeNil", Vec::new()) =>
         Value::Bool(true),
         "zero converts to a nil object parameter and defaults to the caller"
     );
-    assert_eq!(
-        engine.call_test_object_function(plant_idx, "ProbeFalse", Vec::new()),
+    unit_assert_eq!(
+        engine.call_test_object_function(plant_idx, "ProbeFalse", Vec::new()) =>
         Value::Bool(true),
         "false is Set0 before C4Object* conversion and defaults to the caller"
     );
     let consumer_snapshot = engine.test_object_snapshot(consumer);
-    assert!(
-        consumer_snapshot.need_energy,
-        "NeedEnergy is part of the persisted object snapshot (C4Object.cpp:2805)"
-    );
-    assert_eq!(
-        engine.call_test_object_function(consumer_idx, "Disarm", Vec::new()),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        engine.call_test_object_function(plant_idx, "Probe", Vec::new()),
+    unit_assert!(consumer_snapshot.need_energy, "NeedEnergy is part of the persisted object snapshot (C4Object.cpp:2805)");
+    unit_assert_eq!(engine.call_test_object_function(consumer_idx, "Disarm", Vec::new()) => Value::Bool(true));
+    unit_assert_eq!(
+        engine.call_test_object_function(plant_idx, "Probe", Vec::new()) =>
         Value::Bool(false),
         "EnergyCheck's success branch clears NeedEnergy (C4Script.cpp:1842-1849)"
     );
@@ -3600,17 +3152,12 @@ func Slay() { DoEnergy(-100); return(1); }
         ..PhysicalInfo::default()
     });
     engine.register_test_definition(living);
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING),
-    );
+    let id = spawn_fixture!(engine, "CLNK", with_category: CATEGORY_OBJECT | CATEGORY_LIVING);
     let idx = engine.test_object_index(id);
     engine.call_test_object_function(idx, "Slay", Vec::new());
     let idx = engine.test_object_index(id);
-    assert_eq!(engine.objects[idx].state.energy, 0);
-    assert!(
-        !engine.objects[idx].state.alive,
-        "energy zero from nonzero -> AssignDeath (C4Object.cpp:1363)"
-    );
+    unit_assert_eq!(engine.objects[idx].state.energy => 0);
+    unit_assert!(!engine.objects[idx].state.alive, "energy zero from nonzero -> AssignDeath (C4Object.cpp:1363)");
 }
 
 // C4Game::NewObject adds the object to Game.Objects BEFORE the
@@ -3628,22 +3175,14 @@ func Initialize() { SetTransferZone(-4, -38, 37, 82); return(1); }
     let mut engine = Engine::with_seed(0);
     let keep = Definition::from_script("WZKP", "WizardKeep", script).test_value();
     engine.register_test_definition(keep);
-    let id = engine.spawn_test_object(
-        SpawnConfig::new("WZKP")
-            .with_position(Vector2::new(100, 200))
-            .with_category(CATEGORY_OBJECT),
-    );
+    let id = spawn_fixture!(engine, "WZKP", with_position: Vector2::new(100, 200), with_category: CATEGORY_OBJECT);
     let snapshot = engine.snapshot();
     let zone = snapshot
         .transfer_zones
         .iter()
         .find(|zone| zone.owner == id)
         .test_value();
-    assert_eq!(
-        (zone.x, zone.y, zone.width, zone.height),
-        (96, 162, 37, 82),
-        "iX/iY are object-relative (C4Script.cpp:3154)"
-    );
+    unit_assert_eq!((zone.x, zone.y, zone.width, zone.height) => (96, 162, 37, 82), "iX/iY are object-relative (C4Script.cpp:3154)");
 }
 
 #[test]
@@ -3660,9 +3199,7 @@ func Deactivate(object target, bool clear_pointers)
     let controller = engine.spawn_test_object(SpawnConfig::new("CTRL"));
 
     for (offset, clear_pointers) in [(0, false), (20, true)] {
-        let target = engine.spawn_test_object(
-            SpawnConfig::new("ZONE").with_position(Vector2::new(50 + offset, 50)),
-        );
+        let target = spawn_fixture!(engine, "ZONE", with_position: Vector2::new(50 + offset, 50));
         engine
             .set_transfer_zone(
                 target,
@@ -3676,26 +3213,16 @@ func Deactivate(object target, bool clear_pointers)
             .test_value();
 
         let controller_index = engine.test_object_index(controller);
-        assert_eq!(
+        unit_assert_eq!(
             engine.call_test_object_function(
                 controller_index,
                 "Deactivate",
                 vec![object_reference_value(target), Value::Bool(clear_pointers)],
-            ),
+            ) =>
             Value::Bool(true)
         );
-        assert_eq!(
-            engine.test_object_snapshot(target).status,
-            ObjectStatus::Inactive
-        );
-        assert!(
-            engine
-                .snapshot()
-                .transfer_zones
-                .iter()
-                .all(|zone| zone.owner != target),
-            "StatusDeactivate({clear_pointers}) clears its zone before returning"
-        );
+        unit_assert_eq!(engine.test_object_snapshot(target).status => ObjectStatus::Inactive);
+        unit_assert!(engine.snapshot().transfer_zones.iter().all(|zone| zone.owner != target), "StatusDeactivate({clear_pointers}) clears its zone before returning");
     }
 }
 
@@ -3794,7 +3321,7 @@ public func Deactivate(object target)
     );
     let mut holder_action = ActionState::new("Idle");
     holder_action.target = Some(target);
-    let holder = engine.spawn_test_object(SpawnConfig::new("L82H").with_action(holder_action));
+    let holder = spawn_fixture!(engine, "L82H", with_action: holder_action);
     let holder_index = engine.test_object_index(holder);
     engine.objects[holder_index]
         .commands
@@ -3803,14 +3330,7 @@ public func Deactivate(object target)
     let controller = engine.spawn_test_object(SpawnConfig::new("L82R"));
 
     let target_index = engine.test_object_index(target);
-    assert_eq!(
-        engine.call_test_object_function(
-            target_index,
-            "Prepare",
-            vec![object_reference_value(holder)],
-        ),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_test_object_function(target_index, "Prepare", vec![object_reference_value(holder)],) => Value::Bool(true));
     engine
         .set_transfer_zone(
             target,
@@ -3824,71 +3344,38 @@ public func Deactivate(object target)
         .test_value();
 
     let controller_index = engine.test_object_index(controller);
-    assert_eq!(
-        engine.call_test_object_function(
-            controller_index,
-            "Deactivate",
-            vec![object_reference_value(target)],
-        ),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_test_object_function(controller_index, "Deactivate", vec![object_reference_value(target)],) => Value::Bool(true));
 
     let target_state = engine.test_object_snapshot(target);
     let child_state = engine.test_object_snapshot(child);
     let outer_state = engine.test_object_snapshot(outer);
-    assert_eq!(target_state.status, ObjectStatus::Inactive);
-    assert_eq!(target_state.container, None);
-    assert!(target_state.contents.is_empty());
-    assert!(!outer_state.contents.contains(&target));
-    assert_eq!(child_state.container, None);
-    assert_eq!(child_state.position, Vector2::new(40, 50));
-    assert_eq!(target_state.position, Vector2::new(70, 80));
-    assert_eq!(
-        target_state.local_vars.get("callback_order"),
-        Some(&Value::Int(1234)),
-        "child Ejection/Departure precede target Ejection/Departure"
-    );
-    assert_eq!(
-        target_state.local_vars.get("pointers_visible"),
-        Some(&Value::Int(8)),
-        "all four callbacks run before the object-pointer sweep"
-    );
-    assert_eq!(
-        target_state.local_vars.get("callback_status"),
-        Some(&Value::Int(ObjectStatus::Inactive.to_script_value()))
-    );
+    unit_assert_eq!(target_state.status => ObjectStatus::Inactive);
+    unit_assert_eq!(target_state.container => None);
+    unit_assert!(target_state.contents.is_empty());
+    unit_assert!(!outer_state.contents.contains(&target));
+    unit_assert_eq!(child_state.container => None);
+    unit_assert_eq!(child_state.position => Vector2::new(40, 50));
+    unit_assert_eq!(target_state.position => Vector2::new(70, 80));
+    unit_assert_eq!(target_state.local_vars.get("callback_order") => Some(&Value::Int(1234)), "child Ejection/Departure precede target Ejection/Departure");
+    unit_assert_eq!(target_state.local_vars.get("pointers_visible") => Some(&Value::Int(8)), "all four callbacks run before the object-pointer sweep");
+    unit_assert_eq!(target_state.local_vars.get("callback_status") => Some(&Value::Int(ObjectStatus::Inactive.to_script_value())));
 
     for id in [target, child] {
         let index = engine.test_object_index(id);
         let object = &engine.objects[index];
-        assert_eq!(object.state.rotation, 0);
-        assert_eq!(object.fixed_rotation, C4Fixed::ZERO);
-        assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
-        assert_eq!(object.state.velocity, Vector2::ZERO);
-        assert_eq!(object.rotation_velocity, C4Fixed::ZERO);
-        assert!(object.state.mobile);
-        assert!(!object.state.in_liquid);
+        unit_assert_eq!(object.state.rotation => 0);
+        unit_assert_eq!(object.fixed_rotation => C4Fixed::ZERO);
+        unit_assert_eq!(object.fixed_velocity => FixedVec2::ZERO);
+        unit_assert_eq!(object.state.velocity => Vector2::ZERO);
+        unit_assert_eq!(object.rotation_velocity => C4Fixed::ZERO);
+        unit_assert!(object.state.mobile);
+        unit_assert!(!object.state.in_liquid);
     }
 
     let holder_index = engine.test_object_index(holder);
-    assert_eq!(engine.objects[holder_index].state.action.target, None);
-    assert_eq!(
-        engine.objects[holder_index]
-            .commands
-            .command_views()
-            .first()
-            .expect("holder command remains")
-            .target,
-        None
-    );
-    assert!(
-        engine
-            .snapshot()
-            .transfer_zones
-            .iter()
-            .all(|zone| zone.owner != target),
-        "Game.ClearPointers clears zones created by the exit callbacks"
-    );
+    unit_assert_eq!(engine.objects[holder_index].state.action.target => None);
+    unit_assert_eq!(engine.objects[holder_index].commands.command_views().first().expect("holder command remains").target => None);
+    unit_assert!(engine.snapshot().transfer_zones.iter().all(|zone| zone.owner != target), "Game.ClearPointers clears zones created by the exit callbacks");
 }
 
 #[test]
@@ -3926,41 +3413,20 @@ public func Deactivate(object target)
     }
 
     let target = engine.spawn_test_object(SpawnConfig::new("L8IT"));
-    let skipped = engine.spawn_test_object(SpawnConfig::new("L8IC").with_container(target));
-    let reentered = engine.spawn_test_object(SpawnConfig::new("L8IC").with_container(target));
-    assert_eq!(
-        engine.test_object_snapshot(target).contents,
-        [reentered, skipped],
-        "stContents inserts a same-definition child at the cluster head"
-    );
+    let skipped = spawn_fixture!(engine, "L8IC", with_container: target);
+    let reentered = spawn_fixture!(engine, "L8IC", with_container: target);
+    unit_assert_eq!(engine.test_object_snapshot(target).contents => [reentered, skipped], "stContents inserts a same-definition child at the cluster head");
     let reentered_index = engine.test_object_index(reentered);
-    assert_eq!(
-        engine.call_test_object_function(reentered_index, "Arm", vec![]),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_test_object_function(reentered_index, "Arm", vec![]) => Value::Bool(true));
     let controller = engine.spawn_test_object(SpawnConfig::new("L8IR"));
     let controller_index = engine.test_object_index(controller);
-    assert_eq!(
-        engine.call_test_object_function(
-            controller_index,
-            "Deactivate",
-            vec![object_reference_value(target)],
-        ),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_test_object_function(controller_index, "Deactivate", vec![object_reference_value(target)],) => Value::Bool(true));
 
     let target_state = engine.test_object_snapshot(target);
-    assert_eq!(target_state.status, ObjectStatus::Inactive);
-    assert_eq!(
-        target_state.contents,
-        [reentered, skipped],
-        "the iterator stays on the original successor link: re-entry cannot alias the removed link"
-    );
-    assert_eq!(
-        engine.test_object_snapshot(reentered).container,
-        Some(target)
-    );
-    assert_eq!(engine.test_object_snapshot(skipped).container, Some(target));
+    unit_assert_eq!(target_state.status => ObjectStatus::Inactive);
+    unit_assert_eq!(target_state.contents => [reentered, skipped], "the iterator stays on the original successor link: re-entry cannot alias the removed link");
+    unit_assert_eq!(engine.test_object_snapshot(reentered).container => Some(target));
+    unit_assert_eq!(engine.test_object_snapshot(skipped).container => Some(target));
 }
 
 #[test]
@@ -3995,10 +3461,8 @@ func FindZones()
     engine.register_test_definition(zone);
     engine.register_test_script_definition("CTRL", "Controller", controller_script);
 
-    let target =
-        engine.spawn_test_object(SpawnConfig::new("ZONE").with_position(Vector2::new(50, 50)));
-    let peer =
-        engine.spawn_test_object(SpawnConfig::new("ZONE").with_position(Vector2::new(150, 150)));
+    let target = spawn_fixture!(engine, "ZONE", with_position: Vector2::new(50, 50));
+    let peer = spawn_fixture!(engine, "ZONE", with_position: Vector2::new(150, 150));
     let controller = engine.spawn_test_object(SpawnConfig::new("CTRL"));
     let call_status = |engine: &mut Engine, status| {
         let index = engine.test_object_index(controller);
@@ -4009,48 +3473,25 @@ func FindZones()
         )
     };
 
-    assert_eq!(call_status(&mut engine, 2), Value::Bool(true));
-    assert_eq!(
-        engine.test_object_snapshot(target).status,
-        ObjectStatus::Inactive
-    );
-    assert_eq!(call_status(&mut engine, 1), Value::Bool(true));
+    unit_assert_eq!(call_status(&mut engine, 2) => Value::Bool(true));
+    unit_assert_eq!(engine.test_object_snapshot(target).status => ObjectStatus::Inactive);
+    unit_assert_eq!(call_status(&mut engine, 1) => Value::Bool(true));
 
     let target_state = engine.test_object_snapshot(target);
-    assert_eq!(target_state.status, ObjectStatus::Normal);
-    assert_eq!(
-        target_state.local_vars.get("callback_status"),
-        Some(&Value::Int(1)),
-        "the callback runs after Status becomes normal"
-    );
-    assert_eq!(
-        target_state.local_vars.get("callback_master"),
-        Some(&Value::Bool(true)),
-        "the callback runs after stMain re-listing"
-    );
-    assert_eq!(
-        target_state.local_vars.get("callback_sector"),
-        Some(&Value::Bool(true)),
-        "the callback runs after UpdatePos restores the sector link"
-    );
+    unit_assert_eq!(target_state.status => ObjectStatus::Normal);
+    unit_assert_eq!(target_state.local_vars.get("callback_status") => Some(&Value::Int(1)), "the callback runs after Status becomes normal");
+    unit_assert_eq!(target_state.local_vars.get("callback_master") => Some(&Value::Bool(true)), "the callback runs after stMain re-listing");
+    unit_assert_eq!(target_state.local_vars.get("callback_sector") => Some(&Value::Bool(true)), "the callback runs after UpdatePos restores the sector link");
     let zone = engine
         .snapshot()
         .transfer_zones
         .into_iter()
         .find(|zone| zone.owner == target)
         .test_value();
-    assert_eq!(
-        (zone.x, zone.y, zone.width, zone.height),
-        (
-            target_state.position.x - 4,
-            target_state.position.y - 3,
-            8,
-            6,
-        )
-    );
+    unit_assert_eq!((zone.x, zone.y, zone.width, zone.height) => (target_state.position.x - 4, target_state.position.y - 3, 8, 6,));
     let controller_index = engine.test_object_index(controller);
-    assert_eq!(
-        engine.call_test_object_function(controller_index, "FindZones", vec![]),
+    unit_assert_eq!(
+        engine.call_test_object_function(controller_index, "FindZones", vec![]) =>
         Value::Array(vec![
             object_reference_value(target),
             object_reference_value(peer),
@@ -4084,17 +3525,9 @@ func Initialize() { CreateObject(CHLD, 0, 0, -1); UnknownFn(); return(1); }
         .iter()
         .find(|object| object.definition_id.as_str() == "CHLD")
         .test_value();
-    assert_eq!(
-        child_object.id.as_u64(),
-        parent_id.as_u64() + 1,
-        "the in-flight preview id materializes verbatim"
-    );
+    unit_assert_eq!(child_object.id.as_u64() => parent_id.as_u64() + 1, "the in-flight preview id materializes verbatim");
     let next = engine.spawn_test_object(test_object_config("CHLD"));
-    assert_eq!(
-        next.as_u64(),
-        parent_id.as_u64() + 2,
-        "the burned id is never re-minted"
-    );
+    unit_assert_eq!(next.as_u64() => parent_id.as_u64() + 2, "the burned id is never re-minted");
 }
 
 #[test]
@@ -4136,16 +3569,9 @@ func Ping() { return 17; }
         .into_iter()
         .find(|object| object.definition_id == "HELP")
         .test_value();
-    assert_eq!(
-        child.local_vars.get("helper"),
-        Some(&Value::Object(helper.id.as_u64())),
-        "the pending child's Initialize local survives materialization"
-    );
+    unit_assert_eq!(child.local_vars.get("helper") => Some(&Value::Object(helper.id.as_u64())), "the pending child's Initialize local survives materialization");
     let child_index = engine.test_object_index(child.id);
-    assert_eq!(
-        engine.call_test_object_function(child_index, "Probe", Vec::new()),
-        Value::Int(17)
-    );
+    unit_assert_eq!(engine.call_test_object_function(child_index, "Probe", Vec::new()) => Value::Int(17));
 }
 
 #[test]
@@ -4189,11 +3615,7 @@ func Initialize() { seen = GetXDir(FindObject(MARK), 100); }
         .into_iter()
         .find(|object| object.definition_id == "CHLD")
         .test_value();
-    assert_eq!(
-        child.local_vars.get("seen"),
-        Some(&Value::Int(300)),
-        "the child Initialize sees the earlier synchronous marker write"
-    );
+    unit_assert_eq!(child.local_vars.get("seen") => Some(&Value::Int(300)), "the child Initialize sees the earlier synchronous marker write");
 }
 
 #[test]
@@ -4245,11 +3667,7 @@ func Initialize() { seen = FindObject(CHLD)->Read(); }
         .test_value();
 
     let observer = engine.test_object_snapshot(observer_id);
-    assert_eq!(
-        observer.local_vars.get("seen"),
-        Some(&Value::Int(99)),
-        "the retained child mutation commits before the observer Initialize"
-    );
+    unit_assert_eq!(observer.local_vars.get("seen") => Some(&Value::Int(99)), "the retained child mutation commits before the observer Initialize");
 }
 
 #[test]
@@ -4289,11 +3707,7 @@ func Construction()
         .into_iter()
         .map(|child| engine.test_object_snapshot(child).definition_id)
         .collect::<Vec<_>>();
-    assert_eq!(
-        contents,
-        ["PSTL", "ROCK", "GOLD"],
-        "the retained callback-final list overrides generic spawn insertion"
-    );
+    unit_assert_eq!(contents => ["PSTL", "ROCK", "GOLD"], "the retained callback-final list overrides generic spawn insertion");
 }
 
 #[test]
@@ -4319,17 +3733,9 @@ func Construction() { CreateObject(CHLD, 0, 0, -1); UnknownFn(); return(1); }
         .iter()
         .find(|object| object.definition_id.as_str() == "CHLD")
         .test_value();
-    assert_eq!(
-        child_object.id.as_u64(),
-        parent_id.as_u64() + 1,
-        "the in-flight preview id materializes verbatim"
-    );
+    unit_assert_eq!(child_object.id.as_u64() => parent_id.as_u64() + 1, "the in-flight preview id materializes verbatim");
     let next = engine.spawn_test_object(test_object_config("CHLD"));
-    assert_eq!(
-        next.as_u64(),
-        parent_id.as_u64() + 2,
-        "the burned id is never re-minted"
-    );
+    unit_assert_eq!(next.as_u64() => parent_id.as_u64() + 2, "the burned id is never re-minted");
 }
 
 // SkiesOfFire InitializePlayer refills the crew's magic:
@@ -4363,19 +3769,10 @@ global func DoMagicEnergy(int iChange, object pObject, bool fAllowPartial)
     engine.register_test_definition(mage);
     let id = engine.spawn_test_object(test_object_config("MAGE"));
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.call_test_object_function(idx, "Refill", Vec::new()),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_test_object_function(idx, "Refill", Vec::new()) => Value::Bool(true));
     let idx = engine.test_object_index(id);
-    assert_eq!(
-        engine.objects[idx].state.magic_energy, 25_000,
-        "the scope write folds onto engine state"
-    );
-    assert_eq!(
-        engine.call_test_object_function(idx, "ReadBack", Vec::new()),
-        Value::Int(25)
-    );
+    unit_assert_eq!(engine.objects[idx].state.magic_energy => 25_000, "the scope write folds onto engine state");
+    unit_assert_eq!(engine.call_test_object_function(idx, "ReadBack", Vec::new()) => Value::Int(25));
 }
 
 // GoldRush DoInitialize pins NPCs in place: `while(pObj =
@@ -4414,7 +3811,7 @@ func Sweep() {
     let id = engine.spawn_test_object(test_object_config("CALL"));
     let idx = engine.test_object_index(id);
     let swept = engine.call_test_object_function(idx, "Sweep", Vec::new());
-    assert_eq!(swept, Value::Int(2), "both unowned crew NPCs iterated");
+    unit_assert_eq!(swept => Value::Int(2), "both unowned crew NPCs iterated");
     let pinned = engine
         .objects
         .iter()
@@ -4423,7 +3820,7 @@ func Sweep() {
                 && object.state.effects.iter().any(|e| e.name == "StayThere")
         })
         .count();
-    assert_eq!(pinned, 2, "StayThere lands on every NPC");
+    unit_assert_eq!(pinned => 2, "StayThere lands on every NPC");
 }
 
 // The REAL GoldRush chain is one level deeper: the SCENARIO script
@@ -4459,11 +3856,8 @@ protected func Script1() { StartTheMovie(); }
         .install_scenario_script_with_convention("Goldrush", scenario_script, true)
         .test_value();
 
-    let animal = engine.spawn_test_object(
-        SpawnConfig::new("ANML")
-            .with_position(Vector2::new(40, 40))
-            .with_alive(true),
-    );
+    let animal =
+        spawn_fixture!(engine, "ANML", with_position: Vector2::new(40, 40), with_alive: true);
 
     engine.scenario_script_go = true;
     for _ in 0..20 {
@@ -4472,7 +3866,7 @@ protected func Script1() { StartTheMovie(); }
 
     let idx = engine.test_object_index(animal);
     let effects = engine.objects[idx].state.effects.clone();
-    assert!(
+    unit_assert!(
         effects
             .iter()
             .any(|effect| effect.name == "Divinity" && effect.priority == 200),
@@ -4513,41 +3907,21 @@ fn object_property_and_index_write_declared_foreign_named_locals() {
     let caller = engine.spawn_test_object(SpawnConfig::new("CLLR"));
     let caller_index = engine.test_object_index(caller);
     let target = Value::Object(bank.as_u64());
-    assert_eq!(
-        engine.call_test_object_function(caller_index, "Write", vec![target.clone()]),
-        Value::Array(vec![Value::Int(7), Value::Int(7)]),
-    );
+    unit_assert_eq!(engine.call_test_object_function(caller_index, "Write", vec![target.clone()]) => Value::Array(vec![Value::Int(7), Value::Int(7)]),);
 
     let bank_index = engine.test_object_index(bank);
-    assert_eq!(
-        engine.call_test_object_function(bank_index, "ReadMoney", Vec::new()),
-        Value::Int(7),
-    );
+    unit_assert_eq!(engine.call_test_object_function(bank_index, "ReadMoney", Vec::new()) => Value::Int(7),);
     let caller_index = engine.test_object_index(caller);
-    assert_eq!(
-        engine.call_test_object_function(caller_index, "ReadMissing", vec![target.clone()]),
-        Value::Nil,
-    );
+    unit_assert_eq!(engine.call_test_object_function(caller_index, "ReadMissing", vec![target.clone()]) => Value::Nil,);
     let bank_index = engine.test_object_index(bank);
-    assert!(
-        !engine.objects[bank_index]
-            .state
-            .local_vars
-            .contains_key("missing"),
-        "a missing object local reads nil without being materialized",
-    );
+    unit_assert!(!engine.objects[bank_index].state.local_vars.contains_key("missing"), "a missing object local reads nil without being materialized",);
 
     let caller_index = engine.test_object_index(caller);
     let error = engine
         .call_object_function(caller_index, "BadKey", vec![target])
         .expect_err("non-string object index must fail");
     match error {
-        EngineError::Script { source, .. } => assert!(
-            source
-                .to_string()
-                .contains("indexed access on object: only string keys are allowed"),
-            "got: {source}",
-        ),
+        EngineError::Script { source, .. } => unit_assert!(source.to_string().contains("indexed access on object: only string keys are allowed"), "got: {source}",),
         other => panic!("expected script error, got {other:?}"),
     }
 }
@@ -4583,18 +3957,14 @@ func Probe(pOther) {
     engine.call_test_object_function(idx, "Probe", vec![Value::Object(cross_id.as_u64())]);
 
     let idx = engine.test_object_index(rider_id);
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("iRead"),
+    unit_assert_eq!(
+        engine.objects[idx].state.local_vars.get("iRead") =>
         Some(&Value::Int(84)),
         "the cross-object read sees the cross-object write \
              (FnLocal by-reference, C4Script.cpp:3423-3433)"
     );
     let cross_idx = engine.test_object_index(cross_id);
-    assert_eq!(
-        engine.objects[cross_idx].state.local_vars.get("__local_0"),
-        Some(&Value::Int(84)),
-        "the write landed in the TARGET's numbered slot 0"
-    );
+    unit_assert_eq!(engine.objects[cross_idx].state.local_vars.get("__local_0") => Some(&Value::Int(84)), "the write landed in the TARGET's numbered slot 0");
 }
 
 // `g_pIntroHorse->SetGait(3)` (M_Mov_Intro.c:19): an arrow call to a
@@ -4628,11 +3998,7 @@ func Probe(pOther) {
     engine.call_test_object_function(idx, "Probe", vec![Value::Object(horse_id.as_u64())]);
 
     let horse_idx = engine.test_object_index(horse_id);
-    assert_eq!(
-        engine.objects[horse_idx].state.local_vars.get("iGot"),
-        Some(&Value::Int(3)),
-        "the arrow-call argument arrives in the private function"
-    );
+    unit_assert_eq!(engine.objects[horse_idx].state.local_vars.get("iGot") => Some(&Value::Int(3)), "the arrow-call argument arrives in the private function");
 }
 
 // C4Aul mutates the LIVE object: a nested call's own-local write is    // C4Aul mutates the LIVE object: a nested call's own-local write is
@@ -4681,11 +4047,7 @@ protected func Script1() { PrivateCall(CreateObject(TALK), "Begin"); }
         .local_vars
         .get("iSaw")
         .cloned();
-    assert_eq!(
-        saw,
-        Some(Value::String("Intro".to_string().into())),
-        "the synchronous FxMovieStart sees the in-flight sName write"
-    );
+    unit_assert_eq!(saw => Some(Value::String("Intro".to_string().into())), "the synchronous FxMovieStart sees the in-flight sName write");
 }
 
 // `pPlayer->FindObject(HORS, 0, 0, -1, -1)` (M_Mov_Intro.c:16): an    // `pPlayer->FindObject(HORS, 0, 0, -1, -1)` (M_Mov_Intro.c:16): an
@@ -4714,15 +4076,9 @@ func FoundIt(pObj) { RemoveObject(pObj); return(1); }
     probe_def.set_category(CATEGORY_OBJECT);
     engine.register_test_definition(probe_def);
 
-    let caller_id = engine.spawn_test_object(
-        SpawnConfig::new("CALR")
-            .with_position(Vector2::new(10, 10))
-            .with_category(CATEGORY_OBJECT),
-    );
-    let other =
-        engine.spawn_test_object(SpawnConfig::new("PROB").with_position(Vector2::new(500, 40)));
-    let animal =
-        engine.spawn_test_object(SpawnConfig::new("ANML").with_position(Vector2::new(510, 40)));
+    let caller_id = spawn_fixture!(engine, "CALR", with_position: Vector2::new(10, 10), with_category: CATEGORY_OBJECT);
+    let other = spawn_fixture!(engine, "PROB", with_position: Vector2::new(500, 40));
+    let animal = spawn_fixture!(engine, "ANML", with_position: Vector2::new(510, 40));
 
     let idx = engine.test_object_index(caller_id);
     engine.call_test_object_function(idx, "Probe", vec![Value::Object(other.as_u64())]);
@@ -4731,10 +4087,7 @@ func FoundIt(pObj) { RemoveObject(pObj); return(1); }
         .find_object_index(animal)
         .map(|index| engine.objects[index].destroyed)
         .unwrap_or(true);
-    assert!(
-        removed,
-        "the target-relative closest search finds the animal next to pOther"
-    );
+    unit_assert!(removed, "the target-relative closest search finds the animal next to pOther");
 }
 
 // Time.c4d/Script.c `Initialized` (and Driftwood.c4d): `while(pOther =
@@ -4759,20 +4112,13 @@ func Dedup() {
 "#;
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("TIMR", "Timer", script);
-    let keeper =
-        engine.spawn_test_object(SpawnConfig::new("TIMR").with_position(Vector2::new(10, 10)));
-    let dup_a =
-        engine.spawn_test_object(SpawnConfig::new("TIMR").with_position(Vector2::new(20, 10)));
-    let dup_b =
-        engine.spawn_test_object(SpawnConfig::new("TIMR").with_position(Vector2::new(30, 10)));
+    let keeper = spawn_fixture!(engine, "TIMR", with_position: Vector2::new(10, 10));
+    let dup_a = spawn_fixture!(engine, "TIMR", with_position: Vector2::new(20, 10));
+    let dup_b = spawn_fixture!(engine, "TIMR", with_position: Vector2::new(30, 10));
 
     let idx = engine.test_object_index(keeper);
     let result = engine.call_test_object_function(idx, "Dedup", Vec::new());
-    assert_eq!(
-        result,
-        Value::Int(2),
-        "each duplicate is found+removed exactly once (C4Object.cpp:282, C4Game.cpp:1365)"
-    );
+    unit_assert_eq!(result => Value::Int(2), "each duplicate is found+removed exactly once (C4Object.cpp:282, C4Game.cpp:1365)");
     for id in [dup_a, dup_b] {
         let destroyed = engine
             .find_object_index(id)
@@ -4781,16 +4127,13 @@ func Dedup() {
                     || engine.objects[index].state.status == ObjectStatus::Deleted
             })
             .unwrap_or(true);
-        assert!(destroyed, "the duplicate's removal was committed");
+        unit_assert!(destroyed, "the duplicate's removal was committed");
     }
     let keeper_alive = engine
         .find_object_index(keeper)
         .map(|index| engine.objects[index].state.status == ObjectStatus::Normal)
         .unwrap_or(false);
-    assert!(
-        keeper_alive,
-        "the caller survives (FindObject excludes cthr->Obj, C4Script.cpp:2115-2131)"
-    );
+    unit_assert!(keeper_alive, "the caller survives (FindObject excludes cthr->Obj, C4Script.cpp:2115-2131)");
 }
 
 // Basement72.c4d (BAS7) `MoveOutClonk`: `while(Stuck(pObj) &&
@@ -4831,18 +4174,14 @@ func MoveOut(pObj) {
     let idx = engine.test_object_index(base);
     let result =
         engine.call_test_object_function(idx, "MoveOut", vec![Value::Object(stuck_clonk.as_u64())]);
-    assert_eq!(
-        result,
+    unit_assert_eq!(
+        result =>
         Value::Int(6),
         "y walks 25→19 one pixel per iteration, Stuck turns false above the surface \
              (C4Script.cpp:462-477,1858-1862)"
     );
     let final_position = engine.test_object_snapshot(stuck_clonk).position;
-    assert_eq!(
-        final_position,
-        Vector2::new(50, 19),
-        "the foreign ForcePosition writes commit to the world"
-    );
+    unit_assert_eq!(final_position => Vector2::new(50, 19), "the foreign ForcePosition writes commit to the world");
 }
 
 // TotemHunt _PLO `DoPlrLaunch`: `while (Contents()) {
@@ -4874,14 +4213,10 @@ func Eject() {
 
     let idx = engine.test_object_index(container);
     let result = engine.call_test_object_function(idx, "Eject", Vec::new());
-    assert_eq!(
-        result,
-        Value::Int(2),
-        "each content is ejected exactly once (C4Object.cpp:1529-1533)"
-    );
+    unit_assert_eq!(result => Value::Int(2), "each content is ejected exactly once (C4Object.cpp:1529-1533)");
     for id in [item_a, item_b] {
         let contained = engine.test_object_snapshot(id).container;
-        assert_eq!(contained, None, "the Exit committed to the world");
+        unit_assert_eq!(contained => None, "the Exit committed to the world");
     }
 }
 
@@ -4917,38 +4252,18 @@ public func Prep() {
     engine.register_test_script_definition("Vict", "Victim", victim_script);
     engine.register_test_player(PlayerConfig::new(5, "Owner"));
     let prober = engine.spawn_test_object(test_object_config("Prob"));
-    let victim = engine.spawn_test_object(
-        SpawnConfig::new("Vict")
-            .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-            .with_alive(true),
-    );
+    let victim = spawn_fixture!(engine, "Vict", with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_alive: true);
     let victim_idx = engine.test_object_index(victim);
-    assert_ne!(
-        engine.objects[victim_idx].state.ocf & clonk_engine::ocf::ALIVE,
-        0,
-        "sanity: the living victim starts with OCF_Alive"
-    );
+    unit_assert_ne!(engine.objects[victim_idx].state.ocf & clonk_engine::ocf::ALIVE => 0, "sanity: the living victim starts with OCF_Alive");
 
     let idx = engine.test_object_index(prober);
     engine.call_test_object_function(idx, "Probe", vec![Value::Object(victim.as_u64())]);
 
     let idx = engine.test_object_index(prober);
     let locals = &engine.objects[idx].state.local_vars;
-    assert_eq!(
-        locals.get("iOwn"),
-        Some(&Value::Int(5)),
-        "GetOwner sees the staged SetOwner mid-call"
-    );
-    assert_eq!(
-        locals.get("iXd"),
-        Some(&Value::Int(30)),
-        "GetXDir sees the staged SetXDir mid-call"
-    );
-    assert_eq!(
-        locals.get("iOcfAlive"),
-        Some(&Value::Int(0)),
-        "GetOCF drops OCF_Alive after the staged SetAlive(0) (SetOCF runs synchronously in C++)"
-    );
+    unit_assert_eq!(locals.get("iOwn") => Some(&Value::Int(5)), "GetOwner sees the staged SetOwner mid-call");
+    unit_assert_eq!(locals.get("iXd") => Some(&Value::Int(30)), "GetXDir sees the staged SetXDir mid-call");
+    unit_assert_eq!(locals.get("iOcfAlive") => Some(&Value::Int(0)), "GetOCF drops OCF_Alive after the staged SetAlive(0) (SetOCF runs synchronously in C++)");
 }
 
 // FnExit (C4Script.cpp:372-388): the optional position args are
@@ -4976,27 +4291,15 @@ public func Launch(pItem) {
     let idx = engine.test_object_index(container);
     let result =
         engine.call_test_object_function(idx, "Launch", vec![Value::Object(item.as_u64())]);
-    assert_eq!(result, Value::Bool(true), "the contained item exits");
+    unit_assert_eq!(result => Value::Bool(true), "the contained item exits");
 
     let item_idx = engine.test_object_index(item);
     let state = &engine.objects[item_idx].state;
-    assert_eq!(state.container, None, "the Exit committed");
-    assert_eq!(
-        state.position,
-        Vector2::new(50, 42),
-        "x = caller.x + tx, y = caller.y + ty + Shape.y (40+5-3)"
-    );
-    assert_eq!(state.rotation, 90, "r = tr (C4Object.cpp:1552)");
-    assert_eq!(
-        engine.objects[item_idx].fixed_velocity,
-        FixedVec2::new(itofix(3), itofix(-2)),
-        "xdir/ydir = itofix(txdir/tydir)"
-    );
-    assert_eq!(
-        engine.objects[item_idx].rotation_velocity,
-        itofix(20) / 10,
-        "rdir = itofix(trdir) / 10 (C4Script.cpp:388)"
-    );
+    unit_assert_eq!(state.container => None, "the Exit committed");
+    unit_assert_eq!(state.position => Vector2::new(50, 42), "x = caller.x + tx, y = caller.y + ty + Shape.y (40+5-3)");
+    unit_assert_eq!(state.rotation => 90, "r = tr (C4Object.cpp:1552)");
+    unit_assert_eq!(engine.objects[item_idx].fixed_velocity => FixedVec2::new(itofix(3), itofix(-2)), "xdir/ydir = itofix(txdir/tydir)");
+    unit_assert_eq!(engine.objects[item_idx].rotation_velocity => itofix(20) / 10, "rdir = itofix(trdir) / 10 (C4Script.cpp:388)");
 }
 
 #[test]
@@ -5068,33 +4371,23 @@ public func Leave()
     engine.set_landscape(Landscape::flat(100, 100));
     engine.register_test_definition(container);
     engine.register_test_definition(item);
-    let container =
-        engine.spawn_test_object(SpawnConfig::new("CONT").with_position(Vector2::new(30, 40)));
-    let item = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_container(container)
-            .with_rotation(11)
-            .with_in_liquid(true)
-            .with_mobile(false),
-    );
+    let container = spawn_fixture!(engine, "CONT", with_position: Vector2::new(30, 40));
+    let item = spawn_fixture!(engine, "ITEM", with_container: container, with_rotation: 11, with_in_liquid: true, with_mobile: false);
     let item_idx = engine.test_object_index(item);
     engine.objects[item_idx].set_fixed_velocity(FixedVec2::new(itofix(8), itofix(9)));
 
-    assert_eq!(
-        engine.call_object_function(item_idx, "Leave", Vec::new())?,
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(item_idx, "Leave", Vec::new())? => Value::Bool(true));
 
     let item_idx = engine.test_object_index(item);
     let object = &engine.objects[item_idx];
-    assert_eq!(object.state.container, None);
-    assert_eq!(object.state.position, Vector2::new(4, 45));
-    assert_eq!(object.fixed_position, FixedVec2::new(itofix(4), itofix(45)));
-    assert_eq!(object.state.rotation, 90);
-    assert_eq!(object.fixed_velocity, FixedVec2::new(itofix(3), itofix(-2)));
-    assert_eq!(object.rotation_velocity, itofix(20) / 10);
-    assert!(object.state.mobile, "Exit sets Mobile");
-    assert!(!object.state.in_liquid, "Exit clears InLiquid");
+    unit_assert_eq!(object.state.container => None);
+    unit_assert_eq!(object.state.position => Vector2::new(4, 45));
+    unit_assert_eq!(object.fixed_position => FixedVec2::new(itofix(4), itofix(45)));
+    unit_assert_eq!(object.state.rotation => 90);
+    unit_assert_eq!(object.fixed_velocity => FixedVec2::new(itofix(3), itofix(-2)));
+    unit_assert_eq!(object.rotation_velocity => itofix(20) / 10);
+    unit_assert!(object.state.mobile, "Exit sets Mobile");
+    unit_assert!(!object.state.in_liquid, "Exit clears InLiquid");
 
     let locals = &object.state.local_vars;
     for (name, expected) in [
@@ -5113,14 +4406,14 @@ public func Leave()
         ("departure_xdir", 30),
         ("departure_ydir", -20),
     ] {
-        assert_eq!(locals.get(name), Some(&Value::Int(expected)), "{name}");
+        unit_assert_eq!(locals.get(name) => Some(&Value::Int(expected)), "{name}");
     }
     for name in [
         "contact_contained",
         "ejection_contained",
         "departure_contained",
     ] {
-        assert_eq!(locals.get(name), Some(&Value::Bool(false)), "{name}");
+        unit_assert_eq!(locals.get(name) => Some(&Value::Bool(false)), "{name}");
     }
     Ok(())
 }
@@ -5159,28 +4452,17 @@ func Leave()
 
     let item_idx = engine.test_object_index(item);
     let result = engine.call_test_object_function(item_idx, "Leave", vec![]);
-    assert_eq!(
-        result,
-        Value::Bool(false),
-        "callback re-entry makes Exit fail"
-    );
+    unit_assert_eq!(result => Value::Bool(false), "callback re-entry makes Exit fail");
 
     let container_idx = engine.test_object_index(container);
     let item_idx = engine.test_object_index(item);
-    assert_eq!(engine.objects[item_idx].state.container, Some(container));
-    assert_eq!(
-        engine.objects[container_idx]
-            .state
-            .local_vars
-            .get("ejected"),
-        Some(&Value::Int(1)),
-        "Ejection ran"
-    );
-    assert_eq!(
+    unit_assert_eq!(engine.objects[item_idx].state.container => Some(container));
+    unit_assert_eq!(engine.objects[container_idx].state.local_vars.get("ejected") => Some(&Value::Int(1)), "Ejection ran");
+    unit_assert_eq!(
         engine.objects[item_idx]
             .state
             .local_vars
-            .get("departure_saw_reentry"),
+            .get("departure_saw_reentry") =>
         Some(&Value::Bool(true)),
         "Departure ran after Ejection and saw the re-entry"
     );
@@ -5233,19 +4515,12 @@ protected func AttachAbort(int phase)
     );
     engine.register_test_definition(item_definition);
 
-    let driver =
-        engine.spawn_test_object(SpawnConfig::new("DRVR").with_position(Vector2::new(100, 200)));
+    let driver = spawn_fixture!(engine, "DRVR", with_position: Vector2::new(100, 200));
     let driver_index = engine.test_object_index(driver);
 
     let mut attach_action = ActionState::new("Attach");
     attach_action.phase = 3;
-    let loose = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_position(Vector2::new(30, 40))
-            .with_rotation(11)
-            .with_action(attach_action)
-            .with_loaded(true),
-    );
+    let loose = spawn_fixture!(engine, "ITEM", with_position: Vector2::new(30, 40), with_rotation: 11, with_action: attach_action, with_loaded: true);
     let mut expected_rng = engine.debug_rng_clone();
     let _discarded_rotation = expected_rng.random(360);
     let expected_abort_random = expected_rng.random(360);
@@ -5259,40 +4534,26 @@ protected func AttachAbort(int phase)
             Value::Int(-1),
         ],
     );
-    assert_eq!(result, Value::Bool(false));
+    unit_assert_eq!(result => Value::Bool(false));
     let loose = engine.test_object_snapshot(loose);
-    assert_eq!(loose.action.name, "Idle");
-    assert_eq!(loose.position, Vector2::new(30, 40));
-    assert_eq!(loose.rotation, 11);
-    assert_eq!(loose.local_vars.get("abort_count"), Some(&Value::Int(1)));
-    assert_eq!(loose.local_vars.get("abort_container"), Some(&Value::Nil));
-    assert_eq!(loose.local_vars.get("abort_phase"), Some(&Value::Int(3)));
-    assert_eq!(
-        loose.local_vars.get("abort_saw_idle"),
-        Some(&Value::Bool(true))
-    );
-    assert_eq!(
-        loose.local_vars.get("abort_random"),
+    unit_assert_eq!(loose.action.name => "Idle");
+    unit_assert_eq!(loose.position => Vector2::new(30, 40));
+    unit_assert_eq!(loose.rotation => 11);
+    unit_assert_eq!(loose.local_vars.get("abort_count") => Some(&Value::Int(1)));
+    unit_assert_eq!(loose.local_vars.get("abort_container") => Some(&Value::Nil));
+    unit_assert_eq!(loose.local_vars.get("abort_phase") => Some(&Value::Int(3)));
+    unit_assert_eq!(loose.local_vars.get("abort_saw_idle") => Some(&Value::Bool(true)));
+    unit_assert_eq!(
+        loose.local_vars.get("abort_random") =>
         Some(&Value::Int(expected_abort_random)),
         "tr=-1 consumes Random(360) before CancelAttach's AbortCall even when Exit then fails"
     );
     let mut observed_rng = engine.debug_rng_clone();
-    assert_eq!(
-        observed_rng.random(360),
-        expected_rng.random(360),
-        "the failed uncontained Exit and AbortCall consumed exactly two draws"
-    );
+    unit_assert_eq!(observed_rng.random(360) => expected_rng.random(360), "the failed uncontained Exit and AbortCall consumed exactly two draws");
 
     let mut attach_action = ActionState::new("Attach");
     attach_action.phase = 7;
-    let contained = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_position(Vector2::new(30, 40))
-            .with_rotation(11)
-            .with_container(driver)
-            .with_action(attach_action)
-            .with_loaded(true),
-    );
+    let contained = spawn_fixture!(engine, "ITEM", with_position: Vector2::new(30, 40), with_rotation: 11, with_container: driver, with_action: attach_action, with_loaded: true);
     let result = engine.call_test_object_function(
         driver_index,
         "Leave",
@@ -5303,35 +4564,19 @@ protected func AttachAbort(int phase)
             Value::Int(90),
         ],
     );
-    assert_eq!(result, Value::Bool(true));
+    unit_assert_eq!(result => Value::Bool(true));
     let contained = engine.test_object_snapshot(contained);
-    assert_eq!(contained.action.name, "Idle");
-    assert_eq!(contained.container, None);
-    assert_eq!(
-        contained.position,
-        Vector2::new(110, 199),
-        "FnExit reads the subject's Shape.y after CancelAttach's AbortCall"
-    );
-    assert_eq!(contained.rotation, 90);
-    assert_eq!(
-        contained.local_vars.get("abort_container"),
-        Some(&object_reference_value(driver))
-    );
-    assert_eq!(contained.local_vars.get("abort_x"), Some(&Value::Int(30)));
-    assert_eq!(contained.local_vars.get("abort_y"), Some(&Value::Int(40)));
-    assert_eq!(contained.local_vars.get("abort_r"), Some(&Value::Int(11)));
-    assert_eq!(
-        contained.local_vars.get("abort_phase"),
-        Some(&Value::Int(7))
-    );
+    unit_assert_eq!(contained.action.name => "Idle");
+    unit_assert_eq!(contained.container => None);
+    unit_assert_eq!(contained.position => Vector2::new(110, 199), "FnExit reads the subject's Shape.y after CancelAttach's AbortCall");
+    unit_assert_eq!(contained.rotation => 90);
+    unit_assert_eq!(contained.local_vars.get("abort_container") => Some(&object_reference_value(driver)));
+    unit_assert_eq!(contained.local_vars.get("abort_x") => Some(&Value::Int(30)));
+    unit_assert_eq!(contained.local_vars.get("abort_y") => Some(&Value::Int(40)));
+    unit_assert_eq!(contained.local_vars.get("abort_r") => Some(&Value::Int(11)));
+    unit_assert_eq!(contained.local_vars.get("abort_phase") => Some(&Value::Int(7)));
 
-    let walking = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_position(Vector2::new(50, 60))
-            .with_container(driver)
-            .with_action(ActionState::new("Walk"))
-            .with_loaded(true),
-    );
+    let walking = spawn_fixture!(engine, "ITEM", with_position: Vector2::new(50, 60), with_container: driver, with_action: ActionState::new("Walk"), with_loaded: true);
     let result = engine.call_test_object_function(
         driver_index,
         "Leave",
@@ -5342,10 +4587,10 @@ protected func AttachAbort(int phase)
             Value::Int(90),
         ],
     );
-    assert_eq!(result, Value::Bool(true));
+    unit_assert_eq!(result => Value::Bool(true));
     let walking = engine.test_object_snapshot(walking);
-    assert_eq!(walking.action.name, "Walk");
-    assert_eq!(walking.local_vars.get("abort_count"), None);
+    unit_assert_eq!(walking.action.name => "Walk");
+    unit_assert_eq!(walking.local_vars.get("abort_count") => None);
 }
 
 // C4Object::Enter adds the object to the container's Contents list
@@ -5374,22 +4619,10 @@ public func Take(pItem) {
 
     let idx = engine.test_object_index(container);
     let result = engine.call_test_object_function(idx, "Take", vec![Value::Object(item.as_u64())]);
-    assert_eq!(
-        result,
-        Value::Int(1),
-        "the same-call Enter is visible to ContentsCount (C4Object.cpp:1601-1605)"
-    );
+    unit_assert_eq!(result => Value::Int(1), "the same-call Enter is visible to ContentsCount (C4Object.cpp:1601-1605)");
     let idx = engine.test_object_index(container);
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("pFirst"),
-        Some(&Value::Object(item.as_u64())),
-        "Contents(0) returns the just-entered item mid-call"
-    );
-    assert_eq!(
-        engine.objects[idx].state.contents,
-        vec![item],
-        "the Enter committed to the world"
-    );
+    unit_assert_eq!(engine.objects[idx].state.local_vars.get("pFirst") => Some(&Value::Object(item.as_u64())), "Contents(0) returns the just-entered item mid-call");
+    unit_assert_eq!(engine.objects[idx].state.contents => vec![item], "the Enter committed to the world");
 }
 
 // Dragon Rock's Redefine3 creates the replacement Clonk and immediately
@@ -5411,21 +4644,16 @@ public func Replace() {
     engine.register_test_definition(simple_definition("NEWK"));
     engine.register_test_definition(simple_definition("ITEM"));
 
-    let old = engine.spawn_test_object(
-        SpawnConfig::new("OLDK")
-            .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-            .with_alive(true)
-            .with_owner(7),
-    );
+    let old = spawn_fixture!(engine, "OLDK", with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_alive: true, with_owner: 7);
     let first =
         engine.spawn_test_object(test_object_config("ITEM").with_owner(3).with_container(old));
     let second =
         engine.spawn_test_object(test_object_config("ITEM").with_owner(4).with_container(old));
     let old_idx = engine.test_object_index(old);
-    assert_eq!(engine.objects[old_idx].state.contents, vec![second, first]);
+    unit_assert_eq!(engine.objects[old_idx].state.contents => vec![second, first]);
 
     let result = engine.call_test_object_function(old_idx, "Replace", Vec::new());
-    assert_eq!(result, Value::Bool(true));
+    unit_assert_eq!(result => Value::Bool(true));
 
     let new_idx = engine
         .objects
@@ -5434,24 +4662,14 @@ public func Replace() {
         .test_value();
     let new = engine.objects[new_idx].id;
     let old_idx = engine.test_object_index(old);
-    assert!(engine.objects[old_idx].state.contents.is_empty());
-    assert_eq!(
-        engine.objects[new_idx].state.contents,
-        vec![first, second],
-        "the copied source order is fed through runtime stContents insertion"
-    );
+    unit_assert!(engine.objects[old_idx].state.contents.is_empty());
+    unit_assert_eq!(engine.objects[new_idx].state.contents => vec![first, second], "the copied source order is fed through runtime stContents insertion");
     let first_idx = engine.test_object_index(first);
     let second_idx = engine.test_object_index(second);
-    assert_eq!(engine.objects[first_idx].state.container, Some(new));
-    assert_eq!(engine.objects[second_idx].state.container, Some(new));
-    assert_eq!(
-        engine.objects[first_idx].state.owner, 3,
-        "Owner is unchanged"
-    );
-    assert_eq!(
-        engine.objects[second_idx].state.owner, 4,
-        "Owner is unchanged"
-    );
+    unit_assert_eq!(engine.objects[first_idx].state.container => Some(new));
+    unit_assert_eq!(engine.objects[second_idx].state.container => Some(new));
+    unit_assert_eq!(engine.objects[first_idx].state.owner => 3, "Owner is unchanged");
+    unit_assert_eq!(engine.objects[second_idx].state.owner => 4, "Owner is unchanged");
 }
 
 // GrabContents reports whether the bulk operation itself was valid, not
@@ -5484,13 +4702,13 @@ protected func RejectEntrance(pContainer) { return(1); }
         "MoveTo",
         vec![object_reference_value(destination)],
     );
-    assert_eq!(result, Value::Bool(true), "an individual veto is ignored");
+    unit_assert_eq!(result => Value::Bool(true), "an individual veto is ignored");
     let rejected_idx = engine.test_object_index(rejected);
-    assert_eq!(engine.objects[rejected_idx].state.container, Some(source));
+    unit_assert_eq!(engine.objects[rejected_idx].state.container => Some(source));
 
     let source_idx = engine.test_object_index(source);
-    assert_eq!(
-        engine.call_test_object_function(source_idx, "MoveToSelf", Vec::new()),
+    unit_assert_eq!(
+        engine.call_test_object_function(source_idx, "MoveToSelf", Vec::new()) =>
         Value::Bool(false),
         "pTo == from is rejected before the bulk operation"
     );
@@ -5600,43 +4818,21 @@ public func MarkCollection()
     engine.register_test_definition(source);
     engine.register_test_definition(destination);
     engine.register_test_definition(item);
-    let source =
-        engine.spawn_test_object(SpawnConfig::new("SRCE").with_position(Vector2::new(-20, -20)));
-    let destination = engine.spawn_test_object(
-        SpawnConfig::new("DEST")
-            .with_position(Vector2::new(60, 70))
-            .with_velocity(Vector2::new(3, -2)),
-    );
-    let collected = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(source));
-    let grabbed = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(source));
-    let inactive = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_container(source)
-            .with_status(ObjectStatus::Inactive),
-    );
+    let source = spawn_fixture!(engine, "SRCE", with_position: Vector2::new(-20, -20));
+    let destination = spawn_fixture!(engine, "DEST", with_position: Vector2::new(60, 70), with_velocity: Vector2::new(3, -2));
+    let collected = spawn_fixture!(engine, "ITEM", with_container: source);
+    let grabbed = spawn_fixture!(engine, "ITEM", with_container: source);
+    let inactive =
+        spawn_fixture!(engine, "ITEM", with_container: source, with_status: ObjectStatus::Inactive);
     for target in [collected, grabbed, inactive] {
         let index = engine.test_object_index(target);
         engine.objects[index].set_fixed_velocity(FixedVec2::new(itofix(8), itofix(9)));
     }
 
     let destination_idx = engine.test_object_index(destination);
-    assert_eq!(
-        engine.call_object_function(
-            destination_idx,
-            "Take",
-            vec![object_reference_value(collected)],
-        )?,
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(destination_idx, "Take", vec![object_reference_value(collected)],)? => Value::Bool(true));
     let destination_idx = engine.test_object_index(destination);
-    assert_eq!(
-        engine.call_object_function(
-            destination_idx,
-            "TakeAll",
-            vec![object_reference_value(source)],
-        )?,
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(destination_idx, "TakeAll", vec![object_reference_value(source)],)? => Value::Bool(true));
 
     for (target, expected_order) in [
         (collected, 12_345_678),
@@ -5645,9 +4841,9 @@ public func MarkCollection()
     ] {
         let index = engine.test_object_index(target);
         let object = &engine.objects[index];
-        assert_eq!(object.state.container, Some(destination));
-        assert_eq!(object.state.position, Vector2::new(60, 70));
-        assert_eq!(object.fixed_velocity, FixedVec2::new(itofix(3), itofix(-2)));
+        unit_assert_eq!(object.state.container => Some(destination));
+        unit_assert_eq!(object.state.position => Vector2::new(60, 70));
+        unit_assert_eq!(object.fixed_velocity => FixedVec2::new(itofix(3), itofix(-2)));
         let (entered_x, entered_y, entered_xdir, entered_ydir) = if target == collected {
             // Collect calls Enter with fCopyMotion=false; its callbacks
             // see Exit's clamped zero-motion state and its own tail copies
@@ -5682,18 +4878,14 @@ public func MarkCollection()
             ("entrance_xdir", entered_xdir),
             ("entrance_ydir", entered_ydir),
         ] {
-            assert_eq!(locals.get(name), Some(&Value::Int(expected)), "{name}");
+            unit_assert_eq!(locals.get(name) => Some(&Value::Int(expected)), "{name}");
         }
         for name in ["left_contained", "top_contained", "ejection_contained"] {
-            assert_eq!(locals.get(name), Some(&Value::Bool(false)), "{name}");
+            unit_assert_eq!(locals.get(name) => Some(&Value::Bool(false)), "{name}");
         }
     }
     let inactive_idx = engine.test_object_index(inactive);
-    assert_eq!(
-        engine.objects[inactive_idx].state.status,
-        ObjectStatus::Inactive,
-        "raw nonzero Status remains eligible for GrabContents -> Enter"
-    );
+    unit_assert_eq!(engine.objects[inactive_idx].state.status => ObjectStatus::Inactive, "raw nonzero Status remains eligible for GrabContents -> Enter");
     Ok(())
 }
 
@@ -5790,9 +4982,9 @@ func Gates(object shot, object victim)
     second_config.team = Some(1);
     let second = engine.join_player(second_config)?.number();
 
-    engine.spawn_test_object(SpawnConfig::new("NOFF").with_owner(-1));
-    let shot = engine.spawn_test_object(SpawnConfig::new("HZCK").with_owner(first));
-    let victim = engine.spawn_test_object(SpawnConfig::new("HZCK").with_owner(second));
+    spawn_fixture!(engine, "NOFF", with_owner: -1);
+    let shot = spawn_fixture!(engine, "HZCK", with_owner: first);
+    let victim = spawn_fixture!(engine, "HZCK", with_owner: second);
 
     let index = engine.test_object_index(shot);
     let gates = engine.call_test_object_function(
@@ -5800,8 +4992,8 @@ func Gates(object shot, object victim)
         "Gates",
         vec![Value::Object(shot.as_u64()), Value::Object(victim.as_u64())],
     );
-    assert_eq!(
-        gates,
+    unit_assert_eq!(
+        gates =>
         Value::Array(vec![
             Value::Int(1),
             Value::Bool(false),
@@ -5940,13 +5132,10 @@ func Grenade(object victim) { return BlastObjects(GetX(victim), GetY(victim), 20
     let bullet = engine.call_object_function(
         index,
         "Bullet",
-        vec![
-            Value::Object(shot.as_u64()),
-            Value::Object(victim.as_u64()),
-        ],
+        vec![Value::Object(shot.as_u64()), Value::Object(victim.as_u64())],
     )?;
-    assert_eq!(
-        bullet,
+    unit_assert_eq!(
+        bullet =>
         Value::Array(vec![
             Value::Int(1),
             Value::Bool(false),
@@ -5966,15 +5155,12 @@ func Grenade(object victim) { return BlastObjects(GetX(victim), GetY(victim), 20
     let index = engine.find_object_index(shot).expect("shooter remains");
     engine.call_object_function(index, "Grenade", vec![Value::Object(victim.as_u64())])?;
     let victim_index = engine.find_object_index(victim).expect("victim remains");
-    assert!(
+    unit_assert!(
         engine.objects[victim_index].state.energy < energy_before,
         "the blast ignores the rule entirely and damages the teammate \
          (C4Game.cpp:1281-1284 has no hostility test); energy stayed {}",
         engine.objects[victim_index].state.energy
     );
-    assert_eq!(
-        engine.objects[victim_index].state.controller, first,
-        "the causing player rides along on the blast damage"
-    );
+    unit_assert_eq!(engine.objects[victim_index].state.controller => first, "the causing player rides along on the blast damage");
     Ok(())
 }

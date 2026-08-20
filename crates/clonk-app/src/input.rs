@@ -254,13 +254,6 @@ impl KeyboardBindings {
         self.assign_binding(0, id, id.default_key());
     }
 
-    pub fn reset_binding_for_set(&mut self, control_set: usize, id: ControlBindingId) -> bool {
-        let Some(default) = Self::default_key_for_set(control_set, id) else {
-            return false;
-        };
-        self.rebind_for_set(control_set, id, default)
-    }
-
     pub fn reset_all(&mut self) {
         self.keys = cpp_default_keyboard_keys(is_german_system());
     }

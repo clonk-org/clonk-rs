@@ -70,35 +70,17 @@ pub mod control_facets {
     use crate::classic_gui::IntRect;
 
     /// `fctKeyboard.Set(&sfcControl, 0, 0, 80, 36)` — one phase per control set.
-    pub const KEYBOARD: IntRect = IntRect {
-        x: 0,
-        y: 0,
-        w: 80,
-        h: 36,
-    };
+    pub const KEYBOARD: IntRect = IntRect::new(0, 0, 80, 36);
     /// `fctCommand.Set(&sfcControl, 0, 36, 32, 32)` — one phase per command.
-    pub const COMMAND: IntRect = IntRect {
-        x: 0,
-        y: 36,
-        w: 32,
-        h: 32,
-    };
+    pub const COMMAND: IntRect = IntRect::new(0, 36, 32, 32);
     /// `fctKey.Set(&sfcControl, 0, 100, 64, 64)` — phase 0 idle, 1 pressed.
-    pub const KEY: IntRect = IntRect {
-        x: 0,
-        y: 100,
-        w: 64,
-        h: 64,
-    };
+    pub const KEY: IntRect = IntRect::new(0, 100, 64, 64);
     /// `LoadFile(fctGamepad, "Gamepad", Files, 80)` — phase width, own image.
     pub const GAMEPAD_PHASE_WIDTH: i32 = 80;
 
     /// The source rect of `phase` within a facet whose cells run left to right.
     pub fn phase_rect(cell: IntRect, phase: usize) -> IntRect {
-        IntRect {
-            x: cell.x + cell.w * phase as i32,
-            ..cell
-        }
+        cell.with_x(cell.x + cell.w * phase as i32)
     }
 }
 
@@ -131,12 +113,12 @@ pub struct KeyButtonFacets {
 /// follows the cap.
 pub fn key_button_facets(bounds: IntRect, key_id: usize, down: bool) -> KeyButtonFacets {
     let indent = bounds.w / 5;
-    let mut command = IntRect {
-        x: bounds.x + indent,
-        y: bounds.y + indent * 3 / 4,
-        w: bounds.w - 2 * indent,
-        h: bounds.h - 2 * indent,
-    };
+    let mut command = IntRect::new(
+        bounds.x + indent,
+        bounds.y + indent * 3 / 4,
+        bounds.w - 2 * indent,
+        bounds.h - 2 * indent,
+    );
     if down {
         command.y += indent / 2;
     }
@@ -330,16 +312,7 @@ impl ControlSheetLayout {
         gamepad_check: Option<(i32, i32)>,
     ) -> Self {
         let sets = sets.clamp(1, CONTROL_SET_COUNT);
-        let mut area = Aligner::new(
-            IntRect {
-                x: 0,
-                y: 0,
-                w: sheet.w,
-                h: sheet.h,
-            },
-            h_margin,
-            v_margin,
-        );
+        let mut area = Aligner::new(IntRect::new(0, 0, sheet.w, sheet.h), h_margin, v_margin);
 
         // Selector row (`:271-289`). The button width is clamped to the facet's
         // own width, and the slack that leaves is redistributed as the row's
@@ -416,11 +389,7 @@ impl ControlSheetLayout {
         let reset_width = (reset_text.0 + reset_text.1 * 4).min(bottom.inner_width());
         let reset_button = bottom.get_from_right(reset_width, -1);
 
-        let on_sheet = |rect: IntRect| IntRect {
-            x: rect.x + sheet.x,
-            y: rect.y + sheet.y,
-            ..rect
-        };
+        let on_sheet = |rect: IntRect| rect.with_position(rect.x + sheet.x, rect.y + sheet.y);
         Self {
             set_buttons: set_buttons.map(on_sheet),
             separator: on_sheet(separator),
@@ -468,10 +437,9 @@ pub fn control_sheet_hit_test(
     // `CheckBox::MouseInput` only reacts inside the box square, whose width is an
     // inclusive `rcBounds.Hgt` from the left edge (`C4GuiCheckBox.cpp:87`); the
     // caption beside it is not a target.
-    let check_square = IntRect {
-        w: layout.gamepad_gui_check.h + 1,
-        ..layout.gamepad_gui_check
-    };
+    let check_square = layout
+        .gamepad_gui_check
+        .with_width(layout.gamepad_gui_check.h + 1);
     if device == ControlDevice::Gamepad
         && state.gamepad_gui_checkbox_visible()
         && contains(check_square)
@@ -502,24 +470,19 @@ mod tests {
 
         // KeySelButton::DrawElement's inset: a fifth of the width either side,
         // three quarters of that above, two indents off the height.
-        let bounds = IntRect {
-            x: 100,
-            y: 40,
-            w: 40,
-            h: 40,
-        };
+        let bounds = IntRect::new(100, 40, 40, 40);
         let released = key_button_facets(bounds, 7, false);
         assert_eq!(released.key_phase, 0, "an idle cap uses phase 0");
         assert_eq!(released.command_phase, 7, "the command phase is the key id");
         let indent = 40 / 5;
         assert_eq!(
             released.command_rect,
-            IntRect {
-                x: 100 + indent,
-                y: 40 + indent * 3 / 4,
-                w: 40 - 2 * indent,
-                h: 40 - 2 * indent,
-            }
+            IntRect::new(
+                100 + indent,
+                40 + indent * 3 / 4,
+                40 - 2 * indent,
+                40 - 2 * indent
+            )
         );
 
         // A held cap switches phase and nudges the glyph down half an indent,
@@ -531,15 +494,7 @@ mod tests {
         assert_eq!(held.command_rect.w, released.command_rect.w);
 
         // A button too narrow to indent degrades without inverting the rect.
-        let narrow = key_button_facets(
-            IntRect {
-                w: 3,
-                h: 3,
-                ..bounds
-            },
-            0,
-            false,
-        );
+        let narrow = key_button_facets(bounds.with_size(3, 3), 0, false);
         assert_eq!(narrow.command_rect.w, 3);
         assert_eq!(narrow.command_rect.h, 3);
 
@@ -559,12 +514,7 @@ mod tests {
         // A selector's phase steps one cell per control set, and the gamepad
         // facet is a separate image whose phase width is 80
         // (C4StartupOptionsDlg.cpp:271; C4GraphicsResource.cpp:229).
-        let gamepad_cell = IntRect {
-            x: 0,
-            y: 0,
-            w: control_facets::GAMEPAD_PHASE_WIDTH,
-            h: 36,
-        };
+        let gamepad_cell = IntRect::new(0, 0, control_facets::GAMEPAD_PHASE_WIDTH, 36);
         assert_eq!(control_facets::phase_rect(gamepad_cell, 2).x, 160);
         assert_eq!(
             control_facets::phase_rect(control_facets::KEYBOARD, 2).x,
@@ -631,12 +581,7 @@ mod tests {
     /// `caMain.GetWidth()/20 = 61` and `caMain.GetHeight()/40 = 13`.
     #[test]
     fn control_layout_matches_the_cpp_component_aligner_at_1280x720() {
-        let sheet = IntRect {
-            x: 356,
-            y: 108,
-            w: 644,
-            h: 462,
-        };
+        let sheet = IntRect::new(356, 108, 644, 462);
         let layout = ControlSheetLayout::from_sheet(sheet, 61, 13, 4, (100, 20), None);
 
         // `iCtrlSetBtnWdt` clamps to `fctKeyboard.Wdt` (80) and the leftover is
@@ -646,52 +591,31 @@ mod tests {
         for (set, x) in expected_sets.into_iter().enumerate() {
             assert_eq!(
                 layout.set_buttons[set],
-                IntRect {
-                    x,
-                    y: 126,
-                    w: 80,
-                    h: 36
-                },
+                IntRect::new(x, 126, 80, 36),
                 "selector {set}"
             );
         }
 
         // `caArea.ExpandTop(vM); GetFromTop(2); ExpandTop(vM)` (`:291-293`).
-        assert_eq!(
-            layout.separator,
-            IntRect {
-                x: 417,
-                y: 180,
-                w: 522,
-                h: 2
-            }
-        );
+        assert_eq!(layout.separator, IntRect::new(417, 180, 522, 2));
 
         // The key grid is `(iKeyUseWdt + 2*iKeyMargin) * 3` by
         // `(iKeyHgt + 2*iKeyMargin) * 4` scaled down by `min(fScaleX, fScaleY)`
         // (`:294-312`); each button is the *square* `iKeyWdt`, and the label
         // space `iKeyUseWdt - iKeyWdt` sits outside it (`:320-321`).
         for control in 0..CONTROL_KEY_COUNT {
-            let expected = IntRect {
-                x: [425, 598, 771][control % 3],
-                y: [203, 258, 313, 368][control / 3],
-                w: 39,
-                h: 39,
-            };
+            let expected = IntRect::new(
+                [425, 598, 771][control % 3],
+                [203, 258, 313, 368][control / 3],
+                39,
+                39,
+            );
             assert_eq!(layout.key_buttons[control], expected, "key {control}");
         }
 
         // `caArea.ExpandBottom(-iKeyHgt/2)`, then a `C4GUI_ButtonHgt` strip whose
         // right end holds `min(txtW + txtH*4, GetInnerWidth())` (`:329-347`).
-        assert_eq!(
-            layout.reset_button,
-            IntRect {
-                x: 757,
-                y: 506,
-                w: 180,
-                h: 32
-            }
-        );
+        assert_eq!(layout.reset_button, IntRect::new(757, 506, 180, 32));
     }
 
     /// The gamepad tab differs only in its selector count and in the
@@ -699,34 +623,13 @@ mod tests {
     /// left before the reset button is taken from the right (`:332-347`).
     #[test]
     fn gamepad_control_layout_centres_one_selector_and_seats_the_gui_checkbox() {
-        let sheet = IntRect {
-            x: 356,
-            y: 108,
-            w: 644,
-            h: 462,
-        };
+        let sheet = IntRect::new(356, 108, 644, 462);
         let layout = ControlSheetLayout::from_sheet(sheet, 61, 13, 1, (100, 20), Some((150, 20)));
 
         // `iCtrlSetHMargin = (522 - 80) / 2 = 221`, so the lone pad is centred.
-        assert_eq!(
-            layout.set_buttons[0],
-            IntRect {
-                x: 638,
-                y: 126,
-                w: 80,
-                h: 36
-            }
-        );
+        assert_eq!(layout.set_buttons[0], IntRect::new(638, 126, 80, 36));
         // `caKeyBottomBtns.GetFromLeft(iWdt, iHgt)` vertically centres the box.
-        assert_eq!(
-            layout.gamepad_gui_check,
-            IntRect {
-                x: 419,
-                y: 512,
-                w: 150,
-                h: 20
-            }
-        );
+        assert_eq!(layout.gamepad_gui_check, IntRect::new(419, 512, 150, 20));
         // `GetFromRight` only shrinks `Wdt`, never moves `x` (`C4Gui.cpp:1119`),
         // so the checkbox eats into the strip's *left* and the reset button
         // lands exactly where the keyboard tab puts it.
@@ -739,12 +642,7 @@ mod tests {
     // caption beside it is inert, exactly as the Program and Sound sheets model.
     #[test]
     fn gamepad_gui_checkbox_accepts_only_its_box_square() {
-        let sheet = IntRect {
-            x: 356,
-            y: 108,
-            w: 644,
-            h: 462,
-        };
+        let sheet = IntRect::new(356, 108, 644, 462);
         let layout = ControlSheetLayout::from_sheet(sheet, 61, 13, 1, (100, 20), Some((150, 20)));
         let state = ControlSheetState::default();
         let hit = |x: i32, y: i32| {
@@ -779,12 +677,7 @@ mod tests {
     fn layout_routes_all_twelve_key_buttons() {
         let state = ControlSheetState::default();
         let layout = ControlSheetLayout::from_sheet(
-            IntRect {
-                x: 100,
-                y: 80,
-                w: 600,
-                h: 400,
-            },
+            IntRect::new(100, 80, 600, 400),
             30,
             10,
             4,

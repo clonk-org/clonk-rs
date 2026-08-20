@@ -812,12 +812,12 @@ impl GameApp {
             }
             self.startup_tooltip.pointer_left();
             let mut info_layout = layout;
-            info_layout.selection_info = clonk_frontend::classic_gui::IntRect {
-                x: info_rect.origin.x.round() as i32,
-                y: info_rect.origin.y.round() as i32,
-                w: info_rect.size.width.round() as i32,
-                h: info_rect.size.height.round() as i32,
-            };
+            info_layout.selection_info = clonk_frontend::classic_gui::IntRect::new(
+                info_rect.origin.x.round() as i32,
+                info_rect.origin.y.round() as i32,
+                info_rect.size.width.round() as i32,
+                info_rect.size.height.round() as i32,
+            );
             let metrics = {
                 let info = scensel_selection_info(&self.menu_state);
                 clonk_frontend::startup_scensel::selection_info_scroll_metrics(

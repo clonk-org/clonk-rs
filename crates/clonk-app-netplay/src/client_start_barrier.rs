@@ -82,11 +82,7 @@ mod tests {
     };
 
     fn status(state: u8, control_mode: i32, target_tick: i32) -> NetworkStatus {
-        NetworkStatus {
-            state,
-            control_mode,
-            target_tick,
-        }
+        NetworkStatus::new(state, control_mode, target_tick)
     }
 
     #[test]
@@ -96,11 +92,11 @@ mod tests {
         // installs that status, but a later ordinary PID_Status packet supplies
         // the actual target (pristine 9ffa0a5d src/C4Network2.cpp:54-55,
         // 108-123,1501-1510,1574-1592).
-        let mut barrier = super::ClientStartBarrier::from_join_data_status(NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 2,
-            target_tick: -1,
-        });
+        let mut barrier = super::ClientStartBarrier::from_join_data_status(NetworkStatus::new(
+            NETWORK_STATE_GO,
+            2,
+            -1,
+        ));
 
         assert_eq!(barrier.local_initialized_at(0), None);
         assert_eq!(

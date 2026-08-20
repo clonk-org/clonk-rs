@@ -470,12 +470,12 @@ impl ComponentEditorText {
     pub(crate) fn render(&mut self, surface: &mut Surface, font: &dyn TextFont, title: &str) {
         surface.fill(WINDOW_BACKGROUND);
         let (width, height) = (surface.width() as i32, surface.height() as i32);
-        let text_area = IntRect {
-            x: PADDING,
-            y: PADDING,
-            w: (width - PADDING * 2).max(1),
-            h: (height - PADDING * 2 - STATUS_HEIGHT).max(1),
-        };
+        let text_area = IntRect::new(
+            PADDING,
+            PADDING,
+            (width - PADDING * 2).max(1),
+            (height - PADDING * 2 - STATUS_HEIGHT).max(1),
+        );
         draw_sunken(surface, text_area, CONTROL_BACKGROUND);
         let rows = ((text_area.h - 2) / ROW_HEIGHT).max(0) as usize;
         self.follow_caret(rows);
@@ -486,12 +486,12 @@ impl ComponentEditorText {
             .skip(self.first_visible)
             .take(rows)
         {
-            let rect = IntRect {
-                x: text_area.x + 1,
-                y: text_area.y + 1 + (row - self.first_visible) as i32 * ROW_HEIGHT,
-                w: (text_area.w - 2).max(1),
-                h: ROW_HEIGHT,
-            };
+            let rect = IntRect::new(
+                text_area.x + 1,
+                text_area.y + 1 + (row - self.first_visible) as i32 * ROW_HEIGHT,
+                (text_area.w - 2).max(1),
+                ROW_HEIGHT,
+            );
             if row == self.caret.0 {
                 // Between glyphs, measured. `draw_fitted_text` starts the line
                 // at `rect.x + padding` and truncates rather than rescaling, so
@@ -500,11 +500,10 @@ impl ComponentEditorText {
                 let offset = Self::caret_offset(line, self.caret.1, font);
                 fill(
                     surface,
-                    IntRect {
-                        x: (rect.x + TEXT_PADDING + offset).min(rect.x + rect.w - 1),
-                        w: 1,
-                        ..rect
-                    },
+                    rect.with_horizontal(
+                        (rect.x + TEXT_PADDING + offset).min(rect.x + rect.w - 1),
+                        1,
+                    ),
                     MID_EDGE,
                 );
             }
@@ -521,12 +520,12 @@ impl ComponentEditorText {
         draw_fitted_text(
             surface,
             font,
-            IntRect {
-                x: PADDING,
-                y: height - STATUS_HEIGHT,
-                w: (width - PADDING * 2).max(1),
-                h: STATUS_HEIGHT,
-            },
+            IntRect::new(
+                PADDING,
+                height - STATUS_HEIGHT,
+                (width - PADDING * 2).max(1),
+                STATUS_HEIGHT,
+            ),
             title,
             CONTROL_TEXT,
             SMALL_FONT_SIZE,

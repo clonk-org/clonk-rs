@@ -8243,6 +8243,12 @@ mod tests {
         landscape
     }
 
+    fn flat_world_with_lake() -> Landscape {
+        let mut landscape = flat_world();
+        landscape.set_liquid_column(25, vec![LiquidSegment::new(40, 49)]);
+        landscape
+    }
+
     fn blank_pixel_grid(width: u32, height: u32, bytes: Vec<u8>, slots: usize) -> PixelGrid {
         PixelGrid::new(
             width,
@@ -8252,6 +8258,65 @@ mod tests {
             vec![None; slots],
             vec![None; slots],
         )
+    }
+
+    fn test_materials(source: &str) -> MaterialSet {
+        let library = MaterialLibrary::parse(source).expect("material library parses");
+        MaterialSet::from_resource_library(&library)
+    }
+
+    macro_rules! test_materials {
+        ($($name:ident { $($key:ident = $value:expr;)* })+) => {{
+            let mut source = String::new();
+            $(
+                source.push_str(concat!(
+                    "[Material ",
+                    stringify!($name),
+                    "]\nName=",
+                    stringify!($name),
+                    "\n",
+                ));
+                $(
+                    source.push_str(concat!(stringify!($key), "="));
+                    source.push_str(&stringify!($value).replace(' ', ""));
+                    source.push('\n');
+                )*
+            )+
+            test_materials(&source)
+        }};
+    }
+
+    fn spawn_test_object(
+        engine: &mut crate::Engine,
+        config: crate::SpawnConfig,
+    ) -> crate::ObjectId {
+        engine.spawn_object(config).expect("test object spawns")
+    }
+
+    fn call_test_object_function(
+        engine: &mut crate::Engine,
+        index: usize,
+        function: &str,
+        args: Vec<clonk_script::Value>,
+    ) -> clonk_script::Value {
+        engine
+            .call_object_function(index, function, args)
+            .expect("test object function executes")
+    }
+
+    fn test_grid(landscape: &Landscape) -> &PixelGrid {
+        landscape.pixel_grid().expect("test pixel grid exists")
+    }
+
+    fn test_raster_state(landscape: &Landscape) -> &LandscapeRasterState {
+        landscape.raster_state().expect("test raster state exists")
+    }
+
+    fn engine_grid_byte(engine: &crate::Engine, x: i32, y: i32) -> Option<u8> {
+        engine
+            .landscape
+            .as_ref()
+            .and_then(|landscape| landscape.grid_byte_at(x, y))
     }
 
     #[test]
@@ -8270,12 +8335,10 @@ mod tests {
 
     #[test]
     fn surface_palette_retains_source_and_stale_slots_until_add_entry_repaint() {
-        let library = MaterialLibrary::parse(
+        let materials = test_materials(
             "[Material]\nName=Earth\nColor=10,20,30\n\
              [Material]\nName=Rock\nColor=40,50,60\n",
-        )
-        .expect("palette materials parse");
-        let materials = MaterialSet::from_resource_library(&library);
+        );
         let mut texmap = RuntimeTexMapState::default();
         texmap.material_names[1] = Some("Earth".to_string());
         let mut raster = LandscapeRasterState::new(1, 7, texmap);
@@ -8355,11 +8418,7 @@ mod tests {
         changed.grid_set_byte(0, 0, 1);
         changed.grid_set_byte(1, 1, 3);
         changed.refresh_all_raster_columns();
-        let current = changed
-            .pixel_grid()
-            .expect("changed Surface8")
-            .bytes()
-            .to_vec();
+        let current = test_grid(&changed).bytes().to_vec();
         let masked = changed
             .save_diff(false)
             .expect("masked diff builds")
@@ -8401,16 +8460,16 @@ mod tests {
         let mut reloaded = raster_grid_landscape(3, 3, original);
         reloaded.save_initial().expect("reload initial captures");
         assert!(reloaded.set_surface32_pixel(0, 0, 0x0011_2233));
-        let revision = reloaded.pixel_grid().expect("reload Surface8").revision();
+        let revision = test_grid(&reloaded).revision();
         reloaded.apply_diff(&decoded).expect("diff applies");
 
         assert_eq!(
-            reloaded.pixel_grid().expect("reload Surface8").bytes(),
+            test_grid(&reloaded).bytes(),
             current,
             "base plus masked diff reproduces the changed Surface8 byte-for-byte"
         );
         assert_eq!(
-            reloaded.pixel_grid().expect("reload Surface8").revision(),
+            test_grid(&reloaded).revision(),
             revision + 2,
             "each differing byte passes through SetPix bookkeeping"
         );
@@ -8508,7 +8567,7 @@ mod tests {
         let restored: Landscape = serde_json::from_str(&serialized).expect("state restores");
 
         assert_eq!(restored, landscape);
-        let state = restored.raster_state().expect("raster state survives");
+        let state = test_raster_state(&restored);
         assert_eq!(state.map_zoom(), 10);
         assert_eq!(state.map_seed(), 31337);
         assert_eq!(state.map(), Some(map));
@@ -9065,12 +9124,8 @@ mod tests {
         // the retained map and Pix2* tables change without any landscape
         // pixels changing (C4Texture.cpp:116-135,319-369).
         let landscape = raster_grid_landscape(2, 2, vec![0; 4]);
-        let revision = landscape.pixel_grid().expect("pixel grid").revision();
-        let mut texmap = landscape
-            .raster_state()
-            .expect("raster state")
-            .texmap()
-            .clone();
+        let revision = test_grid(&landscape).revision();
+        let mut texmap = test_raster_state(&landscape).texmap().clone();
         texmap.texture_inventory.push("Ridge".to_string());
         let slot = texmap.get_index("Earth", Some("Ridge"), true);
         assert_eq!(slot, 4);
@@ -9081,15 +9136,10 @@ mod tests {
 
         let landscape = engine.landscape().expect("landscape");
         assert_eq!(
-            landscape
-                .raster_state()
-                .expect("raster state")
-                .texmap()
-                .match_texture_names[slot as usize]
-                .as_deref(),
+            test_raster_state(landscape).texmap().match_texture_names[slot as usize].as_deref(),
             Some("Ridge")
         );
-        let grid = landscape.pixel_grid().expect("pixel grid");
+        let grid = test_grid(landscape);
         assert_eq!(
             grid.material_names()[slot as usize].as_deref(),
             Some("Earth")
@@ -9147,11 +9197,7 @@ mod tests {
     fn runtime_texmap_liquid_smooth_validates_liquid_but_stores_raw_name() {
         let make_texmap = || {
             let landscape = raster_grid_landscape(1, 1, vec![0]);
-            landscape
-                .raster_state()
-                .expect("raster state")
-                .texmap()
-                .clone()
+            test_raster_state(&landscape).texmap().clone()
         };
 
         let mut liquid_only = make_texmap();
@@ -9188,11 +9234,7 @@ mod tests {
     #[test]
     fn runtime_texmap_copies_native_names_through_the_first_nul() {
         let landscape = raster_grid_landscape(1, 1, vec![0]);
-        let mut texmap = landscape
-            .raster_state()
-            .expect("raster state")
-            .texmap()
-            .clone();
+        let mut texmap = test_raster_state(&landscape).texmap().clone();
         texmap.texture_inventory = vec!["Ridge".to_string()];
         let material = clonk_script::c4_string_from_bytes(b"Earth\0ignored\x80");
         let texture = clonk_script::c4_string_from_bytes(b"Ridge\0ignored\x81");
@@ -9328,6 +9370,27 @@ mod tests {
             .expect("solid mask is put")
     }
 
+    fn test_effect(engine: &crate::Engine, index: usize, name: &str) -> crate::effect::EffectState {
+        engine.objects[index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == name)
+            .cloned()
+            .expect("test effect exists")
+    }
+
+    fn dispatch_named_test_effects(engine: &mut crate::Engine, index: usize, names: &[&str]) {
+        let events = names
+            .iter()
+            .map(|name| crate::effect::EffectEvent::timer(test_effect(engine, index, name)))
+            .collect();
+        let definition_id = engine.objects[index].definition_id.clone();
+        engine
+            .dispatch_object_effect_events(index, &definition_id, events)
+            .expect("test effect batch executes");
+    }
+
     fn overlapping_solid_mask_engine() -> (crate::Engine, [crate::ObjectId; 3]) {
         let mut engine = solid_mask_engine(
             8,
@@ -9357,9 +9420,7 @@ func MoveMask(int x, int y)
         );
         let mut ids = [crate::ObjectId::new(0); 3];
         for id in &mut ids {
-            *id = engine
-                .spawn_object(mask_spawn())
-                .expect("overlapping mask spawns");
+            *id = spawn_test_object(&mut engine, mask_spawn());
         }
         (engine, ids)
     }
@@ -9440,7 +9501,7 @@ func MoveMask(int x, int y)
             &[LiquidSegment::new(2, 3)]
         );
         assert!(landscape.is_tunnel_at(1, 3));
-        let revision = landscape.pixel_grid().expect("grid").revision();
+        let revision = test_grid(&landscape).revision();
 
         landscape
             .raster_transaction(RasterChangeRect::new(1, 0, 1, 5), |grid, _state| {
@@ -9457,7 +9518,7 @@ func MoveMask(int x, int y)
             &[LiquidSegment::new(3, 3)]
         );
         assert!(!landscape.is_tunnel_at(1, 3));
-        let grid = landscape.pixel_grid().expect("grid");
+        let grid = test_grid(&landscape);
         assert_eq!(grid.byte_at(1, 0), Some(1));
         assert_eq!(grid.byte_at(1, 2), Some(0));
         assert_eq!(grid.byte_at(1, 3), Some(3));
@@ -9520,14 +9581,11 @@ func MoveMask(int x, int y)
         // runtime quad must therefore not scan the full Surface8 merely to
         // maintain MatCount.
         let mut engine = crate::Engine::with_seed(9);
-        let materials = MaterialSet::from_resource_library(
-            &MaterialLibrary::parse(
-                "[Material Earth]\nName=Earth\nDensity=100\n\n\
-                 [Material Vehicle]\nName=Vehicle\nDensity=100\n\n\
-                 [Material Water]\nName=Water\nDensity=25\n",
-            )
-            .expect("materials parse"),
-        );
+        let materials = test_materials! {
+            Earth { Density = 100; }
+            Vehicle { Density = 100; }
+            Water { Density = 25; }
+        };
         engine.set_materials(materials);
         engine.set_landscape(raster_grid_landscape(64, 48, vec![0; 64 * 48]));
         MATERIAL_COUNT_FULL_REBUILDS.with(|rebuilds| rebuilds.set(0));
@@ -9590,7 +9648,7 @@ func MoveMask(int x, int y)
         }
         assert_eq!(landscape.surface(), &[3; 3]);
         assert_eq!(
-            landscape.pixel_grid().expect("pixel grid").revision(),
+            test_grid(landscape).revision(),
             revision,
             "failed resolution never enters PrepareChange"
         );
@@ -9614,11 +9672,8 @@ func MoveMask(int x, int y)
         ];
         let mut sequential = base.clone();
         let mut batched = base;
-        let sequential_anchor = sequential
-            .pixel_grid()
-            .expect("sequential grid")
-            .render_anchor();
-        let batched_anchor = batched.pixel_grid().expect("batched grid").render_anchor();
+        let sequential_anchor = test_grid(&sequential).render_anchor();
+        let batched_anchor = test_grid(&batched).render_anchor();
 
         for (position, color) in writes {
             assert!(sequential.set_surface32_pixel(position.x, position.y, color));
@@ -9627,14 +9682,8 @@ func MoveMask(int x, int y)
 
         assert_eq!(sequential, batched);
         assert_eq!(
-            sequential
-                .pixel_grid()
-                .expect("sequential grid")
-                .render_dirty_rects_since_anchor(&sequential_anchor),
-            batched
-                .pixel_grid()
-                .expect("batched grid")
-                .render_dirty_rects_since_anchor(&batched_anchor),
+            test_grid(&sequential).render_dirty_rects_since_anchor(&sequential_anchor),
+            test_grid(&batched).render_dirty_rects_since_anchor(&batched_anchor),
         );
 
         // C4Landscape::SetPix queues a relight around the material write
@@ -9664,7 +9713,7 @@ func MoveMask(int x, int y)
         let surface = landscape.surface().to_vec();
         let liquids = landscape.liquids().to_vec();
         let was_tunnel = landscape.is_tunnel_at(0, 2);
-        let revision = landscape.pixel_grid().expect("grid").revision();
+        let revision = test_grid(&landscape).revision();
 
         landscape.grid_write_mask_byte(0, 0, 2);
 
@@ -9672,10 +9721,7 @@ func MoveMask(int x, int y)
         assert_eq!(landscape.surface(), surface);
         assert_eq!(landscape.liquids(), liquids);
         assert_eq!(landscape.is_tunnel_at(0, 2), was_tunnel);
-        assert_eq!(
-            landscape.pixel_grid().expect("grid").revision(),
-            revision + 1
-        );
+        assert_eq!(test_grid(&landscape).revision(), revision + 1);
     }
 
     #[test]
@@ -9687,14 +9733,12 @@ func MoveMask(int x, int y)
         // leaves DoRelights with nothing to do (C4Landscape.cpp:2477-2479)
         // and a mask byte never reaches the rendered landscape.
         let mut landscape = raster_grid_landscape(1, 4, vec![0, 0, 3 | 0x80, 1]);
-        let rendered = landscape.pixel_grid().expect("grid").clone();
+        let rendered = test_grid(&landscape).clone();
 
         landscape.grid_write_mask_byte(0, 0, 2);
         landscape.grid_write_mask_byte(0, 0, 0);
 
-        let rects = landscape
-            .pixel_grid()
-            .expect("grid")
+        let rects = test_grid(&landscape)
             .render_dirty_rects_since(&rendered)
             .expect("mask writes keep the render lineage intact");
         assert!(
@@ -9870,14 +9914,11 @@ func MoveMask(int x, int y)
         // CheckInstabilityRange before visiting the next one
         // (C4SolidMask.cpp:244-257). A later restored neighbor must therefore
         // not become visible to an earlier probe.
-        let materials = MaterialSet::from_resource_library(
-            &MaterialLibrary::parse(
-                "[Material Earth]\nName=Earth\nDensity=100\n\n\
-                 [Material Vehicle]\nName=Vehicle\nDensity=100\n\n\
-                 [Material Water]\nName=Water\nDensity=25\nInstable=1\n",
-            )
-            .expect("materials parse"),
-        );
+        let materials = test_materials! {
+            Earth { Density = 100; }
+            Vehicle { Density = 100; }
+            Water { Density = 25; Instable = 1; }
+        };
         let landscape = || {
             let mut landscape = raster_grid_landscape(3, 3, vec![2; 9]);
             landscape.resolve_grid_materials(|name| materials.id_of(name));
@@ -9969,15 +10010,13 @@ func MoveMask(int x, int y)
         // the mask bytes put back around it are _SBackPix writes and add
         // nothing to Relights[].
         let mut landscape = raster_grid_landscape(64, 4, vec![0; 256]);
-        let rendered = landscape.pixel_grid().expect("grid").clone();
+        let rendered = test_grid(&landscape).clone();
 
         landscape.grid_write_mask_byte(0, 0, 2);
         landscape.grid_set_byte(40, 2, 1);
         landscape.grid_write_mask_byte(63, 3, 2);
 
-        let rects = landscape
-            .pixel_grid()
-            .expect("grid")
+        let rects = test_grid(&landscape)
             .render_dirty_rects_since(&rendered)
             .expect("mask writes keep the render lineage intact");
         assert_eq!(rects.len(), 1, "only the dug pixel is dirty, got {rects:?}");
@@ -10035,12 +10074,8 @@ protected func Construction(object creator)
 "#,
             false,
         );
-        let oldest = engine
-            .spawn_object(mask_spawn())
-            .expect("oldest mask spawns");
-        let recreated = engine
-            .spawn_object(mask_spawn())
-            .expect("second mask spawns");
+        let oldest = spawn_test_object(&mut engine, mask_spawn());
+        let recreated = spawn_test_object(&mut engine, mask_spawn());
         let recreated_index = object_index(&engine, recreated);
         let original_sequence = mask_bake(&engine, recreated_index).instance_sequence;
 
@@ -10079,10 +10114,8 @@ protected func Construction()
             true,
         );
         let spawn = adjusted_mask_spawn();
-        let first = engine
-            .spawn_object(spawn.clone())
-            .expect("first mask spawns");
-        let second = engine.spawn_object(spawn).expect("second mask spawns");
+        let first = spawn_test_object(&mut engine, spawn.clone());
+        let second = spawn_test_object(&mut engine, spawn);
 
         for id in [first, second] {
             let index = object_index(&engine, id);
@@ -10110,15 +10143,13 @@ protected func Construction()
 "#,
             true,
         );
-        let foreign = engine
-            .spawn_object(mask_spawn())
-            .expect("foreign mask spawns");
+        let foreign = spawn_test_object(&mut engine, mask_spawn());
         let mut config = mask_spawn().with_local_vars(std::collections::HashMap::from([(
             "Victim".to_string(),
             clonk_script::Value::Object(foreign.as_u64()),
         )]));
         config.position_adjusted = true;
-        let spawned = engine.spawn_object(config).expect("new mask spawns");
+        let spawned = spawn_test_object(&mut engine, config);
         let foreign_index = object_index(&engine, foreign);
         let spawned_index = object_index(&engine, spawned);
         let foreign_sequence = engine.objects[foreign_index]
@@ -10157,12 +10188,8 @@ protected func Construction()
             .register_definition(parent)
             .expect("parent registers");
         let mask_spawn = adjusted_mask_spawn();
-        let oldest = engine
-            .spawn_object(mask_spawn.clone())
-            .expect("oldest mask spawns");
-        let survivor = engine
-            .spawn_object(mask_spawn)
-            .expect("survivor mask spawns");
+        let oldest = spawn_test_object(&mut engine, mask_spawn.clone());
+        let survivor = spawn_test_object(&mut engine, mask_spawn);
 
         let mut parent_spawn = crate::SpawnConfig::new("PARN")
             .with_position(Vector2::ZERO)
@@ -10171,9 +10198,7 @@ protected func Construction()
                 clonk_script::Value::Object(oldest.as_u64()),
             )]));
         parent_spawn.position_adjusted = true;
-        let parent_id = engine
-            .spawn_object(parent_spawn)
-            .expect("parent and child spawn");
+        let parent_id = spawn_test_object(&mut engine, parent_spawn);
         let child = engine
             .objects
             .iter()
@@ -10217,33 +10242,13 @@ func FxRecreateTimer(object target, int number, int time)
 "#,
             true,
         );
-        let oldest = engine
-            .spawn_object(mask_spawn())
-            .expect("oldest mask spawns");
-        let recreated = engine
-            .spawn_object(mask_spawn())
-            .expect("effect owner spawns");
+        let oldest = spawn_test_object(&mut engine, mask_spawn());
+        let recreated = spawn_test_object(&mut engine, mask_spawn());
         let recreated_index = object_index(&engine, recreated);
         let original_sequence = mask_bake(&engine, recreated_index).instance_sequence;
 
-        engine
-            .call_object_function(recreated_index, "Arm", Vec::new())
-            .expect("effect arms");
-        let effect = engine.objects[recreated_index]
-            .state
-            .effects
-            .iter()
-            .find(|effect| effect.name == "Recreate")
-            .cloned()
-            .expect("recreation effect exists");
-        let definition_id = engine.objects[recreated_index].definition_id.clone();
-        engine
-            .dispatch_object_effect_events(
-                recreated_index,
-                &definition_id,
-                vec![crate::effect::EffectEvent::timer(effect)],
-            )
-            .expect("effect timer executes");
+        call_test_object_function(&mut engine, recreated_index, "Arm", Vec::new());
+        dispatch_named_test_effects(&mut engine, recreated_index, &["Recreate"]);
 
         let spawned = engine
             .objects
@@ -10312,58 +10317,29 @@ func FxSecondTimer(object target, int number, int time)
 "#,
             true,
         );
-        let _oldest = engine
-            .spawn_object(mask_spawn())
-            .expect("oldest mask spawns");
-        let recreated = engine
-            .spawn_object(mask_spawn())
-            .expect("effect owner spawns");
+        let _oldest = spawn_test_object(&mut engine, mask_spawn());
+        let recreated = spawn_test_object(&mut engine, mask_spawn());
         let mut pending_config = mask_spawn().with_construction(0);
         pending_config.position_adjusted = true;
-        let pending = engine
-            .spawn_object(pending_config)
-            .expect("incomplete mask object spawns");
+        let pending = spawn_test_object(&mut engine, pending_config);
         let recreated_index = object_index(&engine, recreated);
         let original_recreated_sequence = mask_bake(&engine, recreated_index).instance_sequence;
 
         let pending_index = object_index(&engine, pending);
-        engine
-            .call_object_function(
-                pending_index,
-                "ArmThreaded",
-                vec![clonk_script::Value::Object(recreated.as_u64())],
-            )
-            .expect("effects arm");
-        let first = engine.objects[pending_index]
-            .state
-            .effects
-            .iter()
-            .find(|effect| effect.name == "First")
-            .cloned()
-            .expect("first effect exists");
-        let second = engine.objects[pending_index]
-            .state
-            .effects
-            .iter()
-            .find(|effect| effect.name == "Second")
-            .cloned()
-            .expect("second effect exists");
+        call_test_object_function(
+            &mut engine,
+            pending_index,
+            "ArmThreaded",
+            vec![clonk_script::Value::Object(recreated.as_u64())],
+        );
+        let first = test_effect(&engine, pending_index, "First");
+        let second = test_effect(&engine, pending_index, "Second");
         assert_eq!(
             first.vars,
             vec![crate::effect::EffectVarValue::Object(recreated.as_u64())]
         );
         assert!(second.vars.is_empty());
-        let definition_id = engine.objects[pending_index].definition_id.clone();
-        engine
-            .dispatch_object_effect_events(
-                pending_index,
-                &definition_id,
-                vec![
-                    crate::effect::EffectEvent::timer(first),
-                    crate::effect::EffectEvent::timer(second),
-                ],
-            )
-            .expect("effect batch executes");
+        dispatch_named_test_effects(&mut engine, pending_index, &["First", "Second"]);
 
         let pending_sequence = engine.objects[pending_index]
             .solid_mask_instance_sequence
@@ -10417,40 +10393,18 @@ func FxMoveForeignTimer(object target, int number, int time)
 "#,
             true,
         );
-        let outer = engine
-            .spawn_object(mask_spawn())
-            .expect("outer mask spawns");
-        let foreign = engine
-            .spawn_object(mask_spawn())
-            .expect("foreign mask spawns");
+        let outer = spawn_test_object(&mut engine, mask_spawn());
+        let foreign = spawn_test_object(&mut engine, mask_spawn());
         let outer_index = object_index(&engine, outer);
         let foreign_index = object_index(&engine, foreign);
 
-        engine
-            .call_object_function(
-                outer_index,
-                "ArmForeignState",
-                vec![clonk_script::Value::Object(foreign.as_u64())],
-            )
-            .expect("effects arm");
-        let events = ["DisableForeign", "MoveForeign"].map(|name| {
-            let effect = engine.objects[outer_index]
-                .state
-                .effects
-                .iter()
-                .find(|effect| effect.name == name)
-                .cloned()
-                .expect("effect exists");
-            crate::effect::EffectEvent::timer(effect)
-        });
-        let definition_id = engine.objects[outer_index].definition_id.clone();
-        engine
-            .dispatch_object_effect_events(
-                outer_index,
-                &definition_id,
-                events.into_iter().collect(),
-            )
-            .expect("effect batch executes");
+        call_test_object_function(
+            &mut engine,
+            outer_index,
+            "ArmForeignState",
+            vec![clonk_script::Value::Object(foreign.as_u64())],
+        );
+        dispatch_named_test_effects(&mut engine, outer_index, &["DisableForeign", "MoveForeign"]);
 
         assert_eq!(
             engine.objects[foreign_index].state.position,
@@ -10499,45 +10453,20 @@ func FxDisableOuterTimer(object target, int number, int time)
 "#,
             true,
         );
-        let a = engine.spawn_object(mask_spawn()).expect("A spawns");
-        let b = engine.spawn_object(mask_spawn()).expect("B spawns");
-        let c = engine.spawn_object(mask_spawn()).expect("C spawns");
+        let a = spawn_test_object(&mut engine, mask_spawn());
+        let b = spawn_test_object(&mut engine, mask_spawn());
+        let c = spawn_test_object(&mut engine, mask_spawn());
         let a_index = object_index(&engine, a);
         let b_index = object_index(&engine, b);
         let c_index = object_index(&engine, c);
 
-        engine
-            .call_object_function(
-                a_index,
-                "ArmOwnership",
-                vec![clonk_script::Value::Object(b.as_u64())],
-            )
-            .expect("effects arm");
-        let recreate = engine.objects[a_index]
-            .state
-            .effects
-            .iter()
-            .find(|effect| effect.name == "RecreateForeign")
-            .cloned()
-            .expect("foreign recreation effect exists");
-        let disable = engine.objects[a_index]
-            .state
-            .effects
-            .iter()
-            .find(|effect| effect.name == "DisableOuter")
-            .cloned()
-            .expect("outer disable effect exists");
-        let definition_id = engine.objects[a_index].definition_id.clone();
-        engine
-            .dispatch_object_effect_events(
-                a_index,
-                &definition_id,
-                vec![
-                    crate::effect::EffectEvent::timer(recreate),
-                    crate::effect::EffectEvent::timer(disable),
-                ],
-            )
-            .expect("effect batch executes");
+        call_test_object_function(
+            &mut engine,
+            a_index,
+            "ArmOwnership",
+            vec![clonk_script::Value::Object(b.as_u64())],
+        );
+        dispatch_named_test_effects(&mut engine, a_index, &["RecreateForeign", "DisableOuter"]);
 
         assert!(engine.objects[a_index].solid_mask_bake.is_none());
         assert!(engine.objects[a_index]
@@ -10600,32 +10529,20 @@ func TransactionThenRaw()
 "#,
             true,
         );
-        let id = engine
-            .spawn_object(adjusted_mask_spawn())
-            .expect("mask spawns");
+        let id = spawn_test_object(&mut engine, adjusted_mask_spawn());
         let index = object_index(&engine, id);
 
-        engine
-            .call_object_function(index, "PutThenRaw", Vec::new())
-            .expect("put then raw executes");
+        call_test_object_function(&mut engine, index, "PutThenRaw", Vec::new());
         assert_eq!(
-            engine
-                .landscape
-                .as_ref()
-                .and_then(|landscape| landscape.grid_byte_at(1, 1)),
+            engine_grid_byte(&engine, 1, 1),
             Some(1),
             "raw Earth remains visible after the preceding Put"
         );
         assert_eq!(mask_bake(&engine, index).buffer, vec![0]);
 
-        engine
-            .call_object_function(index, "RawThenPut", Vec::new())
-            .expect("raw then put executes");
+        call_test_object_function(&mut engine, index, "RawThenPut", Vec::new());
         assert_eq!(
-            engine
-                .landscape
-                .as_ref()
-                .and_then(|landscape| landscape.grid_byte_at(1, 1)),
+            engine_grid_byte(&engine, 1, 1),
             Some(2),
             "the following Put restores MCVehic"
         );
@@ -10635,26 +10552,16 @@ func TransactionThenRaw()
             "Put saves the raw Earth byte"
         );
 
-        engine
-            .call_object_function(index, "RawThenTransaction", Vec::new())
-            .expect("raw then transaction executes");
+        call_test_object_function(&mut engine, index, "RawThenTransaction", Vec::new());
         assert_eq!(
-            engine
-                .landscape
-                .as_ref()
-                .and_then(|landscape| landscape.grid_byte_at(1, 1)),
+            engine_grid_byte(&engine, 1, 1),
             Some(3),
             "the later transactional Water draw wins"
         );
 
-        engine
-            .call_object_function(index, "TransactionThenRaw", Vec::new())
-            .expect("transaction then raw executes");
+        call_test_object_function(&mut engine, index, "TransactionThenRaw", Vec::new());
         assert_eq!(
-            engine
-                .landscape
-                .as_ref()
-                .and_then(|landscape| landscape.grid_byte_at(1, 1)),
+            engine_grid_byte(&engine, 1, 1),
             Some(1),
             "the later raw Earth write wins"
         );
@@ -10666,9 +10573,7 @@ func TransactionThenRaw()
         let indices = ids.map(|id| object_index(&engine, id));
         let previous_newest = mask_bake(&engine, indices[2]).instance_sequence;
 
-        engine
-            .call_object_function(indices[1], "RotateMaskCycle", Vec::new())
-            .expect("rotation cycle completes");
+        call_test_object_function(&mut engine, indices[1], "RotateMaskCycle", Vec::new());
         let recreated_b = mask_bake(&engine, indices[1]).instance_sequence;
         assert!(recreated_b > previous_newest);
 
@@ -10687,26 +10592,24 @@ func TransactionThenRaw()
         let indices = ids.map(|id| object_index(&engine, id));
         let original_sequence = mask_bake(&engine, indices[1]).instance_sequence;
 
-        engine
-            .call_object_function(
-                indices[1],
-                "MoveMask",
-                vec![clonk_script::Value::Int(2), clonk_script::Value::Int(1)],
-            )
-            .expect("changed SetPosition succeeds");
+        call_test_object_function(
+            &mut engine,
+            indices[1],
+            "MoveMask",
+            vec![clonk_script::Value::Int(2), clonk_script::Value::Int(1)],
+        );
         let moved = mask_bake(&engine, indices[1]);
         assert_eq!((moved.x, moved.y), (2, 1));
         assert_eq!(moved.instance_sequence, original_sequence);
         assert_eq!(moved.buffer, vec![0]);
 
         let before_same_position = moved.clone();
-        engine
-            .call_object_function(
-                indices[1],
-                "MoveMask",
-                vec![clonk_script::Value::Int(2), clonk_script::Value::Int(1)],
-            )
-            .expect("same-position SetPosition succeeds");
+        call_test_object_function(
+            &mut engine,
+            indices[1],
+            "MoveMask",
+            vec![clonk_script::Value::Int(2), clonk_script::Value::Int(1)],
+        );
         let after_same_position = mask_bake(&engine, indices[1]);
         assert_eq!(
             after_same_position.instance_sequence,
@@ -10726,21 +10629,21 @@ func TransactionThenRaw()
     fn solid_mask_containment_eligibility_cycle_recreates_instance() {
         let (mut engine, ids) = overlapping_solid_mask_engine();
         let target_index = object_index(&engine, ids[1]);
-        let container = engine
-            .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(-20, -20)))
-            .expect("offscreen container spawns");
+        let container = spawn_test_object(
+            &mut engine,
+            crate::SpawnConfig::new("MASK").with_position(Vector2::new(-20, -20)),
+        );
         let container_index = object_index(&engine, container);
         let container_sequence = engine.objects[container_index]
             .solid_mask_instance_sequence
             .expect("eligible offscreen container has an instance");
 
-        let result = engine
-            .call_object_function(
-                target_index,
-                "ContainerMaskCycle",
-                vec![clonk_script::Value::Object(container.as_u64())],
-            )
-            .expect("containment cycle completes");
+        let result = call_test_object_function(
+            &mut engine,
+            target_index,
+            "ContainerMaskCycle",
+            vec![clonk_script::Value::Object(container.as_u64())],
+        );
         assert_eq!(result, clonk_script::Value::Int(3));
         assert!(engine.objects[target_index].state.container.is_none());
         assert!(engine.objects[target_index].solid_mask_bake.is_none());
@@ -10817,9 +10720,10 @@ func TransactionThenRaw()
             raster_grid_landscape(4, 4, vec![0; 16]),
             solid_mask_definition("", false),
         );
-        let id = engine
-            .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(-20, -20)))
-            .expect("offscreen mask spawns");
+        let id = spawn_test_object(
+            &mut engine,
+            crate::SpawnConfig::new("MASK").with_position(Vector2::new(-20, -20)),
+        );
         let index = object_index(&engine, id);
         let offscreen_sequence = engine.objects[index]
             .solid_mask_instance_sequence
@@ -10858,7 +10762,7 @@ func TransactionThenRaw()
             raster_grid_landscape(4, 4, vec![0; 16]),
             solid_mask_definition("", false),
         );
-        let id = engine.spawn_object(mask_spawn()).expect("mask spawns");
+        let id = spawn_test_object(&mut engine, mask_spawn());
         let index = object_index(&engine, id);
         assert!(engine.solid_mask_grid_mode());
         assert!(engine.solid_mask_spec(index).is_some());
@@ -10912,15 +10816,11 @@ func TransactionThenRaw()
         // mask over the newly written background (C4Landscape.cpp:2851-2880;
         // C4SolidMask.cpp:323-342,365-385).
         let mut landscape = raster_grid_landscape(7, 5, vec![1; 35]);
-        let mut texmap = landscape
-            .raster_state()
-            .expect("raster state")
-            .texmap()
-            .clone();
+        let mut texmap = test_raster_state(&landscape).texmap().clone();
         texmap.shapes[3] = Some(crate::chunky::ChunkShape::Flat);
         landscape.set_raster_state(LandscapeRasterState::new(2, 0, texmap.clone()));
         let mut engine = engine_with_definition(11, landscape, solid_mask_definition("", false));
-        let id = engine.spawn_object(mask_spawn()).expect("mask spawns");
+        let id = spawn_test_object(&mut engine, mask_spawn());
         let index = object_index(&engine, id);
         engine.update_solid_mask(index);
         let bake = mask_bake(&engine, index);
@@ -11029,15 +10929,7 @@ func TransactionThenRaw()
     fn semi_solid_includes_liquids() {
         // GBackSemiSolid = density >= C4M_SemiSolid(25) (C4Material.h:202),
         // which liquids satisfy; GBackSolid = density >= C4M_Solid(50).
-        let mut landscape = flat_world();
-        landscape.set_liquid_column(
-            25,
-            vec![LiquidSegment {
-                top: 40,
-                bottom: 49,
-                material: None,
-            }],
-        );
+        let landscape = flat_world_with_lake();
         assert!(landscape.is_semi_solid_at(25, 45), "water is semi-solid");
         assert!(!landscape.is_solid_at(25, 45), "water is not solid");
         assert!(landscape.is_semi_solid_at(25, 60), "ground is semi-solid");
@@ -11056,15 +10948,7 @@ func TransactionThenRaw()
         assert_eq!(landscape.above_semi_solid(10, 30), Some(50));
 
         // Above a lake the DOWN scan stops on the water surface row.
-        let mut with_lake = flat_world();
-        with_lake.set_liquid_column(
-            25,
-            vec![LiquidSegment {
-                top: 40,
-                bottom: 49,
-                material: None,
-            }],
-        );
+        let with_lake = flat_world_with_lake();
         assert_eq!(with_lake.above_semi_solid(25, 35), Some(40));
         // Buried under the lake: first free pixel above the WATER.
         assert_eq!(with_lake.above_semi_solid(25, 70), Some(39));
@@ -11076,15 +10960,7 @@ func TransactionThenRaw()
         // (C4Landscape.cpp:1757-1782); SemiAboveSolid only wants
         // free-of-SOLID above solid (:1784-1809), so a water column
         // resting on rock satisfies the latter but not the former.
-        let mut landscape = flat_world();
-        landscape.set_liquid_column(
-            25,
-            vec![LiquidSegment {
-                top: 40,
-                bottom: 49,
-                material: None,
-            }],
-        );
+        let landscape = flat_world_with_lake();
         assert_eq!(landscape.above_solid(10, 30), Some(49));
         assert_eq!(landscape.above_solid(25, 30), None);
         assert_eq!(landscape.semi_above_solid(25, 30), Some(49));
@@ -11381,21 +11257,10 @@ func TransactionThenRaw()
         // divided into 17×15 cells; the walk steps diagonally while both
         // axes differ, then straight; any cell containing a nonzero-density
         // pixel (UpdatePixCnt, C4Landscape.cpp:2894-2908) blocks the path.
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
-
-            [Material Water]
-            Name=Water
-            Density=25
-            Friction=0
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Earth { Density = 100; Friction = 25; }
+            Water { Density = 25; Friction = 0; }
+        };
         let earth = materials.id_of("Earth").expect("earth exists");
         let water = materials.id_of("Water").expect("water exists");
 
@@ -11425,21 +11290,10 @@ func TransactionThenRaw()
         // upward search at cslide=0. A negative MaxSlide therefore skips the
         // loop entirely and extracts the probed pixel, while zero still
         // climbs through the same-material pixel directly above it.
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Negative]
-            Name=Negative
-            Density=25
-            MaxSlide=-1
-
-            [Material Zero]
-            Name=Zero
-            Density=25
-            MaxSlide=0
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Negative { Density = 25; MaxSlide = -1; }
+            Zero { Density = 25; MaxSlide = 0; }
+        };
         let negative = materials
             .id_of("Negative")
             .expect("negative material exists");
@@ -11490,16 +11344,9 @@ func TransactionThenRaw()
         // down first; then per cslide = 1..=mslide check LEFT before RIGHT;
         // a side is clogged only when both (±cslide, fy) and (±cslide, fy+1)
         // are >= mdens; a slide fires when (±cslide, fy+1) is free.
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=50
-            Friction=20
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Earth { Density = 50; Friction = 20; }
+        };
         let earth = materials.id_of("Earth").expect("earth exists");
         let mdens = 25;
 
@@ -11573,16 +11420,9 @@ func TransactionThenRaw()
             let (exit_x, exit_y) = neighbors[selected];
             bytes[exit_y as usize * 7 + exit_x as usize] = 0;
             let landscape = find_mat_path_push_landscape(7, 7, bytes);
-            let (mut x, mut y) = origin;
-            assert!(landscape.find_mat_path_push(
-                &mut x,
-                &mut y,
-                25,
-                1,
-                false,
-                &MaterialSet::new(),
-            ));
-            assert_eq!((x, y), neighbors[selected], "direction case {selected}");
+            let mut point = origin;
+            assert!(find_test_path_push(&landscape, &mut point, 25, 1, false));
+            assert_eq!(point, neighbors[selected], "direction case {selected}");
         }
 
         // The greater-density ray uses the same L/U/R/D priority. Four
@@ -11592,9 +11432,9 @@ func TransactionThenRaw()
             bytes[y as usize * 7 + x as usize] = 0;
         }
         let landscape = find_mat_path_push_landscape(7, 7, bytes);
-        let (mut x, mut y) = origin;
-        assert!(landscape.find_mat_path_push(&mut x, &mut y, 25, 1, false, &MaterialSet::new(),));
-        assert_eq!((x, y), (2, 3));
+        let mut point = origin;
+        assert!(find_test_path_push(&landscape, &mut point, 25, 1, false));
+        assert_eq!(point, (2, 3));
     }
 
     #[test]
@@ -11613,24 +11453,10 @@ func TransactionThenRaw()
         bytes[5 * 7 + 4] = 0;
         let landscape = find_mat_path_push_landscape(7, 7, bytes);
         let mut stable = (3, 3);
-        assert!(landscape.find_mat_path_push(
-            &mut stable.0,
-            &mut stable.1,
-            25,
-            2,
-            false,
-            &MaterialSet::new(),
-        ));
+        assert!(find_test_path_push(&landscape, &mut stable, 25, 2, false));
         assert_eq!(stable, (3, 1));
         let mut instable = (3, 3);
-        assert!(landscape.find_mat_path_push(
-            &mut instable.0,
-            &mut instable.1,
-            25,
-            2,
-            true,
-            &MaterialSet::new(),
-        ));
+        assert!(find_test_path_push(&landscape, &mut instable, 25, 2, true));
         assert_eq!(instable, (4, 5));
 
         // Best replacement is strict: four equal exits around one material
@@ -11642,14 +11468,7 @@ func TransactionThenRaw()
         }
         let landscape = find_mat_path_push_landscape(7, 7, bytes);
         let mut tied = (3, 3);
-        assert!(landscape.find_mat_path_push(
-            &mut tied.0,
-            &mut tied.1,
-            25,
-            1,
-            false,
-            &MaterialSet::new(),
-        ));
+        assert!(find_test_path_push(&landscape, &mut tied, 25, 1, false));
         assert_eq!(tied, (2, 3));
     }
 
@@ -11657,14 +11476,7 @@ func TransactionThenRaw()
     fn find_mat_path_push_matches_cpp_range_and_sealed_failure() {
         let sealed = find_mat_path_push_landscape(7, 7, vec![1; 7 * 7]);
         let mut point = (3, 3);
-        assert!(!sealed.find_mat_path_push(
-            &mut point.0,
-            &mut point.1,
-            25,
-            1,
-            false,
-            &MaterialSet::new(),
-        ));
+        assert!(!find_test_path_push(&sealed, &mut point, 25, 1, false));
 
         // The greater-density ray tests radii 1..499; radius 500 is excluded.
         let mut bytes = vec![1; 1001 * 3];
@@ -11672,28 +11484,37 @@ func TransactionThenRaw()
         bytes[exit_y * 1001 + 1] = 0;
         let landscape = find_mat_path_push_landscape(1001, 3, bytes);
         let mut within = (500, 1);
-        assert!(landscape.find_mat_path_push(
-            &mut within.0,
-            &mut within.1,
-            25,
-            1,
-            false,
-            &MaterialSet::new(),
-        ));
+        assert!(find_test_path_push(&landscape, &mut within, 25, 1, false));
         assert_eq!(within, (1, 1));
 
         let mut bytes = vec![1; 1001 * 3];
         bytes[exit_y * 1001] = 0;
         let landscape = find_mat_path_push_landscape(1001, 3, bytes);
         let mut at_limit = (500, 1);
-        assert!(!landscape.find_mat_path_push(
-            &mut at_limit.0,
-            &mut at_limit.1,
+        assert!(!find_test_path_push(
+            &landscape,
+            &mut at_limit,
             25,
             1,
-            false,
-            &MaterialSet::new(),
+            false
         ));
+    }
+
+    fn find_test_path_push(
+        landscape: &Landscape,
+        point: &mut (i32, i32),
+        density: i32,
+        max_slide: i32,
+        instable: bool,
+    ) -> bool {
+        landscape.find_mat_path_push(
+            &mut point.0,
+            &mut point.1,
+            density,
+            max_slide,
+            instable,
+            &MaterialSet::new(),
+        )
     }
 
     fn temperature_pixel_landscape(
@@ -11780,47 +11601,37 @@ func TransactionThenRaw()
         landscape
     }
 
+    fn test_environment(
+        temperature: i32,
+        climate: i32,
+        temperature_range: i32,
+    ) -> EnvironmentSettings {
+        EnvironmentSettings::new(0)
+            .with_temperature(temperature)
+            .with_climate(climate)
+            .with_temperature_range(temperature_range)
+    }
+
     #[test]
     fn temperature_scan_uses_frozen_crossmap_slots_after_lower_index_copy() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material HotAbove]
-            Name=HotAbove
-            Density=80
-            AboveTempConvert=-1
-            AboveTempConvertDir=0
-            AboveTempConvertTo=Target-Smooth
-            TempConvStrength=0
-
-            [Material ColdBelow]
-            Name=ColdBelow
-            Density=80
-            BelowTempConvert=1
-            BelowTempConvertDir=0
-            BelowTempConvertTo=Target-Smooth
-            TempConvStrength=0
-
-            [Material Target]
-            Name=Target
-            Density=30
-
-            [Material Stale]
-            Name=Stale
-            Density=50
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            HotAbove {
+                Density = 80; AboveTempConvert = -1; AboveTempConvertDir = 0;
+                AboveTempConvertTo = Target-Smooth; TempConvStrength = 0;
+            }
+            ColdBelow {
+                Density = 80; BelowTempConvert = 1; BelowTempConvertDir = 0;
+                BelowTempConvertTo = Target-Smooth; TempConvStrength = 0;
+            }
+            Target { Density = 30; }
+            Stale { Density = 50; }
+        };
         let hot = materials.id_of("HotAbove").expect("hot source exists");
         let target = materials.id_of("Target").expect("target exists");
         let stale = materials.id_of("Stale").expect("stale material exists");
         let mut baseline = frozen_temperature_pixel_landscape(&materials);
         let mut moved = baseline.clone();
-        let mut moved_texmap = moved
-            .raster_state()
-            .expect("raster state exists")
-            .texmap()
-            .clone();
+        let mut moved_texmap = test_raster_state(&moved).texmap().clone();
         let (success, indices) = moved_texmap.set_texture_index("Target-Smooth", 5, false);
         assert!(success);
         assert_eq!(indices, Some((40, 5)));
@@ -11834,7 +11645,7 @@ func TransactionThenRaw()
         assert_eq!(moved.grid_byte_at(0, 1), Some(40 | 0x80));
         assert_eq!(moved.grid_byte_at(1, 1), Some(40));
         assert_eq!(moved.material_pixel_count(target, None), 2);
-        let texmap = moved.raster_state().expect("raster state exists").texmap();
+        let texmap = test_raster_state(&moved).texmap();
         assert_eq!(texmap.material_names[5].as_deref(), Some("Target"));
         assert_eq!(texmap.material_names[40].as_deref(), Some("Target"));
         assert_eq!(texmap.material_crossmap_entries, vec![40, 40]);
@@ -11853,23 +11664,13 @@ func TransactionThenRaw()
 
     #[test]
     fn temperature_scan_uses_global_integer_temperature_without_climate_or_height() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Water]
-            Name=Water
-            Density=30
-            AboveTempConvert=4
-            AboveTempConvertDir=1
-            AboveTempConvertTo=Ice
-            TempConvStrength=3
-
-            [Material Ice]
-            Name=Ice
-            Density=80
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Water {
+                Density = 30; AboveTempConvert = 4; AboveTempConvertDir = 1; AboveTempConvertTo = Ice;
+                TempConvStrength = 3;
+            }
+            Ice { Density = 80; }
+        };
         let water = materials.id_of("Water").expect("water exists");
         let ice = materials.id_of("Ice").expect("ice exists");
         let water_byte = (water.index() + 1) as u8;
@@ -11880,10 +11681,7 @@ func TransactionThenRaw()
             }
         }
         let mut landscape = temperature_pixel_landscape(2, 8, bytes, &materials);
-        let environment = EnvironmentSettings::new(0)
-            .with_temperature(1)
-            .with_climate(20)
-            .with_temperature_range(30);
+        let environment = test_environment(1, 20, 30);
 
         landscape.apply_temperature_conversions(&materials, environment.temperature);
 
@@ -11898,23 +11696,13 @@ func TransactionThenRaw()
 
     #[test]
     fn temperature_scan_converts_only_scan_speed_columns_per_frame() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Ice]
-            Name=Ice
-            Density=80
-            AboveTempConvert=0
-            AboveTempConvertDir=0
-            AboveTempConvertTo=Water
-            TempConvStrength=3
-
-            [Material Water]
-            Name=Water
-            Density=30
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Ice {
+                Density = 80; AboveTempConvert = 0; AboveTempConvertDir = 0;
+                AboveTempConvertTo = Water; TempConvStrength = 3;
+            }
+            Water { Density = 30; }
+        };
         let ice = materials.id_of("Ice").expect("ice exists");
         let water = materials.id_of("Water").expect("water exists");
         let ice_byte = (ice.index() + 1) as u8;
@@ -11926,10 +11714,7 @@ func TransactionThenRaw()
             }
         }
         let mut landscape = temperature_pixel_landscape(6, 8, bytes, &materials);
-        let environment = EnvironmentSettings::new(0)
-            .with_temperature(10)
-            .with_climate(50)
-            .with_temperature_range(100);
+        let environment = test_environment(10, 50, 100);
 
         landscape.apply_temperature_conversions(&materials, environment.temperature);
 
@@ -11947,22 +11732,12 @@ func TransactionThenRaw()
 
     #[test]
     fn temperature_scan_preserves_ift_and_strength_zero_converts_one_pixel() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Ice]
-            Name=Ice
-            Density=80
-            AboveTempConvert=0
-            AboveTempConvertTo=Water
-            TempConvStrength=0
-
-            [Material Water]
-            Name=Water
-            Density=30
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Ice {
+                Density = 80; AboveTempConvert = 0; AboveTempConvertTo = Water; TempConvStrength = 0;
+            }
+            Water { Density = 30; }
+        };
         let ice = materials.id_of("Ice").expect("ice exists");
         let water = materials.id_of("Water").expect("water exists");
         let ice_byte = (ice.index() + 1) as u8;
@@ -11984,22 +11759,12 @@ func TransactionThenRaw()
 
     #[test]
     fn temperature_scan_pretty_surface_waits_for_the_left_column() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Ice]
-            Name=Ice
-            Density=80
-            AboveTempConvert=0
-            AboveTempConvertTo=Water
-            TempConvStrength=0
-
-            [Material Water]
-            Name=Water
-            Density=30
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Ice {
+                Density = 80; AboveTempConvert = 0; AboveTempConvertTo = Water; TempConvStrength = 0;
+            }
+            Water { Density = 30; }
+        };
         let ice = materials.id_of("Ice").expect("ice exists");
         let water = materials.id_of("Water").expect("water exists");
         let ice_byte = (ice.index() + 1) as u8;
@@ -12023,22 +11788,12 @@ func TransactionThenRaw()
 
     #[test]
     fn temperature_scan_cursor_pauses_without_an_eligible_conversion_or_when_disabled() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Ice]
-            Name=Ice
-            Density=80
-            AboveTempConvert=10
-            AboveTempConvertTo=Water
-            TempConvStrength=3
-
-            [Material Water]
-            Name=Water
-            Density=30
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Ice {
+                Density = 80; AboveTempConvert = 10; AboveTempConvertTo = Water; TempConvStrength = 3;
+            }
+            Water { Density = 30; }
+        };
         let ice = materials.id_of("Ice").expect("ice exists");
         let ice_byte = (ice.index() + 1) as u8;
         let mut bytes = vec![0; 4 * 4];
@@ -12060,33 +11815,18 @@ func TransactionThenRaw()
 
     #[test]
     fn apply_temperature_conversions_updates_materials() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Ice]
-            Name=Ice
-            Density=80
-            Friction=15
-            AboveTempConvert=0
-            AboveTempConvertDir=0
-            AboveTempConvertTo=Water
-            TempConvStrength=4
-
-            [Material Water]
-            Name=Water
-            Density=60
-            Friction=0
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Ice {
+                Density = 80; Friction = 15; AboveTempConvert = 0; AboveTempConvertDir = 0;
+                AboveTempConvertTo = Water; TempConvStrength = 4;
+            }
+            Water { Density = 60; Friction = 0; }
+        };
         let ice = materials.id_of("Ice").expect("ice exists");
         let water = materials.id_of("Water").expect("water exists");
 
         let mut landscape = Landscape::flat_with_material(3, 12, Some(ice));
-        let environment = EnvironmentSettings::new(0)
-            .with_temperature(10)
-            .with_climate(0)
-            .with_temperature_range(0);
+        let environment = test_environment(10, 0, 0);
         landscape.apply_temperature_conversions(&materials, environment.temperature);
 
         assert_eq!(landscape.solid_material_at(0), Some(water));
@@ -12096,27 +11836,16 @@ func TransactionThenRaw()
 
     #[test]
     fn temperature_conversion_to_sky_removes_surface_pixels() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Frost]
-            Name=Frost
-            Density=80
-            Friction=10
-            AboveTempConvert=0
-            AboveTempConvertDir=0
-            AboveTempConvertTo=Sky
-            TempConvStrength=3
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Frost {
+                Density = 80; Friction = 10; AboveTempConvert = 0; AboveTempConvertDir = 0;
+                AboveTempConvertTo = Sky; TempConvStrength = 3;
+            }
+        };
         let frost = materials.id_of("Frost").expect("frost exists");
 
         let mut landscape = Landscape::flat_with_material(2, 8, Some(frost));
-        let environment = EnvironmentSettings::new(0)
-            .with_temperature(5)
-            .with_climate(0)
-            .with_temperature_range(0);
+        let environment = test_environment(5, 0, 0);
         landscape.apply_temperature_conversions(&materials, environment.temperature);
 
         assert_eq!(landscape.surface(), &[11, 11]);
@@ -12125,25 +11854,13 @@ func TransactionThenRaw()
 
     #[test]
     fn temperature_conversion_converts_liquid_segments() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Water]
-            Name=Water
-            Density=30
-            Friction=0
-            AboveTempConvert=0
-            AboveTempConvertDir=0
-            AboveTempConvertTo=Steam
-            TempConvStrength=2
-
-            [Material Steam]
-            Name=Steam
-            Density=5
-            Friction=1
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Water {
+                Density = 30; Friction = 0; AboveTempConvert = 0; AboveTempConvertDir = 0;
+                AboveTempConvertTo = Steam; TempConvStrength = 2;
+            }
+            Steam { Density = 5; Friction = 1; }
+        };
         let water = materials.id_of("Water").expect("water exists");
         let steam = materials.id_of("Steam").expect("steam exists");
 
@@ -12151,10 +11868,7 @@ func TransactionThenRaw()
         landscape.set_default_liquid_material(Some(water));
         landscape.set_liquid_column(0, vec![LiquidSegment::new(4, 7)]);
 
-        let environment = EnvironmentSettings::new(0)
-            .with_temperature(5)
-            .with_climate(0)
-            .with_temperature_range(0);
+        let environment = test_environment(5, 0, 0);
         landscape.apply_temperature_conversions(&materials, environment.temperature);
 
         let column = &landscape.liquids()[0];
@@ -12169,30 +11883,19 @@ func TransactionThenRaw()
 
     #[test]
     fn temperature_conversion_evaporates_liquid_segments() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Steam]
-            Name=Steam
-            Density=5
-            Friction=1
-            BelowTempConvert=10
-            BelowTempConvertDir=1
-            BelowTempConvertTo=Sky
-            TempConvStrength=1
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Steam {
+                Density = 5; Friction = 1; BelowTempConvert = 10; BelowTempConvertDir = 1;
+                BelowTempConvertTo = Sky; TempConvStrength = 1;
+            }
+        };
         let steam = materials.id_of("Steam").expect("steam exists");
 
         let mut landscape = Landscape::flat(1, 20);
         landscape.set_default_liquid_material(Some(steam));
         landscape.set_liquid_column(0, vec![LiquidSegment::new(3, 5)]);
 
-        let environment = EnvironmentSettings::new(0)
-            .with_temperature(0)
-            .with_climate(0)
-            .with_temperature_range(0);
+        let environment = test_environment(0, 0, 0);
         landscape.apply_temperature_conversions(&materials, environment.temperature);
 
         let column = &landscape.liquids()[0];
@@ -12201,35 +11904,20 @@ func TransactionThenRaw()
 
     #[test]
     fn climate_zone_gradient_does_not_affect_material_conversion() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Ice]
-            Name=Ice
-            Density=80
-            Friction=15
-            AboveTempConvert=0
-            AboveTempConvertDir=0
-            AboveTempConvertTo=Water
-            TempConvStrength=4
-
-            [Material Water]
-            Name=Water
-            Density=60
-            Friction=0
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Ice {
+                Density = 80; Friction = 15; AboveTempConvert = 0; AboveTempConvertDir = 0;
+                AboveTempConvertTo = Water; TempConvStrength = 4;
+            }
+            Water { Density = 60; Friction = 0; }
+        };
         let ice = materials.id_of("Ice").expect("ice exists");
 
         let mut landscape = Landscape::flat_with_material(2, 20, Some(ice));
         landscape.set_height(0, 5);
         landscape.set_height(1, 100);
 
-        let environment = EnvironmentSettings::new(0)
-            .with_temperature(0)
-            .with_climate(20)
-            .with_temperature_range(40);
+        let environment = test_environment(0, 20, 40);
 
         landscape.apply_temperature_conversions(&materials, environment.temperature);
 
@@ -12239,18 +11927,9 @@ func TransactionThenRaw()
 
     #[test]
     fn blast_circle_raises_surface_for_blastable_materials() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
-            BlastFree=1
-            Inflammable=25
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Earth { Density = 100; Friction = 25; BlastFree = 1; Inflammable = 25; }
+        };
         let earth = materials.id_of("Earth").expect("earth exists");
 
         let mut landscape = Landscape::flat_with_material(11, 40, Some(earth));
@@ -12283,17 +11962,9 @@ func TransactionThenRaw()
 
     #[test]
     fn blast_circle_does_not_change_non_blastable_materials() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Steel]
-            Name=Steel
-            Density=120
-            Friction=60
-            BlastFree=0
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Steel { Density = 120; Friction = 60; BlastFree = 0; }
+        };
         let steel = materials.id_of("Steel").expect("steel exists");
 
         let mut landscape = Landscape::flat_with_material(7, 50, Some(steel));
@@ -12307,25 +11978,10 @@ func TransactionThenRaw()
 
     #[test]
     fn can_incinerate_respects_inflammable_materials() {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Wood]
-            Name=Wood
-            Density=90
-            Friction=15
-            BlastFree=1
-            Inflammable=-50
-
-            [Material Stone]
-            Name=Stone
-            Density=120
-            Friction=50
-            BlastFree=0
-            Inflammable=0
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Wood { Density = 90; Friction = 15; BlastFree = 1; Inflammable = -50; }
+            Stone { Density = 120; Friction = 50; BlastFree = 0; Inflammable = 0; }
+        };
         let wood = materials.id_of("Wood").expect("wood exists");
         let stone = materials.id_of("Stone").expect("stone exists");
 
@@ -12344,21 +12000,10 @@ func TransactionThenRaw()
         // C++ oracle: C4Landscape::Incinerate calls GetMat(x, y) and tests
         // that exact material's Inflammable field (src/C4Landscape.cpp:
         // 1417-1426). It does not substitute the column's surface material.
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Stone]
-            Name=Stone
-            Density=120
-            Inflammable=0
-
-            [Material Oil]
-            Name=Oil
-            Density=100
-            Inflammable=50
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Stone { Density = 120; Inflammable = 0; }
+            Oil { Density = 100; Inflammable = 50; }
+        };
         let stone = materials.id_of("Stone").expect("stone exists");
 
         let mut densities = vec![0; 128];
@@ -12397,22 +12042,10 @@ func TransactionThenRaw()
         // cast amounts derive from that count (:1066-1079). Circle loop:
         // ycnt -rad..=rad, lwdt = sqrt(rad²-ycnt²), xcnt -lwdt..lwdt with
         // the lwdt==0 single-pixel extension.
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
-            BlastFree=1
-
-            [Material Granite]
-            Name=Granite
-            Density=150
-            Friction=100
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Earth { Density = 100; Friction = 25; BlastFree = 1; }
+            Granite { Density = 150; Friction = 100; }
+        };
         let earth = materials.id_of("Earth").expect("earth exists");
         let granite = materials.id_of("Granite").expect("granite exists");
 
@@ -12433,21 +12066,10 @@ func TransactionThenRaw()
     }
 
     fn vehicle_earth_materials() -> (MaterialSet, MaterialId, MaterialId) {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Vehicle]
-            Name=Vehicle
-            Density=100
-            Friction=100
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
+        let materials = test_materials! {
+            Vehicle { Density = 100; Friction = 100; }
+            Earth { Density = 100; Friction = 25; }
+        };
         let vehicle = materials.id_of("Vehicle").expect("vehicle exists");
         let earth = materials.id_of("Earth").expect("earth exists");
         (materials, vehicle, earth)

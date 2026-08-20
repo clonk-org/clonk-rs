@@ -60,7 +60,6 @@ pub mod startup_scensel;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod viewport;
-pub mod viewport_draw_order;
 pub mod viewport_projection;
 
 use clonk_engine::landscape::{PixelGrid, PixelGridRenderAnchor};
@@ -209,6 +208,33 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    macro_rules! front_assert_eq {
+        ($actual:expr => $expected:expr, $($message:tt)+) => {
+            assert_eq!($actual, $expected, $($message)+)
+        };
+        ($actual:expr => $expected:expr $(,)?) => {
+            assert_eq!($actual, $expected)
+        };
+    }
+
+    macro_rules! front_assert {
+        ($condition:expr, $($message:tt)+) => {
+            assert!($condition, $($message)+)
+        };
+        ($condition:expr $(,)?) => {
+            assert!($condition)
+        };
+    }
+
+    macro_rules! front_assert_ne {
+        ($actual:expr => $unexpected:expr, $($message:tt)+) => {
+            assert_ne!($actual, $unexpected, $($message)+)
+        };
+        ($actual:expr => $unexpected:expr $(,)?) => {
+            assert_ne!($actual, $unexpected)
+        };
+    }
+
     trait TestValueExt<T> {
         fn test_value(self) -> T;
     }
@@ -270,12 +296,7 @@ mod tests {
             &font,
             4,
             4,
-            crate::classic_gui::IntRect {
-                x: 0,
-                y: 0,
-                w: 48,
-                h: 48,
-            },
+            crate::classic_gui::IntRect::new(0, 0, 48, 48),
             None,
         );
 
@@ -295,58 +316,49 @@ mod tests {
         if run > 0 {
             runs.push(run);
         }
-        assert_eq!(runs, vec![13, 13], "tile-clamped caret bars");
+        front_assert_eq! {runs => vec![13, 13], "tile-clamped caret bars"};
     }
 
     #[test]
     fn player_startup_name_decodes_native_bytes_only_for_presentation() {
         let raw = clonk_script::c4_string_from_bytes(b"Andr\xe9");
-        assert_eq!(c4_presentation_text(&raw), "Andr\u{e9}");
-        assert_eq!(clonk_script::c4_string_bytes(&raw), b"Andr\xe9");
+        front_assert_eq! {c4_presentation_text(&raw) => "Andr\u{e9}"};
+        front_assert_eq! {clonk_script::c4_string_bytes(&raw) => b"Andr\xe9"};
     }
 
     #[test]
     fn clr_mod_map_reset_aligns_cells_and_keeps_the_extra_edge() {
         let map = ClrModMap::reset(64, 64, 100, 70, 10, 70, 5, 9, 0).test_value();
 
-        assert_eq!((map.origin_x, map.origin_y), (-5, 3));
-        assert_eq!((map.width, map.height), (3, 3));
-        assert_eq!(map.cells, vec![0; 9]);
+        front_assert_eq! {(map.origin_x, map.origin_y) => (-5, 3)};
+        front_assert_eq! {(map.width, map.height) => (3, 3)};
+        front_assert_eq! {map.cells => vec![0; 9]};
     }
 
     #[test]
     fn clr_mod_map_uses_native_nonstandard_corner_term() {
-        let map = ClrModMap {
-            resolution_x: 64,
-            resolution_y: 64,
-            width: 2,
-            height: 2,
-            origin_x: 0,
-            origin_y: 0,
-            fade_transparent: false,
-            cells: vec![0x0000_0000, 0x4040_4040, 0x8080_8080, 0xffff_ffff],
-        };
+        let map = clr_mod_map_fixture(
+            64,
+            64,
+            2,
+            2,
+            vec![0x0000_0000, 0x4040_4040, 0x8080_8080, 0xffff_ffff],
+        );
 
-        assert_eq!(map.get_mod_at(32, 32), 0x8787_8787);
-        assert_eq!(map.get_mod_at(16, 48), 0x8a8a_8a8a);
+        front_assert_eq! {map.get_mod_at(32, 32) => 0x8787_8787};
+        front_assert_eq! {map.get_mod_at(16, 48) => 0x8a8a_8a8a};
     }
 
     #[test]
     fn fog_sprite_sampler_uses_64px_corner_quads_instead_of_per_pixel_get_mod_at() {
-        let map = ClrModMap {
-            resolution_x: 64,
-            resolution_y: 64,
-            width: 2,
-            height: 2,
-            origin_x: 0,
-            origin_y: 0,
-            fade_transparent: false,
-            cells: vec![0x0000_0000, 0x0040_4040, 0x0080_8080, 0x00ff_ffff],
-        };
-        let fog = FogDrawContext {
-            map: Arc::new(map.clone()),
-            zoom: 1.0,
-        };
+        let map = clr_mod_map_fixture(
+            64,
+            64,
+            2,
+            2,
+            vec![0x0000_0000, 0x0040_4040, 0x0080_8080, 0x00ff_ffff],
+        );
+        let fog = fog_draw_fixture(map.clone());
         let sampler = FogSpriteSampler::new(
             &fog,
             (0.0, 0.0, 64.0, 64.0),
@@ -357,8 +369,8 @@ mod tests {
         )
         .test_value();
 
-        assert_eq!(map.get_mod_at(32, 32), 0x0087_8787);
-        assert_eq!(sampler.modulation_at(0.5, 0.5), 0x0060_6060);
+        front_assert_eq! {map.get_mod_at(32, 32) => 0x0087_8787};
+        front_assert_eq! {sampler.modulation_at(0.5, 0.5) => 0x0060_6060};
 
         let (x_samples, y_samples) = sampler.raster_axes(73, 41);
         for y in 0..41 {
@@ -368,9 +380,9 @@ mod tests {
                 let scalar = sampler.modulation_sample(normalized_x, normalized_y);
                 let cached = sampler
                     .modulation_sample_for_axes(x_samples[x as usize], y_samples[y as usize]);
-                assert_eq!(cached.modulation, scalar.modulation);
-                assert_eq!(cached.weights, scalar.weights);
-                assert_eq!(cached.interpolate(), scalar.interpolate());
+                front_assert_eq! {cached.modulation => scalar.modulation};
+                front_assert_eq! {cached.weights => scalar.weights};
+                front_assert_eq! {cached.interpolate() => scalar.interpolate()};
             }
         }
 
@@ -383,11 +395,8 @@ mod tests {
             |x, y| (x, y),
         )
         .test_value();
-        assert_eq!(flipped_partial.x_ranges, vec![(0.0, 26.0), (26.0, 40.0)]);
-        assert!(flipped_partial
-            .x_ranges
-            .iter()
-            .all(|(left, right)| right - left <= 64.0));
+        front_assert_eq! {flipped_partial.x_ranges => vec![(0.0, 26.0), (26.0, 40.0)]};
+        front_assert! {flipped_partial.x_ranges.iter().all(|(left, right)| right - left <= 64.0)};
 
         let local_box = FogSpriteSampler::new_with_chunks(
             &fog,
@@ -407,24 +416,16 @@ mod tests {
             |x, y| (x, y),
         )
         .test_value();
-        assert_eq!(local_box.x_ranges[0], (0.0, 16.0));
-        assert_eq!(world_aligned_box.x_ranges[0], (0.0, 11.0));
+        front_assert_eq! {local_box.x_ranges[0] => (0.0, 16.0)};
+        front_assert_eq! {world_aligned_box.x_ranges[0] => (0.0, 11.0)};
 
         let vertex_first = FogModulationSample {
             modulation: [0, 0x0002_0202, 0, 0],
             weights: [0.5, 0.5, 0.0, 0.0],
         };
-        assert_eq!(vertex_first.interpolate(), 0x0001_0101);
-        assert_eq!(
-            modulate_c4_colors(0x0080_8080, vertex_first.interpolate()),
-            0,
-            "combining after interpolation loses the low byte",
-        );
-        assert_eq!(
-            vertex_first.combine_with(0x0080_8080),
-            0x0001_0101,
-            "native ModulateClr runs at vertices before GL interpolation",
-        );
+        front_assert_eq! {vertex_first.interpolate() => 0x0001_0101};
+        front_assert_eq! {modulate_c4_colors(0x0080_8080, vertex_first.interpolate()) => 0, "combining after interpolation loses the low byte",};
+        front_assert_eq! {vertex_first.combine_with(0x0080_8080) => 0x0001_0101, "native ModulateClr runs at vertices before GL interpolation",};
 
         let mod2_at_black_corner = prepare_sprite_fragment(
             Color::opaque(200, 200, 200),
@@ -443,11 +444,8 @@ mod tests {
         let PreparedSpriteFragment::Shader { rgb, alpha } = mod2_at_black_corner else {
             panic!("fogged MOD2 sprite must use the shader path");
         };
-        assert_eq!(rgb, [145.0; 3]);
-        assert_eq!(
-            alpha, 255.0,
-            "one nonblack quad vertex keeps MOD2 active at its black corner",
-        );
+        front_assert_eq! {rgb => [145.0; 3]};
+        front_assert_eq! {alpha => 255.0, "one nonblack quad vertex keeps MOD2 active at its black corner",};
     }
 
     #[test]
@@ -512,8 +510,8 @@ mod tests {
                 |x, y| (x * 1.125 + 3.0, y * 0.75 - 4.0),
             )
             .test_value();
-            assert!(sampler.x_ranges.len() > 2);
-            assert!(sampler.y_ranges.len() > 2);
+            front_assert! {sampler.x_ranges.len() > 2};
+            front_assert! {sampler.y_ranges.len() > 2};
 
             // These dimensions put pixel centers exactly on the first global
             // 64px source seams (local x=51 and y=57), pinning `< end`
@@ -528,8 +526,8 @@ mod tests {
                     let cached_axes = (x_samples[x as usize], y_samples[y as usize]);
                     let (cached_quad, cached_weights) =
                         sampler.quad_and_weights_for_axes(cached_axes.0, cached_axes.1);
-                    assert_eq!(cached_quad, quad);
-                    assert_eq!(cached_weights, weights);
+                    front_assert_eq! {cached_quad => quad};
+                    front_assert_eq! {cached_weights => weights};
 
                     let color = Color::new(213, 147, 89, 255);
                     let reference_color = interpolate_quad_color(
@@ -537,10 +535,7 @@ mod tests {
                             .map(|modulation| modulate_surface_color(color, modulation)),
                         weights,
                     );
-                    assert_eq!(
-                        sampler.color_at_axes(color, cached_axes.0, cached_axes.1),
-                        reference_color,
-                    );
+                    front_assert_eq! {sampler.color_at_axes(color, cached_axes.0, cached_axes.1) => reference_color,};
 
                     let color_at_y = |vertex_y: f32| {
                         Color::new(
@@ -561,10 +556,7 @@ mod tests {
                         ],
                         weights,
                     );
-                    assert_eq!(
-                        sampler.vertical_color_at_axes(cached_axes.0, cached_axes.1, color_at_y,),
-                        reference_vertical,
-                    );
+                    front_assert_eq! {sampler.vertical_color_at_axes(cached_axes.0, cached_axes.1, color_at_y,) => reference_vertical,};
                 }
             }
         }
@@ -572,19 +564,13 @@ mod tests {
 
     #[test]
     fn fog_lines_interpolate_original_endpoint_samples_and_fog_precedes_gamma() {
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 64,
-                resolution_y: 64,
-                width: 2,
-                height: 2,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![0x0000_0000, 0x0040_4040, 0x0080_8080, 0x00ff_ffff],
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(
+            64,
+            64,
+            2,
+            2,
+            vec![0x0000_0000, 0x0040_4040, 0x0080_8080, 0x00ff_ffff],
+        ));
         let mut line = Surface::new(65, 65, PixelFormat::Rgba8888);
         draw_pxs_line(
             &mut line,
@@ -594,21 +580,9 @@ mod tests {
             None,
             Some(&fog),
         );
-        assert_eq!(line.get_pixel(32, 32), Some(gray(127)));
+        front_assert_eq! {line.get_pixel(32, 32) => Some(gray(127))};
 
-        let black_fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 64,
-                resolution_y: 64,
-                width: 2,
-                height: 2,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![0; 4],
-            }),
-            zoom: 1.0,
-        };
+        let black_fog = fog_draw_fixture(clr_mod_map_fixture(64, 64, 2, 2, vec![0; 4]));
         let image = ImageData::new(1, 1, vec![255, 255, 255, 255]);
         let mut pixel = Surface::new(1, 1, PixelFormat::Rgba8888);
         let gamma = clonk_graphics::GammaRamp::standard();
@@ -624,15 +598,12 @@ mod tests {
             Some(&gamma),
             Some(&black_fog),
         );
-        assert_eq!(
-            pixel.get_pixel(0, 0),
-            Some(gamma_encode_fragment(Color::opaque(0, 0, 0), &gamma))
-        );
+        front_assert_eq! {pixel.get_pixel(0, 0) => Some(gamma_encode_fragment(Color::opaque(0, 0, 0), &gamma))};
     }
 
     #[test]
     fn fog_transparency_adds_to_sky_texture_transparency() {
-        let mut graphics = test_graphics(1, 1, 1, "FoW sky alpha");
+        let mut graphics = test_graphics((1, 1, 1), "FoW sky alpha");
         graphics.surface_mut().fill(Color::opaque(0, 255, 0));
         graphics.active_fog_map = Some(Arc::new(ClrModMap {
             resolution_x: 64,
@@ -652,26 +623,20 @@ mod tests {
             1.0,
             None,
         );
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
-            Some(Color::opaque(0, 255, 0))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(Color::opaque(0, 255, 0))};
     }
 
     #[test]
     fn sky_modulation_combines_with_fog_vertices_and_keeps_packed_alpha() {
-        let mut graphics = test_graphics(1, 1, 1, "FoW sky modulation");
+        let mut graphics = test_graphics((1, 1, 1), "FoW sky modulation");
         graphics.surface_mut().fill(Color::opaque(0, 255, 0));
-        graphics.active_fog_map = Some(Arc::new(ClrModMap {
-            resolution_x: 64,
-            resolution_y: 64,
-            width: 2,
-            height: 2,
-            origin_x: 0,
-            origin_y: 0,
-            fade_transparent: false,
-            cells: vec![0x00ff_ffff; 4],
-        }));
+        graphics.active_fog_map = Some(Arc::new(clr_mod_map_fixture(
+            64,
+            64,
+            2,
+            2,
+            vec![0x00ff_ffff; 4],
+        )));
 
         graphics.blit_sky_tile(
             &ImageData::new(1, 1, vec![255, 0, 0, 255]),
@@ -682,26 +647,23 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
+        front_assert_eq! {
+            graphics.surface().get_pixel(0, 0) =>
             Some(Color::opaque(127, 128, 0)),
             "Sky.Modulation is combined with GetModAt by packed ModulateClr before blending",
-        );
+        };
     }
 
     #[test]
     fn fogged_sky_gradient_applies_global_modulation_before_the_map() {
-        let mut graphics = test_graphics(1, 1, 1, "FoW gradient modulation");
-        graphics.active_fog_map = Some(Arc::new(ClrModMap {
-            resolution_x: 64,
-            resolution_y: 64,
-            width: 2,
-            height: 2,
-            origin_x: 0,
-            origin_y: 0,
-            fade_transparent: false,
-            cells: vec![0x00ff_ffff; 4],
-        }));
+        let mut graphics = test_graphics((1, 1, 1), "FoW gradient modulation");
+        graphics.active_fog_map = Some(Arc::new(clr_mod_map_fixture(
+            64,
+            64,
+            2,
+            2,
+            vec![0x00ff_ffff; 4],
+        )));
         let settings = SkySettings {
             fade_top: RgbColor::new(255, 255, 255),
             fade_bottom: RgbColor::new(255, 255, 255),
@@ -711,24 +673,21 @@ mod tests {
 
         graphics.fill_sky_gradient(&settings, 1.0, None);
 
-        assert_eq!(graphics.surface().get_pixel(0, 0), Some(gray(126)));
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(gray(126))};
     }
 
     #[test]
     fn cropped_sky_tile_uses_visible_crop_edges_as_fog_vertices() {
-        let mut graphics = test_graphics(49, 1, 1, "cropped FoW sky tile");
+        let mut graphics = test_graphics((49, 1, 1), "cropped FoW sky tile");
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         let row = [0x0064_6464, 0x00c8_c8c8, 0x0032_3232, 0x0032_3232];
-        graphics.active_fog_map = Some(Arc::new(ClrModMap {
-            resolution_x: 32,
-            resolution_y: 1,
-            width: 4,
-            height: 2,
-            origin_x: 0,
-            origin_y: 0,
-            fade_transparent: false,
-            cells: row.into_iter().chain(row).collect(),
-        }));
+        graphics.active_fog_map = Some(Arc::new(clr_mod_map_fixture(
+            32,
+            1,
+            4,
+            2,
+            row.into_iter().chain(row).collect(),
+        )));
         let image = ImageData::new(64, 64, vec![255; 64 * 64 * 4]);
         let fog = graphics.fog_draw_context().test_value();
         let cropped = FogSpriteSampler::new(
@@ -763,8 +722,8 @@ mod tests {
 
         graphics.blit_sky_tile(&image, -15, 0, None, 1.0, None);
 
-        assert_eq!(graphics.surface().get_pixel(0, 0), Some(expected));
-        assert_ne!(expected, stale_offscreen_vertex);
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(expected)};
+        front_assert_ne! {expected => stale_offscreen_vertex};
     }
 
     #[test]
@@ -831,9 +790,7 @@ mod tests {
         });
         let make_graphics = || {
             let mut graphics = test_graphics(
-                SURFACE_WIDTH,
-                SURFACE_HEIGHT,
-                SURFACE_HEIGHT as i32,
+                (SURFACE_WIDTH, SURFACE_HEIGHT, SURFACE_HEIGHT as i32),
                 "parallel sky rows",
             );
             graphics.viewport_x = 18.75;
@@ -881,13 +838,9 @@ mod tests {
             true,
         );
 
-        assert_eq!(parallel.surface().pixels(), scalar.surface().pixels());
-        assert_eq!(
-            scalar.surface().get_pixel(0, 0),
-            Some(Color::opaque(11, 23, 41)),
-            "the direct row path must retain pixels outside the surface clip",
-        );
-        assert!(
+        front_assert_eq! {parallel.surface().pixels() => scalar.surface().pixels()};
+        front_assert_eq! {scalar.surface().get_pixel(0, 0) => Some(Color::opaque(11, 23, 41)), "the direct row path must retain pixels outside the surface clip",};
+        front_assert! {
             (4..123).any(|y| {
                 (6..167).any(|x| {
                     let background = Color::opaque(
@@ -899,7 +852,7 @@ mod tests {
                 })
             }),
             "the cropped, rounded tiles must exercise the clipped draw region",
-        );
+        };
     }
 
     #[test]
@@ -921,7 +874,7 @@ mod tests {
                 .flat_map(|color| [color.r, color.g, color.b, color.a])
                 .collect(),
         );
-        let mut graphics = test_graphics(5, 5, 5, "contiguous sky tiles");
+        let mut graphics = test_graphics((5, 5, 5), "contiguous sky tiles");
         graphics.surface_mut().fill(Color::opaque(1, 1, 1));
         graphics.viewport_x = 1.0;
         graphics.viewport_y = 1.0;
@@ -935,11 +888,7 @@ mod tests {
 
         for y in 0..5 {
             for x in 0..5 {
-                assert_eq!(
-                    graphics.surface().get_pixel(x, y),
-                    Some(tile[((y % 2) * 2 + x % 2) as usize]),
-                    "native integer phase covers ({x}, {y})"
-                );
+                front_assert_eq! {graphics.surface().get_pixel(x, y) => Some(tile[((y % 2) * 2 + x % 2) as usize]), "native integer phase covers ({x}, {y})"};
             }
         }
     }
@@ -969,7 +918,7 @@ mod tests {
             offset_y: 0.0,
             fixed: Some([-(1 << 15), 0, 0, 0]),
         };
-        let mut graphics = test_graphics(3, 1, 1, "fixed sky phase");
+        let mut graphics = test_graphics((3, 1, 1), "fixed sky phase");
         graphics.viewport_x = 1.0;
 
         graphics.tile_sky_image_with_parallel_rows(
@@ -981,50 +930,41 @@ mod tests {
             false,
         );
 
-        assert_eq!(graphics.surface().get_pixel(0, 0), Some(left));
-        assert_eq!(graphics.surface().get_pixel(1, 0), Some(right));
-        assert_eq!(graphics.surface().get_pixel(2, 0), Some(left));
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(left)};
+        front_assert_eq! {graphics.surface().get_pixel(1, 0) => Some(right)};
+        front_assert_eq! {graphics.surface().get_pixel(2, 0) => Some(left)};
     }
 
     #[test]
     fn clr_mod_map_squared_reveal_and_generator_values_match_cpp() {
         let mut reveal = ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0).test_value();
         reveal.reduce_modulation(64, 64, 64, 96);
-        assert_eq!(reveal.get_mod_at(128, 128), 0x0033_3333);
+        front_assert_eq! {reveal.get_mod_at(128, 128) => 0x0033_3333};
 
         let mut alpha_reveal =
             ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0x0000_0001).test_value();
         alpha_reveal.reduce_modulation(64, 64, 64, 96);
-        assert_eq!(alpha_reveal.get_mod_at(128, 128), 0xccff_ffff);
+        front_assert_eq! {alpha_reveal.get_mod_at(128, 128) => 0xccff_ffff};
 
         let mut generator = ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0).test_value();
         generator.reduce_modulation(0, 0, 10_000, 11_000);
         generator.add_modulation(0, 0, 64, 264, 0);
-        assert_eq!(generator.get_mod_at(128, 0), 0x0030_3030);
+        front_assert_eq! {generator.get_mod_at(128, 0) => 0x0030_3030};
 
         let mut alpha_generator =
             ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0x0000_0001).test_value();
         alpha_generator.reduce_modulation(0, 0, 10_000, 11_000);
         alpha_generator.add_modulation(0, 0, 64, 264, 64);
-        assert_eq!(alpha_generator.get_mod_at(128, 0), 0x8fff_ffff);
+        front_assert_eq! {alpha_generator.get_mod_at(128, 0) => 0x8fff_ffff};
     }
 
     #[test]
     fn packed_fog_modulation_keeps_native_shift_and_transparency_math() {
         let color = Color::new(200, 100, 50, 245);
 
-        assert_eq!(
-            modulate_surface_color(color, 0x0080_8080),
-            Color::new(100, 50, 25, 245)
-        );
-        assert_eq!(
-            modulate_surface_color(color, 0x8080_8080),
-            Color::new(100, 50, 25, 122)
-        );
-        assert_eq!(
-            modulate_surface_color(color, 0x00ff_ffff),
-            Color::new(199, 99, 49, 245)
-        );
+        front_assert_eq! {modulate_surface_color(color, 0x0080_8080) => Color::new(100, 50, 25, 245)};
+        front_assert_eq! {modulate_surface_color(color, 0x8080_8080) => Color::new(100, 50, 25, 122)};
+        front_assert_eq! {modulate_surface_color(color, 0x00ff_ffff) => Color::new(199, 99, 49, 245)};
     }
 
     #[test]
@@ -1109,22 +1049,10 @@ mod tests {
         }];
 
         let map = build_fog_modulation_map(&snapshot, 0, 0, 0, 480, 128).test_value();
-        assert_eq!(map.get_mod_at(96, 64), 0, "generator wins after reveal");
-        assert_eq!(
-            map.get_mod_at(192, 64),
-            0,
-            "ClosedContainer==1 suppresses the contained repeller"
-        );
-        assert_eq!(
-            map.get_mod_at(336, 64),
-            0x00ff_ffff,
-            "target uses the cursor's nonzero fallback range"
-        );
-        assert_eq!(
-            map.get_mod_at(416, 64),
-            0x00ff_ffff,
-            "ClosedContainer==2 explicitly retains outward vision"
-        );
+        front_assert_eq! {map.get_mod_at(96, 64) => 0, "generator wins after reveal"};
+        front_assert_eq! {map.get_mod_at(192, 64) => 0, "ClosedContainer==1 suppresses the contained repeller"};
+        front_assert_eq! {map.get_mod_at(336, 64) => 0x00ff_ffff, "target uses the cursor's nonzero fallback range"};
+        front_assert_eq! {map.get_mod_at(416, 64) => 0x00ff_ffff, "ClosedContainer==2 explicitly retains outward vision"};
 
         snapshot
             .objects
@@ -1141,24 +1069,16 @@ mod tests {
         let fow_player = snapshot.fow_players.get_mut(&0).test_value();
         fow_player.view_objects.clear();
         let default_target = build_fog_modulation_map(&snapshot, 0, 0, 0, 800, 128).test_value();
-        assert_ne!(
-            default_target.get_mod_at(100, 64) & 0x00ff_ffff,
-            0,
-            "zero target and cursor ranges fall back to the native 500px range"
-        );
-        assert_eq!(
-            default_target.get_mod_at(0, 64) & 0x00ff_ffff,
-            0,
-            "the fallback reveal excludes its exact outer-radius boundary"
-        );
+        front_assert_ne! {default_target.get_mod_at(100, 64) & 0x00ff_ffff => 0, "zero target and cursor ranges fall back to the native 500px range"};
+        front_assert_eq! {default_target.get_mod_at(0, 64) & 0x00ff_ffff => 0, "the fallback reveal excludes its exact outer-radius boundary"};
     }
 
     #[test]
     fn ignore_fow_suppresses_only_an_object_base_draw() {
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            ..test_sprite(ImageData::new(1, 1, vec![255, 255, 255, 255]))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(1, 1, vec![255, 255, 255, 255]),
+            DefinitionRect::new(0, 0, 1, 1),
+        );
         let mut object = make_snapshot().objects.remove(0);
         object.definition_id = "IgnoreFog".into();
         object.position = Vector2::new(1, 1);
@@ -1167,59 +1087,28 @@ mod tests {
         object.blit_mode = 0;
         object.action = Default::default();
 
-        let mut graphics = test_graphics_with(
-            3,
-            3,
-            3,
+        let mut graphics = test_graphics_with_sprites(
+            (3, 3, 3),
             "Ignore FoW",
-            Arc::new(HashMap::from([(sprite_map_key("IgnoreFog", None), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("IgnoreFog", sprite)]),
         );
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
-        graphics.active_fog_map = Some(Arc::new(ClrModMap {
-            resolution_x: 64,
-            resolution_y: 64,
-            width: 2,
-            height: 2,
-            origin_x: 0,
-            origin_y: 0,
-            fade_transparent: false,
-            cells: vec![0; 4],
-        }));
-        graphics.draw_objects(
+        graphics.active_fog_map = Some(Arc::new(clr_mod_map_fixture(64, 64, 2, 2, vec![0; 4])));
+        draw_test_objects(
+            &mut graphics,
             std::slice::from_ref(&object),
-            &[object.id],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::default().render_order(&[object.id]),
         );
-        assert_eq!(
-            graphics.surface().get_pixel(1, 1),
-            Some(Color::opaque(255, 255, 255))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(1, 1) => Some(Color::opaque(255, 255, 255))};
 
         object.category &= !CATEGORY_IGNORE_FOW_FLAG;
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             std::slice::from_ref(&object),
-            &[object.id],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::default().render_order(&[object.id]),
         );
-        assert_eq!(
-            graphics.surface().get_pixel(1, 1),
-            Some(Color::opaque(0, 0, 0))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(1, 1) => Some(Color::opaque(0, 0, 0))};
     }
 
     /// The row a narrower action draws after `SetAction` left the direction
@@ -1240,16 +1129,11 @@ mod tests {
     /// that `SetAction` leaves the direction at 3.
     #[test]
     fn a_narrower_action_draws_the_row_the_wider_one_left_behind() {
-        let narrow = DefinitionActionGraphics {
-            directions: 2,
-            flip_dir: Some(0),
-            ..DefinitionActionGraphics::default()
-        };
-        assert_eq!(
-            GraphicsSystem::resolve_draw_direction(&narrow, Direction::from_script_value(3)),
-            3,
-            "the row is not clamped to the two the action declares"
-        );
+        let narrow = action_graphics_fixture(|action| {
+            action.directions = 2;
+            action.flip_dir = Some(0);
+        });
+        front_assert_eq! {GraphicsSystem::resolve_draw_direction(&narrow, Direction::from_script_value(3)) => 3, "the row is not clamped to the two the action declares"};
     }
 
     #[test]
@@ -1257,47 +1141,31 @@ mod tests {
         // C4Object::UpdateFlipDir keeps raw Action.Dir and computes
         // DrawDir=2*FlipDir-1-Dir for the mirrored half
         // (C4Object.cpp:404-430).
-        let banner = DefinitionActionGraphics {
-            directions: 14,
-            flip_dir: Some(7),
-            ..DefinitionActionGraphics::default()
-        };
+        let banner = action_graphics_fixture(|action| {
+            action.directions = 14;
+            action.flip_dir = Some(7);
+        });
         for (raw, expected_row) in [(13, 0), (7, 6)] {
             let direction = Direction::from_script_value(raw);
-            assert_eq!(
-                GraphicsSystem::resolve_draw_direction(&banner, direction),
-                expected_row
-            );
+            front_assert_eq! {GraphicsSystem::resolve_draw_direction(&banner, direction) => expected_row};
         }
 
-        let flag = DefinitionActionGraphics {
-            directions: 9,
-            ..DefinitionActionGraphics::default()
-        };
+        let flag = action_graphics_fixture(|action| action.directions = 9);
         let direction = Direction::from_script_value(4);
-        assert_eq!(GraphicsSystem::resolve_draw_direction(&flag, direction), 4);
+        front_assert_eq! {GraphicsSystem::resolve_draw_direction(&flag, direction) => 4};
 
-        let malformed = DefinitionActionGraphics {
-            flip_dir: Some(-2),
-            ..DefinitionActionGraphics::default()
-        };
-        assert_eq!(
-            GraphicsSystem::resolve_draw_direction(&malformed, Direction::from_script_value(0),),
+        let malformed = action_graphics_fixture(|action| action.flip_dir = Some(-2));
+        front_assert_eq! {
+            GraphicsSystem::resolve_draw_direction(&malformed, Direction::from_script_value(0),) =>
             -5,
             "negative FlipDir remains truthy and uses the signed C++ formula"
-        );
+        };
     }
 
     #[test]
     fn renderer_uses_physical_action_graphics_for_duplicate_names() {
-        let first = DefinitionActionGraphics {
-            length: Some(2),
-            ..DefinitionActionGraphics::default()
-        };
-        let last = DefinitionActionGraphics {
-            length: Some(5),
-            ..DefinitionActionGraphics::default()
-        };
+        let first = action_graphics_fixture(|action| action.length = Some(2));
+        let last = action_graphics_fixture(|action| action.length = Some(5));
         let actions = HashMap::from([
             ("Dup".to_string(), first),
             (physical_action_graphics_key(1), last),
@@ -1310,14 +1178,10 @@ mod tests {
             act_map_index: Some(1),
             ..clonk_engine::ActionState::new("Dup")
         };
-        assert_eq!(
-            GraphicsSystem::live_action_graphics(&actions, &physical)
-                .and_then(|graphics| graphics.length),
-            Some(5)
-        );
+        front_assert_eq! {GraphicsSystem::live_action_graphics(&actions, &physical).and_then(|graphics| graphics.length) => Some(5)};
 
         let idle = clonk_engine::ActionState::new("Idle");
-        assert!(GraphicsSystem::live_action_graphics(&actions, &idle).is_none());
+        front_assert! {GraphicsSystem::live_action_graphics(&actions, &idle).is_none()};
     }
 
     #[test]
@@ -1333,33 +1197,17 @@ mod tests {
         pixels[expected_offset..expected_offset + 4]
             .copy_from_slice(&[green.r, green.g, green.b, green.a]);
 
-        let named_first = DefinitionActionGraphics {
-            facet: Some(clonk_engine::DefinitionActionFacet {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-                target_x: 0,
-                target_y: 0,
-            }),
-            facet_top_face: true,
-            length: Some(1),
-            ..DefinitionActionGraphics::default()
-        };
-        let physical_second = DefinitionActionGraphics {
-            facet: Some(clonk_engine::DefinitionActionFacet {
-                x: 2,
-                y: 1,
-                width: 2,
-                height: 1,
-                target_x: 99,
-                target_y: 99,
-            }),
-            reverse: true,
-            facet_top_face: true,
-            length: Some(3),
-            ..DefinitionActionGraphics::default()
-        };
+        let named_first = action_graphics_fixture(|action| {
+            action.facet = Some(test_action_facet(0, 0, 1, 1, 0, 0));
+            action.facet_top_face = true;
+            action.length = Some(1);
+        });
+        let physical_second = action_graphics_fixture(|action| {
+            action.facet = Some(test_action_facet(2, 1, 2, 1, 99, 99));
+            action.reverse = true;
+            action.facet_top_face = true;
+            action.length = Some(3);
+        });
         let sprite = DefinitionSprite {
             actions: HashMap::from([
                 ("Dup".to_string(), named_first),
@@ -1382,27 +1230,13 @@ mod tests {
         object.action.phase = 0;
         object.direction = Direction::from_script_value(2);
 
-        let sprites = Arc::new(HashMap::from([(
-            sprite_map_key("TestObject", None),
-            sprite,
-        )]));
-        let mut graphics = test_graphics_with(
-            24,
-            24,
-            24,
-            "FacetTopFace physical slot",
-            sprites,
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let sprites = test_sprites([("TestObject", sprite)]);
+        let mut graphics =
+            test_graphics_with_sprites((24, 24, 24), "FacetTopFace physical slot", sprites);
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
 
-        assert_eq!(
-            graphics.surface().get_pixel(10, 10),
-            Some(green),
-            "the physical duplicate's live FacetTopFace source must win"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(10, 10) => Some(green), "the physical duplicate's live FacetTopFace source must win"};
     }
 
     #[test]
@@ -1444,10 +1278,10 @@ mod tests {
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
             ..test_sprite(ImageData::new(12, 8, override_pixels))
         };
-        let sprites = Arc::new(HashMap::from([
-            (sprite_map_key("TestObject", None), definition_sprite),
-            (sprite_map_key("OverrideSheet", None), override_sprite),
-        ]));
+        let sprites = test_sprites([
+            ("TestObject", definition_sprite),
+            ("OverrideSheet", override_sprite),
+        ]);
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(12, 10);
         object.base_graphics = Some(clonk_engine::ObjectBaseGraphics {
@@ -1456,40 +1290,25 @@ mod tests {
             blit_mode: 0,
         });
 
-        let mut graphics = test_graphics_with(
-            24,
-            20,
-            20,
-            "cross-definition plain TopFace",
-            sprites,
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((24, 20, 20), "cross-definition plain TopFace", sprites);
         graphics.set_point_filtering(true);
         let background = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(background);
         graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
 
-        assert_eq!(
+        front_assert_eq! {
             [
                 graphics.surface().get_pixel(11, 9),
                 graphics.surface().get_pixel(12, 9),
                 graphics.surface().get_pixel(11, 10),
                 graphics.surface().get_pixel(12, 10),
-            ],
+            ] =>
             [Some(green); 4],
             "live TopFace metadata must sample the scaled override source rectangle"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(13, 9),
-            Some(background),
-            "the selected bitmap scale must not enlarge destination geometry"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(14, 12),
-            Some(background),
-            "override-definition TopFace metadata must not relocate the draw"
-        );
+        };
+        front_assert_eq! {graphics.surface().get_pixel(13, 9) => Some(background), "the selected bitmap scale must not enlarge destination geometry"};
+        front_assert_eq! {graphics.surface().get_pixel(14, 12) => Some(background), "override-definition TopFace metadata must not relocate the draw"};
     }
 
     #[test]
@@ -1512,10 +1331,10 @@ mod tests {
             graphics_scale: 0.5,
             ..test_sprite(ImageData::new(2, 2, pixels))
         };
-        let sprites = Arc::new(HashMap::from([
-            (sprite_map_key("TestObject", None), definition_sprite),
-            (sprite_map_key("HalfScale", None), override_sprite),
-        ]));
+        let sprites = test_sprites([
+            ("TestObject", definition_sprite),
+            ("HalfScale", override_sprite),
+        ]);
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(5, 5);
         object.base_graphics = Some(clonk_engine::ObjectBaseGraphics {
@@ -1524,25 +1343,14 @@ mod tests {
             blit_mode: 0,
         });
 
-        let mut graphics = test_graphics_with(
-            12,
-            12,
-            12,
-            "fractional TopFace scale",
-            sprites,
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((12, 12, 12), "fractional TopFace scale", sprites);
         graphics.set_point_filtering(true);
         graphics.surface_mut().fill(background);
         graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
 
-        assert_eq!(graphics.surface().get_pixel(5, 5), Some(green));
-        assert_eq!(
-            graphics.surface().get_pixel(6, 5),
-            Some(background),
-            "fractional source scale must not alter the 1x1 destination"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(5, 5) => Some(green)};
+        front_assert_eq! {graphics.surface().get_pixel(6, 5) => Some(background), "fractional source scale must not alter the 1x1 destination"};
     }
 
     #[test]
@@ -1564,7 +1372,7 @@ mod tests {
         };
         let background = Color::opaque(0, 0, 0);
         let render = |source, transform| {
-            let mut graphics = test_graphics(4, 2, 2, "fractional object source");
+            let mut graphics = test_graphics((4, 2, 2), "fractional object source");
             graphics.set_point_filtering(true);
             graphics.surface_mut().fill(background);
             graphics.blit_face(
@@ -1584,23 +1392,14 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert_eq!(
-            render(SourceRect::new(1, 0, 2, 1), None),
-            vec![Some(red), Some(green), Some(green), Some(blue)]
-        );
-        assert_eq!(
-            render(SourceRect::new(1, 0, 2, 1), Some(DrawTransform::identity()),),
-            vec![Some(red), Some(green), Some(green), Some(blue)]
-        );
+        front_assert_eq! {render(SourceRect::new(1, 0, 2, 1), None) => vec![Some(red), Some(green), Some(green), Some(blue)]};
+        front_assert_eq! {render(SourceRect::new(1, 0, 2, 1), Some(DrawTransform::identity()),) => vec![Some(red), Some(green), Some(green), Some(blue)]};
         // Logical x=2 scales to x=2.5 with width 2.5. Only 1.5 source
         // pixels remain before the four-pixel sheet edge, so the target is
         // clipped by 1.5/2.5 and rounds to two rendered pixels.
         let clipped = vec![Some(green), Some(blue), Some(background), Some(background)];
-        assert_eq!(render(SourceRect::new(2, 0, 2, 1), None), clipped);
-        assert_eq!(
-            render(SourceRect::new(2, 0, 2, 1), Some(DrawTransform::identity()),),
-            clipped
-        );
+        front_assert_eq! {render(SourceRect::new(2, 0, 2, 1), None) => clipped};
+        front_assert_eq! {render(SourceRect::new(2, 0, 2, 1), Some(DrawTransform::identity()),) => clipped};
     }
 
     #[test]
@@ -1619,21 +1418,13 @@ mod tests {
         override_pixels[live_source_offset..live_source_offset + 4]
             .copy_from_slice(&[green.r, green.g, green.b, green.a]);
 
-        let live_action = DefinitionActionGraphics {
-            facet: Some(clonk_engine::DefinitionActionFacet {
-                x: 2,
-                y: 1,
-                width: 2,
-                height: 1,
-                target_x: 99,
-                target_y: 99,
-            }),
-            directions: 2,
-            flip_dir: Some(1),
-            facet_top_face: true,
-            length: Some(3),
-            ..DefinitionActionGraphics::default()
-        };
+        let live_action = action_graphics_fixture(|action| {
+            action.facet = Some(test_action_facet(2, 1, 2, 1, 99, 99));
+            action.directions = 2;
+            action.flip_dir = Some(1);
+            action.facet_top_face = true;
+            action.length = Some(3);
+        });
         let definition_sprite = DefinitionSprite {
             actions: HashMap::from([("Active".to_string(), live_action)]),
             shape: Some(DefinitionRect::new(-3, -1, 6, 2)),
@@ -1650,10 +1441,10 @@ mod tests {
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
             ..test_sprite(ImageData::new(8, 4, override_pixels))
         };
-        let sprites = Arc::new(HashMap::from([
-            (sprite_map_key("TestObject", None), definition_sprite),
-            (sprite_map_key("OverrideSheet", None), override_sprite),
-        ]));
+        let sprites = test_sprites([
+            ("TestObject", definition_sprite),
+            ("OverrideSheet", override_sprite),
+        ]);
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(12, 8);
         object.action = clonk_engine::ActionState::new("Active");
@@ -1670,29 +1461,14 @@ mod tests {
             blit_mode: 0,
         });
 
-        let mut graphics = test_graphics_with(
-            24,
-            16,
-            16,
-            "cross-definition FacetTopFace",
-            sprites,
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((24, 16, 16), "cross-definition FacetTopFace", sprites);
         let background = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(background);
         graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
 
-        assert_eq!(
-            graphics.surface().get_pixel(14, 7),
-            Some(green),
-            "live FacetTopFace must sample the override bitmap and FlipDir must mirror it"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(9, 7),
-            Some(background),
-            "the live FlipDir transform must move the unflipped target"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(14, 7) => Some(green), "live FacetTopFace must sample the override bitmap and FlipDir must mirror it"};
+        front_assert_eq! {graphics.surface().get_pixel(9, 7) => Some(background), "the live FlipDir transform must move the unflipped target"};
     }
 
     #[test]
@@ -1701,11 +1477,10 @@ mod tests {
         // FacetTopFace is false and the source remains Def->TopFace
         // (src/C4Object.cpp:404-430,2639-2668).
         let green = Color::opaque(0, 200, 0);
-        let action = DefinitionActionGraphics {
-            flip_dir: Some(1),
-            facet_top_face: false,
-            ..DefinitionActionGraphics::default()
-        };
+        let action = action_graphics_fixture(|action| {
+            action.flip_dir = Some(1);
+            action.facet_top_face = false;
+        });
         let sprite = DefinitionSprite {
             actions: HashMap::from([("Active".to_string(), action)]),
             shape: Some(DefinitionRect::new(-3, -1, 6, 2)),
@@ -1716,10 +1491,7 @@ mod tests {
                 vec![green.r, green.g, green.b, green.a],
             ))
         };
-        let sprites = Arc::new(HashMap::from([(
-            sprite_map_key("TestObject", None),
-            sprite,
-        )]));
+        let sprites = test_sprites([("TestObject", sprite)]);
         let render = |direction| {
             let mut object = make_snapshot().objects.remove(0);
             object.position = Vector2::new(12, 8);
@@ -1729,14 +1501,10 @@ mod tests {
             // hand-built (src/C4Object.cpp:415-428).
             object.draw_transform =
                 DrawTransform::updated_flip_dir(object.draw_transform, direction, 1);
-            let mut graphics = test_graphics_with(
-                24,
-                16,
-                16,
+            let mut graphics = test_graphics_with_sprites(
+                (24, 16, 16),
                 "plain TopFace FlipDir",
                 Arc::clone(&sprites),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.surface_mut().fill(Color::opaque(0, 0, 0));
             graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
@@ -1745,13 +1513,9 @@ mod tests {
 
         let unflipped = render(0);
         let flipped = render(1);
-        assert_eq!(unflipped.get_pixel(9, 7), Some(green));
-        assert_eq!(flipped.get_pixel(14, 7), Some(green));
-        assert_ne!(
-            flipped.get_pixel(9, 7),
-            Some(green),
-            "FlipDir must move the plain TopFace across the shape center"
-        );
+        front_assert_eq! {unflipped.get_pixel(9, 7) => Some(green)};
+        front_assert_eq! {flipped.get_pixel(14, 7) => Some(green)};
+        front_assert_ne! {flipped.get_pixel(9, 7) => Some(green), "FlipDir must move the plain TopFace across the shape center"};
     }
 
     #[test]
@@ -1770,42 +1534,28 @@ mod tests {
                 [green.r, green.g, green.b, green.a].repeat(4),
             ))
         };
-        let sprites = Arc::new(HashMap::from([(
-            sprite_map_key("TestObject", None),
-            sprite,
-        )]));
+        let sprites = test_sprites([("TestObject", sprite)]);
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(10, 10);
         object.construction = FULL_CON / 2;
-        let mut graphics = test_graphics_with(
-            20,
-            20,
-            20,
-            "partial GrowthType TopFace",
-            sprites,
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((20, 20, 20), "partial GrowthType TopFace", sprites);
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
 
         graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
 
-        assert_eq!(graphics.surface().get_pixel(9, 9), Some(green));
-        assert_eq!(
-            graphics.surface().get_pixel(10, 9),
-            Some(Color::opaque(0, 0, 0)),
-            "a 2x2 TopFace scales to exactly 1x1 at fifty-percent Con"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(9, 9) => Some(green)};
+        front_assert_eq! {graphics.surface().get_pixel(10, 9) => Some(Color::opaque(0, 0, 0)), "a 2x2 TopFace scales to exactly 1x1 at fifty-percent Con"};
     }
 
     #[test]
     fn set_obj_draw_transform_rotation_reaches_presenter() {
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(-4, -1, 9, 3)),
-            ..test_sprite(ImageData::new(9, 3, [220, 40, 20, 255].repeat(27)))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(9, 3, [220, 40, 20, 255].repeat(27)),
+            DefinitionRect::new(-4, -1, 9, 3),
+        );
         let render = |transform| {
-            let mut graphics = test_graphics(24, 24, 24, "Draw transform");
+            let mut graphics = test_graphics((24, 24, 24), "Draw transform");
             graphics.blit_face(
                 &sprite,
                 SourceRect::new(0, 0, 9, 3),
@@ -1843,15 +1593,9 @@ mod tests {
         let rotated = render(Some(DrawTransform::from_matrix([
             0.866, -0.5, 0.0, 0.5, 0.866, 0.0, 0.0, 0.0, 1.0,
         ])));
-        assert_eq!(straight.3 - straight.1 + 1, 3);
-        assert!(
-            rotated.3 - rotated.1 + 1 >= 6,
-            "30-degree b/d rotation must increase the 9x3 sprite's vertical span: {rotated:?}"
-        );
-        assert!(
-            rotated.2 - rotated.0 + 1 >= 8,
-            "rotated sprite unexpectedly collapsed: {rotated:?}"
-        );
+        front_assert_eq! {straight.3 - straight.1 + 1 => 3};
+        front_assert! {rotated.3 - rotated.1 + 1 >= 6, "30-degree b/d rotation must increase the 9x3 sprite's vertical span: {rotated:?}"};
+        front_assert! {rotated.2 - rotated.0 + 1 >= 8, "rotated sprite unexpectedly collapsed: {rotated:?}"};
     }
 
     #[test]
@@ -1859,44 +1603,27 @@ mod tests {
         // C4Object.cpp:477 selects the straight blit when Def->Rotateable is
         // false, even if a scripted object retains a nonzero raw r.
         let red = Color::opaque(220, 40, 20);
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(-2, 0, 4, 1)),
-            ..test_sprite(ImageData::new(4, 1, [red.r, red.g, red.b, red.a].repeat(4)))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(4, 1, [red.r, red.g, red.b, red.a].repeat(4)),
+            DefinitionRect::new(-2, 0, 4, 1),
+        );
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(8, 8);
         object.rotation = 90;
         object.crew_member = false;
 
-        let mut graphics = test_graphics_with(
-            20,
-            20,
-            20,
+        let mut graphics = test_graphics_with_sprites(
+            (20, 20, 20),
             "non-rotateable raw rotation",
-            Arc::new(HashMap::from([(
-                sprite_map_key("TestObject", None),
-                sprite,
-            )])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("TestObject", sprite)]),
         );
         let background = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(background);
-        graphics.draw_objects(
-            &[object],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
+        draw_test_objects(&mut graphics, &[object], TestObjectDraw::default());
 
-        assert_eq!(graphics.surface().get_pixel(6, 8), Some(red));
-        assert_eq!(graphics.surface().get_pixel(9, 8), Some(red));
-        assert_eq!(graphics.surface().get_pixel(7, 6), Some(background));
+        front_assert_eq! {graphics.surface().get_pixel(6, 8) => Some(red)};
+        front_assert_eq! {graphics.surface().get_pixel(9, 8) => Some(red)};
+        front_assert_eq! {graphics.surface().get_pixel(7, 6) => Some(background)};
     }
 
     #[test]
@@ -1920,47 +1647,30 @@ mod tests {
         object.rotation = 360;
         object.crew_member = false;
 
-        let mut graphics = test_graphics_with(
-            20,
-            20,
-            20,
+        let mut graphics = test_graphics_with_sprites(
+            (20, 20, 20),
             "raw three-sixty rotation",
-            Arc::new(HashMap::from([(
-                sprite_map_key("TestObject", None),
-                sprite,
-            )])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("TestObject", sprite)]),
         );
         // A fractional viewport makes the transformed path's linear sample
         // observably different from the exact straight-path samples.
         graphics.viewport_x = 0.25;
         let background = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(background);
-        graphics.draw_objects(
-            &[object],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
+        draw_test_objects(&mut graphics, &[object], TestObjectDraw::default());
 
         let first = graphics.surface().get_pixel(7, 8);
-        assert_ne!(first, Some(red));
-        assert_ne!(first, Some(blue));
-        assert_ne!(first, Some(background));
+        front_assert_ne! {first => Some(red)};
+        front_assert_ne! {first => Some(blue)};
+        front_assert_ne! {first => Some(background)};
     }
 
     #[test]
     fn overlay_draw_transform_uses_its_full_local_matrix() {
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(-4, -1, 9, 3)),
-            ..test_sprite(ImageData::new(9, 3, [30, 180, 70, 255].repeat(27)))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(9, 3, [30, 180, 70, 255].repeat(27)),
+            DefinitionRect::new(-4, -1, 9, 3),
+        );
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(12, 12);
         object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
@@ -1968,17 +1678,10 @@ mod tests {
             .with_transform(Some(DrawTransform::from_matrix([
                 0.866, -0.5, 0.0, 0.5, 0.866, 0.0, 0.0, 0.0, 1.0,
             ])))];
-        let mut graphics = test_graphics_with(
-            28,
-            28,
-            28,
+        let mut graphics = test_graphics_with_sprites(
+            (28, 28, 28),
             "Overlay transform",
-            Arc::new(HashMap::from([(
-                sprite_map_key("RotatedOverlay", None),
-                sprite,
-            )])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("RotatedOverlay", sprite)]),
         );
         graphics.draw_object_overlays(
             &object,
@@ -2014,16 +1717,8 @@ mod tests {
         }
         let width = max_x - min_x + 1;
         let height = max_y - min_y + 1;
-        assert!(
-            height >= 6,
-            "overlay b/d terms were not presented: {:?}",
-            (min_x, min_y, max_x, max_y)
-        );
-        assert!(
-            width <= 11,
-            "ordinary overlay incorrectly inherited host scale/rotation: {:?}",
-            (min_x, min_y, max_x, max_y)
-        );
+        front_assert! {height >= 6, "overlay b/d terms were not presented: {:?}", (min_x, min_y, max_x, max_y)};
+        front_assert! {width <= 11, "ordinary overlay incorrectly inherited host scale/rotation: {:?}", (min_x, min_y, max_x, max_y)};
     }
 
     #[test]
@@ -2036,8 +1731,8 @@ mod tests {
         let image = ImageData::new(4, 1, pixels);
         let mut surface = Surface::new(2, 1, PixelFormat::Rgba8888);
         draw_image_strip(&mut surface, 0, 0, &image, 2, 0, 2, 1, None);
-        assert_eq!(surface.get_pixel(0, 0), Some(gray(30)));
-        assert_eq!(surface.get_pixel(1, 0), Some(gray(40)));
+        front_assert_eq! {surface.get_pixel(0, 0) => Some(gray(30))};
+        front_assert_eq! {surface.get_pixel(1, 0) => Some(gray(40))};
     }
 
     #[test]
@@ -2050,7 +1745,7 @@ mod tests {
 
         draw_image_strip(&mut surface, 0, 0, &image, 0, 0, 1, 1, Some(&gamma));
 
-        assert_eq!(surface.get_pixel(0, 0), Some(Color::new(17, 33, 49, 255)));
+        front_assert_eq! {surface.get_pixel(0, 0) => Some(Color::new(17, 33, 49, 255))};
     }
 
     #[test]
@@ -2067,8 +1762,8 @@ mod tests {
             Color::transparent(),
             &gamma,
         );
-        assert_eq!(scene.textures.len(), 1);
-        assert_eq!(scene.commands.len(), 1);
+        front_assert_eq! {scene.textures.len() => 1};
+        front_assert_eq! {scene.commands.len() => 1};
         // clonk-org/clonk-rs#271: a compact instance; same geometry and UV
         // extent, carried as a rect rather than per-vertex pairs.
         let GpuCommand::ObjectBatch {
@@ -2080,14 +1775,14 @@ mod tests {
         else {
             panic!("image strip did not lower to a textured command");
         };
-        assert_eq!(sprites.len(), 1);
+        front_assert_eq! {sprites.len() => 1};
         let sprite = &sprites[0];
-        assert_eq!(sprite.sampler(), GpuSampler::Nearest);
-        assert_eq!(*blend, GpuBlend::Normal);
-        assert!(*gamma);
-        assert_eq!(sprite.positions[0], [2.0, 1.0, 1.0]);
-        assert_eq!(sprite.positions[3], [4.0, 3.0, 1.0]);
-        assert_eq!(sprite.uv, [0.25, 0.0, 0.75, 1.0]);
+        front_assert_eq! {sprite.sampler() => GpuSampler::Nearest};
+        front_assert_eq! {*blend => GpuBlend::Normal};
+        front_assert! {*gamma};
+        front_assert_eq! {sprite.positions[0] => [2.0, 1.0, 1.0]};
+        front_assert_eq! {sprite.positions[3] => [4.0, 3.0, 1.0]};
+        front_assert_eq! {sprite.uv => [0.25, 0.0, 0.75, 1.0]};
     }
 
     #[test]
@@ -2109,10 +1804,7 @@ mod tests {
             Some(&gamma),
         );
 
-        assert_eq!(
-            surface.get_pixel(0, 0),
-            Some(Color::new(125, 150, 175, 255))
-        );
+        front_assert_eq! {surface.get_pixel(0, 0) => Some(Color::new(125, 150, 175, 255))};
     }
 
     #[test]
@@ -2129,10 +1821,10 @@ mod tests {
             &image,
             None,
         );
-        assert_eq!(surface.get_pixel(0, 0), Some(gray(0)));
-        assert_eq!(surface.get_pixel(1, 0), Some(gray(64)));
-        assert_eq!(surface.get_pixel(2, 0), Some(gray(191)));
-        assert_eq!(surface.get_pixel(3, 0), Some(gray(255)));
+        front_assert_eq! {surface.get_pixel(0, 0) => Some(gray(0))};
+        front_assert_eq! {surface.get_pixel(1, 0) => Some(gray(64))};
+        front_assert_eq! {surface.get_pixel(2, 0) => Some(gray(191))};
+        front_assert_eq! {surface.get_pixel(3, 0) => Some(gray(255))};
     }
 
     #[test]
@@ -2164,19 +1856,11 @@ mod tests {
 
         let positive = GuiRect::new(1.25, 1.25, 4.5, 3.5);
         let positive_crop = draw_x_float_crop(&positive, 8, 4).test_value();
-        assert_eq!(
-            (
-                positive_crop.target_x,
-                positive_crop.target_y,
-                positive_crop.target_width,
-                positive_crop.target_height,
-            ),
-            (2, 2, 3, 2)
-        );
-        assert!((positive_crop.source.x - 4.0 / 3.0).abs() < 1e-6);
-        assert!((positive_crop.source.y - 6.0 / 7.0).abs() < 1e-6);
-        assert!((positive_crop.source.width - 16.0 / 3.0).abs() < 1e-6);
-        assert!((positive_crop.source.height - 16.0 / 7.0).abs() < 1e-6);
+        front_assert_eq! {(positive_crop.target_x, positive_crop.target_y, positive_crop.target_width, positive_crop.target_height,) => (2, 2, 3, 2)};
+        front_assert! {(positive_crop.source.x - 4.0 / 3.0).abs() < 1e-6};
+        front_assert! {(positive_crop.source.y - 6.0 / 7.0).abs() < 1e-6};
+        front_assert! {(positive_crop.source.width - 16.0 / 3.0).abs() < 1e-6};
+        front_assert! {(positive_crop.source.height - 16.0 / 7.0).abs() < 1e-6};
 
         let ordinary = render(positive, false);
         let inward = render(positive, true);
@@ -2184,62 +1868,46 @@ mod tests {
             for x in 0..inward.width() {
                 let pixel = inward.get_pixel(x, y).test_value();
                 if (2..5).contains(&(x as i32)) && (2..4).contains(&(y as i32)) {
-                    assert_eq!(pixel, ordinary.get_pixel(x, y).unwrap());
+                    front_assert_eq! {pixel => ordinary.get_pixel(x, y).unwrap()};
                 } else {
-                    assert_eq!(pixel, sentinel, "unexpected inward pixel at {x},{y}");
+                    front_assert_eq! {pixel => sentinel, "unexpected inward pixel at {x},{y}"};
                 }
             }
         }
-        assert_ne!(ordinary.get_pixel(1, 2), Some(sentinel));
-        assert_ne!(ordinary.get_pixel(5, 2), Some(sentinel));
-        assert_ne!(ordinary.get_pixel(2, 1), Some(sentinel));
-        assert_ne!(ordinary.get_pixel(2, 4), Some(sentinel));
+        front_assert_ne! {ordinary.get_pixel(1, 2) => Some(sentinel)};
+        front_assert_ne! {ordinary.get_pixel(5, 2) => Some(sentinel)};
+        front_assert_ne! {ordinary.get_pixel(2, 1) => Some(sentinel)};
+        front_assert_ne! {ordinary.get_pixel(2, 4) => Some(sentinel)};
 
         let negative = GuiRect::new(-1.25, 1.25, 4.0, 3.5);
         let negative_crop = draw_x_float_crop(&negative, 8, 4).test_value();
-        assert_eq!(
-            (
-                negative_crop.target_x,
-                negative_crop.target_y,
-                negative_crop.target_width,
-                negative_crop.target_height,
-            ),
-            (-1, 2, 3, 2)
-        );
-        assert!((negative_crop.source.x - 0.5).abs() < 1e-6);
-        assert!((negative_crop.source.width - 6.0).abs() < 1e-6);
+        front_assert_eq! {(negative_crop.target_x, negative_crop.target_y, negative_crop.target_width, negative_crop.target_height,) => (-1, 2, 3, 2)};
+        front_assert! {(negative_crop.source.x - 0.5).abs() < 1e-6};
+        front_assert! {(negative_crop.source.width - 6.0).abs() < 1e-6};
         let ordinary = render(negative, false);
         let inward = render(negative, true);
         for y in 2..4 {
             for x in 0..2 {
-                assert_eq!(inward.get_pixel(x, y), ordinary.get_pixel(x, y));
+                front_assert_eq! {inward.get_pixel(x, y) => ordinary.get_pixel(x, y)};
             }
         }
-        assert_eq!(inward.get_pixel(2, 2), Some(sentinel));
-        assert_ne!(ordinary.get_pixel(2, 2), Some(sentinel));
+        front_assert_eq! {inward.get_pixel(2, 2) => Some(sentinel)};
+        front_assert_ne! {ordinary.get_pixel(2, 2) => Some(sentinel)};
 
         let negative_y = GuiRect::new(1.25, -1.25, 4.5, 4.0);
         let negative_y_crop = draw_x_float_crop(&negative_y, 8, 4).test_value();
-        assert_eq!(
-            (
-                negative_y_crop.target_x,
-                negative_y_crop.target_y,
-                negative_y_crop.target_width,
-                negative_y_crop.target_height,
-            ),
-            (2, -1, 3, 3)
-        );
-        assert!((negative_y_crop.source.y - 0.25).abs() < 1e-6);
-        assert!((negative_y_crop.source.height - 3.0).abs() < 1e-6);
+        front_assert_eq! {(negative_y_crop.target_x, negative_y_crop.target_y, negative_y_crop.target_width, negative_y_crop.target_height,) => (2, -1, 3, 3)};
+        front_assert! {(negative_y_crop.source.y - 0.25).abs() < 1e-6};
+        front_assert! {(negative_y_crop.source.height - 3.0).abs() < 1e-6};
         let ordinary = render(negative_y, false);
         let inward = render(negative_y, true);
         for y in 0..2 {
             for x in 2..5 {
-                assert_eq!(inward.get_pixel(x, y), ordinary.get_pixel(x, y));
+                front_assert_eq! {inward.get_pixel(x, y) => ordinary.get_pixel(x, y)};
             }
         }
-        assert_eq!(inward.get_pixel(2, 2), Some(sentinel));
-        assert_ne!(ordinary.get_pixel(2, 2), Some(sentinel));
+        front_assert_eq! {inward.get_pixel(2, 2) => Some(sentinel)};
+        front_assert_ne! {ordinary.get_pixel(2, 2) => Some(sentinel)};
 
         // Native tile selection casts `source_right - 1` before dividing by
         // the 4px tile size. The 4.0..4.8 source tail therefore never emits
@@ -2253,21 +1921,18 @@ mod tests {
         );
         let tile_edge_rect = GuiRect::new(0.2, 1.0, 5.0, 4.0);
         let tile_edge_crop = draw_x_float_crop(&tile_edge_rect, 5, 4).test_value();
-        assert_eq!(
-            (tile_edge_crop.target_x, tile_edge_crop.target_width),
-            (1, 4)
-        );
-        assert!((tile_edge_crop.source.x - 0.8).abs() < 1e-6);
-        assert!((tile_edge_crop.source.width - 4.0).abs() < 1e-6);
+        front_assert_eq! {(tile_edge_crop.target_x, tile_edge_crop.target_width) => (1, 4)};
+        front_assert! {(tile_edge_crop.source.x - 0.8).abs() < 1e-6};
+        front_assert! {(tile_edge_crop.source.width - 4.0).abs() < 1e-6};
         let mut ordinary = Surface::new(7, 7, PixelFormat::Rgba8888);
         ordinary.fill(sentinel);
         draw_image_bilinear(&mut ordinary, &tile_edge_rect, &tile_edge_image, None);
         let mut inward = Surface::new(7, 7, PixelFormat::Rgba8888);
         inward.fill(sentinel);
         draw_image_x_float(&mut inward, &tile_edge_rect, &tile_edge_image, None);
-        assert_ne!(inward.get_pixel(3, 2), Some(sentinel));
-        assert_eq!(inward.get_pixel(4, 2), Some(sentinel));
-        assert_ne!(ordinary.get_pixel(4, 2), Some(sentinel));
+        front_assert_ne! {inward.get_pixel(3, 2) => Some(sentinel)};
+        front_assert_eq! {inward.get_pixel(4, 2) => Some(sentinel)};
+        front_assert_ne! {ordinary.get_pixel(4, 2) => Some(sentinel)};
 
         for empty in [
             GuiRect::new(2.2, 1.25, 0.6, 3.5),
@@ -2277,16 +1942,10 @@ mod tests {
             GuiRect::new(1.25, 1.25, 3.5, 0.0),
             GuiRect::new(1.25, 1.25, 3.5, -1.0),
         ] {
-            assert!(draw_x_float_crop(&empty, 8, 4).is_none());
-            assert!(render(empty, true)
-                .pixels()
-                .chunks_exact(4)
-                .all(|pixel| pixel == [sentinel.r, sentinel.g, sentinel.b, sentinel.a]));
+            front_assert! {draw_x_float_crop(&empty, 8, 4).is_none()};
+            front_assert! {render(empty, true).pixels().chunks_exact(4).all(|pixel| pixel == [sentinel.r, sentinel.g, sentinel.b, sentinel.a])};
         }
-        assert_ne!(
-            render(GuiRect::new(2.2, 1.25, 0.6, 3.5), false).get_pixel(2, 2),
-            Some(sentinel)
-        );
+        front_assert_ne! {render(GuiRect::new(2.2, 1.25, 0.6, 3.5), false).get_pixel(2, 2) => Some(sentinel)};
     }
 
     #[test]
@@ -2306,9 +1965,7 @@ mod tests {
                       destination_extent: u32|
          -> (BlitSampling, Vec<Color>) {
             let mut graphics = test_graphics(
-                destination_extent,
-                destination_extent,
-                0,
+                (destination_extent, destination_extent, 0),
                 "runtime sprite filtering",
             );
             graphics.set_runtime_sprite_filtering(application_scale, point_filtering);
@@ -2349,54 +2006,39 @@ mod tests {
         // Exact scale-one blits stay nearest for both PointFiltering values.
         for point_filtering in [false, true] {
             let (sampling, pixels) = render(1.0, point_filtering, 2);
-            assert_eq!(sampling, BlitSampling::Nearest);
-            assert_eq!(
-                pixels,
-                vec![
-                    Color::opaque(0, 0, 0),
-                    Color::opaque(255, 0, 0),
-                    Color::opaque(0, 255, 0),
-                    Color::opaque(0, 0, 255),
-                ]
-            );
+            front_assert_eq! {sampling => BlitSampling::Nearest};
+            front_assert_eq! {pixels => vec![Color::opaque(0, 0, 0), Color::opaque(255, 0, 0), Color::opaque(0, 255, 0), Color::opaque(0, 0, 255),]};
         }
 
         // At scale one, PointFiltering alone distinguishes a non-exact 2x
         // stretch. The centre-near sample retains GL's fractional channels.
         let (sampling, linear) = render(1.0, false, 4);
-        assert_eq!(sampling, BlitSampling::Linear);
-        assert_eq!(linear[5], Color::opaque(48, 48, 16));
+        front_assert_eq! {sampling => BlitSampling::Linear};
+        front_assert_eq! {linear[5] => Color::opaque(48, 48, 16)};
         let (sampling, point) = render(1.0, true, 4);
-        assert_eq!(sampling, BlitSampling::Nearest);
-        assert_eq!(point[5], Color::opaque(0, 0, 0));
+        front_assert_eq! {sampling => BlitSampling::Nearest};
+        front_assert_eq! {point[5] => Color::opaque(0, 0, 0)};
 
         // Non-100% scale forces linear for both config values and first
         // applies CStdDDraw's 0.5/-1 source correction.
         for point_filtering in [false, true] {
             let (sampling, exact_geometry) = render(2.0, point_filtering, 2);
-            assert_eq!(sampling, BlitSampling::Linear);
-            assert_eq!(exact_geometry[0], Color::opaque(48, 48, 16));
+            front_assert_eq! {sampling => BlitSampling::Linear};
+            front_assert_eq! {exact_geometry[0] => Color::opaque(48, 48, 16)};
             let (sampling, scaled) = render(2.0, point_filtering, 4);
-            assert_eq!(sampling, BlitSampling::Linear);
-            assert_eq!(scaled[5], Color::opaque(60, 60, 36));
+            front_assert_eq! {sampling => BlitSampling::Linear};
+            front_assert_eq! {scaled[5] => Color::opaque(60, 60, 36)};
         }
 
         // A transform pointer makes identity, rotation, mirror and projective
         // calls alike non-exact; the shared selector then supplies StdGL's
         // default-linear / PointFiltering-nearest choice at scale one.
-        let mut graphics = test_graphics(2, 2, 0, "transformed sampler selection");
+        let mut graphics = test_graphics((2, 2, 0), "transformed sampler selection");
         let source = FloatSourceRect::scaled(SourceRect::new(0, 0, 2, 2), 1.0);
         for point_filtering in [false, true] {
             graphics.set_runtime_sprite_filtering(1.0, point_filtering);
             let (_, transformed_sampling) = graphics.runtime_sprite_blit(source, (2.0, 2.0), true);
-            assert_eq!(
-                transformed_sampling,
-                if point_filtering {
-                    BlitSampling::Nearest
-                } else {
-                    BlitSampling::Linear
-                }
-            );
+            front_assert_eq! {transformed_sampling => if point_filtering {BlitSampling::Nearest} else {BlitSampling::Linear}};
         }
     }
 
@@ -2421,10 +2063,7 @@ mod tests {
             };
             let additive = configured_blit(config, C4GFXBLIT_ADDITIVE, None);
             let source = prepare_sprite_fragment(Color::opaque(40, 50, 60), None, None, additive);
-            assert_eq!(
-                composite_sprite_fragment(source, Color::opaque(10, 20, 30), additive, None),
-                Color::opaque(50, 70, 90),
-            );
+            front_assert_eq! {composite_sprite_fragment(source, Color::opaque(10, 20, 30), additive, None) => Color::opaque(50, 70, 90),};
 
             let masked = configured_blit(
                 AdvancedRendererConfig {
@@ -2435,10 +2074,7 @@ mod tests {
                 None,
             );
             let source = prepare_sprite_fragment(Color::opaque(40, 50, 60), None, None, masked);
-            assert_eq!(
-                composite_sprite_fragment(source, Color::opaque(10, 20, 30), masked, None),
-                Color::opaque(40, 50, 60),
-            );
+            front_assert_eq! {composite_sprite_fragment(source, Color::opaque(10, 20, 30), masked, None) => Color::opaque(40, 50, 60),};
         }
 
         let alpha_result = |shader, no_alpha_add| {
@@ -2454,9 +2090,9 @@ mod tests {
             let source = prepare_sprite_fragment(Color::new(200, 100, 50, 192), None, None, blit);
             composite_sprite_fragment(source, Color::opaque(0, 0, 0), blit, None)
         };
-        assert_eq!(alpha_result(false, false), Color::opaque(100, 50, 25));
-        assert_eq!(alpha_result(false, true), Color::opaque(151, 75, 38));
-        assert_eq!(alpha_result(true, true), Color::opaque(100, 50, 25));
+        front_assert_eq! {alpha_result(false, false) => Color::opaque(100, 50, 25)};
+        front_assert_eq! {alpha_result(false, true) => Color::opaque(151, 75, 38)};
+        front_assert_eq! {alpha_result(true, true) => Color::opaque(100, 50, 25)};
 
         let mod2_alpha = |shader| {
             let blit = configured_blit(
@@ -2469,8 +2105,8 @@ mod tests {
             );
             prepare_sprite_fragment(Color::new(64, 96, 128, 192), None, None, blit).alpha()
         };
-        assert_eq!(mod2_alpha(false), 128.0);
-        assert_eq!(mod2_alpha(true), 192.0);
+        front_assert_eq! {mod2_alpha(false) => 128.0};
+        front_assert_eq! {mod2_alpha(true) => 192.0};
 
         let fog_fragment = |shader: bool, no_box_fades: bool, weights: [f32; 4]| {
             let blit = configured_blit(
@@ -2490,13 +2126,13 @@ mod tests {
             composite_sprite_fragment(source, Color::opaque(0, 0, 0), blit, None).r
         };
         for shader in [false, true] {
-            assert_eq!(fog_fragment(shader, false, [0.5, 0.25, 0.25, 0.0]), 111);
-            assert_eq!(fog_fragment(shader, true, [0.5, 0.25, 0.25, 0.0]), 191);
-            assert_eq!(fog_fragment(shader, false, [0.0, 0.25, 0.25, 0.5]), 207);
-            assert_eq!(fog_fragment(shader, true, [0.0, 0.25, 0.25, 0.5]), 254);
+            front_assert_eq! {fog_fragment(shader, false, [0.5, 0.25, 0.25, 0.0]) => 111};
+            front_assert_eq! {fog_fragment(shader, true, [0.5, 0.25, 0.25, 0.0]) => 191};
+            front_assert_eq! {fog_fragment(shader, false, [0.0, 0.25, 0.25, 0.5]) => 207};
+            front_assert_eq! {fog_fragment(shader, true, [0.0, 0.25, 0.25, 0.5]) => 254};
 
             let gradient = |no_box_fades| {
-                let mut graphics = test_graphics(1, 3, 0, "advanced renderer gradient");
+                let mut graphics = test_graphics((1, 3, 0), "advanced renderer gradient");
                 graphics.set_advanced_renderer_config(AdvancedRendererConfig {
                     shader,
                     no_box_fades,
@@ -2514,11 +2150,11 @@ mod tests {
                     .map(|y| graphics.surface().get_pixel(0, y).test_value().r)
                     .collect::<Vec<_>>()
             };
-            assert_eq!(gradient(false), vec![64, 160, 255]);
-            assert_eq!(gradient(true), vec![124, 124, 124]);
+            front_assert_eq! {gradient(false) => vec![64, 160, 255]};
+            front_assert_eq! {gradient(true) => vec![124, 124, 124]};
 
             let solid = |no_box_fades| {
-                let mut graphics = test_graphics(1, 1, 0, "advanced renderer solid box");
+                let mut graphics = test_graphics((1, 1, 0), "advanced renderer solid box");
                 graphics.set_advanced_renderer_config(AdvancedRendererConfig {
                     shader,
                     no_box_fades,
@@ -2527,8 +2163,8 @@ mod tests {
                 graphics.fill_world_color(Color::opaque(64, 0, 0), false, None);
                 graphics.surface().get_pixel(0, 0).test_value().r
             };
-            assert_eq!(solid(false), 64);
-            assert_eq!(solid(true), 8);
+            front_assert_eq! {solid(false) => 64};
+            front_assert_eq! {solid(true) => 8};
         }
 
         let row = [
@@ -2565,38 +2201,23 @@ mod tests {
                 shader,
                 ..AdvancedRendererConfig::DEFAULT
             });
-            assert_eq!(
-                (10..14)
-                    .map(|x| baseline.get_pixel(x, 1).unwrap().r)
-                    .collect::<Vec<_>>(),
-                vec![0, 64, 128, 255]
-            );
+            front_assert_eq! {(10..14).map(|x| baseline.get_pixel(x, 1).unwrap().r).collect::<Vec<_>>() => vec![0, 64, 128, 255]};
 
             let indented = render_quad(AdvancedRendererConfig {
                 shader,
                 tex_indent: 500,
                 ..AdvancedRendererConfig::DEFAULT
             });
-            assert_eq!(
-                (10..14)
-                    .map(|x| indented.get_pixel(x, 1).unwrap().r)
-                    .collect::<Vec<_>>(),
-                vec![26, 77, 128, 230]
-            );
+            front_assert_eq! {(10..14).map(|x| indented.get_pixel(x, 1).unwrap().r).collect::<Vec<_>>() => vec![26, 77, 128, 230]};
 
             let shifted = render_quad(AdvancedRendererConfig {
                 shader,
                 blit_offset: 100,
                 ..AdvancedRendererConfig::DEFAULT
             });
-            assert_eq!(shifted.get_pixel(10, 2), Some(sentinel));
-            assert_eq!(shifted.get_pixel(11, 1), Some(sentinel));
-            assert_eq!(
-                (11..15)
-                    .map(|x| shifted.get_pixel(x, 2).unwrap().r)
-                    .collect::<Vec<_>>(),
-                vec![0, 64, 128, 255]
-            );
+            front_assert_eq! {shifted.get_pixel(10, 2) => Some(sentinel)};
+            front_assert_eq! {shifted.get_pixel(11, 1) => Some(sentinel)};
+            front_assert_eq! {(11..15).map(|x| shifted.get_pixel(x, 2).unwrap().r).collect::<Vec<_>>() => vec![0, 64, 128, 255]};
         }
 
         let cropped_row = (0_u8..8)
@@ -2629,17 +2250,17 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(
+        front_assert_eq! {
             (0..4)
                 .map(|x| cropped.get_pixel(x, 0).unwrap().r)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>() =>
             vec![78, 107, 135, 164],
             "ordinary TexIndent re-anchors its rescale at the cropped quad edge",
-        );
+        };
 
         let sky_row = [0, 0, 0, 255, 50, 0, 0, 255, 100, 0, 0, 255, 150, 0, 0, 255];
         let sky_image = ImageData::new(4, 4, sky_row.repeat(4));
-        let mut clipped_sky = test_graphics(2, 4, 0, "advanced renderer cropped sky");
+        let mut clipped_sky = test_graphics((2, 4, 0), "advanced renderer cropped sky");
         clipped_sky.set_advanced_renderer_config(AdvancedRendererConfig {
             tex_indent: 1000,
             ..AdvancedRendererConfig::DEFAULT
@@ -2652,11 +2273,11 @@ mod tests {
             None,
             false,
         );
-        assert_eq!(
-            clipped_sky.surface().get_pixel(0, 0),
+        front_assert_eq! {
+            clipped_sky.surface().get_pixel(0, 0) =>
             Some(Color::opaque(150, 0, 0)),
             "BlitSurfaceTile2 crops the source before ordinary TexIndent rescaling",
-        );
+        };
 
         let padded_image = ImageData::new(3, 3, [255, 0, 0, 255].repeat(9));
         let padded_source = FloatSourceRect {
@@ -2684,51 +2305,30 @@ mod tests {
             ),
         )
         .test_value();
-        assert!(
-            (padded.alpha() - 170.0).abs() < 0.01,
-            "negative indent mixes the last logical texel with transparent-white padding",
-        );
+        front_assert! {(padded.alpha() - 170.0).abs() < 0.01, "negative indent mixes the last logical texel with transparent-white padding",};
 
-        assert_eq!(
-            cpp_landscape_source_texel(6, 4, 3.5, 0.5, 1.0),
-            Some((3, 1, 4, 1)),
-            "landscape indent clamps at the raw coordinate's left texture seam",
-        );
-        assert_eq!(
-            cpp_landscape_source_texel(6, 4, 4.1, 0.5, 1.0),
-            Some((5, 1, 1, 1)),
-            "the next raw coordinate selects the next texture before indent",
-        );
-        assert_eq!(
-            cpp_landscape_source_texel(6, 4, 5.5, 0.5, 1.0),
-            None,
-            "landscape physical padding is transparent rather than the last logical texel",
-        );
+        front_assert_eq! {cpp_landscape_source_texel(6, 4, 3.5, 0.5, 1.0) => Some((3, 1, 4, 1)), "landscape indent clamps at the raw coordinate's left texture seam",};
+        front_assert_eq! {cpp_landscape_source_texel(6, 4, 4.1, 0.5, 1.0) => Some((5, 1, 1, 1)), "the next raw coordinate selects the next texture before indent",};
+        front_assert_eq! {cpp_landscape_source_texel(6, 4, 5.5, 0.5, 1.0) => None, "landscape physical padding is transparent rather than the last logical texel",};
         let texture_size = cpp_tex_size(6, 4) as i32;
         let raw_y = 2.5_f32;
         let world_y = raw_y.floor() as i32;
         let liquid_y = world_y.rem_euclid(texture_size);
         for raw_x in [f32::NAN, -0.5, 0.5, 3.5, 4.1, 5.5, 6.0] {
-            assert_eq!(
-                LandscapeXSample::new(raw_x, texture_size).zero_indent_texel(6, world_y, liquid_y,),
+            front_assert_eq! {
+                LandscapeXSample::new(raw_x, texture_size).zero_indent_texel(6, world_y, liquid_y,) =>
                 cpp_landscape_source_texel(6, 4, raw_x, raw_y, 0.0),
                 "zero-indent fast path at x={raw_x:?}",
-            );
+            };
         }
 
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 64,
-                resolution_y: 64,
-                width: 2,
-                height: 2,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![0x0000_0000, 0x0040_4040, 0x0080_8080, 0x00ff_ffff],
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(
+            64,
+            64,
+            2,
+            2,
+            vec![0x0000_0000, 0x0040_4040, 0x0080_8080, 0x00ff_ffff],
+        ));
         let sampler = FogSpriteSampler::new_with_chunks(
             &fog,
             (0.0, 0.0, 64.0, 64.0),
@@ -2739,13 +2339,13 @@ mod tests {
         )
         .test_value();
         let (x_samples, y_samples) = sampler.raster_axes_with_destination_offset(64, 64, 1.0, 1.0);
-        assert_eq!(
+        front_assert_eq! {
             sampler
                 .modulation_sample_for_axes(x_samples[1], y_samples[1])
-                .interpolate(),
+                .interpolate() =>
             sampler.modulation_at(0.5 / 64.0, 0.5 / 64.0),
             "DrawQuad samples ClrModMap at raw vertices before adding BlitOffset",
-        );
+        };
 
         let mut gamma_state = GammaControlState::default();
         gamma_state.set_ramp(0, [0x000000, 0x646464, 0xc8c8c8]);
@@ -2769,7 +2369,7 @@ mod tests {
         for shader in [false, true] {
             for use_shader_gamma in [false, true] {
                 for disable_gamma in [false, true] {
-                    let mut graphics = test_graphics(1, 1, 0, "advanced renderer gamma");
+                    let mut graphics = test_graphics((1, 1, 0), "advanced renderer gamma");
                     graphics.set_advanced_renderer_config(AdvancedRendererConfig {
                         shader,
                         use_shader_gamma,
@@ -2779,19 +2379,19 @@ mod tests {
                     graphics.apply_gamma_now(&gamma_state);
                     let fragment_gamma = !disable_gamma && shader && use_shader_gamma;
                     let monitor_gamma = !disable_gamma && !fragment_gamma;
-                    assert_eq!(graphics.fragment_gamma_enabled(), fragment_gamma);
-                    assert_eq!(graphics.monitor_gamma_enabled(), monitor_gamma);
+                    front_assert_eq! {graphics.fragment_gamma_enabled() => fragment_gamma};
+                    front_assert_eq! {graphics.monitor_gamma_enabled() => monitor_gamma};
                     let ramp = graphics.active_gamma_ramp(&gamma_state);
-                    assert_eq!(
-                        gamma_encode_fragment(Color::opaque(64, 128, 192), &ramp),
+                    front_assert_eq! {
+                        gamma_encode_fragment(Color::opaque(64, 128, 192), &ramp) =>
                         if disable_gamma {
                             Color::opaque(64, 128, 192)
                         } else {
                             Color::opaque(50, 100, 150)
                         },
-                    );
-                    assert_eq!(
-                        configured_gamma_output(graphics.advanced_renderer_config()),
+                    };
+                    front_assert_eq! {
+                        configured_gamma_output(graphics.advanced_renderer_config()) =>
                         if fragment_gamma {
                             Color::opaque(74, 61, 49)
                         } else if monitor_gamma {
@@ -2800,7 +2400,7 @@ mod tests {
                             Color::opaque(88, 72, 56)
                         },
                         "shader={shader}, use_shader_gamma={use_shader_gamma}, disable_gamma={disable_gamma}",
-                    );
+                    };
                 }
             }
         }
@@ -2837,21 +2437,9 @@ mod tests {
             )
         };
 
-        assert_eq!(
-            sample(1.25),
-            Color::opaque(75, 0, 0),
-            "a source-facet boundary may filter an adjacent atlas texel",
-        );
-        assert_eq!(
-            sample(1.75),
-            Color::opaque(100, 0, 0),
-            "the left C4TexRef clamps instead of sampling the right tile",
-        );
-        assert_eq!(
-            sample(2.25),
-            Color::opaque(200, 0, 0),
-            "the right C4TexRef independently clamps its left edge",
-        );
+        front_assert_eq! {sample(1.25) => Color::opaque(75, 0, 0), "a source-facet boundary may filter an adjacent atlas texel",};
+        front_assert_eq! {sample(1.75) => Color::opaque(100, 0, 0), "the left C4TexRef clamps instead of sampling the right tile",};
+        front_assert_eq! {sample(2.25) => Color::opaque(200, 0, 0), "the right C4TexRef independently clamps its left edge",};
 
         // Keep sub-byte filtered channels in float until after shader
         // modulation: 0..3 sampled at 25% is 0.75, then *128/255 rounds to
@@ -2881,10 +2469,7 @@ mod tests {
             blit,
         )
         .test_value();
-        assert_eq!(
-            composite_sprite_fragment(fragment, Color::opaque(0, 0, 0), blit, None),
-            Color::opaque(0, 0, 0),
-        );
+        front_assert_eq! {composite_sprite_fragment(fragment, Color::opaque(0, 0, 0), blit, None) => Color::opaque(0, 0, 0),};
 
         // The owner bitmap is a second filtered texture pass. Its filtered
         // purple midpoint is tinted and composed over the independently
@@ -2903,15 +2488,7 @@ mod tests {
             SpriteBlitState::normal(),
         )
         .test_value();
-        assert_eq!(
-            composite_sprite_fragment(
-                fragment,
-                Color::opaque(0, 0, 0),
-                SpriteBlitState::normal(),
-                None,
-            ),
-            Color::opaque(128, 0, 128),
-        );
+        front_assert_eq! {composite_sprite_fragment(fragment, Color::opaque(0, 0, 0), SpriteBlitState::normal(), None,) => Color::opaque(128, 0, 128),};
     }
 
     #[test]
@@ -2929,10 +2506,7 @@ mod tests {
             None,
         );
         // 200 + round(100*128/255) = 200 + 50 = 250
-        assert_eq!(
-            surface.get_pixel(0, 0),
-            Some(Color::new(250, 250, 250, 255))
-        );
+        front_assert_eq! {surface.get_pixel(0, 0) => Some(Color::new(250, 250, 250, 255))};
     }
 
     #[test]
@@ -2967,8 +2541,8 @@ mod tests {
             Color::transparent(),
             &gamma,
         );
-        assert_eq!(scene.textures.len(), 1);
-        assert_eq!(scene.commands.len(), 3);
+        front_assert_eq! {scene.textures.len() => 1};
+        front_assert_eq! {scene.commands.len() => 3};
         for (index, command) in scene.commands.iter().enumerate() {
             // clonk-org/clonk-rs#271: compact instances. Modulation is carried
             // packed per corner rather than normalised per vertex, so the
@@ -2982,22 +2556,15 @@ mod tests {
             else {
                 panic!("bilinear HUD draw {index} did not lower to a textured command");
             };
-            assert_eq!(sprites.len(), 1);
+            front_assert_eq! {sprites.len() => 1};
             let sprite = &sprites[0];
             let base_mod2 = &sprite.mod2();
-            assert_eq!(sprite.sampler(), GpuSampler::Linear);
-            assert_eq!(
-                *blend,
-                if index == 1 {
-                    GpuBlend::Additive
-                } else {
-                    GpuBlend::Normal
-                }
-            );
-            assert!(!*base_mod2);
-            assert!(*gamma);
+            front_assert_eq! {sprite.sampler() => GpuSampler::Linear};
+            front_assert_eq! {*blend => if index == 1 {GpuBlend::Additive} else {GpuBlend::Normal}};
+            front_assert! {!*base_mod2};
+            front_assert! {*gamma};
             if index == 2 {
-                assert_eq!(sprite.modulation[0], 0x2080_c0f0);
+                front_assert_eq! {sprite.modulation[0] => 0x2080_c0f0};
             }
         }
     }
@@ -3021,13 +2588,13 @@ mod tests {
             None,
         );
 
-        assert!(surface.pixels().iter().all(|component| *component == 0));
+        front_assert! {surface.pixels().iter().all(|component| *component == 0)};
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [2, 1],
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(scene.commands.len(), 2);
+        front_assert_eq! {scene.commands.len() => 2};
         let GpuCommand::Solid {
             vertices,
             topology,
@@ -3037,10 +2604,10 @@ mod tests {
         else {
             panic!("partial source fallback did not remain a solid fragment");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::PointList);
-        assert_eq!(*blend, GpuBlend::Normal);
-        assert_eq!(vertices.len(), 1);
-        assert_eq!(vertices[0].position, [1.5, 0.5, 1.0]);
+        front_assert_eq! {*topology => GpuPrimitiveTopology::PointList};
+        front_assert_eq! {*blend => GpuBlend::Normal};
+        front_assert_eq! {vertices.len() => 1};
+        front_assert_eq! {vertices[0].position => [1.5, 0.5, 1.0]};
     }
 
     #[test]
@@ -3063,19 +2630,19 @@ mod tests {
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(scene.commands.len(), 1);
+        front_assert_eq! {scene.commands.len() => 1};
         // clonk-org/clonk-rs#271: a compact instance. The native tile size the
         // generic path repeated on every vertex is one per-instance scalar
         // here, which is the same number.
         let GpuCommand::ObjectBatch { sprites, .. } = &scene.commands[0] else {
             panic!("native texture tile did not lower to a textured command");
         };
-        assert_eq!(sprites.len(), 1);
+        front_assert_eq! {sprites.len() => 1};
         let sprite = &sprites[0];
-        assert_eq!(sprite.sampler(), GpuSampler::Linear);
-        assert_eq!(sprite.positions[0][0], 0.0);
-        assert_eq!(sprite.positions[3][0], 12.0);
-        assert_eq!(sprite.sample_tile_size, 2.0);
+        front_assert_eq! {sprite.sampler() => GpuSampler::Linear};
+        front_assert_eq! {sprite.positions[0][0] => 0.0};
+        front_assert_eq! {sprite.positions[3][0] => 12.0};
+        front_assert_eq! {sprite.sample_tile_size => 2.0};
     }
 
     #[test]
@@ -3095,7 +2662,7 @@ mod tests {
         let mut surface = Surface::new(24, 16, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(capture_gpu_sprite(
+        front_assert! {capture_gpu_sprite(
             &mut surface,
             (0.0, 0.0, 24.0, 16.0),
             (0.0, 0.0, 24.0, 16.0),
@@ -3115,23 +2682,20 @@ mod tests {
             None,
             GpuSampler::Linear,
             false,
-        ));
+        )};
 
         let stats = surface.gpu_scene_capture().test_value().capture_stats();
-        assert_eq!(stats.generic_sprite_fallbacks, 1);
-        assert_eq!(stats.physical_texture_tile_fallbacks, 1);
+        front_assert_eq! {stats.generic_sprite_fallbacks => 1};
+        front_assert_eq! {stats.physical_texture_tile_fallbacks => 1};
 
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [24, 16],
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(scene.textures.len(), 2);
-        assert!(scene
-            .textures
-            .iter()
-            .all(|resource| resource.extent == [16, 16]));
-        assert_eq!(scene.commands.len(), 2);
+        front_assert_eq! {scene.textures.len() => 2};
+        front_assert! {scene.textures.iter().all(|resource| resource.extent == [16, 16])};
+        front_assert_eq! {scene.commands.len() => 2};
         let quads = scene
             .commands
             .iter()
@@ -3145,11 +2709,11 @@ mod tests {
                 _ => panic!("native image tile did not lower to a quad"),
             })
             .collect::<Vec<_>>();
-        assert_eq!(quads[0].1[0].position[0], 0.0);
-        assert_eq!(quads[0].1[3].position[0], 16.0);
-        assert_eq!(quads[1].1[0].position[0], 16.0);
-        assert_eq!(quads[1].1[3].position[0], 24.0);
-        assert!(quads.iter().all(|(_, vertices, sampler)| {
+        front_assert_eq! {quads[0].1[0].position[0] => 0.0};
+        front_assert_eq! {quads[0].1[3].position[0] => 16.0};
+        front_assert_eq! {quads[1].1[0].position[0] => 16.0};
+        front_assert_eq! {quads[1].1[3].position[0] => 24.0};
+        front_assert! {quads.iter().all(|(_, vertices, sampler)| {
             *sampler == GpuSampler::Linear
                 && vertices.iter().all(|vertex| {
                     vertex
@@ -3158,19 +2722,16 @@ mod tests {
                         .all(|coordinate| (0.0..=1.0).contains(coordinate))
                         && vertex.sample_tile == [0.0, 0.0, 16.0, 1.0]
                 })
-        }));
-        assert!(quads.iter().all(|(texture, _, _)| scene
-            .textures
-            .iter()
-            .any(|resource| resource.id == *texture)));
+        })};
+        front_assert! {quads.iter().all(|(texture, _, _)| scene.textures.iter().any(|resource| resource.id == *texture))};
 
         let right_tile = scene
             .textures
             .iter()
             .find(|resource| resource.pixels[0] == (4_096 % 251) as u8)
             .test_value();
-        assert_eq!(&right_tile.pixels[0..4], &[(4_096 % 251) as u8, 2, 3, 255]);
-        assert_eq!(&right_tile.pixels[4 * 4..5 * 4], &[255, 255, 255, 0]);
+        front_assert_eq! {&right_tile.pixels[0..4] => &[(4_096 % 251) as u8, 2, 3, 255]};
+        front_assert_eq! {&right_tile.pixels[4 * 4..5 * 4] => &[255, 255, 255, 0]};
     }
 
     #[test]
@@ -3182,7 +2743,7 @@ mod tests {
         let mut surface = Surface::new(2, 2, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(capture_gpu_sprite(
+        front_assert! {capture_gpu_sprite(
             &mut surface,
             (0.0, 0.0, 2.0, 2.0),
             (0.0, 0.0, 2.0, 2.0),
@@ -3202,15 +2763,15 @@ mod tests {
             None,
             GpuSampler::Linear,
             false,
-        ));
+        )};
 
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [2, 2],
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(scene.commands.len(), 2);
-        assert!(scene.commands.iter().all(|command| match command {
+        front_assert_eq! {scene.commands.len() => 2};
+        front_assert! {scene.commands.iter().all(|command| match command {
             GpuCommand::Quad { vertices, .. } => vertices.iter().all(|vertex| {
                 vertex
                     .uv
@@ -3218,12 +2779,12 @@ mod tests {
                     .all(|coordinate| (0.0..=1.0).contains(coordinate))
             }),
             _ => false,
-        }));
+        })};
         let GpuCommand::Quad { vertices, .. } = &scene.commands[1] else {
             panic!("second native image tile did not lower to a quad");
         };
-        assert_eq!(vertices[0].uv[0], 0.0);
-        assert_eq!(vertices[2].uv[0], 0.0);
+        front_assert_eq! {vertices[0].uv[0] => 0.0};
+        front_assert_eq! {vertices[2].uv[0] => 0.0};
     }
 
     #[test]
@@ -3235,7 +2796,7 @@ mod tests {
         let mut surface = Surface::new(3, 2, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(!capture_gpu_sprite(
+        front_assert! {!capture_gpu_sprite(
             &mut surface,
             (0.0, 0.0, 3.0, 2.0),
             (0.0, 0.0, 3.0, 2.0),
@@ -3255,7 +2816,7 @@ mod tests {
             None,
             GpuSampler::Nearest,
             true,
-        ));
+        )};
     }
 
     #[test]
@@ -3274,13 +2835,13 @@ mod tests {
 
         cache.insert(keys[0], resources[0].clone());
         cache.insert(keys[1], resources[1].clone());
-        assert!(cache.get(&keys[0]).is_some());
+        front_assert! {cache.get(&keys[0]).is_some()};
         cache.insert(keys[2], resources[2].clone());
 
-        assert!(cache.get(&keys[0]).is_some());
-        assert!(cache.get(&keys[1]).is_none());
-        assert!(cache.get(&keys[2]).is_some());
-        assert_eq!(cache.retained_bytes(), 8);
+        front_assert! {cache.get(&keys[0]).is_some()};
+        front_assert! {cache.get(&keys[1]).is_none()};
+        front_assert! {cache.get(&keys[2]).is_some()};
+        front_assert_eq! {cache.retained_bytes() => 8};
     }
 
     #[test]
@@ -3289,7 +2850,7 @@ mod tests {
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(capture_gpu_sprite(
+        front_assert! {capture_gpu_sprite(
             &mut surface,
             (0.0, 0.0, 4.0, 4.0),
             (0.0, 0.0, 4.0, 4.0),
@@ -3309,16 +2870,9 @@ mod tests {
             None,
             GpuSampler::Nearest,
             false,
-        ));
+        )};
 
-        assert_eq!(
-            surface
-                .gpu_scene_capture()
-                .test_value()
-                .capture_stats()
-                .generic_sprite_fallbacks,
-            0
-        );
+        front_assert_eq! {surface.gpu_scene_capture().test_value().capture_stats().generic_sprite_fallbacks => 0};
     }
 
     #[test]
@@ -3328,7 +2882,7 @@ mod tests {
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(capture_gpu_sprite(
+        front_assert! {capture_gpu_sprite(
             &mut surface,
             (0.0, 0.0, 4.0, 4.0),
             (0.0, 0.0, 4.0, 4.0),
@@ -3348,16 +2902,16 @@ mod tests {
             None,
             GpuSampler::Nearest,
             false,
-        ));
+        )};
 
         let stats = surface.gpu_scene_capture().test_value().capture_stats();
-        assert_eq!(stats.generic_sprite_fallbacks, 1);
-        assert_eq!(stats.owner_mask_fallbacks, 1);
-        assert_eq!(stats.spatial_fog_fallbacks, 0);
-        assert_eq!(stats.precomputed_fog_modulation_fallbacks, 0);
-        assert_eq!(stats.texture_indent_fallbacks, 0);
-        assert_eq!(stats.physical_texture_tile_fallbacks, 0);
-        assert_eq!(stats.fog_expanded_chunks, 0);
+        front_assert_eq! {stats.generic_sprite_fallbacks => 1};
+        front_assert_eq! {stats.owner_mask_fallbacks => 1};
+        front_assert_eq! {stats.spatial_fog_fallbacks => 0};
+        front_assert_eq! {stats.precomputed_fog_modulation_fallbacks => 0};
+        front_assert_eq! {stats.texture_indent_fallbacks => 0};
+        front_assert_eq! {stats.physical_texture_tile_fallbacks => 0};
+        front_assert_eq! {stats.fog_expanded_chunks => 0};
     }
 
     #[test]
@@ -3367,7 +2921,7 @@ mod tests {
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(capture_gpu_object_sprite(
+        front_assert! {capture_gpu_object_sprite(
             &mut surface,
             (0.0, 0.0, 4.0, 4.0),
             (0.0, 0.0, 4.0, 4.0),
@@ -3387,17 +2941,17 @@ mod tests {
             None,
             GpuSampler::Nearest,
             false,
-        ));
+        )};
 
         let capture = surface.gpu_scene_capture().test_value();
-        assert_eq!(capture.capture_stats().generic_sprite_fallbacks, 0);
-        assert_eq!(capture.capture_stats().owner_mask_fallbacks, 0);
+        front_assert_eq! {capture.capture_stats().generic_sprite_fallbacks => 0};
+        front_assert_eq! {capture.capture_stats().owner_mask_fallbacks => 0};
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [4, 4],
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(scene.textures.len(), 2);
+        front_assert_eq! {scene.textures.len() => 2};
         let [GpuCommand::ObjectBatch {
             owner_texture: Some(_),
             sprites,
@@ -3406,9 +2960,9 @@ mod tests {
         else {
             panic!("compact owner capture did not retain one paired object run");
         };
-        assert_eq!(sprites.len(), 2);
-        assert!(!sprites[0].owner_layer());
-        assert!(sprites[1].owner_layer());
+        front_assert_eq! {sprites.len() => 2};
+        front_assert! {!sprites[0].owner_layer()};
+        front_assert! {sprites[1].owner_layer()};
     }
 
     #[test]
@@ -3422,7 +2976,7 @@ mod tests {
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(capture_gpu_object_sprite(
+        front_assert! {capture_gpu_object_sprite(
             &mut surface,
             (0.0, 0.0, 4.0, 4.0),
             (0.0, 0.0, 4.0, 4.0),
@@ -3446,7 +3000,7 @@ mod tests {
             None,
             GpuSampler::Nearest,
             false,
-        ));
+        )};
 
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [4, 4],
@@ -3456,14 +3010,11 @@ mod tests {
         let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
             panic!("OWNCLR owner capture did not retain one paired object run");
         };
-        assert_eq!(sprites.len(), 2);
-        assert_eq!(sprites[0].modulation, [global_modulation; 4]);
-        assert_eq!(sprites[0].outer_modulation(), GpuOuterModulation::Combine);
-        assert_eq!(
-            sprites[1].modulation, [owner_color; 4],
-            "CLRSFC_OWNCLR must not fold the global color into the owner layer"
-        );
-        assert_eq!(sprites[1].outer_modulation(), GpuOuterModulation::Ignore);
+        front_assert_eq! {sprites.len() => 2};
+        front_assert_eq! {sprites[0].modulation => [global_modulation; 4]};
+        front_assert_eq! {sprites[0].outer_modulation() => GpuOuterModulation::Combine};
+        front_assert_eq! {sprites[1].modulation => [owner_color; 4], "CLRSFC_OWNCLR must not fold the global color into the owner layer"};
+        front_assert_eq! {sprites[1].outer_modulation() => GpuOuterModulation::Ignore};
     }
 
     #[test]
@@ -3479,7 +3030,7 @@ mod tests {
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(capture_gpu_object_sprite(
+        front_assert! {capture_gpu_object_sprite(
             &mut surface,
             (0.0, 0.0, 4.0, 4.0),
             (0.0, 0.0, 4.0, 4.0),
@@ -3499,7 +3050,7 @@ mod tests {
             None,
             GpuSampler::Nearest,
             false,
-        ));
+        )};
 
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [4, 4],
@@ -3515,7 +3066,7 @@ mod tests {
         else {
             panic!("full-RGBA owner capture did not retain one paired object run");
         };
-        assert_eq!(sprites.len(), 2);
+        front_assert_eq! {sprites.len() => 2};
         let base = scene
             .textures
             .iter()
@@ -3526,8 +3077,8 @@ mod tests {
             .iter()
             .find(|resource| resource.id == *owner_texture)
             .test_value();
-        assert_eq!(base.pixels.as_ref(), &base_pixels);
-        assert_eq!(overlay.pixels.as_ref(), &overlay_pixels);
+        front_assert_eq! {base.pixels.as_ref() => &base_pixels};
+        front_assert_eq! {overlay.pixels.as_ref() => &overlay_pixels};
     }
 
     #[test]
@@ -3537,7 +3088,7 @@ mod tests {
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(!capture_gpu_object_sprite(
+        front_assert! {!capture_gpu_object_sprite(
             &mut surface,
             (0.0, 0.0, 4.0, 4.0),
             (0.0, 0.0, 4.0, 4.0),
@@ -3557,18 +3108,18 @@ mod tests {
             None,
             GpuSampler::Nearest,
             false,
-        ));
+        )};
 
         let capture = surface.gpu_scene_capture().test_value();
-        assert_eq!(capture.capture_stats().generic_sprite_fallbacks, 0);
-        assert_eq!(capture.capture_stats().owner_mask_fallbacks, 0);
+        front_assert_eq! {capture.capture_stats().generic_sprite_fallbacks => 0};
+        front_assert_eq! {capture.capture_stats().owner_mask_fallbacks => 0};
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [4, 4],
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert!(scene.commands.is_empty());
-        assert!(scene.textures.is_empty());
+        front_assert! {scene.commands.is_empty()};
+        front_assert! {scene.textures.is_empty()};
     }
 
     #[test]
@@ -3598,7 +3149,7 @@ mod tests {
         };
         let mut cpu = Surface::new(4, 4, PixelFormat::Rgba8888);
         draw(&mut cpu);
-        assert!(cpu.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0));
+        front_assert! {cpu.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0)};
 
         let mut retained = Surface::new(4, 4, PixelFormat::Rgba8888);
         retained.begin_gpu_scene_capture();
@@ -3609,37 +3160,19 @@ mod tests {
             &clonk_graphics::GammaRamp::standard(),
         );
 
-        assert!(!scene.commands.is_empty(), "fallback output was dropped");
-        assert!(scene.commands.iter().all(|command| !matches!(
-            command,
-            GpuCommand::ObjectBatch {
-                owner_texture: Some(_),
-                ..
-            }
-        )));
+        front_assert! {!scene.commands.is_empty(), "fallback output was dropped"};
+        front_assert! {scene.commands.iter().all(|command| !matches!(command, GpuCommand::ObjectBatch {owner_texture: Some(_),..}))};
     }
 
     #[test]
     fn compact_fogged_owner_capture_avoids_generic_quad_fallback() {
         let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
         let mask = ColorByOwnerMask::new(2, 2, Arc::from([255_u8; 4]));
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 2,
-                resolution_y: 2,
-                width: 3,
-                height: 3,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![0x00ff_ffff; 9],
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(2, 2, 3, 3, vec![0x00ff_ffff; 9]));
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(capture_gpu_object_sprite(
+        front_assert! {capture_gpu_object_sprite(
             &mut surface,
             (0.0, 0.0, 4.0, 4.0),
             (0.0, 0.0, 4.0, 4.0),
@@ -3659,12 +3192,12 @@ mod tests {
             Some(&fog),
             GpuSampler::Nearest,
             false,
-        ));
+        )};
 
         let capture = surface.gpu_scene_capture().test_value();
-        assert_eq!(capture.capture_stats().generic_sprite_fallbacks, 0);
-        assert_eq!(capture.capture_stats().owner_mask_fallbacks, 0);
-        assert_eq!(capture.capture_stats().spatial_fog_fallbacks, 0);
+        front_assert_eq! {capture.capture_stats().generic_sprite_fallbacks => 0};
+        front_assert_eq! {capture.capture_stats().owner_mask_fallbacks => 0};
+        front_assert_eq! {capture.capture_stats().spatial_fog_fallbacks => 0};
     }
 
     #[test]
@@ -3673,23 +3206,17 @@ mod tests {
         // owner layer; retain that ordering while compacting both layers.
         let image = ImageData::new(128, 128, [64, 128, 192, 255].repeat(128 * 128));
         let mask = ColorByOwnerMask::new(128, 128, Arc::from(vec![255_u8; 128 * 128]));
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 2,
-                resolution_y: 2,
-                width: 33,
-                height: 33,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![0x00ff_ffff; 33 * 33],
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(
+            2,
+            2,
+            33,
+            33,
+            vec![0x00ff_ffff; 33 * 33],
+        ));
         let mut surface = Surface::new(64, 64, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(capture_gpu_object_sprite(
+        front_assert! {capture_gpu_object_sprite(
             &mut surface,
             (0.0, 0.0, 64.0, 64.0),
             (0.0, 0.0, 64.0, 64.0),
@@ -3709,7 +3236,7 @@ mod tests {
             Some(&fog),
             GpuSampler::Nearest,
             false,
-        ));
+        )};
 
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [64, 64],
@@ -3724,14 +3251,8 @@ mod tests {
         else {
             panic!("fogged owner chunks did not remain one paired object run");
         };
-        assert_eq!(sprites.len(), 4);
-        assert_eq!(
-            sprites
-                .iter()
-                .map(|sprite| sprite.owner_layer())
-                .collect::<Vec<_>>(),
-            [false, false, true, true]
-        );
+        front_assert_eq! {sprites.len() => 4};
+        front_assert_eq! {sprites.iter().map(|sprite| sprite.owner_layer()).collect::<Vec<_>>() => [false, false, true, true]};
     }
 
     #[test]
@@ -3742,7 +3263,7 @@ mod tests {
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(!capture_gpu_sprite(
+        front_assert! {!capture_gpu_sprite(
             &mut surface,
             (0.0, 0.0, 4.0, 4.0),
             (0.0, 0.0, 4.0, 4.0),
@@ -3762,12 +3283,9 @@ mod tests {
             None,
             GpuSampler::Nearest,
             false,
-        ));
+        )};
 
-        assert_eq!(
-            surface.gpu_scene_capture().test_value().capture_stats(),
-            clonk_graphics::GpuSceneCaptureStats::default()
-        );
+        front_assert_eq! {surface.gpu_scene_capture().test_value().capture_stats() => clonk_graphics::GpuSceneCaptureStats::default()};
     }
 
     #[test]
@@ -3780,7 +3298,7 @@ mod tests {
             weights: [0.25; 4],
         });
 
-        assert!(capture_gpu_sprite(
+        front_assert! {capture_gpu_sprite(
             &mut surface,
             (0.0, 0.0, 4.0, 4.0),
             (0.0, 0.0, 4.0, 4.0),
@@ -3800,16 +3318,16 @@ mod tests {
             None,
             GpuSampler::Nearest,
             false,
-        ));
+        )};
 
         let stats = surface.gpu_scene_capture().test_value().capture_stats();
-        assert_eq!(stats.generic_sprite_fallbacks, 1);
-        assert_eq!(stats.precomputed_fog_modulation_fallbacks, 1);
-        assert_eq!(stats.spatial_fog_fallbacks, 0);
-        assert_eq!(stats.texture_indent_fallbacks, 0);
-        assert_eq!(stats.owner_mask_fallbacks, 0);
-        assert_eq!(stats.physical_texture_tile_fallbacks, 0);
-        assert_eq!(stats.fog_expanded_chunks, 0);
+        front_assert_eq! {stats.generic_sprite_fallbacks => 1};
+        front_assert_eq! {stats.precomputed_fog_modulation_fallbacks => 1};
+        front_assert_eq! {stats.spatial_fog_fallbacks => 0};
+        front_assert_eq! {stats.texture_indent_fallbacks => 0};
+        front_assert_eq! {stats.owner_mask_fallbacks => 0};
+        front_assert_eq! {stats.physical_texture_tile_fallbacks => 0};
+        front_assert_eq! {stats.fog_expanded_chunks => 0};
     }
 
     #[test]
@@ -3819,7 +3337,7 @@ mod tests {
         surface.begin_gpu_scene_capture();
 
         for phase in 0..20_u32 {
-            assert!(capture_gpu_object_sprite(
+            front_assert! {capture_gpu_object_sprite(
                 &mut surface,
                 (phase as f32 * 15.0, 0.0, 15.0, 15.0),
                 (phase as f32 * 15.0, 0.0, 15.0, 15.0),
@@ -3846,7 +3364,7 @@ mod tests {
                     GpuSampler::Linear
                 },
                 false,
-            ));
+            )};
         }
 
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
@@ -3857,36 +3375,28 @@ mod tests {
         let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
             panic!("representable object faces did not form one compact resource run");
         };
-        assert_eq!(sprites.len(), 20);
-        assert_eq!(sprites[0].sampler(), GpuSampler::Nearest);
-        assert_eq!(sprites[1].sampler(), GpuSampler::Linear);
-        assert!(sprites
-            .windows(2)
-            .all(|pair| pair[0].modulation != pair[1].modulation));
+        front_assert_eq! {sprites.len() => 20};
+        front_assert_eq! {sprites[0].sampler() => GpuSampler::Nearest};
+        front_assert_eq! {sprites[1].sampler() => GpuSampler::Linear};
+        front_assert! {sprites.windows(2).all(|pair| pair[0].modulation != pair[1].modulation)};
     }
 
     #[test]
     fn fogged_st5b_phase_crossing_a_64px_boundary_stays_compact() {
         let image = ImageData::new(300, 110, vec![255; 300 * 110 * 4]);
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 8,
-                resolution_y: 8,
-                width: 4,
-                height: 4,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: (0..16)
-                    .map(|index| (index as u32 + 1) * 0x0008_0402)
-                    .collect(),
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(
+            8,
+            8,
+            4,
+            4,
+            (0..16)
+                .map(|index| (index as u32 + 1) * 0x0008_0402)
+                .collect(),
+        ));
         let mut surface = Surface::new(15, 15, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
-        assert!(capture_gpu_object_sprite(
+        front_assert! {capture_gpu_object_sprite(
             &mut surface,
             (0.0, 0.0, 15.0, 15.0),
             (0.0, 0.0, 15.0, 15.0),
@@ -3909,7 +3419,7 @@ mod tests {
             Some(&fog),
             GpuSampler::Linear,
             false,
-        ));
+        )};
 
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [15, 15],
@@ -3919,16 +3429,14 @@ mod tests {
         let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
             panic!("fogged ST5B phase entered the generic quad fallback");
         };
-        assert_eq!(sprites.len(), 2, "source phase crosses the 64px chunk edge");
-        assert_eq!(sprites[0].uv[2], 64.0 / 300.0);
-        assert_eq!(sprites[1].uv[0], 64.0 / 300.0);
-        assert!(sprites
-            .iter()
-            .all(|sprite| sprite.sampler() == GpuSampler::Linear));
+        front_assert_eq! {sprites.len() => 2, "source phase crosses the 64px chunk edge"};
+        front_assert_eq! {sprites[0].uv[2] => 64.0 / 300.0};
+        front_assert_eq! {sprites[1].uv[0] => 64.0 / 300.0};
+        front_assert! {sprites.iter().all(|sprite| sprite.sampler() == GpuSampler::Linear)};
 
         let mut generic_surface = Surface::new(15, 15, PixelFormat::Rgba8888);
         generic_surface.begin_gpu_scene_capture();
-        assert!(capture_gpu_sprite(
+        front_assert! {capture_gpu_sprite(
             &mut generic_surface,
             (0.0, 0.0, 15.0, 15.0),
             (0.0, 0.0, 15.0, 15.0),
@@ -3951,7 +3459,7 @@ mod tests {
             Some(&fog),
             GpuSampler::Linear,
             false,
-        ));
+        )};
         let generic = generic_surface
             .take_gpu_scene_capture()
             .test_value()
@@ -3960,7 +3468,7 @@ mod tests {
                 Color::transparent(),
                 &clonk_graphics::GammaRamp::standard(),
             );
-        assert_eq!(generic.commands.len(), sprites.len());
+        front_assert_eq! {generic.commands.len() => sprites.len()};
         for (sprite, command) in sprites.iter().zip(&generic.commands) {
             let GpuCommand::Quad {
                 vertices,
@@ -3977,48 +3485,42 @@ mod tests {
                 [sprite.uv[0], sprite.uv[3]],
                 [sprite.uv[2], sprite.uv[3]],
             ];
-            assert_eq!(vertices.map(|vertex| vertex.position), sprite.positions);
-            assert_eq!(vertices.map(|vertex| vertex.uv), expected_uv);
-            assert_eq!(
+            front_assert_eq! {vertices.map(|vertex| vertex.position) => sprite.positions};
+            front_assert_eq! {vertices.map(|vertex| vertex.uv) => expected_uv};
+            front_assert_eq! {
                 vertices.map(|vertex| {
                     let [red, green, blue, transparency] = vertex
                         .modulation
                         .map(|channel| (channel * 255.0).round() as u32);
                     (transparency << 24) | (red << 16) | (green << 8) | blue
-                }),
+                }) =>
                 sprite.modulation,
-            );
-            assert_eq!(*base_mod2, sprite.mod2());
-            assert_eq!(*sampler, sprite.sampler());
+            };
+            front_assert_eq! {*base_mod2 => sprite.mod2()};
+            front_assert_eq! {*sampler => sprite.sampler()};
         }
     }
 
     #[test]
     fn gpu_capture_reanchors_tex_indent_at_fog_chunks_and_flattens_each_triangle() {
         let image = ImageData::new(128, 128, vec![255; 128 * 128 * 4]);
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 64,
-                resolution_y: 64,
-                width: 3,
-                height: 2,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![
-                    0x0020_4060,
-                    0x0040_6080,
-                    0x0060_80a0,
-                    0x0080_a0c0,
-                    0x00a0_c0e0,
-                    0x00ff_ffff,
-                ],
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(
+            64,
+            64,
+            3,
+            2,
+            vec![
+                0x0020_4060,
+                0x0040_6080,
+                0x0060_80a0,
+                0x0080_a0c0,
+                0x00a0_c0e0,
+                0x00ff_ffff,
+            ],
+        ));
         let mut surface = Surface::new(100, 1, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
-        assert!(capture_gpu_sprite(
+        front_assert! {capture_gpu_sprite(
             &mut surface,
             (0.0, 0.0, 100.0, 1.0),
             (0.0, 0.0, 100.0, 1.0),
@@ -4047,40 +3549,31 @@ mod tests {
             Some(&fog),
             GpuSampler::Linear,
             false,
-        ));
+        )};
         let stats = surface.gpu_scene_capture().test_value().capture_stats();
-        assert_eq!(stats.generic_sprite_fallbacks, 1);
-        assert_eq!(stats.spatial_fog_fallbacks, 1);
-        assert_eq!(stats.texture_indent_fallbacks, 1);
-        assert_eq!(stats.fog_expanded_chunks, 2);
+        front_assert_eq! {stats.generic_sprite_fallbacks => 1};
+        front_assert_eq! {stats.spatial_fog_fallbacks => 1};
+        front_assert_eq! {stats.texture_indent_fallbacks => 1};
+        front_assert_eq! {stats.fog_expanded_chunks => 2};
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [100, 1],
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(
-            scene.commands.len(),
-            4,
-            "two fog chunks split into two flat triangles"
-        );
+        front_assert_eq! {scene.commands.len() => 4, "two fog chunks split into two flat triangles"};
 
         let mut chunks = Vec::new();
         for command in &scene.commands {
             let GpuCommand::Quad { vertices, .. } = command else {
                 panic!("fogged sprite did not lower to a textured quad");
             };
-            assert_eq!(
-                vertices[2], vertices[3],
-                "each command is one degenerate triangle"
-            );
-            assert!(vertices
-                .iter()
-                .all(|vertex| vertex.modulation == vertices[0].modulation));
+            front_assert_eq! {vertices[2] => vertices[3], "each command is one degenerate triangle"};
+            front_assert! {vertices.iter().all(|vertex| vertex.modulation == vertices[0].modulation)};
             chunks.push(*vertices);
         }
 
         let close = |actual: f32, expected: f32| {
-            assert!((actual - expected).abs() < 1.0e-6, "{actual} != {expected}");
+            front_assert! {(actual - expected).abs() < 1.0e-6, "{actual} != {expected}"};
         };
         close(chunks[0][0].uv[0], 11.0 / 128.0);
         close(chunks[2][0].uv[0], 65.0 / 128.0);
@@ -4109,21 +3602,21 @@ mod tests {
             192,
         );
 
-        assert!(surface.pixels().iter().all(|component| *component == 0));
+        front_assert! {surface.pixels().iter().all(|component| *component == 0)};
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [8, 8],
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert!(!scene.commands.is_empty());
-        assert!(scene.commands.iter().all(|command| matches!(
+        front_assert! {!scene.commands.is_empty()};
+        front_assert! {scene.commands.iter().all(|command| matches!(
             command,
             GpuCommand::Solid {
                 topology: GpuPrimitiveTopology::PointList,
                 style: GpuSolidStyle::NONE,
                 ..
             }
-        )));
+        ))};
     }
 
     #[test]
@@ -4136,34 +3629,28 @@ mod tests {
             ],
         );
         let mask = ColorByOwnerMask::new(2, 2, Arc::from([0_u8, 255, 128, 0]));
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 2,
-                resolution_y: 2,
-                width: 3,
-                height: 3,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![
-                    0x0020_4060,
-                    0x0040_6080,
-                    0x0060_80a0,
-                    0x0040_8060,
-                    0x0080_a0c0,
-                    0x00a0_c0e0,
-                    0x0060_a080,
-                    0x00a0_c0e0,
-                    0x00ff_ffff,
-                ],
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(
+            2,
+            2,
+            3,
+            3,
+            vec![
+                0x0020_4060,
+                0x0040_6080,
+                0x0060_80a0,
+                0x0040_8060,
+                0x0080_a0c0,
+                0x00a0_c0e0,
+                0x0060_a080,
+                0x00a0_c0e0,
+                0x00ff_ffff,
+            ],
+        ));
         let transform = GraphicsTransform::set(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.03, 0.02, 1.0);
         let mut surface = Surface::new(8, 8, PixelFormat::Rgba8888);
         surface.set_clip(SurfaceRect::new(1, 1, 6, 6));
         surface.begin_gpu_scene_capture();
-        assert!(capture_gpu_sprite(
+        front_assert! {capture_gpu_sprite(
             &mut surface,
             (1.0, 1.0, 4.0, 4.0),
             (1.0, 1.0, 4.0, 4.0),
@@ -4188,22 +3675,18 @@ mod tests {
             Some(&fog),
             GpuSampler::Nearest,
             false,
-        ));
+        )};
         let stats = surface.gpu_scene_capture().test_value().capture_stats();
-        assert_eq!(stats.generic_sprite_fallbacks, 1);
-        assert_eq!(stats.spatial_fog_fallbacks, 1);
-        assert_eq!(stats.owner_mask_fallbacks, 1);
+        front_assert_eq! {stats.generic_sprite_fallbacks => 1};
+        front_assert_eq! {stats.spatial_fog_fallbacks => 1};
+        front_assert_eq! {stats.owner_mask_fallbacks => 1};
         let scene = surface.take_gpu_scene_capture().test_value().into_scene(
             [8, 8],
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(
-            scene.textures.len(),
-            2,
-            "scalar owner masks split two layers"
-        );
-        assert!(!scene.commands.is_empty() && scene.commands.len().is_multiple_of(2));
+        front_assert_eq! {scene.textures.len() => 2, "scalar owner masks split two layers"};
+        front_assert! {!scene.commands.is_empty() && scene.commands.len().is_multiple_of(2)};
         let layer_commands = scene.commands.len() / 2;
         let base_texture = scene.textures[0].id;
         let overlay_texture = scene.textures[1].id;
@@ -4222,37 +3705,19 @@ mod tests {
             else {
                 panic!("owner capture must lower to ordinary quads");
             };
-            assert_eq!(
-                *texture,
-                if index < layer_commands {
-                    base_texture
-                } else {
-                    overlay_texture
-                },
-                "every base chunk must precede every owner chunk"
-            );
-            assert_eq!(*clip, Some(SurfaceRect::new(1, 1, 6, 6)));
-            assert_eq!(*blend, GpuBlend::Additive);
-            assert!(*base_mod2);
-            assert!(*gamma);
+            front_assert_eq! {*texture => if index < layer_commands {base_texture} else {overlay_texture}, "every base chunk must precede every owner chunk"};
+            front_assert_eq! {*clip => Some(SurfaceRect::new(1, 1, 6, 6))};
+            front_assert_eq! {*blend => GpuBlend::Additive};
+            front_assert! {*base_mod2};
+            front_assert! {*gamma};
             modulations.extend(vertices.iter().map(|vertex| vertex.modulation));
             homogeneous_w.extend(vertices.iter().map(|vertex| vertex.position[2]));
         }
-        assert!(modulations.windows(2).any(|values| values[0] != values[1]));
-        assert!(homogeneous_w.iter().all(|value| *value > 0.0));
-        assert!(homogeneous_w
-            .windows(2)
-            .any(|values| values[0] != values[1]));
-        assert_eq!(
-            &scene.textures[0].pixels[4..8],
-            &[0, 0, 0, 0],
-            "owner pixels are removed from the base layer"
-        );
-        assert_eq!(
-            &scene.textures[1].pixels[4..8],
-            &[255, 255, 255, 255],
-            "scalar masks become owner-intensity RGBA"
-        );
+        front_assert! {modulations.windows(2).any(|values| values[0] != values[1])};
+        front_assert! {homogeneous_w.iter().all(|value| *value > 0.0)};
+        front_assert! {homogeneous_w.windows(2).any(|values| values[0] != values[1])};
+        front_assert_eq! {&scene.textures[0].pixels[4..8] => &[0, 0, 0, 0], "owner pixels are removed from the base layer"};
+        front_assert_eq! {&scene.textures[1].pixels[4..8] => &[255, 255, 255, 255], "scalar masks become owner-intensity RGBA"};
     }
 
     #[test]
@@ -4273,8 +3738,8 @@ mod tests {
                 &image,
                 None,
             );
-            assert_eq!(surface.get_pixel(0, 0), Some(Color::opaque(10, 10, 10)));
-            assert_eq!(surface.get_pixel(1, 1), Some(Color::opaque(55, 55, 55)));
+            front_assert_eq! {surface.get_pixel(0, 0) => Some(Color::opaque(10, 10, 10))};
+            front_assert_eq! {surface.get_pixel(1, 1) => Some(Color::opaque(55, 55, 55))};
 
             {
                 let _inner = activate_advanced_renderer_config(AdvancedRendererConfig {
@@ -4287,7 +3752,7 @@ mod tests {
                     &image,
                     None,
                 );
-                assert_eq!(surface.get_pixel(0, 0), Some(Color::opaque(60, 60, 60)));
+                front_assert_eq! {surface.get_pixel(0, 0) => Some(Color::opaque(60, 60, 60))};
             }
 
             draw_color_rect(
@@ -4296,11 +3761,7 @@ mod tests {
                 Color::opaque(200, 0, 0),
                 None,
             );
-            assert_eq!(
-                surface.get_pixel(1, 1),
-                Some(Color::opaque(200, 0, 0)),
-                "dropping the nested scope restores the outer BlitOffset",
-            );
+            front_assert_eq! {surface.get_pixel(1, 1) => Some(Color::opaque(200, 0, 0)), "dropping the nested scope restores the outer BlitOffset",};
         }
 
         draw_image_bilinear_additive(
@@ -4309,11 +3770,7 @@ mod tests {
             &image,
             None,
         );
-        assert_eq!(
-            surface.get_pixel(2, 0),
-            Some(Color::opaque(60, 60, 60)),
-            "dropping the outer scope restores the compatibility path",
-        );
+        front_assert_eq! {surface.get_pixel(2, 0) => Some(Color::opaque(60, 60, 60)), "dropping the outer scope restores the compatibility path",};
 
         let mut normalized_box = Surface::new(1, 1, PixelFormat::Rgba8888);
         let _box = activate_advanced_renderer_config(AdvancedRendererConfig {
@@ -4326,11 +3783,7 @@ mod tests {
             Color::opaque(64, 0, 0),
             None,
         );
-        assert_eq!(
-            normalized_box.get_pixel(0, 0),
-            Some(Color::opaque(8, 0, 0)),
-            "NoBoxFades maps even a uniform DrawBoxDw through NormalizeColors",
-        );
+        front_assert_eq! {normalized_box.get_pixel(0, 0) => Some(Color::opaque(8, 0, 0)), "NoBoxFades maps even a uniform DrawBoxDw through NormalizeColors",};
 
         let row = [
             0, 0, 0, 255, 64, 64, 64, 255, 128, 128, 128, 255, 255, 255, 255, 255,
@@ -4347,16 +3800,19 @@ mod tests {
             &indented_image,
             None,
         );
-        assert_eq!(
-            (0..4)
-                .map(|x| indented.get_pixel(x, 0).unwrap().r)
-                .collect::<Vec<_>>(),
-            vec![26, 77, 128, 230],
-        );
+        front_assert_eq! {(0..4).map(|x| indented.get_pixel(x, 0).unwrap().r).collect::<Vec<_>>() => vec![26, 77, 128, 230],};
     }
 
     fn empty_sprites() -> Arc<HashMap<String, DefinitionSprite>> {
         Arc::new(HashMap::new())
+    }
+
+    fn test_sprites<const N: usize>(
+        entries: [(&str, DefinitionSprite); N],
+    ) -> Arc<HashMap<String, DefinitionSprite>> {
+        Arc::new(HashMap::from(entries.map(|(definition_id, sprite)| {
+            (sprite_map_key(definition_id, None), sprite)
+        })))
     }
 
     fn empty_cursor_atlas() -> Arc<CursorAtlas> {
@@ -4365,6 +3821,16 @@ mod tests {
 
     fn empty_hud_graphics() -> Arc<HudGraphics> {
         Arc::new(HudGraphics::default())
+    }
+
+    fn hud_graphics_fixture(configure: impl FnOnce(&mut HudGraphics)) -> HudGraphics {
+        let mut graphics = HudGraphics::default();
+        configure(&mut graphics);
+        graphics
+    }
+
+    fn test_hud_graphics(configure: impl FnOnce(&mut HudGraphics)) -> Arc<HudGraphics> {
+        Arc::new(hud_graphics_fixture(configure))
     }
 
     fn test_sprite(image: ImageData) -> DefinitionSprite {
@@ -4383,10 +3849,209 @@ mod tests {
         }
     }
 
+    fn test_shaped_sprite(image: ImageData, shape: DefinitionRect) -> DefinitionSprite {
+        DefinitionSprite {
+            shape: Some(shape),
+            ..test_sprite(image)
+        }
+    }
+
+    fn action_graphics_fixture(
+        configure: impl FnOnce(&mut DefinitionActionGraphics),
+    ) -> DefinitionActionGraphics {
+        let mut graphics = DefinitionActionGraphics::default();
+        configure(&mut graphics);
+        graphics
+    }
+
+    fn test_action_facet(
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        target_x: i32,
+        target_y: i32,
+    ) -> clonk_engine::DefinitionActionFacet {
+        clonk_engine::DefinitionActionFacet {
+            x,
+            y,
+            width,
+            height,
+            target_x,
+            target_y,
+        }
+    }
+
+    fn particle_definition_fixture(
+        image: ImageData,
+        core: ParticleDefCore,
+    ) -> ParticleRenderDefinition {
+        ParticleRenderDefinition {
+            image,
+            facet: ParticleFacet::new(0, 0, 1, 1),
+            length: 1,
+            aspect: 1.0,
+            core,
+            draw_proc: ParticleDrawProc::Std,
+        }
+    }
+
+    fn particle_fixture(
+        definition_id: impl Into<String>,
+        position: FloatVector2,
+        layer: ParticleLayer,
+    ) -> ParticleSnapshot {
+        ParticleSnapshot {
+            definition_id: definition_id.into(),
+            position,
+            velocity: FloatVector2::new(0.0, 0.0),
+            life: 0,
+            parameter_a: 1.0,
+            parameter_b: 0x00ff_ffff,
+            layer,
+            pxs_fixed: None,
+            pxs_slot: None,
+        }
+    }
+
+    fn clr_mod_map_fixture(
+        resolution_x: i32,
+        resolution_y: i32,
+        width: i32,
+        height: i32,
+        cells: Vec<u32>,
+    ) -> ClrModMap {
+        ClrModMap {
+            resolution_x,
+            resolution_y,
+            width,
+            height,
+            origin_x: 0,
+            origin_y: 0,
+            fade_transparent: false,
+            cells,
+        }
+    }
+
+    fn fog_draw_fixture(map: ClrModMap) -> FogDrawContext {
+        FogDrawContext {
+            map: Arc::new(map),
+            zoom: 1.0,
+        }
+    }
+
+    fn graphics_overlay_fixture<'a>() -> GraphicsOverlay<'a> {
+        GraphicsOverlay {
+            frame_text: "",
+            status_text: "",
+            debug_hud: false,
+            viewport_overlays_visible: true,
+            players: Vec::new(),
+            crew_name_labels: Vec::new(),
+            speaking: SpeakingOverlay::default(),
+            game_time_seconds: 0,
+            message_board: MessageBoardOverlay::default(),
+            clock_text: None,
+            frames_per_second: None,
+            upper_board_mode: hud::UpperBoardMode::Full,
+            show_portraits: true,
+            show_commands: true,
+            show_command_keys: true,
+        }
+    }
+
+    struct TestObjectDraw<'a> {
+        render_order: &'a [ObjectId],
+        definition_lines: Option<&'a HashMap<DefinitionId, DefinitionLineMetadata>>,
+        players: &'a [PlayerState],
+        for_player: i32,
+        owner_colors: Option<&'a HashMap<i32, Color>>,
+        pass: ObjectRenderPass,
+        gamma: Option<&'a clonk_graphics::GammaRamp>,
+    }
+
+    impl<'a> TestObjectDraw<'a> {
+        fn snapshot(snapshot: &'a SimulationSnapshot) -> Self {
+            Self {
+                render_order: &snapshot.render_order,
+                definition_lines: Some(&snapshot.definition_lines),
+                players: &snapshot.players,
+                ..Self::default()
+            }
+        }
+
+        fn render_order(mut self, render_order: &'a [ObjectId]) -> Self {
+            self.render_order = render_order;
+            self
+        }
+
+        fn definition_lines(
+            mut self,
+            definition_lines: &'a HashMap<DefinitionId, DefinitionLineMetadata>,
+        ) -> Self {
+            self.definition_lines = Some(definition_lines);
+            self
+        }
+
+        fn for_player(mut self, for_player: i32) -> Self {
+            self.for_player = for_player;
+            self
+        }
+
+        fn owner_colors(mut self, owner_colors: &'a HashMap<i32, Color>) -> Self {
+            self.owner_colors = Some(owner_colors);
+            self
+        }
+
+        fn pass(mut self, pass: ObjectRenderPass) -> Self {
+            self.pass = pass;
+            self
+        }
+
+        fn gamma(mut self, gamma: &'a clonk_graphics::GammaRamp) -> Self {
+            self.gamma = Some(gamma);
+            self
+        }
+    }
+
+    impl Default for TestObjectDraw<'_> {
+        fn default() -> Self {
+            Self {
+                render_order: &[],
+                definition_lines: None,
+                players: &[],
+                for_player: OWNER_NONE,
+                owner_colors: None,
+                pass: ObjectRenderPass::Normal,
+                gamma: None,
+            }
+        }
+    }
+
+    fn draw_test_objects(
+        graphics: &mut GraphicsSystem,
+        objects: &[ObjectSnapshot],
+        draw: TestObjectDraw<'_>,
+    ) {
+        let empty_lines = HashMap::new();
+        let empty_owner_colors = HashMap::new();
+        graphics.draw_objects(
+            objects,
+            draw.render_order,
+            draw.definition_lines.unwrap_or(&empty_lines),
+            draw.players,
+            draw.for_player,
+            1.0,
+            draw.owner_colors.unwrap_or(&empty_owner_colors),
+            draw.pass,
+            draw.gamma,
+        );
+    }
+
+    type TestGraphicsDimensions = (u32, u32, i32);
+
     fn test_graphics_with(
-        surface_width: u32,
-        surface_height: u32,
-        fallback_ground_height: i32,
+        (surface_width, surface_height, fallback_ground_height): TestGraphicsDimensions,
         scenario_label: &str,
         sprites: Arc<HashMap<String, DefinitionSprite>>,
         cursor_atlas: Arc<CursorAtlas>,
@@ -4405,24 +4070,39 @@ mod tests {
         )
     }
 
-    /// A graphics system with the empty test assets: no object sprites, no
-    /// cursor atlas and no HUD sheets. The render tests construct dozens of
-    /// these and only ever vary the surface size, ground height and label.
-    fn test_graphics(
-        surface_width: u32,
-        surface_height: u32,
-        fallback_ground_height: i32,
+    fn test_graphics_with_sprites(
+        dimensions: TestGraphicsDimensions,
         scenario_label: &str,
+        sprites: Arc<HashMap<String, DefinitionSprite>>,
     ) -> GraphicsSystem {
         test_graphics_with(
-            surface_width,
-            surface_height,
-            fallback_ground_height,
+            dimensions,
             scenario_label,
-            empty_sprites(),
+            sprites,
             empty_cursor_atlas(),
             empty_hud_graphics(),
         )
+    }
+
+    fn test_graphics_with_hud(
+        dimensions: TestGraphicsDimensions,
+        scenario_label: &str,
+        hud_graphics: Arc<HudGraphics>,
+    ) -> GraphicsSystem {
+        test_graphics_with(
+            dimensions,
+            scenario_label,
+            empty_sprites(),
+            empty_cursor_atlas(),
+            hud_graphics,
+        )
+    }
+
+    /// A graphics system with the empty test assets: no object sprites, no
+    /// cursor atlas and no HUD sheets. The render tests construct dozens of
+    /// these and only ever vary the surface size, ground height and label.
+    fn test_graphics(dimensions: TestGraphicsDimensions, scenario_label: &str) -> GraphicsSystem {
+        test_graphics_with_sprites(dimensions, scenario_label, empty_sprites())
     }
 
     struct RepositoryContentResolver {
@@ -4514,8 +4194,6 @@ mod tests {
             sprites.insert(
                 sprite_map_key(definition_id, None),
                 DefinitionSprite {
-                    graphics_scale: 1.0,
-                    image: ImageData::from_arc(width, height, image.into_pixels()),
                     actions: engine
                         .definition_action_graphics(definition_id)
                         .unwrap_or_default(),
@@ -4526,7 +4204,7 @@ mod tests {
                     line: engine.definition_line(definition_id),
                     stretch_growth: engine.definition_stretch_growth(definition_id),
                     top_face: engine.definition_top_face(definition_id),
-                    picture: None,
+                    ..test_sprite(ImageData::from_arc(width, height, image.into_pixels()))
                 },
             );
         }
@@ -4534,8 +4212,8 @@ mod tests {
     }
 
     fn assert_surface_pixels_eq(actual: &Surface, expected: &Surface, context: &str) {
-        assert_eq!(actual.width(), expected.width(), "{context}: width");
-        assert_eq!(actual.height(), expected.height(), "{context}: height");
+        front_assert_eq! {actual.width() => expected.width(), "{context}: width"};
+        front_assert_eq! {actual.height() => expected.height(), "{context}: height"};
         if let Some((index, (actual_pixel, expected_pixel))) = actual
             .pixels()
             .chunks_exact(4)
@@ -4553,14 +4231,6 @@ mod tests {
 
     fn make_snapshot() -> SimulationSnapshot {
         SimulationSnapshot {
-            frame: 0,
-            game_time: 0,
-            game_over: false,
-            round_results: Default::default(),
-            league_name: Vec::new(),
-            player_info_league_progress_data: Default::default(),
-            player_info_league_scores: Default::default(),
-            physics: None,
             objects: vec![ObjectSnapshot {
                 id: ObjectId::new(1),
                 definition_id: "TestObject".to_string(),
@@ -4629,32 +4299,9 @@ mod tests {
                 rotation_velocity: None,
                 fixed_rotation: None,
             }],
-            render_order: Vec::new(),
-            environment: EnvironmentFrame::default(),
-            sky: None,
-            weather_events: Vec::new(),
-            global_effects: Vec::new(),
-            script_globals: Default::default(),
-            particles: Vec::new(),
-            players: Vec::new(),
-            fow_players: Default::default(),
-            crew_selection: Default::default(),
-            crew_roles: Default::default(),
-            known_crew_owners: Vec::new(),
-            eliminated_crew_owners: Vec::new(),
             landscape: Some(Landscape::flat(256, 120)),
             rng: clonk_engine::LcgRng::seed_from_u64(0),
-            surfaces: Vec::new(),
-            hud: Default::default(),
-            controls: Vec::new(),
-            network_packets: Vec::new(),
-            definition_categories: Default::default(),
-            definition_closed_containers: Default::default(),
-            definition_lines: Default::default(),
-            transfer_zones: Vec::new(),
-            pathfinder_debug: Default::default(),
-            menu_requests: Vec::new(),
-            audio: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -4668,80 +4315,49 @@ mod tests {
             ObjectVertex::new(4, 0),
         ];
         object.vertex_contacts = vec![0, clonk_engine::CNAT_BOTTOM];
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(-1, -1, 2, 2)),
-            ..test_sprite(ImageData::new(2, 2, vec![0; 16]))
-        };
-        let mut graphics = test_graphics_with(
-            32,
-            32,
-            32,
+        let sprite = test_shaped_sprite(
+            ImageData::new(2, 2, vec![0; 16]),
+            DefinitionRect::new(-1, -1, 2, 2),
+        );
+        let mut graphics = test_graphics_with_sprites(
+            (32, 32, 32),
             "vertex overlay",
-            Arc::new(HashMap::from([(
-                sprite_map_key("TestObject", None),
-                sprite,
-            )])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("TestObject", sprite)]),
         );
         let draw = |graphics: &mut GraphicsSystem| {
-            graphics.draw_objects(
+            draw_test_objects(
+                graphics,
                 &snapshot.objects,
-                &snapshot.render_order,
-                &snapshot.definition_lines,
-                &snapshot.players,
-                OWNER_NONE,
-                1.0,
-                &HashMap::new(),
-                ObjectRenderPass::Normal,
-                None,
+                TestObjectDraw::snapshot(&snapshot),
             );
         };
 
         graphics.surface_mut().fill(Color::transparent());
         draw(&mut graphics);
-        assert_eq!(
-            graphics.surface().get_pixel(16, 16),
-            Some(Color::transparent()),
-            "the developer overlay is inert by default"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(16, 16) => Some(Color::transparent()), "the developer overlay is inert by default"};
 
         graphics.set_debug_draw_flags(DebugDrawFlags {
             show_vertices: true,
             ..DebugDrawFlags::default()
         });
         draw(&mut graphics);
-        assert_eq!(
-            graphics.surface().get_pixel(16, 16),
-            Some(graphics.game_palette.color(14)),
-            "CNAT_NoCollision uses CBlue for the three-pixel vertex cross"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(18, 14),
-            Some(graphics.game_palette.color(6)),
-            "a contacted vertex receives the surrounding CWhite frame"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(16, 16) => Some(graphics.game_palette.color(14)), "CNAT_NoCollision uses CBlue for the three-pixel vertex cross"};
+        front_assert_eq! {graphics.surface().get_pixel(18, 14) => Some(graphics.game_palette.color(6)), "a contacted vertex receives the surrounding CWhite frame"};
 
         snapshot.objects[0].position = Vector2::new(-20, 16);
         snapshot.objects[0].vertices[0].x = 36;
         snapshot.objects[0].vertices[1].x = 40;
         graphics.surface_mut().fill(Color::transparent());
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &snapshot.objects,
-            &snapshot.render_order,
-            &snapshot.definition_lines,
-            &snapshot.players,
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::snapshot(&snapshot),
         );
-        assert_eq!(
-            graphics.surface().get_pixel(16, 16),
+        front_assert_eq! {
+            graphics.surface().get_pixel(16, 16) =>
             Some(Color::transparent()),
             "the native output-boundary return suppresses the debug tail even when a displaced vertex would land onscreen"
-        );
+        };
     }
 
     #[test]
@@ -4749,7 +4365,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(80, 60);
         let render = |show_net_status| {
-            let mut graphics = test_graphics(180, 110, 120, "network status");
+            let mut graphics = test_graphics((180, 110, 120), "network status");
             graphics.set_debug_draw_flags(DebugDrawFlags {
                 show_net_status,
                 ..DebugDrawFlags::default()
@@ -4772,8 +4388,8 @@ mod tests {
 
         let (hidden, width, rect) = render(false);
         let (visible, visible_width, visible_rect) = render(true);
-        assert_eq!(width, visible_width);
-        assert_eq!(rect, visible_rect);
+        front_assert_eq! {width => visible_width};
+        front_assert_eq! {rect => visible_rect};
         let changed = hidden
             .chunks_exact(4)
             .zip(visible.chunks_exact(4))
@@ -4781,16 +4397,8 @@ mod tests {
             .filter(|(_, (hidden, visible))| hidden != visible)
             .map(|(index, _)| ((index % width) as i32, (index / width) as i32))
             .collect::<Vec<_>>();
-        assert!(
-            changed.len() > 20,
-            "enabling ShowNetstatus must rasterize detailed status text"
-        );
-        assert!(changed.iter().all(|(x, y)| {
-            *x >= rect.x
-                && *x < rect.x + rect.width as i32
-                && *y >= rect.y
-                && *y < rect.y + rect.height as i32
-        }));
+        front_assert! {changed.len() > 20, "enabling ShowNetstatus must rasterize detailed status text"};
+        front_assert! {changed.iter().all(|(x, y)| {*x >= rect.x && *x < rect.x + rect.width as i32 && *y >= rect.y && *y < rect.y + rect.height as i32})};
     }
 
     #[test]
@@ -4801,7 +4409,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(80, 60);
         let render = |text: Option<&str>| {
-            let mut graphics = test_graphics(180, 110, 120, "diagnostics overlay");
+            let mut graphics = test_graphics((180, 110, 120), "diagnostics overlay");
             graphics.set_diagnostics_overlay_text(text.map(str::to_string));
             graphics.render_frame(
                 &snapshot,
@@ -4813,9 +4421,9 @@ mod tests {
 
         let (drawn_without, without) = render(None);
         let (drawn_with, with) = render(Some("Sim 36 FPS|Render 9 FPS|Draw 32.5 ms"));
-        assert!(!drawn_without, "no text means no draw site at all");
-        assert!(drawn_with);
-        assert_ne!(without, with);
+        front_assert! {!drawn_without, "no text means no draw site at all"};
+        front_assert! {drawn_with};
+        front_assert_ne! {without => with};
     }
 
     #[test]
@@ -4826,7 +4434,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(80, 60);
         let render = |show_net_status| {
-            let mut graphics = test_graphics(180, 220, 120, "diagnostics overlay");
+            let mut graphics = test_graphics((180, 220, 120), "diagnostics overlay");
             graphics.set_debug_draw_flags(DebugDrawFlags {
                 show_net_status,
                 ..DebugDrawFlags::default()
@@ -4861,19 +4469,13 @@ mod tests {
 
         let (alone, no_status) = render(false);
         let (below, status_top) = render(true);
-        assert_eq!(no_status, None, "the flag still gates the network status");
+        front_assert_eq! {no_status => None, "the flag still gates the network status"};
         let alone = alone.test_value();
         let below = below.test_value();
         let status_top = status_top.test_value();
-        assert_eq!(
-            alone, status_top,
-            "with nothing above it the overlay takes the same anchor"
-        );
-        assert!(
-            below > alone,
-            "a visible network status pushes the overlay below it: \
-             alone at row {alone}, beside it at row {below}"
-        );
+        front_assert_eq! {alone => status_top, "with nothing above it the overlay takes the same anchor"};
+        front_assert! {below > alone, "a visible network status pushes the overlay below it: \
+        alone at row {alone}, beside it at row {below}"};
     }
 
     #[test]
@@ -4882,52 +4484,36 @@ mod tests {
         let object = &mut snapshot.objects[0];
         object.position = Vector2::new(12, 12);
         object.solid_mask_override = Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0));
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(-1, -1, 3, 3)),
-            ..test_sprite(ImageData::new(3, 3, [220, 30, 20, 255].repeat(9)))
-        };
-        let mut graphics = test_graphics_with(
-            24,
-            24,
-            24,
+        let sprite = test_shaped_sprite(
+            ImageData::new(3, 3, [220, 30, 20, 255].repeat(9)),
+            DefinitionRect::new(-1, -1, 3, 3),
+        );
+        let mut graphics = test_graphics_with_sprites(
+            (24, 24, 24),
             "solid masks",
-            Arc::new(HashMap::from([(
-                sprite_map_key("TestObject", None),
-                sprite,
-            )])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("TestObject", sprite)]),
         );
         let draw_object = |graphics: &mut GraphicsSystem| {
-            graphics.draw_objects(
+            draw_test_objects(
+                graphics,
                 &snapshot.objects,
-                &snapshot.render_order,
-                &snapshot.definition_lines,
-                &snapshot.players,
-                OWNER_NONE,
-                1.0,
-                &HashMap::new(),
-                ObjectRenderPass::Normal,
-                None,
+                TestObjectDraw::snapshot(&snapshot),
             );
         };
         graphics.surface_mut().fill(Color::transparent());
         draw_object(&mut graphics);
-        assert_eq!(
-            graphics.surface().get_pixel(12, 12),
-            Some(Color::opaque(220, 30, 20))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(12, 12) => Some(Color::opaque(220, 30, 20))};
         graphics.surface_mut().fill(Color::transparent());
         graphics.set_debug_draw_flags(DebugDrawFlags {
             show_solid_mask: true,
             ..DebugDrawFlags::default()
         });
         draw_object(&mut graphics);
-        assert_eq!(
-            graphics.surface().get_pixel(12, 12),
+        front_assert_eq! {
+            graphics.surface().get_pixel(12, 12) =>
             Some(Color::transparent()),
             "the mask is already represented by Surface8, so Draw and DrawTopFace return"
-        );
+        };
 
         let mut bytes = vec![0; 24 * 24];
         bytes[4 * 24 + 3] = 14;
@@ -4954,17 +4540,9 @@ mod tests {
             material_names,
             vec![None; 128],
         ));
-        assert!(graphics.draw_ground_surface8(Some(&landscape), None));
-        assert_eq!(
-            graphics.surface().get_pixel(3, 4),
-            Some(Color::new(12, 24, 48, 191)),
-            "the low Surface8 slot uses Mat2Pal Color and Alpha[0]"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(4, 4),
-            Some(Color::new(4, 8, 16, 63)),
-            "the +128 IFT slot uses the same Mat2Pal RGB and Alpha[3]"
-        );
+        front_assert! {graphics.draw_ground_surface8(Some(&landscape), None)};
+        front_assert_eq! {graphics.surface().get_pixel(3, 4) => Some(Color::new(12, 24, 48, 191)), "the low Surface8 slot uses Mat2Pal Color and Alpha[0]"};
+        front_assert_eq! {graphics.surface().get_pixel(4, 4) => Some(Color::new(4, 8, 16, 63)), "the +128 IFT slot uses the same Mat2Pal RGB and Alpha[3]"};
     }
 
     #[test]
@@ -4973,7 +4551,7 @@ mod tests {
         // Surface32 and puts them back afterwards (C4Landscape.cpp:2497,2501),
         // so the drawn landscape never contains a mask byte - neither as its
         // own material nor in the placement its neighbours shade against.
-        let mut graphics = test_graphics(24, 24, 24, "Masked landscape");
+        let mut graphics = test_graphics((24, 24, 24), "Masked landscape");
         graphics.surface_mut().fill(Color::transparent());
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "earth".to_string(),
@@ -5003,14 +4581,10 @@ mod tests {
 
         landscape.grid_write_mask_byte(10, 10, 2);
 
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
         let masked = graphics.surface().get_pixel(10, 10);
-        assert_eq!(
-            masked,
-            graphics.surface().get_pixel(14, 10),
-            "the masked pixel draws exactly like the earth beside it"
-        );
-        assert_ne!(masked, Some(Color::transparent()), "and it is drawn at all");
+        front_assert_eq! {masked => graphics.surface().get_pixel(14, 10), "the masked pixel draws exactly like the earth beside it"};
+        front_assert_ne! {masked => Some(Color::transparent()), "and it is drawn at all"};
     }
 
     #[test]
@@ -5024,7 +4598,7 @@ mod tests {
         }];
         snapshot.environment.fow_color = 0x00ff_0000;
         let focus = &snapshot.objects[0];
-        let mut graphics = test_graphics(64, 40, 120, "Full landscape capture");
+        let mut graphics = test_graphics((64, 40, 120), "Full landscape capture");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::new(0, focus.position, 1.0, focus)],
@@ -5034,14 +4608,10 @@ mod tests {
 
         let capture = graphics.render_full_landscape(&snapshot).test_value();
 
-        assert_eq!((capture.width(), capture.height()), (256, 120));
-        assert_ne!(
-            capture.get_pixel(0, 0),
-            Some(Color::opaque(255, 0, 0)),
-            "temporary NO_OWNER projection disables the player's red fog"
-        );
-        assert_eq!(graphics.surface().pixels(), screen_before);
-        assert_eq!(graphics.active_viewport_projections(), viewport_before);
+        front_assert_eq! {(capture.width(), capture.height()) => (256, 120)};
+        front_assert_ne! {capture.get_pixel(0, 0) => Some(Color::opaque(255, 0, 0)), "temporary NO_OWNER projection disables the player's red fog"};
+        front_assert_eq! {graphics.surface().pixels() => screen_before};
+        front_assert_eq! {graphics.active_viewport_projections() => viewport_before};
     }
 
     #[test]
@@ -5052,7 +4622,7 @@ mod tests {
             .environment
             .gamma
             .set_ramp(0, [0x102030, 0x405060, 0x708090]);
-        let mut graphics = test_graphics(64, 40, 120, "Full landscape gamma");
+        let mut graphics = test_graphics((64, 40, 120), "Full landscape gamma");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::from_focus(&snapshot.objects[0])],
@@ -5062,11 +4632,7 @@ mod tests {
         graphics.render_frame(&changed, &[ViewportInput::from_focus(&changed.objects[0])]);
         let after_latch = graphics.render_full_landscape(&changed).test_value();
 
-        assert_ne!(
-            before_latch.pixels(),
-            after_latch.pixels(),
-            "full capture reads CStdDDraw's installed ramp, not pending controls"
-        );
+        front_assert_ne! {before_latch.pixels() => after_latch.pixels(), "full capture reads CStdDDraw's installed ramp, not pending controls"};
     }
 
     #[test]
@@ -5081,7 +4647,7 @@ mod tests {
         }];
 
         let render = |snapshot: &SimulationSnapshot| {
-            let mut graphics = test_graphics(128, 80, 120, "FoW render");
+            let mut graphics = test_graphics((128, 80, 120), "FoW render");
             graphics.render_frame_with_gamma(
                 snapshot,
                 &[ViewportInput::new(
@@ -5107,11 +4673,7 @@ mod tests {
             },
         );
         let metadata_render = render(&metadata_only);
-        assert_eq!(
-            baseline.surface().pixels(),
-            metadata_render.surface().pixels(),
-            "FoW metadata is inert while the viewport player's flag is false"
-        );
+        front_assert_eq! {baseline.surface().pixels() => metadata_render.surface().pixels(), "FoW metadata is inert while the viewport player's flag is false"};
 
         let mut fog = metadata_only.clone();
         fog.players[0].fog_of_war = true;
@@ -5131,30 +4693,20 @@ mod tests {
         let far = output_at_world(viewport.viewport_x as i32, viewport.viewport_y as i32);
         let near = output_at_world(100, 60);
         let fade = output_at_world(140, 60);
-        assert_eq!(
-            fog_render.surface().get_pixel(far.0, far.1),
-            Some(Color::opaque(0, 0, 0))
-        );
+        front_assert_eq! {fog_render.surface().get_pixel(far.0, far.1) => Some(Color::opaque(0, 0, 0))};
         let baseline_near = baseline.surface().get_pixel(near.0, near.1).test_value();
-        assert_eq!(
-            fog_render.surface().get_pixel(near.0, near.1),
-            Some(modulate_surface_color(baseline_near, 0x00ff_ffff))
-        );
+        front_assert_eq! {fog_render.surface().get_pixel(near.0, near.1) => Some(modulate_surface_color(baseline_near, 0x00ff_ffff))};
         let fade_color = fog_render.surface().get_pixel(fade.0, fade.1).test_value();
         let near_color = fog_render.surface().get_pixel(near.0, near.1).test_value();
         let brightness =
             |color: Color| u16::from(color.r) + u16::from(color.g) + u16::from(color.b);
-        assert!(brightness(fade_color) < brightness(near_color));
-        assert!(brightness(fade_color) > 0);
+        front_assert! {brightness(fade_color) < brightness(near_color)};
+        front_assert! {brightness(fade_color) > 0};
 
         let mut colored_fog = fog;
         colored_fog.environment.fow_color = 0x0000_ff00;
         let colored_render = render(&colored_fog);
-        assert_eq!(
-            colored_render.surface().get_pixel(far.0, far.1),
-            Some(Color::opaque(0, 255, 0)),
-            "nonzero FoWColor is the fully shrouded backdrop"
-        );
+        front_assert_eq! {colored_render.surface().get_pixel(far.0, far.1) => Some(Color::opaque(0, 255, 0)), "nonzero FoWColor is the fully shrouded backdrop"};
     }
 
     #[test]
@@ -5220,16 +4772,11 @@ mod tests {
         );
         let render = |snapshot: &SimulationSnapshot| {
             let mut graphics = test_graphics_with(
-                128,
-                120,
-                120,
+                (128, 120, 120),
                 "FoW lifetime",
                 Arc::new(sprites.clone()),
                 empty_cursor_atlas(),
-                Arc::new(HudGraphics {
-                    upper_board: Some(board.clone()),
-                    ..HudGraphics::default()
-                }),
+                test_hud_graphics(|hud| hud.upper_board = Some(board.clone())),
             );
             graphics.render_frame_with_gamma(
                 snapshot,
@@ -5266,38 +4813,22 @@ mod tests {
             parallax_screen.0.round() as u32 + 1,
             parallax_screen.1.round() as u32 + 1,
         );
-        assert_eq!(
-            baseline.surface().get_pixel(normal.0, normal.1),
-            Some(Color::opaque(220, 20, 20)),
-        );
-        assert_eq!(
-            baseline
-                .surface()
-                .get_pixel(parallax_pixel.0, parallax_pixel.1),
-            Some(Color::opaque(20, 220, 20)),
-        );
+        front_assert_eq! {baseline.surface().get_pixel(normal.0, normal.1) => Some(Color::opaque(220, 20, 20)),};
+        front_assert_eq! {baseline.surface().get_pixel(parallax_pixel.0, parallax_pixel.1) => Some(Color::opaque(20, 220, 20)),};
 
         let mut fog_snapshot = snapshot;
         fog_snapshot.players[0].fog_of_war = true;
         let fog = render(&fog_snapshot);
-        assert_eq!(
-            fog.surface().get_pixel(normal.0, normal.1),
-            Some(Color::opaque(0, 0, 0)),
-            "ordinary world sprite is shrouded",
-        );
-        assert_eq!(
-            fog.surface().get_pixel(parallax_pixel.0, parallax_pixel.1),
+        front_assert_eq! {fog.surface().get_pixel(normal.0, normal.1) => Some(Color::opaque(0, 0, 0)), "ordinary world sprite is shrouded",};
+        front_assert_eq! {
+            fog.surface().get_pixel(parallax_pixel.0, parallax_pixel.1) =>
             baseline
                 .surface()
                 .get_pixel(parallax_pixel.0, parallax_pixel.1),
             "ForegroundParallax is drawn after ClrModMap is disabled",
-        );
-        assert_eq!(
-            fog.surface().get_pixel(0, 0),
-            baseline.surface().get_pixel(0, 0),
-            "fullscreen HUD chrome remains byte-identical",
-        );
-        assert_eq!(fog.surface().get_pixel(0, 0), Some(board_color));
+        };
+        front_assert_eq! {fog.surface().get_pixel(0, 0) => baseline.surface().get_pixel(0, 0), "fullscreen HUD chrome remains byte-identical",};
+        front_assert_eq! {fog.surface().get_pixel(0, 0) => Some(board_color)};
     }
 
     #[test]
@@ -5318,7 +4849,7 @@ mod tests {
                 view_target: None,
             },
         );
-        let mut graphics = test_graphics(200, 120, 120, "zoomed FoW border");
+        let mut graphics = test_graphics((200, 120, 120), "zoomed FoW border");
         graphics.render_frame_with_gamma(
             &snapshot,
             &[ViewportInput::new(
@@ -5330,8 +4861,8 @@ mod tests {
             None,
         );
         let viewport = &graphics.active_viewports[0];
-        assert!(viewport.content_rect.x > viewport.rect.x);
-        assert!(viewport.content_rect.y > viewport.rect.y);
+        front_assert! {viewport.content_rect.x > viewport.rect.x};
+        front_assert! {viewport.content_rect.y > viewport.rect.y};
         let at_world = |world: Vector2| {
             (
                 (viewport.content_rect.x as f32
@@ -5344,14 +4875,8 @@ mod tests {
         };
         let near = at_world(snapshot.objects[0].position);
         let far = at_world(Vector2::new(50, 10));
-        assert_ne!(
-            graphics.surface().get_pixel(near.0, near.1),
-            Some(Color::opaque(0, 0, 0)),
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(far.0, far.1),
-            Some(Color::opaque(0, 0, 0)),
-        );
+        front_assert_ne! {graphics.surface().get_pixel(near.0, near.1) => Some(Color::opaque(0, 0, 0)),};
+        front_assert_eq! {graphics.surface().get_pixel(far.0, far.1) => Some(Color::opaque(0, 0, 0)),};
     }
 
     fn standard_gamma_color(color: Color) -> Color {
@@ -5362,38 +4887,20 @@ mod tests {
     fn bolt_quad_culls_before_rng_and_uses_cpp_random_order() {
         let mut rng = SafeRng::new(1);
         let untouched = rng.clone();
-        assert_eq!(
-            build_bolt_quad((-1, 3), (8, 3), 8, 8, &mut rng),
-            None,
-            "both x endpoints outside cull even when the segment spans the facet"
-        );
-        assert_eq!(rng, untouched, "the x cull precedes SafeRandom");
-        assert_eq!(
-            build_bolt_quad((3, -1), (3, 8), 8, 8, &mut rng),
-            None,
-            "the same coarse rule applies independently to y"
-        );
-        assert_eq!(rng, untouched, "the y cull also precedes SafeRandom");
+        front_assert_eq! {build_bolt_quad((-1, 3), (8, 3), 8, 8, &mut rng) => None, "both x endpoints outside cull even when the segment spans the facet"};
+        front_assert_eq! {rng => untouched, "the x cull precedes SafeRandom"};
+        front_assert_eq! {build_bolt_quad((3, -1), (3, 8), 8, 8, &mut rng) => None, "the same coarse rule applies independently to y"};
+        front_assert_eq! {rng => untouched, "the y cull also precedes SafeRandom"};
 
-        assert!(
-            build_bolt_quad((0, -1), (8, 7), 8, 8, &mut rng).is_some(),
-            "different endpoints can satisfy the independent x/y tests"
-        );
+        front_assert! {build_bolt_quad((0, -1), (8, 7), 8, 8, &mut rng).is_some(), "different endpoints can satisfy the independent x/y tests"};
 
         let mut rng = SafeRng::new(1);
-        assert_eq!(
-            build_bolt_quad((4, 5), (12, 8), 16, 16, &mut rng),
-            Some([(4, 5), (12, 8), (12, 9), (6, 3)]),
-            "C++ consumes end-x, end-y, start-x, start-y"
-        );
+        front_assert_eq! {build_bolt_quad((4, 5), (12, 8), 16, 16, &mut rng) => Some([(4, 5), (12, 8), (12, 9), (6, 3)]), "C++ consumes end-x, end-y, start-x, start-y"};
         let mut mirror = SafeRng::new(1);
         for _ in 0..4 {
             mirror.random(7);
         }
-        assert_eq!(
-            rng, mirror,
-            "one visible segment consumes exactly four draws"
-        );
+        front_assert_eq! {rng => mirror, "one visible segment consumes exactly four draws"};
     }
 
     #[test]
@@ -5417,13 +4924,9 @@ mod tests {
             &mut rng,
         );
 
-        assert_eq!(
-            surface.get_pixel(11, 9),
-            Some(Color::opaque(252, 252, 252)),
-            "the folded GL strip covers its interior"
-        );
-        assert_eq!(surface.get_pixel(8, 9), Some(black));
-        assert_eq!(surface.get_pixel(13, 9), Some(black));
+        front_assert_eq! {surface.get_pixel(11, 9) => Some(Color::opaque(252, 252, 252)), "the folded GL strip covers its interior"};
+        front_assert_eq! {surface.get_pixel(8, 9) => Some(black)};
+        front_assert_eq! {surface.get_pixel(13, 9) => Some(black)};
     }
 
     #[test]
@@ -5447,11 +4950,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            surface.get_pixel(1, 2),
-            Some(blend_color_over(translucent, black)),
-            "GL's top-left rule assigns the shared diagonal to one triangle"
-        );
+        front_assert_eq! {surface.get_pixel(1, 2) => Some(blend_color_over(translucent, black)), "GL's top-left rule assigns the shared diagonal to one triangle"};
     }
 
     #[test]
@@ -5479,15 +4978,15 @@ mod tests {
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(scene.commands.len(), 1);
+        front_assert_eq! {scene.commands.len() => 1};
         let GpuCommand::Solid {
             vertices, topology, ..
         } = &scene.commands[0]
         else {
             panic!("bolt did not lower to solid geometry");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::TriangleList);
-        assert_eq!(vertices.len(), 6, "the GL strip is exactly two triangles");
+        front_assert_eq! {*topology => GpuPrimitiveTopology::TriangleList};
+        front_assert_eq! {vertices.len() => 6, "the GL strip is exactly two triangles"};
     }
 
     #[test]
@@ -5513,7 +5012,7 @@ mod tests {
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(scene.commands.len(), 2);
+        front_assert_eq! {scene.commands.len() => 2};
         let GpuCommand::Solid {
             vertices,
             topology,
@@ -5523,11 +5022,11 @@ mod tests {
         else {
             panic!("CONNECT segment did not lower to solid geometry");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::LineList);
-        assert_eq!(*alpha_mode, GpuSolidAlphaMode::SourceOver);
-        assert_eq!(vertices.len(), 2);
-        assert_eq!(vertices[0].position, [2.75, 4.25, 1.0]);
-        assert_eq!(vertices[1].position, [20.625, 9.875, 1.0]);
+        front_assert_eq! {*topology => GpuPrimitiveTopology::LineList};
+        front_assert_eq! {*alpha_mode => GpuSolidAlphaMode::SourceOver};
+        front_assert_eq! {vertices.len() => 2};
+        front_assert_eq! {vertices[0].position => [2.75, 4.25, 1.0]};
+        front_assert_eq! {vertices[1].position => [20.625, 9.875, 1.0]};
         let GpuCommand::Solid {
             vertices,
             topology,
@@ -5537,10 +5036,10 @@ mod tests {
         else {
             panic!("CONNECT marker did not lower to a solid point");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::PointList);
-        assert_eq!(*alpha_mode, GpuSolidAlphaMode::SourceOver);
-        assert_eq!(vertices.len(), 1);
-        assert_eq!(vertices[0].position, [2.75, 4.25, 1.0]);
+        front_assert_eq! {*topology => GpuPrimitiveTopology::PointList};
+        front_assert_eq! {*alpha_mode => GpuSolidAlphaMode::SourceOver};
+        front_assert_eq! {vertices.len() => 1};
+        front_assert_eq! {vertices[0].position => [2.75, 4.25, 1.0]};
     }
 
     #[test]
@@ -5563,25 +5062,25 @@ mod tests {
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(scene.commands.len(), 2);
+        front_assert_eq! {scene.commands.len() => 2};
         let GpuCommand::Solid {
             vertices, topology, ..
         } = &scene.commands[0]
         else {
             panic!("zero-length CONNECT primary did not remain a line");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::LineList);
-        assert_eq!(vertices.len(), 2);
-        assert_eq!(vertices[0].position, [2.75, 4.25, 1.0]);
-        assert_eq!(vertices[0].position, vertices[1].position);
+        front_assert_eq! {*topology => GpuPrimitiveTopology::LineList};
+        front_assert_eq! {vertices.len() => 2};
+        front_assert_eq! {vertices[0].position => [2.75, 4.25, 1.0]};
+        front_assert_eq! {vertices[0].position => vertices[1].position};
         let GpuCommand::Solid {
             vertices, topology, ..
         } = &scene.commands[1]
         else {
             panic!("zero-length CONNECT marker did not remain a point");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::PointList);
-        assert_eq!(vertices[0].position, [2.75, 4.25, 1.0]);
+        front_assert_eq! {*topology => GpuPrimitiveTopology::PointList};
+        front_assert_eq! {vertices[0].position => [2.75, 4.25, 1.0]};
     }
 
     #[test]
@@ -5607,7 +5106,7 @@ mod tests {
         let second_rng = second.rng.clone();
 
         let render = |snapshot: &SimulationSnapshot| {
-            let mut graphics = test_graphics(32, 16, 16, "Lightning RNG");
+            let mut graphics = test_graphics((32, 16, 16), "Lightning RNG");
             graphics.presentation_rng = SafeRng::new(23);
             graphics.render_frame(snapshot, &[ViewportInput::from_focus(&snapshot.objects[0])]);
             (
@@ -5618,9 +5117,9 @@ mod tests {
         let first_render = render(&first);
         let second_render = render(&second);
 
-        assert_eq!(first_render, second_render);
-        assert_eq!(first.rng, first_rng);
-        assert_eq!(second.rng, second_rng);
+        front_assert_eq! {first_render => second_render};
+        front_assert_eq! {first.rng => first_rng};
+        front_assert_eq! {second.rng => second_rng};
     }
 
     #[test]
@@ -5628,10 +5127,10 @@ mod tests {
         // C4Object::Draw returns through DrawLine before the Contained check,
         // TargetPos/parallax adjustment, or any face drawing
         // (src/C4Object.cpp:2249-2254). Shape vertices are already absolute.
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            ..test_sprite(ImageData::new(1, 1, vec![255, 0, 255, 255]))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(1, 1, vec![255, 0, 255, 255]),
+            DefinitionRect::new(0, 0, 1, 1),
+        );
         let template = make_snapshot().objects.remove(0);
         let mut power = template.clone();
         power.definition_id = "PowerLine".to_string();
@@ -5665,94 +5164,43 @@ mod tests {
                 },
             ),
         ]);
-        let mut graphics = test_graphics_with(
-            32,
-            12,
-            12,
+        let mut graphics = test_graphics_with_sprites(
+            (32, 12, 12),
             "Typed lines",
-            Arc::new(HashMap::from([
-                (sprite_map_key("PowerLine", None), sprite.clone()),
-                (sprite_map_key("LightningLine", None), sprite),
-            ])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("PowerLine", sprite.clone()), ("LightningLine", sprite)]),
         );
         let black = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &[power.clone(), lightning.clone()],
-            &[],
-            &lines,
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::default().definition_lines(&lines),
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(2, 3),
-            Some(Color::opaque(168, 168, 168)),
-            "C4FacetEx::DrawLine's secondary color overwrites the start pixel"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(3, 3),
-            Some(Color::opaque(152, 100, 44)),
-            "Power uses expanded C4.PAL entry 68"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(6, 3),
-            Some(black),
-            "GL_LINES diamond-exit raster is half-open at the endpoint"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(21, 7),
-            Some(Color::opaque(252, 252, 252)),
-            "Lightning uses C4FacetEx::DrawBolt's CWhite quadrilateral"
-        );
-        assert_ne!(
-            graphics.surface().get_pixel(20, 8),
-            Some(Color::opaque(255, 0, 255)),
-            "the line path suppresses the object's magenta sprite face"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(2, 3) => Some(Color::opaque(168, 168, 168)), "C4FacetEx::DrawLine's secondary color overwrites the start pixel"};
+        front_assert_eq! {graphics.surface().get_pixel(3, 3) => Some(Color::opaque(152, 100, 44)), "Power uses expanded C4.PAL entry 68"};
+        front_assert_eq! {graphics.surface().get_pixel(6, 3) => Some(black), "GL_LINES diamond-exit raster is half-open at the endpoint"};
+        front_assert_eq! {graphics.surface().get_pixel(21, 7) => Some(Color::opaque(252, 252, 252)), "Lightning uses C4FacetEx::DrawBolt's CWhite quadrilateral"};
+        front_assert_ne! {graphics.surface().get_pixel(20, 8) => Some(Color::opaque(255, 0, 255)), "the line path suppresses the object's magenta sprite face"};
 
         let mut palette_bytes = vec![0_u8; GamePalette::BYTE_LEN];
         palette_bytes[6 * 3..6 * 3 + 3].copy_from_slice(&[1, 2, 3]);
         palette_bytes[26 * 3..26 * 3 + 3].copy_from_slice(&[7, 8, 9]);
         palette_bytes[68 * 3..68 * 3 + 3].copy_from_slice(&[4, 5, 6]);
         let palette = GamePalette::from_c4_pal(&palette_bytes).test_value();
-        assert_eq!(palette.color(0), Color::transparent());
-        assert_eq!(palette.color(191), Color::new(0, 0, 255, 128));
+        front_assert_eq! {palette.color(0) => Color::transparent()};
+        front_assert_eq! {palette.color(191) => Color::new(0, 0, 255, 128)};
         graphics.set_game_palette(Arc::new(palette));
         graphics.presentation_rng = SafeRng::default();
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &[power, lightning],
-            &[],
-            &lines,
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::default().definition_lines(&lines),
         );
-        assert_eq!(
-            graphics.surface().get_pixel(2, 3),
-            Some(Color::opaque(28, 32, 36)),
-            "the active C4.pal supplies the typed-line marker"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(3, 3),
-            Some(Color::opaque(16, 20, 24)),
-            "the active C4.pal supplies the typed-line primary color"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(21, 7),
-            Some(Color::opaque(4, 8, 12)),
-            "the active C4.pal supplies DrawBolt's white index"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(2, 3) => Some(Color::opaque(28, 32, 36)), "the active C4.pal supplies the typed-line marker"};
+        front_assert_eq! {graphics.surface().get_pixel(3, 3) => Some(Color::opaque(16, 20, 24)), "the active C4.pal supplies the typed-line primary color"};
+        front_assert_eq! {graphics.surface().get_pixel(21, 7) => Some(Color::opaque(4, 8, 12)), "the active C4.pal supplies DrawBolt's white index"};
     }
 
     #[test]
@@ -5801,7 +5249,7 @@ mod tests {
                 line_intersect: 0,
             },
         )]);
-        let mut graphics = test_graphics(32, 16, 16, "Audibility calls");
+        let mut graphics = test_graphics((32, 16, 16), "Audibility calls");
         graphics.content_audibility_facet = Some(AudibilityFacet {
             target_x: 20,
             target_y: 30,
@@ -5815,31 +5263,19 @@ mod tests {
             height: 60,
         });
 
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &[line.clone(), ordinary.clone(), parallax.clone()],
-            &[],
-            &lines,
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::default().definition_lines(&lines),
         );
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &[foreground_parallax.clone()],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::ForegroundParallax,
-            None,
+            TestObjectDraw::default().pass(ObjectRenderPass::ForegroundParallax),
         );
 
-        assert_eq!(
-            graphics.rendered_object_audibility_calls().get(&line.id),
+        front_assert_eq! {
+            graphics.rendered_object_audibility_calls().get(&line.id) =>
             Some(&vec![
                 RenderedAudibilityCall::World {
                     point: Vector2::new(7, 9),
@@ -5849,34 +5285,29 @@ mod tests {
                 },
             ]),
             "DrawLine calls both first and last even for one live vertex, before containment",
-        );
-        assert!(
-            !graphics
-                .rendered_object_audibility_calls()
-                .contains_key(&ordinary.id),
-            "ordinary non-line objects retain native lazy origin mixing",
-        );
-        assert_eq!(
+        };
+        front_assert! {!graphics.rendered_object_audibility_calls().contains_key(&ordinary.id), "ordinary non-line objects retain native lazy origin mixing",};
+        front_assert_eq! {
             graphics
                 .rendered_object_audibility_calls()
-                .get(&parallax.id),
+                .get(&parallax.id) =>
             Some(&vec![RenderedAudibilityCall::Parallax {
                 point: parallax.position,
                 rendered_center: Vector2::new(50, 27),
             }]),
             "normal-pass parallax uses the border-clipped content facet",
-        );
-        assert_eq!(
+        };
+        front_assert_eq! {
             graphics
                 .rendered_object_audibility_calls()
-                .get(&foreground_parallax.id),
+                .get(&foreground_parallax.id) =>
             Some(&vec![RenderedAudibilityCall::Parallax {
                 point: foreground_parallax.position,
                 rendered_center: Vector2::new(50, 20),
             }]),
             "foreground parallax uses the restored full viewport facet",
-        );
-        assert_eq!(graphics.current_audibility_facet, None);
+        };
+        front_assert_eq! {graphics.current_audibility_facet => None};
     }
 
     #[test]
@@ -5921,19 +5352,13 @@ mod tests {
             );
             objects.push(object);
         }
-        let mut graphics = test_graphics(32, 16, 16, "Typed-line variants");
+        let mut graphics = test_graphics((32, 16, 16), "Typed-line variants");
         let black = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &objects,
-            &[],
-            &lines,
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::default().definition_lines(&lines),
         );
 
         let palette = |index| match index {
@@ -5945,21 +5370,9 @@ mod tests {
         };
         for (index, (name, _, primary, marker)) in cases.iter().enumerate() {
             let y = 1 + index as u32 * 2;
-            assert_eq!(
-                graphics.surface().get_pixel(2, y),
-                Some(palette(*marker)),
-                "{name} start marker"
-            );
-            assert_eq!(
-                graphics.surface().get_pixel(3, y),
-                Some(palette(*primary)),
-                "{name} primary segment"
-            );
-            assert_eq!(
-                graphics.surface().get_pixel(5, y),
-                Some(black),
-                "{name} endpoint remains half-open"
-            );
+            front_assert_eq! {graphics.surface().get_pixel(2, y) => Some(palette(*marker)), "{name} start marker"};
+            front_assert_eq! {graphics.surface().get_pixel(3, y) => Some(palette(*primary)), "{name} primary segment"};
+            front_assert_eq! {graphics.surface().get_pixel(5, y) => Some(black), "{name} endpoint remains half-open"};
         }
     }
 
@@ -5988,38 +5401,24 @@ mod tests {
                 line_intersect: 0,
             },
         )]);
-        let mut graphics = test_graphics(12, 8, 8, "Bent typed line");
+        let mut graphics = test_graphics((12, 8, 8), "Bent typed line");
         let background = Color::opaque(10, 20, 30);
         graphics.surface_mut().fill(background);
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &[object],
-            &[],
-            &lines,
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::default().definition_lines(&lines),
         );
 
         let primary = Color::opaque(152, 100, 44);
         let marker = Color::opaque(168, 168, 168);
-        assert_eq!(graphics.surface().get_pixel(2, 2), Some(marker));
-        assert_eq!(graphics.surface().get_pixel(3, 2), Some(primary));
-        assert_eq!(graphics.surface().get_pixel(4, 2), Some(primary));
-        assert_eq!(
-            graphics.surface().get_pixel(5, 2),
-            Some(marker),
-            "the next segment's start marker overwrites the L joint"
-        );
-        assert_eq!(graphics.surface().get_pixel(5, 3), Some(primary));
-        assert_eq!(graphics.surface().get_pixel(5, 4), Some(primary));
-        assert_eq!(
-            graphics.surface().get_pixel(5, 5),
-            Some(background),
-            "the polyline's final vertex remains untouched"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(2, 2) => Some(marker)};
+        front_assert_eq! {graphics.surface().get_pixel(3, 2) => Some(primary)};
+        front_assert_eq! {graphics.surface().get_pixel(4, 2) => Some(primary)};
+        front_assert_eq! {graphics.surface().get_pixel(5, 2) => Some(marker), "the next segment's start marker overwrites the L joint"};
+        front_assert_eq! {graphics.surface().get_pixel(5, 3) => Some(primary)};
+        front_assert_eq! {graphics.surface().get_pixel(5, 4) => Some(primary)};
+        front_assert_eq! {graphics.surface().get_pixel(5, 5) => Some(background), "the polyline's final vertex remains untouched"};
 
         draw_object_line_segment(
             graphics.surface_mut(),
@@ -6031,11 +5430,11 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(
-            graphics.surface().get_pixel(8, 2),
+        front_assert_eq! {
+            graphics.surface().get_pixel(8, 2) =>
             Some(Color::new(4, 9, 142, 255)),
             "zero-length GL_LINES emits no primary fragment but still receives the secondary marker"
-        );
+        };
 
         draw_object_line_segment(
             graphics.surface_mut(),
@@ -6047,39 +5446,33 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(
-            graphics.surface().get_pixel(8, 4),
+        front_assert_eq! {
+            graphics.surface().get_pixel(8, 4) =>
             Some(Color::new(4, 9, 142, 255)),
             "transparent palette index 0 leaves the half-blue index 191 primary pixel visible"
-        );
-        assert_eq!(graphics.surface().get_pixel(11, 4), Some(background));
+        };
+        front_assert_eq! {graphics.surface().get_pixel(11, 4) => Some(background)};
 
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &[mod2_object],
-            &[],
-            &lines,
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::default().definition_lines(&lines),
         );
-        assert_eq!(
-            graphics.surface().get_pixel(3, 6),
+        front_assert_eq! {
+            graphics.surface().get_pixel(3, 6) =>
             Some(Color::opaque(0, 0, 0)),
             "line primitives keep zero ColorMod activation but do not run texture MOD2 math"
-        );
-        assert_eq!(
-            modulate_line_palette_color(primary, Some(0x00ff_ffff)),
+        };
+        front_assert_eq! {
+            modulate_line_palette_color(primary, Some(0x00ff_ffff)) =>
             Color::opaque(151, 99, 43),
             "line ColorMod uses C++ >>8 channel multiplication, even for white"
-        );
-        assert_eq!(
-            modulate_line_palette_color(c4_palette_color(191), Some(0x4080_ffff)),
+        };
+        front_assert_eq! {
+            modulate_line_palette_color(c4_palette_color(191), Some(0x4080_ffff)) =>
             Color::new(0, 0, 254, 95),
             "palette and ColorMod transparencies screen-combine in packed C4 alpha"
-        );
+        };
     }
 
     #[test]
@@ -6095,7 +5488,7 @@ mod tests {
             .set_ramp(0, [0x102030, 0x405060, 0x708090]);
         let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
         let make_graphics = || {
-            let mut graphics = test_graphics(320, 180, 150, "Gamma Seam");
+            let mut graphics = test_graphics((320, 180, 150), "Gamma Seam");
             graphics.set_advanced_renderer_config(AdvancedRendererConfig {
                 shader: true,
                 ..AdvancedRendererConfig::DEFAULT
@@ -6120,9 +5513,9 @@ mod tests {
         let mut changed_render = make_graphics();
         changed_render.render_frame_with_gamma(&changed, &viewports, Some(&changed_ramp));
 
-        assert_eq!(before_apply, standard_render.surface().pixels());
-        assert_eq!(after_apply, changed_render.surface().pixels());
-        assert_ne!(before_apply, after_apply);
+        front_assert_eq! {before_apply => standard_render.surface().pixels()};
+        front_assert_eq! {after_apply => changed_render.surface().pixels()};
+        front_assert_ne! {before_apply => after_apply};
     }
 
     #[test]
@@ -6138,17 +5531,10 @@ mod tests {
                 .collect(),
         );
         let make_graphics = || {
-            test_graphics_with(
-                128,
-                120,
-                120,
+            test_graphics_with_hud(
+                (128, 120, 120),
                 "Split frame",
-                empty_sprites(),
-                empty_cursor_atlas(),
-                Arc::new(HudGraphics {
-                    upper_board: Some(board.clone()),
-                    ..HudGraphics::default()
-                }),
+                test_hud_graphics(|hud| hud.upper_board = Some(board.clone())),
             )
         };
 
@@ -6162,12 +5548,9 @@ mod tests {
         let pending = split.render_frame_hud_players(pending);
         let split_atlas = split.render_frame_hud_chrome(pending);
 
-        assert_eq!(split.surface().pixels(), single_pixels);
-        assert_eq!(split_atlas, single_atlas);
-        assert_eq!(
-            split.active_gamma_control_points,
-            single.active_gamma_control_points
-        );
+        front_assert_eq! {split.surface().pixels() => single_pixels};
+        front_assert_eq! {split_atlas => single_atlas};
+        front_assert_eq! {split.active_gamma_control_points => single.active_gamma_control_points};
     }
 
     /// A GPU scene-capture frame records commands instead of rasterizing, so
@@ -6187,14 +5570,10 @@ mod tests {
         // the content surface is the full viewport the shipping game renders.
         snapshot.landscape = Some(Landscape::flat(WIDTH * 2, HEIGHT as i32 * 2));
         let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
-        let mut graphics = test_graphics_with(
-            WIDTH,
-            HEIGHT,
-            120,
+        let mut graphics = test_graphics_with_sprites(
+            (WIDTH, HEIGHT, 120),
             "Deferred pixel plane probe",
             empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         let gamma = clonk_graphics::GammaRamp::identity();
         let capture_frame = |graphics: &mut GraphicsSystem| {
@@ -6203,7 +5582,7 @@ mod tests {
             graphics.finish_gpu_scene_capture(&gamma)
         };
         // Warm the retained caches so the measured window is steady state.
-        assert!(capture_frame(&mut graphics).is_some());
+        front_assert! {capture_frame(&mut graphics).is_some()};
 
         let before = clonk_graphics::pixel_plane_stats();
         let start = std::time::Instant::now();
@@ -6235,15 +5614,12 @@ mod tests {
             deferred_bytes / FRAMES,
             eager_plane.as_secs_f64() * 1000.0 / FRAMES as f64,
         );
-        assert_eq!(
-            materialized, 0,
-            "a scene-capture frame rasterized into a deferred pixel plane"
-        );
-        assert!(
+        front_assert_eq! {materialized => 0, "a scene-capture frame rasterized into a deferred pixel plane"};
+        front_assert! {
             deferred_bytes / FRAMES >= u64::from(WIDTH * HEIGHT * 4),
             "expected at least one full viewport plane deferred per frame, got {} bytes",
             deferred_bytes / FRAMES
-        );
+        };
     }
 
     #[test]
@@ -6261,15 +5637,8 @@ mod tests {
             Some(DefinitionRect::new(0, 0, 4, 4)),
             false,
         );
-        let mut graphics = test_graphics_with(
-            128,
-            120,
-            120,
-            "Retained viewport foreground",
-            sprites,
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((128, 120, 120), "Retained viewport foreground", sprites);
 
         // The app ends the base capture before drawing C4Viewport's final
         // foreground-parallax pass into its next ordered layer
@@ -6286,55 +5655,40 @@ mod tests {
             .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::identity())
             .test_value();
 
-        assert_eq!(
+        front_assert_eq! {
             scene
                 .textures
                 .iter()
                 .map(|texture| texture.extent)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>() =>
             vec![[4, 4]],
             "foreground sprites must not be flattened into a viewport-sized upload"
-        );
-        assert!(matches!(
-            scene.commands.as_slice(),
-            [GpuCommand::ObjectBatch { .. }]
-        ));
+        };
+        front_assert! {matches!(scene.commands.as_slice(), [GpuCommand::ObjectBatch { .. }])};
     }
 
     #[test]
     fn no_atlas_completions_match_snapshot_render_state() {
         let snapshot = make_snapshot();
         let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
-        let make_graphics = || test_graphics(128, 120, 120, "No-atlas frame");
+        let make_graphics = || test_graphics((128, 120, 120), "No-atlas frame");
 
         let mut snapshot_render = make_graphics();
         let atlas = snapshot_render.render_frame(&snapshot, &viewports);
-        assert!(!atlas.is_empty());
+        front_assert! {!atlas.is_empty()};
 
         let mut direct = make_graphics();
         direct.render_frame_without_atlas(&snapshot, &viewports);
-        assert_eq!(
-            direct.surface().pixels(),
-            snapshot_render.surface().pixels()
-        );
-        assert_eq!(
-            direct.active_gamma_control_points,
-            snapshot_render.active_gamma_control_points
-        );
+        front_assert_eq! {direct.surface().pixels() => snapshot_render.surface().pixels()};
+        front_assert_eq! {direct.active_gamma_control_points => snapshot_render.active_gamma_control_points};
 
         let mut ordered = make_graphics();
         let pending = ordered.render_frame_base(&snapshot, &viewports);
         ordered.render_frame_foreground(&pending);
         let pending = ordered.render_frame_hud_players(pending);
         ordered.render_frame_hud_chrome_without_atlas(pending);
-        assert_eq!(
-            ordered.surface().pixels(),
-            snapshot_render.surface().pixels()
-        );
-        assert_eq!(
-            ordered.active_gamma_control_points,
-            snapshot_render.active_gamma_control_points
-        );
+        front_assert_eq! {ordered.surface().pixels() => snapshot_render.surface().pixels()};
+        front_assert_eq! {ordered.active_gamma_control_points => snapshot_render.active_gamma_control_points};
     }
 
     #[test]
@@ -6353,17 +5707,10 @@ mod tests {
                 .flat_map(|_| [board_color.r, board_color.g, board_color.b, board_color.a])
                 .collect(),
         );
-        let mut graphics = test_graphics_with(
-            128,
-            120,
-            120,
+        let mut graphics = test_graphics_with_hud(
+            (128, 120, 120),
             "Transparent HUD",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            Arc::new(HudGraphics {
-                upper_board: Some(board),
-                ..HudGraphics::default()
-            }),
+            test_hud_graphics(|hud| hud.upper_board = Some(board)),
         );
         let initial_viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
         graphics.render_frame(&snapshot, &initial_viewports);
@@ -6371,7 +5718,7 @@ mod tests {
 
         let changed_viewports = [ViewportInput::from_focus(&changed.objects[0])];
         let pending = graphics.render_frame_base(&changed, &changed_viewports);
-        assert_eq!(graphics.active_gamma_control_points, Some(installed_before));
+        front_assert_eq! {graphics.active_gamma_control_points => Some(installed_before)};
         graphics.surface_mut().fill(Color::transparent());
         graphics.render_frame_foreground(&pending);
         graphics.surface_mut().fill(Color::transparent());
@@ -6379,15 +5726,9 @@ mod tests {
         graphics.surface_mut().fill(Color::transparent());
         let atlas = graphics.render_frame_hud_chrome(pending);
 
-        assert!(!atlas.is_empty());
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
-            Some(standard_gamma_color(board_color))
-        );
-        assert_eq!(
-            graphics.active_gamma_control_points,
-            Some(changed.environment.gamma.combined_control_points())
-        );
+        front_assert! {!atlas.is_empty()};
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(standard_gamma_color(board_color))};
+        front_assert_eq! {graphics.active_gamma_control_points => Some(changed.environment.gamma.combined_control_points())};
     }
 
     #[test]
@@ -6403,12 +5744,8 @@ mod tests {
             surface.pixels().to_vec()
         };
 
-        assert!(render(Some(&gamma))
-            .chunks_exact(4)
-            .all(|pixel| pixel == [50, 100, 150, 128]));
-        assert!(render(None)
-            .chunks_exact(4)
-            .all(|pixel| pixel == [64, 128, 192, 128]));
+        front_assert! {render(Some(&gamma)).chunks_exact(4).all(|pixel| pixel == [50, 100, 150, 128])};
+        front_assert! {render(None).chunks_exact(4).all(|pixel| pixel == [64, 128, 192, 128])};
     }
 
     #[test]
@@ -6429,16 +5766,13 @@ mod tests {
         let mut cached = Surface::new(7, 5, PixelFormat::Rgba8888);
         cache.begin_frame(&cached, Some(&image), Some(&gamma));
         cache.draw(&mut cached, &image, -2, 3, Some(&gamma));
-        assert_eq!(cached.pixels(), expected.pixels());
-        assert_eq!(cache.rasterizations, 1);
+        front_assert_eq! {cached.pixels() => expected.pixels()};
+        front_assert_eq! {cache.rasterizations => 1};
 
         cached.fill(Color::opaque(1, 2, 3));
         cache.draw(&mut cached, &image, -2, 3, Some(&gamma));
-        assert_eq!(cached.pixels(), expected.pixels());
-        assert_eq!(
-            cache.rasterizations, 1,
-            "an identical frame key must restore the retained backing without retiling"
-        );
+        front_assert_eq! {cached.pixels() => expected.pixels()};
+        front_assert_eq! {cache.rasterizations => 1, "an identical frame key must restore the retained backing without retiling"};
     }
 
     #[test]
@@ -6453,51 +5787,39 @@ mod tests {
         let mut surface = Surface::new(3, 2, PixelFormat::Rgba8888);
         cache.begin_frame(&surface, Some(&image_a), Some(&gamma_a));
         cache.draw(&mut surface, &image_a, 0, 0, Some(&gamma_a));
-        assert_eq!(cache.rasterizations, 1);
+        front_assert_eq! {cache.rasterizations => 1};
 
         let mut resized = Surface::new(4, 2, PixelFormat::Rgba8888);
         cache.begin_frame(&resized, Some(&image_a), Some(&gamma_a));
-        assert!(
-            cache.entries.is_empty(),
-            "an output resize drops old backings"
-        );
+        front_assert! {cache.entries.is_empty(), "an output resize drops old backings"};
         cache.draw(&mut resized, &image_a, 0, 0, Some(&gamma_a));
-        assert_eq!(cache.rasterizations, 2);
+        front_assert_eq! {cache.rasterizations => 2};
 
         cache.begin_frame(&resized, Some(&image_b), Some(&gamma_a));
-        assert!(
-            cache.entries.is_empty(),
-            "replacing the HUD background drops old-image backings"
-        );
+        front_assert! {cache.entries.is_empty(), "replacing the HUD background drops old-image backings"};
         cache.draw(&mut resized, &image_b, 0, 0, Some(&gamma_a));
         let mut expected = Surface::new(4, 2, PixelFormat::Rgba8888);
         tile_image_on_surface(&mut expected, &image_b, 0, 0, Some(&gamma_a));
-        assert_eq!(resized.pixels(), expected.pixels());
-        assert_eq!(cache.rasterizations, 3);
+        front_assert_eq! {resized.pixels() => expected.pixels()};
+        front_assert_eq! {cache.rasterizations => 3};
 
         cache.begin_frame(&resized, Some(&image_b), Some(&gamma_b));
-        assert!(
-            cache.entries.is_empty(),
-            "a new gamma ramp drops old pixels"
-        );
+        front_assert! {cache.entries.is_empty(), "a new gamma ramp drops old pixels"};
         cache.draw(&mut resized, &image_b, 0, 0, Some(&gamma_b));
         tile_image_on_surface(&mut expected, &image_b, 0, 0, Some(&gamma_b));
-        assert_eq!(resized.pixels(), expected.pixels());
-        assert_eq!(cache.rasterizations, 4);
+        front_assert_eq! {resized.pixels() => expected.pixels()};
+        front_assert_eq! {cache.rasterizations => 4};
 
         let origin_zero = resized.pixels().to_vec();
         cache.draw(&mut resized, &image_b, 1, -1, Some(&gamma_b));
         tile_image_on_surface(&mut expected, &image_b, 1, -1, Some(&gamma_b));
-        assert_eq!(resized.pixels(), expected.pixels());
-        assert_ne!(resized.pixels(), origin_zero);
-        assert_eq!(cache.rasterizations, 5);
+        front_assert_eq! {resized.pixels() => expected.pixels()};
+        front_assert_ne! {resized.pixels() => origin_zero};
+        front_assert_eq! {cache.rasterizations => 5};
 
         cache.draw(&mut resized, &image_b, 1, -1, Some(&gamma_b));
-        assert_eq!(resized.pixels(), expected.pixels());
-        assert_eq!(
-            cache.rasterizations, 5,
-            "the distinct origin becomes independently reusable"
-        );
+        front_assert_eq! {resized.pixels() => expected.pixels()};
+        front_assert_eq! {cache.rasterizations => 5, "the distinct origin becomes independently reusable"};
     }
 
     #[test]
@@ -6513,24 +5835,17 @@ mod tests {
         });
         cache.begin_frame(&surface, Some(&image), None);
         cache.draw(&mut surface, &image, 2, 0, None);
-        assert_eq!(
-            surface.get_pixel(0, 0),
-            Some(Color::opaque(255, 0, 0)),
-            "the visible source crop, not the offscreen tile edge, anchors TexIndent",
-        );
-        assert_eq!(cache.rasterizations, 1);
+        front_assert_eq! {surface.get_pixel(0, 0) => Some(Color::opaque(255, 0, 0)), "the visible source crop, not the offscreen tile edge, anchors TexIndent",};
+        front_assert_eq! {cache.rasterizations => 1};
 
         let _shift = activate_advanced_renderer_config(AdvancedRendererConfig {
             blit_offset: 100,
             ..AdvancedRendererConfig::DEFAULT
         });
         cache.begin_frame(&surface, Some(&image), None);
-        assert!(
-            cache.entries.is_empty(),
-            "replacing the immutable device snapshot drops cached underlay pixels",
-        );
+        front_assert! {cache.entries.is_empty(), "replacing the immutable device snapshot drops cached underlay pixels",};
         cache.draw(&mut surface, &image, 2, 0, None);
-        assert_eq!(cache.rasterizations, 2);
+        front_assert_eq! {cache.rasterizations => 2};
     }
 
     #[test]
@@ -6570,7 +5885,7 @@ mod tests {
         );
         present_viewport_content(&mut direct_path, None, &content, rect, 0, 0);
 
-        assert_eq!(direct_path.pixels(), scratch_path.pixels());
+        front_assert_eq! {direct_path.pixels() => scratch_path.pixels()};
     }
 
     #[test]
@@ -6578,7 +5893,7 @@ mod tests {
         // C4Sky::Draw emits its solid/fade colours through DrawBoxDw/Fade;
         // DummyShader samples three independent gamma textures before output
         // (C4Sky.cpp:206-225; StdGL.cpp:1185-1200).
-        let mut graphics = test_graphics(1, 1, 1, "Gamma Sky");
+        let mut graphics = test_graphics((1, 1, 1), "Gamma Sky");
         let environment = EnvironmentFrame {
             sky_color: Some(RgbColor::new(0, 0, 0)),
             ..EnvironmentFrame::default()
@@ -6587,41 +5902,23 @@ mod tests {
 
         graphics.draw_sky(None, &environment, &[], &[], &[], 1.0, Some(&gamma));
 
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
-            Some(Color::new(17, 33, 49, 255))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(Color::new(17, 33, 49, 255))};
     }
 
     #[test]
     fn sky_render_state_caches_only_complete_opaque_rgba_images() {
         let settings = SkySettings::default().with_surface(2, 1);
-        assert!(SkyRenderState::new(
-            settings.clone(),
-            Some(ImageData::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255])),
-        )
-        .image_is_fully_opaque());
-        assert!(!SkyRenderState::new(
-            settings.clone(),
-            Some(ImageData::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 254])),
-        )
-        .image_is_fully_opaque());
-        assert!(
-            !SkyRenderState::new(settings, Some(ImageData::new(2, 1, vec![1, 2, 3, 255])))
-                .image_is_fully_opaque()
-        );
-        assert!(!SkyRenderState::new(
-            SkySettings::default().with_surface(0, 0),
-            Some(ImageData::new(0, 0, Vec::new())),
-        )
-        .image_is_fully_opaque());
+        front_assert! {SkyRenderState::new(settings.clone(), Some(ImageData::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255])),).image_is_fully_opaque()};
+        front_assert! {!SkyRenderState::new(settings.clone(), Some(ImageData::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 254])),).image_is_fully_opaque()};
+        front_assert! {!SkyRenderState::new(settings, Some(ImageData::new(2, 1, vec![1, 2, 3, 255]))).image_is_fully_opaque()};
+        front_assert! {!SkyRenderState::new(SkySettings::default().with_surface(0, 0), Some(ImageData::new(0, 0, Vec::new())),).image_is_fully_opaque()};
     }
 
     #[test]
     fn gamma_render_seam_encodes_tutorial_six_sky_gradient() {
         // DrawBoxFade interpolation is gamma sampled per fragment before the
         // framebuffer store (C4Sky.cpp:219-225; StdGL.cpp:846-889,1193-1200).
-        let mut graphics = test_graphics(1, 1, 1, "Gamma Gradient");
+        let mut graphics = test_graphics((1, 1, 1), "Gamma Gradient");
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
 
         graphics.fill_vertical_gradient(
@@ -6631,10 +5928,7 @@ mod tests {
             Some(&gamma),
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
-            Some(Color::new(50, 100, 150, 255))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(Color::new(50, 100, 150, 255))};
     }
 
     #[test]
@@ -6646,7 +5940,7 @@ mod tests {
         // fill has no banding to hide.
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
         let dithered = |enabled: bool, top: Color, bottom: Color| {
-            let mut graphics = test_graphics(8, 6, 12, "sky dither");
+            let mut graphics = test_graphics((8, 6, 12), "sky dither");
             graphics.set_sky_dither(enabled);
             graphics.begin_gpu_scene_capture();
             graphics.fill_vertical_gradient(top, bottom, 1.0, Some(&gamma));
@@ -6659,23 +5953,14 @@ mod tests {
 
         let top = Color::opaque(28, 64, 152);
         let bottom = Color::opaque(192, 196, 252);
-        assert!(
-            dithered(true, top, bottom),
-            "an enabled gradient sky must ask for dithering"
-        );
-        assert!(
-            !dithered(false, top, bottom),
-            "the C++ byte-exact gradient stays the default"
-        );
-        assert!(
-            !dithered(true, top, top),
-            "a flat sky has no interpolation to dither"
-        );
+        front_assert! {dithered(true, top, bottom), "an enabled gradient sky must ask for dithering"};
+        front_assert! {!dithered(false, top, bottom), "the C++ byte-exact gradient stays the default"};
+        front_assert! {!dithered(true, top, top), "a flat sky has no interpolation to dither"};
     }
 
     #[test]
     fn gpu_capture_lowers_sky_gradient_to_one_gamma_solid_draw() {
-        let mut graphics = test_graphics(8, 6, 12, "GPU Gradient");
+        let mut graphics = test_graphics((8, 6, 12), "GPU Gradient");
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
         graphics.begin_gpu_scene_capture();
         graphics.fill_vertical_gradient(
@@ -6686,7 +5971,7 @@ mod tests {
         );
         let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
 
-        assert_eq!(scene.commands.len(), 1);
+        front_assert_eq! {scene.commands.len() => 1};
         let GpuCommand::Solid {
             vertices,
             topology,
@@ -6697,43 +5982,39 @@ mod tests {
         else {
             panic!("sky gradient did not lower to solid triangles");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::TriangleList);
-        assert_eq!(*blend, GpuBlend::Normal);
-        assert!(style.gamma);
-        assert_eq!(
-            vertices.len(),
-            6,
-            "gradient must not emit one point per pixel"
-        );
+        front_assert_eq! {*topology => GpuPrimitiveTopology::TriangleList};
+        front_assert_eq! {*blend => GpuBlend::Normal};
+        front_assert! {style.gamma};
+        front_assert_eq! {vertices.len() => 6, "gradient must not emit one point per pixel"};
     }
 
     #[test]
     fn advanced_lit_sky_keeps_one_texture_identity_and_revises_pixels() {
-        let mut graphics = test_graphics(8, 6, 12, "retained advanced sky");
+        let mut graphics = test_graphics((8, 6, 12), "retained advanced sky");
         let image = ImageData::new(2, 2, [120, 80, 40, 255].repeat(4));
 
         let (_, initial) = graphics.retained_lit_sky_texture(&image, 1.0);
         let (_, unchanged) = graphics.retained_lit_sky_texture(&image, 1.0);
-        assert_eq!(initial.id, unchanged.id);
-        assert_eq!(initial.revision, unchanged.revision);
-        assert!(unchanged.dirty.is_empty());
+        front_assert_eq! {initial.id => unchanged.id};
+        front_assert_eq! {initial.revision => unchanged.revision};
+        front_assert! {unchanged.dirty.is_empty()};
 
         let (_, darkened) = graphics.retained_lit_sky_texture(&image, 0.5);
-        assert_eq!(initial.id, darkened.id);
-        assert_eq!(darkened.revision, initial.revision + 1);
-        assert_eq!(darkened.base_revision, Some(initial.revision));
-        assert_eq!(darkened.dirty, vec![clonk_graphics::Rect::new(0, 0, 2, 2)]);
-        assert_ne!(darkened.pixels, initial.pixels);
+        front_assert_eq! {initial.id => darkened.id};
+        front_assert_eq! {darkened.revision => initial.revision + 1};
+        front_assert_eq! {darkened.base_revision => Some(initial.revision)};
+        front_assert_eq! {darkened.dirty => vec![clonk_graphics::Rect::new(0, 0, 2, 2)]};
+        front_assert_ne! {darkened.pixels => initial.pixels};
 
         let (_, repeated) = graphics.retained_lit_sky_texture(&image, 0.5);
-        assert_eq!(repeated.id, darkened.id);
-        assert_eq!(repeated.revision, darkened.revision);
-        assert!(repeated.dirty.is_empty());
+        front_assert_eq! {repeated.id => darkened.id};
+        front_assert_eq! {repeated.revision => darkened.revision};
+        front_assert! {repeated.dirty.is_empty()};
     }
 
     #[test]
     fn gpu_capture_sections_fogged_solid_sky_into_gamma_quads() {
-        let mut graphics = test_graphics(130, 70, 70, "GPU fogged solid sky");
+        let mut graphics = test_graphics((130, 70, 70), "GPU fogged solid sky");
         graphics.active_fog_map = Some(Arc::new(
             ClrModMap::reset(64, 64, 130, 70, 0, 0, 0, 0, 0).test_value(),
         ));
@@ -6743,7 +6024,7 @@ mod tests {
         graphics.fill_world_color(Color::opaque(153, 141, 255), false, Some(&gamma));
 
         let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
-        assert_eq!(scene.commands.len(), 1);
+        front_assert_eq! {scene.commands.len() => 1};
         for command in &scene.commands {
             let GpuCommand::Solid {
                 vertices,
@@ -6755,14 +6036,10 @@ mod tests {
             else {
                 panic!("fogged sky did not lower to solid triangles");
             };
-            assert_eq!(*topology, GpuPrimitiveTopology::TriangleList);
-            assert_eq!(*blend, GpuBlend::Normal);
-            assert!(style.gamma);
-            assert_eq!(
-                vertices.len(),
-                36,
-                "three 64px fog columns by two rows become six merged GPU quads"
-            );
+            front_assert_eq! {*topology => GpuPrimitiveTopology::TriangleList};
+            front_assert_eq! {*blend => GpuBlend::Normal};
+            front_assert! {style.gamma};
+            front_assert_eq! {vertices.len() => 36, "three 64px fog columns by two rows become six merged GPU quads"};
         }
     }
 
@@ -6771,7 +6048,7 @@ mod tests {
         // C4Sky::Draw sends its tiled surface through BlitSurfaceTile2, whose
         // shader gamma-samples the source before blending (C4Sky.cpp:210-218;
         // StdGL.cpp:1068-1087).
-        let mut graphics = test_graphics(1, 1, 1, "Gamma Sky Image");
+        let mut graphics = test_graphics((1, 1, 1), "Gamma Sky Image");
         graphics
             .surface_mut()
             .set_pixel(0, 0, Color::opaque(200, 200, 200))
@@ -6781,10 +6058,7 @@ mod tests {
 
         graphics.blit_sky_tile(&image, 0, 0, None, 1.0, Some(&gamma));
 
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
-            Some(Color::new(125, 150, 175, 255))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(Color::new(125, 150, 175, 255))};
     }
 
     #[test]
@@ -6792,36 +6066,33 @@ mod tests {
         // The fallback painter stands in for the same landscape presentation
         // shader. Even black is sampled through MinGamma, yielding one rather
         // than a raw zero (StdGL.cpp:1139-1148; StdDDraw2.cpp:237-271).
-        let mut graphics = test_graphics(1, 1, 0, "Gamma Fallback Ground");
+        let mut graphics = test_graphics((1, 1, 0), "Gamma Fallback Ground");
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
 
-        assert!(!graphics.draw_ground(0, None, 0.0, Some(&gamma)));
+        front_assert! {!graphics.draw_ground(0, None, 0.0, Some(&gamma))};
 
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
-            Some(Color::new(1, 1, 1, 255))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(Color::new(1, 1, 1, 255))};
     }
 
     #[test]
     fn gpu_column_landscape_fallback_matches_cpu_reference_pixels() {
         let mut landscape = Landscape::flat(4, 2);
         landscape.set_liquid_column(1, vec![clonk_engine::landscape::LiquidSegment::new(0, 2)]);
-        let make_graphics = || test_graphics(4, 4, 2, "Column fallback");
+        let make_graphics = || test_graphics((4, 4, 2), "Column fallback");
 
         let mut cpu = make_graphics();
-        assert!(!cpu.draw_ground(0, Some(&landscape), 1.0, None));
+        front_assert! {!cpu.draw_ground(0, Some(&landscape), 1.0, None)};
         cpu.draw_liquids(0, Some(&landscape), 1.0, None);
         let expected = cpu.surface().pixels().to_vec();
 
         let mut gpu = make_graphics();
         gpu.begin_gpu_scene_capture();
-        assert!(gpu.draw_ground(0, Some(&landscape), 1.0, None));
+        front_assert! {gpu.draw_ground(0, Some(&landscape), 1.0, None)};
         let scene = gpu
             .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::standard())
             .test_value();
-        assert_eq!(scene.commands.len(), 2, "ground precedes the liquid pass");
-        assert_eq!(scene.textures.len(), 2);
+        front_assert_eq! {scene.commands.len() => 2, "ground precedes the liquid pass"};
+        front_assert_eq! {scene.textures.len() => 2};
 
         let mut replay = Surface::new(4, 4, PixelFormat::Rgba8888);
         replay.fill(scene.clear);
@@ -6841,14 +6112,11 @@ mod tests {
             else {
                 panic!("column fallback must lower to retained compact sprites");
             };
-            assert!(
-                owner_texture.is_none(),
-                "no owner mask on a landscape layer"
-            );
-            assert_eq!(sprites.len(), 1, "one source layer is one sprite");
-            assert_eq!(sprites[0].sampler(), GpuSampler::Nearest);
-            assert_eq!(*blend, GpuBlend::Normal);
-            assert!(!*gamma);
+            front_assert! {owner_texture.is_none(), "no owner mask on a landscape layer"};
+            front_assert_eq! {sprites.len() => 1, "one source layer is one sprite"};
+            front_assert_eq! {sprites[0].sampler() => GpuSampler::Nearest};
+            front_assert_eq! {*blend => GpuBlend::Normal};
+            front_assert! {!*gamma};
             let resource = scene
                 .textures
                 .iter()
@@ -6860,7 +6128,7 @@ mod tests {
                 &ImageData::transient_from_arc(4, 4, Arc::clone(&resource.pixels)),
             );
         }
-        assert_eq!(replay.pixels(), expected);
+        front_assert_eq! {replay.pixels() => expected};
 
         let first_ids = scene
             .textures
@@ -6873,23 +6141,12 @@ mod tests {
         // therefore a new resource identity.
         drop(scene);
         gpu.begin_gpu_scene_capture();
-        assert!(gpu.draw_ground(0, Some(&landscape), 1.0, None));
+        front_assert! {gpu.draw_ground(0, Some(&landscape), 1.0, None)};
         let second = gpu
             .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::standard())
             .test_value();
-        assert_eq!(
-            second
-                .textures
-                .iter()
-                .map(|resource| resource.id)
-                .collect::<Vec<_>>(),
-            first_ids,
-            "column source textures persist across frames"
-        );
-        assert!(second
-            .textures
-            .iter()
-            .all(|resource| resource.base_revision.is_some() && !resource.dirty.is_empty()));
+        front_assert_eq! {second.textures.iter().map(|resource| resource.id).collect::<Vec<_>>() => first_ids, "column source textures persist across frames"};
+        front_assert! {second.textures.iter().all(|resource| resource.base_revision.is_some() && !resource.dirty.is_empty())};
     }
 
     #[test]
@@ -6909,53 +6166,49 @@ mod tests {
             )
         };
 
-        assert_eq!(
+        front_assert_eq! {
             render(
                 Color::opaque(0, 255, 0),
                 Color::new(128, 128, 128, 128),
                 0x00ff_0000,
-            ),
+            ) =>
             Color::opaque(64, 127, 0),
             "a half-alpha owner pass blends over, rather than replacing, green base"
-        );
-        assert_eq!(
+        };
+        front_assert_eq! {
             render(
                 Color::opaque(20, 30, 40),
                 Color::opaque(0, 0, 255),
                 0x00ff_ffff,
-            ),
+            ) =>
             Color::opaque(0, 0, 255),
             "colored Overlay.png channels survive white-owner modulation"
-        );
-        assert_eq!(
+        };
+        front_assert_eq! {
             render(
                 Color::opaque(20, 30, 40),
                 Color::opaque(0, 0, 255),
                 0x00ff_0000,
-            ),
+            ) =>
             Color::opaque(0, 0, 0),
             "an opaque red-zero overlay still covers the base after modulation"
-        );
-        assert_eq!(
+        };
+        front_assert_eq! {
             render(
                 Color::opaque(20, 30, 40),
                 Color::new(200, 150, 100, 0),
                 0x00ff_0000,
-            ),
+            ) =>
             Color::opaque(20, 30, 40),
             "transparent overlay RGB never changes the base pass"
-        );
+        };
     }
 
     #[test]
     fn shipped_knight_walk_crop_matches_two_pass_owner_overlay_oracle() {
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../content/Knights.c4d/Crew.c4d/Knight.c4d");
-        assert!(
-            directory.is_dir(),
-            "the initialized official content submodule must provide {}",
-            directory.display()
-        );
+        front_assert! {directory.is_dir(), "the initialized official content submodule must provide {}", directory.display()};
         let group = Group::open(&directory).test_value();
         let resource = clonk_resources::ResourceDefinition::load(&group).test_value();
         let mut engine = Engine::new();
@@ -6969,7 +6222,7 @@ mod tests {
         let width = image.width();
         let height = image.height();
         let overlay = image.color_mask().test_value();
-        assert_eq!(overlay.len(), width as usize * height as usize * 4);
+        front_assert_eq! {overlay.len() => width as usize * height as usize * 4};
 
         let mut raw_base =
             image::load_from_memory(&group.read_file("Graphics.png").expect("read Graphics.png"))
@@ -6988,8 +6241,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(image.pixels().as_ref(), raw_base.as_raw());
-        assert_eq!(overlay.as_ref(), raw_overlay.as_raw());
+        front_assert_eq! {image.pixels().as_ref() => raw_base.as_raw()};
+        front_assert_eq! {overlay.as_ref() => raw_overlay.as_raw()};
 
         // Find a 16x20 window that actually contains antialiased owner-color
         // edges rather than assuming they sit at the sheet origin. The crop is
@@ -7047,17 +6300,11 @@ mod tests {
                     .into_iter()
                     .zip([expected.r, expected.g, expected.b, expected.a])
                 {
-                    assert!(
-                        actual.abs_diff(expected) <= 1,
-                        "Knight Walk crop mismatch at ({x},{y}): {actual} vs {expected}"
-                    );
+                    front_assert! {actual.abs_diff(expected) <= 1, "Knight Walk crop mismatch at ({x},{y}): {actual} vs {expected}"};
                 }
             }
         }
-        assert!(
-            partial_overlay_pixels > 0,
-            "the reference crop must exercise antialiased owner-color edges"
-        );
+        front_assert! {partial_overlay_pixels > 0, "the reference crop must exercise antialiased owner-color edges"};
     }
 
     #[test]
@@ -7085,41 +6332,20 @@ mod tests {
         fish.owner = OWNER_NONE;
         fish.color = 0x00ff_ffff;
 
-        let mut graphics = test_graphics_with(
-            4,
-            3,
-            3,
+        let mut graphics = test_graphics_with_sprites(
+            (4, 3, 3),
             "Object ColorByOwner",
-            Arc::new(HashMap::from([(
-                sprite_map_key("ObjectColor", None),
-                sprite,
-            )])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("ObjectColor", sprite)]),
         );
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &[recolored, fish],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::from([(7, Color::opaque(0, 0, 255))]),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::default().owner_colors(&HashMap::from([(7, Color::opaque(0, 0, 255))])),
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(1, 1),
-            Some(Color::opaque(128, 0, 0)),
-            "SetColorDw red must win over the owner's blue player color"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(2, 1),
-            Some(Color::opaque(128, 128, 128)),
-            "an unowned white FISH must not expose its cleared black base"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(1, 1) => Some(Color::opaque(128, 0, 0)), "SetColorDw red must win over the owner's blue player color"};
+        front_assert_eq! {graphics.surface().get_pixel(2, 1) => Some(Color::opaque(128, 128, 128)), "an unowned white FISH must not expose its cleared black base"};
     }
 
     #[test]
@@ -7138,30 +6364,22 @@ mod tests {
             .test_value();
         let first_snapshot = engine.snapshot();
         let fish = first_snapshot.object(fish_id).test_value();
-        assert_eq!(fish.owner, OWNER_NONE);
-        assert_eq!(
-            fish.color, 0x00ff_ffff,
-            "Birth applies the shipped white tint"
-        );
-        assert_eq!(fish.action.name, "Swim");
-        assert_eq!(fish.action.phase, 0);
+        front_assert_eq! {fish.owner => OWNER_NONE};
+        front_assert_eq! {fish.color => 0x00ff_ffff, "Birth applies the shipped white tint"};
+        front_assert_eq! {fish.action.name => "Swim"};
+        front_assert_eq! {fish.action.phase => 0};
 
         let image = engine.definition_sprite_image("FISH", None).test_value();
         let width = image.width();
         let height = image.height();
-        assert_eq!((width, height), (448, 64));
+        front_assert_eq! {(width, height) => (448, 64)};
         let mask = image.color_mask().test_value();
         // Swim phase zero starts at (0,12). Its opaque body pixel at local
         // (7,7) is grey 147 in Overlay.png and transparent in Graphics.png.
         let body_mask_index = 19 * width as usize + 7;
         let body_mask_offset = body_mask_index * 4;
-        assert_eq!(
-            &mask[body_mask_offset..body_mask_offset + 4],
-            &[147, 147, 147, 255]
-        );
+        front_assert_eq! {&mask[body_mask_offset..body_mask_offset + 4] => &[147, 147, 147, 255]};
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::from_arc(width, height, image.into_pixels()),
             actions: engine.definition_action_graphics("FISH").test_value(),
             color_mask: Some(ColorByOwnerMask::new(width, height, mask)),
             shape: engine.definition_shape_rect("FISH"),
@@ -7170,16 +6388,12 @@ mod tests {
             line: engine.definition_line("FISH"),
             stretch_growth: engine.definition_stretch_growth("FISH"),
             top_face: engine.definition_top_face("FISH"),
-            picture: None,
+            ..test_sprite(ImageData::from_arc(width, height, image.into_pixels()))
         };
-        let mut graphics = test_graphics_with(
-            16,
-            12,
-            12,
+        let mut graphics = test_graphics_with_sprites(
+            (16, 12, 12),
             "real unowned FISH",
-            Arc::new(HashMap::from([(sprite_map_key("FISH", None), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("FISH", sprite)]),
         );
         let render_body_pixel =
             |graphics: &mut GraphicsSystem, snapshot: &SimulationSnapshot| -> Color {
@@ -7200,28 +6414,22 @@ mod tests {
                 graphics.surface().get_pixel(7, 7).test_value()
             };
 
-        assert_eq!(
-            render_body_pixel(&mut graphics, &first_snapshot),
+        front_assert_eq! {
+            render_body_pixel(&mut graphics, &first_snapshot) =>
             Color::opaque(147, 147, 147),
             "white Birth color must reveal the shipped grey fish body, not black"
-        );
+        };
 
         let mut recolor = ObjectUpdate::new();
         recolor.color = Some(0x00ff_0000);
         engine.apply_object_update(fish_id, recolor).test_value();
         let recolored_snapshot = engine.snapshot();
-        assert_eq!(
-            recolored_snapshot
-                .object(fish_id)
-                .expect("FISH remains present")
-                .color,
-            0x00ff_0000
-        );
-        assert_eq!(
-            render_body_pixel(&mut graphics, &recolored_snapshot),
+        front_assert_eq! {recolored_snapshot.object(fish_id).expect("FISH remains present").color => 0x00ff_0000};
+        front_assert_eq! {
+            render_body_pixel(&mut graphics, &recolored_snapshot) =>
             Color::opaque(147, 0, 0),
             "the real overlay follows live SetColorDw-style color, not owner lookup"
-        );
+        };
     }
 
     #[test]
@@ -7243,36 +6451,19 @@ mod tests {
         object.blit_mode = C4GFXBLIT_CLRSFC_OWNCLR;
         object.crew_member = false;
 
-        let mut graphics = test_graphics_with(
-            3,
-            3,
-            3,
+        let mut graphics = test_graphics_with_sprites(
+            (3, 3, 3),
             "Packed owner transparency",
-            Arc::new(HashMap::from([(
-                sprite_map_key("OwnerTransparency", None),
-                sprite,
-            )])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("OwnerTransparency", sprite)]),
         );
         graphics.surface_mut().fill(Color::opaque(0, 0, 200));
-        graphics.draw_objects(
-            &[object],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
+        draw_test_objects(&mut graphics, &[object], TestObjectDraw::default());
 
-        assert_eq!(
-            graphics.surface().get_pixel(1, 1),
+        front_assert_eq! {
+            graphics.surface().get_pixel(1, 1) =>
             Some(Color::opaque(127, 0, 100)),
             "0x80 transparency must blend raw red over blue; OWNCLR must ignore green ColorMod"
-        );
+        };
     }
 
     #[test]
@@ -7285,32 +6476,20 @@ mod tests {
         let mut sprites = HashMap::new();
         sprites.insert(
             sprite_map_key("BaseAdd", None),
-            DefinitionSprite {
-                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                ..test_sprite(ImageData::new(
-                    1,
-                    1,
-                    vec![source.r, source.g, source.b, source.a],
-                ))
-            },
+            test_shaped_sprite(
+                ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
+                DefinitionRect::new(0, 0, 1, 1),
+            ),
         );
         sprites.insert(
             sprite_map_key("ActionAdd", None),
             DefinitionSprite {
                 actions: HashMap::from([(
                     "Active".to_string(),
-                    DefinitionActionGraphics {
-                        facet: Some(clonk_engine::DefinitionActionFacet {
-                            x: 0,
-                            y: 0,
-                            width: 1,
-                            height: 1,
-                            target_x: 0,
-                            target_y: 0,
-                        }),
-                        length: Some(1),
-                        ..DefinitionActionGraphics::default()
-                    },
+                    action_graphics_fixture(|action| {
+                        action.facet = Some(test_action_facet(0, 0, 1, 1, 0, 0));
+                        action.length = Some(1);
+                    }),
                 )]),
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
                 ..test_sprite(ImageData::new(
@@ -7351,38 +6530,21 @@ mod tests {
             make_object(4, "BaseAdd", 7, "Idle", 0),
         ];
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
-        let mut graphics = test_graphics_with(
-            9,
-            3,
-            3,
-            "Object additive",
-            Arc::new(sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((9, 3, 3), "Object additive", Arc::new(sprites));
         graphics.surface_mut().fill(Color::opaque(200, 200, 200));
 
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &objects,
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            Some(&gamma),
+            TestObjectDraw::default().gamma(&gamma),
         );
 
         let additive = Some(Color::opaque(225, 250, 255));
         for (label, x) in [("base", 1), ("action", 3), ("top", 5)] {
-            assert_eq!(graphics.surface().get_pixel(x, 1), additive, "{label}");
+            front_assert_eq! {graphics.surface().get_pixel(x, 1) => additive, "{label}"};
         }
-        assert_eq!(
-            graphics.surface().get_pixel(7, 1),
-            Some(Color::opaque(125, 150, 175)),
-            "normal mode must remain source-alpha over"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(7, 1) => Some(Color::opaque(125, 150, 175)), "normal mode must remain source-alpha over"};
     }
 
     #[test]
@@ -7412,17 +6574,10 @@ mod tests {
                 vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
                     .with_definition(Some("OverlayAdd".to_string()))
                     .with_blit_mode(overlay_mode)];
-            let mut graphics = test_graphics_with(
-                3,
-                3,
-                3,
+            let mut graphics = test_graphics_with_sprites(
+                (3, 3, 3),
                 "Overlay additive",
-                Arc::new(HashMap::from([(
-                    sprite_map_key("OverlayAdd", None),
-                    sprite.clone(),
-                )])),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
+                test_sprites([("OverlayAdd", sprite.clone())]),
             );
             graphics.surface_mut().fill(Color::opaque(20, 30, 40));
             graphics.draw_object_overlays(
@@ -7442,13 +6597,9 @@ mod tests {
         };
 
         let additive = Some(Color::opaque(70, 90, 110));
-        assert_eq!(render(0, 1), additive, "explicit overlay additive");
-        assert_eq!(render(1, 256), additive, "exact parent inheritance");
-        assert_eq!(
-            render(1, 0),
-            Some(Color::opaque(60, 75, 90)),
-            "explicit normal overlay must override an additive parent"
-        );
+        front_assert_eq! {render(0, 1) => additive, "explicit overlay additive"};
+        front_assert_eq! {render(1, 256) => additive, "exact parent inheritance"};
+        front_assert_eq! {render(1, 0) => Some(Color::opaque(60, 75, 90)), "explicit normal overlay must override an additive parent"};
     }
 
     #[test]
@@ -7485,101 +6636,72 @@ mod tests {
         target.current_shape = Some(DefinitionRect::new(0, 0, 1, 1));
         target.graphics_overlays.clear();
 
-        let sprites = Arc::new(HashMap::from([
+        let sprites = test_sprites([
             (
-                sprite_map_key("OverlayHost", None),
-                DefinitionSprite {
-                    shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                    ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 0]))
-                },
+                "OverlayHost",
+                test_shaped_sprite(
+                    ImageData::new(1, 1, vec![0, 0, 0, 0]),
+                    DefinitionRect::new(0, 0, 1, 1),
+                ),
             ),
             (
-                sprite_map_key("OverlayTarget", None),
+                "OverlayTarget",
                 DefinitionSprite {
                     shape: Some(DefinitionRect::new(0, 0, 1, 1)),
                     top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 1, 0)),
                     ..test_sprite(ImageData::new(2, 1, vec![40, 0, 0, 255, 0, 40, 0, 255]))
                 },
             ),
-        ]));
+        ]);
         let render = |for_player, target_blit_mode| {
             let mut target = target.clone();
             target.blit_mode = target_blit_mode;
             let mut graphics = test_graphics_with(
-                12,
-                8,
-                8,
+                (12, 8, 8),
                 "Object overlay",
                 Arc::clone(&sprites),
                 empty_cursor_atlas(),
-                Arc::new(HudGraphics {
-                    fire: Some(ImageData::new(1, 1, vec![0, 0, 20, 255])),
-                    ..HudGraphics::default()
-                }),
+                test_hud_graphics(|hud| hud.fire = Some(ImageData::new(1, 1, vec![0, 0, 20, 255]))),
             );
             graphics.surface_mut().fill(Color::opaque(10, 10, 10));
-            graphics.draw_objects(
+            draw_test_objects(
+                &mut graphics,
                 &[host.clone(), target.clone()],
-                &[],
-                &HashMap::new(),
-                &[],
-                for_player,
-                1.0,
-                &HashMap::new(),
-                ObjectRenderPass::Normal,
-                None,
+                TestObjectDraw::default().for_player(for_player),
             );
             graphics.surface().clone()
         };
 
         let visible = render(4, C4GFXBLIT_ADDITIVE);
-        assert_eq!(
-            visible.get_pixel(5, 2),
-            Some(Color::opaque(50, 10, 30)),
-            "MODE_Object fire inherits the target's additive PARENT state"
-        );
-        assert_eq!(visible.get_pixel(6, 2), Some(Color::opaque(10, 50, 10)));
-        assert_eq!(visible.get_pixel(7, 2), Some(Color::opaque(10, 10, 10)));
-        assert_eq!(visible.get_pixel(10, 6), Some(Color::opaque(10, 10, 10)));
+        front_assert_eq! {visible.get_pixel(5, 2) => Some(Color::opaque(50, 10, 30)), "MODE_Object fire inherits the target's additive PARENT state"};
+        front_assert_eq! {visible.get_pixel(6, 2) => Some(Color::opaque(10, 50, 10))};
+        front_assert_eq! {visible.get_pixel(7, 2) => Some(Color::opaque(10, 10, 10))};
+        front_assert_eq! {visible.get_pixel(10, 6) => Some(Color::opaque(10, 10, 10))};
 
         let normal = render(4, 0);
-        assert_eq!(
-            normal.get_pixel(5, 2),
-            Some(Color::opaque(40, 0, 0)),
-            "MODE_Object paints fire before the referenced object's opaque face"
-        );
+        front_assert_eq! {normal.get_pixel(5, 2) => Some(Color::opaque(40, 0, 0)), "MODE_Object paints fire before the referenced object's opaque face"};
 
         let hidden = render(5, C4GFXBLIT_ADDITIVE);
-        assert_eq!(hidden.get_pixel(5, 2), Some(Color::opaque(10, 10, 10)));
-        assert_eq!(hidden.get_pixel(6, 2), Some(Color::opaque(10, 10, 10)));
+        front_assert_eq! {hidden.get_pixel(5, 2) => Some(Color::opaque(10, 10, 10))};
+        front_assert_eq! {hidden.get_pixel(6, 2) => Some(Color::opaque(10, 10, 10))};
 
         let render_parallax = |host: ObjectSnapshot,
                                target: ObjectSnapshot,
                                viewport: Vector2,
                                width: u32,
                                height: u32| {
-            let mut graphics = test_graphics_with(
-                width,
-                height,
-                height as i32,
+            let mut graphics = test_graphics_with_sprites(
+                (width, height, height as i32),
                 "Parallax object overlay",
                 Arc::clone(&sprites),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.viewport_x = viewport.x as f32;
             graphics.viewport_y = viewport.y as f32;
             graphics.surface_mut().fill(Color::opaque(10, 10, 10));
-            graphics.draw_objects(
+            draw_test_objects(
+                &mut graphics,
                 &[host, target],
-                &[],
-                &HashMap::new(),
-                &[],
-                4,
-                1.0,
-                &HashMap::new(),
-                ObjectRenderPass::Normal,
-                None,
+                TestObjectDraw::default().for_player(4),
             );
             graphics.surface().clone()
         };
@@ -7604,11 +6726,7 @@ mod tests {
             80,
             50,
         );
-        assert_eq!(
-            percentage.get_pixel(42, 19),
-            Some(Color::opaque(50, 10, 10)),
-            "Local(0/1)=50 scales viewport TargetX/Y before MODE_Object anchoring"
-        );
+        front_assert_eq! {percentage.get_pixel(42, 19) => Some(Color::opaque(50, 10, 10)), "Local(0/1)=50 scales viewport TargetX/Y before MODE_Object anchoring"};
 
         let mut hud_host = host.clone();
         hud_host.position = Vector2::new(-10, -5);
@@ -7620,11 +6738,7 @@ mod tests {
             .local_vars
             .insert("__local_1".to_string(), int_value(0));
         let hud = render_parallax(hud_host, target, Vector2::new(20, 20), 80, 50);
-        assert_eq!(
-            hud.get_pixel(72, 44),
-            Some(Color::opaque(50, 10, 10)),
-            "zero parallax plus negative host coordinates anchors from right/bottom"
-        );
+        front_assert_eq! {hud.get_pixel(72, 44) => Some(Color::opaque(50, 10, 10)), "zero parallax plus negative host coordinates anchors from right/bottom"};
     }
 
     /// Bounding box of every pixel matching `wanted`, as (min_x, min_y, max_x, max_y).
@@ -7673,17 +6787,10 @@ mod tests {
         object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
             .with_definition(Some("Pickup".to_string()))
             .with_transform(Some(DrawTransform::identity()))];
-        let mut graphics = test_graphics_with(
-            24,
-            24,
-            24,
+        let mut graphics = test_graphics_with_sprites(
+            (24, 24, 24),
             "Base overlay shape",
-            Arc::new(HashMap::from([(
-                sprite_map_key("Pickup", None),
-                source_sprite,
-            )])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("Pickup", source_sprite)]),
         );
         graphics.set_point_filtering(true);
         graphics.surface_mut().fill(Color::opaque(10, 10, 10));
@@ -7702,14 +6809,8 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            colour_bbox(graphics.surface(), left_half),
-            Some((9, 11, 10, 13)),
-        );
-        assert_eq!(
-            colour_bbox(graphics.surface(), right_half),
-            Some((11, 11, 12, 13)),
-        );
+        front_assert_eq! {colour_bbox(graphics.surface(), left_half) => Some((9, 11, 10, 13)),};
+        front_assert_eq! {colour_bbox(graphics.surface(), right_half) => Some((11, 11, 12, 13)),};
     }
 
     #[test]
@@ -7723,14 +6824,10 @@ mod tests {
         object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
             .with_definition(Some("Shapeless".to_string()))
             .with_transform(Some(DrawTransform::identity()))];
-        let mut graphics = test_graphics_with(
-            7,
-            7,
-            7,
+        let mut graphics = test_graphics_with_sprites(
+            (7, 7, 7),
             "Shapeless base overlay",
             solid_sprite("Shapeless", 2, 2, overlay_color, None, false),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         graphics.surface_mut().fill(Color::opaque(10, 10, 10));
 
@@ -7748,7 +6845,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(colour_bbox(graphics.surface(), overlay_color), None);
+        front_assert_eq! {colour_bbox(graphics.surface(), overlay_color) => None};
     }
 
     #[test]
@@ -7759,10 +6856,10 @@ mod tests {
         // transform at the object origin, applies
         // fZoom = min(Shape.Wdt/fct.Wdt, Shape.Hgt/fct.Hgt) about that origin,
         // and blits the facet centred there (src/C4DefGraphics.cpp:818-826).
-        let host_sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(-8, -6, 16, 12)),
-            ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 0]))
-        };
+        let host_sprite = test_shaped_sprite(
+            ImageData::new(1, 1, vec![0, 0, 0, 0]),
+            DefinitionRect::new(-8, -6, 16, 12),
+        );
         // 16x16 sheet, transparent except a 4x4 marker block at (8,0) that the
         // source definition declares as its DefCore Picture rect.
         let marker = Color::opaque(30, 210, 90);
@@ -7789,17 +6886,13 @@ mod tests {
                         .with_definition(Some("PicSrc".to_string()))
                         .with_transform(transform),
                 ];
-            let mut graphics = test_graphics_with(
-                40,
-                40,
-                40,
+            let mut graphics = test_graphics_with_sprites(
+                (40, 40, 40),
                 "Ingame picture overlay",
-                Arc::new(HashMap::from([
-                    (sprite_map_key("PicHost", None), host_sprite.clone()),
-                    (sprite_map_key("PicSrc", None), source_sprite.clone()),
-                ])),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
+                test_sprites([
+                    ("PicHost", host_sprite.clone()),
+                    ("PicSrc", source_sprite.clone()),
+                ]),
             );
             // Keep the magnified edges exactly the marker colour so the bbox is
             // a real assertion rather than a bilinear smear.
@@ -7824,13 +6917,13 @@ mod tests {
         // fZoom = min(16/4, 12/4) = 3. The 4x4 facet is centred at the object
         // origin (20,20) — i.e. 18..22 — then scaled 3x about (20,20), giving
         // 14..26 on both axes: a 12x12 block.
-        assert_eq!(render(None), Some((14, 14, 25, 25)));
+        front_assert_eq! {render(None) => Some((14, 14, 25, 25))};
 
         // C4DrawTransform::ScaleAt composes the zoom OUTSIDE the script
         // transform (src/StdDDraw2.h:83-94), so a script translation of +4 is
         // multiplied by fZoom and moves the block by 12, not 4.
         let translated = DrawTransform::from_components(1.0, 1.0, 4.0, 0.0);
-        assert_eq!(render(Some(translated)), Some((26, 14, 37, 25)));
+        front_assert_eq! {render(Some(translated)) => Some((26, 14, 37, 25))};
     }
 
     #[test]
@@ -7847,9 +6940,11 @@ mod tests {
         // (content/Knights.c4d/Crew.c4d/Knight.c4d/Script.c:1214), which passes
         // GetID() so host and source share a definition and differ only in the
         // named graphics sheet.
-        let sheet = |rgba: [u8; 4]| DefinitionSprite {
-            shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
-            ..test_sprite(ImageData::new(8, 8, rgba.repeat(64)))
+        let sheet = |rgba: [u8; 4]| {
+            test_shaped_sprite(
+                ImageData::new(8, 8, rgba.repeat(64)),
+                DefinitionRect::new(-4, -4, 8, 8),
+            )
         };
         let base_colour = Color::opaque(200, 40, 40);
         let shield_colour = Color::opaque(40, 80, 200);
@@ -7867,10 +6962,8 @@ mod tests {
             } else {
                 Vec::new()
             };
-            let mut graphics = test_graphics_with(
-                32,
-                32,
-                32,
+            let mut graphics = test_graphics_with_sprites(
+                (32, 32, 32),
                 "Extra graphics overlay",
                 Arc::new(HashMap::from([
                     (sprite_map_key("KNIG", None), sheet([200, 40, 40, 255])),
@@ -7879,8 +6972,6 @@ mod tests {
                         sheet([40, 80, 200, 255]),
                     ),
                 ])),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.set_point_filtering(true);
             graphics.surface_mut().fill(Color::opaque(10, 10, 10));
@@ -7901,19 +6992,15 @@ mod tests {
         };
 
         // Without the overlay the walk draws nothing at all.
-        assert_eq!(colour_bbox(&render(false), shield_colour), None);
+        front_assert_eq! {colour_bbox(&render(false), shield_colour) => None};
 
         // With it, the host's own 8x8 Shape is redrawn from the shield sheet at
         // the host's shape origin (16-4, 16-4) = (12, 12).
         let drawn = render(true);
-        assert_eq!(
-            colour_bbox(&drawn, shield_colour),
-            Some((12, 12, 19, 19)),
-            "the host face is redrawn from the overlay's bitmap at host geometry"
-        );
+        front_assert_eq! {colour_bbox(&drawn, shield_colour) => Some((12, 12, 19, 19)), "the host face is redrawn from the overlay's bitmap at host geometry"};
         // The overlay must not pull in the host's own base sheet: that is drawn
         // by the normal face pass, not by the overlay walk.
-        assert_eq!(colour_bbox(&drawn, base_colour), None);
+        front_assert_eq! {colour_bbox(&drawn, base_colour) => None};
     }
 
     #[test]
@@ -7924,19 +7011,10 @@ mod tests {
         // inner map and the overlay's is the outer one. With a host translate
         // of +4 and an overlay scale of 2 that is x' = 2(x + 4); the reversed
         // order would give x' = 2x + 4 and shift the face by 4 px instead of 8.
-        let sheet = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(8, 8, [40, 80, 200, 255].repeat(64)),
-            actions: HashMap::new(),
-            color_mask: None,
-            shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
-        };
+        let sheet = test_shaped_sprite(
+            ImageData::new(8, 8, [40, 80, 200, 255].repeat(64)),
+            DefinitionRect::new(-4, -4, 8, 8),
+        );
         let mut object = make_snapshot().objects.remove(0);
         object.definition_id = "KNIG".to_string();
         object.position = Vector2::new(16, 16);
@@ -7948,14 +7026,10 @@ mod tests {
                     .with_transform(Some(DrawTransform::from_components(2.0, 2.0, 0.0, 0.0))),
             ];
 
-        let mut graphics = test_graphics_with(
-            48,
-            48,
-            48,
+        let mut graphics = test_graphics_with_sprites(
+            (48, 48, 48),
             "Extra graphics transform order",
-            Arc::new(HashMap::from([(sprite_map_key("KNIG", None), sheet)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("KNIG", sheet)]),
         );
         graphics.set_point_filtering(true);
         graphics.surface_mut().fill(Color::opaque(10, 10, 10));
@@ -7976,10 +7050,7 @@ mod tests {
         // The 8x8 face spans world 12..20. Composed and rebased at the shape
         // centre (16,16) the map is x' = 2x - 8, y' = 2y - 16, so the block
         // covers x 16..31 and y 8..23.
-        assert_eq!(
-            colour_bbox(graphics.surface(), Color::opaque(40, 80, 200)),
-            Some((16, 8, 31, 23)),
-        );
+        front_assert_eq! {colour_bbox(graphics.surface(), Color::opaque(40, 80, 200)) => Some((16, 8, 31, 23)),};
     }
 
     #[test]
@@ -7996,11 +7067,7 @@ mod tests {
         // do not "correct" it toward the content's stated intent.
         let hud =
             crate::test_support::repo_root().join("content/ClonkMars.c4d/Helpers.c4d/HUD.c4d");
-        assert!(
-            hud.is_dir(),
-            "the bundled ClonkMars pack must provide {}",
-            hud.display()
-        );
+        front_assert! {hud.is_dir(), "the bundled ClonkMars pack must provide {}", hud.display()};
         let def_core = std::fs::read_to_string(hud.join("DefCore.txt")).test_value();
         let value = |key: &str| {
             def_core
@@ -8009,9 +7076,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("MHUD DefCore has {key}"))
                 .to_string()
         };
-        assert_eq!(value("Width="), "160");
-        assert_eq!(value("Height="), "120");
-        assert_eq!(value("Offset="), "-80,-60");
+        front_assert_eq! {value("Width=") => "160"};
+        front_assert_eq! {value("Height=") => "120"};
+        front_assert_eq! {value("Offset=") => "-80,-60"};
 
         // The content comment assumes a 64x64 item picture.
         let picture_extent = 64;
@@ -8025,10 +7092,10 @@ mod tests {
                 [15, 120, 240, 255].repeat((picture_extent * picture_extent) as usize),
             ))
         };
-        let hud_sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(-80, -60, 160, 120)),
-            ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 0]))
-        };
+        let hud_sprite = test_shaped_sprite(
+            ImageData::new(1, 1, vec![0, 0, 0, 0]),
+            DefinitionRect::new(-80, -60, 160, 120),
+        );
 
         // DrawLogItem's transform, in the engine's 1/1000 units.
         let scale = 15.0 * 1000.0 / picture_extent as f32 / 1000.0;
@@ -8047,17 +7114,10 @@ mod tests {
                     ))),
             ];
 
-        let mut graphics = test_graphics_with(
-            200,
-            140,
-            140,
+        let mut graphics = test_graphics_with_sprites(
+            (200, 140, 140),
             "ClonkMars item log",
-            Arc::new(HashMap::from([
-                (sprite_map_key("MHUD", None), hud_sprite),
-                (sprite_map_key("ITEM", None), source_sprite),
-            ])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("MHUD", hud_sprite), ("ITEM", source_sprite)]),
         );
         graphics.set_point_filtering(true);
         graphics.surface_mut().fill(Color::opaque(10, 10, 10));
@@ -8078,9 +7138,9 @@ mod tests {
         // Final map is x' = 0.43875x + 27.9375, y' = 0.43875y + 19.55625 over a
         // 64x64 quad at (118, 73): x 79.71..107.79, y 51.59..79.67.
         let bbox = colour_bbox(graphics.surface(), marker).test_value();
-        assert_eq!(bbox, (80, 52, 107, 79));
-        assert_eq!(bbox.2 - bbox.0 + 1, 28, "64px picture renders 28px wide");
-        assert_eq!(bbox.3 - bbox.1 + 1, 28, "64px picture renders 28px tall");
+        front_assert_eq! {bbox => (80, 52, 107, 79)};
+        front_assert_eq! {bbox.2 - bbox.0 + 1 => 28, "64px picture renders 28px wide"};
+        front_assert_eq! {bbox.3 - bbox.1 + 1 => 28, "64px picture renders 28px tall"};
     }
 
     #[test]
@@ -8107,14 +7167,10 @@ mod tests {
             object.graphics_overlays = vec![
                 ObjectGraphicsOverlay::new(1, mode).with_definition(Some("PicSrc".to_string()))
             ];
-            let mut graphics = test_graphics_with(
-                16,
-                16,
-                16,
+            let mut graphics = test_graphics_with_sprites(
+                (16, 16, 16),
                 "Non-drawing overlay modes",
                 Arc::clone(&sprite),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.surface_mut().fill(background);
             graphics.draw_object_overlays(
@@ -8134,11 +7190,8 @@ mod tests {
             (0..16).all(|y| (0..16).all(|x| surface.get_pixel(x, y) == Some(background)))
         };
 
-        assert!(
-            render(GraphicsOverlayMode::Picture),
-            "MODE_Picture is in-game invisible"
-        );
-        assert!(render(GraphicsOverlayMode::None), "MODE_None has no facet");
+        front_assert! {render(GraphicsOverlayMode::Picture), "MODE_Picture is in-game invisible"};
+        front_assert! {render(GraphicsOverlayMode::None), "MODE_None has no facet"};
     }
 
     #[test]
@@ -8164,18 +7217,10 @@ mod tests {
             graphics_scale: 2.0,
             actions: HashMap::from([(
                 "Wave".to_string(),
-                DefinitionActionGraphics {
-                    facet: Some(clonk_engine::DefinitionActionFacet {
-                        x: 4,
-                        y: 0,
-                        width: 4,
-                        height: 4,
-                        target_x: 0,
-                        target_y: 0,
-                    }),
-                    length: Some(1),
-                    ..DefinitionActionGraphics::default()
-                },
+                action_graphics_fixture(|action| {
+                    action.facet = Some(test_action_facet(4, 0, 4, 4, 0, 0));
+                    action.length = Some(1);
+                }),
             )]),
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
             ..test_sprite(ImageData::new(16, 16, pixels))
@@ -8189,14 +7234,10 @@ mod tests {
             .with_action(Some("Wave".to_string()))];
 
         let background = Color::opaque(10, 10, 10);
-        let mut graphics = test_graphics_with(
-            16,
-            8,
-            8,
+        let mut graphics = test_graphics_with_sprites(
+            (16, 8, 8),
             "HD action overlay",
-            Arc::new(HashMap::from([(sprite_map_key("HdOverlay", None), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("HdOverlay", sprite)]),
         );
         graphics.surface_mut().fill(background);
         graphics.draw_object_overlays(
@@ -8217,17 +7258,9 @@ mod tests {
         // the green half — into a 4x4 destination centred on the object,
         // covering x 6..9 and y 2..5.
         for (x, y) in [(6u32, 2u32), (9, 2), (6, 5), (9, 5)] {
-            assert_eq!(
-                graphics.surface().get_pixel(x, y),
-                Some(green),
-                "MODE_Action must read its facet through the source definition's Scale"
-            );
+            front_assert_eq! {graphics.surface().get_pixel(x, y) => Some(green), "MODE_Action must read its facet through the source definition's Scale"};
         }
-        assert_eq!(
-            graphics.surface().get_pixel(10, 4),
-            Some(background),
-            "the source scale must not enlarge the destination facet"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(10, 4) => Some(background), "the source scale must not enlarge the destination facet"};
     }
 
     #[test]
@@ -8259,20 +7292,12 @@ mod tests {
         let sprite = DefinitionSprite {
             actions: HashMap::from([(
                 "Pose".to_string(),
-                DefinitionActionGraphics {
-                    facet: Some(clonk_engine::DefinitionActionFacet {
-                        x: 0,
-                        y: 0,
-                        width: 4,
-                        height: 4,
-                        target_x: 0,
-                        target_y: 0,
-                    }),
-                    directions: 14,
-                    flip_dir: Some(7),
-                    length: Some(1),
-                    ..DefinitionActionGraphics::default()
-                },
+                action_graphics_fixture(|action| {
+                    action.facet = Some(test_action_facet(0, 0, 4, 4, 0, 0));
+                    action.directions = 14;
+                    action.flip_dir = Some(7);
+                    action.length = Some(1);
+                }),
             )]),
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
             ..test_sprite(ImageData::new(4, 28, pixels))
@@ -8289,17 +7314,10 @@ mod tests {
                 .with_definition(Some("Overlay".to_string()))
                 .with_action(Some("Pose".to_string()))
                 .with_transform(Some(own_transform))];
-            let mut graphics = test_graphics_with(
-                16,
-                16,
-                16,
+            let mut graphics = test_graphics_with_sprites(
+                (16, 16, 16),
                 "overlay row zero",
-                Arc::new(HashMap::from([(
-                    sprite_map_key("Overlay", None),
-                    sprite.clone(),
-                )])),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
+                test_sprites([("Overlay", sprite.clone())]),
             );
             graphics.set_point_filtering(true);
             graphics.surface_mut().fill(background);
@@ -8323,21 +7341,9 @@ mod tests {
             let right_facing = render(mode, 0);
             let left_facing = render(mode, 7);
             for (label, surface) in [("right-facing", right_facing), ("left-facing", left_facing)] {
-                assert_eq!(
-                    colour_bbox(&surface, blue),
-                    Some((6, 6, 7, 9)),
-                    "{mode:?} {label}"
-                );
-                assert_eq!(
-                    colour_bbox(&surface, red),
-                    Some((8, 6, 9, 9)),
-                    "{mode:?} {label}"
-                );
-                assert_eq!(
-                    colour_bbox(&surface, green),
-                    None,
-                    "{mode:?} {label} must use row 0"
-                );
+                front_assert_eq! {colour_bbox(&surface, blue) => Some((6, 6, 7, 9)), "{mode:?} {label}"};
+                front_assert_eq! {colour_bbox(&surface, red) => Some((8, 6, 9, 9)), "{mode:?} {label}"};
+                front_assert_eq! {colour_bbox(&surface, green) => None, "{mode:?} {label} must use row 0"};
             }
         }
     }
@@ -8361,7 +7367,7 @@ mod tests {
         };
 
         let capture = |presentation_scale: f32, hd_exact_blits: bool| {
-            let mut graphics = test_graphics(64, 64, 0, "hd crew gpu");
+            let mut graphics = test_graphics((64, 64, 0), "hd crew gpu");
             graphics.set_presentation_scale(presentation_scale);
             graphics.set_hd_exact_blits(hd_exact_blits);
             graphics.begin_gpu_scene_capture();
@@ -8409,7 +7415,7 @@ mod tests {
         };
 
         let (extent, (positions, uv, sampler)) = capture(3.0, true);
-        assert_eq!(sampler, clonk_graphics::GpuSampler::Nearest);
+        front_assert_eq! {sampler => clonk_graphics::GpuSampler::Nearest};
 
         // Source: the UV span covers exactly the 48x66 authored texels.
         let span = |axis: usize| {
@@ -8418,7 +7424,7 @@ mod tests {
             let min = values.fold(f32::MAX, f32::min);
             (max - min) * extent[axis] as f32
         };
-        assert_eq!((span(0), span(1)), (48.0, 66.0), "authored source texels");
+        front_assert_eq! {(span(0), span(1)) => (48.0, 66.0), "authored source texels"};
 
         // Destination: the retained vertices are logical game units.
         let logical = |axis: usize| {
@@ -8427,7 +7433,7 @@ mod tests {
             let min = values.fold(f32::MAX, f32::min);
             max - min
         };
-        assert_eq!((logical(0), logical(1)), (16.0, 22.0), "logical game units");
+        front_assert_eq! {(logical(0), logical(1)) => (16.0, 22.0), "logical game units"};
 
         // Projection: the renderer's own transform turns those logical units
         // into device pixels, and 48x66 texels land on 48x66 of them.
@@ -8439,20 +7445,13 @@ mod tests {
         );
         let (left, top) = projection.logical_to_physical(0.0, 0.0);
         let (right, bottom) = projection.logical_to_physical(16.0, 22.0);
-        assert_eq!(
-            (right - left, bottom - top),
-            (48.0, 66.0),
-            "one authored texel per device pixel at Graphics.Scale=300"
-        );
+        front_assert_eq! {(right - left, bottom - top) => (48.0, 66.0), "one authored texel per device pixel at Graphics.Scale=300"};
 
         // Without the opt-in the same blit takes C++'s half-texel correction
         // and a linear filter, which is what softens the art today.
         let (_, (_, corrected, sampling)) = capture(3.0, false);
-        assert_eq!(sampling, clonk_graphics::GpuSampler::Linear);
-        assert_ne!(
-            corrected[0], uv[0],
-            "the correction must move the sampled origin"
-        );
+        front_assert_eq! {sampling => clonk_graphics::GpuSampler::Linear};
+        front_assert_ne! {corrected[0] => uv[0], "the correction must move the sampled origin"};
     }
 
     #[test]
@@ -8481,18 +7480,10 @@ mod tests {
             graphics_scale: 2.0,
             actions: HashMap::from([(
                 "Wave".to_string(),
-                DefinitionActionGraphics {
-                    facet: Some(clonk_engine::DefinitionActionFacet {
-                        x: 6,
-                        y: 0,
-                        width: 4,
-                        height: 4,
-                        target_x: 0,
-                        target_y: 0,
-                    }),
-                    length: Some(1),
-                    ..DefinitionActionGraphics::default()
-                },
+                action_graphics_fixture(|action| {
+                    action.facet = Some(test_action_facet(6, 0, 4, 4, 0, 0));
+                    action.length = Some(1);
+                }),
             )]),
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
             ..test_sprite(ImageData::new(16, 16, pixels))
@@ -8506,14 +7497,10 @@ mod tests {
             .with_action(Some("Wave".to_string()))];
 
         let background = Color::opaque(10, 10, 10);
-        let mut graphics = test_graphics_with(
-            16,
-            8,
-            8,
+        let mut graphics = test_graphics_with_sprites(
+            (16, 8, 8),
             "HD facet clamp",
-            Arc::new(HashMap::from([(sprite_map_key("HdClamp", None), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("HdClamp", sprite)]),
         );
         graphics.surface_mut().fill(background);
         graphics.draw_object_overlays(
@@ -8532,16 +7519,8 @@ mod tests {
 
         // Half the eight scaled source columns exist, so the 4-wide facet is
         // drawn two pixels wide from the same origin.
-        assert_eq!(
-            graphics.surface().get_pixel(6, 3),
-            Some(green),
-            "the in-bounds half of the scaled facet must still be drawn"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(9, 3),
-            Some(background),
-            "a scaled facet may not be drawn past the columns the sheet actually has"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(6, 3) => Some(green), "the in-bounds half of the scaled facet must still be drawn"};
+        front_assert_eq! {graphics.surface().get_pixel(9, 3) => Some(background), "a scaled facet may not be drawn past the columns the sheet actually has"};
     }
 
     #[test]
@@ -8563,33 +7542,17 @@ mod tests {
             }
         }
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(8, 4, pixels),
             actions: HashMap::from([(
                 "O20".to_string(),
-                DefinitionActionGraphics {
-                    facet: Some(clonk_engine::DefinitionActionFacet {
-                        x: 4,
-                        y: 0,
-                        width: 4,
-                        height: 4,
-                        target_x: 0,
-                        target_y: 0,
-                    }),
-                    length: Some(1),
-                    ..DefinitionActionGraphics::default()
-                },
+                action_graphics_fixture(|action| {
+                    action.facet = Some(test_action_facet(4, 0, 4, 4, 0, 0));
+                    action.length = Some(1);
+                }),
             )]),
-            color_mask: None,
             // The left half of the sheet is fully transparent, so the base
             // face contributes nothing and only the overlay is asserted on.
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(8, 4, pixels))
         };
 
         let mut template = make_snapshot().objects.remove(0);
@@ -8604,31 +7567,18 @@ mod tests {
                 .with_action(Some("O20".to_string()))];
 
         let render = |viewport: Vector2| {
-            let mut graphics = test_graphics_with(
-                24,
-                16,
-                16,
+            let mut graphics = test_graphics_with_sprites(
+                (24, 16, 16),
                 "Parallax action overlay",
-                Arc::new(HashMap::from([(
-                    sprite_map_key("ParallaxHud", None),
-                    sprite.clone(),
-                )])),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
+                test_sprites([("ParallaxHud", sprite.clone())]),
             );
             graphics.viewport_x = viewport.x as f32;
             graphics.viewport_y = viewport.y as f32;
             graphics.surface_mut().fill(Color::opaque(10, 10, 10));
-            graphics.draw_objects(
+            draw_test_objects(
+                &mut graphics,
                 &[template.clone()],
-                &[],
-                &HashMap::new(),
-                &[],
-                4,
-                1.0,
-                &HashMap::new(),
-                ObjectRenderPass::Normal,
-                None,
+                TestObjectDraw::default().for_player(4),
             );
             graphics.surface().clone()
         };
@@ -8639,21 +7589,13 @@ mod tests {
         let background = Some(Color::opaque(10, 10, 10));
 
         let unscrolled = render(Vector2::new(0, 0));
-        assert_eq!(unscrolled.get_pixel(8, 4), marker);
-        assert_eq!(unscrolled.get_pixel(11, 7), marker);
+        front_assert_eq! {unscrolled.get_pixel(8, 4) => marker};
+        front_assert_eq! {unscrolled.get_pixel(11, 7) => marker};
 
         let scrolled = render(Vector2::new(5, 3));
-        assert_eq!(
-            scrolled.get_pixel(8, 4),
-            marker,
-            "TargetPos pins a zero-parallax overlay against viewport scroll"
-        );
-        assert_eq!(scrolled.get_pixel(11, 7), marker);
-        assert_eq!(
-            scrolled.get_pixel(3, 1),
-            background,
-            "the overlay must not slide by the raw scroll offset"
-        );
+        front_assert_eq! {scrolled.get_pixel(8, 4) => marker, "TargetPos pins a zero-parallax overlay against viewport scroll"};
+        front_assert_eq! {scrolled.get_pixel(11, 7) => marker};
+        front_assert_eq! {scrolled.get_pixel(3, 1) => background, "the overlay must not slide by the raw scroll offset"};
     }
 
     #[test]
@@ -8704,30 +7646,18 @@ mod tests {
         line.graphics_overlays.clear();
 
         let sprite = |line| DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
             line,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 0]))
         };
-        let mut graphics = test_graphics_with(
-            160,
-            100,
-            100,
+        let mut graphics = test_graphics_with_sprites(
+            (160, 100, 100),
             "Nested overlay audibility",
-            Arc::new(HashMap::from([
-                (sprite_map_key("AudibleOverlayHost", None), sprite(0)),
-                (sprite_map_key("AudibleOverlayMiddle", None), sprite(0)),
-                (sprite_map_key("AudibleOverlayLine", None), sprite(1)),
-            ])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([
+                ("AudibleOverlayHost", sprite(0)),
+                ("AudibleOverlayMiddle", sprite(0)),
+                ("AudibleOverlayLine", sprite(1)),
+            ]),
         );
         graphics.viewport_x = 20.0;
         graphics.viewport_y = 30.0;
@@ -8737,20 +7667,14 @@ mod tests {
             width: 80,
             height: 40,
         });
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &[host.clone(), middle.clone(), line.clone()],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::default(),
         );
 
-        assert_eq!(
-            graphics.rendered_object_audibility_calls().get(&line.id),
+        front_assert_eq! {
+            graphics.rendered_object_audibility_calls().get(&line.id) =>
             Some(&vec![
                 RenderedAudibilityCall::Parallax {
                     point: Vector2::new(200, 90),
@@ -8762,14 +7686,9 @@ mod tests {
                 },
             ]),
             "each nesting level rewrites TargetX/Y before the line target applies parallax",
-        );
-        assert!(
-            !graphics
-                .rendered_object_audibility_calls()
-                .contains_key(&middle.id),
-            "ODM_Overlay does not run the ordinary non-line parallax call",
-        );
-        assert_eq!(graphics.current_audibility_facet, None);
+        };
+        front_assert! {!graphics.rendered_object_audibility_calls().contains_key(&middle.id), "ODM_Overlay does not run the ordinary non-line parallax call",};
+        front_assert_eq! {graphics.current_audibility_facet => None};
     }
 
     #[test]
@@ -8813,25 +7732,13 @@ mod tests {
         scenario.apply(&mut engine).test_value();
         let restored = engine.object_snapshot(ObjectId::new(1)).test_value();
 
-        assert_eq!(
-            restored
-                .local_vars
-                .get("__local_0")
-                .and_then(|value| value.as_c4_int()),
-            Some(50)
-        );
-        assert_eq!(
-            restored
-                .local_vars
-                .get("__local_1")
-                .and_then(|value| value.as_c4_int()),
-            Some(25)
-        );
+        front_assert_eq! {restored.local_vars.get("__local_0").and_then(|value| value.as_c4_int()) => Some(50)};
+        front_assert_eq! {restored.local_vars.get("__local_1").and_then(|value| value.as_c4_int()) => Some(25)};
 
-        let mut graphics = test_graphics(80, 50, 50, "Restored parallax");
+        let mut graphics = test_graphics((80, 50, 50), "Restored parallax");
         graphics.viewport_x = 20.0;
         graphics.viewport_y = 20.0;
-        assert_eq!(graphics.object_target_position(&restored), (10.0, 5.0));
+        front_assert_eq! {graphics.object_target_position(&restored) => (10.0, 5.0)};
     }
 
     #[test]
@@ -8841,7 +7748,7 @@ mod tests {
         let definition = crate::test_support::repo_root()
             .join("content/Objects.c4d/Environment.c4d/Stars.c4d/Star.c4d");
         let def_core = std::fs::read_to_string(definition.join("DefCore.txt")).test_value();
-        assert!(def_core.lines().any(|line| line.trim() == "BlitMode=1"));
+        front_assert! {def_core.lines().any(|line| line.trim() == "BlitMode=1")};
         let rgba = image::open(definition.join("Graphics.png"))
             .test_value()
             .into_rgba8();
@@ -8849,18 +7756,10 @@ mod tests {
         let sprite = DefinitionSprite {
             actions: HashMap::from([(
                 "Appear".to_string(),
-                DefinitionActionGraphics {
-                    facet: Some(clonk_engine::DefinitionActionFacet {
-                        x: 0,
-                        y: 0,
-                        width: 3,
-                        height: 3,
-                        target_x: 0,
-                        target_y: 0,
-                    }),
-                    length: Some(10),
-                    ..DefinitionActionGraphics::default()
-                },
+                action_graphics_fixture(|action| {
+                    action.facet = Some(test_action_facet(0, 0, 3, 3, 0, 0));
+                    action.length = Some(10);
+                }),
             )]),
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
             ..test_sprite(ImageData::new(width, height, rgba.into_raw()))
@@ -8872,33 +7771,16 @@ mod tests {
         star.action.phase = 4;
         star.blit_mode = 1;
         star.crew_member = false;
-        let mut graphics = test_graphics_with(
-            10,
-            10,
-            10,
+        let mut graphics = test_graphics_with_sprites(
+            (10, 10, 10),
             "Shipped STAR additive",
-            Arc::new(HashMap::from([(sprite_map_key("STAR", None), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("STAR", sprite)]),
         );
         graphics.surface_mut().fill(Color::opaque(50, 60, 70));
 
-        graphics.draw_objects(
-            &[star],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
+        draw_test_objects(&mut graphics, &[star], TestObjectDraw::default());
 
-        assert_eq!(
-            graphics.surface().get_pixel(4, 4),
-            Some(Color::opaque(234, 244, 254))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(4, 4) => Some(Color::opaque(234, 244, 254))};
     }
 
     #[test]
@@ -8907,24 +7789,17 @@ mod tests {
         // (C4Object.cpp:2410-2499,2648-2672). Bit 2 selects BlitShaderMod2
         // for the main surface (StdDDraw2.cpp:768-770; StdGL.cpp:1072-1079).
         let source = Color::new(64, 128, 192, 128);
-        let plain_sprite = |width, height, shape| DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(
-                width,
-                height,
-                (0..width * height)
-                    .flat_map(|_| [source.r, source.g, source.b, source.a])
-                    .collect(),
-            ),
-            actions: HashMap::new(),
-            color_mask: None,
-            shape: Some(shape),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+        let plain_sprite = |width, height, shape| {
+            test_shaped_sprite(
+                ImageData::new(
+                    width,
+                    height,
+                    (0..width * height)
+                        .flat_map(|_| [source.r, source.g, source.b, source.a])
+                        .collect(),
+                ),
+                shape,
+            )
         };
         let mut sprites = HashMap::from([(
             sprite_map_key("BaseMod2", None),
@@ -8933,18 +7808,10 @@ mod tests {
         let mut action = plain_sprite(1, 1, DefinitionRect::new(0, 0, 1, 1));
         action.actions.insert(
             "Active".to_string(),
-            DefinitionActionGraphics {
-                facet: Some(clonk_engine::DefinitionActionFacet {
-                    x: 0,
-                    y: 0,
-                    width: 1,
-                    height: 1,
-                    target_x: 0,
-                    target_y: 0,
-                }),
-                length: Some(1),
-                ..DefinitionActionGraphics::default()
-            },
+            action_graphics_fixture(|action| {
+                action.facet = Some(test_action_facet(0, 0, 1, 1, 0, 0));
+                action.length = Some(1);
+            }),
         );
         sprites.insert(sprite_map_key("ActionMod2", None), action);
         sprites.insert(
@@ -8983,34 +7850,17 @@ mod tests {
             make_object(3, "TopMod2", Vector2::new(5, 2), "Idle", 0),
             make_object(4, "RotatedMod2", Vector2::new(8, 2), "Idle", 45),
         ];
-        let mut graphics = test_graphics_with(
-            11,
-            5,
-            5,
-            "Object MOD2 routes",
-            Arc::new(sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((11, 5, 5), "Object MOD2 routes", Arc::new(sprites));
         graphics.surface_mut().fill(Color::opaque(200, 200, 200));
 
-        graphics.draw_objects(
-            &objects,
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
+        draw_test_objects(&mut graphics, &objects, TestObjectDraw::default());
 
         // Shader MOD2 source: clamp(2*src + 2*mod - 255) = (0,129,255),
         // then ordinary source-alpha over the framebuffer.
         let expected = Some(Color::opaque(100, 164, 228));
         for (route, x) in [("base", 1), ("action", 3), ("top", 5), ("rotated", 8)] {
-            assert_eq!(graphics.surface().get_pixel(x, 2), expected, "{route}");
+            front_assert_eq! {graphics.surface().get_pixel(x, 2) => expected, "{route}"};
         }
     }
 
@@ -9022,17 +7872,17 @@ mod tests {
         let mut sprites = HashMap::new();
         sprites.insert(
             sprite_map_key("BlackMod2", None),
-            DefinitionSprite {
-                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                ..test_sprite(ImageData::new(1, 1, vec![200, 200, 200, 255]))
-            },
+            test_shaped_sprite(
+                ImageData::new(1, 1, vec![200, 200, 200, 255]),
+                DefinitionRect::new(0, 0, 1, 1),
+            ),
         );
         sprites.insert(
             sprite_map_key("AddMod2", None),
-            DefinitionSprite {
-                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                ..test_sprite(ImageData::new(1, 1, vec![64, 128, 192, 128]))
-            },
+            test_shaped_sprite(
+                ImageData::new(1, 1, vec![64, 128, 192, 128]),
+                DefinitionRect::new(0, 0, 1, 1),
+            ),
         );
         let template = make_snapshot().objects.remove(0);
         let mut black = template.clone();
@@ -9049,33 +7899,17 @@ mod tests {
         combined.color_modulation = 0x0020_4080;
         combined.crew_member = false;
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
-        let mut graphics = test_graphics_with(
-            5,
-            3,
-            3,
-            "MOD2 precedence",
-            Arc::new(sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((5, 3, 3), "MOD2 precedence", Arc::new(sprites));
         graphics.surface_mut().fill(Color::opaque(100, 100, 100));
 
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &[black, combined],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            Some(&gamma),
+            TestObjectDraw::default().gamma(&gamma),
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(1, 1),
-            Some(gamma_encode_fragment(Color::opaque(0, 0, 0), &gamma))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(1, 1) => Some(gamma_encode_fragment(Color::opaque(0, 0, 0), &gamma))};
         let modulated = [0.0, 129.0, 255.0];
         let alpha = 128.0 / 255.0;
         let expected = Color::opaque(
@@ -9104,7 +7938,7 @@ mod tests {
                     ) * alpha,
             ),
         );
-        assert_eq!(graphics.surface().get_pixel(3, 1), Some(expected));
+        front_assert_eq! {graphics.surface().get_pixel(3, 1) => Some(expected)};
     }
 
     #[test]
@@ -9126,29 +7960,16 @@ mod tests {
             object.color = 0x0040_80c0;
             object.color_modulation = 0x0080_4020;
             object.crew_member = false;
-            let mut graphics = test_graphics_with(
-                3,
-                3,
-                3,
+            let mut graphics = test_graphics_with_sprites(
+                (3, 3, 3),
                 "Owner modulation modes",
-                Arc::new(HashMap::from([(
-                    sprite_map_key("OwnerModes", None),
-                    sprite.clone(),
-                )])),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
+                test_sprites([("OwnerModes", sprite.clone())]),
             );
             graphics.surface_mut().fill(Color::opaque(9, 11, 13));
-            graphics.draw_objects(
+            draw_test_objects(
+                &mut graphics,
                 &[object],
-                &[],
-                &HashMap::new(),
-                &[],
-                OWNER_NONE,
-                1.0,
-                &HashMap::from([(0, owner)]),
-                ObjectRenderPass::Normal,
-                None,
+                TestObjectDraw::default().owner_colors(&HashMap::from([(0, owner)])),
             );
             graphics.surface().get_pixel(1, 1)
         };
@@ -9156,10 +7977,10 @@ mod tests {
         // owner ⊗ global is (32,32,24) by C++'s >>8 combine. The owner
         // texture is grey 64. Bit 8's normalized shader formula is
         // clamp(2*grey + 2*mod - 255), proving it is not bit-2 aliasing.
-        assert_eq!(render(0), Some(Color::opaque(8, 8, 6)));
-        assert_eq!(render(4), Some(Color::opaque(16, 32, 48)));
-        assert_eq!(render(8), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(render(4 | 8), Some(Color::opaque(1, 129, 255)));
+        front_assert_eq! {render(0) => Some(Color::opaque(8, 8, 6))};
+        front_assert_eq! {render(4) => Some(Color::opaque(16, 32, 48))};
+        front_assert_eq! {render(8) => Some(Color::opaque(0, 0, 0))};
+        front_assert_eq! {render(4 | 8) => Some(Color::opaque(1, 129, 255))};
     }
 
     #[test]
@@ -9168,10 +7989,10 @@ mod tests {
         // from 0x00ffffff (C4DefGraphics.cpp:762-768). Thus mode 2 + default
         // white is MOD2-to-white, while explicit black triggers the PerformBlt
         // black reset. Exact parent mode inherits both mode and ColorMod.
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(-1, -1, 3, 3)),
-            ..test_sprite(ImageData::new(3, 3, [64, 128, 192, 255].repeat(9)))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(3, 3, [64, 128, 192, 255].repeat(9)),
+            DefinitionRect::new(-1, -1, 3, 3),
+        );
         let render = |overlay_mode, overlay_modulation, rotation| {
             let mut object = make_snapshot().objects.remove(0);
             object.position = Vector2::new(2, 2);
@@ -9182,17 +8003,10 @@ mod tests {
                 .with_blit_mode(overlay_mode);
             overlay.color_modulation = overlay_modulation;
             object.graphics_overlays = vec![overlay];
-            let mut graphics = test_graphics_with(
-                5,
-                5,
-                5,
+            let mut graphics = test_graphics_with_sprites(
+                (5, 5, 5),
                 "Overlay MOD2",
-                Arc::new(HashMap::from([(
-                    sprite_map_key("OverlayMod2", None),
-                    sprite.clone(),
-                )])),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
+                test_sprites([("OverlayMod2", sprite.clone())]),
             );
             graphics.surface_mut().fill(Color::opaque(9, 11, 13));
             graphics.draw_object_overlays(
@@ -9211,16 +8025,10 @@ mod tests {
             graphics.surface().get_pixel(2, 2)
         };
 
-        assert_eq!(
-            render(2, 0x00ff_ffff, 0.0),
-            Some(Color::opaque(255, 255, 255))
-        );
-        assert_eq!(render(2, 0, 0.0), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(
-            render(256, 0x00ff_ffff, 45.0),
-            Some(Color::opaque(0, 129, 255))
-        );
-        assert_eq!(render(0, 0x0020_4080, 0.0), Some(Color::opaque(8, 32, 96)));
+        front_assert_eq! {render(2, 0x00ff_ffff, 0.0) => Some(Color::opaque(255, 255, 255))};
+        front_assert_eq! {render(2, 0, 0.0) => Some(Color::opaque(0, 0, 0))};
+        front_assert_eq! {render(256, 0x00ff_ffff, 45.0) => Some(Color::opaque(0, 129, 255))};
+        front_assert_eq! {render(0, 0x0020_4080, 0.0) => Some(Color::opaque(8, 32, 96))};
     }
 
     #[test]
@@ -9231,11 +8039,9 @@ mod tests {
         let definition = crate::test_support::repo_root()
             .join("content/Fantasy.c4d/Magic.c4d/Firelump.c4d/Fball.c4d");
         let def_core = std::fs::read_to_string(definition.join("DefCore.txt")).test_value();
-        assert!(def_core.lines().any(|line| line.trim() == "BlitMode=2"));
+        front_assert! {def_core.lines().any(|line| line.trim() == "BlitMode=2")};
         let script = std::fs::read(definition.join("Script.c")).test_value();
-        assert!(script
-            .windows(b"SetClrModulation(RGB(iR,iG,64))".len())
-            .any(|window| window == b"SetClrModulation(RGB(iR,iG,64))"));
+        front_assert! {script.windows(b"SetClrModulation(RGB(iR,iG,64))".len()).any(|window| window == b"SetClrModulation(RGB(iR,iG,64))")};
         let rgba = image::open(definition.join("Graphics.png"))
             .test_value()
             .into_rgba8();
@@ -9243,10 +8049,7 @@ mod tests {
         let sprite = DefinitionSprite {
             actions: HashMap::from([(
                 "Exist".to_string(),
-                DefinitionActionGraphics {
-                    facet_base: true,
-                    ..DefinitionActionGraphics::default()
-                },
+                action_graphics_fixture(|action| action.facet_base = true),
             )]),
             shape: Some(DefinitionRect::new(-5, -5, 10, 10)),
             ..test_sprite(ImageData::new(width, height, rgba.into_raw()))
@@ -9258,45 +8061,26 @@ mod tests {
         firelump.blit_mode = 2;
         firelump.color_modulation = 0x0018_2040;
         firelump.crew_member = false;
-        let mut graphics = test_graphics_with(
-            20,
-            20,
-            20,
+        let mut graphics = test_graphics_with_sprites(
+            (20, 20, 20),
             "Shipped FRBL MOD2",
-            Arc::new(HashMap::from([(sprite_map_key("FRBL", None), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
+            test_sprites([("FRBL", sprite)]),
         );
         graphics.surface_mut().fill(Color::opaque(50, 60, 70));
 
-        graphics.draw_objects(
-            &[firelump],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
+        draw_test_objects(&mut graphics, &[firelump], TestObjectDraw::default());
 
         // Graphics.png (6,0) = (255,140,0,179). MOD2 with (24,32,64)
         // produces (255,89,0), then alpha-over gives this framebuffer value.
-        assert_eq!(
-            graphics.surface().get_pixel(11, 5),
-            Some(Color::opaque(194, 80, 21))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(11, 5) => Some(Color::opaque(194, 80, 21))};
     }
 
     #[test]
     fn object_and_old_style_pxs_gamma_sample_independent_r16_channels() {
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x102030, 0x405060, 0x708090]);
         let snapshot = make_snapshot();
-        let mut graphics = test_graphics_with(
-            128,
-            128,
-            128,
+        let mut graphics = test_graphics_with_sprites(
+            (128, 128, 128),
             "Gamma Object/PXS",
             solid_sprite(
                 "TestObject",
@@ -9306,8 +8090,6 @@ mod tests {
                 Some(DefinitionRect::new(0, 0, 1, 1)),
                 false,
             ),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         graphics.surface_mut().fill(Color::opaque(200, 200, 200));
         graphics.set_material_render_info(Arc::new(HashMap::from([(
@@ -9320,21 +8102,15 @@ mod tests {
             1.0,
             Some(&gamma),
         );
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &snapshot.objects,
-            &snapshot.render_order,
-            &snapshot.definition_lines,
-            &snapshot.players,
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            Some(&gamma),
+            TestObjectDraw::snapshot(&snapshot).gamma(&gamma),
         );
 
         let encoded = Some(Color::new(17, 33, 49, 255));
-        assert_eq!(graphics.surface().get_pixel(96, 100), encoded);
-        assert_eq!(graphics.surface().get_pixel(100, 100), encoded);
+        front_assert_eq! {graphics.surface().get_pixel(96, 100) => encoded};
+        front_assert_eq! {graphics.surface().get_pixel(100, 100) => encoded};
     }
 
     #[test]
@@ -9343,10 +8119,8 @@ mod tests {
         let mut overlay = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base);
         overlay.definition = Some("Overlay".to_string());
         object.graphics_overlays.push(overlay);
-        let mut graphics = test_graphics_with(
-            9,
-            9,
-            9,
+        let mut graphics = test_graphics_with_sprites(
+            (9, 9, 9),
             "Gamma Rotated Overlay",
             solid_sprite(
                 "Overlay",
@@ -9356,8 +8130,6 @@ mod tests {
                 Some(DefinitionRect::new(-1, -1, 3, 3)),
                 false,
             ),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         graphics.surface_mut().fill(Color::opaque(200, 200, 200));
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
@@ -9376,10 +8148,7 @@ mod tests {
             Some(&gamma),
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(4, 4),
-            Some(Color::new(125, 150, 175, 255))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(4, 4) => Some(Color::new(125, 150, 175, 255))};
     }
 
     #[test]
@@ -9401,10 +8170,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            surface.get_pixel(0, 0),
-            Some(Color::new(125, 150, 175, 255))
-        );
+        front_assert_eq! {surface.get_pixel(0, 0) => Some(Color::new(125, 150, 175, 255))};
     }
 
     #[test]
@@ -9442,10 +8208,10 @@ mod tests {
         else {
             panic!("graphical PXS did not lower to a textured command");
         };
-        assert_eq!(sprites.len(), 1);
-        assert_eq!(sprites[0].sampler(), GpuSampler::Linear);
-        assert_eq!(*blend, GpuBlend::Normal);
-        assert!(*gamma);
+        front_assert_eq! {sprites.len() => 1};
+        front_assert_eq! {sprites[0].sampler() => GpuSampler::Linear};
+        front_assert_eq! {*blend => GpuBlend::Normal};
+        front_assert! {*gamma};
     }
 
     #[test]
@@ -9470,9 +8236,9 @@ mod tests {
             );
             surface.get_pixel(0, 0).test_value()
         };
-        assert_eq!(alpha_result(false, false), Color::opaque(100, 50, 25));
-        assert_eq!(alpha_result(false, true), Color::opaque(151, 75, 38));
-        assert_eq!(alpha_result(true, true), Color::opaque(100, 50, 25));
+        front_assert_eq! {alpha_result(false, false) => Color::opaque(100, 50, 25)};
+        front_assert_eq! {alpha_result(false, true) => Color::opaque(151, 75, 38)};
+        front_assert_eq! {alpha_result(true, true) => Color::opaque(100, 50, 25)};
 
         let sentinel = Color::opaque(7, 11, 13);
         let image = ImageData::new(1, 1, vec![255, 0, 0, 255]);
@@ -9493,8 +8259,8 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(shifted.get_pixel(0, 0), Some(sentinel));
-        assert_eq!(shifted.get_pixel(1, 1), Some(Color::opaque(255, 0, 0)));
+        front_assert_eq! {shifted.get_pixel(0, 0) => Some(sentinel)};
+        front_assert_eq! {shifted.get_pixel(1, 1) => Some(Color::opaque(255, 0, 0))};
 
         let pixels = (0..8)
             .flat_map(|_| {
@@ -9525,22 +8291,16 @@ mod tests {
                 .map(|x| surface.get_pixel(x, 0).test_value().r)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(sample_crop(0), vec![64, 96, 128, 160]);
-        assert_eq!(sample_crop(500), vec![78, 107, 135, 164]);
+        front_assert_eq! {sample_crop(0) => vec![64, 96, 128, 160]};
+        front_assert_eq! {sample_crop(500) => vec![78, 107, 135, 164]};
 
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 64,
-                resolution_y: 64,
-                width: 2,
-                height: 2,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![0x0040_4040, 0x0080_8080, 0x00c0_c0c0, 0x00ff_ffff],
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(
+            64,
+            64,
+            2,
+            2,
+            vec![0x0040_4040, 0x0080_8080, 0x00c0_c0c0, 0x00ff_ffff],
+        ));
         let white = ImageData::new(64, 64, vec![255; 64 * 64 * 4]);
         let fog_result = |no_box_fades| {
             let mut surface = Surface::new(64, 64, PixelFormat::Rgba8888);
@@ -9560,8 +8320,8 @@ mod tests {
             );
             surface.get_pixel(0, 0).test_value().r
         };
-        assert_eq!(fog_result(false), 65);
-        assert_eq!(fog_result(true), 191);
+        front_assert_eq! {fog_result(false) => 65};
+        front_assert_eq! {fog_result(true) => 191};
     }
 
     #[test]
@@ -9569,7 +8329,7 @@ mod tests {
         // Tutorial07 Script.c:12 and AcidRain.c4m:3: the opaque old-style
         // PXS fragment (200,250,200) is sampled by the scenario's green-heavy
         // ramp before it replaces the framebuffer pixel.
-        let mut graphics = test_graphics(4, 4, 4, "Tutorial 07 Acid Rain");
+        let mut graphics = test_graphics((4, 4, 4), "Tutorial 07 Acid Rain");
         let background = Color::opaque(7, 11, 13);
         graphics.surface_mut().fill(background);
         graphics.set_material_render_info(Arc::new(HashMap::from([(
@@ -9590,11 +8350,8 @@ mod tests {
             Some(&gamma),
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(2, 2),
-            Some(Color::opaque(157, 250, 157))
-        );
-        assert_eq!(graphics.surface().get_pixel(1, 2), Some(background));
+        front_assert_eq! {graphics.surface().get_pixel(2, 2) => Some(Color::opaque(157, 250, 157))};
+        front_assert_eq! {graphics.surface().get_pixel(1, 2) => Some(background)};
     }
 
     #[test]
@@ -9614,7 +8371,7 @@ mod tests {
             .filter(|value| !value.is_empty())
             .map(|value| value.parse::<u32>().test_value())
             .collect::<Vec<_>>();
-        assert_eq!(gamma_values.len(), 9);
+        front_assert_eq! {gamma_values.len() => 9};
         let rgb = |offset: usize| {
             (gamma_values[offset] << 16)
                 | (gamma_values[offset + 1] << 8)
@@ -9641,7 +8398,7 @@ mod tests {
         snapshot
             .particles
             .push(pxs_particle("acidrain", [100 << 16, 60 << 16, 0, 0], 0));
-        let mut graphics = test_graphics(120, 100, 100, "Tutorial 07 Acid Rain");
+        let mut graphics = test_graphics((120, 100, 100), "Tutorial 07 Acid Rain");
         graphics.set_material_render_info(Arc::new(HashMap::from([(
             "acidrain".to_string(),
             MaterialRenderInfo::new(material_color, [0; 6], None, 0, 25),
@@ -9661,12 +8418,7 @@ mod tests {
             .world_to_screen(0, Vector2::new(100, 60))
             .test_value();
 
-        assert_eq!(
-            graphics
-                .surface()
-                .get_pixel(x.round() as u32, y.round() as u32),
-            Some(Color::opaque(157, 250, 157)),
-        );
+        front_assert_eq! {graphics.surface().get_pixel(x.round() as u32, y.round() as u32) => Some(Color::opaque(157, 250, 157)),};
     }
 
     #[test]
@@ -9700,9 +8452,9 @@ mod tests {
             .collect::<Vec<_>>()
             .try_into()
             .test_value();
-        assert!(acid.value("PXSGfx").is_none());
-        assert_eq!(color, [200, 250, 200, 200, 250, 200, 200, 250, 200]);
-        assert_eq!(acid.int("Density"), Some(25));
+        front_assert! {acid.value("PXSGfx").is_none()};
+        front_assert_eq! {color => [200, 250, 200, 200, 250, 200, 200, 250, 200]};
+        front_assert_eq! {acid.int("Density") => Some(25)};
         let material = MaterialRenderInfo::new(
             color,
             [0; 6],
@@ -9753,36 +8505,26 @@ mod tests {
                 .iter()
                 .filter(|particle| particle.definition_id == "material/pxs/acidrain")
                 .collect::<Vec<_>>();
-            assert_eq!(
-                pxs.len(),
-                expected_count,
-                "frame {} PXS cadence",
-                snapshot.frame
-            );
-            assert_eq!(
+            front_assert_eq! {pxs.len() => expected_count, "frame {} PXS cadence", snapshot.frame};
+            front_assert_eq! {
                 pxs.iter()
                     .map(|particle| particle.pxs_slot)
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>() =>
                 (0..expected_count as u32).map(Some).collect::<Vec<_>>(),
                 "frame {} preserves C4PXS slot order",
                 snapshot.frame,
-            );
+            };
             if let Some(first) = pxs.first() {
-                assert_eq!(
-                    first.pxs_fixed,
-                    Some(expected_first_particle[frame_index - 1]),
-                    "frame {} first AcidRain PXS trajectory",
-                    snapshot.frame,
-                );
+                front_assert_eq! {first.pxs_fixed => Some(expected_first_particle[frame_index - 1]), "frame {} first AcidRain PXS trajectory", snapshot.frame,};
             }
-            let mut graphics = test_graphics(1024, 256, 256, "Tutorial 07 Acid Rain");
+            let mut graphics = test_graphics((1024, 256, 256), "Tutorial 07 Acid Rain");
             graphics.surface_mut().fill(Color::opaque(7, 11, 13));
             graphics.set_material_render_info(Arc::new(HashMap::from([(
                 "acidrain".to_string(),
                 material.clone(),
             )])));
             let gamma_points = snapshot.environment.gamma.combined_control_points();
-            assert_eq!(gamma_points, [0x000000, 0x648064, 0xc8ffc8]);
+            front_assert_eq! {gamma_points => [0x000000, 0x648064, 0xc8ffc8]};
             let gamma = clonk_graphics::GammaRamp::from_control_points(gamma_points);
             graphics.draw_pxs(
                 &snapshot.particles,
@@ -9801,18 +8543,8 @@ mod tests {
                     }),
                 )
             });
-            assert_eq!(
-                graphics.surface().snapshot().checksum(),
-                checksum,
-                "frame {} rendered PXS streaks",
-                snapshot.frame,
-            );
-            assert_eq!(
-                (changed.len(), bounds),
-                (changed_count, expected_bounds),
-                "frame {} rendered PXS coverage",
-                snapshot.frame,
-            );
+            front_assert_eq! {graphics.surface().snapshot().checksum() => checksum, "frame {} rendered PXS streaks", snapshot.frame,};
+            front_assert_eq! {(changed.len(), bounds) => (changed_count, expected_bounds), "frame {} rendered PXS coverage", snapshot.frame,};
         }
     }
 
@@ -9841,12 +8573,9 @@ mod tests {
         let texmap_source = local_material_group.read_file("Texmap.txt").test_value();
         let texmap = clonk_resources::texmap::TextureMap::parse_bytes(&texmap_source);
         let acid_slot = texmap.entry(22).test_value();
-        assert_eq!(
-            (acid_slot.material.as_str(), acid_slot.texture.as_str()),
-            ("Acid", "Smooth"),
-        );
-        assert_eq!(grid.material_names()[22].as_deref(), Some("Acid"));
-        assert_eq!(grid.texture_names()[22].as_deref(), Some("Liquid"));
+        front_assert_eq! {(acid_slot.material.as_str(), acid_slot.texture.as_str()) => ("Acid", "Smooth"),};
+        front_assert_eq! {grid.material_names()[22].as_deref() => Some("Acid")};
+        front_assert_eq! {grid.texture_names()[22].as_deref() => Some("Liquid")};
 
         // C4Landscape::ApplyLighting shades material edges from Placement
         // (C4Landscape.cpp:2534-2588). This real 16x16 interior plus its
@@ -9858,7 +8587,7 @@ mod tests {
                 .and_then(|name| name.as_deref())
                 .is_some_and(|name| name.eq_ignore_ascii_case("Acid"))
         };
-        assert!((0..16).all(|dy| {
+        front_assert! {(0..16).all(|dy| {
             (0..16).all(|dx| {
                 let x = 196 + dx;
                 let y = 349 + dy;
@@ -9866,7 +8595,7 @@ mod tests {
                     && acid_at(x + 1, y)
                     && (-9..=8).all(|offset| acid_at(x, y + offset))
             })
-        }));
+        })};
 
         let global_material_group =
             Group::open(crate::test_support::repo_root().join("content/Material.c4g")).test_value();
@@ -9876,17 +8605,14 @@ mod tests {
         for (target, source) in color.iter_mut().zip(acid.int_list("Color").test_value()) {
             *target = source as u8;
         }
-        assert_eq!(color, [0, 190, 0, 0, 200, 0, 0, 210, 0]);
-        assert_eq!(acid.value("TextureOverlay"), Some("Liquid"));
-        assert_eq!(
-            (acid.int("Density"), acid.int("Placement")),
-            (Some(25), Some(10)),
-        );
+        front_assert_eq! {color => [0, 190, 0, 0, 200, 0, 0, 210, 0]};
+        front_assert_eq! {acid.value("TextureOverlay") => Some("Liquid")};
+        front_assert_eq! {(acid.int("Density"), acid.int("Placement")) => (Some(25), Some(10)),};
         let resource =
             clonk_resources::graphics::GraphicsResource::from_group(global_material_group)
                 .test_value();
         let liquid = resource.load_image("LIQUID.png").test_value();
-        assert_eq!((liquid.width(), liquid.height()), (128, 128));
+        front_assert_eq! {(liquid.width(), liquid.height()) => (128, 128)};
         let liquid = ImageData::new(liquid.width(), liquid.height(), liquid.pixels().to_vec());
         let material = MaterialRenderInfo::new(
             color,
@@ -9896,7 +8622,7 @@ mod tests {
             acid.int("Density").unwrap_or(0),
         )
         .with_placement(acid.int("Placement").unwrap_or(0));
-        let mut graphics = test_graphics(16, 16, 16, "Tutorial 07 Acid");
+        let mut graphics = test_graphics((16, 16, 16), "Tutorial 07 Acid");
         graphics.viewport_x = 196.0;
         graphics.viewport_y = 349.0;
         graphics.surface_mut().fill(Color::opaque(7, 11, 13));
@@ -9904,15 +8630,15 @@ mod tests {
         graphics
             .set_material_render_info(Arc::new(HashMap::from([("acid".to_string(), material)])));
         let gamma_points = snapshot.environment.gamma.combined_control_points();
-        assert_eq!(gamma_points, [0x000000, 0x648064, 0xc8ffc8]);
-        assert_eq!(snapshot.environment.settings.time_of_day, 0);
-        assert_eq!(GraphicsSystem::lighting_factor(0), 1.0);
+        front_assert_eq! {gamma_points => [0x000000, 0x648064, 0xc8ffc8]};
+        front_assert_eq! {snapshot.environment.settings.time_of_day => 0};
+        front_assert_eq! {GraphicsSystem::lighting_factor(0) => 1.0};
         let gamma = clonk_graphics::GammaRamp::from_control_points(gamma_points);
-        assert!(graphics.draw_ground_textured(snapshot.landscape.as_ref(), Some(&gamma)));
+        front_assert! {graphics.draw_ground_textured(snapshot.landscape.as_ref(), Some(&gamma))};
 
-        assert_eq!(
+        front_assert_eq! {
             [(0, 0), (4, 0), (15, 0), (0, 8), (8, 8), (15, 15)]
-                .map(|(x, y)| graphics.surface().get_pixel(x, y)),
+                .map(|(x, y)| graphics.surface().get_pixel(x, y)) =>
             [
                 Some(Color::opaque(1, 192, 1)),
                 Some(Color::opaque(1, 188, 1)),
@@ -9921,15 +8647,15 @@ mod tests {
                 Some(Color::opaque(1, 192, 1)),
                 Some(Color::opaque(1, 182, 1)),
             ],
-        );
-        assert_eq!(graphics.surface().snapshot().checksum(), 0x03df_cb2d);
+        };
+        front_assert_eq! {graphics.surface().snapshot().checksum() => 0x03df_cb2d};
     }
 
     #[test]
     fn viewport_point_at_maps_screen_to_world() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
-        let mut graphics = test_graphics(320, 180, 150, "Viewport Test");
+        let mut graphics = test_graphics((320, 180, 150), "Viewport Test");
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
@@ -9939,17 +8665,9 @@ mod tests {
         let pointer = graphics
             .viewport_point_at(GuiPoint::new(screen_x, screen_y))
             .test_value();
-        assert_eq!(pointer.owner, focus.owner);
-        assert!(
-            (pointer.world.x - focus.position.x as f32).abs() < 0.5,
-            "expected world x close to focus, got {}",
-            pointer.world.x
-        );
-        assert!(
-            (pointer.world.y - focus.position.y as f32).abs() < 0.5,
-            "expected world y close to focus, got {}",
-            pointer.world.y
-        );
+        front_assert_eq! {pointer.owner => focus.owner};
+        front_assert! {(pointer.world.x - focus.position.x as f32).abs() < 0.5, "expected world x close to focus, got {}", pointer.world.x};
+        front_assert! {(pointer.world.y - focus.position.y as f32).abs() < 0.5, "expected world y close to focus, got {}", pointer.world.y};
     }
 
     #[test]
@@ -9966,7 +8684,7 @@ mod tests {
         second.controller = 1;
         second.position = Vector2::new(180, 100);
         snapshot.objects.push(second);
-        let mut graphics = test_graphics(320, 180, 150, "Mouse owner viewport");
+        let mut graphics = test_graphics((320, 180, 150), "Mouse owner viewport");
         graphics.render_frame(
             &snapshot,
             &[
@@ -9980,14 +8698,14 @@ mod tests {
             other_viewport.rect.x as f32 + other_viewport.rect.width as f32 / 2.0,
             other_viewport.rect.y as f32 + other_viewport.rect.height as f32 / 2.0,
         );
-        assert_eq!(
+        front_assert_eq! {
             graphics
                 .viewport_output_point_at(physical_point)
                 .expect("hovered viewport pointer")
-                .owner,
+                .owner =>
             1,
             "the existing hit-test confirms the physical point is over owner 1"
-        );
+        };
 
         let pointer = graphics
             .viewport_output_point_for_owner(0, physical_point)
@@ -10002,9 +8720,9 @@ mod tests {
             (expected_screen.y - owner_viewport.content_rect.y as f32) / owner_viewport.zoom
                 + owner_viewport.viewport_y,
         );
-        assert_eq!(pointer.owner, 0);
-        assert_eq!(pointer.screen, expected_screen);
-        assert_eq!(pointer.world, expected_world);
+        front_assert_eq! {pointer.owner => 0};
+        front_assert_eq! {pointer.screen => expected_screen};
+        front_assert_eq! {pointer.world => expected_world};
     }
 
     #[test]
@@ -10013,7 +8731,7 @@ mod tests {
         snapshot.objects[0].owner = 1;
         let focus = &snapshot.objects[0];
 
-        let mut graphics = test_graphics(320, 180, 150, "Crew Pick");
+        let mut graphics = test_graphics((320, 180, 150), "Crew Pick");
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
@@ -10021,12 +8739,8 @@ mod tests {
         let point = GuiPoint::new(screen_x, screen_y);
 
         let picked = graphics.crew_at_point(&snapshot, 1, point);
-        assert_eq!(picked, Some(focus.id));
-        assert_eq!(
-            graphics.crew_at_point(&snapshot, 2, point),
-            None,
-            "other owners should not pick crew"
-        );
+        front_assert_eq! {picked => Some(focus.id)};
+        front_assert_eq! {graphics.crew_at_point(&snapshot, 2, point) => None, "other owners should not pick crew"};
     }
 
     #[test]
@@ -10046,49 +8760,34 @@ mod tests {
         snapshot.render_order = vec![back_id, front_id];
 
         let focus = snapshot.objects[0].clone();
-        let mut graphics = test_graphics(320, 180, 150, "Object Pick");
+        let mut graphics = test_graphics((320, 180, 150), "Object Pick");
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(&focus)]);
         let (screen_x, screen_y) = graphics.world_to_screen(1, focus.position).test_value();
         let point = GuiPoint::new(screen_x, screen_y);
 
-        assert_eq!(
-            graphics.object_at_point(&snapshot, 1, point),
-            Some(front_id)
-        );
-        assert_eq!(
-            graphics.object_at_point_excluding(&snapshot, 1, point, front_id),
-            Some(back_id),
-            "FindVisObject skips only the exact excluded object"
-        );
+        front_assert_eq! {graphics.object_at_point(&snapshot, 1, point) => Some(front_id)};
+        front_assert_eq! {graphics.object_at_point_excluding(&snapshot, 1, point, front_id) => Some(back_id), "FindVisObject skips only the exact excluded object"};
 
         snapshot.objects[1].visibility = clonk_engine::VIS_NONE;
-        assert_eq!(
-            graphics.object_at_point(&snapshot, 1, point),
-            Some(back_id),
-            "FindVisObject must skip a VIS_None front object"
-        );
+        front_assert_eq! {graphics.object_at_point(&snapshot, 1, point) => Some(back_id), "FindVisObject must skip a VIS_None front object"};
         snapshot.objects[1].visibility = clonk_engine::VIS_ALL;
 
         snapshot.objects[0].ocf = clonk_engine::ocf::CONTAINER;
-        assert_eq!(
-            graphics.object_at_point_with_ocf(&snapshot, 1, point, clonk_engine::ocf::CONTAINER,),
+        front_assert_eq! {
+            graphics.object_at_point_with_ocf(&snapshot, 1, point, clonk_engine::ocf::CONTAINER,) =>
             Some(back_id),
             "an OCF-filtered search skips a nonmatching front object"
-        );
+        };
         snapshot.objects[0].ocf = 1;
 
         snapshot.objects[1].alive = false;
-        assert_eq!(
-            graphics.object_at_point(&snapshot, 1, point),
-            Some(front_id),
-            "structures and items are context targets despite Alive=false"
-        );
+        front_assert_eq! {graphics.object_at_point(&snapshot, 1, point) => Some(front_id), "structures and items are context targets despite Alive=false"};
 
         snapshot.objects[1].category |= CATEGORY_MOUSE_IGNORE_FLAG;
-        assert_eq!(graphics.object_at_point(&snapshot, 1, point), Some(back_id));
+        front_assert_eq! {graphics.object_at_point(&snapshot, 1, point) => Some(back_id)};
 
         snapshot.objects[0].container = Some(front_id);
-        assert_eq!(graphics.object_at_point(&snapshot, 1, point), None);
+        front_assert_eq! {graphics.object_at_point(&snapshot, 1, point) => None};
 
         snapshot.objects[0].container = None;
         snapshot.objects[1].category &= !CATEGORY_MOUSE_IGNORE_FLAG;
@@ -10097,11 +8796,7 @@ mod tests {
             cursor: None,
             ..PlayerState::default()
         }];
-        assert_eq!(
-            graphics.object_at_point(&snapshot, 1, point),
-            None,
-            "a valid player without a cursor must fall through to select-next"
-        );
+        front_assert_eq! {graphics.object_at_point(&snapshot, 1, point) => None, "a valid player without a cursor must fall through to select-next"};
     }
 
     #[test]
@@ -10126,87 +8821,27 @@ mod tests {
         ];
 
         snapshot.objects[0].visibility = VIS_OWNER;
-        assert!(GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            1,
-            false,
-        ));
-        assert!(!GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            2,
-            false,
-        ));
+        front_assert! {GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 1, false,)};
+        front_assert! {!GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 2, false,)};
 
         snapshot.objects[0].visibility = VIS_ALLIES | VIS_ENEMIES;
-        assert!(GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            2,
-            false,
-        ));
-        assert!(GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            3,
-            false,
-        ));
-        assert!(!GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            1,
-            false,
-        ));
+        front_assert! {GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 2, false,)};
+        front_assert! {GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 3, false,)};
+        front_assert! {!GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 1, false,)};
 
         snapshot.objects[0].visibility = VIS_LOCAL;
         snapshot.objects[0].local_vars.insert(
             "__local_0".into(),
             serde_json::from_value(serde_json::json!({"Int": 1 << 3})).test_value(),
         );
-        assert!(GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            3,
-            false,
-        ));
-        assert!(!GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            2,
-            false,
-        ));
+        front_assert! {GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 3, false,)};
+        front_assert! {!GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 2, false,)};
 
         snapshot.objects[0].visibility = VIS_GOD;
-        assert!(GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            OWNER_NONE,
-            false,
-        ));
+        front_assert! {GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], OWNER_NONE, false,)};
         snapshot.objects[0].visibility = VIS_OVERLAY_ONLY;
-        assert!(!GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            1,
-            false,
-        ));
-        assert!(GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            1,
-            true,
-        ));
+        front_assert! {!GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 1, false,)};
+        front_assert! {GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 1, true,)};
 
         let mut layer = snapshot.objects[0].clone();
         layer.id = ObjectId::new(2);
@@ -10215,48 +8850,37 @@ mod tests {
         snapshot.objects[0].visibility = 0;
         snapshot.objects[0].layer = Some(layer.id);
         snapshot.objects.push(layer);
-        assert!(!GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            1,
-            false,
-        ));
-        assert!(GraphicsSystem::object_is_visible(
-            &snapshot.objects,
-            &snapshot.players,
-            &snapshot.objects[0],
-            3,
-            false,
-        ));
+        front_assert! {!GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 1, false,)};
+        front_assert! {GraphicsSystem::object_is_visible(&snapshot.objects, &snapshot.players, &snapshot.objects[0], 3, false,)};
     }
 
     #[test]
     fn graphics_system_draws_ground() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
-        let mut graphics = test_graphics(320, 180, 150, "Test Scenario");
+        let mut graphics = test_graphics((320, 180, 150), "Test Scenario");
         graphics.set_world_width(256);
 
         let viewports = vec![ViewportInput::from_focus(focus)];
         let atlas = graphics.render_frame(&snapshot, &viewports);
-        assert!(!atlas.is_empty());
+        front_assert! {!atlas.is_empty()};
 
         let ground = graphics.surface().get_pixel(0, 179).test_value();
-        assert_ne!(ground, Color::opaque(8, 12, 24));
+        front_assert_ne! {ground => Color::opaque(8, 12, 24)};
     }
 
     fn pxs_particle(material: &str, fixed: [i32; 4], slot: u32) -> clonk_engine::ParticleSnapshot {
         clonk_engine::ParticleSnapshot {
-            definition_id: format!("material/pxs/{material}"),
-            position: FloatVector2::new(fixed[0] as f32 / 65_536.0, fixed[1] as f32 / 65_536.0),
             velocity: FloatVector2::new(fixed[2] as f32 / 65_536.0, fixed[3] as f32 / 65_536.0),
-            life: 0,
             parameter_a: 0.0,
             parameter_b: 0,
-            layer: clonk_engine::ParticleLayer::Global,
             pxs_fixed: Some(fixed),
             pxs_slot: Some(slot),
+            ..particle_fixture(
+                format!("material/pxs/{material}"),
+                FloatVector2::new(fixed[0] as f32 / 65_536.0, fixed[1] as f32 / 65_536.0),
+                ParticleLayer::Global,
+            )
         }
     }
 
@@ -10266,7 +8890,7 @@ mod tests {
         // pixels into x-xdir/y-ydir velocity lines. Its Clonk transparency is
         // max(alpha, 195-(195-alpha)/fixtoi(|xdir|+|ydir|))
         // (C4PXS.cpp:242-275).
-        let mut graphics = test_graphics(12, 12, 12, "PXS");
+        let mut graphics = test_graphics((12, 12, 12), "PXS");
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         graphics.set_material_render_info(Arc::new(HashMap::from([(
             "rain".to_string(),
@@ -10276,20 +8900,9 @@ mod tests {
 
         graphics.draw_pxs(std::slice::from_ref(&particle), 1.0, None);
 
-        assert_eq!(
-            graphics.surface().get_pixel(6, 8),
-            Some(Color::opaque(123, 61, 30)),
-            "two-pixel velocity has C++ transparency 98 (opacity 157)"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(7, 8),
-            Some(Color::opaque(123, 61, 30))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(8, 8),
-            Some(Color::opaque(0, 0, 0)),
-            "GL_LINES applies the diamond-exit rule and omits the final endpoint",
-        );
+        front_assert_eq! {graphics.surface().get_pixel(6, 8) => Some(Color::opaque(123, 61, 30)), "two-pixel velocity has C++ transparency 98 (opacity 157)"};
+        front_assert_eq! {graphics.surface().get_pixel(7, 8) => Some(Color::opaque(123, 61, 30))};
+        front_assert_eq! {graphics.surface().get_pixel(8, 8) => Some(Color::opaque(0, 0, 0)), "GL_LINES applies the diamond-exit rule and omits the final endpoint",};
     }
 
     #[test]
@@ -10310,17 +8923,17 @@ mod tests {
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(scene.commands.len(), 1);
+        front_assert_eq! {scene.commands.len() => 1};
         let GpuCommand::Solid {
             vertices, topology, ..
         } = &scene.commands[0]
         else {
             panic!("moving PXS did not lower to solid geometry");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::LineList);
-        assert_eq!(vertices.len(), 2);
-        assert_eq!(vertices[0].position, [2.75, 5.25, 1.0]);
-        assert_eq!(vertices[1].position, [11.625, 7.875, 1.0]);
+        front_assert_eq! {*topology => GpuPrimitiveTopology::LineList};
+        front_assert_eq! {vertices.len() => 2};
+        front_assert_eq! {vertices[0].position => [2.75, 5.25, 1.0]};
+        front_assert_eq! {vertices[1].position => [11.625, 7.875, 1.0]};
     }
 
     #[test]
@@ -10350,14 +8963,10 @@ mod tests {
         else {
             panic!("a PXS burst did not stay one retained solid run");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::LineList);
-        assert_eq!(
-            vertices.len(),
-            8,
-            "every endpoint pair appends to the same reusable storage"
-        );
-        assert_eq!(vertices[0].position, [1.5, 2.5, 1.0]);
-        assert_eq!(vertices[7].position, [6.5, 5.5, 1.0]);
+        front_assert_eq! {*topology => GpuPrimitiveTopology::LineList};
+        front_assert_eq! {vertices.len() => 8, "every endpoint pair appends to the same reusable storage"};
+        front_assert_eq! {vertices[0].position => [1.5, 2.5, 1.0]};
+        front_assert_eq! {vertices[7].position => [6.5, 5.5, 1.0]};
     }
 
     #[test]
@@ -10384,10 +8993,10 @@ mod tests {
         else {
             panic!("degenerate DrawLineDw did not remain one line primitive");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::LineList);
-        assert_eq!(vertices.len(), 2);
-        assert_eq!(vertices[0].position, [2.75, 4.25, 1.0]);
-        assert_eq!(vertices[0].position, vertices[1].position);
+        front_assert_eq! {*topology => GpuPrimitiveTopology::LineList};
+        front_assert_eq! {vertices.len() => 2};
+        front_assert_eq! {vertices[0].position => [2.75, 4.25, 1.0]};
+        front_assert_eq! {vertices[0].position => vertices[1].position};
     }
 
     #[test]
@@ -10417,9 +9026,9 @@ mod tests {
         else {
             panic!("DrawPixInt did not remain one retained point");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::PointList);
-        assert_eq!(*alpha_mode, GpuSolidAlphaMode::SourceOver);
-        assert_eq!(vertices[0].position, [1.25, 1.75, 1.0]);
+        front_assert_eq! {*topology => GpuPrimitiveTopology::PointList};
+        front_assert_eq! {*alpha_mode => GpuSolidAlphaMode::SourceOver};
+        front_assert_eq! {vertices[0].position => [1.25, 1.75, 1.0]};
     }
 
     #[test]
@@ -10443,39 +9052,36 @@ mod tests {
         let [GpuCommand::Solid { vertices, .. }] = scene.commands.as_slice() else {
             panic!("edge DrawPixInt was culled before physical scale was known");
         };
-        assert_eq!(vertices[0].position, [0.0, 1.5, 1.0]);
+        front_assert_eq! {vertices[0].position => [0.0, 1.5, 1.0]};
     }
 
     #[test]
     fn stationary_pxs_samples_fog_before_rounding_its_raster_position() {
-        let mut graphics = test_graphics(3, 2, 2, "fractional PXS fog");
+        let mut graphics = test_graphics((3, 2, 2), "fractional PXS fog");
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         graphics.set_material_render_info(Arc::new(HashMap::from([(
             "rain".to_string(),
             MaterialRenderInfo::new([200, 100, 50, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25),
         )])));
-        graphics.active_fog_map = Some(Arc::new(ClrModMap {
-            resolution_x: 1,
-            resolution_y: 1,
-            width: 3,
-            height: 2,
-            origin_x: 0,
-            origin_y: 0,
-            fade_transparent: false,
-            cells: vec![0x00ff_ffff, 0, 0, 0x00ff_ffff, 0, 0],
-        }));
+        graphics.active_fog_map = Some(Arc::new(clr_mod_map_fixture(
+            1,
+            1,
+            3,
+            2,
+            vec![0x00ff_ffff, 0, 0, 0x00ff_ffff, 0, 0],
+        )));
         let particle = pxs_particle("rain", [49_152, 0, 0, 0], 0); // x = 0.75
 
         graphics.draw_pxs(&[particle], 1.0, None);
 
-        assert_eq!(
-            graphics.surface().get_pixel(1, 0),
+        front_assert_eq! {
+            graphics.surface().get_pixel(1, 0) =>
             Some(modulate_surface_color(
                 Color::opaque(200, 100, 50),
                 0x00ff_ffff,
             )),
             "DrawPix samples fog at int(0.75)=0 before rasterizing at round(0.75)=1",
-        );
+        };
     }
 
     #[test]
@@ -10511,22 +9117,18 @@ mod tests {
         ];
         for y in 0..8 {
             for x in 0..8 {
-                assert_eq!(
-                    surface.get_pixel(x, y),
+                front_assert_eq! {
+                    surface.get_pixel(x, y) =>
                     Some(if expected.contains(&(x, y)) {
                         MOUSE_SELECTION_FRAME_COLOR
                     } else {
                         background
                     }),
                     "selection-frame pixel ({x},{y})"
-                );
+                };
             }
         }
-        assert_eq!(
-            surface.get_pixel(5, 6),
-            Some(background),
-            "the shared second endpoint stays omitted by all four GL lines"
-        );
+        front_assert_eq! {surface.get_pixel(5, 6) => Some(background), "the shared second endpoint stays omitted by all four GL lines"};
 
         let active_palette_red = Color::opaque(4, 8, 12);
         surface.fill(background);
@@ -10538,11 +9140,7 @@ mod tests {
             active_palette_red,
             None,
         );
-        assert_eq!(
-            surface.get_pixel(3, 3),
-            Some(active_palette_red),
-            "the selection frame uses color index 10 from the active game palette"
-        );
+        front_assert_eq! {surface.get_pixel(3, 3) => Some(active_palette_red), "the selection frame uses color index 10 from the active game palette"};
     }
 
     #[test]
@@ -10563,7 +9161,7 @@ mod tests {
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert_eq!(scene.commands.len(), 1);
+        front_assert_eq! {scene.commands.len() => 1};
         let GpuCommand::Solid {
             vertices,
             topology,
@@ -10573,9 +9171,9 @@ mod tests {
         else {
             panic!("selection frame did not lower to solid geometry");
         };
-        assert_eq!(*topology, GpuPrimitiveTopology::LineList);
-        assert_eq!(vertices.len(), 8);
-        assert_eq!(*clip, Some(SurfaceRect::new(1, 1, 10, 8)));
+        front_assert_eq! {*topology => GpuPrimitiveTopology::LineList};
+        front_assert_eq! {vertices.len() => 8};
+        front_assert_eq! {*clip => Some(SurfaceRect::new(1, 1, 10, 8))};
     }
 
     #[test]
@@ -10595,10 +9193,7 @@ mod tests {
             Some(&gamma),
         );
 
-        assert_eq!(
-            surface.get_pixel(1, 1),
-            Some(gamma_encode_fragment(MOUSE_SELECTION_FRAME_COLOR, &gamma))
-        );
+        front_assert_eq! {surface.get_pixel(1, 1) => Some(gamma_encode_fragment(MOUSE_SELECTION_FRAME_COLOR, &gamma))};
     }
 
     #[test]
@@ -10606,7 +9201,7 @@ mod tests {
         // The enlarged VisibleRect checks fixtoi(x,y) before drawing the
         // x-xdir velocity line (C4PXS.cpp:245-275). This endpoint is far
         // outside that rect even though its 100px line crosses the surface.
-        let mut graphics = test_graphics(12, 12, 12, "PXS");
+        let mut graphics = test_graphics((12, 12, 12), "PXS");
         graphics.surface_mut().fill(Color::opaque(1, 2, 3));
         graphics.set_material_render_info(Arc::new(HashMap::from([(
             "rain".to_string(),
@@ -10616,11 +9211,7 @@ mod tests {
 
         graphics.draw_pxs(std::slice::from_ref(&particle), 1.0, None);
 
-        assert!(graphics
-            .surface()
-            .pixels()
-            .chunks_exact(4)
-            .all(|pixel| pixel == [1, 2, 3, 255]));
+        front_assert! {graphics.surface().pixels().chunks_exact(4).all(|pixel| pixel == [1, 2, 3, 255])};
     }
 
     #[test]
@@ -10629,7 +9220,7 @@ mod tests {
         // the 500-entry chunk, then applies PXSGfxRt offsets and size
         // (C4PXS.cpp:280-307). A missing PXSGfx texture stays in the first,
         // old-style pass (C4Material.cpp:382-385; C4PXS.cpp:257-260).
-        let mut graphics = test_graphics(16, 16, 16, "PXS");
+        let mut graphics = test_graphics((16, 16, 16), "PXS");
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         let mut snow_pixels = vec![0; 12 * 6 * 4];
         for y in 0..6usize {
@@ -10693,24 +9284,14 @@ mod tests {
         // 507 % 500 = 7: phase x=1; z=1; tx=6 shifts x by one. Texture
         // transparency 127 plus modulation 16 gives 143, i.e. source opacity
         // 112 over black (PerformBlt alpha addition).
-        assert_eq!(
-            graphics.surface().get_pixel(5, 4),
-            Some(Color::opaque(112, 0, 0))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(10, 10),
-            Some(Color::opaque(90, 80, 70))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(13, 13),
-            Some(Color::opaque(11, 22, 33)),
-            "Surface8 textures are landscape patterns, not graphical PXS sheets"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(14, 14),
+        front_assert_eq! {graphics.surface().get_pixel(5, 4) => Some(Color::opaque(112, 0, 0))};
+        front_assert_eq! {graphics.surface().get_pixel(10, 10) => Some(Color::opaque(90, 80, 70))};
+        front_assert_eq! {graphics.surface().get_pixel(13, 13) => Some(Color::opaque(11, 22, 33)), "Surface8 textures are landscape patterns, not graphical PXS sheets"};
+        front_assert_eq! {
+            graphics.surface().get_pixel(14, 14) =>
             Some(Color::opaque(44, 55, 66)),
             "a 0x0 Surface32 identity contains native divide-by-zero as old-style PXS"
-        );
+        };
     }
 
     #[test]
@@ -10718,7 +9299,7 @@ mod tests {
         // With PXSGfx disabled, the first pass must not skip materials with a
         // sheet and the second graphical pass must not run
         // (src/C4PXS.cpp:259-260,279-281).
-        let mut graphics = test_graphics(8, 8, 8, "PXS disabled");
+        let mut graphics = test_graphics((8, 8, 8), "PXS disabled");
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         graphics.set_pxs_graphics(false);
         graphics.set_material_texture_surfaces(Arc::new(HashMap::from([(
@@ -10743,41 +9324,17 @@ mod tests {
 
         graphics.draw_pxs(&particles, 1.0, None);
 
-        assert_eq!(
-            graphics.surface().get_pixel(3, 4),
-            Some(Color::opaque(0, 157, 0)),
-            "disabled sheet graphics must use the old-style velocity line"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(6, 4),
-            Some(Color::opaque(0, 0, 0)),
-            "the graphical second pass must stay disabled"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(2, 6),
-            Some(Color::opaque(20, 40, 60)),
-            "a material without a sheet must retain its fallback"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(3, 4) => Some(Color::opaque(0, 157, 0)), "disabled sheet graphics must use the old-style velocity line"};
+        front_assert_eq! {graphics.surface().get_pixel(6, 4) => Some(Color::opaque(0, 0, 0)), "the graphical second pass must stay disabled"};
+        front_assert_eq! {graphics.surface().get_pixel(2, 6) => Some(Color::opaque(20, 40, 60)), "a material without a sheet must retain its fallback"};
 
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         graphics.set_pxs_graphics(true);
         graphics.draw_pxs(&particles, 1.0, None);
 
-        assert_eq!(
-            graphics.surface().get_pixel(3, 4),
-            Some(Color::opaque(0, 0, 0)),
-            "enabled sheet graphics must skip the old-style first pass"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(6, 4),
-            Some(Color::opaque(255, 0, 0)),
-            "re-enabling the option must immediately restore the sprite pass"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(2, 6),
-            Some(Color::opaque(20, 40, 60)),
-            "a material without a sheet must be identical in either state"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(3, 4) => Some(Color::opaque(0, 0, 0)), "enabled sheet graphics must skip the old-style first pass"};
+        front_assert_eq! {graphics.surface().get_pixel(6, 4) => Some(Color::opaque(255, 0, 0)), "re-enabling the option must immediately restore the sprite pass"};
+        front_assert_eq! {graphics.surface().get_pixel(2, 6) => Some(Color::opaque(20, 40, 60)), "a material without a sheet must be identical in either state"};
     }
 
     #[test]
@@ -10813,10 +9370,10 @@ mod tests {
             None,
         );
 
-        assert_eq!(surface.get_pixel(0, 1), Some(Color::opaque(64, 0, 0)));
-        assert_eq!(surface.get_pixel(1, 1), Some(Color::opaque(64, 64, 64)));
-        assert_eq!(surface.get_pixel(2, 1), Some(Color::opaque(191, 191, 191)));
-        assert_eq!(surface.get_pixel(3, 1), Some(Color::opaque(191, 191, 255)));
+        front_assert_eq! {surface.get_pixel(0, 1) => Some(Color::opaque(64, 0, 0))};
+        front_assert_eq! {surface.get_pixel(1, 1) => Some(Color::opaque(64, 64, 64))};
+        front_assert_eq! {surface.get_pixel(2, 1) => Some(Color::opaque(191, 191, 191))};
+        front_assert_eq! {surface.get_pixel(3, 1) => Some(Color::opaque(191, 191, 255))};
     }
 
     #[test]
@@ -10826,7 +9383,7 @@ mod tests {
         // into the simulation (C4Viewport.cpp:1056-1078; C4Weather.cpp:48-58,
         // 205-214). A scalar alone must not alter otherwise identical pixels.
         let render = |snapshot: &SimulationSnapshot| {
-            let mut graphics = test_graphics(80, 60, 60, "Weather");
+            let mut graphics = test_graphics((80, 60, 60), "Weather");
             graphics.render_frame(snapshot, &[ViewportInput::from_focus(&snapshot.objects[0])]);
             graphics.surface().pixels().to_vec()
         };
@@ -10839,7 +9396,7 @@ mod tests {
             .with_precipitation(80)
             .with_precipitation_strength(80);
 
-        assert_eq!(render(&scalar_only), render(&dry));
+        front_assert_eq! {render(&scalar_only) => render(&dry)};
     }
 
     #[test]
@@ -10851,7 +9408,7 @@ mod tests {
         // Weather.Execute runs after ExecObjects (C4Game.cpp:811-835). The
         // launch-frame presentation therefore must not add a separate flash.
         let render = |snapshot: &SimulationSnapshot| {
-            let mut graphics = test_graphics(80, 60, 60, "Weather lightning");
+            let mut graphics = test_graphics((80, 60, 60), "Weather lightning");
             graphics.set_sky(Some(SkyRenderState::new(
                 SkySettings {
                     fade_top: RgbColor::new(24, 48, 96),
@@ -10869,7 +9426,7 @@ mod tests {
             .weather_events
             .push(WeatherEvent::Lightning { position: 40 });
 
-        assert_eq!(render(&launched), render(&clear));
+        front_assert_eq! {render(&launched) => render(&clear)};
     }
 
     #[test]
@@ -10889,15 +9446,8 @@ mod tests {
             Some(DefinitionRect::new(0, 0, 1, 1)),
             false,
         );
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "PXS order",
-            Arc::clone(&sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((80, 60, 60), "PXS order", Arc::clone(&sprites));
         graphics.set_material_render_info(Arc::new(HashMap::from([(
             "rain".to_string(),
             MaterialRenderInfo::new([0, 0, 240, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25),
@@ -10910,24 +9460,12 @@ mod tests {
             .world_to_screen(0, snapshot.objects[0].position)
             .test_value();
 
-        assert_eq!(
-            graphics
-                .surface()
-                .get_pixel(screen_x.round() as u32, screen_y.round() as u32),
-            Some(standard_gamma_color(Color::opaque(240, 0, 0))),
-        );
+        front_assert_eq! {graphics.surface().get_pixel(screen_x.round() as u32, screen_y.round() as u32) => Some(standard_gamma_color(Color::opaque(240, 0, 0))),};
 
         let mut background_snapshot = snapshot.clone();
         background_snapshot.objects[0].category |= CATEGORY_BACKGROUND_FLAG;
-        let mut background_graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "PXS background order",
-            sprites,
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut background_graphics =
+            test_graphics_with_sprites((80, 60, 60), "PXS background order", sprites);
         background_graphics.set_material_render_info(Arc::new(HashMap::from([(
             "rain".to_string(),
             MaterialRenderInfo::new([0, 0, 240, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25),
@@ -10942,15 +9480,15 @@ mod tests {
         let lighting =
             GraphicsSystem::lighting_factor(background_snapshot.environment.settings.time_of_day);
 
-        assert_eq!(
+        front_assert_eq! {
             background_graphics
                 .surface()
-                .get_pixel(screen_x.round() as u32, screen_y.round() as u32),
+                .get_pixel(screen_x.round() as u32, screen_y.round() as u32) =>
             Some(standard_gamma_color(
                 Color::opaque(0, 0, 240).modulate(lighting),
             )),
             "PXS must cover C4D_Background objects drawn before landscape",
-        );
+        };
     }
 
     #[test]
@@ -10991,18 +9529,15 @@ mod tests {
             Some(DefinitionRect::new(-6, -6, 12, 12)),
             false,
         );
-        let hud = HudGraphics {
-            select_mark: Some(ImageData::new(
+        let hud = hud_graphics_fixture(|hud| {
+            hud.select_mark = Some(ImageData::new(
                 20,
                 5,
                 (0..100).flat_map(|_| [0, 220, 0, 255]).collect(),
-            )),
-            ..Default::default()
-        };
+            ))
+        });
         let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
+            (80, 60, 60),
             "Parallax select mark",
             sprites,
             empty_cursor_atlas(),
@@ -11022,15 +9557,8 @@ mod tests {
         // unresolved origin would place this mark at (-36,-13) — outside the
         // cull margin entirely. TargetPos pins it at x + Shape.x - 2 = 12.
         let (viewport_x, viewport_y) = graphics.viewport();
-        assert!(
-            viewport_x > 16 && viewport_y > 5,
-            "camera must be scrolled far enough to separate the two origins",
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(13, 8),
-            Some(standard_gamma_color(Color::opaque(0, 220, 0))),
-            "select marks follow the pinned parallax object",
-        );
+        front_assert! {viewport_x > 16 && viewport_y > 5, "camera must be scrolled far enough to separate the two origins",};
+        front_assert_eq! {graphics.surface().get_pixel(13, 8) => Some(standard_gamma_color(Color::opaque(0, 220, 0))), "select marks follow the pinned parallax object",};
     }
 
     #[test]
@@ -11062,18 +9590,15 @@ mod tests {
                 Some(DefinitionRect::new(-6, -6, 12, 12)),
                 false,
             );
-            let hud = HudGraphics {
-                select_mark: Some(ImageData::new(
+            let hud = hud_graphics_fixture(|hud| {
+                hud.select_mark = Some(ImageData::new(
                     20,
                     5,
                     (0..100).flat_map(|_| [0, 220, 0, 255]).collect(),
-                )),
-                ..Default::default()
-            };
+                ))
+            });
             let mut graphics = test_graphics_with(
-                80,
-                60,
-                60,
+                (80, 60, 60),
                 "Foreground order",
                 sprites,
                 empty_cursor_atlas(),
@@ -11099,59 +9624,50 @@ mod tests {
             graphics.surface().get_pixel(x as u32, y as u32)
         };
 
-        assert_eq!(
+        front_assert_eq! {
             render(
                 clonk_engine::DEFAULT_CATEGORY | CATEGORY_FOREGROUND_FLAG,
                 true,
-            ),
+            ) =>
             Some(standard_gamma_color(Color::opaque(0, 220, 0))),
             "cursor mark covers ordinary foreground",
-        );
-        assert_eq!(
+        };
+        front_assert_eq! {
             render(
                 clonk_engine::DEFAULT_CATEGORY | CATEGORY_FOREGROUND_FLAG | CATEGORY_PARALLAX_FLAG,
                 true,
-            ),
+            ) =>
             Some(standard_gamma_color(Color::opaque(220, 0, 0))),
             "custom-GUI/parallax foreground covers cursor mark",
-        );
-        assert_eq!(
+        };
+        front_assert_eq! {
             render(
                 clonk_engine::DEFAULT_CATEGORY | CATEGORY_FOREGROUND_FLAG,
                 false,
-            ),
+            ) =>
             Some(standard_gamma_color(Color::opaque(220, 0, 0))),
             "film replay suppresses object selection marks",
-        );
+        };
     }
 
     #[test]
     fn overlay_state_feeds_the_hud_render() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
-        let mut graphics = test_graphics(320, 180, 150, "Test Scenario");
+        let mut graphics = test_graphics((320, 180, 150), "Test Scenario");
         graphics.update_overlay(&GraphicsOverlay {
             frame_text: "FRAME",
             status_text: "STATUS",
-            debug_hud: false,
-            viewport_overlays_visible: true,
-            players: Vec::new(),
-            crew_name_labels: Vec::new(),
-            speaking: SpeakingOverlay::default(),
             game_time_seconds: 61,
             message_board: MessageBoardOverlay {
                 log_lines: vec!["Player join: Test".to_string()],
                 back_scroll: 0,
                 ..MessageBoardOverlay::default()
             },
-            clock_text: None,
-            frames_per_second: None,
-            upper_board_mode: hud::UpperBoardMode::Full,
             show_portraits: false,
-            show_commands: true,
-            show_command_keys: true,
+            ..graphics_overlay_fixture()
         });
-        assert!(!graphics.show_portraits);
+        front_assert! {!graphics.show_portraits};
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
         // Rendering with overlay state must not panic; without an
@@ -11175,24 +9691,10 @@ mod tests {
                 pixels[index..index + 4].copy_from_slice(&[10, 10, 200, 255]);
             }
         }
-        let hud_graphics = Arc::new(HudGraphics {
-            control: Some(ImageData::new(width, height, pixels)),
-            ..HudGraphics::default()
-        });
-        let mut graphics = test_graphics_with(
-            320,
-            180,
-            150,
-            "Control Hint",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            hud_graphics,
-        );
+        let hud_graphics =
+            test_hud_graphics(|hud| hud.control = Some(ImageData::new(width, height, pixels)));
+        let mut graphics = test_graphics_with_hud((320, 180, 150), "Control Hint", hud_graphics);
         graphics.update_overlay(&GraphicsOverlay {
-            frame_text: "",
-            status_text: "",
-            debug_hud: false,
-            viewport_overlays_visible: true,
             players: vec![PlayerOverlay {
                 owner: 0,
                 name: "Player".to_string(),
@@ -11217,24 +9719,12 @@ mod tests {
                 commands: Vec::new(),
                 flash_command: 0,
             }],
-            crew_name_labels: Vec::new(),
-            speaking: SpeakingOverlay::default(),
-            game_time_seconds: 0,
-            message_board: MessageBoardOverlay::default(),
-            clock_text: None,
-            frames_per_second: None,
-            upper_board_mode: hud::UpperBoardMode::Full,
-            show_portraits: true,
-            show_commands: true,
-            show_command_keys: true,
+            ..graphics_overlay_fixture()
         });
 
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
         // size=min(320/3,7*180/24)=52, default origin=(134,15).
-        assert_eq!(
-            graphics.surface().get_pixel(135, 16),
-            Some(Color::opaque(10, 10, 200))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(135, 16) => Some(Color::opaque(10, 10, 200))};
     }
 
     #[test]
@@ -11245,42 +9735,24 @@ mod tests {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
         let board = ImageData::new(4, 55, vec![120; 4 * 55 * 4]);
-        let hud_graphics = Arc::new(HudGraphics {
-            upper_board: Some(board),
-            ..HudGraphics::default()
-        });
-        let mut graphics = test_graphics_with(
-            320,
-            240,
-            150,
-            "Chrome",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            hud_graphics,
-        );
+        let hud_graphics = test_hud_graphics(|hud| hud.upper_board = Some(board));
+        let mut graphics = test_graphics_with_hud((320, 240, 150), "Chrome", hud_graphics);
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
         let rect = graphics.active_viewports[0].rect;
-        assert_eq!(rect.y, hud::UPPER_BOARD_HEIGHT);
+        front_assert_eq! {rect.y => hud::UPPER_BOARD_HEIGHT};
         let board_height = graphics.message_board_height();
-        assert_eq!(
-            rect.height as i32,
-            240 - hud::UPPER_BOARD_HEIGHT - board_height
-        );
-        assert_eq!(
-            graphics.preferred_dialog_rect(None),
+        front_assert_eq! {rect.height as i32 => 240 - hud::UPPER_BOARD_HEIGHT - board_height};
+        front_assert_eq! {
+            graphics.preferred_dialog_rect(None) =>
             SurfaceRect::new(
                 0,
                 hud::UPPER_BOARD_HEIGHT,
                 320,
                 (240 - hud::UPPER_BOARD_HEIGHT - board_height) as u32,
             )
-        );
-        assert_eq!(
-            graphics.preferred_dialog_rect(Some(focus.owner)),
-            rect,
-            "mouse control narrows dialog placement to its viewport"
-        );
+        };
+        front_assert_eq! {graphics.preferred_dialog_rect(Some(focus.owner)) => rect, "mouse control narrows dialog placement to its viewport"};
     }
 
     #[test]
@@ -11288,19 +9760,9 @@ mod tests {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
         let board = ImageData::new(4, 55, vec![120; 4 * 55 * 4]);
-        let hud_graphics = Arc::new(HudGraphics {
-            upper_board: Some(board),
-            ..HudGraphics::default()
-        });
-        let mut graphics = test_graphics_with(
-            320,
-            240,
-            150,
-            "Dynamic message board",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            hud_graphics,
-        );
+        let hud_graphics = test_hud_graphics(|hud| hud.upper_board = Some(board));
+        let mut graphics =
+            test_graphics_with_hud((320, 240, 150), "Dynamic message board", hud_graphics);
         let line_height = graphics.hud_font().line_height();
         let viewports = vec![ViewportInput::from_focus(focus)];
 
@@ -11325,20 +9787,17 @@ mod tests {
             graphics.message_board = message_board;
             graphics.render_frame(&snapshot, &viewports);
             let rect = graphics.active_viewports[0].rect;
-            assert_eq!(graphics.message_board_height(), expected_height);
-            assert_eq!(
-                rect.height as i32,
-                240 - hud::UPPER_BOARD_HEIGHT - expected_height
-            );
-            assert_eq!(
-                graphics.preferred_dialog_rect(None),
+            front_assert_eq! {graphics.message_board_height() => expected_height};
+            front_assert_eq! {rect.height as i32 => 240 - hud::UPPER_BOARD_HEIGHT - expected_height};
+            front_assert_eq! {
+                graphics.preferred_dialog_rect(None) =>
                 SurfaceRect::new(
                     0,
                     hud::UPPER_BOARD_HEIGHT,
                     320,
                     (240 - hud::UPPER_BOARD_HEIGHT - expected_height) as u32,
                 )
-            );
+            };
         }
     }
 
@@ -11353,58 +9812,24 @@ mod tests {
             (hud::UpperBoardMode::Small, 25),
             (hud::UpperBoardMode::Mini, 0),
         ] {
-            let hud_graphics = Arc::new(HudGraphics {
-                upper_board: Some(ImageData::new(4, 55, vec![120; 4 * 55 * 4])),
-                ..HudGraphics::default()
+            let hud_graphics = test_hud_graphics(|hud| {
+                hud.upper_board = Some(ImageData::new(4, 55, vec![120; 4 * 55 * 4]))
             });
-            let mut graphics = test_graphics_with(
-                800,
-                240,
-                1_000,
-                "Chrome modes",
-                empty_sprites(),
-                empty_cursor_atlas(),
-                hud_graphics,
-            );
+            let mut graphics =
+                test_graphics_with_hud((800, 240, 1_000), "Chrome modes", hud_graphics);
             graphics.update_overlay(&GraphicsOverlay {
-                frame_text: "",
-                status_text: "",
-                debug_hud: false,
-                viewport_overlays_visible: true,
-                players: Vec::new(),
-                crew_name_labels: Vec::new(),
-                speaking: SpeakingOverlay::default(),
-                game_time_seconds: 0,
-                message_board: MessageBoardOverlay::default(),
-                clock_text: None,
-                frames_per_second: None,
                 upper_board_mode: mode,
-                show_portraits: true,
-                show_commands: true,
-                show_command_keys: true,
+                ..graphics_overlay_fixture()
             });
-            assert_eq!(graphics.upper_board_mode, mode);
+            front_assert_eq! {graphics.upper_board_mode => mode};
             let atlas = graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
-            assert_eq!(graphics.upper_board_mode, mode);
+            front_assert_eq! {graphics.upper_board_mode => mode};
 
             let message_height = graphics.message_board_height();
             let viewport = graphics.active_viewports[0].rect;
-            assert_eq!(viewport.y, expected_top, "mode {mode:?}");
-            assert_eq!(
-                viewport.height as i32,
-                240 - expected_top - message_height,
-                "mode {mode:?}"
-            );
-            assert_eq!(
-                graphics.preferred_dialog_rect(None),
-                SurfaceRect::new(
-                    0,
-                    expected_top,
-                    800,
-                    (240 - expected_top - message_height) as u32,
-                ),
-                "mode {mode:?}"
-            );
+            front_assert_eq! {viewport.y => expected_top, "mode {mode:?}"};
+            front_assert_eq! {viewport.height as i32 => 240 - expected_top - message_height, "mode {mode:?}"};
+            front_assert_eq! {graphics.preferred_dialog_rect(None) => SurfaceRect::new(0, expected_top, 800, (240 - expected_top - message_height) as u32,), "mode {mode:?}"};
 
             let upper = atlas.iter().find(|entry| entry.label == "upper_board");
             let message = atlas
@@ -11420,44 +9845,44 @@ mod tests {
             match mode {
                 hud::UpperBoardMode::Hide => {
                     let upper = upper.test_value();
-                    assert_eq!((upper.width, upper.height), (800, 55));
-                    assert_eq!(message.width, 800);
+                    front_assert_eq! {(upper.width, upper.height) => (800, 55)};
+                    front_assert_eq! {message.width => 800};
                 }
                 hud::UpperBoardMode::Full => {
                     let upper = upper.test_value();
-                    assert_eq!((upper.width, upper.height), (800, 55));
-                    assert_eq!(message.width, 800);
+                    front_assert_eq! {(upper.width, upper.height) => (800, 55)};
+                    front_assert_eq! {message.width => 800};
                 }
                 hud::UpperBoardMode::Small => {
                     let upper = upper.test_value();
-                    assert_eq!((upper.width, upper.height), (800, 27));
-                    assert_eq!(message.width, 800);
+                    front_assert_eq! {(upper.width, upper.height) => (800, 27)};
+                    front_assert_eq! {message.width => 800};
                 }
                 hud::UpperBoardMode::Mini => {
                     let upper = upper.test_value();
-                    assert_eq!(upper.width + message.width, 800);
-                    assert_eq!(upper.height, message.height);
+                    front_assert_eq! {upper.width + message.width => 800};
+                    front_assert_eq! {upper.height => message.height};
 
                     let initialized_width = upper.width as u32;
                     graphics.set_upper_board_mode(hud::UpperBoardMode::Mini, 100 * 60 * 60);
-                    assert_eq!(
+                    front_assert_eq! {
                         graphics
                             .upper_board_output_rect()
                             .expect("latched Mini facet")
-                            .width,
+                            .width =>
                         initialized_width,
                         "TextWidth stays fixed between fullscreen-component initializations"
-                    );
+                    };
                     graphics.set_upper_board_mode(hud::UpperBoardMode::Full, 100 * 60 * 60);
                     graphics.set_upper_board_mode(hud::UpperBoardMode::Mini, 100 * 60 * 60);
-                    assert!(
+                    front_assert! {
                         graphics
                             .upper_board_output_rect()
                             .expect("reinitialized Mini facet")
                             .width
                             > initialized_width,
                         "a reinitialization latches the wider 100-hour time string"
-                    );
+                    };
                 }
             }
         }
@@ -11469,52 +9894,36 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(40, 40));
         snapshot.objects[0].position = Vector2::new(20, 20);
         let focus = &snapshot.objects[0];
-        let hud_graphics = Arc::new(HudGraphics {
-            upper_board: Some(ImageData::new(4, 50, vec![120; 4 * 50 * 4])),
-            ..HudGraphics::default()
+        let hud_graphics = test_hud_graphics(|hud| {
+            hud.upper_board = Some(ImageData::new(4, 50, vec![120; 4 * 50 * 4]))
         });
-        let mut graphics = test_graphics_with(
-            320,
-            200,
-            1_000,
-            "Small world chrome",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            hud_graphics,
-        );
+        let mut graphics =
+            test_graphics_with_hud((320, 200, 1_000), "Small world chrome", hud_graphics);
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
 
         let stored_world = (
             graphics.active_viewports[0].world_width,
             graphics.active_viewports[0].world_height,
         );
-        assert_ne!(stored_world.1, graphics.world_height);
+        front_assert_ne! {stored_world.1 => graphics.world_height};
         graphics.set_upper_board_mode(hud::UpperBoardMode::Small, 0);
 
         let cell = graphics.layout_viewports(1)[0];
         let expected =
             GraphicsSystem::centered_viewport_rect_for_world(cell, stored_world.0, stored_world.1);
-        assert_eq!(graphics.active_viewports[0].rect, expected);
-        assert_eq!((expected.width, expected.height), (120, 120));
+        front_assert_eq! {graphics.active_viewports[0].rect => expected};
+        front_assert_eq! {(expected.width, expected.height) => (120, 120)};
     }
 
     #[test]
     fn upper_board_relayout_clamps_no_owner_camera_at_large_world_edge() {
         let mut snapshot = make_snapshot();
         snapshot.landscape = Some(Landscape::flat(1_000, 1_000));
-        let hud_graphics = Arc::new(HudGraphics {
-            upper_board: Some(ImageData::new(4, 50, vec![120; 4 * 50 * 4])),
-            ..HudGraphics::default()
+        let hud_graphics = test_hud_graphics(|hud| {
+            hud.upper_board = Some(ImageData::new(4, 50, vec![120; 4 * 50 * 4]))
         });
-        let mut graphics = test_graphics_with(
-            320,
-            200,
-            1_000,
-            "Observer edge chrome",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            hud_graphics,
-        );
+        let mut graphics =
+            test_graphics_with_hud((320, 200, 1_000), "Observer edge chrome", hud_graphics);
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::ownerless(Vector2::new(500, 500), 1.0)],
@@ -11531,37 +9940,16 @@ mod tests {
         graphics.set_upper_board_mode(hud::UpperBoardMode::Small, 0);
 
         let viewport = &graphics.active_viewports[0];
-        assert_eq!(
-            (viewport.target_x, viewport.target_y),
-            (
-                viewport.world_width - viewport.logical_width,
-                viewport.world_height - viewport.logical_height,
-            )
-        );
-        assert_eq!(
-            viewport.content_rect, viewport.rect,
-            "a large-world observer gains no synthetic scroll border"
-        );
+        front_assert_eq! {(viewport.target_x, viewport.target_y) => (viewport.world_width - viewport.logical_width, viewport.world_height - viewport.logical_height,)};
+        front_assert_eq! {viewport.content_rect => viewport.rect, "a large-world observer gains no synthetic scroll border"};
     }
 
     #[test]
     fn fixed_item_visibility_combines_global_and_script_requests() {
-        assert_eq!(
-            player_fixed_item_visibility(false, false, false),
-            (false, false, false)
-        );
-        assert_eq!(
-            player_fixed_item_visibility(false, true, false),
-            (true, false, false)
-        );
-        assert_eq!(
-            player_fixed_item_visibility(false, false, true),
-            (false, true, false)
-        );
-        assert_eq!(
-            player_fixed_item_visibility(true, false, false),
-            (true, true, true)
-        );
+        front_assert_eq! {player_fixed_item_visibility(false, false, false) => (false, false, false)};
+        front_assert_eq! {player_fixed_item_visibility(false, true, false) => (true, false, false)};
+        front_assert_eq! {player_fixed_item_visibility(false, false, true) => (false, true, false)};
+        front_assert_eq! {player_fixed_item_visibility(true, false, false) => (true, true, true)};
     }
 
     fn viewport_layout(width: u32, height: u32, count: usize) -> Vec<SurfaceRect> {
@@ -11574,7 +9962,7 @@ mod tests {
         count: usize,
         splitscreen_dividers: bool,
     ) -> Vec<SurfaceRect> {
-        let mut graphics = test_graphics(width, height, height as i32, "Viewport layout");
+        let mut graphics = test_graphics((width, height, height as i32), "Viewport layout");
         graphics.set_renderer_config(true, splitscreen_dividers);
         graphics.layout_viewports(count)
     }
@@ -11636,22 +10024,16 @@ mod tests {
 
     #[test]
     fn disabled_splitscreen_dividers_remove_four_pixel_layout_gaps() {
-        assert_eq!(
-            viewport_layout_with_dividers(800, 600, 2, false),
-            vec![
-                SurfaceRect::new(0, 0, 400, 600),
-                SurfaceRect::new(400, 0, 400, 600),
-            ]
-        );
-        assert_eq!(
-            viewport_layout_with_dividers(800, 600, 4, false),
+        front_assert_eq! {viewport_layout_with_dividers(800, 600, 2, false) => vec![SurfaceRect::new(0, 0, 400, 600), SurfaceRect::new(400, 0, 400, 600),]};
+        front_assert_eq! {
+            viewport_layout_with_dividers(800, 600, 4, false) =>
             vec![
                 SurfaceRect::new(0, 0, 400, 300),
                 SurfaceRect::new(400, 0, 400, 300),
                 SurfaceRect::new(0, 300, 400, 300),
                 SurfaceRect::new(400, 300, 400, 300),
             ]
-        );
+        };
     }
 
     #[test]
@@ -11664,18 +10046,18 @@ mod tests {
             ObjectVertex::new(-4, 4),
         ];
         let focus = &snapshot.objects[0];
-        let mut graphics = test_graphics(120, 80, 60, "Atlas Scenario");
+        let mut graphics = test_graphics((120, 80, 60), "Atlas Scenario");
 
         let viewports = vec![ViewportInput::from_focus(focus)];
         let atlas = graphics.render_frame(&snapshot, &viewports);
 
-        assert!(atlas.iter().any(|entry| entry.label == "back_buffer"));
+        front_assert! {atlas.iter().any(|entry| entry.label == "back_buffer")};
         let object_label = format!("object#{}:def={}", focus.id.as_u64(), focus.definition_id);
-        assert!(
+        front_assert! {
             atlas.iter().any(|entry| entry.label == object_label),
             "expected atlas entry for {object_label}, got labels: {:?}",
             atlas.iter().map(|entry| &entry.label).collect::<Vec<_>>()
-        );
+        };
     }
 
     #[test]
@@ -11683,13 +10065,13 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 260);
         snapshot.landscape = Some(Landscape::flat(256, 280));
-        let mut graphics = test_graphics(320, 180, 150, "Test Scenario");
+        let mut graphics = test_graphics((320, 180, 150), "Test Scenario");
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
         let (_, viewport_y) = graphics.viewport();
-        assert!(viewport_y > 0);
+        front_assert! {viewport_y > 0};
     }
 
     fn initialized_camera(view_x: i32, view_y: i32, width: i32, height: i32) -> CameraState {
@@ -11706,44 +10088,41 @@ mod tests {
     #[test]
     fn viewport_edge_scroll_uses_inclusive_clamped_pixel_zones() {
         let viewport = SurfaceRect::new(10, 20, 100, 50);
-        assert_eq!(
-            viewport_edge_scroll(viewport, GuiPoint::new(10.0, 45.0)),
+        front_assert_eq! {
+            viewport_edge_scroll(viewport, GuiPoint::new(10.0, 45.0)) =>
             Some(ViewportEdgeScroll {
                 delta: Vector2::new(-10, 0),
                 cursor: MouseCursorPhase::Left,
                 edge_mask: 0b0001,
             })
-        );
-        assert_eq!(
-            viewport_edge_scroll(viewport, GuiPoint::new(108.1, 68.1)),
+        };
+        front_assert_eq! {
+            viewport_edge_scroll(viewport, GuiPoint::new(108.1, 68.1)) =>
             Some(ViewportEdgeScroll {
                 delta: Vector2::new(10, 10),
                 cursor: MouseCursorPhase::DownRight,
                 edge_mask: 0b1100,
             }),
             "ceil before subtraction reaches the inclusive right/bottom pixel"
-        );
-        assert_eq!(
-            viewport_edge_scroll(viewport, GuiPoint::new(-100.0, -100.0)),
+        };
+        front_assert_eq! {
+            viewport_edge_scroll(viewport, GuiPoint::new(-100.0, -100.0)) =>
             Some(ViewportEdgeScroll {
                 delta: Vector2::new(-10, -10),
                 cursor: MouseCursorPhase::UpLeft,
                 edge_mask: 0b0011,
             }),
             "points outside the owning viewport are clamped like C4MouseControl"
-        );
-        assert_eq!(
-            viewport_edge_scroll(viewport, GuiPoint::new(11.0, 21.0)),
-            None
-        );
+        };
+        front_assert_eq! {viewport_edge_scroll(viewport, GuiPoint::new(11.0, 21.0)) => None};
 
         let degenerate =
             viewport_edge_scroll(SurfaceRect::new(0, 0, 1, 1), GuiPoint::new(0.0, 0.0))
                 .test_value();
-        assert_eq!(degenerate.delta, Vector2::ZERO);
-        assert_eq!(degenerate.cursor, MouseCursorPhase::DownRight);
-        assert_eq!(
-            degenerate.steps().collect::<Vec<_>>(),
+        front_assert_eq! {degenerate.delta => Vector2::ZERO};
+        front_assert_eq! {degenerate.cursor => MouseCursorPhase::DownRight};
+        front_assert_eq! {
+            degenerate.steps().collect::<Vec<_>>() =>
             vec![
                 Vector2::new(-10, 0),
                 Vector2::new(0, -10),
@@ -11751,77 +10130,46 @@ mod tests {
                 Vector2::new(0, 10),
             ],
             "all four native ScrollView calls survive the zero net delta"
-        );
+        };
     }
 
     #[test]
     fn retained_viewport_coordinate_is_not_reclamped_after_resize() {
-        assert_eq!(
-            viewport_edge_scroll_at(99, 25, 100, 50),
+        front_assert_eq! {
+            viewport_edge_scroll_at(99, 25, 100, 50) =>
             Some(ViewportEdgeScroll {
                 delta: Vector2::new(10, 0),
                 cursor: MouseCursorPhase::Right,
                 edge_mask: 0b0100,
             })
-        );
-        assert_eq!(
-            viewport_edge_scroll_at(99, 25, 120, 50),
-            None,
-            "the old right pixel becomes interior when the viewport grows"
-        );
-        assert_eq!(
-            viewport_edge_scroll_at(119, 25, 120, 50),
+        };
+        front_assert_eq! {viewport_edge_scroll_at(99, 25, 120, 50) => None, "the old right pixel becomes interior when the viewport grows"};
+        front_assert_eq! {
+            viewport_edge_scroll_at(119, 25, 120, 50) =>
             Some(ViewportEdgeScroll {
                 delta: Vector2::new(10, 0),
                 cursor: MouseCursorPhase::Right,
                 edge_mask: 0b0100,
             })
-        );
+        };
     }
 
     #[test]
     fn scrolling_camera_has_no_dead_zone_and_uses_fixed_border() {
         let mut following = initialized_camera(100, 100, 100, 80);
-        assert_eq!(
-            following
-                .update(
-                    155,
-                    140,
-                    100,
-                    80,
-                    500,
-                    500,
-                    VIEWPORT_SCROLL_BORDER,
-                    false,
-                    1
-                )
-                .0,
-            100,
-            "normal following retains the eight-pixel dead zone"
-        );
+        front_assert_eq! {following.update(155, 140, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, false, 1).0 => 100, "normal following retains the eight-pixel dead zone"};
 
         let mut scrolling = initialized_camera(100, 100, 100, 80);
-        assert_eq!(
-            scrolling
-                .update(155, 140, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, true, 1)
-                .0,
-            105,
-            "C4PVM_Scrolling targets the player center exactly"
-        );
+        front_assert_eq! {scrolling.update(155, 140, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, true, 1).0 => 105, "C4PVM_Scrolling targets the player center exactly"};
 
         let mut edge = CameraState::new(500, 500, 100, 80);
-        assert_eq!(
-            edge.update(40, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, true, 1)
-                .0,
-            -10,
-            "scrolling mode keeps the full 40px fullscreen extra bound"
-        );
+        front_assert_eq! {edge.update(40, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, true, 1).0 => -10, "scrolling mode keeps the full 40px fullscreen extra bound"};
     }
 
     #[test]
     fn observer_scroll_uses_physical_classification_across_film_assignment() {
         let snapshot = camera_world_snapshot();
-        let mut graphics = test_graphics(100, 80, 80, "Observer scroll");
+        let mut graphics = test_graphics((100, 80, 80), "Observer scroll");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::new(
@@ -11834,36 +10182,30 @@ mod tests {
         let key = graphics.active_viewports[0].camera_key;
         let before = graphics.camera_states[&key];
         let before_projection = graphics.active_viewport_projections()[0];
-        assert!(before_projection.is_no_owner_viewport);
-        assert!(graphics.scroll_observer_viewport(0, Vector2::new(-10, 10)));
+        front_assert! {before_projection.is_no_owner_viewport};
+        front_assert! {graphics.scroll_observer_viewport(0, Vector2::new(-10, 10))};
         let after = graphics.camera_states[&key];
         let after_projection = graphics.active_viewport_projections()[0];
-        assert_eq!(after.view_x, before.view_x - 10);
-        assert_eq!(after.view_y, before.view_y + 10);
-        assert_eq!(after_projection.target_x, before_projection.target_x - 10);
-        assert_eq!(after_projection.target_y, before_projection.target_y + 10);
-        assert_eq!(
-            after_projection.content_origin_x,
-            before_projection.content_origin_x - 10.0
-        );
-        assert_eq!(
-            after_projection.content_origin_y,
-            before_projection.content_origin_y + 10.0
-        );
+        front_assert_eq! {after.view_x => before.view_x - 10};
+        front_assert_eq! {after.view_y => before.view_y + 10};
+        front_assert_eq! {after_projection.target_x => before_projection.target_x - 10};
+        front_assert_eq! {after_projection.target_y => before_projection.target_y + 10};
+        front_assert_eq! {after_projection.content_origin_x => before_projection.content_origin_x - 10.0};
+        front_assert_eq! {after_projection.content_origin_y => before_projection.content_origin_y + 10.0};
 
         graphics.camera_states.get_mut(&key).test_value().view_x = 0;
-        assert!(graphics.scroll_observer_viewport(0, Vector2::new(-10, 0)));
-        assert_eq!(graphics.camera_states[&key].view_x, 0);
+        front_assert! {graphics.scroll_observer_viewport(0, Vector2::new(-10, 0))};
+        front_assert_eq! {graphics.camera_states[&key].view_x => 0};
 
         graphics.active_viewports[0].owner = 0;
-        assert!(graphics.scroll_observer_viewport(0, Vector2::new(10, 0)));
+        front_assert! {graphics.scroll_observer_viewport(0, Vector2::new(10, 0))};
         let film_projection = graphics.active_viewport_projections()[0];
-        assert_eq!(film_projection.owner, 0);
-        assert!(film_projection.is_no_owner_viewport);
+        front_assert_eq! {film_projection.owner => 0};
+        front_assert! {film_projection.is_no_owner_viewport};
 
         graphics.active_viewports[0].is_no_owner_viewport = false;
-        assert!(!graphics.scroll_observer_viewport(0, Vector2::new(10, 0)));
-        assert!(!graphics.scroll_observer_viewport(99, Vector2::new(10, 0)));
+        front_assert! {!graphics.scroll_observer_viewport(0, Vector2::new(10, 0))};
+        front_assert! {!graphics.scroll_observer_viewport(99, Vector2::new(10, 0))};
     }
 
     // C4Viewport gives each window its own object, so a detached console
@@ -11872,7 +10214,7 @@ mod tests {
     #[test]
     fn detached_viewport_projection_is_addressable_by_physical_identity() {
         let snapshot = camera_world_snapshot();
-        let mut graphics = test_graphics(100, 80, 80, "Identity addressing");
+        let mut graphics = test_graphics((100, 80, 80), "Identity addressing");
         // Two viewports following the *same* player, as a console second
         // window on an already-viewed player produces.
         graphics.render_frame(
@@ -11886,30 +10228,15 @@ mod tests {
         );
 
         let projections = graphics.active_viewport_projections();
-        assert_eq!(projections.len(), 2);
-        assert_eq!(
-            projections[0].owner, projections[1].owner,
-            "duplicate owners are exactly the case the index cannot disambiguate"
-        );
-        assert_eq!(projections[0].identity, Some(41));
-        assert_eq!(projections[1].identity, Some(42));
+        front_assert_eq! {projections.len() => 2};
+        front_assert_eq! {projections[0].owner => projections[1].owner, "duplicate owners are exactly the case the index cannot disambiguate"};
+        front_assert_eq! {projections[0].identity => Some(41)};
+        front_assert_eq! {projections[1].identity => Some(42)};
 
         // Each identity resolves to its own projection, whatever its index.
-        assert_eq!(
-            graphics
-                .viewport_projection_for_identity(41)
-                .expect("identity 41 is live")
-                .index,
-            0
-        );
-        assert_eq!(
-            graphics
-                .viewport_projection_for_identity(42)
-                .expect("identity 42 is live")
-                .index,
-            1
-        );
-        assert!(graphics.viewport_projection_for_identity(99).is_none());
+        front_assert_eq! {graphics.viewport_projection_for_identity(41).expect("identity 41 is live").index => 0};
+        front_assert_eq! {graphics.viewport_projection_for_identity(42).expect("identity 42 is live").index => 1};
+        front_assert! {graphics.viewport_projection_for_identity(99).is_none()};
 
         // Re-rendering with the layout order swapped moves the indices but not
         // the identities, which is the whole point.
@@ -11922,21 +10249,8 @@ mod tests {
                     .with_physical_camera_identity(41, 0),
             ],
         );
-        assert_eq!(
-            graphics
-                .viewport_projection_for_identity(41)
-                .expect("identity 41 survives a relayout")
-                .index,
-            1,
-            "the index moved with the layout"
-        );
-        assert_eq!(
-            graphics
-                .viewport_projection_for_identity(42)
-                .expect("identity 42 survives a relayout")
-                .index,
-            0
-        );
+        front_assert_eq! {graphics.viewport_projection_for_identity(41).expect("identity 41 survives a relayout").index => 1, "the index moved with the layout"};
+        front_assert_eq! {graphics.viewport_projection_for_identity(42).expect("identity 42 survives a relayout").index => 0};
     }
 
     // `C4GraphicsSystem::Execute` runs `cvp->Execute()` per viewport
@@ -11953,7 +10267,7 @@ mod tests {
         second.id = ObjectId::new(2);
         second.position = Vector2::new(900, 500);
         snapshot.objects.push(second);
-        let mut graphics = test_graphics(100, 80, 80, "Detached render");
+        let mut graphics = test_graphics((100, 80, 80), "Detached render");
 
         // Duplicate owners, distinct identities — exactly what a console
         // second window on an already-viewed player produces.
@@ -11975,73 +10289,39 @@ mod tests {
 
         // The supplied target is filled whole: no split layout, and no
         // upper-board/message-board reservation.
-        assert_eq!(first.surface.width(), 320);
-        assert_eq!(first.surface.height(), 200);
-        assert_eq!(first.projection.logical_width, 320);
-        assert_eq!(first.projection.logical_height, 200);
-        assert_eq!(
-            first.projection.rect,
-            SurfaceRect::new(0, 0, 320, 200),
-            "a detached viewport owns its entire window"
-        );
+        front_assert_eq! {first.surface.width() => 320};
+        front_assert_eq! {first.surface.height() => 200};
+        front_assert_eq! {first.projection.logical_width => 320};
+        front_assert_eq! {first.projection.logical_height => 200};
+        front_assert_eq! {first.projection.rect => SurfaceRect::new(0, 0, 320, 200), "a detached viewport owns its entire window"};
 
         // Each call drew the viewport it was asked for, not the first one.
-        assert_eq!(first.projection.identity, Some(41));
-        assert_eq!(second_frame.projection.identity, Some(42));
-        assert_ne!(
-            first.projection.target_x, second_frame.projection.target_x,
-            "the two identities follow different world positions"
-        );
+        front_assert_eq! {first.projection.identity => Some(41)};
+        front_assert_eq! {second_frame.projection.identity => Some(42)};
+        front_assert_ne! {first.projection.target_x => second_frame.projection.target_x, "the two identities follow different world positions"};
 
         // An identity that is not in the supplied list draws nothing rather
         // than falling back to the first viewport.
-        assert!(graphics
-            .render_detached_viewport(&snapshot, &inputs(), 99, 320, 200)
-            .is_none());
+        front_assert! {graphics.render_detached_viewport(&snapshot, &inputs(), 99, 320, 200).is_none()};
 
         // The frame that was drawn is the frame the window's pointer input is
         // converted through: `ViewX + static_cast<int32_t>(local / scale)`
         // per viewport (C4Viewport.cpp:112,181,192). Two windows showing the
         // same player must not share one projection.
-        assert_eq!(
-            first
-                .projection
-                .pointer_projection(1.0)
-                .world_position(7, 3),
-            (first.projection.target_x + 7, first.projection.target_y + 3)
-        );
-        assert_ne!(
-            first
-                .projection
-                .pointer_projection(1.0)
-                .world_position(7, 3),
-            second_frame
-                .projection
-                .pointer_projection(1.0)
-                .world_position(7, 3)
-        );
+        front_assert_eq! {first.projection.pointer_projection(1.0).world_position(7, 3) => (first.projection.target_x + 7, first.projection.target_y + 3)};
+        front_assert_ne! {first.projection.pointer_projection(1.0).world_position(7, 3) => second_frame.projection.pointer_projection(1.0).world_position(7, 3)};
         // The window's own presenter scale divides before the origin is added.
-        assert_eq!(
-            first
-                .projection
-                .pointer_projection(2.0)
-                .world_position(7, 3),
-            (first.projection.target_x + 3, first.projection.target_y + 1)
-        );
+        front_assert_eq! {first.projection.pointer_projection(2.0).world_position(7, 3) => (first.projection.target_x + 3, first.projection.target_y + 1)};
 
         // A detached pass must not disturb the fullscreen layout state the
         // other windows and the audibility reduction read.
         graphics.render_frame(&snapshot, &inputs());
         let fullscreen = graphics.active_viewport_projections();
-        assert_eq!(fullscreen.len(), 2);
+        front_assert_eq! {fullscreen.len() => 2};
         let _ = graphics
             .render_detached_viewport(&snapshot, &inputs(), 41, 320, 200)
             .test_value();
-        assert_eq!(
-            graphics.active_viewport_projections(),
-            fullscreen,
-            "the detached pass restored the fullscreen viewport records"
-        );
+        front_assert_eq! {graphics.active_viewport_projections() => fullscreen, "the detached pass restored the fullscreen viewport records"};
     }
 
     // Two `Application.isFullScreen` gates decide what a console viewport
@@ -12061,7 +10341,7 @@ mod tests {
         let mut snapshot = camera_world_snapshot();
         // A map smaller than the window is what makes both gates observable.
         snapshot.landscape = Some(Landscape::flat(200, 150));
-        let mut graphics = test_graphics(320, 200, 80, "Small map");
+        let mut graphics = test_graphics((320, 200, 80), "Small map");
         let inputs = || {
             vec![ViewportInput::ownerless(Vector2::new(100, 75), 1.0)
                 .with_physical_camera_identity(7, 0)]
@@ -12070,36 +10350,21 @@ mod tests {
         let detached = graphics
             .render_detached_viewport(&snapshot, &inputs(), 7, 320, 200)
             .test_value();
-        assert_eq!(
-            detached.projection.rect,
-            SurfaceRect::new(0, 0, 320, 200),
-            "RecalculateViewports never runs in console mode, so no landscape cap"
-        );
-        assert_eq!(
-            (detached.projection.target_x, detached.projection.target_y),
-            (0, 0),
-            "an undersized map pins a detached ownerless view at the origin"
-        );
+        front_assert_eq! {detached.projection.rect => SurfaceRect::new(0, 0, 320, 200), "RecalculateViewports never runs in console mode, so no landscape cap"};
+        front_assert_eq! {(detached.projection.target_x, detached.projection.target_y) => (0, 0), "an undersized map pins a detached ownerless view at the origin"};
 
         // The fullscreen pass keeps both behaviours: it caps the output to the
         // landscape plus its scroll borders and centres the view on the map.
         graphics.render_frame(&snapshot, &inputs());
         let fullscreen = graphics.active_viewport_projections()[0];
-        assert_ne!(
-            fullscreen.rect,
-            SurfaceRect::new(0, 0, 320, 200),
-            "the fullscreen layout still caps a viewport to the landscape"
-        );
-        assert!(
-            fullscreen.target_x < 0,
-            "the fullscreen arm centres an undersized map, giving a negative origin"
-        );
+        front_assert_ne! {fullscreen.rect => SurfaceRect::new(0, 0, 320, 200), "the fullscreen layout still caps a viewport to the landscape"};
+        front_assert! {fullscreen.target_x < 0, "the fullscreen arm centres an undersized map, giving a negative origin"};
     }
 
     #[test]
     fn observer_scroll_queued_before_projection_moves_the_first_rendered_camera() {
         let snapshot = camera_world_snapshot();
-        let new_graphics = || test_graphics(100, 80, 80, "Queued observer scroll");
+        let new_graphics = || test_graphics((100, 80, 80), "Queued observer scroll");
         let input = || {
             ViewportInput::new(
                 OWNER_NONE,
@@ -12115,31 +10380,27 @@ mod tests {
         let baseline_projection = baseline.active_viewport_projections()[0];
 
         let mut queued = new_graphics();
-        assert!(queued.active_viewports.is_empty());
-        assert!(queued.scroll_observer_viewport(0, Vector2::new(5, 0)));
-        assert!(queued.scroll_observer_viewport(0, Vector2::new(10, -5)));
-        assert_eq!(queued.pending_primary_observer_scroll, Vector2::new(15, -5));
+        front_assert! {queued.active_viewports.is_empty()};
+        front_assert! {queued.scroll_observer_viewport(0, Vector2::new(5, 0))};
+        front_assert! {queued.scroll_observer_viewport(0, Vector2::new(10, -5))};
+        front_assert_eq! {queued.pending_primary_observer_scroll => Vector2::new(15, -5)};
         let mut rebuilt = new_graphics();
         rebuilt.inherit_pending_observer_scroll(&queued);
         queued = new_graphics();
         queued.inherit_pending_observer_scroll(&rebuilt);
-        assert_eq!(
-            queued.pending_primary_observer_scroll,
-            Vector2::new(15, -5),
-            "consecutive resize rebuilds preserve unprojected FreeView input"
-        );
+        front_assert_eq! {queued.pending_primary_observer_scroll => Vector2::new(15, -5), "consecutive resize rebuilds preserve unprojected FreeView input"};
         queued.render_frame(&snapshot, &[input()]);
 
         let projection = queued.active_viewport_projections()[0];
-        assert_eq!(projection.target_x, baseline_projection.target_x + 15);
-        assert_eq!(projection.target_y, baseline_projection.target_y - 5);
-        assert_eq!(queued.pending_primary_observer_scroll, Vector2::ZERO);
+        front_assert_eq! {projection.target_x => baseline_projection.target_x + 15};
+        front_assert_eq! {projection.target_y => baseline_projection.target_y - 5};
+        front_assert_eq! {queued.pending_primary_observer_scroll => Vector2::ZERO};
     }
 
     #[test]
     fn queued_observer_scroll_replaces_a_stale_owned_projection() {
         let snapshot = camera_world_snapshot();
-        let new_graphics = || test_graphics(100, 80, 80, "Stale observer projection");
+        let new_graphics = || test_graphics((100, 80, 80), "Stale observer projection");
         let ownerless = || {
             ViewportInput::ownerless(Vector2::new(500, 500), 1.0)
                 .with_physical_camera_identity(42, 0)
@@ -12157,17 +10418,17 @@ mod tests {
                     .with_physical_camera_identity(41, 0),
             ],
         );
-        assert!(!transitioning.active_viewports[0].is_no_owner_viewport);
+        front_assert! {!transitioning.active_viewports[0].is_no_owner_viewport};
         transitioning.drop_physical_camera(41);
         let delta = Vector2::new(5, -5);
-        assert!(!transitioning.scroll_observer_viewport(0, delta));
+        front_assert! {!transitioning.scroll_observer_viewport(0, delta)};
         transitioning.queue_primary_observer_scroll(delta);
         transitioning.render_frame(&snapshot, &[ownerless()]);
 
         let projection = transitioning.active_viewport_projections()[0];
-        assert_eq!(projection.target_x, baseline_projection.target_x + 5);
-        assert_eq!(projection.target_y, baseline_projection.target_y - 5);
-        assert_eq!(transitioning.pending_primary_observer_scroll, Vector2::ZERO);
+        front_assert_eq! {projection.target_x => baseline_projection.target_x + 5};
+        front_assert_eq! {projection.target_y => baseline_projection.target_y - 5};
+        front_assert_eq! {transitioning.pending_primary_observer_scroll => Vector2::ZERO};
     }
 
     #[test]
@@ -12175,20 +10436,20 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects.clear();
         snapshot.render_order.clear();
-        let mut graphics = test_graphics(320, 180, 150, "Anchor-free observer");
+        let mut graphics = test_graphics((320, 180, 150), "Anchor-free observer");
         let input = ViewportInput::ownerless(Vector2::new(128, 75), 1.0)
             .with_camera_identity(OWNER_NONE, 0);
-        assert!(input.focus.is_none());
+        front_assert! {input.focus.is_none()};
 
         graphics.render_frame(&snapshot, &[input]);
 
         let projection = graphics.active_viewport_projections();
-        assert_eq!(projection.len(), 1);
-        assert_eq!(projection[0].owner, OWNER_NONE);
-        assert!(projection[0].is_no_owner_viewport);
-        assert!(graphics.active_viewports[0].focus.is_none());
+        front_assert_eq! {projection.len() => 1};
+        front_assert_eq! {projection[0].owner => OWNER_NONE};
+        front_assert! {projection[0].is_no_owner_viewport};
+        front_assert! {graphics.active_viewports[0].focus.is_none()};
         let capture = graphics.render_full_landscape(&snapshot).test_value();
-        assert_eq!((capture.width(), capture.height()), (256, 120));
+        front_assert_eq! {(capture.width(), capture.height()) => (256, 120)};
     }
 
     #[test]
@@ -12196,19 +10457,19 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects.clear();
         snapshot.render_order.clear();
-        let mut graphics = test_graphics(100, 80, 80, "Focusless player scroll");
+        let mut graphics = test_graphics((100, 80, 80), "Focusless player scroll");
         let input = ViewportInput::owned_without_focus(0, Vector2::new(128, 60), 1.0)
             .with_scrolling(true)
             .with_camera_identity(0, 0);
-        assert!(input.focus.is_none());
+        front_assert! {input.focus.is_none()};
 
         graphics.render_frame(&snapshot, &[input]);
 
         let projection = graphics.active_viewport_projections();
-        assert_eq!(projection.len(), 1);
-        assert_eq!(projection[0].owner, 0);
-        assert!(!projection[0].is_no_owner_viewport);
-        assert!(graphics.active_viewports[0].focus.is_none());
+        front_assert_eq! {projection.len() => 1};
+        front_assert_eq! {projection[0].owner => 0};
+        front_assert! {!projection[0].is_no_owner_viewport};
+        front_assert! {graphics.active_viewports[0].focus.is_none()};
     }
 
     #[test]
@@ -12225,7 +10486,7 @@ mod tests {
                     .0,
             );
         }
-        assert_eq!(visible, vec![25, 44, 58]);
+        front_assert_eq! {visible => vec![25, 44, 58]};
     }
 
     #[test]
@@ -12239,34 +10500,19 @@ mod tests {
                     .0,
             );
         }
-        assert_eq!(one_pixel_visible, vec![0, 0, 1]);
+        front_assert_eq! {one_pixel_visible => vec![0, 0, 1]};
 
         let mut jump = initialized_camera(0, 0, 100, 1);
-        assert_eq!(
-            jump.update(450, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 4)
-                .0,
-            100,
-            "a 400px target delta is quartered rather than snapped"
-        );
+        front_assert_eq! {jump.update(450, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 4).0 => 100, "a 400px target delta is quartered rather than snapped"};
     }
 
     #[test]
     fn camera_scroll_smooth_is_clamped_like_cpp_config() {
         let mut zero = initialized_camera(0, 0, 100, 1);
-        assert_eq!(
-            zero.update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 0)
-                .0,
-            100,
-            "ScrollSmooth=0 clamps to divisor one"
-        );
+        front_assert_eq! {zero.update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 0).0 => 100, "ScrollSmooth=0 clamps to divisor one"};
 
         let mut huge = initialized_camera(0, 0, 100, 1);
-        assert_eq!(
-            huge.update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 500)
-                .0,
-            2,
-            "ScrollSmooth values above 50 clamp to divisor 50"
-        );
+        front_assert_eq! {huge.update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 500).0 => 2, "ScrollSmooth values above 50 clamp to divisor 50"};
     }
 
     #[test]
@@ -12276,22 +10522,7 @@ mod tests {
         // advances to 451, whose fixed projection remains 450 for two more
         // graphics passes before rounding to 451 on the third.
         let mut camera = initialized_camera(450, 460, 100, 80);
-        assert_eq!(
-            camera
-                .update(
-                    508,
-                    500,
-                    100,
-                    80,
-                    1_000,
-                    1_000,
-                    VIEWPORT_SCROLL_BORDER,
-                    false,
-                    4
-                )
-                .0,
-            450
-        );
+        front_assert_eq! {camera.update(508, 500, 100, 80, 1_000, 1_000, VIEWPORT_SCROLL_BORDER, false, 4).0 => 450};
         let repeated = (0..3)
             .map(|_| {
                 camera
@@ -12309,7 +10540,7 @@ mod tests {
                     .0
             })
             .collect::<Vec<_>>();
-        assert_eq!(repeated, vec![450, 450, 451]);
+        front_assert_eq! {repeated => vec![450, 450, 451]};
     }
 
     #[test]
@@ -12330,35 +10561,15 @@ mod tests {
                 )
                 .0
         };
-        assert_eq!(first_view(0), -40);
-        assert_eq!(first_view(20), -20);
-        assert_eq!(first_view(40), 0);
+        front_assert_eq! {first_view(0) => -40};
+        front_assert_eq! {first_view(20) => -20};
+        front_assert_eq! {first_view(40) => 0};
 
         // The negative dViewX makes C++ take the coupled initialization
         // branch on the next pass, snapping both axes to their new targets.
         let mut camera = CameraState::new(500, 500, 100, 80);
-        assert_eq!(
-            camera
-                .update(0, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, false, 4)
-                .0,
-            -40
-        );
-        assert_eq!(
-            camera
-                .update(
-                    100,
-                    250,
-                    100,
-                    80,
-                    500,
-                    500,
-                    VIEWPORT_SCROLL_BORDER,
-                    false,
-                    4
-                )
-                .0,
-            42
-        );
+        front_assert_eq! {camera.update(0, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, false, 4).0 => -40};
+        front_assert_eq! {camera.update(100, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, false, 4).0 => 42};
     }
 
     fn camera_world_snapshot() -> SimulationSnapshot {
@@ -12375,7 +10586,7 @@ mod tests {
         second.id = ObjectId::new(2);
         second.position = Vector2::new(900, 500);
         snapshot.objects.push(second);
-        let mut graphics = test_graphics(100, 80, 80, "Camera focus");
+        let mut graphics = test_graphics((100, 80, 80), "Camera focus");
 
         graphics.render_frame(
             &snapshot,
@@ -12400,8 +10611,8 @@ mod tests {
             .camera_states
             .get(&CameraKey::Player { owner: 0, slot: 0 })
             .test_value();
-        assert_eq!(camera.view_x, 548);
-        assert_eq!(graphics.active_viewports[0].viewport_x, 548.0);
+        front_assert_eq! {camera.view_x => 548};
+        front_assert_eq! {graphics.active_viewports[0].viewport_x => 548.0};
     }
 
     #[test]
@@ -12412,7 +10623,7 @@ mod tests {
         second.owner = 1;
         second.position = Vector2::new(900, 500);
         snapshot.objects.push(second);
-        let mut graphics = test_graphics(100, 80, 80, "Film view");
+        let mut graphics = test_graphics((100, 80, 80), "Film view");
 
         graphics.render_frame(
             &snapshot,
@@ -12428,8 +10639,8 @@ mod tests {
                     .with_physical_camera_identity(41, 0),
             ],
         );
-        assert_eq!(graphics.active_viewports[0].owner, 1);
-        assert_eq!(
+        front_assert_eq! {graphics.active_viewports[0].owner => 1};
+        front_assert_eq! {
             graphics
                 .camera_states
                 .get(&CameraKey::Physical {
@@ -12437,21 +10648,18 @@ mod tests {
                     slot: 0,
                 })
                 .expect("physical viewport camera survives player switch")
-                .view_x,
+                .view_x =>
             548
-        );
-        assert!(!graphics.camera_states.contains_key(&CameraKey::Physical {
-            identity: 42,
-            slot: 0,
-        }));
+        };
+        front_assert! {!graphics.camera_states.contains_key(&CameraKey::Physical {identity: 42, slot: 0,})};
 
         let mut ownerless =
             ViewportInput::new(0, Vector2::new(900, 500), 1.0, &snapshot.objects[1])
                 .with_physical_camera_identity(41, 0);
         ownerless.owner = OWNER_NONE;
         graphics.render_frame(&snapshot, &[ownerless]);
-        assert_eq!(graphics.active_viewports[0].owner, OWNER_NONE);
-        assert_eq!(
+        front_assert_eq! {graphics.active_viewports[0].owner => OWNER_NONE};
+        front_assert_eq! {
             graphics
                 .camera_states
                 .get(&CameraKey::Physical {
@@ -12459,21 +10667,18 @@ mod tests {
                     slot: 0,
                 })
                 .expect("temporary NO_OWNER keeps the owned viewport camera")
-                .view_x,
+                .view_x =>
             548,
             "temporary NO_OWNER freezes rather than reclassifying the viewport"
-        );
+        };
         graphics.drop_physical_camera(41);
-        assert!(!graphics.camera_states.contains_key(&CameraKey::Physical {
-            identity: 41,
-            slot: 0,
-        }));
+        front_assert! {!graphics.camera_states.contains_key(&CameraKey::Physical {identity: 41, slot: 0,})};
     }
 
     #[test]
     fn film_assigned_ownerless_tracks_player_and_applies_current_frame_offset() {
         let snapshot = camera_world_snapshot();
-        let mut graphics = test_graphics(100, 80, 80, "Ownerless film camera");
+        let mut graphics = test_graphics((100, 80, 80), "Ownerless film camera");
         let mut input = ViewportInput::new(0, Vector2::new(900, 500), 1.0, &snapshot.objects[0])
             .with_offset(Vector2::new(7, -4))
             .with_physical_camera_identity(42, 0);
@@ -12489,11 +10694,11 @@ mod tests {
                 slot: 0,
             })
             .test_value();
-        assert_eq!((camera.view_x, camera.view_y), (842, 460));
+        front_assert_eq! {(camera.view_x, camera.view_y) => (842, 460)};
         let projection = graphics.active_viewport_projections()[0];
-        assert_eq!(projection.owner, 0);
-        assert!(projection.is_no_owner_viewport);
-        assert_eq!((projection.target_x, projection.target_y), (849, 456));
+        front_assert_eq! {projection.owner => 0};
+        front_assert! {projection.is_no_owner_viewport};
+        front_assert_eq! {(projection.target_x, projection.target_y) => (849, 456)};
     }
 
     #[test]
@@ -12503,7 +10708,7 @@ mod tests {
         // Earthquake shake must therefore move the current frame instantly
         // without feeding the displacement back into the smooth camera.
         let snapshot = camera_world_snapshot();
-        let mut graphics = test_graphics(100, 80, 80, "Script view offset");
+        let mut graphics = test_graphics((100, 80, 80), "Script view offset");
         let base = ViewportInput::new(0, Vector2::new(500, 500), 1.0, &snapshot.objects[0]);
         graphics.render_frame(&snapshot, &[base]);
         let camera_before = *graphics
@@ -12519,16 +10724,10 @@ mod tests {
             .camera_states
             .get(&CameraKey::Player { owner: 0, slot: 0 })
             .test_value();
-        assert_eq!(camera_after.view_x, camera_before.view_x);
-        assert_eq!(camera_after.view_y, camera_before.view_y);
-        assert_eq!(
-            graphics.active_viewports[0].viewport_x,
-            camera_before.view_x as f32 + 7.0
-        );
-        assert_eq!(
-            graphics.active_viewports[0].viewport_y,
-            camera_before.view_y as f32 - 4.0
-        );
+        front_assert_eq! {camera_after.view_x => camera_before.view_x};
+        front_assert_eq! {camera_after.view_y => camera_before.view_y};
+        front_assert_eq! {graphics.active_viewports[0].viewport_x => camera_before.view_x as f32 + 7.0};
+        front_assert_eq! {graphics.active_viewports[0].viewport_y => camera_before.view_y as f32 - 4.0};
     }
 
     #[test]
@@ -12538,7 +10737,7 @@ mod tests {
         second.id = ObjectId::new(2);
         second.position = Vector2::new(900, 500);
         snapshot.objects.push(second);
-        let mut graphics = test_graphics(100, 80, 80, "Camera absence");
+        let mut graphics = test_graphics((100, 80, 80), "Camera absence");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::new(
@@ -12562,14 +10761,7 @@ mod tests {
                 &snapshot.objects[1],
             )],
         );
-        assert_eq!(
-            graphics
-                .camera_states
-                .get(&CameraKey::Player { owner: 0, slot: 0 })
-                .expect("camera retained across missed draw")
-                .view_x,
-            548
-        );
+        front_assert_eq! {graphics.camera_states.get(&CameraKey::Player { owner: 0, slot: 0 }).expect("camera retained across missed draw").view_x => 548};
     }
 
     #[test]
@@ -12588,17 +10780,10 @@ mod tests {
                 background_color.a,
             ],
         );
-        let mut graphics = test_graphics_with(
-            100,
-            80,
-            80,
+        let mut graphics = test_graphics_with_hud(
+            (100, 80, 80),
             "Camera border",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            Arc::new(HudGraphics {
-                background: Some(background),
-                ..HudGraphics::default()
-            }),
+            test_hud_graphics(|hud| hud.background = Some(background)),
         );
         graphics.render_frame(
             &snapshot,
@@ -12609,15 +10794,11 @@ mod tests {
             .camera_states
             .get(&CameraKey::Player { owner: 0, slot: 0 })
             .test_value();
-        assert_eq!(camera.view_x, -40);
-        assert_eq!(graphics.active_viewports[0].content_rect.x, 40);
-        assert_eq!(graphics.active_viewports[0].content_rect.width, 60);
-        assert_eq!(graphics.surface().get_pixel(0, 0), Some(background_color));
-        assert_ne!(
-            graphics.surface().get_pixel(40, 0),
-            Some(background_color),
-            "in-world sky starts after the tiled border"
-        );
+        front_assert_eq! {camera.view_x => -40};
+        front_assert_eq! {graphics.active_viewports[0].content_rect.x => 40};
+        front_assert_eq! {graphics.active_viewports[0].content_rect.width => 60};
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(background_color)};
+        front_assert_ne! {graphics.surface().get_pixel(40, 0) => Some(background_color), "in-world sky starts after the tiled border"};
     }
 
     #[test]
@@ -12626,7 +10807,7 @@ mod tests {
         snapshot.objects[0].owner = OWNER_NONE;
         snapshot.objects[0].position = Vector2::new(0, 0);
         snapshot.landscape = Some(Landscape::flat(500, 500));
-        let mut graphics = test_graphics(100, 80, 80, "Observer");
+        let mut graphics = test_graphics((100, 80, 80), "Observer");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::from_focus(&snapshot.objects[0])],
@@ -12638,13 +10819,13 @@ mod tests {
                 slot: 0,
             })
             .test_value();
-        assert_eq!((camera.view_x, camera.view_y), (200, 210));
+        front_assert_eq! {(camera.view_x, camera.view_y) => (200, 210)};
     }
 
     #[test]
     fn viewport_zoom_uses_cpp_ceil_extent_without_resetting_fixed_state() {
         let snapshot = camera_world_snapshot();
-        let mut graphics = test_graphics(100, 80, 80, "Camera scale");
+        let mut graphics = test_graphics((100, 80, 80), "Camera scale");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::new(
@@ -12658,8 +10839,8 @@ mod tests {
             .camera_states
             .get(&CameraKey::Player { owner: 0, slot: 0 })
             .test_value();
-        assert_eq!((camera.view_width, camera.view_height), (67, 54));
-        assert_ne!(camera.d_view_x, itofix(CAMERA_UNINITIALIZED));
+        front_assert_eq! {(camera.view_width, camera.view_height) => (67, 54)};
+        front_assert_ne! {camera.d_view_x => itofix(CAMERA_UNINITIALIZED)};
     }
 
     #[test]
@@ -12667,26 +10848,22 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 30);
         snapshot.landscape = Some(Landscape::flat(256, 200));
-        let mut graphics = test_graphics(320, 180, 150, "Test Scenario");
+        let mut graphics = test_graphics((320, 180, 150), "Test Scenario");
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
         let (_, top_view) = graphics.viewport();
-        assert_eq!(top_view, 0);
+        front_assert_eq! {top_view => 0};
 
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 360);
         snapshot.landscape = Some(Landscape::flat(256, 360));
-        let mut graphics = test_graphics(320, 180, 150, "Test Scenario");
+        let mut graphics = test_graphics((320, 180, 150), "Test Scenario");
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
         let (_, bottom_view) = graphics.viewport();
-        assert_eq!(
-            bottom_view,
-            360 - 180 + VIEWPORT_SCROLL_BORDER,
-            "a focus at the raw map bottom exposes C++'s 40px scroll border"
-        );
+        front_assert_eq! {bottom_view => 360 - 180 + VIEWPORT_SCROLL_BORDER, "a focus at the raw map bottom exposes C++'s 40px scroll border"};
     }
 
     #[test]
@@ -12698,12 +10875,12 @@ mod tests {
         let mut landscape = Landscape::flat(640, 300);
         landscape.set_world_height(480);
         snapshot.landscape = Some(landscape);
-        let mut graphics = test_graphics(640, 480, 300, "Tutorial");
+        let mut graphics = test_graphics((640, 480, 300), "Tutorial");
 
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
         graphics.render_frame(&snapshot, &viewports);
 
-        assert_eq!(graphics.active_viewports[0].content_rect.height, 480);
+        front_assert_eq! {graphics.active_viewports[0].content_rect.height => 480};
     }
 
     #[test]
@@ -12734,49 +10911,19 @@ mod tests {
                 .flat_map(|color| [color.r, color.g, color.b, color.a])
                 .collect(),
         );
-        let hud_graphics = Arc::new(HudGraphics {
-            background: Some(background),
-            ..HudGraphics::default()
-        });
-        let mut graphics = test_graphics_with(
-            1_000,
-            800,
-            300,
-            "Tutorial",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            hud_graphics,
-        );
+        let hud_graphics = test_hud_graphics(|hud| hud.background = Some(background));
+        let mut graphics = test_graphics_with_hud((1_000, 800, 300), "Tutorial", hud_graphics);
 
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
         graphics.render_frame(&snapshot, &viewports);
 
         let viewport = &graphics.active_viewports[0];
-        assert_eq!(
-            (
-                viewport.rect.x,
-                viewport.rect.y,
-                viewport.rect.width,
-                viewport.rect.height
-            ),
-            (140, 120, 720, 560)
-        );
-        assert_eq!(
-            (
-                viewport.content_rect.x,
-                viewport.content_rect.y,
-                viewport.content_rect.width,
-                viewport.content_rect.height
-            ),
-            (180, 160, 640, 480)
-        );
+        front_assert_eq! {(viewport.rect.x, viewport.rect.y, viewport.rect.width, viewport.rect.height) => (140, 120, 720, 560)};
+        front_assert_eq! {(viewport.content_rect.x, viewport.content_rect.y, viewport.content_rect.width, viewport.content_rect.height) => (180, 160, 640, 480)};
 
         let pattern_at = |x: u32, y: u32| background_pattern[((y % 2) * 2 + x % 2) as usize];
-        assert_eq!(graphics.surface().get_pixel(0, 0), Some(pattern_at(0, 0)));
-        assert_eq!(
-            graphics.surface().get_pixel(140, 120),
-            Some(pattern_at(140, 120))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(pattern_at(0, 0))};
+        front_assert_eq! {graphics.surface().get_pixel(140, 120) => Some(pattern_at(140, 120))};
 
         let last_content_y =
             (viewport.content_rect.y + viewport.content_rect.height as i32 - 1) as u32;
@@ -12791,13 +10938,13 @@ mod tests {
             .surface()
             .get_pixel(sky_x, last_content_y)
             .test_value();
-        assert_ne!(terrain_bottom, sky_bottom, "bottom row must be nonuniform");
+        front_assert_ne! {terrain_bottom => sky_bottom, "bottom row must be nonuniform"};
 
         for x in [terrain_x, sky_x] {
             let border = graphics.surface().get_pixel(x, first_border_y).test_value();
             let last_content = graphics.surface().get_pixel(x, last_content_y).test_value();
-            assert_eq!(border, pattern_at(x, first_border_y));
-            assert_ne!(border, last_content, "terrain edge must not be extended");
+            front_assert_eq! {border => pattern_at(x, first_border_y)};
+            front_assert_ne! {border => last_content, "terrain edge must not be extended"};
         }
     }
 
@@ -12812,10 +10959,10 @@ mod tests {
         depleted.energy = 0;
         let low = object_color(&depleted);
 
-        assert_ne!(high, low);
+        front_assert_ne! {high => low};
         let high_sum = u16::from(high.r) + u16::from(high.g) + u16::from(high.b);
         let low_sum = u16::from(low.r) + u16::from(low.g) + u16::from(low.b);
-        assert!(high_sum > low_sum);
+        front_assert! {high_sum > low_sum};
     }
 
     #[test]
@@ -12825,8 +10972,8 @@ mod tests {
         let triangle = [(4, 4), (24, 6), (10, 24)];
 
         let painted = fill_polygon(&mut surface, &triangle, color);
-        assert!(painted);
-        assert_eq!(surface.get_pixel(12, 12), Some(color));
+        front_assert! {painted};
+        front_assert_eq! {surface.get_pixel(12, 12) => Some(color)};
     }
 
     #[test]
@@ -12841,7 +10988,7 @@ mod tests {
         ];
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
-        let mut graphics = test_graphics(80, 60, 60, "Polygon Scenario");
+        let mut graphics = test_graphics((80, 60, 60), "Polygon Scenario");
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -12851,12 +10998,12 @@ mod tests {
         let (viewport_x, viewport_y) = graphics.viewport();
         let screen_x = snapshot.objects[0].position.x - viewport_x;
         let screen_y = snapshot.objects[0].position.y - viewport_y;
-        assert!(screen_x >= 0 && screen_x < graphics.surface().width() as i32);
-        assert!(screen_y >= 0 && screen_y < graphics.surface().height() as i32);
+        front_assert! {screen_x >= 0 && screen_x < graphics.surface().width() as i32};
+        front_assert! {screen_y >= 0 && screen_y < graphics.surface().height() as i32};
         let pixel = graphics
             .surface()
             .get_pixel(screen_x as u32, screen_y as u32);
-        assert_eq!(pixel, Some(expected));
+        front_assert_eq! {pixel => Some(expected)};
     }
 
     #[test]
@@ -12875,7 +11022,7 @@ mod tests {
         snapshot.objects[0].container = Some(ObjectId::new(999));
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
-        let mut graphics = test_graphics(80, 60, 60, "Contained Scenario");
+        let mut graphics = test_graphics((80, 60, 60), "Contained Scenario");
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -12888,11 +11035,7 @@ mod tests {
         let pixel = graphics
             .surface()
             .get_pixel(screen_x as u32, screen_y as u32);
-        assert_ne!(
-            pixel,
-            Some(filled),
-            "contained object must not paint its debug polygon"
-        );
+        front_assert_ne! {pixel => Some(filled), "contained object must not paint its debug polygon"};
     }
 
     fn solid_sprite(
@@ -12942,17 +11085,13 @@ mod tests {
             color: Color,
             core: ParticleDefCore,
         ) -> ParticleRenderDefinition {
-            ParticleRenderDefinition {
-                image: ImageData::new(1, 1, vec![color.r, color.g, color.b, color.a]),
-                facet: ParticleFacet::new(0, 0, 1, 1),
-                length: 1,
-                aspect: 1.0,
-                core: ParticleDefCore {
+            particle_definition_fixture(
+                ImageData::new(1, 1, vec![color.r, color.g, color.b, color.a]),
+                ParticleDefCore {
                     name: name.to_string(),
                     ..core
                 },
-                draw_proc: ParticleDrawProc::Std,
-            }
+            )
         }
 
         fn particle(
@@ -12964,15 +11103,9 @@ mod tests {
             layer: ParticleLayer,
         ) -> ParticleSnapshot {
             ParticleSnapshot {
-                definition_id: definition_id.to_string(),
-                position: FloatVector2::new(x, y),
-                velocity: FloatVector2::new(0.0, 0.0),
                 life,
                 parameter_a,
-                parameter_b: 0x00ff_ffff,
-                layer,
-                pxs_fixed: None,
-                pxs_slot: None,
+                ..particle_fixture(definition_id, FloatVector2::new(x, y), layer)
             }
         }
 
@@ -13105,49 +11238,48 @@ mod tests {
         definitions.insert(
             "Phase".to_string(),
             ParticleRenderDefinition {
-                image: ImageData::new(2, 1, vec![220, 0, 0, 255, 0, 220, 0, 255]),
-                facet: ParticleFacet::new(0, 0, 1, 1),
                 length: 2,
-                aspect: 1.0,
-                core: ParticleDefCore {
-                    name: "Phase".to_string(),
-                    delay: 1,
-                    ..ParticleDefCore::default()
-                },
-                draw_proc: ParticleDrawProc::Std,
+                ..particle_definition_fixture(
+                    ImageData::new(2, 1, vec![220, 0, 0, 255, 0, 220, 0, 255]),
+                    ParticleDefCore {
+                        name: "Phase".to_string(),
+                        delay: 1,
+                        ..ParticleDefCore::default()
+                    },
+                )
             },
         );
         definitions.insert(
             "Smoke".to_string(),
             ParticleRenderDefinition {
-                image: shipped_particle_image(
-                    "content/Objects.c4d/Effects.c4d/Smoke.c4d/Graphics.png",
-                ),
                 facet: ParticleFacet::new(0, 0, 64, 64),
                 length: 4,
-                aspect: 1.0,
-                core: ParticleDefCore {
-                    name: "Smoke".to_string(),
-                    ..ParticleDefCore::default()
-                },
                 draw_proc: ParticleDrawProc::Smoke,
+                ..particle_definition_fixture(
+                    shipped_particle_image(
+                        "content/Objects.c4d/Effects.c4d/Smoke.c4d/Graphics.png",
+                    ),
+                    ParticleDefCore {
+                        name: "Smoke".to_string(),
+                        ..ParticleDefCore::default()
+                    },
+                )
             },
         );
         definitions.insert(
             "Fire".to_string(),
             ParticleRenderDefinition {
-                image: shipped_particle_image(
-                    "content/Objects.c4d/Effects.c4d/Particles.c4d/Fire.c4d/Graphics.png",
-                ),
                 facet: ParticleFacet::new(0, 0, 26, 26),
-                length: 1,
-                aspect: 1.0,
-                core: ParticleDefCore {
-                    name: "Fire".to_string(),
-                    attach: 1,
-                    ..ParticleDefCore::default()
-                },
-                draw_proc: ParticleDrawProc::Std,
+                ..particle_definition_fixture(
+                    shipped_particle_image(
+                        "content/Objects.c4d/Effects.c4d/Particles.c4d/Fire.c4d/Graphics.png",
+                    ),
+                    ParticleDefCore {
+                        name: "Fire".to_string(),
+                        attach: 1,
+                        ..ParticleDefCore::default()
+                    },
+                )
             },
         );
 
@@ -13180,14 +11312,10 @@ mod tests {
             particle("AdditiveRed", 31.0, 18.0, 0, 1.0, ParticleLayer::Global),
         ];
 
-        let mut graphics = test_graphics_with(
-            64,
-            24,
-            24,
+        let mut graphics = test_graphics_with_sprites(
+            (64, 24, 24),
             "particle draw procedures",
             Arc::new(object_sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         graphics.set_particle_sprites(Arc::new(definitions));
         graphics.set_renderer_config(true, true);
@@ -13210,54 +11338,20 @@ mod tests {
             ObjectRenderPass::Normal,
             None,
         );
-        assert_eq!(
-            graphics.surface().get_pixel(7, 8),
-            Some(Color::opaque(0, 0, 220))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(9, 8),
-            Some(Color::opaque(0, 220, 0))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(7, 8) => Some(Color::opaque(0, 0, 220))};
+        front_assert_eq! {graphics.surface().get_pixel(9, 8) => Some(Color::opaque(0, 220, 0))};
 
         graphics.draw_definition_particles(&particles, &ParticleLayer::Global, None, None);
-        assert_eq!(
-            graphics.surface().get_pixel(7, 8),
-            Some(Color::opaque(255, 255, 255))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(22, 8),
-            Some(Color::opaque(220, 0, 220))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(14, 8),
-            Some(Color::opaque(0, 220, 0))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(15, 18),
-            Some(Color::opaque(220, 80, 0)),
-            "definition particles draw newest-first"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(28, 17),
-            Some(Color::opaque(0, 0, 0))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(28, 18),
-            Some(Color::opaque(0, 80, 220))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(31, 18),
-            Some(Color::opaque(150, 20, 30))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(59, 8),
-            Some(Color::opaque(0, 0, 0)),
-            "lookup remains exact-case"
-        );
-        assert!((32..40).any(|x| (4..12)
-            .any(|y| { graphics.surface().get_pixel(x, y) != Some(Color::opaque(0, 0, 0)) })));
-        assert!((43..53).any(|x| (3..13)
-            .any(|y| { graphics.surface().get_pixel(x, y) != Some(Color::opaque(0, 0, 0)) })));
+        front_assert_eq! {graphics.surface().get_pixel(7, 8) => Some(Color::opaque(255, 255, 255))};
+        front_assert_eq! {graphics.surface().get_pixel(22, 8) => Some(Color::opaque(220, 0, 220))};
+        front_assert_eq! {graphics.surface().get_pixel(14, 8) => Some(Color::opaque(0, 220, 0))};
+        front_assert_eq! {graphics.surface().get_pixel(15, 18) => Some(Color::opaque(220, 80, 0)), "definition particles draw newest-first"};
+        front_assert_eq! {graphics.surface().get_pixel(28, 17) => Some(Color::opaque(0, 0, 0))};
+        front_assert_eq! {graphics.surface().get_pixel(28, 18) => Some(Color::opaque(0, 80, 220))};
+        front_assert_eq! {graphics.surface().get_pixel(31, 18) => Some(Color::opaque(150, 20, 30))};
+        front_assert_eq! {graphics.surface().get_pixel(59, 8) => Some(Color::opaque(0, 0, 0)), "lookup remains exact-case"};
+        front_assert! {(32..40).any(|x| (4..12).any(|y| { graphics.surface().get_pixel(x, y) != Some(Color::opaque(0, 0, 0)) }))};
+        front_assert! {(43..53).any(|x| (3..13).any(|y| { graphics.surface().get_pixel(x, y) != Some(Color::opaque(0, 0, 0)) }))};
 
         graphics.draw_objects_at_frame(
             0,
@@ -13272,38 +11366,29 @@ mod tests {
             ObjectRenderPass::ForegroundNonParallax,
             None,
         );
-        assert_eq!(
-            graphics.surface().get_pixel(22, 8),
-            Some(Color::opaque(220, 220, 0))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(22, 8) => Some(Color::opaque(220, 220, 0))};
     }
 
     #[test]
     fn unfogged_definition_particles_capture_in_compatible_batches() {
-        let definition = |name: &str, additive| ParticleRenderDefinition {
-            image: ImageData::new(1, 1, vec![255; 4]),
-            facet: ParticleFacet::new(0, 0, 1, 1),
-            length: 1,
-            aspect: 1.0,
-            core: ParticleDefCore {
-                name: name.to_owned(),
-                additive,
-                ..ParticleDefCore::default()
-            },
-            draw_proc: ParticleDrawProc::Std,
+        let definition = |name: &str, additive| {
+            particle_definition_fixture(
+                ImageData::new(1, 1, vec![255; 4]),
+                ParticleDefCore {
+                    name: name.to_owned(),
+                    additive,
+                    ..ParticleDefCore::default()
+                },
+            )
         };
-        let particle = |definition_id: &str, x| ParticleSnapshot {
-            definition_id: definition_id.to_owned(),
-            position: FloatVector2::new(x, 4.0),
-            velocity: FloatVector2::new(0.0, 0.0),
-            life: 0,
-            parameter_a: 1.0,
-            parameter_b: 0x00ff_ffff,
-            layer: ParticleLayer::Global,
-            pxs_fixed: None,
-            pxs_slot: None,
+        let particle = |definition_id: &str, x| {
+            particle_fixture(
+                definition_id,
+                FloatVector2::new(x, 4.0),
+                ParticleLayer::Global,
+            )
         };
-        let mut graphics = test_graphics(8, 8, 8, "particle batches");
+        let mut graphics = test_graphics((8, 8, 8), "particle batches");
         graphics.set_particle_sprites(Arc::new(HashMap::from([
             ("Fire".to_owned(), definition("Fire", 0)),
             ("Fire2".to_owned(), definition("Fire2", 1)),
@@ -13336,18 +11421,12 @@ mod tests {
             else {
                 panic!("expected a compact sprite batch");
             };
-            assert_eq!(*blend, expected_blend);
-            assert!(!mod2);
-            assert!(!gamma);
-            assert_eq!(*outer_modulation, GpuOuterModulation::Combine);
-            assert_eq!(
-                quads.iter().map(|quad| quad.rect).collect::<Vec<_>>(),
-                expected_rects,
-                "instances retain native newest-first painter order",
-            );
-            assert!(quads
-                .iter()
-                .all(|quad| { quad.uv == [0.0, 0.0, 1.0, 1.0] && quad.modulation == 0x00ff_ffff }));
+            front_assert_eq! {*blend => expected_blend};
+            front_assert! {!mod2};
+            front_assert! {!gamma};
+            front_assert_eq! {*outer_modulation => GpuOuterModulation::Combine};
+            front_assert_eq! {quads.iter().map(|quad| quad.rect).collect::<Vec<_>>() => expected_rects, "instances retain native newest-first painter order",};
+            front_assert! {quads.iter().all(|quad| { quad.uv == [0.0, 0.0, 1.0, 1.0] && quad.modulation == 0x00ff_ffff })};
         };
         batch(
             fire2,
@@ -13384,32 +11463,16 @@ mod tests {
         for name in ["Fire", "Fire2"] {
             let shipped = load_shipped(name);
             let core = ParticleDefCore::from(&shipped.core);
-            assert_eq!(
-                core.name, name,
-                "SetDefParticles resolves pFire1/pFire2 by this name \
-                 (src/C4Particles.cpp:485-486)",
-            );
+            front_assert_eq! {core.name => name, "SetDefParticles resolves pFire1/pFire2 by this name \
+            (src/C4Particles.cpp:485-486)",};
             // One flat opaque phase, so the blend is the only variable.
             definitions.insert(
                 name.to_string(),
-                ParticleRenderDefinition {
-                    image: ImageData::new(1, 1, vec![100, 0, 0, 255]),
-                    facet: ParticleFacet::new(0, 0, 1, 1),
-                    length: 1,
-                    aspect: 1.0,
-                    core,
-                    draw_proc: ParticleDrawProc::Std,
-                },
+                particle_definition_fixture(ImageData::new(1, 1, vec![100, 0, 0, 255]), core),
             );
         }
-        assert_eq!(
-            definitions["Fire2"].core.additive, 1,
-            "the shipped Fire2 Particle.txt carries Additive=1",
-        );
-        assert_eq!(
-            definitions["Fire"].core.additive, 0,
-            "the shipped Fire underlay is an ordinary alpha blit",
-        );
+        front_assert_eq! {definitions["Fire2"].core.additive => 1, "the shipped Fire2 Particle.txt carries Additive=1",};
+        front_assert_eq! {definitions["Fire"].core.additive => 0, "the shipped Fire underlay is an ordinary alpha blit",};
 
         // Engine fire is dealt to the burning object's own lists with
         // Attach=1, so the stored position is relative to that object
@@ -13431,27 +11494,19 @@ mod tests {
         ))
         .clone();
 
-        let particle = |name: &str, x: f32| ParticleSnapshot {
-            definition_id: name.to_string(),
-            position: FloatVector2::new(x - 8.0, 10.0),
-            velocity: FloatVector2::new(0.0, 0.0),
-            life: 0,
-            parameter_a: 1.0,
-            parameter_b: 0x00ff_ffff,
-            layer: ParticleLayer::ObjectBack(owner_id),
-            pxs_fixed: None,
-            pxs_slot: None,
+        let particle = |name: &str, x: f32| {
+            particle_fixture(
+                name,
+                FloatVector2::new(x - 8.0, 10.0),
+                ParticleLayer::ObjectBack(owner_id),
+            )
         };
         let particles = vec![particle("Fire2", 31.0), particle("Fire", 41.0)];
 
-        let mut graphics = test_graphics_with(
-            64,
-            24,
-            24,
+        let mut graphics = test_graphics_with_sprites(
+            (64, 24, 24),
             "shipped fire particle blending",
             Arc::new(object_sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         graphics.set_particle_sprites(Arc::new(definitions));
         graphics.set_renderer_config(true, true);
@@ -13477,16 +11532,8 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(31, 18),
-            Some(Color::opaque(150, 20, 30)),
-            "Fire2 adds src*srcAlpha to the destination",
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(41, 18),
-            Some(Color::opaque(100, 0, 0)),
-            "Fire replaces the destination through the ordinary alpha blit",
-        );
+        front_assert_eq! {graphics.surface().get_pixel(31, 18) => Some(Color::opaque(150, 20, 30)), "Fire2 adds src*srcAlpha to the destination",};
+        front_assert_eq! {graphics.surface().get_pixel(41, 18) => Some(Color::opaque(100, 0, 0)), "Fire replaces the destination through the ordinary alpha blit",};
     }
 
     /// A rotated definition particle lowers to the compact transformed-sprite
@@ -13502,9 +11549,7 @@ mod tests {
     #[test]
     fn a_rotated_definition_particle_lowers_to_a_compact_sprite() {
         let mut graphics = test_graphics_with(
-            32,
-            32,
-            16,
+            (32, 32, 16),
             "rotated-particle",
             Arc::new(HashMap::new()),
             Arc::new(CursorAtlas::default()),
@@ -13514,32 +11559,25 @@ mod tests {
         definitions.insert(
             "SPIN".to_string(),
             ParticleRenderDefinition {
-                image: ImageData::new(1, 1, vec![200, 0, 0, 255]),
-                facet: ParticleFacet::new(0, 0, 1, 1),
-                length: 1,
                 aspect: 4.0,
-                core: ParticleDefCore {
-                    name: "SPIN".to_string(),
-                    // Rotate by velocity: this is what leaves the batch.
-                    r_by_v: 1,
-                    ..ParticleDefCore::default()
-                },
-                draw_proc: ParticleDrawProc::Std,
+                ..particle_definition_fixture(
+                    ImageData::new(1, 1, vec![200, 0, 0, 255]),
+                    ParticleDefCore {
+                        name: "SPIN".to_string(),
+                        // Rotate by velocity: this is what leaves the batch.
+                        r_by_v: 1,
+                        ..ParticleDefCore::default()
+                    },
+                )
             },
         );
         graphics.set_particle_sprites(Arc::new(definitions));
 
         let particles = vec![ParticleSnapshot {
-            definition_id: "SPIN".to_string(),
-            position: FloatVector2::new(16.0, 14.0),
             // A nonzero velocity is what makes `c4_particle_angle` nonzero.
             velocity: FloatVector2::new(1.0, 0.0),
-            life: 0,
             parameter_a: 2.0,
-            parameter_b: 0x00ff_ffff,
-            layer: ParticleLayer::Global,
-            pxs_fixed: None,
-            pxs_slot: None,
+            ..particle_fixture("SPIN", FloatVector2::new(16.0, 14.0), ParticleLayer::Global)
         }];
 
         graphics.surface_mut().begin_gpu_scene_capture();
@@ -13564,11 +11602,8 @@ mod tests {
             }
         }
 
-        assert_eq!(
-            object_sprites, 1,
-            "the rotated particle takes the compact transformed-sprite record"
-        );
-        assert_eq!(quads, 0, "and emits no generic quad");
+        front_assert_eq! {object_sprites => 1, "the rotated particle takes the compact transformed-sprite record"};
+        front_assert_eq! {quads => 0, "and emits no generic quad"};
     }
 
     #[test]
@@ -13580,28 +11615,20 @@ mod tests {
             core: ParticleDefCore,
         ) -> ParticleRenderDefinition {
             ParticleRenderDefinition {
-                image: ImageData::new(1, 1, vec![color.r, color.g, color.b, color.a]),
-                facet: ParticleFacet::new(0, 0, 1, 1),
-                length: 1,
                 aspect,
-                core: ParticleDefCore {
-                    name: name.to_string(),
-                    ..core
-                },
-                draw_proc: ParticleDrawProc::Std,
+                ..particle_definition_fixture(
+                    ImageData::new(1, 1, vec![color.r, color.g, color.b, color.a]),
+                    ParticleDefCore {
+                        name: name.to_string(),
+                        ..core
+                    },
+                )
             }
         }
         fn particle(name: &str, x: f32, y: f32, a: f32) -> ParticleSnapshot {
             ParticleSnapshot {
-                definition_id: name.to_string(),
-                position: FloatVector2::new(x, y),
-                velocity: FloatVector2::new(0.0, 0.0),
-                life: 0,
                 parameter_a: a,
-                parameter_b: 0x00ff_ffff,
-                layer: ParticleLayer::Global,
-                pxs_fixed: None,
-                pxs_slot: None,
+                ..particle_fixture(name, FloatVector2::new(x, y), ParticleLayer::Global)
             }
         }
 
@@ -13656,7 +11683,7 @@ mod tests {
         rotated.velocity = FloatVector2::new(1.0, 0.0);
         let parallax = particle("Parallax", 35.0, 7.0, 1.0);
 
-        let mut graphics = test_graphics(36, 16, 16, "Std particle branches");
+        let mut graphics = test_graphics((36, 16, 16), "Std particle branches");
         graphics.viewport_x = 10.0;
         graphics.viewport_y = 6.0;
         graphics.set_particle_sprites(Arc::new(definitions));
@@ -13668,35 +11695,13 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(4, 4),
-            Some(Color::opaque(17, 34, 51))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(12, 4),
-            Some(Color::opaque(0, 180, 0))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(9, 8),
-            Some(Color::opaque(0, 0, 0))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(17, 8),
-            Some(Color::opaque(200, 0, 0)),
-            "RByV rotates the tall destination onto the horizontal axis"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(20, 5),
-            Some(Color::opaque(0, 0, 0))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(30, 4),
-            Some(Color::opaque(220, 220, 0))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(25, 1),
-            Some(Color::opaque(0, 0, 0))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(4, 4) => Some(Color::opaque(17, 34, 51))};
+        front_assert_eq! {graphics.surface().get_pixel(12, 4) => Some(Color::opaque(0, 180, 0))};
+        front_assert_eq! {graphics.surface().get_pixel(9, 8) => Some(Color::opaque(0, 0, 0))};
+        front_assert_eq! {graphics.surface().get_pixel(17, 8) => Some(Color::opaque(200, 0, 0)), "RByV rotates the tall destination onto the horizontal axis"};
+        front_assert_eq! {graphics.surface().get_pixel(20, 5) => Some(Color::opaque(0, 0, 0))};
+        front_assert_eq! {graphics.surface().get_pixel(30, 4) => Some(Color::opaque(220, 220, 0))};
+        front_assert_eq! {graphics.surface().get_pixel(25, 1) => Some(Color::opaque(0, 0, 0))};
     }
 
     #[test]
@@ -13706,28 +11711,20 @@ mod tests {
         // it has to actually skip them. Everything else keeps drawing: the
         // rung is about fire, not about particles in general.
         fn solid(name: &str) -> ParticleRenderDefinition {
-            ParticleRenderDefinition {
-                image: ImageData::new(1, 1, vec![200, 0, 0, 255]),
-                facet: ParticleFacet::new(0, 0, 1, 1),
-                length: 1,
-                aspect: 1.0,
-                core: ParticleDefCore {
+            particle_definition_fixture(
+                ImageData::new(1, 1, vec![200, 0, 0, 255]),
+                ParticleDefCore {
                     name: name.to_string(),
                     ..ParticleDefCore::default()
                 },
-                draw_proc: ParticleDrawProc::Std,
-            }
+            )
         }
-        let particle = |name: &str, x: f32, owner: ObjectId| ParticleSnapshot {
-            definition_id: name.to_string(),
-            position: FloatVector2::new(x, 8.0),
-            velocity: FloatVector2::new(0.0, 0.0),
-            life: 0,
-            parameter_a: 1.0,
-            parameter_b: 0x00ff_ffff,
-            layer: ParticleLayer::ObjectBack(owner),
-            pxs_fixed: None,
-            pxs_slot: None,
+        let particle = |name: &str, x: f32, owner: ObjectId| {
+            particle_fixture(
+                name,
+                FloatVector2::new(x, 8.0),
+                ParticleLayer::ObjectBack(owner),
+            )
         };
         let definitions: HashMap<_, _> = ["Fire", "Fire2", "Smoke2"]
             .iter()
@@ -13770,14 +11767,10 @@ mod tests {
         .clone();
 
         let render = |fire_particles: bool| {
-            let mut graphics = test_graphics_with(
-                32,
-                16,
-                16,
+            let mut graphics = test_graphics_with_sprites(
+                (32, 16, 16),
                 "fire particle suppression",
                 Arc::new(object_sprites.clone()),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.set_particle_sprites(Arc::new(definitions.clone()));
             graphics.set_renderer_config(true, true);
@@ -13801,17 +11794,13 @@ mod tests {
 
         let drawn = Color::opaque(200, 0, 0);
         let blank = Color::opaque(0, 0, 0);
-        assert_eq!(
-            render(true),
-            [Some(drawn), Some(drawn), Some(drawn), Some(drawn)],
-            "at full detail every particle draws",
-        );
-        assert_eq!(
-            render(false),
+        front_assert_eq! {render(true) => [Some(drawn), Some(drawn), Some(drawn), Some(drawn)], "at full detail every particle draws",};
+        front_assert_eq! {
+            render(false) =>
             [Some(blank), Some(blank), Some(drawn), Some(drawn)],
             "the rung skips the burning object's Fire and Fire2, and leaves \
              both other defs and script fire on an unlit object alone",
-        );
+        };
     }
 
     #[test]
@@ -13826,35 +11815,15 @@ mod tests {
         object.crew_member = false;
         object.on_fire = true;
         object.fire_phase = 0;
-        let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(2, 2, vec![0; 2 * 2 * 4]),
-            actions: HashMap::new(),
-            color_mask: None,
-            shape: Some(DefinitionRect::new(-1, -1, 2, 2)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
-        };
-        let hud = Arc::new(HudGraphics {
-            fire: Some(fire_test_strip()),
-            ..HudGraphics::default()
-        });
-        let mut graphics = test_graphics_with(
-            12,
-            12,
-            12,
-            "simple fire fallback",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            hud,
+        let sprite = test_shaped_sprite(
+            ImageData::new(2, 2, vec![0; 2 * 2 * 4]),
+            DefinitionRect::new(-1, -1, 2, 2),
         );
+        let hud = test_hud_graphics(|hud| hud.fire = Some(fire_test_strip()));
+        let mut graphics = test_graphics_with_hud((12, 12, 12), "simple fire fallback", hud);
         graphics.set_renderer_config(true, true);
         graphics.set_fire_particle_detail(false);
-        assert!(!graphics.draws_fire_particles());
+        front_assert! {!graphics.draws_fire_particles()};
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
 
         graphics.draw_object_fire(
@@ -13865,10 +11834,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(5, 5),
-            Some(Color::opaque(200, 0, 0))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(5, 5) => Some(Color::opaque(200, 0, 0))};
     }
 
     #[test]
@@ -13891,31 +11857,15 @@ mod tests {
         let base_index = (4 * 10 + 5) * 4;
         base_pixels[base_index..base_index + 4].copy_from_slice(&[0, 0, 200, 255]);
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(10, 8, base_pixels),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-5, -4, 10, 8)),
             fire_top: 4,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(10, 8, base_pixels))
         };
-        let hud = Arc::new(HudGraphics {
-            fire: Some(fire_test_strip()),
-            ..HudGraphics::default()
-        });
+        let hud = test_hud_graphics(|hud| hud.fire = Some(fire_test_strip()));
         let mut graphics = test_graphics_with(
-            40,
-            32,
-            32,
+            (40, 32, 32),
             "straight fire facet",
-            Arc::new(HashMap::from([(
-                sprite_map_key("BurningStraight", None),
-                sprite,
-            )])),
+            test_sprites([("BurningStraight", sprite)]),
             empty_cursor_atlas(),
             hud,
         );
@@ -13923,45 +11873,21 @@ mod tests {
         let green = Color::opaque(0, 200, 0);
         let blue = Color::opaque(0, 0, 200);
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
-            &[object.clone()],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
+        draw_test_objects(&mut graphics, &[object.clone()], TestObjectDraw::default());
 
-        assert_eq!(graphics.surface().get_pixel(15, 18), Some(green));
-        assert_eq!(graphics.surface().get_pixel(24, 19), Some(green));
-        assert_eq!(graphics.surface().get_pixel(14, 18), Some(black));
-        assert_eq!(graphics.surface().get_pixel(25, 18), Some(black));
-        assert_eq!(graphics.surface().get_pixel(15, 17), Some(black));
-        assert_eq!(graphics.surface().get_pixel(15, 20), Some(black));
-        assert_eq!(
-            graphics.surface().get_pixel(20, 18),
-            Some(blue),
-            "the base face is drawn after and can cover the fire facet"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(15, 18) => Some(green)};
+        front_assert_eq! {graphics.surface().get_pixel(24, 19) => Some(green)};
+        front_assert_eq! {graphics.surface().get_pixel(14, 18) => Some(black)};
+        front_assert_eq! {graphics.surface().get_pixel(25, 18) => Some(black)};
+        front_assert_eq! {graphics.surface().get_pixel(15, 17) => Some(black)};
+        front_assert_eq! {graphics.surface().get_pixel(15, 20) => Some(black)};
+        front_assert_eq! {graphics.surface().get_pixel(20, 18) => Some(blue), "the base face is drawn after and can cover the fire facet"};
 
         object.current_fire_top = Some(1);
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
-            &[object.clone()],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
-        assert_eq!(graphics.surface().get_pixel(15, 20), Some(green));
-        assert_eq!(graphics.surface().get_pixel(15, 21), Some(black));
+        draw_test_objects(&mut graphics, &[object.clone()], TestObjectDraw::default());
+        front_assert_eq! {graphics.surface().get_pixel(15, 20) => Some(green)};
+        front_assert_eq! {graphics.surface().get_pixel(15, 21) => Some(black)};
 
         // TargetPos applies object-local parallax before fire. The existing
         // base-face path intentionally remains transparent at the sampled
@@ -13979,41 +11905,17 @@ mod tests {
         graphics.viewport_x = 10.0;
         graphics.viewport_y = 10.0;
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
-            &[object.clone()],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
-        assert_eq!(graphics.surface().get_pixel(10, 13), Some(green));
-        assert_eq!(graphics.surface().get_pixel(5, 8), Some(black));
+        draw_test_objects(&mut graphics, &[object.clone()], TestObjectDraw::default());
+        front_assert_eq! {graphics.surface().get_pixel(10, 13) => Some(green)};
+        front_assert_eq! {graphics.surface().get_pixel(5, 8) => Some(black)};
         graphics.viewport_x = 0.0;
         graphics.viewport_y = 0.0;
         object.category &= !CATEGORY_PARALLAX_FLAG;
 
         object.on_fire = false;
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
-            &[object.clone()],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(15, 18),
-            Some(black),
-            "the phase-one pixels come only from the burning overlay"
-        );
+        draw_test_objects(&mut graphics, &[object.clone()], TestObjectDraw::default());
+        front_assert_eq! {graphics.surface().get_pixel(15, 18) => Some(black), "the phase-one pixels come only from the burning overlay"};
 
         // C4Object::UpdateShape also scales burning Oversize definitions
         // beyond 100%; fire must not clamp Con to FullCon.
@@ -14021,20 +11923,10 @@ mod tests {
         object.construction = FULL_CON + FULL_CON / 2;
         object.current_shape = Some(DefinitionRect::new(-5, -6, 10, 12));
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
-            &[object],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
-        assert_eq!(graphics.surface().get_pixel(15, 14), Some(green));
-        assert_eq!(graphics.surface().get_pixel(15, 19), Some(green));
-        assert_eq!(graphics.surface().get_pixel(15, 20), Some(black));
+        draw_test_objects(&mut graphics, &[object], TestObjectDraw::default());
+        front_assert_eq! {graphics.surface().get_pixel(15, 14) => Some(green)};
+        front_assert_eq! {graphics.surface().get_pixel(15, 19) => Some(green)};
+        front_assert_eq! {graphics.surface().get_pixel(15, 20) => Some(black)};
     }
 
     #[test]
@@ -14065,64 +11957,36 @@ mod tests {
             rotateable: 1,
             ..test_sprite(ImageData::new(12, 8, vec![0; 12 * 8 * 4]))
         };
-        let hud = Arc::new(HudGraphics {
-            fire: Some(fire_test_strip()),
-            ..HudGraphics::default()
-        });
+        let hud = test_hud_graphics(|hud| hud.fire = Some(fire_test_strip()));
         let mut graphics = test_graphics_with(
-            40,
-            32,
-            32,
+            (40, 32, 32),
             "rotated fire facet",
-            Arc::new(HashMap::from([(
-                sprite_map_key("BurningRotated", None),
-                sprite,
-            )])),
+            test_sprites([("BurningRotated", sprite)]),
             empty_cursor_atlas(),
             hud,
         );
         let black = Color::opaque(0, 0, 0);
         let blue = Color::opaque(0, 0, 200);
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
-            &[object.clone()],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
+        draw_test_objects(&mut graphics, &[object.clone()], TestObjectDraw::default());
 
-        assert_eq!(graphics.surface().get_pixel(16, 7), Some(blue));
-        assert_eq!(graphics.surface().get_pixel(20, 18), Some(blue));
-        assert_eq!(graphics.surface().get_pixel(15, 7), Some(black));
-        assert_eq!(graphics.surface().get_pixel(21, 7), Some(black));
-        assert_eq!(graphics.surface().get_pixel(16, 6), Some(black));
-        assert_eq!(graphics.surface().get_pixel(16, 19), Some(black));
+        front_assert_eq! {graphics.surface().get_pixel(16, 7) => Some(blue)};
+        front_assert_eq! {graphics.surface().get_pixel(20, 18) => Some(blue)};
+        front_assert_eq! {graphics.surface().get_pixel(15, 7) => Some(black)};
+        front_assert_eq! {graphics.surface().get_pixel(21, 7) => Some(black)};
+        front_assert_eq! {graphics.surface().get_pixel(16, 6) => Some(black)};
+        front_assert_eq! {graphics.surface().get_pixel(16, 19) => Some(black)};
 
         // A non-rotateable object may retain raw r != 0. C++ still selects
         // the vertex-outline fire branch, but its live Shape is not enlarged.
         // Using current_shape also covers a script SetShape override.
         object.current_shape = Some(DefinitionRect::new(-6, -4, 12, 8));
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
-            &[object],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
-        assert_eq!(graphics.surface().get_pixel(16, 12), Some(blue));
-        assert_eq!(graphics.surface().get_pixel(20, 18), Some(blue));
-        assert_eq!(graphics.surface().get_pixel(16, 11), Some(black));
-        assert_eq!(graphics.surface().get_pixel(16, 19), Some(black));
+        draw_test_objects(&mut graphics, &[object], TestObjectDraw::default());
+        front_assert_eq! {graphics.surface().get_pixel(16, 12) => Some(blue)};
+        front_assert_eq! {graphics.surface().get_pixel(20, 18) => Some(blue)};
+        front_assert_eq! {graphics.surface().get_pixel(16, 11) => Some(black)};
+        front_assert_eq! {graphics.surface().get_pixel(16, 19) => Some(black)};
     }
 
     #[test]
@@ -14151,40 +12015,18 @@ mod tests {
             ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 0]))
         };
         let mut graphics = test_graphics_with(
-            10,
-            10,
-            10,
+            (10, 10, 10),
             "culled fire facet",
-            Arc::new(HashMap::from([(
-                sprite_map_key("CulledBurning", None),
-                sprite,
-            )])),
+            test_sprites([("CulledBurning", sprite)]),
             empty_cursor_atlas(),
-            Arc::new(HudGraphics {
-                fire: Some(fire_test_strip()),
-                ..HudGraphics::default()
-            }),
+            test_hud_graphics(|hud| hud.fire = Some(fire_test_strip())),
         );
         let black = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
-            &[object],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
+        draw_test_objects(&mut graphics, &[object], TestObjectDraw::default());
 
-        assert_eq!(graphics.surface().get_pixel(1, 5), Some(black));
-        assert!(graphics
-            .surface()
-            .pixels()
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0, 0, 0, 255]));
+        front_assert_eq! {graphics.surface().get_pixel(1, 5) => Some(black)};
+        front_assert! {graphics.surface().pixels().chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255])};
     }
 
     #[test]
@@ -14198,44 +12040,22 @@ mod tests {
         object.crew_member = false;
         object.on_fire = true;
 
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(0, 0, 0, 0)),
-            ..test_sprite(ImageData::new(4, 4, vec![0; 4 * 4 * 4]))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(4, 4, vec![0; 4 * 4 * 4]),
+            DefinitionRect::new(0, 0, 0, 0),
+        );
         let mut graphics = test_graphics_with(
-            10,
-            10,
-            10,
+            (10, 10, 10),
             "zero shape fire facet",
-            Arc::new(HashMap::from([(
-                sprite_map_key("ZeroShapeBurning", None),
-                sprite,
-            )])),
+            test_sprites([("ZeroShapeBurning", sprite)]),
             empty_cursor_atlas(),
-            Arc::new(HudGraphics {
-                fire: Some(fire_test_strip()),
-                ..HudGraphics::default()
-            }),
+            test_hud_graphics(|hud| hud.fire = Some(fire_test_strip())),
         );
         let black = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(black);
-        graphics.draw_objects(
-            &[object],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
-        );
+        draw_test_objects(&mut graphics, &[object], TestObjectDraw::default());
 
-        assert!(graphics
-            .surface()
-            .pixels()
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0, 0, 0, 255]));
+        front_assert! {graphics.surface().pixels().chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255])};
     }
 
     #[test]
@@ -14289,42 +12109,25 @@ mod tests {
             .as_ref()
             .clone(),
         );
-        let hud = Arc::new(HudGraphics {
-            construction: Some(ImageData::new(2, 2, [0, 200, 0, 255].repeat(4))),
-            ..HudGraphics::default()
+        let hud = test_hud_graphics(|hud| {
+            hud.construction = Some(ImageData::new(2, 2, [0, 200, 0, 255].repeat(4)))
         });
         let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
+            (80, 60, 60),
             "Construction sign",
             Arc::new(sprites),
             empty_cursor_atlas(),
             hud,
         );
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &snapshot.objects,
-            &snapshot.render_order,
-            &snapshot.definition_lines,
-            &snapshot.players,
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::snapshot(&snapshot),
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(36, 42),
-            Some(green),
-            "the top-face sign must cover a base drawn later in the base pass"
-        );
-        assert_ne!(
-            graphics.surface().get_pixel(36, 46),
-            Some(green),
-            "the sign must use the Con-scaled Shape, not the unscaled Def shape"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(36, 42) => Some(green), "the top-face sign must cover a base drawn later in the base pass"};
+        front_assert_ne! {graphics.surface().get_pixel(36, 46) => Some(green), "the sign must use the Con-scaled Shape, not the unscaled Def shape"};
     }
 
     #[test]
@@ -14365,21 +12168,14 @@ mod tests {
         );
         sprites.insert(
             sprite_map_key("BaseObject", None),
-            DefinitionSprite {
-                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                ..test_sprite(ImageData::new(1, 1, vec![0, 0, 200, 255]))
-            },
+            test_shaped_sprite(
+                ImageData::new(1, 1, vec![0, 0, 200, 255]),
+                DefinitionRect::new(0, 0, 1, 1),
+            ),
         );
 
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "TopFace pass",
-            Arc::new(sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((80, 60, 60), "TopFace pass", Arc::new(sprites));
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::from_focus(&snapshot.objects[0])],
@@ -14387,14 +12183,8 @@ mod tests {
         let (viewport_x, viewport_y) = graphics.viewport();
         let x = (105 - viewport_x) as u32;
         let y = (100 - viewport_y) as u32;
-        assert_eq!(
-            graphics.surface().get_pixel(x, y),
-            Some(standard_gamma_color(green))
-        );
-        assert_ne!(
-            graphics.surface().get_pixel(x, y),
-            Some(standard_gamma_color(blue))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(x, y) => Some(standard_gamma_color(green))};
+        front_assert_ne! {graphics.surface().get_pixel(x, y) => Some(standard_gamma_color(blue))};
     }
 
     #[test]
@@ -14459,26 +12249,19 @@ mod tests {
             },
         );
 
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "Elevator object order",
-            Arc::new(sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((80, 60, 60), "Elevator object order", Arc::new(sprites));
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
         graphics.render_frame(&snapshot, &viewports);
 
         let (viewport_x, viewport_y) = graphics.viewport();
-        assert_eq!(
+        front_assert_eq! {
             graphics
                 .surface()
-                .get_pixel((64 - viewport_x) as u32, (50 - viewport_y) as u32),
+                .get_pixel((64 - viewport_x) as u32, (50 - viewport_y) as u32) =>
             Some(standard_gamma_color(green)),
             "SetObjectOrder keeps the raised ELEC TopFace over ELEV"
-        );
+        };
     }
 
     #[test]
@@ -14498,10 +12281,8 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
         let green = Color::opaque(0, 200, 0);
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
+        let mut graphics = test_graphics_with_sprites(
+            (80, 60, 60),
             "Sprite Precedence",
             solid_sprite(
                 "TestObject",
@@ -14511,8 +12292,6 @@ mod tests {
                 Some(DefinitionRect::new(-4, -4, 8, 8)),
                 false,
             ),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -14521,11 +12300,11 @@ mod tests {
         let (viewport_x, viewport_y) = graphics.viewport();
         let screen_x = (snapshot.objects[0].position.x - viewport_x) as u32;
         let screen_y = (snapshot.objects[0].position.y - viewport_y) as u32;
-        assert_eq!(
-            graphics.surface().get_pixel(screen_x, screen_y),
+        front_assert_eq! {
+            graphics.surface().get_pixel(screen_x, screen_y) =>
             Some(standard_gamma_color(green)),
             "expected the sprite pixel, not the vertex-polygon fill"
-        );
+        };
     }
 
     #[test]
@@ -14548,10 +12327,8 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
         let green = Color::opaque(0, 200, 0);
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
+        let mut graphics = test_graphics_with_sprites(
+            (80, 60, 60),
             "Idle Anchor",
             solid_sprite(
                 "TestObject",
@@ -14561,8 +12338,6 @@ mod tests {
                 Some(DefinitionRect::new(-8, -8, 8, 8)),
                 false,
             ),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -14572,27 +12347,15 @@ mod tests {
         let sx = 64 - viewport_x;
         let sy = 40 - viewport_y;
         // The face covers world [56,64) x [32,40).
-        assert_eq!(
+        front_assert_eq! {graphics.surface().get_pixel((sx - 5) as u32, (sy - 5) as u32) => Some(standard_gamma_color(green)), "expected the face inside the shape rect"};
+        front_assert_ne! {
             graphics
                 .surface()
-                .get_pixel((sx - 5) as u32, (sy - 5) as u32),
-            Some(standard_gamma_color(green)),
-            "expected the face inside the shape rect"
-        );
-        assert_ne!(
-            graphics
-                .surface()
-                .get_pixel((sx + 1) as u32, (sy + 1) as u32),
+                .get_pixel((sx + 1) as u32, (sy + 1) as u32) =>
             Some(standard_gamma_color(green)),
             "face must not extend past the shape rect (centered draw would)"
-        );
-        assert_ne!(
-            graphics
-                .surface()
-                .get_pixel((sx - 9) as u32, (sy - 9) as u32),
-            Some(standard_gamma_color(green)),
-            "face must start at the shape top-left"
-        );
+        };
+        front_assert_ne! {graphics.surface().get_pixel((sx - 9) as u32, (sy - 9) as u32) => Some(standard_gamma_color(green)), "face must start at the shape top-left"};
     }
 
     #[test]
@@ -14616,10 +12379,8 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
         let green = Color::opaque(0, 200, 0);
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
+        let mut graphics = test_graphics_with_sprites(
+            (80, 60, 60),
             "Growth Anchor",
             solid_sprite(
                 "TestObject",
@@ -14629,8 +12390,6 @@ mod tests {
                 Some(DefinitionRect::new(0, -16, 8, 16)),
                 true,
             ),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -14642,27 +12401,21 @@ mod tests {
         // Con 50%: inst shape (0,-8,4,8), target 4x8 at world [64,68) x [32,40).
         // (Probe the lower face rows: the GUI overlay text occupies the
         // top rows of the tiny test surface.)
-        assert_eq!(
+        front_assert_eq! {
             graphics
                 .surface()
-                .get_pixel((sx + 1) as u32, (sy - 2) as u32),
+                .get_pixel((sx + 1) as u32, (sy - 2) as u32) =>
             Some(standard_gamma_color(green)),
             "expected the half-grown face inside the con-scaled shape"
-        );
-        assert_ne!(
+        };
+        front_assert_ne! {
             graphics
                 .surface()
-                .get_pixel((sx - 2) as u32, (sy - 2) as u32),
+                .get_pixel((sx - 2) as u32, (sy - 2) as u32) =>
             Some(standard_gamma_color(green)),
             "half-grown face must not spill left of the scaled shape"
-        );
-        assert_ne!(
-            graphics
-                .surface()
-                .get_pixel((sx + 5) as u32, (sy - 2) as u32),
-            Some(standard_gamma_color(green)),
-            "half-grown face must be half-width"
-        );
+        };
+        front_assert_ne! {graphics.surface().get_pixel((sx + 5) as u32, (sy - 2) as u32) => Some(standard_gamma_color(green)), "half-grown face must be half-width"};
     }
 
     #[test]
@@ -14705,15 +12458,7 @@ mod tests {
                 .test_value(),
         );
 
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "Variant",
-            Arc::new(sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics_with_sprites((80, 60, 60), "Variant", Arc::new(sprites));
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -14721,13 +12466,13 @@ mod tests {
         let (viewport_x, viewport_y) = graphics.viewport();
         let sx = 64 - viewport_x;
         let sy = 40 - viewport_y;
-        assert_eq!(
+        front_assert_eq! {
             graphics
                 .surface()
-                .get_pixel((sx + 1) as u32, (sy + 1) as u32),
+                .get_pixel((sx + 1) as u32, (sy + 1) as u32) =>
             Some(standard_gamma_color(green)),
             "expected the '2' graphics variant, not the default sheet"
-        );
+        };
     }
 
     #[test]
@@ -14749,28 +12494,12 @@ mod tests {
             }
         }
 
-        let host_action = DefinitionActionGraphics {
-            facet: Some(clonk_engine::DefinitionActionFacet {
-                x: 4,
-                y: 0,
-                width: 4,
-                height: 4,
-                target_x: 0,
-                target_y: 0,
-            }),
-            ..DefinitionActionGraphics::default()
-        };
-        let source_action = DefinitionActionGraphics {
-            facet: Some(clonk_engine::DefinitionActionFacet {
-                x: 0,
-                y: 4,
-                width: 2,
-                height: 2,
-                target_x: 0,
-                target_y: 0,
-            }),
-            ..DefinitionActionGraphics::default()
-        };
+        let host_action = action_graphics_fixture(|action| {
+            action.facet = Some(test_action_facet(4, 0, 4, 4, 0, 0))
+        });
+        let source_action = action_graphics_fixture(|action| {
+            action.facet = Some(test_action_facet(0, 4, 2, 2, 0, 0))
+        });
         let host_sprite = DefinitionSprite {
             actions: HashMap::from([("Active".to_string(), host_action)]),
             shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
@@ -14789,10 +12518,10 @@ mod tests {
             stretch_growth: true,
             ..test_sprite(ImageData::new(8, 8, override_pixels))
         };
-        let sprites = Arc::new(HashMap::from([
-            (sprite_map_key("TestObject", None), host_sprite),
-            (sprite_map_key("OverrideSheet", None), override_sprite),
-        ]));
+        let sprites = test_sprites([
+            ("TestObject", host_sprite),
+            ("OverrideSheet", override_sprite),
+        ]);
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(12, 10);
         object.construction = FULL_CON / 2;
@@ -14803,15 +12532,8 @@ mod tests {
             blit_mode: 0,
         });
 
-        let mut graphics = test_graphics_with(
-            24,
-            20,
-            20,
-            "cross-definition base graphics",
-            sprites,
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((24, 20, 20), "cross-definition base graphics", sprites);
         graphics.set_point_filtering(true);
         let background = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(background);
@@ -14826,16 +12548,8 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            graphics.surface().get_pixel(8, 8),
-            Some(green),
-            "host Shape/GrowthType/ActMap must place the selected bitmap crop"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(14, 12),
-            Some(background),
-            "the selected definition's geometry must not place the face"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(8, 8) => Some(green), "host Shape/GrowthType/ActMap must place the selected bitmap crop"};
+        front_assert_eq! {graphics.surface().get_pixel(14, 12) => Some(background), "the selected definition's geometry must not place the face"};
     }
 
     #[test]
@@ -14870,51 +12584,24 @@ mod tests {
         let mut actions = HashMap::new();
         actions.insert(
             "Still".to_string(),
-            DefinitionActionGraphics {
-                facet: Some(clonk_engine::DefinitionActionFacet {
-                    x: 8,
-                    y: 0,
-                    width: 8,
-                    height: 8,
-                    target_x: 2,
-                    target_y: 4,
-                }),
-                directions: 1,
-                flip_dir: None,
-                reverse: false,
-                facet_base: false,
-                facet_top_face: false,
-                facet_target_stretch: false,
-                length: Some(1),
-            },
+            action_graphics_fixture(|action| {
+                action.facet = Some(test_action_facet(8, 0, 8, 8, 2, 4));
+                action.directions = 1;
+                action.length = Some(1);
+            }),
         );
         let mut sprites = HashMap::new();
         sprites.insert(
             sprite_map_key("TestObject", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(16, 8, pixels),
                 actions,
-                color_mask: None,
                 shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
-                top_face: None,
-                picture: None,
+                ..test_sprite(ImageData::new(16, 8, pixels))
             },
         );
 
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "Facet Anchor",
-            Arc::new(sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((80, 60, 60), "Facet Anchor", Arc::new(sprites));
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -14924,20 +12611,20 @@ mod tests {
         let sy = 40 - viewport_y;
         // cox = 64-4, coy = 40-4; facet dest [62,70) x [40,48) with the
         // GREEN sheet half (Facet x=8).
-        assert_eq!(
+        front_assert_eq! {
             graphics
                 .surface()
-                .get_pixel((sx + 1) as u32, (sy + 3) as u32),
+                .get_pixel((sx + 1) as u32, (sy + 3) as u32) =>
             Some(standard_gamma_color(green)),
             "expected the facet at cox+FacetX/coy+FacetY sourcing Facet x/y"
-        );
-        assert_ne!(
+        };
+        front_assert_ne! {
             graphics
                 .surface()
-                .get_pixel((sx - 3) as u32, (sy - 3) as u32),
+                .get_pixel((sx - 3) as u32, (sy - 3) as u32) =>
             Some(standard_gamma_color(green)),
             "facet must not be centered on the position"
-        );
+        };
     }
 
     #[test]
@@ -14978,64 +12665,32 @@ mod tests {
                     .copy_from_slice(&[green.r, green.g, green.b, green.a]);
             }
         }
-        let lift_case = DefinitionActionGraphics {
-            facet: Some(clonk_engine::DefinitionActionFacet {
-                x: 58,
-                y: 5,
-                width: 2,
-                height: 4,
-                target_x: 13,
-                target_y: 13,
-            }),
-            directions: 1,
-            facet_base: false,
-            facet_target_stretch: true,
-            length: Some(1),
-            ..DefinitionActionGraphics::default()
-        };
+        let lift_case = action_graphics_fixture(|action| {
+            action.facet = Some(test_action_facet(58, 5, 2, 4, 13, 13));
+            action.directions = 1;
+            action.facet_base = false;
+            action.facet_target_stretch = true;
+            action.length = Some(1);
+        });
         let mut sprites = HashMap::new();
         sprites.insert(
             sprite_map_key("ELEV", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(60, 9, elevator_pixels),
                 actions: HashMap::from([("LiftCase".to_string(), lift_case)]),
-                color_mask: None,
                 shape: Some(DefinitionRect::new(-14, -28, 28, 56)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
-                top_face: None,
-                picture: None,
+                ..test_sprite(ImageData::new(60, 9, elevator_pixels))
             },
         );
         sprites.insert(
             sprite_map_key("ELEC", None),
-            DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(24, 26, vec![0; 24 * 26 * 4]),
-                actions: HashMap::new(),
-                color_mask: None,
-                shape: Some(DefinitionRect::new(-12, -13, 24, 26)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
-                top_face: None,
-                picture: None,
-            },
+            test_shaped_sprite(
+                ImageData::new(24, 26, vec![0; 24 * 26 * 4]),
+                DefinitionRect::new(-12, -13, 24, 26),
+            ),
         );
 
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "Facet target stretch",
-            Arc::new(sprites),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((80, 60, 60), "Facet target stretch", Arc::new(sprites));
         // This regression isolates FacetTargetStretch geometry under C++'s
         // explicit point-filter mode; default non-exact blits are linear.
         graphics.set_point_filtering(true);
@@ -15049,28 +12704,19 @@ mod tests {
         let cable_top = (45 - viewport_y) as u32;
         let cable_last = (81 - viewport_y) as u32;
         let cable_bottom = (82 - viewport_y) as u32;
-        assert_eq!(
-            graphics.surface().get_pixel(cable_x, cable_top),
-            Some(standard_gamma_color(green))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(cable_x, cable_last),
-            Some(standard_gamma_color(green))
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(cable_x + 1, cable_last),
-            Some(standard_gamma_color(green))
-        );
-        assert_ne!(
-            graphics.surface().get_pixel(cable_x + 2, cable_last),
+        front_assert_eq! {graphics.surface().get_pixel(cable_x, cable_top) => Some(standard_gamma_color(green))};
+        front_assert_eq! {graphics.surface().get_pixel(cable_x, cable_last) => Some(standard_gamma_color(green))};
+        front_assert_eq! {graphics.surface().get_pixel(cable_x + 1, cable_last) => Some(standard_gamma_color(green))};
+        front_assert_ne! {
+            graphics.surface().get_pixel(cable_x + 2, cable_last) =>
             Some(standard_gamma_color(green)),
             "the stretched target keeps the source facet's two-pixel width"
-        );
-        assert_ne!(
-            graphics.surface().get_pixel(cable_x, cable_bottom),
+        };
+        front_assert_ne! {
+            graphics.surface().get_pixel(cable_x, cable_bottom) =>
             Some(standard_gamma_color(green)),
             "FacetTargetStretch must stop at the target shape's top edge"
-        );
+        };
     }
 
     #[test]
@@ -15085,8 +12731,8 @@ mod tests {
             let dest_height = rect.size.height.round() as i32;
             let dest_x = rect.origin.x.round() as i32;
             let dest_y = rect.origin.y.round() as i32;
-            assert!(dest_width > 0 && dest_height > 0);
-            assert!(source.width > 0 && source.height > 0);
+            front_assert! {dest_width > 0 && dest_height > 0};
+            front_assert! {source.width > 0 && source.height > 0};
 
             for dy in 0..dest_height {
                 // Independent GL_NEAREST oracle: the rasterizer evaluates
@@ -15107,7 +12753,7 @@ mod tests {
                     let source_x = source.x
                         + ((2_i64 * i64::from(dx) + 1) * i64::from(source.width)
                             / (2_i64 * i64::from(dest_width))) as i32;
-                    assert!(source_x >= 0 && source_y >= 0);
+                    front_assert! {source_x >= 0 && source_y >= 0};
                     let idx = ((source_y as u32 * image.width() + source_x as u32) * 4) as usize;
                     let pixel = &image.pixels()[idx..idx + 4];
                     let source = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]);
@@ -15142,52 +12788,30 @@ mod tests {
             .iter()
             .find(|object| object.definition_id == "ELEV")
             .test_value();
-        assert_eq!(partial.construction, 80_000);
-        assert_ne!(
-            partial.ocf & clonk_engine::ocf::CONSTRUCT,
-            0,
-            "the real upright, unburned partial ELEV carries OCF_Construct"
-        );
-        assert!(
-            partial_snapshot
-                .objects
-                .iter()
-                .all(|object| object.definition_id != "ELEC"),
-            "ELEV Initialize creates ELEC only after completion"
-        );
+        front_assert_eq! {partial.construction => 80_000};
+        front_assert_ne! {partial.ocf & clonk_engine::ocf::CONSTRUCT => 0, "the real upright, unburned partial ELEV carries OCF_Construct"};
+        front_assert! {partial_snapshot.objects.iter().all(|object| object.definition_id != "ELEC"), "ELEV Initialize creates ELEC only after completion"};
 
         let partial_sprites = real_elevator_sprites(&tutorial05);
         let real_elev = partial_sprites
             .get(&sprite_map_key("ELEV", None))
             .test_value();
-        assert_eq!(real_elev.image.width(), 84);
-        assert_eq!(real_elev.image.height(), 56);
-        assert_eq!(real_elev.shape, Some(DefinitionRect::new(-14, -28, 28, 56)));
-        assert_eq!(
-            real_elev.top_face,
-            Some(DefinitionTargetRect::new(28, 0, 28, 56, 0, 0))
-        );
-        assert!(!real_elev.stretch_growth);
-        assert!(real_elev.color_mask.is_none());
+        front_assert_eq! {real_elev.image.width() => 84};
+        front_assert_eq! {real_elev.image.height() => 56};
+        front_assert_eq! {real_elev.shape => Some(DefinitionRect::new(-14, -28, 28, 56))};
+        front_assert_eq! {real_elev.top_face => Some(DefinitionTargetRect::new(28, 0, 28, 56, 0, 0))};
+        front_assert! {!real_elev.stretch_growth};
+        front_assert! {real_elev.color_mask.is_none()};
 
         let partial_origin = Vector2::new(partial.position.x - 48, partial.position.y - 56);
         let construction_sign = test_support::load_graphics_png("Construction.png");
-        assert_eq!(
-            (construction_sign.width(), construction_sign.height()),
-            (16, 16),
-            "C++ fctConstruction uses the whole shipped image"
-        );
+        front_assert_eq! {(construction_sign.width(), construction_sign.height()) => (16, 16), "C++ fctConstruction uses the whole shipped image"};
         let mut partial_graphics = test_graphics_with(
-            96,
-            112,
-            112,
+            (96, 112, 112),
             "real Tutorial05 partial ELEV",
             Arc::clone(&partial_sprites),
             empty_cursor_atlas(),
-            Arc::new(HudGraphics {
-                construction: Some(construction_sign.clone()),
-                ..HudGraphics::default()
-            }),
+            test_hud_graphics(|hud| hud.construction = Some(construction_sign.clone())),
         );
         // This oracle isolates construction/facet geometry under C++'s
         // explicit PointFiltering mode; default non-exact blits are linear.
@@ -15246,11 +12870,7 @@ mod tests {
             &partial_expected,
             "an incomplete ELEV draws only its construction sign in the TopFace pass",
         );
-        assert_ne!(
-            partial_graphics.surface().pixels(),
-            before_top_face.pixels(),
-            "the real Construction.png sign must visibly change the TopFace pass"
-        );
+        front_assert_ne! {partial_graphics.surface().pixels() => before_top_face.pixels(), "the real Construction.png sign must visibly change the TopFace pass"};
 
         // Tutorial06 supplies the same real definitions and builds ELEV to
         // completion. Spawn one through the real ELEV Initialize callback so
@@ -15262,29 +12882,23 @@ mod tests {
             .test_value();
         let first_snapshot = tutorial06.snapshot();
         let elevator = first_snapshot.object(elevator_id).test_value();
-        assert_eq!(elevator.construction, FULL_CON);
-        assert_eq!(elevator.action.name, "LiftCase");
+        front_assert_eq! {elevator.construction => FULL_CON};
+        front_assert_eq! {elevator.action.name => "LiftCase"};
         let case_id = elevator.action.target.test_value();
         let first_case = first_snapshot.object(case_id).test_value();
-        assert_eq!(first_case.definition_id, "ELEC");
-        assert_eq!(
-            first_case.action.name, "Wait",
-            "ELEC Initialize selects its facet-less active action"
-        );
+        front_assert_eq! {first_case.definition_id => "ELEC"};
+        front_assert_eq! {first_case.action.name => "Wait", "ELEC Initialize selects its facet-less active action"};
         // CreateObject(ELEC, 0, +27) supplies the requested construction
         // bottom. Initial DoCon then keeps that bottom fixed while changing
         // ELEC's zero-con shape to its full 26px shape, moving its center up
         // by Shape.Hgt+Shape.y=13 (src/C4Object.cpp:1428-1496).
-        assert_eq!(
-            first_case.position,
-            Vector2::new(elevator.position.x, elevator.position.y + 14)
-        );
+        front_assert_eq! {first_case.position => Vector2::new(elevator.position.x, elevator.position.y + 14)};
 
         let sprites = real_elevator_sprites(&tutorial06);
         let elev_sprite = sprites.get(&sprite_map_key("ELEV", None)).test_value();
         let lift_case = elev_sprite.actions.get("LiftCase").test_value();
         let cable_facet = lift_case.facet.as_ref().test_value();
-        assert_eq!(
+        front_assert_eq! {
             (
                 cable_facet.x,
                 cable_facet.y,
@@ -15292,37 +12906,27 @@ mod tests {
                 cable_facet.height,
                 cable_facet.target_x,
                 cable_facet.target_y,
-            ),
+            ) =>
             (58, 5, 2, 4, 13, 0),
             "the five-value C4TargetRect defaults FacetY to zero (src/C4Rect.cpp:80-84)"
-        );
-        assert!(lift_case.facet_base);
-        assert!(lift_case.facet_target_stretch);
+        };
+        front_assert! {lift_case.facet_base};
+        front_assert! {lift_case.facet_target_stretch};
 
         let case_sprite = sprites.get(&sprite_map_key("ELEC", None)).test_value();
-        assert_eq!(case_sprite.image.width(), 24);
-        assert_eq!(case_sprite.image.height(), 28);
-        assert_eq!(
-            case_sprite.shape,
-            Some(DefinitionRect::new(-12, -13, 24, 26))
-        );
-        assert_eq!(
-            case_sprite.top_face,
-            Some(DefinitionTargetRect::new(0, 0, 24, 26, 0, 0))
-        );
-        assert!(case_sprite.color_mask.is_none());
+        front_assert_eq! {case_sprite.image.width() => 24};
+        front_assert_eq! {case_sprite.image.height() => 28};
+        front_assert_eq! {case_sprite.shape => Some(DefinitionRect::new(-12, -13, 24, 26))};
+        front_assert_eq! {case_sprite.top_face => Some(DefinitionTargetRect::new(0, 0, 24, 26, 0, 0))};
+        front_assert! {case_sprite.color_mask.is_none()};
 
         let origin = Vector2::new(elevator.position.x - 48, elevator.position.y - 48);
         let render_elevator_base_and_cable = |snapshot: &SimulationSnapshot| {
             let elevator = snapshot.object(elevator_id).test_value();
-            let mut graphics = test_graphics_with(
-                96,
-                128,
-                128,
+            let mut graphics = test_graphics_with_sprites(
+                (96, 128, 128),
                 "real Tutorial06 ELEV cable",
                 Arc::clone(&sprites),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.set_point_filtering(true);
             graphics.surface_mut().fill(Color::opaque(0, 0, 0));
@@ -15382,14 +12986,10 @@ mod tests {
         };
         let render_case = |snapshot: &SimulationSnapshot| {
             let case = snapshot.object(case_id).test_value();
-            let mut graphics = test_graphics_with(
-                96,
-                128,
-                128,
+            let mut graphics = test_graphics_with_sprites(
+                (96, 128, 128),
                 "real Tutorial06 ELEC carriage",
                 Arc::clone(&sprites),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.set_point_filtering(true);
             graphics.surface_mut().fill(Color::opaque(0, 0, 0));
@@ -15443,22 +13043,16 @@ mod tests {
             &expected_case(&first_snapshot),
             "real ELEC full-con TopFace must render the carriage",
         );
-        assert!(
-            first_carriage
-                .pixels()
-                .chunks_exact(4)
-                .any(|pixel| pixel != [0, 0, 0, 255]),
-            "regression guard: a missing ELEC carriage must fail visibly"
-        );
+        front_assert! {first_carriage.pixels().chunks_exact(4).any(|pixel| pixel != [0, 0, 0, 255]), "regression guard: a missing ELEC carriage must fail visibly"};
 
         let moved_position = Vector2::new(first_case.position.x, first_case.position.y + 1);
         tutorial06
             .apply_object_update(case_id, ObjectUpdate::new().with_position(moved_position))
             .test_value();
         let second_snapshot = tutorial06.tick().test_value();
-        assert_eq!(second_snapshot.frame, first_snapshot.frame + 1);
+        front_assert_eq! {second_snapshot.frame => first_snapshot.frame + 1};
         let second_case = second_snapshot.object(case_id).test_value();
-        assert_eq!(second_case.position, moved_position);
+        front_assert_eq! {second_case.position => moved_position};
 
         let second_cable = render_elevator_base_and_cable(&second_snapshot);
         assert_surface_pixels_eq(
@@ -15472,10 +13066,7 @@ mod tests {
             &expected_case(&second_snapshot),
             "the rendered carriage must follow the live case without lag or quantization",
         );
-        assert!(
-            first_carriage.pixels() != second_carriage.pixels(),
-            "consecutive snapshots one pixel apart must produce distinct carriage placement"
-        );
+        front_assert! {first_carriage.pixels() != second_carriage.pixels(), "consecutive snapshots one pixel apart must produce distinct carriage placement"};
     }
 
     #[test]
@@ -15500,11 +13091,7 @@ mod tests {
 
         // At or below the C++ breakpoint the classic choice is already right.
         for width in [320u32, 640, 799, 800, 1279, 1280] {
-            assert_eq!(
-                hd(width, 1.0),
-                CursorAtlas::index_for_scaled_resolution(width, 1.0),
-                "width {width} must keep the C++ selection"
-            );
+            front_assert_eq! {hd(width, 1.0) => CursorAtlas::index_for_scaled_resolution(width, 1.0), "width {width} must keep the C++ selection"};
         }
 
         // Above it, each shipped cell size takes over at the width where it
@@ -15522,19 +13109,16 @@ mod tests {
             (8652, 1),
             (8653, 0),
         ] {
-            assert_eq!(hd(width, 1.0), index, "physical width {width}");
+            front_assert_eq! {hd(width, 1.0) => index, "physical width {width}"};
         }
 
         // The tier follows physical pixels, so Graphics.Scale cannot shrink
         // the pointer below its angular size the way the C++ shift does.
-        assert_eq!(hd(1920, 2.0), 2, "3840 physical through a 2x GUI scale");
-        assert_eq!(hd(1280, 3.0), 2, "3840 physical through a 3x GUI scale");
+        front_assert_eq! {hd(1920, 2.0) => 2, "3840 physical through a 2x GUI scale"};
+        front_assert_eq! {hd(1280, 3.0) => 2, "3840 physical through a 3x GUI scale"};
 
         // Classic selection is untouched by the new policy.
-        assert_eq!(
-            CursorAtlas::index_for_tiers(3840, 1.0, CursorTiers::Classic),
-            5
-        );
+        front_assert_eq! {CursorAtlas::index_for_tiers(3840, 1.0, CursorTiers::Classic) => 5};
     }
 
     #[test]
@@ -15553,45 +13137,29 @@ mod tests {
         let images = vec![None, None, sheet(150), None, None, sheet(50), None, None];
         let atlas = Arc::new(CursorAtlas::new(images));
         let mut graphics = test_graphics_with(
-            3840,
-            8,
-            8,
+            (3840, 8, 8),
             "HD cursor tiers",
             Arc::new(HashMap::new()),
             Arc::clone(&atlas),
             empty_hud_graphics(),
         );
 
-        assert_eq!(
-            graphics.construction_cursor_primary_offset(),
-            Some(GuiPoint::new(25.0, 25.0)),
-            "the default policy keeps C++'s 50px cell at 3840"
-        );
+        front_assert_eq! {graphics.construction_cursor_primary_offset() => Some(GuiPoint::new(25.0, 25.0)), "the default policy keeps C++'s 50px cell at 3840"};
 
         graphics.set_cursor_tiers(CursorTiers::HighDpi);
-        assert_eq!(
-            graphics.construction_cursor_primary_offset(),
-            Some(GuiPoint::new(75.0, 75.0)),
-            "HighDpi selects the 150px sheet and its hotspot at 3840"
-        );
+        front_assert_eq! {graphics.construction_cursor_primary_offset() => Some(GuiPoint::new(75.0, 75.0)), "HighDpi selects the 150px sheet and its hotspot at 3840"};
 
         // The policy is configured once at startup, but every resolution
         // change and scenario start builds a fresh GraphicsSystem.
         let mut rebuilt = test_graphics_with(
-            3840,
-            8,
-            8,
+            (3840, 8, 8),
             "HD cursor tiers rebuilt",
             Arc::new(HashMap::new()),
             atlas,
             empty_hud_graphics(),
         );
         rebuilt.inherit_cursor_tiers(&graphics);
-        assert_eq!(
-            rebuilt.construction_cursor_primary_offset(),
-            Some(GuiPoint::new(75.0, 75.0)),
-            "a rebuilt viewport must keep the configured cursor policy"
-        );
+        front_assert_eq! {rebuilt.construction_cursor_primary_offset() => Some(GuiPoint::new(75.0, 75.0)), "a rebuilt viewport must keep the configured cursor policy"};
     }
 
     #[test]
@@ -15610,52 +13178,37 @@ mod tests {
             } else {
                 7
             };
-            assert_eq!(
-                CursorAtlas::index_for_scaled_resolution(width, 1.0),
-                legacy_index,
-                "Scale=100 width {width}"
-            );
-            assert_eq!(
-                atlas
-                    .image_for_scaled_resolution(width, 1.0)
-                    .expect("selected cursor sheet")
-                    .pixels()[0],
-                legacy_index as u8
-            );
+            front_assert_eq! {CursorAtlas::index_for_scaled_resolution(width, 1.0) => legacy_index, "Scale=100 width {width}"};
+            front_assert_eq! {atlas.image_for_scaled_resolution(width, 1.0).expect("selected cursor sheet").pixels()[0] => legacy_index as u8};
         }
 
         // Strict physical-width edges and the truncated scale shift from
         // C4GraphicsResource.cpp:474-490.
-        assert_eq!(CursorAtlas::index_for_scaled_resolution(399, 2.0), 7);
-        assert_eq!(CursorAtlas::index_for_scaled_resolution(400, 2.0), 6);
-        assert_eq!(CursorAtlas::index_for_scaled_resolution(639, 2.0), 6);
-        assert_eq!(CursorAtlas::index_for_scaled_resolution(640, 2.0), 5);
-        assert_eq!(CursorAtlas::index_for_scaled_resolution(641, 2.0), 4);
-        assert_eq!(CursorAtlas::index_for_scaled_resolution(1280, 2.0), 4);
-        assert_eq!(CursorAtlas::index_for_scaled_resolution(853, 1.5), 6);
-        assert_eq!(CursorAtlas::index_for_scaled_resolution(854, 1.5), 4);
-        assert_eq!(CursorAtlas::index_for_scaled_resolution(512, 2.5), 5);
-        assert_eq!(CursorAtlas::index_for_scaled_resolution(513, 2.5), 3);
+        front_assert_eq! {CursorAtlas::index_for_scaled_resolution(399, 2.0) => 7};
+        front_assert_eq! {CursorAtlas::index_for_scaled_resolution(400, 2.0) => 6};
+        front_assert_eq! {CursorAtlas::index_for_scaled_resolution(639, 2.0) => 6};
+        front_assert_eq! {CursorAtlas::index_for_scaled_resolution(640, 2.0) => 5};
+        front_assert_eq! {CursorAtlas::index_for_scaled_resolution(641, 2.0) => 4};
+        front_assert_eq! {CursorAtlas::index_for_scaled_resolution(1280, 2.0) => 4};
+        front_assert_eq! {CursorAtlas::index_for_scaled_resolution(853, 1.5) => 6};
+        front_assert_eq! {CursorAtlas::index_for_scaled_resolution(854, 1.5) => 4};
+        front_assert_eq! {CursorAtlas::index_for_scaled_resolution(512, 2.5) => 5};
+        front_assert_eq! {CursorAtlas::index_for_scaled_resolution(513, 2.5) => 3};
 
         let odd_cell = GraphicsSystem::cursor_mark_rect(100.0, 100.0, 12.0, 75, 2.0);
-        assert_eq!(odd_cell.origin, GuiPoint::new(81.5, 59.5));
-        assert_eq!(odd_cell.size, GuiSize::new(37.5, 37.5));
+        front_assert_eq! {odd_cell.origin => GuiPoint::new(81.5, 59.5)};
+        front_assert_eq! {odd_cell.size => GuiSize::new(37.5, 37.5)};
 
         let mut sparse = vec![None; 8];
         sparse[5] = Some(ImageData::new(1, 1, vec![1, 2, 3, 255]));
-        assert!(
-            CursorAtlas::new(sparse)
-                .image_for_scaled_resolution(320, 1.0)
-                .is_none(),
-            "C++ does not substitute a nearby loaded cursor sheet"
-        );
+        front_assert! {CursorAtlas::new(sparse).image_for_scaled_resolution(320, 1.0).is_none(), "C++ does not substitute a nearby loaded cursor sheet"};
     }
 
     #[test]
     fn all_cursor_phases_use_cpp_cells_and_hotspots() {
-        assert_eq!(MouseCursorPhase::Down.hotspot(15), (7, 14));
-        assert_eq!(MouseCursorPhase::Right.hotspot(15), (14, 7));
-        assert_eq!(MouseCursorPhase::DownRight.hotspot(15), (14, 14));
+        front_assert_eq! {MouseCursorPhase::Down.hotspot(15) => (7, 14)};
+        front_assert_eq! {MouseCursorPhase::Right.hotspot(15) => (14, 7)};
+        front_assert_eq! {MouseCursorPhase::DownRight.hotspot(15) => (14, 14)};
 
         let cell = 4u32;
         let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
@@ -15668,9 +13221,7 @@ mod tests {
         let mut entries = vec![None; 8];
         entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
         let mut graphics = test_graphics_with(
-            24,
-            24,
-            24,
+            (24, 24, 24),
             "Mouse scroll cursor",
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
@@ -15715,7 +13266,7 @@ mod tests {
         ];
         for (phase, expected_origin) in cases {
             graphics.surface_mut().fill(Color::opaque(0, 0, 0));
-            assert!(graphics.draw_mouse_cursor(phase, GuiPoint::new(10.0, 10.0), None,));
+            front_assert! {graphics.draw_mouse_cursor(phase, GuiPoint::new(10.0, 10.0), None,)};
             let expected = Color::opaque(
                 phase.atlas_phase() as u8,
                 phase.atlas_phase() as u8 + 40,
@@ -15725,17 +13276,9 @@ mod tests {
                 .flat_map(|y| (0..24).map(move |x| (x, y)))
                 .filter(|&(x, y)| graphics.surface().get_pixel(x, y) == Some(expected))
                 .collect::<Vec<_>>();
-            assert_eq!(points.len(), 16, "phase {phase:?} source cell");
-            assert_eq!(
-                points.iter().map(|point| point.0).min(),
-                Some(expected_origin.0),
-                "phase {phase:?} x hotspot"
-            );
-            assert_eq!(
-                points.iter().map(|point| point.1).min(),
-                Some(expected_origin.1),
-                "phase {phase:?} y hotspot"
-            );
+            front_assert_eq! {points.len() => 16, "phase {phase:?} source cell"};
+            front_assert_eq! {points.iter().map(|point| point.0).min() => Some(expected_origin.0), "phase {phase:?} x hotspot"};
+            front_assert_eq! {points.iter().map(|point| point.1).min() => Some(expected_origin.1), "phase {phase:?} y hotspot"};
         }
     }
 
@@ -15752,9 +13295,7 @@ mod tests {
         let mut entries = vec![None; 8];
         entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
         let mut graphics = test_graphics_with(
-            24,
-            24,
-            24,
+            (24, 24, 24),
             "Mouse cursor clip",
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
@@ -15762,19 +13303,14 @@ mod tests {
         );
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
 
-        assert!(graphics.draw_mouse_cursor_clipped(
-            MouseCursorPhase::Grab,
-            SurfaceRect::new(10, 9, 2, 2),
-            GuiPoint::new(10.0, 10.0),
-            None,
-        ));
+        front_assert! {graphics.draw_mouse_cursor_clipped(MouseCursorPhase::Grab, SurfaceRect::new(10, 9, 2, 2), GuiPoint::new(10.0, 10.0), None,)};
         let expected = Color::opaque(MouseCursorPhase::Grab.atlas_phase() as u8, 100, 200);
         let points = (0..24)
             .flat_map(|y| (0..24).map(move |x| (x, y)))
             .filter(|&(x, y)| graphics.surface().get_pixel(x, y) == Some(expected))
             .collect::<Vec<_>>();
-        assert_eq!(points, vec![(10, 9), (11, 9), (10, 10), (11, 10)]);
-        assert_eq!(graphics.surface().clip(), None, "caller clip is restored");
+        front_assert_eq! {points => vec![(10, 9), (11, 9), (10, 10), (11, 10)]};
+        front_assert_eq! {graphics.surface().clip() => None, "caller clip is restored"};
     }
 
     #[test]
@@ -15790,9 +13326,7 @@ mod tests {
         let mut entries = vec![None; 8];
         entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
         let mut graphics = test_graphics_with(
-            48,
-            48,
-            48,
+            (48, 48, 48),
             "Old-style mouse cursor",
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
@@ -15821,20 +13355,14 @@ mod tests {
             (MouseCursorPhase::Up, (Some(14), Some(14))),
         ] {
             graphics.surface_mut().fill(Color::opaque(1, 2, 3));
-            assert!(graphics.draw_mouse_cursor(phase, GuiPoint::new(20.0, 20.0), None));
-            assert_eq!(origin(&graphics, phase), expected, "{phase:?}");
+            front_assert! {graphics.draw_mouse_cursor(phase, GuiPoint::new(20.0, 20.0), None)};
+            front_assert_eq! {origin(&graphics, phase) => expected, "{phase:?}"};
         }
 
         graphics.surface_mut().fill(Color::opaque(1, 2, 3));
-        assert!(graphics.draw_gui_mouse_cursor(GuiPoint::new(20.0, 20.0), true, None));
-        assert_eq!(
-            origin(&graphics, MouseCursorPhase::Region),
-            (Some(20), Some(20))
-        );
-        assert_eq!(
-            origin(&graphics, MouseCursorPhase::Help),
-            (Some(25), Some(15))
-        );
+        front_assert! {graphics.draw_gui_mouse_cursor(GuiPoint::new(20.0, 20.0), true, None)};
+        front_assert_eq! {origin(&graphics, MouseCursorPhase::Region) => (Some(20), Some(20))};
+        front_assert_eq! {origin(&graphics, MouseCursorPhase::Help) => (Some(25), Some(15))};
     }
 
     #[test]
@@ -15850,9 +13378,7 @@ mod tests {
         let mut entries = vec![None; 8];
         entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
         let mut graphics = test_graphics_with(
-            40,
-            40,
-            40,
+            (40, 40, 40),
             "GUI help cursor",
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
@@ -15860,17 +13386,17 @@ mod tests {
         );
         graphics.surface_mut().fill(Color::opaque(200, 200, 200));
 
-        assert!(graphics.draw_gui_mouse_cursor(GuiPoint::new(10.0, 10.0), true, None));
+        front_assert! {graphics.draw_gui_mouse_cursor(GuiPoint::new(10.0, 10.0), true, None)};
         let region = Color::opaque(0, 0, 0);
         let help = Color::opaque(29, 29, 29);
-        assert_eq!(graphics.surface().get_pixel(8, 8), Some(region));
-        assert_eq!(graphics.surface().get_pixel(13, 3), Some(help));
+        front_assert_eq! {graphics.surface().get_pixel(8, 8) => Some(region)};
+        front_assert_eq! {graphics.surface().get_pixel(13, 3) => Some(help)};
 
         graphics.set_presentation_scale(0.5);
         graphics.surface_mut().fill(Color::opaque(200, 200, 200));
-        assert!(graphics.draw_gui_mouse_cursor(GuiPoint::new(20.0, 20.0), true, None));
-        assert_eq!(graphics.surface().get_pixel(16, 16), Some(region));
-        assert_eq!(graphics.surface().get_pixel(26, 6), Some(help));
+        front_assert! {graphics.draw_gui_mouse_cursor(GuiPoint::new(20.0, 20.0), true, None)};
+        front_assert_eq! {graphics.surface().get_pixel(16, 16) => Some(region)};
+        front_assert_eq! {graphics.surface().get_pixel(26, 6) => Some(help)};
     }
 
     #[test]
@@ -15886,9 +13412,7 @@ mod tests {
         let mut entries = vec![None; 8];
         entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
         let mut graphics = test_graphics_with(
-            24,
-            24,
-            24,
+            (24, 24, 24),
             "Construction add marker",
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
@@ -15905,89 +13429,47 @@ mod tests {
         };
 
         let cursor_offset = graphics.construction_cursor_primary_offset().test_value();
-        assert_eq!(cursor_offset, GuiPoint::new(2.0, 2.0));
-        assert!(graphics.draw_construction_add_marker(
-            SurfaceRect::new(0, 0, 24, 24),
-            screen,
-            cursor_offset,
-            None,
-        ));
-        assert_eq!(
-            marker_points(&graphics),
-            vec![(13, 13), (14, 13), (13, 14), (14, 14)],
-            "(cursor*2 - centered 2px offset + 8px) / 2",
-        );
+        front_assert_eq! {cursor_offset => GuiPoint::new(2.0, 2.0)};
+        front_assert! {graphics.draw_construction_add_marker(SurfaceRect::new(0, 0, 24, 24), screen, cursor_offset, None,)};
+        front_assert_eq! {marker_points(&graphics) => vec![(13, 13), (14, 13), (13, 14), (14, 14)], "(cursor*2 - centered 2px offset + 8px) / 2",};
 
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         let drag_image_offset = GuiPoint::new(4.0, 6.0); // 8x6 drag image
-        assert!(graphics.draw_construction_add_marker(
-            SurfaceRect::new(13, 11, 1, 2),
-            screen,
-            drag_image_offset,
-            None,
-        ));
-        assert_eq!(
-            marker_points(&graphics),
-            vec![(13, 11), (13, 12)],
-            "the marker keeps its native offset but stays inside the viewport clip",
-        );
+        front_assert! {graphics.draw_construction_add_marker(SurfaceRect::new(13, 11, 1, 2), screen, drag_image_offset, None,)};
+        front_assert_eq! {marker_points(&graphics) => vec![(13, 11), (13, 12)], "the marker keeps its native offset but stays inside the viewport clip",};
 
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         let fallback = Color::opaque(32, 72, 200);
-        assert!(graphics.draw_construction_cursor_fallback(
-            SurfaceRect::new(10, 9, 1, 2),
-            screen,
-            None,
-        ));
+        front_assert! {graphics.draw_construction_cursor_fallback(SurfaceRect::new(10, 9, 1, 2), screen, None,)};
         let fallback_points = (0..24)
             .flat_map(|y| (0..24).map(move |x| (x, y)))
             .filter(|&(x, y)| graphics.surface().get_pixel(x, y) == Some(fallback))
             .collect::<Vec<_>>();
-        assert_eq!(fallback_points, vec![(10, 9), (10, 10)]);
+        front_assert_eq! {fallback_points => vec![(10, 9), (10, 10)]};
     }
 
     #[test]
     fn construction_drag_preview_uses_native_mod2_validity_colors() {
         let image = ImageData::new(1, 1, vec![128, 128, 128, 255]);
-        let mut graphics = test_graphics(3, 2, 2, "Construction drag MOD2");
+        let mut graphics = test_graphics((3, 2, 2), "Construction drag MOD2");
         graphics.set_advanced_renderer_config(AdvancedRendererConfig {
             shader: true,
             ..AdvancedRendererConfig::DEFAULT
         });
 
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
-        assert!(graphics.draw_construction_drag_preview(
-            &image,
-            SurfaceRect::new(0, 0, 3, 2),
-            GuiPoint::new(1.0, 1.0),
-            true,
-            None,
-        ));
-        assert_eq!(
-            graphics.surface().get_pixel(1, 0),
-            Some(Color::opaque(1, 255, 1)),
-            "0x1f007f00 uses the native green MOD2 channels",
-        );
+        front_assert! {graphics.draw_construction_drag_preview(&image, SurfaceRect::new(0, 0, 3, 2), GuiPoint::new(1.0, 1.0), true, None,)};
+        front_assert_eq! {graphics.surface().get_pixel(1, 0) => Some(Color::opaque(1, 255, 1)), "0x1f007f00 uses the native green MOD2 channels",};
 
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
-        assert!(graphics.draw_construction_drag_preview(
-            &image,
-            SurfaceRect::new(0, 0, 3, 2),
-            GuiPoint::new(1.0, 1.0),
-            false,
-            None,
-        ));
-        assert_eq!(
-            graphics.surface().get_pixel(1, 0),
-            Some(Color::opaque(255, 1, 1)),
-            "0x8f7f0000 uses the native red MOD2 channels",
-        );
+        front_assert! {graphics.draw_construction_drag_preview(&image, SurfaceRect::new(0, 0, 3, 2), GuiPoint::new(1.0, 1.0), false, None,)};
+        front_assert_eq! {graphics.surface().get_pixel(1, 0) => Some(Color::opaque(255, 1, 1)), "0x8f7f0000 uses the native red MOD2 channels",};
     }
 
     #[test]
     fn construction_drag_preview_uses_cpp_hotspot_clipping_and_gamma() {
         let image = ImageData::new(4, 3, (0..12).flat_map(|_| [128, 128, 128, 255]).collect());
-        let mut graphics = test_graphics(4, 3, 3, "Construction drag hotspot");
+        let mut graphics = test_graphics((4, 3, 3), "Construction drag hotspot");
         graphics.set_advanced_renderer_config(AdvancedRendererConfig {
             shader: true,
             ..AdvancedRendererConfig::DEFAULT
@@ -15997,13 +13479,7 @@ mod tests {
         graphics.surface_mut().fill(background);
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
 
-        assert!(graphics.draw_construction_drag_preview(
-            &image,
-            SurfaceRect::new(1, 0, 1, 3),
-            GuiPoint::new(1.0, 1.0),
-            true,
-            Some(&gamma),
-        ));
+        front_assert! {graphics.draw_construction_drag_preview(&image, SurfaceRect::new(1, 0, 1, 3), GuiPoint::new(1.0, 1.0), true, Some(&gamma),)};
 
         // Wdt/2 and Hgt place the 4x3 image at (-1,-2). Only its last row,
         // columns 1..=3, remains on the logical surface, and the originating
@@ -16017,21 +13493,11 @@ mod tests {
                 } else {
                     background
                 };
-                assert_eq!(
-                    graphics.surface().get_pixel(x, y),
-                    Some(expected),
-                    "pixel ({x},{y})",
-                );
+                front_assert_eq! {graphics.surface().get_pixel(x, y) => Some(expected), "pixel ({x},{y})",};
             }
         }
 
-        assert!(!graphics.draw_construction_drag_preview(
-            &ImageData::new(0, 0, Vec::new()),
-            SurfaceRect::new(0, 0, 4, 3),
-            GuiPoint::new(1.0, 1.0),
-            true,
-            None,
-        ));
+        front_assert! {!graphics.draw_construction_drag_preview(&ImageData::new(0, 0, Vec::new()), SurfaceRect::new(0, 0, 4, 3), GuiPoint::new(1.0, 1.0), true, None,)};
     }
 
     #[test]
@@ -16073,9 +13539,7 @@ mod tests {
         let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
 
         let mut graphics = test_graphics_with(
-            800,
-            180,
-            150,
+            (800, 180, 150),
             "Cursor Scenario",
             empty_sprites(),
             cursor_atlas,
@@ -16101,8 +13565,8 @@ mod tests {
                 leaked = true;
             }
         }
-        assert!(found, "expected the fctCursor cell above the cursor crew");
-        assert!(!leaked, "other sheet cells must not be drawn");
+        front_assert! {found, "expected the fctCursor cell above the cursor crew"};
+        front_assert! {!leaked, "other sheet cells must not be drawn"};
     }
 
     #[test]
@@ -16134,26 +13598,13 @@ mod tests {
             }
         }
         let gui_icons = ImageData::new(240, 360, pixels);
-        let mut graphics = test_graphics(200, 120, 120, "Remote speaking crew");
+        let mut graphics = test_graphics((200, 120, 120), "Remote speaking crew");
         graphics.update_overlay(&GraphicsOverlay {
-            frame_text: "",
-            status_text: "",
-            debug_hud: false,
-            viewport_overlays_visible: true,
-            players: Vec::new(),
-            crew_name_labels: Vec::new(),
             speaking: SpeakingOverlay {
                 object_ids: vec![object_id],
                 gui_icons: Some(gui_icons),
             },
-            game_time_seconds: 0,
-            message_board: MessageBoardOverlay::default(),
-            clock_text: None,
-            frames_per_second: None,
-            upper_board_mode: hud::UpperBoardMode::Full,
-            show_portraits: true,
-            show_commands: true,
-            show_command_keys: true,
+            ..graphics_overlay_fixture()
         });
         graphics.render_frame(
             &snapshot,
@@ -16171,14 +13622,8 @@ mod tests {
             found_phase |= pixel == phase_color;
             leaked_other_phase |= pixel == other_color;
         }
-        assert!(
-            found_phase,
-            "GUIIcons phase 23 is drawn above the speaking crew"
-        );
-        assert!(
-            !leaked_other_phase,
-            "no neighboring GUIIcons phase may leak into the viewport",
-        );
+        front_assert! {found_phase, "GUIIcons phase 23 is drawn above the speaking crew"};
+        front_assert! {!leaked_other_phase, "no neighboring GUIIcons phase may leak into the viewport",};
 
         let phase_pixels = |graphics: &GraphicsSystem| {
             graphics
@@ -16207,10 +13652,7 @@ mod tests {
                 &snapshot.objects[0],
             )],
         );
-        assert!(
-            phase_pixels(&graphics) > 0,
-            "a selected crew member keeps its speaking indicator while contained",
-        );
+        front_assert! {phase_pixels(&graphics) > 0, "a selected crew member keeps its speaking indicator while contained",};
 
         snapshot.objects[1].visibility = VIS_OWNER;
         graphics.render_frame(
@@ -16222,11 +13664,7 @@ mod tests {
                 &snapshot.objects[0],
             )],
         );
-        assert_eq!(
-            phase_pixels(&graphics),
-            0,
-            "an invisible containing object must hide its occupant's speaking indicator",
-        );
+        front_assert_eq! {phase_pixels(&graphics) => 0, "an invisible containing object must hide its occupant's speaking indicator",};
 
         snapshot.objects[1].visibility = 0;
         snapshot.objects[0].container = Some(ObjectId::new(container_id.as_u64() + 1));
@@ -16239,11 +13677,7 @@ mod tests {
                 &snapshot.objects[0],
             )],
         );
-        assert_eq!(
-            phase_pixels(&graphics),
-            0,
-            "a missing container ancestor must fail closed",
-        );
+        front_assert_eq! {phase_pixels(&graphics) => 0, "a missing container ancestor must fail closed",};
 
         snapshot.objects[0].container = Some(container_id);
         snapshot.objects[1].container = Some(object_id);
@@ -16256,11 +13690,7 @@ mod tests {
                 &snapshot.objects[0],
             )],
         );
-        assert_eq!(
-            phase_pixels(&graphics),
-            0,
-            "a malformed containment cycle must fail closed",
-        );
+        front_assert_eq! {phase_pixels(&graphics) => 0, "a malformed containment cycle must fail closed",};
         snapshot.objects[0].container = None;
         snapshot.objects[1].container = None;
 
@@ -16274,11 +13704,7 @@ mod tests {
                 &snapshot.objects[0],
             )],
         );
-        assert_eq!(
-            phase_pixels(&graphics),
-            0,
-            "a remote owner-only crew position must not leak through its speaking icon",
-        );
+        front_assert_eq! {phase_pixels(&graphics) => 0, "a remote owner-only crew position must not leak through its speaking icon",};
 
         snapshot.objects[0].visibility = 0;
         graphics.viewport_overlays_visible = false;
@@ -16291,11 +13717,7 @@ mod tests {
                 &snapshot.objects[0],
             )],
         );
-        assert_eq!(
-            phase_pixels(&graphics),
-            0,
-            "film replay suppresses process-local speaking state",
-        );
+        front_assert_eq! {phase_pixels(&graphics) => 0, "film replay suppresses process-local speaking state",};
 
         graphics.viewport_overlays_visible = true;
         snapshot.players[0].fog_of_war = true;
@@ -16317,11 +13739,7 @@ mod tests {
                 &snapshot.objects[0],
             )],
         );
-        assert_eq!(
-            phase_pixels(&graphics),
-            0,
-            "fog modulation must prevent the speaking icon revealing shrouded crew",
-        );
+        front_assert_eq! {phase_pixels(&graphics) => 0, "fog modulation must prevent the speaking icon revealing shrouded crew",};
     }
 
     #[test]
@@ -16357,9 +13775,7 @@ mod tests {
         let mut entries = vec![None; 8];
         entries[4] = Some(image);
         let mut graphics = test_graphics_with(
-            800,
-            180,
-            150,
+            (800, 180, 150),
             "Scaled Cursor Scenario",
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
@@ -16389,14 +13805,8 @@ mod tests {
         let max_y = points.iter().map(|point| point.1).max().test_value();
         let physical_width = max_x - min_x + 1;
         let physical_height = max_y - min_y + 1;
-        assert!(
-            physical_width.abs_diff(cell as usize) <= 1,
-            "inverse-scaled 75px cell rendered {physical_width}px wide"
-        );
-        assert!(
-            physical_height.abs_diff(cell as usize) <= 1,
-            "inverse-scaled 75px cell rendered {physical_height}px high"
-        );
+        front_assert! {physical_width.abs_diff(cell as usize) <= 1, "inverse-scaled 75px cell rendered {physical_width}px wide"};
+        front_assert! {physical_height.abs_diff(cell as usize) <= 1, "inverse-scaled 75px cell rendered {physical_height}px high"};
     }
 
     /// Cursor + flash + a 40-cell atlas sheet so the mark (cell 35) draws.
@@ -16425,9 +13835,7 @@ mod tests {
         let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
 
         let mut graphics = test_graphics_with(
-            320,
-            180,
-            150,
+            (320, 180, 150),
             "Cursor Label Scenario",
             empty_sprites(),
             cursor_atlas,
@@ -16480,21 +13888,8 @@ mod tests {
             flash_command: 0,
         }];
         graphics.update_overlay(&GraphicsOverlay {
-            frame_text: "",
-            status_text: "",
-            debug_hud: false,
-            viewport_overlays_visible: true,
             players,
-            crew_name_labels: Vec::new(),
-            speaking: SpeakingOverlay::default(),
-            game_time_seconds: 0,
-            message_board: MessageBoardOverlay::default(),
-            clock_text: None,
-            frames_per_second: None,
-            upper_board_mode: hud::UpperBoardMode::Full,
-            show_portraits: true,
-            show_commands: true,
-            show_command_keys: true,
+            ..graphics_overlay_fixture()
         });
         (snapshot, graphics)
     }
@@ -16534,14 +13929,8 @@ mod tests {
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
-        assert!(
-            count_red_text_pixels(&graphics) > 0,
-            "expected red 0xffff0000 name text above the cursor mark"
-        );
-        assert!(
-            count_cursor_info_white_pixels(&graphics) > 0,
-            "cursor object info also draws the white HUD row"
-        );
+        front_assert! {count_red_text_pixels(&graphics) > 0, "expected red 0xffff0000 name text above the cursor mark"};
+        front_assert! {count_cursor_info_white_pixels(&graphics) > 0, "cursor object info also draws the white HUD row"};
     }
 
     #[test]
@@ -16578,21 +13967,13 @@ mod tests {
                          width: u32,
                          height: u32,
                          zoom: f32| {
-            let mut graphics = test_graphics_with(
-                width,
-                height,
-                height as i32,
+            let mut graphics = test_graphics_with_sprites(
+                (width, height, height as i32),
                 "Crew label",
                 Arc::clone(&sprites),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.update_overlay(&GraphicsOverlay {
-                frame_text: "",
-                status_text: "",
-                debug_hud: false,
                 viewport_overlays_visible: overlays_visible,
-                players: Vec::new(),
                 crew_name_labels: text
                     .map(|text| {
                         vec![CrewNameOverlay {
@@ -16602,15 +13983,7 @@ mod tests {
                         }]
                     })
                     .unwrap_or_default(),
-                speaking: SpeakingOverlay::default(),
-                game_time_seconds: 0,
-                message_board: MessageBoardOverlay::default(),
-                clock_text: None,
-                frames_per_second: None,
-                upper_board_mode: hud::UpperBoardMode::Full,
-                show_portraits: true,
-                show_commands: true,
-                show_command_keys: true,
+                ..graphics_overlay_fixture()
             });
             graphics.render_frame(
                 &snapshot,
@@ -16631,25 +14004,13 @@ mod tests {
         let player_name = render(Some("Owner"), vec![0], true);
         let clonk_name = render(Some("Clonk"), vec![0], true);
         let both_names = render(Some("Clonk (Owner)"), vec![0], true);
-        assert_ne!(player_name, hidden, "ShowCrewNames draws the player name");
-        assert_ne!(clonk_name, hidden, "ShowCrewCNames draws the clonk name");
-        assert_ne!(both_names, player_name, "both flags use the composed label");
-        assert_ne!(both_names, clonk_name, "both flags retain both names");
-        assert_eq!(
-            render(Some("<c ff0000>Clonk</c>"), vec![0], true),
-            clonk_name,
-            "fallback rendering consumes markup instead of drawing its tags literally"
-        );
-        assert_eq!(
-            render(Some("Clonk (Owner)"), vec![1], true),
-            hidden,
-            "the owning/non-visible viewport receives no label"
-        );
-        assert_eq!(
-            render(Some("Clonk (Owner)"), vec![0], false),
-            hidden,
-            "film replay suppresses world crew labels"
-        );
+        front_assert_ne! {player_name => hidden, "ShowCrewNames draws the player name"};
+        front_assert_ne! {clonk_name => hidden, "ShowCrewCNames draws the clonk name"};
+        front_assert_ne! {both_names => player_name, "both flags use the composed label"};
+        front_assert_ne! {both_names => clonk_name, "both flags retain both names"};
+        front_assert_eq! {render(Some("<c ff0000>Clonk</c>"), vec![0], true) => clonk_name, "fallback rendering consumes markup instead of drawing its tags literally"};
+        front_assert_eq! {render(Some("Clonk (Owner)"), vec![1], true) => hidden, "the owning/non-visible viewport receives no label"};
+        front_assert_eq! {render(Some("Clonk (Owner)"), vec![0], false) => hidden, "film replay suppresses world crew labels"};
 
         let zoomed_hidden = render_at(None, Vec::new(), true, 800, 240, 2.0);
         let zoomed_wrapped = render_at(
@@ -16672,10 +14033,7 @@ mod tests {
             .last()
             .zip(changed_rows.first())
             .map_or(0, |(last, first)| last - first + 1);
-        assert!(
-            changed_span > 14,
-            "2x zoom wraps against the 400-unit logical viewport, not 800 physical pixels"
-        );
+        front_assert! {changed_span > 14, "2x zoom wraps against the 400-unit logical viewport, not 800 physical pixels"};
     }
 
     #[test]
@@ -16701,65 +14059,25 @@ mod tests {
         };
 
         graphics.render_frame(&snapshot, &viewports);
-        assert!(
-            count_cursor_pixels(&graphics) > 0,
-            "ordinary play draws Cursor.png"
-        );
-        assert!(
-            count_red_text_pixels(&graphics) > 0,
-            "ordinary play draws the cursor label"
-        );
-        assert!(
-            count_cursor_info_white_pixels(&graphics) > 0,
-            "ordinary play draws cursor-info HUD text"
-        );
+        front_assert! {count_cursor_pixels(&graphics) > 0, "ordinary play draws Cursor.png"};
+        front_assert! {count_red_text_pixels(&graphics) > 0, "ordinary play draws the cursor label"};
+        front_assert! {count_cursor_info_white_pixels(&graphics) > 0, "ordinary play draws cursor-info HUD text"};
 
         let players = graphics.hud_players.clone();
         graphics.update_overlay(&GraphicsOverlay {
-            frame_text: "",
-            status_text: "",
-            debug_hud: false,
             viewport_overlays_visible: false,
             players,
-            crew_name_labels: Vec::new(),
-            speaking: SpeakingOverlay::default(),
-            game_time_seconds: 0,
-            message_board: MessageBoardOverlay::default(),
-            clock_text: None,
-            frames_per_second: None,
-            upper_board_mode: hud::UpperBoardMode::Full,
-            show_portraits: true,
-            show_commands: true,
-            show_command_keys: true,
+            ..graphics_overlay_fixture()
         });
         graphics.render_frame(&snapshot, &viewports);
 
-        assert_eq!(
-            count_cursor_pixels(&graphics),
-            0,
-            "film replay hides Cursor.png"
-        );
-        assert_eq!(
-            count_red_text_pixels(&graphics),
-            0,
-            "film replay hides cursor labels"
-        );
-        assert_eq!(
-            count_cursor_info_white_pixels(&graphics),
-            0,
-            "film replay hides the per-player HUD"
-        );
+        front_assert_eq! {count_cursor_pixels(&graphics) => 0, "film replay hides Cursor.png"};
+        front_assert_eq! {count_red_text_pixels(&graphics) => 0, "film replay hides cursor labels"};
+        front_assert_eq! {count_cursor_info_white_pixels(&graphics) => 0, "film replay hides the per-player HUD"};
 
         graphics.surface_mut().fill(Color::transparent());
         graphics.draw_viewport_control_overlays(None, false, None, None);
-        assert!(
-            graphics
-                .surface()
-                .pixels()
-                .iter()
-                .all(|channel| *channel == 0),
-            "film replay hides the late viewport command buttons"
-        );
+        front_assert! {graphics.surface().pixels().iter().all(|channel| *channel == 0), "film replay hides the late viewport command buttons"};
     }
 
     #[test]
@@ -16773,19 +14091,13 @@ mod tests {
             },
         );
         let font = hud::HudFont::Clonk(&raster);
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 4,
-                resolution_y: 2,
-                width: 4,
-                height: 2,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![0, 0x00ff_ffff, 0, 0, 0, 0x00ff_ffff, 0, 0],
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(
+            4,
+            2,
+            4,
+            2,
+            vec![0, 0x00ff_ffff, 0, 0, 0, 0x00ff_ffff, 0, 0],
+        ));
         let mut surface = Surface::new(9, 2, PixelFormat::Rgba8888);
 
         draw_fogged_cursor_text_line(
@@ -16805,10 +14117,7 @@ mod tests {
             .filter(|pixel| pixel.r != 0)
             .map(|pixel| pixel.r)
             .collect();
-        assert!(
-            distinct_red.len() > 1,
-            "glyph-local fog vertices must produce a spatially varying label",
-        );
+        front_assert! {distinct_red.len() > 1, "glyph-local fog vertices must produce a spatially varying label",};
     }
 
     #[test]
@@ -16822,19 +14131,7 @@ mod tests {
             },
         );
         let font = hud::HudFont::Clonk(&raster);
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 64,
-                resolution_y: 64,
-                width: 2,
-                height: 2,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![0x00ff_ffff; 4],
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(64, 64, 2, 2, vec![0x00ff_ffff; 4]));
         let gamma = clonk_graphics::GammaRamp::standard();
         let mut surface = Surface::new(3, 2, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
@@ -16856,8 +14153,8 @@ mod tests {
             Color::transparent(),
             &gamma,
         );
-        assert_eq!(scene.commands.len(), 1);
-        assert_eq!(scene.textures.len(), 1);
+        front_assert_eq! {scene.commands.len() => 1};
+        front_assert_eq! {scene.textures.len() => 1};
         let GpuCommand::Quad {
             vertices,
             sampler,
@@ -16868,10 +14165,10 @@ mod tests {
         else {
             panic!("fogged text did not lower to a textured glyph quad");
         };
-        assert_eq!(vertices.len(), 4);
-        assert_eq!(*sampler, GpuSampler::Linear);
-        assert_eq!(*blend, GpuBlend::Normal);
-        assert!(*gamma);
+        front_assert_eq! {vertices.len() => 4};
+        front_assert_eq! {*sampler => GpuSampler::Linear};
+        front_assert_eq! {*blend => GpuBlend::Normal};
+        front_assert! {*gamma};
     }
 
     #[test]
@@ -16881,9 +14178,9 @@ mod tests {
             .blend_fragment(0, 0, [120.0, 80.0, 40.0, 128.0], None)
             .test_value();
 
-        assert_eq!(surface.get_pixel(0, 0), Some(Color::new(60, 40, 20, 128)));
+        front_assert_eq! {surface.get_pixel(0, 0) => Some(Color::new(60, 40, 20, 128))};
         let image = retained_straight_alpha_text_image(&surface);
-        assert_eq!(image.pixels(), &[120, 80, 40, 128]);
+        front_assert_eq! {image.pixels() => &[120, 80, 40, 128]};
     }
 
     #[test]
@@ -16897,19 +14194,7 @@ mod tests {
             },
         );
         let font = hud::HudFont::Clonk(&raster);
-        let fog = FogDrawContext {
-            map: Arc::new(ClrModMap {
-                resolution_x: 64,
-                resolution_y: 64,
-                width: 2,
-                height: 2,
-                origin_x: 0,
-                origin_y: 0,
-                fade_transparent: false,
-                cells: vec![0x00ff_ffff; 4],
-            }),
-            zoom: 1.0,
-        };
+        let fog = fog_draw_fixture(clr_mod_map_fixture(64, 64, 2, 2, vec![0x00ff_ffff; 4]));
         let mut surface = Surface::new(8, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
 
@@ -16930,15 +14215,9 @@ mod tests {
             Color::transparent(),
             &clonk_graphics::GammaRamp::standard(),
         );
-        assert!(!scene.commands.is_empty());
-        assert!(
-            scene
-                .commands
-                .iter()
-                .all(|command| matches!(command, GpuCommand::Quad { .. })),
-            "fogged markup must not lower glyph coverage to retained points"
-        );
-        assert_eq!(scene.textures.len(), 1);
+        front_assert! {!scene.commands.is_empty()};
+        front_assert! {scene.commands.iter().all(|command| matches!(command, GpuCommand::Quad { .. })), "fogged markup must not lower glyph coverage to retained points"};
+        front_assert_eq! {scene.textures.len() => 1};
     }
 
     #[test]
@@ -16948,16 +14227,8 @@ mod tests {
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
-        assert_eq!(
-            count_red_text_pixels(&graphics),
-            0,
-            "objects without info draw no cursor label"
-        );
-        assert_eq!(
-            count_cursor_info_white_pixels(&graphics),
-            0,
-            "objects without info draw no cursor-info name/rank row"
-        );
+        front_assert_eq! {count_red_text_pixels(&graphics) => 0, "objects without info draw no cursor label"};
+        front_assert_eq! {count_cursor_info_white_pixels(&graphics) => 0, "objects without info draw no cursor-info name/rank row"};
     }
 
     #[test]
@@ -16987,30 +14258,14 @@ mod tests {
         players[0].crew[0].rank = 3;
         players[0].crew[0].rank_name = Some("Captain".to_string());
         graphics.update_overlay(&GraphicsOverlay {
-            frame_text: "",
-            status_text: "",
-            debug_hud: false,
-            viewport_overlays_visible: true,
             players,
-            crew_name_labels: Vec::new(),
-            speaking: SpeakingOverlay::default(),
-            game_time_seconds: 0,
-            message_board: MessageBoardOverlay::default(),
-            clock_text: None,
-            frames_per_second: None,
-            upper_board_mode: hud::UpperBoardMode::Full,
-            show_portraits: true,
-            show_commands: true,
-            show_command_keys: true,
+            ..graphics_overlay_fixture()
         });
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
         graphics.render_frame(&snapshot, &viewports);
         let ranked_top = min_red_y(&graphics).test_value();
 
-        assert!(
-            ranked_top < name_only_top,
-            "rank line must raise the label block (ranked_top={ranked_top}, name_only_top={name_only_top})"
-        );
+        front_assert! {ranked_top < name_only_top, "rank line must raise the label block (ranked_top={ranked_top}, name_only_top={name_only_top})"};
     }
 
     #[test]
@@ -17039,10 +14294,8 @@ mod tests {
             [0, 0, 70, 255],
         ];
         let pixels = (0..3).flat_map(|_| columns.into_iter().flatten()).collect();
-        graphics.hud_graphics = Arc::new(HudGraphics {
-            energy_bars: Some(ImageData::new(6, 3, pixels)),
-            ..HudGraphics::default()
-        });
+        graphics.hud_graphics =
+            test_hud_graphics(|hud| hud.energy_bars = Some(ImageData::new(6, 3, pixels)));
 
         let focus = &snapshot.objects[0];
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
@@ -17050,75 +14303,63 @@ mod tests {
         let bar_bottom_y = 180 - hud::SYMBOL_SIZE - hud::SYMBOL_BORDER - 1;
         let energy_x = hud::SYMBOL_BORDER as u32;
         let breath_x = energy_x + 2; // one-pixel bar + C++'s one-pixel gap
-        assert_eq!(
-            graphics.surface().get_pixel(energy_x, bar_bottom_y as u32),
+        front_assert_eq! {
+            graphics.surface().get_pixel(energy_x, bar_bottom_y as u32) =>
             Some(standard_gamma_color(Color::opaque(220, 0, 0))),
             "energy remains in bar index 0"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(breath_x, bar_bottom_y as u32),
+        };
+        front_assert_eq! {
+            graphics.surface().get_pixel(breath_x, bar_bottom_y as u32) =>
             Some(standard_gamma_color(Color::opaque(0, 0, 220))),
             "partial breath uses filled source column 4 immediately after energy"
-        );
+        };
 
         let portraitless_top_y = hud::SYMBOL_SIZE + 2 * hud::SYMBOL_BORDER;
         let energy_color = standard_gamma_color(Color::opaque(220, 0, 0));
-        assert_ne!(
+        front_assert_ne! {
             graphics
                 .surface()
-                .get_pixel(energy_x, portraitless_top_y as u32),
+                .get_pixel(energy_x, portraitless_top_y as u32) =>
             Some(energy_color),
             "portraits-on retains the ten-pixel gap above the energy bar"
-        );
+        };
         let players = graphics.hud_players.clone();
         graphics.update_overlay(&GraphicsOverlay {
-            frame_text: "",
-            status_text: "",
-            debug_hud: false,
-            viewport_overlays_visible: true,
             players,
-            crew_name_labels: Vec::new(),
-            speaking: SpeakingOverlay::default(),
-            game_time_seconds: 0,
-            message_board: MessageBoardOverlay::default(),
-            clock_text: None,
-            frames_per_second: None,
-            upper_board_mode: hud::UpperBoardMode::Full,
             show_portraits: false,
-            show_commands: true,
-            show_command_keys: true,
+            ..graphics_overlay_fixture()
         });
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
-        assert_eq!(
+        front_assert_eq! {
             graphics
                 .surface()
-                .get_pixel(energy_x, portraitless_top_y as u32),
+                .get_pixel(energy_x, portraitless_top_y as u32) =>
             Some(energy_color),
             "the overlay portrait flag moves the energy bar up ten pixels"
-        );
+        };
 
         graphics.hud_players[0].crew[0].magic_energy = 1_000;
         graphics.hud_players[0].crew[0].magic_capacity = 1_999;
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
-        assert_eq!(
+        front_assert_eq! {
             graphics
                 .surface()
-                .get_pixel(breath_x, portraitless_top_y as u32),
+                .get_pixel(breath_x, portraitless_top_y as u32) =>
             Some(standard_gamma_color(Color::opaque(0, 220, 0))),
             "magic level and range are divided by 1000 separately before drawing"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(breath_x, bar_bottom_y as u32),
+        };
+        front_assert_eq! {
+            graphics.surface().get_pixel(breath_x, bar_bottom_y as u32) =>
             Some(standard_gamma_color(Color::opaque(0, 220, 0))),
             "present magic occupies the middle slot with source column 2"
-        );
-        assert_eq!(
+        };
+        front_assert_eq! {
             graphics
                 .surface()
-                .get_pixel(breath_x + 2, bar_bottom_y as u32),
+                .get_pixel(breath_x + 2, bar_bottom_y as u32) =>
             Some(standard_gamma_color(Color::opaque(0, 0, 220))),
             "breath shifts one compact slot right when magic is present"
-        );
+        };
     }
 
     /// `DrawCursorInfo` gates the whole energy/magic/breath group on
@@ -17165,10 +14406,8 @@ mod tests {
                 [0, 0, 70, 255],
             ];
             let pixels = (0..3).flat_map(|_| columns.into_iter().flatten()).collect();
-            graphics.hud_graphics = Arc::new(HudGraphics {
-                energy_bars: Some(ImageData::new(6, 3, pixels)),
-                ..HudGraphics::default()
-            });
+            graphics.hud_graphics =
+                test_hud_graphics(|hud| hud.energy_bars = Some(ImageData::new(6, 3, pixels)));
             graphics.set_renderer_config(always, true);
             graphics.render_frame(
                 &snapshot,
@@ -17200,26 +14439,18 @@ mod tests {
         let drawn = [red, green, blue];
 
         // A live timer draws them, and so does the always-HUD option.
-        assert_eq!(
-            render(100, false).1,
-            drawn,
-            "a live ViewEnergy draws the bars"
-        );
-        assert_eq!(render(1, false).1, drawn, "the last tick still draws them");
-        assert_eq!(
-            render(0, true).1,
-            drawn,
-            "ShowPlayerHUDAlways draws them regardless"
-        );
+        front_assert_eq! {render(100, false).1 => drawn, "a live ViewEnergy draws the bars"};
+        front_assert_eq! {render(1, false).1 => drawn, "the last tick still draws them"};
+        front_assert_eq! {render(0, true).1 => drawn, "ShowPlayerHUDAlways draws them regardless"};
 
         // An expired timer without the option draws none of the three, while
         // the inventory beside them is untouched: only the bar group is
         // transient (C4Viewport.cpp:921).
         let (inventory, hidden) = render(0, false);
-        assert_eq!(inventory, magenta);
-        assert_ne!(hidden[0], red);
-        assert_ne!(hidden[1], green);
-        assert_ne!(hidden[2], blue);
+        front_assert_eq! {inventory => magenta};
+        front_assert_ne! {hidden[0] => red};
+        front_assert_ne! {hidden[1] => green};
+        front_assert_ne! {hidden[2] => blue};
     }
 
     #[test]
@@ -17261,10 +14492,8 @@ mod tests {
                 [0, 0, 70, 255],
             ];
             let pixels = (0..3).flat_map(|_| columns.into_iter().flatten()).collect();
-            graphics.hud_graphics = Arc::new(HudGraphics {
-                energy_bars: Some(ImageData::new(6, 3, pixels)),
-                ..HudGraphics::default()
-            });
+            graphics.hud_graphics =
+                test_hud_graphics(|hud| hud.energy_bars = Some(ImageData::new(6, 3, pixels)));
             graphics.render_frame(
                 &snapshot,
                 &[ViewportInput::from_focus(&snapshot.objects[0])],
@@ -17292,24 +14521,24 @@ mod tests {
         let blue = Some(standard_gamma_color(Color::opaque(0, 0, 220)));
 
         let baseline = render(0, 0);
-        assert_eq!(baseline, [magenta, red, green, blue]);
+        front_assert_eq! {baseline => [magenta, red, green, blue]};
 
         let hidden_energy = render(0, clonk_engine::HIDE_HUD_BAR_ENERGY);
-        assert_eq!(hidden_energy[1], green);
-        assert_eq!(hidden_energy[2], blue);
+        front_assert_eq! {hidden_energy[1] => green};
+        front_assert_eq! {hidden_energy[2] => blue};
 
         let hidden_magic = render(0, clonk_engine::HIDE_HUD_BAR_MAGIC_ENERGY);
-        assert_eq!(hidden_magic[1], red);
-        assert_eq!(hidden_magic[2], blue);
+        front_assert_eq! {hidden_magic[1] => red};
+        front_assert_eq! {hidden_magic[2] => blue};
 
         let hidden_breath = render(0, clonk_engine::HIDE_HUD_BAR_BREATH);
-        assert_eq!(hidden_breath[1], red);
-        assert_eq!(hidden_breath[2], green);
-        assert_ne!(hidden_breath[3], blue);
+        front_assert_eq! {hidden_breath[1] => red};
+        front_assert_eq! {hidden_breath[2] => green};
+        front_assert_ne! {hidden_breath[3] => blue};
 
         let hidden_inventory = render(clonk_engine::HIDE_HUD_ELEMENT_INVENTORY, 0);
-        assert_ne!(hidden_inventory[0], magenta);
-        assert_eq!(&hidden_inventory[1..], &[red, green, blue]);
+        front_assert_ne! {hidden_inventory[0] => magenta};
+        front_assert_eq! {&hidden_inventory[1..] => &[red, green, blue]};
     }
 
     #[test]
@@ -17336,38 +14565,20 @@ mod tests {
 
         let bolt = [230u8, 20, 20, 255];
         let bolt_pixels: Vec<u8> = (0..8 * 8).flat_map(|_| bolt).collect();
-        let hud = HudGraphics {
-            energy: Some(ImageData::new(8, 8, bolt_pixels.clone())),
-            magic: Some(ImageData::new(8, 8, bolt_pixels)),
-            ..Default::default()
-        };
+        let hud = hud_graphics_fixture(|hud| {
+            hud.energy = Some(ImageData::new(8, 8, bolt_pixels.clone()));
+            hud.magic = Some(ImageData::new(8, 8, bolt_pixels));
+        });
 
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "Energy Scenario",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            Arc::new(hud),
-        );
+        let mut graphics = test_graphics_with_hud((80, 60, 60), "Energy Scenario", Arc::new(hud));
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
         let bar_background = Color::new(16, 24, 40, 210);
         for chunk in graphics.surface().pixels().chunks_exact(4) {
-            assert_ne!(chunk, bolt, "no floating Energy/Magic bolt icons");
-            assert_ne!(
-                chunk,
-                [
-                    bar_background.r,
-                    bar_background.g,
-                    bar_background.b,
-                    bar_background.a
-                ],
-                "no floating bar backgrounds"
-            );
+            front_assert_ne! {chunk => bolt, "no floating Energy/Magic bolt icons"};
+            front_assert_ne! {chunk => [bar_background.r, bar_background.g, bar_background.b, bar_background.a], "no floating bar backgrounds"};
         }
     }
 
@@ -17385,37 +14596,17 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
         let shape = DefinitionRect::new(-3, -4, 6, 9);
-        let sprite = DefinitionSprite {
-            image: ImageData::new(6, 9, vec![0; 6 * 9 * 4]),
-            actions: HashMap::new(),
-            color_mask: None,
-            graphics_scale: 1.0,
-            shape: Some(shape),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
-        };
-        let sprites = Arc::new(HashMap::from([(
-            sprite_map_key("TestObject", None),
-            sprite,
-        )]));
+        let sprite = test_shaped_sprite(ImageData::new(6, 9, vec![0; 6 * 9 * 4]), shape);
+        let sprites = test_sprites([("TestObject", sprite)]);
 
         let bolt = Color::opaque(231, 47, 113);
         let bolt_image = ImageData::new(5, 3, [bolt.r, bolt.g, bolt.b, bolt.a].repeat(5 * 3));
         let mut graphics = test_graphics_with(
-            160,
-            120,
-            80,
+            (160, 120, 80),
             "NeedEnergy",
             sprites,
             empty_cursor_atlas(),
-            Arc::new(HudGraphics {
-                energy: Some(bolt_image),
-                ..HudGraphics::default()
-            }),
+            test_hud_graphics(|hud| hud.energy = Some(bolt_image)),
         );
         graphics.set_rotateable_definitions(HashSet::from(["TestObject".to_string()]));
         let rendered_bolt = standard_gamma_color(bolt);
@@ -17456,10 +14647,7 @@ mod tests {
                 .zip(hidden_frame.chunks_exact(4))
                 .filter(|(actual, hidden)| actual != hidden)
                 .count();
-            assert_eq!(
-                changed_pixels, expected_changed_pixels,
-                "NeedEnergy bolt footprint for frame={frame}, need_energy={need_energy}"
-            );
+            front_assert_eq! {changed_pixels => expected_changed_pixels, "NeedEnergy bolt footprint for frame={frame}, need_energy={need_energy}"};
 
             if expected_changed_pixels == 0 {
                 continue;
@@ -17482,28 +14670,20 @@ mod tests {
             };
             for y in output_y..output_y + 6 {
                 for x in output_x..output_x + 10 {
-                    assert_ne!(
-                        graphics.surface().get_pixel(x, y),
-                        Some(hidden_pixel(x, y)),
-                        "bolt extent at ({x}, {y})"
-                    );
+                    front_assert_ne! {graphics.surface().get_pixel(x, y) => Some(hidden_pixel(x, y)), "bolt extent at ({x}, {y})"};
                 }
             }
-            assert_eq!(
-                graphics.surface().get_pixel(output_x + 2, output_y + 2),
-                Some(rendered_bolt),
-                "an interior texel retains the Energy image color"
-            );
-            assert_eq!(
-                graphics.surface().get_pixel(output_x - 1, output_y),
+            front_assert_eq! {graphics.surface().get_pixel(output_x + 2, output_y + 2) => Some(rendered_bolt), "an interior texel retains the Energy image color"};
+            front_assert_eq! {
+                graphics.surface().get_pixel(output_x - 1, output_y) =>
                 Some(hidden_pixel(output_x - 1, output_y)),
                 "bolt starts at the exact Shape-centered x coordinate"
-            );
-            assert_eq!(
-                graphics.surface().get_pixel(output_x, output_y - 1),
+            };
+            front_assert_eq! {
+                graphics.surface().get_pixel(output_x, output_y - 1) =>
                 Some(hidden_pixel(output_x, output_y - 1)),
                 "bolt starts exactly five logical pixels above the facet"
-            );
+            };
         }
 
         // C4Object::Draw's bounds return precedes NeedEnergy. Keep the
@@ -17522,13 +14702,13 @@ mod tests {
         let viewport =
             ViewportInput::new(0, snapshot.objects[1].position, 2.0, &snapshot.objects[1]);
         graphics.render_frame(&snapshot, &[viewport]);
-        assert_eq!(
-            graphics.surface().pixels(),
+        front_assert_eq! {
+            graphics.surface().pixels() =>
             hidden_frame
                 .as_deref()
                 .expect("frame 12 established the hidden reference"),
             "an output-culled object cannot leak its NeedEnergy bolt"
-        );
+        };
     }
 
     #[test]
@@ -17564,20 +14744,10 @@ mod tests {
                 pixels.extend_from_slice(&corner_colors[(x / 5) as usize]);
             }
         }
-        let hud = HudGraphics {
-            select_mark: Some(ImageData::new(20, 5, pixels)),
-            ..Default::default()
-        };
+        let hud = hud_graphics_fixture(|hud| hud.select_mark = Some(ImageData::new(20, 5, pixels)));
 
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "SelectMark Scenario",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            Arc::new(hud),
-        );
+        let mut graphics =
+            test_graphics_with_hud((80, 60, 60), "SelectMark Scenario", Arc::new(hud));
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -17593,20 +14763,11 @@ mod tests {
             (sx + 6, sy + 6, corner_colors[3]),
         ];
         for (px, py, color) in expected {
-            assert_eq!(
-                graphics.surface().get_pixel(px as u32, py as u32),
-                Some(Color::new(color[0], color[1], color[2], color[3])),
-                "corner phase at ({px}, {py})"
-            );
+            front_assert_eq! {graphics.surface().get_pixel(px as u32, py as u32) => Some(Color::new(color[0], color[1], color[2], color[3])), "corner phase at ({px}, {py})"};
         }
         // The whole-sheet regression put cell colors at the object center.
         let center = graphics.surface().get_pixel(sx as u32, sy as u32);
-        assert!(
-            corner_colors
-                .iter()
-                .all(|c| center != Some(Color::new(c[0], c[1], c[2], c[3]))),
-            "no sheet cells across the object center"
-        );
+        front_assert! {corner_colors.iter().all(|c| center != Some(Color::new(c[0], c[1], c[2], c[3]))), "no sheet cells across the object center"};
     }
 
     #[test]
@@ -17624,32 +14785,15 @@ mod tests {
 
         let mark = [200u8, 10, 10, 255];
         let pixels: Vec<u8> = (0..20 * 5).flat_map(|_| mark).collect();
-        let hud = HudGraphics {
-            select_mark: Some(ImageData::new(20, 5, pixels)),
-            ..Default::default()
-        };
+        let hud = hud_graphics_fixture(|hud| hud.select_mark = Some(ImageData::new(20, 5, pixels)));
 
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "SelectMark Scenario",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            Arc::new(hud),
-        );
+        let mut graphics =
+            test_graphics_with_hud((80, 60, 60), "SelectMark Scenario", Arc::new(hud));
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
-        assert!(
-            graphics
-                .surface()
-                .pixels()
-                .chunks_exact(4)
-                .all(|chunk| chunk != mark),
-            "no flash → no select marks"
-        );
+        front_assert! {graphics.surface().pixels().chunks_exact(4).all(|chunk| chunk != mark), "no flash → no select marks"};
     }
 
     #[test]
@@ -17681,40 +14825,17 @@ mod tests {
                 pixels.extend_from_slice(&corner_colors[(x / 5) as usize]);
             }
         }
-        let hud = HudGraphics {
-            select_mark: Some(ImageData::new(20, 5, pixels)),
-            ..Default::default()
-        };
-        let mut graphics = test_graphics_with(
-            80,
-            60,
-            60,
-            "Mouse selection candidates",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            Arc::new(hud),
-        );
+        let hud = hud_graphics_fixture(|hud| hud.select_mark = Some(ImageData::new(20, 5, pixels)));
+        let mut graphics =
+            test_graphics_with_hud((80, 60, 60), "Mouse selection candidates", Arc::new(hud));
         let focus = &snapshot.objects[0];
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
-        assert!(corner_colors.iter().all(|color| {
-            graphics
-                .surface()
-                .pixels()
-                .chunks_exact(4)
-                .all(|pixel| pixel != *color)
-        }));
+        front_assert! {corner_colors.iter().all(|color| {graphics.surface().pixels().chunks_exact(4).all(|pixel| pixel != *color)})};
 
-        assert!(graphics.draw_mouse_selection_marks(&snapshot, 1, &[snapshot.objects[0].id], None,));
+        front_assert! {graphics.draw_mouse_selection_marks(&snapshot, 1, &[snapshot.objects[0].id], None,)};
 
         for color in corner_colors {
-            assert!(
-                graphics
-                    .surface()
-                    .pixels()
-                    .chunks_exact(4)
-                    .any(|pixel| pixel == color),
-                "mouse-local Selection draws corner phase {color:?}"
-            );
+            front_assert! {graphics.surface().pixels().chunks_exact(4).any(|pixel| pixel == color), "mouse-local Selection draws corner phase {color:?}"};
         }
     }
 
@@ -17742,9 +14863,7 @@ mod tests {
         let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
 
         let mut graphics = test_graphics_with(
-            320,
-            180,
-            150,
+            (320, 180, 150),
             "Cursor Scenario",
             empty_sprites(),
             cursor_atlas,
@@ -17755,14 +14874,7 @@ mod tests {
         graphics.render_frame(&snapshot, &viewports);
 
         let cell_color = [123u8, 45, 210, 255];
-        assert!(
-            graphics
-                .surface()
-                .pixels()
-                .chunks_exact(4)
-                .all(|chunk| chunk != cell_color),
-            "no flash → no cursor mark"
-        );
+        front_assert! {graphics.surface().pixels().chunks_exact(4).all(|chunk| chunk != cell_color), "no flash → no cursor mark"};
     }
 
     #[test]
@@ -17776,23 +14888,12 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            GraphicsSystem::sky_fade_color(&settings, 0, 400),
-            RgbColor::new(28, 64, 152),
-            "world top shows FadeClr1"
-        );
-        assert_eq!(
-            GraphicsSystem::sky_fade_color(&settings, 400, 400),
-            RgbColor::new(192, 196, 252),
-            "world bottom shows FadeClr2"
-        );
+        front_assert_eq! {GraphicsSystem::sky_fade_color(&settings, 0, 400) => RgbColor::new(28, 64, 152), "world top shows FadeClr1"};
+        front_assert_eq! {GraphicsSystem::sky_fade_color(&settings, 400, 400) => RgbColor::new(192, 196, 252), "world bottom shows FadeClr2"};
         // iY=100, GBackHgt=400: iPos2 = 64, iPos1 = 192;
         // r = (28*192 + 192*64) >> 8 = 69, g = (64*192 + 196*64) >> 8 = 97,
         // b = (152*192 + 252*64) >> 8 = 177.
-        assert_eq!(
-            GraphicsSystem::sky_fade_color(&settings, 100, 400),
-            RgbColor::new(69, 97, 177),
-        );
+        front_assert_eq! {GraphicsSystem::sky_fade_color(&settings, 100, 400) => RgbColor::new(69, 97, 177),};
     }
 
     #[test]
@@ -17811,23 +14912,20 @@ mod tests {
         };
 
         let focus = &snapshot.objects[0];
-        let mut graphics = test_graphics(120, 80, 60, "Sky Fade");
+        let mut graphics = test_graphics((120, 80, 60), "Sky Fade");
         graphics.set_sky(Some(SkyRenderState::new(settings, None)));
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
         let top = graphics.surface().get_pixel(0, 0).test_value();
-        assert!(
-            top.r > top.b,
-            "expected the red fade_top at the top of the view, got {top:?}"
-        );
+        front_assert! {top.r > top.b, "expected the red fade_top at the top of the view, got {top:?}"};
     }
 
     #[test]
     fn sky_draws_distinct_sun_and_moon_for_noon_and_midnight() {
         let background = [24, 48, 96, 255];
         let render = |time_of_day| {
-            let mut graphics = test_graphics(120, 80, 80, "Celestial Clock");
+            let mut graphics = test_graphics((120, 80, 80), "Celestial Clock");
             let environment = EnvironmentFrame {
                 settings: EnvironmentSettings::new(0).with_time_of_day(time_of_day),
                 sky_color: Some(RgbColor::new(background[0], background[1], background[2])),
@@ -17842,19 +14940,10 @@ mod tests {
         let midnight = render(1);
         let disabled = render(0);
 
-        assert!(
-            noon.chunks_exact(4).any(|pixel| pixel != background),
-            "noon must show a sun against a flat sky"
-        );
-        assert!(
-            midnight.chunks_exact(4).any(|pixel| pixel != background),
-            "midnight must show a moon against a flat sky"
-        );
-        assert!(
-            disabled.chunks_exact(4).all(|pixel| pixel == background),
-            "the native all-zero clock must leave ordinary skies unchanged"
-        );
-        assert_ne!(noon, midnight, "sun and moon must be visually distinct");
+        front_assert! {noon.chunks_exact(4).any(|pixel| pixel != background), "noon must show a sun against a flat sky"};
+        front_assert! {midnight.chunks_exact(4).any(|pixel| pixel != background), "midnight must show a moon against a flat sky"};
+        front_assert! {disabled.chunks_exact(4).all(|pixel| pixel == background), "the native all-zero clock must leave ordinary skies unchanged"};
+        front_assert_ne! {noon => midnight, "sun and moon must be visually distinct"};
     }
 
     #[test]
@@ -17869,20 +14958,16 @@ mod tests {
             sky_color: Some(RgbColor::new(background[0], background[1], background[2])),
             ..EnvironmentFrame::default()
         };
-        let mut graphics = test_graphics(120, 80, 80, "Non-clock TIME");
+        let mut graphics = test_graphics((120, 80, 80), "Non-clock TIME");
 
         graphics.draw_sky(None, &environment, &[], &[object], &[], 1.0, None);
 
-        assert!(graphics
-            .surface()
-            .pixels()
-            .chunks_exact(4)
-            .all(|pixel| pixel == background));
+        front_assert! {graphics.surface().pixels().chunks_exact(4).all(|pixel| pixel == background)};
     }
 
     #[test]
     fn gpu_capture_retains_the_celestial_body_texture() {
-        let mut graphics = test_graphics(120, 80, 80, "Retained Celestial Clock");
+        let mut graphics = test_graphics((120, 80, 80), "Retained Celestial Clock");
         let environment = EnvironmentFrame {
             settings: EnvironmentSettings::new(0).with_time_of_day(1_200),
             sky_color: Some(RgbColor::new(24, 48, 96)),
@@ -17917,15 +15002,9 @@ mod tests {
             })
             .test_value();
 
-        assert!(matches!(
-            scene.commands.first(),
-            Some(GpuCommand::Solid { .. })
-        ));
-        assert!(body_index > 0, "the body must draw after the sky");
-        assert!(scene
-            .textures
-            .iter()
-            .any(|resource| resource.id == texture && resource.extent == [24, 24]));
+        front_assert! {matches!(scene.commands.first(), Some(GpuCommand::Solid { .. }))};
+        front_assert! {body_index > 0, "the body must draw after the sky"};
+        front_assert! {scene.textures.iter().any(|resource| resource.id == texture && resource.extent == [24, 24])};
     }
 
     #[test]
@@ -17936,7 +15015,7 @@ mod tests {
         let background = [24, 48, 96, 255];
         let body_center = |time_of_day| {
             let width = 120_u32;
-            let mut graphics = test_graphics(width, 80, 80, "Celestial Orbit");
+            let mut graphics = test_graphics((width, 80, 80), "Celestial Orbit");
             let mut settings = EnvironmentSettings::new(0);
             settings.time_of_day = time_of_day;
             let environment = EnvironmentFrame {
@@ -17962,22 +15041,22 @@ mod tests {
                         )
                     },
                 );
-            assert!(count > 0, "time {time_of_day} must expose a celestial body");
+            front_assert! {count > 0, "time {time_of_day} must expose a celestial body"};
             (x_sum as f32 / count as f32, y_sum as f32 / count as f32)
         };
 
         let dawn = body_center(600);
         let noon = body_center(1_200);
         let dusk = body_center(1_799);
-        assert!(dawn.0 > noon.0 && noon.0 > dusk.0);
-        assert!(noon.1 < dawn.1 && noon.1 < dusk.1);
+        front_assert! {dawn.0 > noon.0 && noon.0 > dusk.0};
+        front_assert! {noon.1 < dawn.1 && noon.1 < dusk.1};
 
         let moonrise = body_center(1_800);
         let midnight = body_center(1);
         let moonset = body_center(599);
-        assert!(moonrise.0 > midnight.0 && midnight.0 > moonset.0);
-        assert!(midnight.1 < moonrise.1 && midnight.1 < moonset.1);
-        assert_eq!(dawn, body_center(3_000), "snapshot clock values must wrap");
+        front_assert! {moonrise.0 > midnight.0 && midnight.0 > moonset.0};
+        front_assert! {midnight.1 < moonrise.1 && midnight.1 < moonset.1};
+        front_assert_eq! {dawn => body_center(3_000), "snapshot clock values must wrap"};
     }
 
     #[test]
@@ -17996,7 +15075,7 @@ mod tests {
                 clonk_script::Value::Int(legacy_time),
             );
 
-            let mut graphics = test_graphics(120, 80, 80, "Script Time");
+            let mut graphics = test_graphics((120, 80, 80), "Script Time");
             let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
             graphics.render_frame(&snapshot, &viewports);
             graphics.surface().pixels().to_vec()
@@ -18005,12 +15084,8 @@ mod tests {
         let background = [24, 48, 96, 255];
         let noon = render(0);
         let midnight = render(5_000);
-        assert!(noon
-            .chunks_exact(4)
-            .any(|pixel| pixel != background && pixel[0] > pixel[2]));
-        assert!(midnight
-            .chunks_exact(4)
-            .any(|pixel| pixel != background && pixel[2] > pixel[0]));
+        front_assert! {noon.chunks_exact(4).any(|pixel| pixel != background && pixel[0] > pixel[2])};
+        front_assert! {midnight.chunks_exact(4).any(|pixel| pixel != background && pixel[2] > pixel[0])};
     }
 
     #[test]
@@ -18036,7 +15111,7 @@ mod tests {
             }
             snapshot.render_order = render_order;
 
-            let mut graphics = test_graphics(120, 80, 80, "Ordered Script Time");
+            let mut graphics = test_graphics((120, 80, 80), "Ordered Script Time");
             let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
             graphics.render_frame(&snapshot, &viewports);
             graphics.surface().pixels().to_vec()
@@ -18051,22 +15126,13 @@ mod tests {
             vec![focus_id, noon_id, midnight_id],
         );
 
-        assert!(
-            actual == expected,
-            "the TIME object first in master order must drive the sky"
-        );
+        front_assert! {actual == expected, "the TIME object first in master order must drive the sky"};
 
         let partial = render(&[(midnight_id, 5_000)], vec![focus_id]);
-        assert!(
-            partial == expected,
-            "objects omitted from a partial draw-order sidecar must remain searchable"
-        );
+        front_assert! {partial == expected, "objects omitted from a partial draw-order sidecar must remain searchable"};
 
         let legacy = render(&[(noon_id, 0), (midnight_id, 5_000)], Vec::new());
-        assert!(
-            legacy == expected,
-            "the canonical draw-order fallback must be reversed for selection"
-        );
+        front_assert! {legacy == expected, "the canonical draw-order fallback must be reversed for selection"};
     }
 
     #[test]
@@ -18089,15 +15155,12 @@ mod tests {
         };
 
         let focus = &snapshot.objects[0];
-        let mut graphics = test_graphics(120, 80, 60, "Unmodified Sky Fade");
+        let mut graphics = test_graphics((120, 80, 60), "Unmodified Sky Fade");
         graphics.set_sky(Some(SkyRenderState::new(settings, None)));
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
-            Some(Color::opaque(fade.r, fade.g, fade.b))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(Color::opaque(fade.r, fade.g, fade.b))};
     }
 
     #[test]
@@ -18107,7 +15170,7 @@ mod tests {
         daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
 
         let focus = &daytime.objects[0];
-        let mut day_view = test_graphics(120, 80, 60, "Day");
+        let mut day_view = test_graphics((120, 80, 60), "Day");
         let day_viewports = vec![ViewportInput::from_focus(focus)];
         day_view.render_frame(&daytime, &day_viewports);
         let day_pixel = day_view.surface().get_pixel(0, 0).test_value();
@@ -18115,7 +15178,7 @@ mod tests {
         let mut nighttime = daytime.clone();
         // 0 means "no day/night cycle" (full daylight); 1 is deepest night.
         nighttime.environment.settings.time_of_day = 1;
-        let mut night_view = test_graphics(120, 80, 60, "Night");
+        let mut night_view = test_graphics((120, 80, 60), "Night");
         let night_focus = &nighttime.objects[0];
         let night_viewports = vec![ViewportInput::from_focus(night_focus)];
         night_view.render_frame(&nighttime, &night_viewports);
@@ -18128,9 +15191,9 @@ mod tests {
         let expected_day = GraphicsSystem::apply_lighting(base_color, day_factor);
         let expected_night = GraphicsSystem::apply_lighting(base_color, night_factor);
 
-        assert_eq!(day_pixel, expected_day);
-        assert_eq!(night_pixel, expected_night);
-        assert_ne!(expected_day, expected_night);
+        front_assert_eq! {day_pixel => expected_day};
+        front_assert_eq! {night_pixel => expected_night};
+        front_assert_ne! {expected_day => expected_night};
     }
 
     #[test]
@@ -18142,7 +15205,7 @@ mod tests {
         // at the borders (C4Viewport.cpp:1035-1041).
         daytime.landscape = Some(Landscape::flat(256, 150));
 
-        let mut day_view = test_graphics(200, 150, 150, "Day Object");
+        let mut day_view = test_graphics((200, 150, 150), "Day Object");
         let day_focus = &daytime.objects[0];
         let day_viewports = vec![ViewportInput::from_focus(day_focus)];
         day_view.render_frame(&daytime, &day_viewports);
@@ -18157,7 +15220,7 @@ mod tests {
         let mut nighttime = daytime.clone();
         // 0 means "no day/night cycle" (full daylight); 1 is deepest night.
         nighttime.environment.settings.time_of_day = 1;
-        let mut night_view = test_graphics(200, 150, 150, "Night Object");
+        let mut night_view = test_graphics((200, 150, 150), "Night Object");
         let night_focus = &nighttime.objects[0];
         let night_viewports = vec![ViewportInput::from_focus(night_focus)];
         night_view.render_frame(&nighttime, &night_viewports);
@@ -18172,7 +15235,7 @@ mod tests {
         let day_factor = GraphicsSystem::lighting_factor(daytime.environment.settings.time_of_day);
         let night_factor =
             GraphicsSystem::lighting_factor(nighttime.environment.settings.time_of_day);
-        assert!(night_factor < day_factor);
+        front_assert! {night_factor < day_factor};
         let ratio = if day_factor <= 0.0 {
             0.0
         } else {
@@ -18180,8 +15243,8 @@ mod tests {
         };
         let expected_night = GraphicsSystem::apply_lighting(day_pixel, ratio);
 
-        assert_eq!(night_pixel, expected_night);
-        assert_ne!(day_pixel, night_pixel);
+        front_assert_eq! {night_pixel => expected_night};
+        front_assert_ne! {day_pixel => night_pixel};
     }
 
     #[test]
@@ -18191,19 +15254,19 @@ mod tests {
         snapshot.objects[0].position = Vector2::new(20, 20);
 
         let focus = &snapshot.objects[0];
-        let mut graphics = test_graphics(120, 80, 40, "Letterbox");
+        let mut graphics = test_graphics((120, 80, 40), "Letterbox");
         let viewports = vec![ViewportInput::new(0, Vector2::new(20, 20), 1.0, focus)];
         graphics.render_frame(&snapshot, &viewports);
 
         let viewport = graphics.active_viewports.first().test_value();
-        assert!(viewport.content_rect.width < viewport.rect.width);
-        assert_eq!(viewport.content_rect.width, 40);
+        front_assert! {viewport.content_rect.width < viewport.rect.width};
+        front_assert_eq! {viewport.content_rect.width => 40};
 
         let left_bar = viewport.content_rect.x - viewport.rect.x;
         let right_bar = (viewport.rect.x + viewport.rect.width as i32)
             - (viewport.content_rect.x + viewport.content_rect.width as i32);
-        assert!(left_bar > 0);
-        assert!(right_bar > 0);
+        front_assert! {left_bar > 0};
+        front_assert! {right_bar > 0};
     }
 
     #[test]
@@ -18215,7 +15278,7 @@ mod tests {
             landscape.set_liquid_column(30, vec![LiquidSegment::new(40, 60)]);
         }
         let focus = &snapshot.objects[0];
-        let mut graphics = test_graphics(120, 80, 80, "Liquid Scenario");
+        let mut graphics = test_graphics((120, 80, 80), "Liquid Scenario");
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
@@ -18246,7 +15309,7 @@ mod tests {
             lighting,
         );
         let expected = blend_color_over(liquid, sky);
-        assert_eq!(pixel, expected);
+        front_assert_eq! {pixel => expected};
     }
 
     #[test]
@@ -18259,8 +15322,8 @@ mod tests {
                 samples.push((call, modulation.map(f32::to_bits)));
             }
         }
-        assert_eq!(
-            samples,
+        front_assert_eq! {
+            samples =>
             [
                 (1, [0xbd4c_cccd, 0x3c88_8889, 0x3daa_aaab]),
                 (2, [0xbd08_8889, 0x3d08_8889, 0x3dcc_cccd]),
@@ -18270,32 +15333,26 @@ mod tests {
                 (22, [0xbdcc_cccd, 0xbd08_8889, 0x3d08_8888]),
                 (46, [0xbdcc_cccd, 0xbd08_8889, 0x3d08_8888]),
             ]
-        );
+        };
     }
 
     #[test]
     fn liquid_animation_cycle_survives_texture_swaps_and_renderer_rebuilds() {
-        let make_graphics = || test_graphics(1, 1, 1, "Liquid phase");
+        let make_graphics = || test_graphics((1, 1, 1), "Liquid phase");
         let image = || ImageData::new(1, 1, vec![255, 128, 0, 255]);
         let mut original = make_graphics();
         original.set_liquid_animation(Some(image()));
-        assert_eq!(
-            original.liquid_animation_cycle.advance().map(f32::to_bits),
-            [0xbd4c_cccd, 0x3c88_8889, 0x3daa_aaab]
-        );
+        front_assert_eq! {original.liquid_animation_cycle.advance().map(f32::to_bits) => [0xbd4c_cccd, 0x3c88_8889, 0x3daa_aaab]};
 
         original.set_liquid_animation(None);
         let paused = original.liquid_animation_cycle.values;
         original.set_liquid_animation(Some(image()));
-        assert_eq!(original.liquid_animation_cycle.values, paused);
+        front_assert_eq! {original.liquid_animation_cycle.values => paused};
 
         let mut rebuilt = make_graphics();
         rebuilt.inherit_liquid_animation_cycle(&original);
         rebuilt.set_liquid_animation(Some(image()));
-        assert_eq!(
-            rebuilt.liquid_animation_cycle.advance().map(f32::to_bits),
-            [0xbd08_8889, 0x3d08_8889, 0x3dcc_cccd]
-        );
+        front_assert_eq! {rebuilt.liquid_animation_cycle.advance().map(f32::to_bits) => [0xbd08_8889, 0x3d08_8889, 0x3dcc_cccd]};
     }
 
     #[test]
@@ -18311,9 +15368,9 @@ mod tests {
         else {
             panic!("liquid animation must retain float shader channels");
         };
-        assert_eq!(alpha, 255.0);
+        front_assert_eq! {alpha => 255.0};
         for (actual, expected) in rgb.into_iter().zip([128.0, 76.8, 38.650_98]) {
-            assert!((actual - expected).abs() < 0.000_01);
+            front_assert! {(actual - expected).abs() < 0.000_01};
         }
 
         let PreparedSpriteFragment::Shader { rgb, .. } =
@@ -18321,7 +15378,7 @@ mod tests {
         else {
             panic!("liquid animation must retain float shader channels");
         };
-        assert_eq!(rgb, [0.0; 3]);
+        front_assert_eq! {rgb => [0.0; 3]};
     }
 
     #[test]
@@ -18374,7 +15431,7 @@ mod tests {
             ),
         ]));
         let make_graphics = || {
-            let mut graphics = test_graphics(2, 1, 1, "Liquid animation");
+            let mut graphics = test_graphics((2, 1, 1), "Liquid animation");
             graphics.set_material_textures(Arc::clone(&textures));
             graphics.set_material_render_info(Arc::clone(&materials));
             graphics
@@ -18382,41 +15439,37 @@ mod tests {
 
         let mut animated = make_graphics();
         animated.set_liquid_animation(Some(ImageData::new(1, 1, vec![255, 128, 128, 255])));
-        assert!(animated.draw_ground_textured(Some(&landscape), None));
+        front_assert! {animated.draw_ground_textured(Some(&landscape), None)};
         let first = [
             animated.surface().get_pixel(0, 0),
             animated.surface().get_pixel(1, 0),
         ];
         reset_material_composition_calls();
-        assert!(animated.draw_ground_textured(Some(&landscape), None));
+        front_assert! {animated.draw_ground_textured(Some(&landscape), None)};
         let second = [
             animated.surface().get_pixel(0, 0),
             animated.surface().get_pixel(1, 0),
         ];
-        assert_ne!(first[0], second[0], "liquid RGB must follow the next phase");
-        assert_eq!(first[1], second[1], "solid density must remain static");
-        assert_eq!(
-            material_composition_calls(),
-            0,
-            "animation must not invalidate the static Surface32 cache"
-        );
+        front_assert_ne! {first[0] => second[0], "liquid RGB must follow the next phase"};
+        front_assert_eq! {first[1] => second[1], "solid density must remain static"};
+        front_assert_eq! {material_composition_calls() => 0, "animation must not invalidate the static Surface32 cache"};
 
         animated.set_liquid_animation(None);
-        assert!(animated.draw_ground_textured(Some(&landscape), None));
+        front_assert! {animated.draw_ground_textured(Some(&landscape), None)};
         let disabled = [
             animated.surface().get_pixel(0, 0),
             animated.surface().get_pixel(1, 0),
         ];
         let mut baseline = make_graphics();
-        assert!(baseline.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            disabled,
+        front_assert! {baseline.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {
+            disabled =>
             [
                 baseline.surface().get_pixel(0, 0),
                 baseline.surface().get_pixel(1, 0),
             ],
             "disabling animation must retain the pre-animation renderer bytes"
-        );
+        };
     }
 
     #[test]
@@ -18443,19 +15496,19 @@ mod tests {
             }
         }))
         .test_value();
-        let mut graphics = test_graphics(2, 1, 1, "Exact Landscape.png");
+        let mut graphics = test_graphics((2, 1, 1), "Exact Landscape.png");
 
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {
             [
                 graphics.surface().get_pixel(0, 0),
                 graphics.surface().get_pixel(1, 0),
-            ],
+            ] =>
             [
                 Some(Color::opaque(0x11, 0x22, 0x33)),
                 Some(Color::opaque(0x44, 0x55, 0x66)),
             ]
-        );
+        };
     }
 
     #[test]
@@ -18546,9 +15599,7 @@ mod tests {
         );
         let make_graphics = || {
             let mut graphics = test_graphics(
-                SCREEN_WIDTH,
-                SCREEN_HEIGHT,
-                WORLD_HEIGHT as i32,
+                (SCREEN_WIDTH, SCREEN_HEIGHT, WORLD_HEIGHT as i32),
                 "parallel landscape rows",
             );
             graphics.set_material_textures(Arc::clone(&textures));
@@ -18598,43 +15649,32 @@ mod tests {
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
         let mut scalar = make_graphics();
         reset_landscape_destination_samples();
-        assert!(scalar.draw_ground_textured_with_parallel_rows(
-            Some(&landscape),
-            Some(&gamma),
-            false,
-        ));
+        front_assert! {scalar.draw_ground_textured_with_parallel_rows(Some(&landscape), Some(&gamma), false,)};
         let scalar_destination_samples = landscape_destination_samples();
 
         let mut parallel = make_graphics();
         reset_landscape_destination_samples();
-        assert!(parallel.draw_ground_textured_with_parallel_rows(
-            Some(&landscape),
-            Some(&gamma),
-            true,
-        ));
+        front_assert! {parallel.draw_ground_textured_with_parallel_rows(Some(&landscape), Some(&gamma), true,)};
         let parallel_destination_samples = landscape_destination_samples();
 
-        assert_eq!(parallel.surface().pixels(), scalar.surface().pixels());
-        assert_eq!(
+        front_assert_eq! {parallel.surface().pixels() => scalar.surface().pixels()};
+        front_assert_eq! {
             parallel
                 .landscape_cache
                 .as_ref()
                 .expect("parallel cache")
                 .pixels
-                .as_ref(),
+                .as_ref() =>
             scalar
                 .landscape_cache
                 .as_ref()
                 .expect("scalar cache")
                 .pixels
                 .as_ref(),
-        );
-        assert_eq!(
-            parallel.liquid_animation_cycle.values.map(f32::to_bits),
-            scalar.liquid_animation_cycle.values.map(f32::to_bits),
-        );
-        assert!(scalar_destination_samples > 0);
-        assert_eq!(parallel_destination_samples, scalar_destination_samples);
+        };
+        front_assert_eq! {parallel.liquid_animation_cycle.values.map(f32::to_bits) => scalar.liquid_animation_cycle.values.map(f32::to_bits),};
+        front_assert! {scalar_destination_samples > 0};
+        front_assert_eq! {parallel_destination_samples => scalar_destination_samples};
     }
 
     #[test]
@@ -18689,9 +15729,7 @@ mod tests {
         );
         let make_graphics = || {
             let mut graphics = test_graphics(
-                WIDTH,
-                HEIGHT,
-                HEIGHT as i32,
+                (WIDTH, HEIGHT, HEIGHT as i32),
                 "parallel retained landscape cache",
             );
             graphics.set_material_texture_surfaces(Arc::clone(&textures));
@@ -18708,15 +15746,15 @@ mod tests {
         };
 
         let mut scalar = make_graphics();
-        assert!(scalar.draw_ground_textured_with_parallel_rows(Some(&landscape), None, false,));
+        front_assert! {scalar.draw_ground_textured_with_parallel_rows(Some(&landscape), None, false,)};
         let mut parallel = make_graphics();
-        assert!(parallel.draw_ground_textured_with_parallel_rows(Some(&landscape), None, true,));
+        front_assert! {parallel.draw_ground_textured_with_parallel_rows(Some(&landscape), None, true,)};
 
         let scalar = scalar.landscape_cache.as_ref().test_value();
         let parallel = parallel.landscape_cache.as_ref().test_value();
-        assert_eq!(parallel.pixels, scalar.pixels);
-        assert_eq!(parallel.liquid_mask, scalar.liquid_mask);
-        assert_eq!(parallel.gpu_dirty, scalar.gpu_dirty);
+        front_assert_eq! {parallel.pixels => scalar.pixels};
+        front_assert_eq! {parallel.liquid_mask => scalar.liquid_mask};
+        front_assert_eq! {parallel.gpu_dirty => scalar.gpu_dirty};
     }
 
     #[test]
@@ -18764,7 +15802,7 @@ mod tests {
 
         let mut snapshot = make_snapshot();
         snapshot.landscape = Some(landscape);
-        let mut graphics = test_graphics(1, 1, 1, "Acid color");
+        let mut graphics = test_graphics((1, 1, 1), "Acid color");
         graphics.set_material_textures(Arc::new(textures));
         graphics.set_material_render_info(Arc::new(materials));
 
@@ -18776,11 +15814,11 @@ mod tests {
         )];
         graphics.render_frame(&snapshot, &viewports);
 
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
+        front_assert_eq! {
+            graphics.surface().get_pixel(0, 0) =>
             Some(standard_gamma_color(Color::opaque(0, 190, 0))),
             "the liquid animation path must preserve Acid's material RGB"
-        );
+        };
     }
 
     #[test]
@@ -18803,10 +15841,7 @@ mod tests {
         );
         let smooth = ImageData::new(2, 1, vec![4, 4, 4, 255, 64, 128, 32, 245]);
 
-        assert_eq!(
-            compose_material_pixel(&material, 1, 2, 0, &rough, Some(&smooth)),
-            Color::new(32, 48, 62, 215),
-        );
+        front_assert_eq! {compose_material_pixel(&material, 1, 2, 0, &rough, Some(&smooth)) => Color::new(32, 48, 62, 215),};
     }
 
     #[test]
@@ -18825,11 +15860,11 @@ mod tests {
         let foreground = compose_material_pixel(&material, 1, 0, 0, &texture, None);
         let background = compose_material_pixel(&material, 1 | 0x80, 0, 0, &texture, None);
 
-        assert_eq!(foreground.a, 245);
-        assert_eq!(background.a, 185);
-        assert_eq!(foreground.r, background.r);
-        assert_eq!(foreground.g, background.g);
-        assert_eq!(foreground.b, background.b);
+        front_assert_eq! {foreground.a => 245};
+        front_assert_eq! {background.a => 185};
+        front_assert_eq! {foreground.r => background.r};
+        front_assert_eq! {foreground.g => background.g};
+        front_assert_eq! {foreground.b => background.b};
     }
 
     #[test]
@@ -18857,19 +15892,10 @@ mod tests {
         let huge = MaterialRenderInfo::new([128; 9], [0; 6], None, MATERIAL_OVERLAY_HUGE_ZOOM, 50);
         let exact = MaterialRenderInfo::new([128; 9], [0; 6], None, MATERIAL_OVERLAY_EXACT, 50);
 
-        assert_eq!(
-            compose_material_pixel(&default, 1, 3, 0, &primary, None).r,
-            64,
-        );
-        assert_eq!(compose_material_pixel(&huge, 1, 3, 0, &primary, None).r, 32,);
-        assert_eq!(
-            compose_material_pixel(&default, 1, 2, 0, &white, Some(&overlay)).r,
-            126,
-        );
-        assert_eq!(
-            compose_material_pixel(&exact, 1, 2, 0, &white, Some(&overlay)).r,
-            62,
-        );
+        front_assert_eq! {compose_material_pixel(&default, 1, 3, 0, &primary, None).r => 64,};
+        front_assert_eq! {compose_material_pixel(&huge, 1, 3, 0, &primary, None).r => 32,};
+        front_assert_eq! {compose_material_pixel(&default, 1, 2, 0, &white, Some(&overlay)).r => 126,};
+        front_assert_eq! {compose_material_pixel(&exact, 1, 2, 0, &white, Some(&overlay)).r => 62,};
     }
 
     #[test]
@@ -18887,7 +15913,7 @@ mod tests {
 
         apply_material_pattern(&mut pixel, &texture, 0, 0, 0, true);
 
-        assert_eq!([pixel.red, pixel.green, pixel.blue], [100, 150, 200]);
+        front_assert_eq! {[pixel.red, pixel.green, pixel.blue] => [100, 150, 200]};
     }
 
     #[test]
@@ -18901,21 +15927,21 @@ mod tests {
         );
         let surface = MaterialTextureSurface::surface8(2, 1, vec![2, 1]);
 
-        assert_eq!(
-            compose_material_surface_pixel(&material, 1, 0, 0, (&surface).into(), None),
+        front_assert_eq! {
+            compose_material_surface_pixel(&material, 1, 0, 0, (&surface).into(), None) =>
             Color::new(70, 80, 90, 252),
             "Surface8 shift 2 selects the third RGB/alpha triplet"
-        );
-        assert_eq!(
-            compose_material_surface_pixel(&material, 0x81, 1, 0, (&surface).into(), None),
+        };
+        front_assert_eq! {
+            compose_material_surface_pixel(&material, 0x81, 1, 0, (&surface).into(), None) =>
             Color::new(40, 50, 60, 250),
             "IFT pixels select the second alpha triplet; monochrome is ignored for Surface8"
-        );
-        assert_eq!(
-            compose_material_surface_pixel(&material, 0x10, 0, 0, (&surface).into(), None),
+        };
+        front_assert_eq! {
+            compose_material_surface_pixel(&material, 0x10, 0, 0, (&surface).into(), None) =>
             Color::new(70, 80, 90, 249),
             "native alpha selection tests the whole high nibble, not only IFT"
-        );
+        };
     }
 
     #[test]
@@ -18959,7 +15985,7 @@ mod tests {
                 50,
             ),
         )]);
-        let mut graphics = test_graphics(1, 1, 1, "Material alpha");
+        let mut graphics = test_graphics((1, 1, 1), "Material alpha");
         graphics
             .surface_mut()
             .set_pixel(0, 0, Color::opaque(10, 20, 30))
@@ -18967,11 +15993,8 @@ mod tests {
         graphics.set_material_textures(Arc::new(textures));
         graphics.set_material_render_info(Arc::new(materials));
 
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
-            Some(Color::opaque(130, 9, 14)),
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(Color::opaque(130, 9, 14)),};
     }
 
     #[test]
@@ -18995,7 +16018,7 @@ mod tests {
         }))
         .test_value();
         let cached_grid = landscape.pixel_grid().test_value().clone();
-        let mut graphics = test_graphics(1, 1, 1, "Gamma Material");
+        let mut graphics = test_graphics((1, 1, 1), "Gamma Material");
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "rough".to_string(),
             ImageData::new(1, 1, vec![255, 255, 255, 255]),
@@ -19017,12 +16040,9 @@ mod tests {
             .test_value();
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
 
-        assert!(graphics.draw_ground_textured(Some(&landscape), Some(&gamma)));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), Some(&gamma))};
 
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
-            Some(Color::new(125, 150, 175, 255))
-        );
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(Color::new(125, 150, 175, 255))};
     }
 
     #[test]
@@ -19059,7 +16079,7 @@ mod tests {
                 }
             }))
             .test_value();
-            let mut graphics = test_graphics(1, 1, 1, "modulated landscape");
+            let mut graphics = test_graphics((1, 1, 1), "modulated landscape");
             graphics.set_material_textures(Arc::new(HashMap::from([(
                 "rough".to_string(),
                 ImageData::new(1, 1, vec![255, 255, 255, 255]),
@@ -19081,7 +16101,7 @@ mod tests {
                 .surface_mut()
                 .set_pixel(0, 0, background)
                 .test_value();
-            assert!(graphics.draw_ground_textured(Some(&landscape), Some(&gamma)));
+            front_assert! {graphics.draw_ground_textured(Some(&landscape), Some(&gamma))};
             graphics.surface().get_pixel(0, 0).test_value()
         };
 
@@ -19093,17 +16113,17 @@ mod tests {
                 blit(modulation),
                 Some(&gamma),
             );
-            assert_eq!(render_textured(modulation), expected);
+            front_assert_eq! {render_textured(modulation) => expected};
         }
-        assert_ne!(render_textured(0), render_textured(MODULATION));
+        front_assert_ne! {render_textured(0) => render_textured(MODULATION)};
 
         let render_fallback = |modulation| {
             let mut landscape = Landscape::flat(1, 1);
             landscape.set_liquid_column(0, vec![LiquidSegment::new(0, 0)]);
             let landscape = with_modulation(landscape, modulation);
-            let mut graphics = test_graphics(1, 2, 2, "modulated fallback landscape");
+            let mut graphics = test_graphics((1, 2, 2), "modulated fallback landscape");
             graphics.surface_mut().fill(background);
-            assert!(!graphics.draw_ground(0, Some(&landscape), 1.0, Some(&gamma)));
+            front_assert! {!graphics.draw_ground(0, Some(&landscape), 1.0, Some(&gamma))};
             graphics.draw_liquids(0, Some(&landscape), 1.0, Some(&gamma));
             (
                 graphics.surface().get_pixel(0, 0).test_value(),
@@ -19132,12 +16152,9 @@ mod tests {
                 blit(modulation),
                 Some(&gamma),
             );
-            assert_eq!(
-                render_fallback(modulation),
-                (expected_liquid, expected_ground)
-            );
+            front_assert_eq! {render_fallback(modulation) => (expected_liquid, expected_ground)};
         }
-        assert_ne!(render_fallback(0), render_fallback(MODULATION));
+        front_assert_ne! {render_fallback(0) => render_fallback(MODULATION)};
     }
 
     #[test]
@@ -19170,7 +16187,7 @@ mod tests {
             ));
             landscape.set_shade_materials(shade_materials);
 
-            let mut graphics = test_graphics(WIDTH, height, height as i32, "placement shading");
+            let mut graphics = test_graphics((WIDTH, height, height as i32), "placement shading");
             graphics.set_material_textures(Arc::new(HashMap::from([(
                 "neutral".to_string(),
                 ImageData::new(1, 1, vec![128, 128, 128, 255]),
@@ -19190,7 +16207,7 @@ mod tests {
                     MaterialRenderInfo::new(base, [0; 6], None, 0, 50).with_placement(30),
                 ),
             ])));
-            assert!(graphics.draw_ground_textured(Some(&landscape), None));
+            front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
             let cache = graphics.landscape_cache.as_ref().test_value();
             (0..height as usize)
                 .map(|y| {
@@ -19208,41 +16225,21 @@ mod tests {
         let mut sky_to_high = vec![0; 8];
         sky_to_high.extend(vec![1; 22]);
         let shaded = render_rows(&sky_to_high, true);
-        assert_eq!(shaded[7], Color::new(0, 0, 0, 0));
-        assert_eq!(
-            shaded[8],
-            Color::opaque(130, 130, 130),
-            "the first dense row lightens by the capped above-placement delta"
-        );
-        assert_eq!(shaded[16], Color::opaque(100, 100, 100));
-        assert_eq!(
-            render_rows(&sky_to_high, false)[8],
-            Color::opaque(100, 100, 100),
-            "ShadeMaterials=0 retains the unshaded material pattern"
-        );
+        front_assert_eq! {shaded[7] => Color::new(0, 0, 0, 0)};
+        front_assert_eq! {shaded[8] => Color::opaque(130, 130, 130), "the first dense row lightens by the capped above-placement delta"};
+        front_assert_eq! {shaded[16] => Color::opaque(100, 100, 100)};
+        front_assert_eq! {render_rows(&sky_to_high, false)[8] => Color::opaque(100, 100, 100), "ShadeMaterials=0 retains the unshaded material pattern"};
 
         let mut high_to_sky = vec![1; 9];
         high_to_sky.extend(vec![0; 21]);
-        assert_eq!(
-            render_rows(&high_to_sky, true)[8],
-            Color::opaque(70, 70, 70),
-            "a dense row over lower placement darkens through BelowDensity"
-        );
+        front_assert_eq! {render_rows(&high_to_sky, true)[8] => Color::opaque(70, 70, 70), "a dense row over lower placement darkens through BelowDensity"};
 
         let mut high_to_low = vec![1; 8];
         high_to_low.extend(vec![2; 22]);
-        assert_eq!(
-            render_rows(&high_to_low, true)[8],
-            Color::opaque(70, 70, 70),
-            "placement below 30 darkens against denser rows above"
-        );
+        front_assert_eq! {render_rows(&high_to_low, true)[8] => Color::opaque(70, 70, 70), "placement below 30 darkens against denser rows above"};
         let mut high_to_threshold = vec![1; 8];
         high_to_threshold.extend(vec![3; 22]);
-        assert_eq!(
-            render_rows(&high_to_threshold, true)[8],
-            Color::opaque(100, 100, 100),
-            "the asymmetric above-darkening arm excludes own placement 30"
-        );
+        front_assert_eq! {render_rows(&high_to_threshold, true)[8] => Color::opaque(100, 100, 100), "the asymmetric above-darkening arm excludes own placement 30"};
     }
 
     /// `draw_definition_particles` filters the whole particle slice on every
@@ -19267,26 +16264,17 @@ mod tests {
         // the whole cost of the old walk was the membership test itself.
         let particles = (0..PARTICLES)
             .map(|index| ParticleSnapshot {
-                definition_id: "Smoke".to_string(),
-                position: FloatVector2::new(index as f32, 4.0),
-                velocity: FloatVector2::new(0.0, 0.0),
                 life: 10,
                 parameter_a: 2.0,
-                parameter_b: 0x00ff_ffff,
-                layer: ParticleLayer::Global,
-                pxs_fixed: None,
-                pxs_slot: None,
+                ..particle_fixture(
+                    "Smoke",
+                    FloatVector2::new(index as f32, 4.0),
+                    ParticleLayer::Global,
+                )
             })
             .collect::<Vec<_>>();
-        let mut graphics = test_graphics_with(
-            160,
-            120,
-            120,
-            "particle layer index",
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics =
+            test_graphics_with_sprites((160, 120, 120), "particle layer index", empty_sprites());
 
         let pass = |graphics: &mut GraphicsSystem| {
             graphics.draw_objects_at_frame(
@@ -19319,11 +16307,7 @@ mod tests {
             elapsed.as_secs_f64() * 1e6 / f64::from(PASSES),
             scans / PASSES as usize,
         );
-        assert_eq!(
-            scans,
-            PARTICLES * PASSES as usize,
-            "an object pass examined the particle slice more than once"
-        );
+        front_assert_eq! {scans => PARTICLES * PASSES as usize, "an object pass examined the particle slice more than once"};
     }
 
     #[test]
@@ -19338,7 +16322,7 @@ mod tests {
                 object
             })
             .collect::<Vec<_>>();
-        let mut graphics = test_graphics(1, 1, 1, "object visibility pass filtering");
+        let mut graphics = test_graphics((1, 1, 1), "object visibility pass filtering");
 
         reset_object_visibility_evaluations();
         for pass in [
@@ -19362,7 +16346,7 @@ mod tests {
             );
         }
 
-        assert_eq!(object_visibility_evaluations(), OBJECTS);
+        front_assert_eq! {object_visibility_evaluations() => OBJECTS};
     }
 
     /// `C4Viewport::Draw` walks each category list at its painter-order site,
@@ -19391,7 +16375,7 @@ mod tests {
         })
         .collect();
         snapshot.render_order = snapshot.objects.iter().map(|object| object.id).collect();
-        let mut graphics = test_graphics(160, 120, 120, "retained object phase plan");
+        let mut graphics = test_graphics((160, 120, 120), "retained object phase plan");
 
         reset_object_render_plan_evaluations();
         reset_object_visibility_evaluations();
@@ -19400,8 +16384,8 @@ mod tests {
             &[ViewportInput::ownerless(Vector2::new(80, 60), 1.0)],
         );
 
-        assert_eq!(object_render_plan_evaluations(), snapshot.objects.len());
-        assert_eq!(object_visibility_evaluations(), snapshot.objects.len());
+        front_assert_eq! {object_render_plan_evaluations() => snapshot.objects.len()};
+        front_assert_eq! {object_visibility_evaluations() => snapshot.objects.len()};
     }
 
     #[test]
@@ -19429,68 +16413,50 @@ mod tests {
                 object
             })
             .collect::<Vec<_>>();
-        let walk = DefinitionActionGraphics {
-            facet: Some(clonk_engine::DefinitionActionFacet {
-                x: 0,
-                y: 0,
-                width: 15,
-                height: 15,
-                target_x: 0,
-                target_y: 0,
-            }),
-            directions: 2,
-            flip_dir: Some(1),
-            length: Some(20),
-            ..DefinitionActionGraphics::default()
-        };
+        let walk = action_graphics_fixture(|action| {
+            action.facet = Some(test_action_facet(0, 0, 15, 15, 0, 0));
+            action.directions = 2;
+            action.flip_dir = Some(1);
+            action.length = Some(20);
+        });
         let sprite = DefinitionSprite {
             actions: HashMap::from([("Walk".to_string(), walk)]),
             shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
             stretch_growth: true,
             ..test_sprite(ImageData::new(300, 110, vec![255; 300 * 110 * 4]))
         };
-        let mut graphics = test_graphics_with(
-            640,
-            420,
-            420,
+        let mut graphics = test_graphics_with_sprites(
+            (640, 420, 420),
             "ST5B compact capture",
             Arc::new(HashMap::from([("ST5B".to_string(), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         let gamma = clonk_graphics::GammaRamp::standard();
         graphics.begin_gpu_scene_capture();
 
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &objects,
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            Some(&gamma),
+            TestObjectDraw::default().gamma(&gamma),
         );
 
         let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
         let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
             panic!("representable ST5B faces entered the generic capture path");
         };
-        assert_eq!(sprites.len(), OBJECTS);
-        assert_eq!(
+        front_assert_eq! {sprites.len() => OBJECTS};
+        front_assert_eq! {
             sprites
                 .iter()
                 .map(|sprite| sprite.modulation[0])
                 .collect::<std::collections::HashSet<_>>()
-                .len(),
+                .len() =>
             OBJECTS,
             "each benchmark object needs a distinct color modulation"
-        );
-        assert_eq!(sprites[0].modulation[0], 0x0040_0001);
-        assert_eq!(sprites[1].modulation[0], 0x0040_0002);
-        assert_eq!(sprites[0].sampler(), GpuSampler::Nearest);
-        assert_eq!(sprites[1].sampler(), GpuSampler::Linear);
+        };
+        front_assert_eq! {sprites[0].modulation[0] => 0x0040_0001};
+        front_assert_eq! {sprites[1].modulation[0] => 0x0040_0002};
+        front_assert_eq! {sprites[0].sampler() => GpuSampler::Nearest};
+        front_assert_eq! {sprites[1].sampler() => GpuSampler::Linear};
     }
 
     #[test]
@@ -19518,20 +16484,12 @@ mod tests {
                 object
             })
             .collect::<Vec<_>>();
-        let walk = DefinitionActionGraphics {
-            facet: Some(clonk_engine::DefinitionActionFacet {
-                x: 0,
-                y: 0,
-                width: 15,
-                height: 15,
-                target_x: 0,
-                target_y: 0,
-            }),
-            directions: 2,
-            flip_dir: Some(1),
-            length: Some(20),
-            ..DefinitionActionGraphics::default()
-        };
+        let walk = action_graphics_fixture(|action| {
+            action.facet = Some(test_action_facet(0, 0, 15, 15, 0, 0));
+            action.directions = 2;
+            action.flip_dir = Some(1);
+            action.length = Some(20);
+        });
         let sprite = DefinitionSprite {
             actions: HashMap::from([("Walk".to_string(), walk)]),
             color_mask: Some(ColorByOwnerMask::new(
@@ -19543,28 +16501,18 @@ mod tests {
             stretch_growth: true,
             ..test_sprite(ImageData::new(300, 110, vec![255; 300 * 110 * 4]))
         };
-        let mut graphics = test_graphics_with(
-            640,
-            420,
-            420,
+        let mut graphics = test_graphics_with_sprites(
+            (640, 420, 420),
             "owner compact capture",
             Arc::new(HashMap::from([("OwnerCrew".to_string(), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         let gamma = clonk_graphics::GammaRamp::standard();
         graphics.begin_gpu_scene_capture();
 
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &objects,
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            Some(&gamma),
+            TestObjectDraw::default().gamma(&gamma),
         );
 
         let stats = graphics
@@ -19572,8 +16520,8 @@ mod tests {
             .gpu_scene_capture()
             .test_value()
             .capture_stats();
-        assert_eq!(stats.generic_sprite_fallbacks, 0);
-        assert_eq!(stats.owner_mask_fallbacks, 0);
+        front_assert_eq! {stats.generic_sprite_fallbacks => 0};
+        front_assert_eq! {stats.owner_mask_fallbacks => 0};
         let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
         let [GpuCommand::ObjectBatch {
             owner_texture: Some(_),
@@ -19583,13 +16531,11 @@ mod tests {
         else {
             panic!("representable owner faces did not form one paired compact run");
         };
-        assert_eq!(sprites.len(), OBJECTS * 2);
-        assert!(sprites
-            .chunks_exact(2)
-            .all(|pair| !pair[0].owner_layer() && pair[1].owner_layer()));
+        front_assert_eq! {sprites.len() => OBJECTS * 2};
+        front_assert! {sprites.chunks_exact(2).all(|pair| !pair[0].owner_layer() && pair[1].owner_layer())};
         let bytes = sprites.len() * std::mem::size_of::<GpuObjectSprite>();
-        assert_eq!(bytes, 176_000);
-        assert!(bytes <= 176 * 1024);
+        front_assert_eq! {bytes => 176_000};
+        front_assert! {bytes <= 176 * 1024};
     }
 
     #[test]
@@ -19614,48 +16560,28 @@ mod tests {
             top_face: Some(DefinitionTargetRect::new(15, 0, 15, 15, 0, 0)),
             ..test_sprite(ImageData::new(30, 15, vec![255; 30 * 15 * 4]))
         };
-        let mut graphics = test_graphics_with(
-            48,
-            32,
-            32,
+        let mut graphics = test_graphics_with_sprites(
+            (48, 32, 32),
             "compact base and top ordering",
             Arc::new(HashMap::from([("Layered".to_owned(), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         let gamma = clonk_graphics::GammaRamp::standard();
         graphics.begin_gpu_scene_capture();
 
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &objects,
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            Some(&gamma),
+            TestObjectDraw::default().gamma(&gamma),
         );
 
         let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
         let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
             panic!("base and TopFace sprites split out of their ordered resource run");
         };
-        assert_eq!(sprites.len(), 4);
-        assert!(sprites[..2]
-            .iter()
-            .all(|sprite| (sprite.uv[0] - 0.0).abs() < f32::EPSILON));
-        assert!(sprites[2..]
-            .iter()
-            .all(|sprite| (sprite.uv[0] - 0.5).abs() < f32::EPSILON));
-        assert_eq!(
-            sprites
-                .iter()
-                .map(|sprite| sprite.modulation[0])
-                .collect::<Vec<_>>(),
-            vec![0x0010_1010, 0x0020_2020, 0x0010_1010, 0x0020_2020]
-        );
+        front_assert_eq! {sprites.len() => 4};
+        front_assert! {sprites[..2].iter().all(|sprite| (sprite.uv[0] - 0.0).abs() < f32::EPSILON)};
+        front_assert! {sprites[2..].iter().all(|sprite| (sprite.uv[0] - 0.5).abs() < f32::EPSILON)};
+        front_assert_eq! {sprites.iter().map(|sprite| sprite.modulation[0]).collect::<Vec<_>>() => vec![0x0010_1010, 0x0020_2020, 0x0010_1010, 0x0020_2020]};
     }
 
     #[test]
@@ -19674,147 +16600,100 @@ mod tests {
         object.position = Vector2::new(16, 16);
         object.construction = FULL_CON / 2;
         object.ocf = clonk_engine::ocf::CONSTRUCT;
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
-            ..test_sprite(ImageData::new(15, 15, vec![255; 15 * 15 * 4]))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(15, 15, vec![255; 15 * 15 * 4]),
+            DefinitionRect::new(-7, -7, 15, 15),
+        );
         let construction = ImageData::new(16, 16, vec![255; 16 * 16 * 4]);
         let mut graphics = test_graphics_with(
-            32,
-            32,
-            32,
+            (32, 32, 32),
             "construction fallback",
             Arc::new(HashMap::from([("Building".to_owned(), sprite)])),
             empty_cursor_atlas(),
-            Arc::new(HudGraphics {
-                construction: Some(construction),
-                ..HudGraphics::default()
-            }),
+            test_hud_graphics(|hud| hud.construction = Some(construction)),
         );
         let gamma = clonk_graphics::GammaRamp::standard();
         graphics.begin_gpu_scene_capture();
 
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &[object],
-            &[],
-            &HashMap::new(),
-            &[],
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            Some(&gamma),
+            TestObjectDraw::default().gamma(&gamma),
         );
 
         let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
-        assert!(matches!(
-            scene.commands.first(),
-            Some(GpuCommand::ObjectBatch { .. })
-        ));
-        assert!(matches!(
-            scene.commands.get(1),
-            Some(GpuCommand::ObjectBatch { .. })
-        ));
-        assert_eq!(scene.commands.len(), 2);
+        front_assert! {matches!(scene.commands.first(), Some(GpuCommand::ObjectBatch { .. }))};
+        front_assert! {matches!(scene.commands.get(1), Some(GpuCommand::ObjectBatch { .. }))};
+        front_assert_eq! {scene.commands.len() => 2};
     }
 
     #[test]
     fn normal_object_draw_borrows_default_sprite_keys() {
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            ..test_sprite(ImageData::new(1, 1, vec![255; 4]))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(1, 1, vec![255; 4]),
+            DefinitionRect::new(0, 0, 1, 1),
+        );
         let snapshot = make_snapshot();
-        let mut graphics = test_graphics_with(
-            160,
-            120,
-            120,
+        let mut graphics = test_graphics_with_sprites(
+            (160, 120, 120),
             "borrowed sprite keys",
             Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
 
         reset_default_sprite_key_allocations();
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &snapshot.objects,
-            &snapshot.render_order,
-            &snapshot.definition_lines,
-            &snapshot.players,
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::snapshot(&snapshot),
         );
 
-        assert_eq!(default_sprite_key_allocations(), 0);
+        front_assert_eq! {default_sprite_key_allocations() => 0};
     }
 
     #[test]
     fn object_without_top_face_or_construction_skips_top_face_draw_setup() {
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            ..test_sprite(ImageData::new(1, 1, vec![255; 4]))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(1, 1, vec![255; 4]),
+            DefinitionRect::new(0, 0, 1, 1),
+        );
         let snapshot = make_snapshot();
-        let mut graphics = test_graphics_with(
-            160,
-            120,
-            120,
+        let mut graphics = test_graphics_with_sprites(
+            (160, 120, 120),
             "absent top face",
             Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
 
         reset_top_face_draw_setups();
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &snapshot.objects,
-            &snapshot.render_order,
-            &snapshot.definition_lines,
-            &snapshot.players,
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::snapshot(&snapshot),
         );
 
-        assert_eq!(top_face_draw_setups(), 0);
+        front_assert_eq! {top_face_draw_setups() => 0};
     }
 
     #[test]
     fn objects_without_overlays_skip_recursive_ancestry_setup() {
-        let sprite = DefinitionSprite {
-            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            ..test_sprite(ImageData::new(1, 1, vec![255; 4]))
-        };
+        let sprite = test_shaped_sprite(
+            ImageData::new(1, 1, vec![255; 4]),
+            DefinitionRect::new(0, 0, 1, 1),
+        );
         let snapshot = make_snapshot();
-        let mut graphics = test_graphics_with(
-            160,
-            120,
-            120,
+        let mut graphics = test_graphics_with_sprites(
+            (160, 120, 120),
             "absent overlays",
             Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
 
         reset_object_overlay_ancestry_setups();
-        graphics.draw_objects(
+        draw_test_objects(
+            &mut graphics,
             &snapshot.objects,
-            &snapshot.render_order,
-            &snapshot.definition_lines,
-            &snapshot.players,
-            OWNER_NONE,
-            1.0,
-            &HashMap::new(),
-            ObjectRenderPass::Normal,
-            None,
+            TestObjectDraw::snapshot(&snapshot),
         );
 
-        assert_eq!(object_overlay_ancestry_setups(), 0);
+        front_assert_eq! {object_overlay_ancestry_setups() => 0};
     }
 
     #[test]
@@ -19829,16 +16708,11 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].need_energy = true;
         let mut graphics = test_graphics_with(
-            160,
-            120,
-            120,
+            (160, 120, 120),
             "single output reach",
             Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
             empty_cursor_atlas(),
-            Arc::new(HudGraphics {
-                energy: Some(ImageData::new(1, 1, vec![255; 4])),
-                ..HudGraphics::default()
-            }),
+            test_hud_graphics(|hud| hud.energy = Some(ImageData::new(1, 1, vec![255; 4]))),
         );
 
         reset_object_output_reach_evaluations();
@@ -19856,7 +16730,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(object_output_reach_evaluations(), 1);
+        front_assert_eq! {object_output_reach_evaluations() => 1};
     }
 
     /// The landscape cache re-anchors to the lineage the frame presented so
@@ -19884,14 +16758,10 @@ mod tests {
             material_names,
             texture_names,
         ));
-        let mut graphics = test_graphics_with(
-            WIDTH,
-            HEIGHT,
-            HEIGHT as i32,
+        let mut graphics = test_graphics_with_sprites(
+            (WIDTH, HEIGHT, HEIGHT as i32),
             "landscape cache anchor",
             empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
         );
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "texture1".to_string(),
@@ -19904,38 +16774,38 @@ mod tests {
 
         let anchor =
             |graphics: &GraphicsSystem| graphics.landscape_cache.as_ref().test_value().grid.clone();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
         let first = anchor(&graphics);
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
         let second = anchor(&graphics);
-        assert_eq!(
+        front_assert_eq! {
             landscape
                 .pixel_grid()
                 .expect("grid")
-                .render_dirty_rects_since_anchor(&first),
+                .render_dirty_rects_since_anchor(&first) =>
             Some(Vec::new()),
             "first checkpoint no longer identifies the unchanged landscape"
-        );
-        assert_eq!(
+        };
+        front_assert_eq! {
             landscape
                 .pixel_grid()
                 .expect("grid")
-                .render_dirty_rects_since_anchor(&second),
+                .render_dirty_rects_since_anchor(&second) =>
             Some(Vec::new()),
             "an unchanged frame lost its retained checkpoint"
-        );
+        };
 
         landscape.grid_write_byte(4, 4, 2);
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
         let third = anchor(&graphics);
-        assert_eq!(
+        front_assert_eq! {
             landscape
                 .pixel_grid()
                 .expect("grid")
-                .render_dirty_rects_since_anchor(&third),
+                .render_dirty_rects_since_anchor(&third) =>
             Some(Vec::new()),
             "changed landscape did not re-anchor its cache lineage"
-        );
+        };
 
         let grid = landscape.pixel_grid().test_value();
         let start = std::time::Instant::now();
@@ -19967,7 +16837,7 @@ mod tests {
             vec![None, Some("Rough".to_string()), Some("Smooth".to_string())],
         ));
         landscape.set_shade_materials(false);
-        let mut graphics = test_graphics(WIDTH, HEIGHT, HEIGHT as i32, "landscape COW anchor");
+        let mut graphics = test_graphics((WIDTH, HEIGHT, HEIGHT as i32), "landscape COW anchor");
         graphics.set_material_textures(Arc::new(HashMap::from([
             (
                 "rough".to_string(),
@@ -19983,24 +16853,17 @@ mod tests {
             MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
         )])));
 
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
         let before = landscape.pixel_grid().test_value().bytes().as_ptr();
 
         landscape.grid_write_byte(17, 23, 2);
 
         let after = landscape.pixel_grid().test_value().bytes().as_ptr();
-        assert_eq!(
-            after, before,
-            "renderer lineage metadata retained the full simulation byte plane"
-        );
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        front_assert_eq! {after => before, "renderer lineage metadata retained the full simulation byte plane"};
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
         let cache = graphics.landscape_cache.as_ref().test_value();
         let slot = (23 * WIDTH as usize + 17) * 4;
-        assert_eq!(
-            &cache.pixels[slot..slot + 4],
-            &[0, 255, 0, 255],
-            "the lightweight checkpoint still identifies the dirty patch"
-        );
+        front_assert_eq! {&cache.pixels[slot..slot + 4] => &[0, 255, 0, 255], "the lightweight checkpoint still identifies the dirty patch"};
     }
 
     #[test]
@@ -20023,7 +16886,7 @@ mod tests {
             ],
         ));
         landscape.set_shade_materials(true);
-        let mut graphics = test_graphics(WIDTH, HEIGHT, HEIGHT as i32, "placement shading cache");
+        let mut graphics = test_graphics((WIDTH, HEIGHT, HEIGHT as i32), "placement shading cache");
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "neutral".to_string(),
             ImageData::new(1, 1, vec![128, 128, 128, 255]),
@@ -20040,15 +16903,11 @@ mod tests {
             ),
         ])));
 
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
         landscape.grid_write_byte(CHANGE_X, CHANGE_Y, 2);
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            material_composition_calls(),
-            3 * 17,
-            "Relight expands one Surface8 change by x=1 and y=8"
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {material_composition_calls() => 3 * 17, "Relight expands one Surface8 change by x=1 and y=8"};
         let cache = graphics.landscape_cache.as_ref().test_value();
         let color_at = |x: i32, y: i32| {
             let offset = (y as usize * WIDTH as usize + x as usize) * 4;
@@ -20059,11 +16918,8 @@ mod tests {
                 cache.pixels[offset + 3],
             )
         };
-        assert_eq!(color_at(CHANGE_X, CHANGE_Y - 1), Color::opaque(84, 84, 84));
-        assert_eq!(
-            color_at(CHANGE_X, CHANGE_Y + 1),
-            Color::opaque(116, 116, 116)
-        );
+        front_assert_eq! {color_at(CHANGE_X, CHANGE_Y - 1) => Color::opaque(84, 84, 84)};
+        front_assert_eq! {color_at(CHANGE_X, CHANGE_Y + 1) => Color::opaque(116, 116, 116)};
     }
 
     #[test]
@@ -20086,7 +16942,7 @@ mod tests {
             vec![None, Some("Rough".to_string())],
         ));
         landscape.set_shade_materials(false);
-        let mut graphics = test_graphics(WIDTH, HEIGHT, HEIGHT as i32, "opaque landscape blit");
+        let mut graphics = test_graphics((WIDTH, HEIGHT, HEIGHT as i32), "opaque landscape blit");
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "rough".to_string(),
             ImageData::new(1, 1, vec![128, 96, 64, 255]),
@@ -20097,21 +16953,14 @@ mod tests {
         )])));
 
         reset_landscape_destination_samples();
-        assert!(graphics.draw_ground_textured(
-            Some(&landscape),
-            Some(&clonk_graphics::GammaRamp::standard()),
-        ));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), Some(&clonk_graphics::GammaRamp::standard()),)};
 
-        assert_eq!(
-            landscape_destination_samples(),
-            0,
-            "opaque source fragments cannot depend on the destination framebuffer"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(WIDTH - 1, HEIGHT - 1),
+        front_assert_eq! {landscape_destination_samples() => 0, "opaque source fragments cannot depend on the destination framebuffer"};
+        front_assert_eq! {
+            graphics.surface().get_pixel(WIDTH - 1, HEIGHT - 1) =>
             Some(Color::opaque(254, 190, 126)),
             "the opaque specialization preserves the C++ material and gamma output"
-        );
+        };
     }
 
     #[test]
@@ -20131,7 +16980,7 @@ mod tests {
             vec![None, Some("Rough".to_string())],
         ));
         landscape.set_shade_materials(false);
-        let mut graphics = test_graphics(WIDTH, 1, 1, "direct Surface32 cache patch");
+        let mut graphics = test_graphics((WIDTH, 1, 1), "direct Surface32 cache patch");
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "rough".to_string(),
             ImageData::new(1, 1, vec![128, 96, 64, 255]),
@@ -20143,47 +16992,27 @@ mod tests {
         graphics.surface_mut().fill(BACKGROUND);
 
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            material_composition_calls(),
-            WIDTH as usize - 1,
-            "the cold cache composes every non-sky material cell"
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {material_composition_calls() => WIDTH as usize - 1, "the cold cache composes every non-sky material cell"};
         let unchanged_material = graphics
             .surface()
             .get_pixel(CHANGE_X as u32 - 1, 0)
             .test_value();
-        assert_eq!(
-            graphics.surface().get_pixel(CHANGE_X as u32, 0),
-            Some(BACKGROUND),
-            "the untouched Surface8 sky cell leaves the backdrop visible"
-        );
+        front_assert_eq! {graphics.surface().get_pixel(CHANGE_X as u32, 0) => Some(BACKGROUND), "the untouched Surface8 sky cell leaves the backdrop visible"};
 
-        assert!(landscape.set_surface32_pixel(CHANGE_X, 0, 0x0011_2233));
-        assert_eq!(
-            landscape.grid_byte_at(CHANGE_X, 0),
-            Some(0),
-            "the direct color write leaves Surface8 sky unchanged"
-        );
+        front_assert! {landscape.set_surface32_pixel(CHANGE_X, 0, 0x0011_2233)};
+        front_assert_eq! {landscape.grid_byte_at(CHANGE_X, 0) => Some(0), "the direct color write leaves Surface8 sky unchanged"};
         graphics.surface_mut().fill(BACKGROUND);
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
 
-        assert_eq!(
-            material_composition_calls(),
-            0,
-            "a warm cache patches the direct color cell instead of rebuilding material pixels"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(CHANGE_X as u32, 0),
+        front_assert_eq! {material_composition_calls() => 0, "a warm cache patches the direct color cell instead of rebuilding material pixels"};
+        front_assert_eq! {
+            graphics.surface().get_pixel(CHANGE_X as u32, 0) =>
             Some(Color::opaque(0x11, 0x22, 0x33)),
             "packed C4 transparency zero renders as an opaque replacement sky pixel"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(CHANGE_X as u32 - 1, 0),
-            Some(unchanged_material),
-            "neighboring cached material output remains unchanged"
-        );
+        };
+        front_assert_eq! {graphics.surface().get_pixel(CHANGE_X as u32 - 1, 0) => Some(unchanged_material), "neighboring cached material output remains unchanged"};
     }
 
     #[test]
@@ -20206,7 +17035,7 @@ mod tests {
             vec![None, Some("Rough".to_string()), Some("Smooth".to_string())],
         ));
         landscape.set_shade_materials(true);
-        let mut graphics = test_graphics(1, 1, 1, "sparse landscape cache patch");
+        let mut graphics = test_graphics((1, 1, 1), "sparse landscape cache patch");
         graphics.set_material_textures(Arc::new(HashMap::from([
             (
                 "rough".to_string(),
@@ -20222,17 +17051,13 @@ mod tests {
             MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
         )])));
 
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert!(landscape.insert_material_texture_pix(2, CHANGE_Y, 2));
-        assert!(landscape.insert_material_texture_pix(509, CHANGE_Y, 2));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert! {landscape.insert_material_texture_pix(2, CHANGE_Y, 2)};
+        front_assert! {landscape.insert_material_texture_pix(509, CHANGE_Y, 2)};
         reset_material_composition_calls();
 
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            material_composition_calls(),
-            2 * 3 * 17,
-            "only the two C++ x=1/y=8 relight neighborhoods should be recomposed"
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {material_composition_calls() => 2 * 3 * 17, "only the two C++ x=1/y=8 relight neighborhoods should be recomposed"};
     }
 
     #[test]
@@ -20255,7 +17080,7 @@ mod tests {
             vec![None, Some("Rough".to_string()), Some("Smooth".to_string())],
         ));
         landscape.set_shade_materials(false);
-        let mut graphics = test_graphics(1, 1, 1, "bounded landscape cache patch");
+        let mut graphics = test_graphics((1, 1, 1), "bounded landscape cache patch");
         graphics.set_material_textures(Arc::new(HashMap::from([
             (
                 "rough".to_string(),
@@ -20274,84 +17099,52 @@ mod tests {
         graphics.viewport_y = CHANGE_Y as f32;
 
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            material_composition_calls(),
-            (WIDTH * HEIGHT) as usize,
-            "the cold cache composes the complete raster once"
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {material_composition_calls() => (WIDTH * HEIGHT) as usize, "the cold cache composes the complete raster once"};
         let before = graphics.surface().get_pixel(0, 0).test_value();
         let mut sibling = landscape.clone();
 
         landscape.grid_write_byte(CHANGE_X, CHANGE_Y, 2);
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            material_composition_calls(),
-            1,
-            "one changed texmap byte must not recompose all 65,536 cache pixels"
-        );
-        assert_ne!(graphics.surface().get_pixel(0, 0), Some(before));
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {material_composition_calls() => 1, "one changed texmap byte must not recompose all 65,536 cache pixels"};
+        front_assert_ne! {graphics.surface().get_pixel(0, 0) => Some(before)};
 
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            material_composition_calls(),
-            0,
-            "an unchanged revision keeps the patched cache"
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {material_composition_calls() => 0, "an unchanged revision keeps the patched cache"};
 
         sibling.grid_write_byte(CHANGE_X + 1, CHANGE_Y, 2);
-        assert_eq!(
-            landscape.pixel_grid().expect("live grid").revision(),
+        front_assert_eq! {
+            landscape.pixel_grid().expect("live grid").revision() =>
             sibling.pixel_grid().expect("sibling grid").revision(),
             "sibling snapshots can carry the same numeric revision"
-        );
+        };
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&sibling), None));
-        assert_eq!(
-            material_composition_calls(),
-            (WIDTH * HEIGHT) as usize,
-            "an unrelated same-revision sibling requires a safe full rebuild"
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&sibling), None)};
+        front_assert_eq! {material_composition_calls() => (WIDTH * HEIGHT) as usize, "an unrelated same-revision sibling requires a safe full rebuild"};
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            material_composition_calls(),
-            (WIDTH * HEIGHT) as usize,
-            "returning to the other sibling also rebuilds instead of reusing stale pixels"
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {material_composition_calls() => (WIDTH * HEIGHT) as usize, "returning to the other sibling also rebuilds instead of reusing stale pixels"};
 
         landscape.grid_write_byte(CHANGE_X, CHANGE_Y, 0);
         graphics.surface_mut().fill(Color::opaque(4, 8, 12));
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            material_composition_calls(),
-            0,
-            "sky needs no material sample"
-        );
-        assert_eq!(
-            graphics.surface().get_pixel(0, 0),
-            Some(Color::opaque(4, 8, 12)),
-            "patching a texmap byte to sky clears the old cached material pixel"
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {material_composition_calls() => 0, "sky needs no material sample"};
+        front_assert_eq! {graphics.surface().get_pixel(0, 0) => Some(Color::opaque(4, 8, 12)), "patching a texmap byte to sky clears the old cached material pixel"};
         landscape.grid_write_byte(CHANGE_X, CHANGE_Y, 2);
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(material_composition_calls(), 1);
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {material_composition_calls() => 1};
 
         graphics.set_material_render_info(Arc::new(HashMap::from([(
             "earth".to_string(),
             MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
         )])));
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        assert_eq!(
-            material_composition_calls(),
-            (WIDTH * HEIGHT) as usize,
-            "changing material presentation invalidates the complete cache"
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&landscape), None)};
+        front_assert_eq! {material_composition_calls() => (WIDTH * HEIGHT) as usize, "changing material presentation invalidates the complete cache"};
 
         let mut resized = Landscape::flat(8, 4);
         resized.set_pixel_grid(PixelGrid::new(
@@ -20364,12 +17157,8 @@ mod tests {
         ));
         resized.set_shade_materials(false);
         reset_material_composition_calls();
-        assert!(graphics.draw_ground_textured(Some(&resized), None));
-        assert_eq!(
-            material_composition_calls(),
-            32,
-            "incompatible landscape dimensions require a complete new cache"
-        );
+        front_assert! {graphics.draw_ground_textured(Some(&resized), None)};
+        front_assert_eq! {material_composition_calls() => 32, "incompatible landscape dimensions require a complete new cache"};
     }
 
     #[test]
@@ -20472,12 +17261,12 @@ mod tests {
             }
 
             let gamma = clonk_graphics::GammaRamp::standard();
-            let mut captured = test_graphics(320, 180, 180, "FXV1 render capture");
+            let mut captured = test_graphics((320, 180, 180), "FXV1 render capture");
             captured.begin_gpu_scene_capture();
-            assert!(captured.draw_ground_textured(engine.landscape(), None));
+            front_assert! {captured.draw_ground_textured(engine.landscape(), None)};
             captured.finish_gpu_scene_capture(&gamma).test_value();
-            let mut software = test_graphics(320, 180, 180, "FXV1 render software");
-            assert!(software.draw_ground_textured(engine.landscape(), None));
+            let mut software = test_graphics((320, 180, 180), "FXV1 render software");
+            front_assert! {software.draw_ground_textured(engine.landscape(), None)};
             software
                 .landscape_cache
                 .as_mut()
@@ -20514,7 +17303,7 @@ mod tests {
 
                 let started = Instant::now();
                 captured.begin_gpu_scene_capture();
-                assert!(captured.draw_ground_textured(engine.landscape(), None));
+                front_assert! {captured.draw_ground_textured(engine.landscape(), None)};
                 let scene = captured.finish_gpu_scene_capture(&gamma).test_value();
                 capture_samples.push(started.elapsed());
                 for texture in scene.textures {
@@ -20531,7 +17320,7 @@ mod tests {
                 }
 
                 let started = Instant::now();
-                assert!(software.draw_ground_textured(engine.landscape(), None));
+                front_assert! {software.draw_ground_textured(engine.landscape(), None)};
                 software_samples.push(started.elapsed());
                 let cache = software.landscape_cache.as_mut().test_value();
                 software_dirty_rects = software_dirty_rects.saturating_add(cache.gpu_dirty.len());
@@ -20572,7 +17361,7 @@ mod tests {
         let grid = PixelGrid::new(32, 32, vec![0; 32 * 32], vec![0], vec![None], vec![None]);
         let mut cache = LandscapeRenderCache::new(grid, 32, 32, false, (0, 0, true, true, None));
         cache.record_gpu_update(&[(2, 3, 3, 3), (4, 4, 2, 2), (20, 20, 1, 1)]);
-        assert_eq!(cache.gpu_dirty.len(), 2);
-        assert!(cache.gpu_dirty.contains(&SurfaceRect::new(2, 3, 4, 3)));
+        front_assert_eq! {cache.gpu_dirty.len() => 2};
+        front_assert! {cache.gpu_dirty.contains(&SurfaceRect::new(2, 3, 4, 3))};
     }
 }

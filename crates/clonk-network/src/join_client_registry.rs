@@ -8,7 +8,7 @@ use crate::name_validation::validate_name_no_empty;
 /// A `C4ClientList` value from `C4GameParameters`, plus the local-only marker
 /// which `C4Client::CompileFunc` deliberately does not serialize
 /// (`src/C4Client.cpp:130-136,353-376`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JoinClientRegistrySnapshot {
     pub clients: Vec<ClientCoreControlData>,
     pub local_client_id: Option<i32>,

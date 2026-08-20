@@ -22,22 +22,20 @@ fn effect_check_warns_for_strict2_type_mismatch_without_replacing_the_value() {
     // a failed conversion (src/C4AulExec.cpp:1621-1648), retaining the
     // original C4Value rather than a coerced replacement.
     let mut engine = Engine::new();
-    engine.add_script(
-        Script::compile(
-            r#"
-                #strict 2
-                func FxResearchEffect(string effect_name, object target, int number, int new_number, id definition) {
-                    return definition;
-                }
-                func FxNestedEffect(string effect_name, object target, int number, int new_number, id definition) {
-                    return RequireId(definition);
-                }
-                func RequireId(id definition) {
-                    return definition;
-                }
-            "#,
-        )
-        .expect("checker script compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict 2
+        func FxResearchEffect(string effect_name, object target, int number, int new_number, id definition) {
+            return definition;
+        }
+        func FxNestedEffect(string effect_name, object target, int number, int new_number, id definition) {
+            return RequireId(definition);
+        }
+        func RequireId(id definition) {
+            return definition;
+        }
+    "#,
     );
     let args = vec![
         Value::String("IntOverlayAction".into()),
@@ -93,14 +91,12 @@ fn effect_check_warns_for_pre_strict3_reference_mismatch_but_not_strict3() {
     let args = vec![Value::String("Door".into())];
 
     let mut strict2 = Engine::new();
-    strict2.add_script(
-        Script::compile(
-            r#"
-                #strict 2
-                func FxReferenceEffect(&value) { return value; }
-            "#,
-        )
-        .expect("strict-2 checker script compiles"),
+    crate::support::load_script(
+        &mut strict2,
+        r#"
+        #strict 2
+        func FxReferenceEffect(&value) { return value; }
+    "#,
     );
     assert_eq!(
         strict2
@@ -116,14 +112,12 @@ fn effect_check_warns_for_pre_strict3_reference_mismatch_but_not_strict3() {
     );
 
     let mut strict3 = Engine::new();
-    strict3.add_script(
-        Script::compile(
-            r#"
-                #strict 3
-                func FxStrictEffect(id definition) { return definition; }
-            "#,
-        )
-        .expect("strict-3 checker script compiles"),
+    crate::support::load_script(
+        &mut strict3,
+        r#"
+        #strict 3
+        func FxStrictEffect(id definition) { return definition; }
+    "#,
     );
     assert_eq!(
         runtime_message(

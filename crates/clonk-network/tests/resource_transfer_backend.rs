@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use clonk_engine::{LegacyCString, NetworkResourceCore};
+use clonk_engine::NetworkResourceCore;
 use clonk_network::{
     HostResourceType, ResourceCatalogAction, ResourceDataPacket, ResourceDiscoverPacket,
     ResourceFileOwnership, ResourcePacket, ResourceRequestPacket, ResourceStatusPacket,
@@ -24,7 +24,7 @@ fn core(
         file_size,
         file_crc,
         chunk_size,
-        filename: LegacyCString::from_bytes(filename.to_vec()).unwrap(),
+        filename: crate::c4(filename),
         ..NetworkResourceCore::default()
     }
 }
@@ -277,7 +277,7 @@ fn cpp_matching_derive_rebinds_the_complete_file_without_downloading() {
         file_size: 7,
         file_crc: 0xdead_beef,
         chunk_size: 2,
-        filename: LegacyCString::from_bytes(b"scenario.c4s".to_vec()).unwrap(),
+        filename: crate::c4(b"scenario.c4s"),
         ..NetworkResourceCore::default()
     };
     let mut safe_random = |_| panic!("derive does not use SafeRandom");

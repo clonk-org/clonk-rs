@@ -12,6 +12,7 @@ LANDING = WORKFLOWS / "landing.yml"
 MAIN = WORKFLOWS / "rust.yml"
 QUALIFICATION = WORKFLOWS / "exact-sha-qualification.yml"
 DEPENDENCY_GUARD = WORKFLOWS / "dependency-guard.yml"
+APT_INSTALLER = REPOSITORY / "scripts" / "install-apt-packages.sh"
 
 # One step, from its first key to the next step's. `actions/cache/restore` is
 # deliberately not matched: only the save halves can consume the budget.
@@ -39,6 +40,19 @@ def fires_on_a_non_default_ref(workflow):
 
 
 class CiLatencyTests(unittest.TestCase):
+    def test_native_dependency_install_retries_are_shared_and_bounded(self):
+        installer = APT_INSTALLER.read_text(encoding="utf-8")
+        workflows = "\n".join(
+            path.read_text(encoding="utf-8") for path in WORKFLOWS.glob("*.yml")
+        )
+
+        self.assertEqual(workflows.count("scripts/install-apt-packages.sh"), 6)
+        self.assertNotIn("apt_install()", workflows)
+        self.assertTrue(APT_INSTALLER.stat().st_mode & 0o111)
+        self.assertLess(installer.index("apt_install"), installer.index("apt_refresh"))
+        self.assertIn("timeout 240 sudo apt-get install", installer)
+        self.assertIn("timeout 180 sudo apt-get update", installer)
+
     def test_restore_only_landing_caches_have_trusted_main_producers(self):
         landing = LANDING.read_text(encoding="utf-8")
         main = MAIN.read_text(encoding="utf-8")
@@ -409,21 +423,7 @@ class CiLatencyTests(unittest.TestCase):
         )
 
         self.assertIn("if: matrix.apt != ''", linux)
-        # Install first and refresh only on failure: the hosted image's index is
-        # usually current, and an unconditional `apt-get update` costs every row
-        # a network round trip. `apt_ensure` keeps that order.
-        self.assertIn("apt_ensure", linux)
-        self.assertLess(
-            linux.index("apt_install"),
-            linux.index("apt_refresh"),
-            "the install attempt must precede the index refresh",
-        )
-        self.assertEqual(linux.count("sudo apt-get update"), 1)
-        # A stalled mirror or dpkg lock evicted a merge-queue entry twice on
-        # 2026-08-19 by burning the job's whole timeout, so each apt call is
-        # bounded and the step carries its own limit.
-        self.assertIn("timeout 240 sudo apt-get install", linux)
-        self.assertIn("timeout 180 sudo apt-get update", linux)
+        self.assertIn("scripts/install-apt-packages.sh", linux)
         self.assertIn("timeout-minutes: 10", linux)
         self.assertIn("rustc 1.97.1", linux)
         self.assertIn("id: preinstalled-rust", linux)

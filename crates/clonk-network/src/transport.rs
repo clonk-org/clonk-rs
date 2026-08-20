@@ -75,6 +75,42 @@ pub struct NetworkStatus {
     pub target_tick: i32,
 }
 
+impl NetworkStatus {
+    pub const fn new(state: u8, control_mode: i32, target_tick: i32) -> Self {
+        Self {
+            state,
+            control_mode,
+            target_tick,
+        }
+    }
+
+    pub const fn with_state(self, state: u8) -> Self {
+        Self { state, ..self }
+    }
+
+    pub const fn with_control_mode(self, control_mode: i32) -> Self {
+        Self {
+            control_mode,
+            ..self
+        }
+    }
+
+    pub const fn with_target_tick(self, target_tick: i32) -> Self {
+        Self {
+            target_tick,
+            ..self
+        }
+    }
+
+    pub const fn with_control_tick(self, control_mode: i32, target_tick: i32) -> Self {
+        Self {
+            control_mode,
+            target_tick,
+            ..self
+        }
+    }
+}
+
 /// Exact payload of `C4PacketConn` (`src/C4Network2IO.cpp:1611-1626`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionRequest {
@@ -175,6 +211,12 @@ impl From<ReadyCheckData> for i32 {
 pub struct ReadyCheckPacket {
     pub client_id: i32,
     pub data: ReadyCheckData,
+}
+
+impl ReadyCheckPacket {
+    pub const fn new(client_id: i32, data: ReadyCheckData) -> Self {
+        Self { client_id, data }
+    }
 }
 
 /// Errors raised while parsing or emitting LegacyClonk network frames.
@@ -997,11 +1039,7 @@ fn parse_network_status(data: &[u8]) -> Result<NetworkStatus, TransportError> {
         .ok_or(TransportError::Malformed("status packet is missing state"))?;
     let (control_mode, mode_len) = decode_packed_i32(fields)?;
     let (target_tick, _) = decode_packed_i32(&fields[mode_len..])?;
-    Ok(NetworkStatus {
-        state,
-        control_mode,
-        target_tick,
-    })
+    Ok(NetworkStatus::new(state, control_mode, target_tick))
 }
 
 fn parse_ready_check(data: &[u8]) -> Result<ReadyCheckPacket, TransportError> {
@@ -1018,10 +1056,7 @@ fn parse_ready_check(data: &[u8]) -> Result<ReadyCheckPacket, TransportError> {
             .try_into()
             .expect("ready-check data length checked above"),
     );
-    Ok(ReadyCheckPacket {
-        client_id,
-        data: ReadyCheckData::from(data),
-    })
+    Ok(ReadyCheckPacket::new(client_id, ReadyCheckData::from(data)))
 }
 
 fn parse_lobby_countdown(data: &[u8]) -> Result<LobbyCountdownPacket, TransportError> {
@@ -1509,12 +1544,9 @@ mod tests {
             .resize(FRAME_HEADER_LEN + BODY_SIZE, 0x5a);
         transport.read_buf[FRAME_HEADER_LEN] = PID_CONTROL_PKT;
         transport.read_buf[FRAME_HEADER_LEN + 1] = u8::from(ControlDelivery::Direct);
-        let control = clonk_engine::ControlPacket::PlayerControl(clonk_engine::PlayerControlData {
-            player: 1,
-            command: 2,
-            data: 3,
-            by_client: 4,
-        });
+        let control = clonk_engine::ControlPacket::PlayerControl(
+            clonk_engine::PlayerControlData::new(1, 2, 3, 4),
+        );
         let encoded_control = crate::encode_control_entry_payload(&control).unwrap();
         let control_start = FRAME_HEADER_LEN + 2;
         transport.read_buf[control_start..control_start + encoded_control.len()]
@@ -1901,13 +1933,9 @@ mod tests {
     }
 
     fn minimal_join_game_parameters() -> crate::JoinGameParametersEnvelope {
-        let empty_players = crate::PlayerInfoListSnapshot {
-            last_player_id: 0,
-            clients: Vec::new(),
-        };
+        let empty_players = crate::PlayerInfoListSnapshot::default();
         crate::JoinGameParametersEnvelope {
             random_seed: 0,
-            startup_player_count: 0,
             max_players: 8,
             use_fair_crew: false,
             fair_crew_forced: false,
@@ -1921,28 +1949,16 @@ mod tests {
             league: LegacyCString::default(),
             league_address: LegacyCString::default(),
             title: LegacyCString::from_bytes(b"No title".to_vec()).unwrap(),
-            scenario: clonk_engine::NetworkResourceCore::default(),
-            game_resources: Vec::new(),
             player_infos: empty_players.clone(),
             restore_player_infos: empty_players,
             teams: crate::JoinTeamListSnapshot {
                 active: 1,
-                custom: 0,
                 allow_hostility_change: 1,
-                allow_team_switch: 0,
                 auto_generate_teams: 1,
-                last_team_id: 0,
-                team_distribution: 0,
-                team_colors: 0,
-                max_script_players: 0,
-                script_player_names: LegacyCString::default(),
-                random_team_count: 0,
-                teams: Vec::new(),
+                ..Default::default()
             },
-            clients: crate::JoinClientRegistrySnapshot {
-                clients: Vec::new(),
-                local_client_id: None,
-            },
+            clients: crate::JoinClientRegistrySnapshot::default(),
+            ..Default::default()
         }
     }
 
@@ -2031,11 +2047,11 @@ mod tests {
         let (client, _server) = duplex(64);
         let mut transport = ControlTransport::new(client);
         transport
-            .send_message(ControlMessage::Status(NetworkStatus {
-                state: NETWORK_STATE_LOBBY,
-                control_mode: 0,
-                target_tick: -1,
-            }))
+            .send_message(ControlMessage::Status(NetworkStatus::new(
+                NETWORK_STATE_LOBBY,
+                0,
+                -1,
+            )))
             .await
             .unwrap();
 
@@ -2056,11 +2072,7 @@ mod tests {
         // (src/C4Network2IO.cpp:1000-1007,1358-1377).
         let (client, mut server) = duplex(128);
         let mut transport = ControlTransport::new(client);
-        let status = NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: -1,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_LOBBY, 0, -1);
         transport
             .send_message(ControlMessage::Status(status))
             .await
@@ -2213,10 +2225,7 @@ mod tests {
         // writes Client then Data as native int32 values
         // (src/C4PacketBase.h:127-130; src/C4Network2.h:480-502;
         // src/C4Network2IO.cpp:1674-1680; src/StdCompiler.cpp:104-107,125-132).
-        let packet = ReadyCheckPacket {
-            client_id: 7,
-            data: ReadyCheckData::Request,
-        };
+        let packet = ReadyCheckPacket::new(7, ReadyCheckData::Request);
         let frame = expect_frame(&[0x21, 0x07, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff]);
         let (client, mut server) = duplex(64);
         server.write_all(&frame).await.unwrap();
@@ -2692,11 +2701,7 @@ mod tests {
         let envelope = crate::JoinDataEnvelope {
             client_id: 3,
             start_control_tick: 17,
-            status: NetworkStatus {
-                state: NETWORK_STATE_LOBBY,
-                control_mode: 1,
-                target_tick: -1,
-            },
+            status: NetworkStatus::new(NETWORK_STATE_LOBBY, 1, -1),
             dynamic: clonk_engine::NetworkResourceCore::default(),
             parameters: minimal_join_game_parameters(),
         };
@@ -2725,11 +2730,7 @@ mod tests {
         let envelope = crate::JoinDataEnvelope {
             client_id: 3,
             start_control_tick: 17,
-            status: NetworkStatus {
-                state: NETWORK_STATE_LOBBY,
-                control_mode: 1,
-                target_tick: -1,
-            },
+            status: NetworkStatus::new(NETWORK_STATE_LOBBY, 1, -1),
             dynamic: clonk_engine::NetworkResourceCore::default(),
             parameters: minimal_join_game_parameters(),
         };
@@ -2873,11 +2874,7 @@ mod tests {
             Some(ControlMessage::PostMortem(post_mortem))
         );
 
-        let status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: -1,
-            target_tick: 195_995,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_GO, -1, 195_995);
         for (packet_id, expected) in [
             (PID_STATUS, ControlMessage::Status(status)),
             (PID_STATUS_ACK, ControlMessage::StatusAck(status)),
@@ -2907,11 +2904,7 @@ mod tests {
         let join_data = crate::JoinDataEnvelope {
             client_id: 3,
             start_control_tick: 17,
-            status: NetworkStatus {
-                state: NETWORK_STATE_LOBBY,
-                control_mode: 1,
-                target_tick: -1,
-            },
+            status: NetworkStatus::new(NETWORK_STATE_LOBBY, 1, -1),
             dynamic: NetworkResourceCore::default(),
             parameters: minimal_join_game_parameters(),
         };
@@ -2923,11 +2916,7 @@ mod tests {
             Some(ControlMessage::JoinData(Box::new(join_data)))
         );
 
-        let player_info = PlayerInfoUpdateRequest {
-            client_id: 3,
-            flags: 0,
-            players: Vec::new(),
-        };
+        let player_info = PlayerInfoUpdateRequest::new(3, 0, Vec::new());
         let mut body = vec![PID_PLAYER_INFO_UPDATE_REQ];
         body.extend(crate::encode_player_info_update_payload(&player_info).unwrap());
         body.extend_from_slice(&trailing);
@@ -2961,12 +2950,9 @@ mod tests {
             "pre-ingress validation must stop at PID_None before the suffix"
         );
 
-        let control = clonk_engine::ControlPacket::PlayerControl(clonk_engine::PlayerControlData {
-            player: 1,
-            command: 2,
-            data: 3,
-            by_client: 4,
-        });
+        let control = clonk_engine::ControlPacket::PlayerControl(
+            clonk_engine::PlayerControlData::new(1, 2, 3, 4),
+        );
         let encoded_control = crate::encode_control_entry_payload(&control).unwrap();
         let mut body = vec![PID_CONTROL_PKT, u8::from(ControlDelivery::Direct)];
         body.extend_from_slice(&encoded_control);
@@ -3233,11 +3219,7 @@ mod tests {
         // (src/C4PacketBase.h:104-113; src/C4Network2.cpp:103-123).
         let (client, mut server) = duplex(128);
         let mut transport = ControlTransport::new(client);
-        let status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 195_995,
-        };
+        let status = NetworkStatus::new(NETWORK_STATE_GO, 1, 195_995);
         transport
             .send_message(ControlMessage::Status(status))
             .await

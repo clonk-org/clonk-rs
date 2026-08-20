@@ -359,12 +359,12 @@ pub fn game_option_buttons_layout(
         .enumerate()
         .map(|(index, button)| GameOptionButtonLayout {
             button,
-            rect: IntRect {
-                x: group_x + icon_spacing + index as i32 * pitch,
-                y: group_y,
-                w: icon_size,
-                h: icon_size,
-            },
+            rect: IntRect::new(
+                group_x + icon_spacing + index as i32 * pitch,
+                group_y,
+                icon_size,
+                icon_size,
+            ),
         })
         .collect();
     GameOptionButtonsLayout {
@@ -474,12 +474,7 @@ impl GameOptionButtons {
         Self {
             context,
             values,
-            bounds: IntRect {
-                x: 0,
-                y: 0,
-                w: 1,
-                h: 1,
-            },
+            bounds: IntRect::new(0, 0, 1, 1),
             focused: None,
             pointer: None,
             hovered: None,
@@ -1360,12 +1355,7 @@ mod tests {
     use clonk_graphics::{Color, PixelFormat};
 
     fn bounds() -> IntRect {
-        IntRect {
-            x: 10,
-            y: 20,
-            w: 600,
-            h: 64,
-        }
+        IntRect::new(10, 20, 600, 64)
     }
 
     fn point(rect: IntRect) -> GuiPoint {
@@ -1394,21 +1384,11 @@ mod tests {
             vec![
                 GameOptionButtonLayout {
                     button: GameOptionButton::FairCrew,
-                    rect: IntRect {
-                        x: 237,
-                        y: 20,
-                        w: 64,
-                        h: 64
-                    },
+                    rect: IntRect::new(237, 20, 64, 64),
                 },
                 GameOptionButtonLayout {
                     button: GameOptionButton::Record,
-                    rect: IntRect {
-                        x: 319,
-                        y: 20,
-                        w: 64,
-                        h: 64
-                    },
+                    rect: IntRect::new(319, 20, 64, 64),
                 },
             ]
         );
@@ -1461,12 +1441,7 @@ mod tests {
         );
 
         let narrow = game_option_buttons_layout(
-            IntRect {
-                x: 10,
-                y: 20,
-                w: 350,
-                h: 64,
-            },
+            IntRect::new(10, 20, 350, 64),
             GameOptionContext::NetworkHostSelector,
         );
         assert_eq!((narrow.icon_size, narrow.icon_spacing), (58, 0));

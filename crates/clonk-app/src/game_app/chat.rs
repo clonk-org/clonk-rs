@@ -233,12 +233,12 @@ impl GameApp {
                 };
                 if let Some((update_type, data)) = update {
                     if let Some(Err(error)) = self.network.as_ref().map(|network| {
-                        network.submit_client_update(clonk_engine::ClientUpdateControlData {
+                        network.submit_client_update(clonk_engine::ClientUpdateControlData::new(
                             update_type,
-                            client_id: target.client_id,
+                            target.client_id,
                             data,
-                            by_client: 0,
-                        })
+                            0,
+                        ))
                     }) {
                         tracing::error!(%error, "failed to submit running client update");
                     }

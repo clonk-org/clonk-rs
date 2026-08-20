@@ -324,14 +324,14 @@ fn landscape_scene(
     }
 
     assert_eq!(commands.len(), expected_commands);
-    GpuScene {
-        logical_extent: extent,
-        clear: Color::opaque(8, 12, 24),
-        gamma: GpuGammaLut::from_ramp(&GammaRamp::identity()),
-        gamma_mode: GpuGammaMode::Disabled,
-        textures: vec![base_texture(base, pixels)],
+    GpuScene::new(
+        extent,
+        Color::opaque(8, 12, 24),
+        GpuGammaLut::from_ramp(&GammaRamp::identity()),
+        GpuGammaMode::Disabled,
+        vec![base_texture(base, pixels)],
         commands,
-    }
+    )
 }
 
 fn benchmark_devices() -> BenchmarkDevices {

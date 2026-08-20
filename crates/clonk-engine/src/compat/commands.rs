@@ -1333,19 +1333,7 @@ fn preview_command_failure_feedback(
         }
         if let Some(text) = fail_message {
             context.register_message(MessageCommand::Append {
-                spec: MessageSpec {
-                    kind: MessageKind::Target,
-                    text,
-                    target: Some(actor),
-                    player: None,
-                    offset: Vector2::ZERO,
-                    color: 0xffff_ffff,
-                    flags: 0,
-                    width: None,
-                    decoration: None,
-                    frame_decoration: None,
-                    portrait: None,
-                },
+                spec: MessageSpec::target(text, actor),
                 no_duplicates: true,
             });
         }
@@ -2040,19 +2028,7 @@ fn preview_object_com_dig(actor: ObjectId) -> Result<bool, RuntimeError> {
             // replacement clear without leaving a message behind.
             String::new()
         };
-        context.register_message(MessageCommand::Add(MessageSpec {
-            kind: MessageKind::Target,
-            text,
-            target: Some(actor),
-            player: None,
-            offset: Vector2::ZERO,
-            color: 0xffff_ffff,
-            flags: 0,
-            width: None,
-            decoration: None,
-            frame_decoration: None,
-            portrait: None,
-        }));
+        context.register_message(MessageCommand::Add(MessageSpec::target(text, actor)));
     });
     Ok(false)
 }
@@ -3285,19 +3261,10 @@ fn preview_activate_entrance(target: ObjectId, caller: ObjectId) -> bool {
                 .player_state(target_snapshot.owner)
                 .map(|player| player.name.clone())
             {
-                context.register_message(MessageCommand::Add(MessageSpec {
-                    kind: MessageKind::Target,
-                    text: format!("{owner_name} hostile.|No entrance!"),
-                    target: Some(target),
-                    player: None,
-                    offset: Vector2::ZERO,
-                    color: 0xffff_ffff,
-                    flags: 0,
-                    width: None,
-                    decoration: None,
-                    frame_decoration: None,
-                    portrait: None,
-                }));
+                context.register_message(MessageCommand::Add(MessageSpec::target(
+                    format!("{owner_name} hostile.|No entrance!"),
+                    target,
+                )));
             }
             return false;
         }

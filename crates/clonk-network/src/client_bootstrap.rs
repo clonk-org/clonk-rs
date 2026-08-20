@@ -1242,53 +1242,27 @@ mod tests {
         JoinDataEnvelope {
             client_id: 2,
             start_control_tick: 0,
-            status: NetworkStatus {
-                state: 0,
-                control_mode: 0,
-                target_tick: -1,
-            },
+            status: NetworkStatus::new(0, 0, -1),
             dynamic,
             parameters: JoinGameParametersEnvelope {
-                random_seed: 0,
-                startup_player_count: 0,
                 max_players: 8,
-                use_fair_crew: false,
-                fair_crew_forced: false,
-                fair_crew_strength: 0,
                 allow_debug: true,
                 is_network_game: true,
                 control_rate: 2,
                 auto_frame_skip: true,
-                rules: Vec::new(),
-                goals: Vec::new(),
-                league: LegacyCString::default(),
                 league_address: LegacyCString::default(),
-                title: LegacyCString::default(),
                 scenario,
                 game_resources,
                 player_infos,
-                restore_player_infos: PlayerInfoListSnapshot {
-                    last_player_id: 0,
-                    clients: Vec::new(),
-                },
+                restore_player_infos: PlayerInfoListSnapshot::default(),
                 teams: JoinTeamListSnapshot {
                     active: 1,
-                    custom: 0,
                     allow_hostility_change: 1,
-                    allow_team_switch: 0,
                     auto_generate_teams: 1,
-                    last_team_id: 0,
-                    team_distribution: 0,
-                    team_colors: 0,
-                    max_script_players: 0,
-                    script_player_names: LegacyCString::default(),
-                    random_team_count: 0,
-                    teams: Vec::new(),
+                    ..Default::default()
                 },
-                clients: JoinClientRegistrySnapshot {
-                    clients: Vec::new(),
-                    local_client_id: None,
-                },
+                clients: JoinClientRegistrySnapshot::default(),
+                ..Default::default()
             },
         }
     }

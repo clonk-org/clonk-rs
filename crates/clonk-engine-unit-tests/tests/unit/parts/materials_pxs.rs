@@ -65,15 +65,13 @@
         global func Step(state, frame, random) { return 0; }
         "#,
         );
-        definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                (
-                    "Idle".to_string(),
-                    ActionSpec::default().with_no_other_action(true),
-                ),
-                ("Run".to_string(), ActionSpec::default()),
-            ]),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default().with_no_other_action(true)),
+                ("Run", ActionSpec::default()),
+            ],
         );
         pxs_fixture(seed, definition, SpawnConfig::new("Actor"))
     }
@@ -87,18 +85,13 @@
         let mut definition = test_definition(id, name, source);
         definition.set_debugger_hooks(hooks);
         definition.set_c4_callback_convention(true);
-        definition.configure_actions(
-            Some("Old".to_string()),
-            HashMap::from([
-                (
-                    "Old".to_string(),
-                    ActionSpec::default().with_abort_call("OnOldAbort"),
-                ),
-                (
-                    "New".to_string(),
-                    ActionSpec::default().with_start_call("OnNewStart"),
-                ),
-            ]),
+        set_test_actions(
+            &mut definition,
+            Some("Old"),
+            [
+                ("Old", ActionSpec::default().with_abort_call("OnOldAbort")),
+                ("New", ActionSpec::default().with_start_call("OnNewStart")),
+            ],
         );
         definition
     }
@@ -170,12 +163,12 @@
         if mirror.random(60) == 0 {
             mirror.random(100);
         }
-        assert_eq!(engine.rng, mirror, "gate draws are level-independent");
+        unit_assert_eq!(engine.rng => mirror, "gate draws are level-independent");
 
         // Non-Tick10 frame: no draws at all (C4Weather.cpp:104).
         let before = engine.rng.clone();
         engine.tick_weather_events(11).test_value();
-        assert_eq!(engine.rng, before);
+        unit_assert_eq!(engine.rng => before);
 
         // With a level at 100, a zero gate launches: lightning consumes
         // Random(GBackWdt) for its position (C4Weather.cpp:125); earthquake
@@ -202,7 +195,7 @@
             let mut mirror = engine.rng.clone();
             engine.tick_weather_events(frame).test_value();
             if frame % 10 != 0 {
-                assert_eq!(engine.rng, mirror);
+                unit_assert_eq!(engine.rng => mirror);
                 continue;
             }
             if mirror.random(60) == 0 && mirror.random(100) < 100 {
@@ -220,7 +213,7 @@
                 mirror.random(10);
                 mirror.random(64);
             }
-            assert_eq!(engine.rng, mirror, "frame {frame}");
+            unit_assert_eq!(engine.rng => mirror, "frame {frame}");
         }
     }
 
@@ -254,8 +247,8 @@
             engine.set_environment(environment);
 
             let mut mirror = engine.rng.clone();
-            assert_eq!(mirror.random(60), 0, "seed reaches the meteor gate");
-            assert!(mirror.random(100) < 100);
+            unit_assert_eq!(mirror.random(60) => 0, "seed reaches the meteor gate");
+            unit_assert!(mirror.random(100) < 100);
             let r2 = mirror.random(101);
             let x = mirror.random(64);
 
@@ -269,17 +262,17 @@
                 .find(|object| object.definition_id == "METO")
                 .test_value();
             let meteor_id = meteor.id;
-            assert_eq!(meteor.state.position.x, x);
-            assert_eq!(meteor.state.owner, OWNER_NONE);
-            assert_eq!(meteor.fixed_velocity.x, expected_xdir);
-            assert_eq!(meteor.rotation_velocity, expected_rdir);
-            assert_eq!(
-                engine.debug_object_motion(meteor_id.as_u64()),
+            unit_assert_eq!(meteor.state.position.x => x);
+            unit_assert_eq!(meteor.state.owner => OWNER_NONE);
+            unit_assert_eq!(meteor.fixed_velocity.x => expected_xdir);
+            unit_assert_eq!(meteor.rotation_velocity => expected_rdir);
+            unit_assert_eq!(
+                engine.debug_object_motion(meteor_id.as_u64()) =>
                 Some((expected_xdir.val(), expected_ydir.val(), true)),
                 "meteor has its C4Object::Init motion on the spawn frame"
             );
             for callback_local in ["construction_xdir", "initialize_xdir"] {
-                assert!(
+                unit_assert!(
                     matches!(
                         meteor.state.local_vars.get(callback_local),
                         Some(Value::Int(value)) if *value != 0
@@ -299,16 +292,13 @@
                     .iter()
                     .find(|object| object.id == meteor_id)
                     .test_value();
-                assert!(
-                    meteor.fixed_position.y > initial_fixed_y,
-                    "open-top meteor falls under gravity before the next Tick10 pulse"
-                );
+                unit_assert!(meteor.fixed_position.y > initial_fixed_y, "open-top meteor falls under gravity before the next Tick10 pulse");
             }
             result
         };
 
-        assert_eq!(spawn(true), (-20, C4Fixed::ZERO));
-        assert_eq!(spawn(false), (5, itofix(2)));
+        unit_assert_eq!(spawn(true) => (-20, C4Fixed::ZERO));
+        unit_assert_eq!(spawn(false) => (5, itofix(2)));
     }
 
     #[test]
@@ -323,14 +313,10 @@
         engine.set_environment(EnvironmentSettings::new(50));
 
         for _ in 0..9 {
-            assert!(engine
-                .tick()
-                .expect("pre-Tick10 frame succeeds")
-                .audio
-                .is_empty());
+            unit_assert!(engine.tick().expect("pre-Tick10 frame succeeds").audio.is_empty());
         }
-        assert_eq!(
-            engine.tick().expect("Tick10 weather succeeds").audio,
+        unit_assert_eq!(
+            engine.tick().expect("Tick10 weather succeeds").audio =>
             vec![AudioCommand::SetSoundVolume {
                 name: "Wind".to_string(),
                 target: None,
@@ -339,17 +325,13 @@
         );
 
         for _ in 0..9 {
-            assert!(engine
-                .tick()
-                .expect("pre-Tick20 frame succeeds")
-                .audio
-                .is_empty());
+            unit_assert!(engine.tick().expect("pre-Tick20 frame succeeds").audio.is_empty());
         }
         let mut rising = EnvironmentSettings::new(49).with_wind_variation(1, 1_000);
         rising.wind_target = 50;
         engine.set_environment(rising);
-        assert_eq!(
-            engine.tick().expect("Tick20 weather succeeds").audio,
+        unit_assert_eq!(
+            engine.tick().expect("Tick20 weather succeeds").audio =>
             vec![AudioCommand::SetSoundVolume {
                 name: "Wind".to_string(),
                 target: None,
@@ -360,29 +342,15 @@
 
         engine.set_environment(EnvironmentSettings::new(30));
         for _ in 0..9 {
-            assert!(engine
-                .tick()
-                .expect("pre-Tick30 frame succeeds")
-                .audio
-                .is_empty());
+            unit_assert!(engine.tick().expect("pre-Tick30 frame succeeds").audio.is_empty());
         }
-        assert_eq!(
-            engine.tick().expect("Tick30 weather succeeds").audio,
-            vec![AudioCommand::StopSound {
-                name: "Wind".to_string(),
-                target: None,
-            }]
-        );
+        unit_assert_eq!(engine.tick().expect("Tick30 weather succeeds").audio => vec![AudioCommand::StopSound {name: "Wind".to_string(), target: None,}]);
 
         for _ in 0..9 {
-            assert!(engine
-                .tick()
-                .expect("pre-Tick40 calm frame succeeds")
-                .audio
-                .is_empty());
+            unit_assert!(engine.tick().expect("pre-Tick40 calm frame succeeds").audio.is_empty());
         }
-        assert_eq!(
-            engine.tick().expect("Tick40 calm weather succeeds").audio,
+        unit_assert_eq!(
+            engine.tick().expect("Tick40 calm weather succeeds").audio =>
             vec![AudioCommand::StopSound {
                 name: "Wind".to_string(),
                 target: None,
@@ -397,14 +365,10 @@
         engine.set_environment(EnvironmentSettings::new(100));
 
         for _ in 0..9 {
-            assert!(engine
-                .tick()
-                .expect("pre-Tick10 frame succeeds")
-                .audio
-                .is_empty());
+            unit_assert!(engine.tick().expect("pre-Tick10 frame succeeds").audio.is_empty());
         }
-        assert_eq!(
-            engine.tick().expect("maximum-wind Tick10 succeeds").audio,
+        unit_assert_eq!(
+            engine.tick().expect("maximum-wind Tick10 succeeds").audio =>
             vec![AudioCommand::SetSoundVolume {
                 name: "Wind".to_string(),
                 target: None,
@@ -464,24 +428,12 @@
             .test_value(),
         );
         let id = |name| natural.id_of(name).test_value();
-        assert_eq!(
-            natural.reaction(Some(id("IL")), Some(id("EH"))).kind,
-            MaterialReactionKind::Poof,
-        );
-        assert_eq!(
-            natural.reaction(Some(id("EL")), Some(id("IH"))).kind,
-            MaterialReactionKind::Poof,
-        );
-        assert_eq!(
-            natural.reaction(Some(id("IL")), Some(id("FH"))).kind,
-            MaterialReactionKind::Incinerate,
-        );
-        assert_eq!(
-            natural.reaction(Some(id("FL")), Some(id("IH"))).kind,
-            MaterialReactionKind::Incinerate,
-        );
-        assert_eq!(
-            natural.reaction(Some(id("AC")), Some(id("RH"))).kind,
+        unit_assert_eq!(natural.reaction(Some(id("IL")), Some(id("EH"))).kind => MaterialReactionKind::Poof,);
+        unit_assert_eq!(natural.reaction(Some(id("EL")), Some(id("IH"))).kind => MaterialReactionKind::Poof,);
+        unit_assert_eq!(natural.reaction(Some(id("IL")), Some(id("FH"))).kind => MaterialReactionKind::Incinerate,);
+        unit_assert_eq!(natural.reaction(Some(id("FL")), Some(id("IH"))).kind => MaterialReactionKind::Incinerate,);
+        unit_assert_eq!(
+            natural.reaction(Some(id("AC")), Some(id("RH"))).kind =>
             MaterialReactionKind::Corrode {
                 corrosive_strength: -7,
                 corrode_resistance: -8,
@@ -496,15 +448,15 @@
         let mut negative_first = LcgRng::new(67);
         let mut one_draw = negative_first.clone();
         let _ = one_draw.random(100);
-        assert!(!evaluate_corrosion(-7, -8, None, &mut negative_first));
-        assert_eq!(negative_first, one_draw);
+        unit_assert!(!evaluate_corrosion(-7, -8, None, &mut negative_first));
+        unit_assert_eq!(negative_first => one_draw);
 
         let mut negative_second = LcgRng::new(68);
         let mut two_draws = negative_second.clone();
         let _ = two_draws.random(100);
         let _ = two_draws.random(100);
-        assert!(!evaluate_corrosion(100, -8, None, &mut negative_second));
-        assert_eq!(negative_second, two_draws);
+        unit_assert!(!evaluate_corrosion(100, -8, None, &mut negative_second));
+        unit_assert_eq!(negative_second => two_draws);
 
         let categories = MaterialSet::from_resource_library(
             &MaterialLibrary::parse(
@@ -588,28 +540,19 @@
         for source_name in ["RI", "RE", "RF", "RC", "RR"] {
             let source = categories.id_of(source_name).test_value();
             let reaction = categories.reaction(Some(source), Some(neg));
-            assert!(reaction.user_defined, "{source_name} matched its category");
-            assert_eq!(reaction.kind, MaterialReactionKind::Poof);
+            unit_assert!(reaction.user_defined, "{source_name} matched its category");
+            unit_assert_eq!(reaction.kind => MaterialReactionKind::Poof);
         }
 
         let inverse = categories.id_of("IV").test_value();
-        assert!(
-            !categories.reaction(Some(inverse), Some(neg)).user_defined,
-            "a nonzero negative flag is excluded from the inverse category",
-        );
-        assert!(
-            categories.reaction(Some(inverse), Some(zero)).user_defined,
-            "a zero flag matches the inverse category",
-        );
-        assert!(
-            categories.reaction(Some(inverse), None).user_defined,
-            "sky matches an inverse flag category",
-        );
+        unit_assert!(!categories.reaction(Some(inverse), Some(neg)).user_defined, "a nonzero negative flag is excluded from the inverse category",);
+        unit_assert!(categories.reaction(Some(inverse), Some(zero)).user_defined, "a zero flag matches the inverse category",);
+        unit_assert!(categories.reaction(Some(inverse), None).user_defined, "sky matches an inverse flag category",);
 
         let rate = categories.id_of("Rate").test_value();
         let rate_reaction = categories.reaction(Some(rate), Some(zero));
-        assert_eq!(
-            rate_reaction.kind,
+        unit_assert_eq!(
+            rate_reaction.kind =>
             MaterialReactionKind::Corrode {
                 corrosive_strength: -9,
                 corrode_resistance: 100,
@@ -620,8 +563,8 @@
         let mut custom_rng = LcgRng::new(69);
         let mut custom_one_draw = custom_rng.clone();
         let _ = custom_one_draw.random(100);
-        assert!(!evaluate_corrosion(-9, 100, Some(-9), &mut custom_rng));
-        assert_eq!(custom_rng, custom_one_draw);
+        unit_assert!(!evaluate_corrosion(-9, 100, Some(-9), &mut custom_rng));
+        unit_assert_eq!(custom_rng => custom_one_draw);
     }
 
     #[test]
@@ -644,7 +587,7 @@
         engine.set_landscape(Landscape::flat_with_material(9, 10, Some(earth)));
 
         let mut mirror = engine.rng.clone();
-        assert_eq!(mirror.random(1), 0, "SplashRate=1 always splashes");
+        unit_assert_eq!(mirror.random(1) => 0, "SplashRate=1 always splashes");
         let expected_xdir = math::itofix(8) / 8 + math::fixed100(mirror.random(200) - 100);
 
         let (mut x, mut y) = (4, 9);
@@ -660,12 +603,12 @@
             Some(earth),
             &mut pos_changed,
         );
-        assert!(!insert_ok, "splash keeps the PXS alive");
-        assert!(pos_changed);
-        assert_eq!(ydir, -math::itofix(16) / 8);
-        assert_eq!(xdir, expected_xdir);
-        assert_eq!((x, y), (4, 9), "splash does not move the pixel");
-        assert_eq!(engine.rng, mirror, "exactly two synced draws");
+        unit_assert!(!insert_ok, "splash keeps the PXS alive");
+        unit_assert!(pos_changed);
+        unit_assert_eq!(ydir => -math::itofix(16) / 8);
+        unit_assert_eq!(xdir => expected_xdir);
+        unit_assert_eq!((x, y) => (4, 9), "splash does not move the pixel");
+        unit_assert_eq!(engine.rng => mirror, "exactly two synced draws");
     }
 
     #[test]
@@ -710,7 +653,7 @@
             .test_value();
 
         let mut mirror = engine.rng.clone();
-        assert_eq!(mirror.random(25), 0);
+        unit_assert_eq!(mirror.random(25) => 0);
         let expected_level = 4 + mirror.rnd3();
 
         let (mut x, mut y) = (4, 20);
@@ -726,22 +669,19 @@
             Some(earth),
             &mut pos_changed,
         );
-        assert!(insert_ok, "no slide target → insertion OK");
-        assert_eq!(ydir, math::C4Fixed::ZERO);
-        assert_eq!(engine.rng, mirror, "Random(25) then Rnd3 consumed");
+        unit_assert!(insert_ok, "no slide target → insertion OK");
+        unit_assert_eq!(ydir => math::C4Fixed::ZERO);
+        unit_assert_eq!(engine.rng => mirror, "Random(25) then Rnd3 consumed");
         let smoke: Vec<_> = engine
             .particle_system()
             .particles()
             .iter()
             .filter(|particle| particle.def_name == "Smoke")
             .collect();
-        assert_eq!(smoke.len(), 1, "smoke particle spawned");
-        assert_eq!(smoke[0].x.to_bits(), 4.0f32.to_bits());
-        assert_eq!(
-            smoke[0].y.to_bits(),
-            (20.0f32 - (expected_level / 2) as f32).to_bits()
-        );
-        assert_eq!(smoke[0].a.to_bits(), (expected_level as f32).to_bits());
+        unit_assert_eq!(smoke.len() => 1, "smoke particle spawned");
+        unit_assert_eq!(smoke[0].x.to_bits() => 4.0f32.to_bits());
+        unit_assert_eq!(smoke[0].y.to_bits() => (20.0f32 - (expected_level / 2) as f32).to_bits());
+        unit_assert_eq!(smoke[0].a.to_bits() => (expected_level as f32).to_bits());
     }
 
     #[test]
@@ -786,10 +726,10 @@
             Some(earth),
             &mut pos_changed,
         );
-        assert!(!insert_ok, "slide keeps the PXS alive");
-        assert_eq!((x, y), (2, 9), "target out of reach → no jump");
-        assert_eq!(xdir, expected_xdir);
-        assert_eq!(engine.rng, mirror, "exactly one Random(5) draw");
+        unit_assert!(!insert_ok, "slide keeps the PXS alive");
+        unit_assert_eq!((x, y) => (2, 9), "target out of reach → no jump");
+        unit_assert_eq!(xdir => expected_xdir);
+        unit_assert_eq!(engine.rng => mirror, "exactly one Random(5) draw");
 
         // Same material at the slide target → absorb without any draw.
         let mut engine = pxs_engine(13, materials);
@@ -810,10 +750,10 @@
             Some(sand),
             &mut pos_changed,
         );
-        assert!(!insert_ok);
-        assert_eq!((x, y), (0, 10), "absorbed at the slide target");
-        assert_eq!(xdir, math::C4Fixed::ZERO);
-        assert_eq!(engine.rng, mirror, "no synced draws on same-mat slide");
+        unit_assert!(!insert_ok);
+        unit_assert_eq!((x, y) => (0, 10), "absorbed at the slide target");
+        unit_assert_eq!(xdir => math::C4Fixed::ZERO);
+        unit_assert_eq!(engine.rng => mirror, "no synced draws on same-mat slide");
     }
 
     #[test]
@@ -849,14 +789,10 @@
             Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth)).test_value(),
         );
         let mirror = engine.rng.clone();
-        assert!(create_test_pxs(&mut engine, sand, 2, 9, 0, 1));
+        unit_assert!(create_test_pxs(&mut engine, sand, 2, 9, 0, 1));
         engine.tick_pxs();
-        assert_eq!(
-            engine.pxs_system.iter().count(),
-            0,
-            "CheckSlide=0 inserts without the slide check"
-        );
-        assert_eq!(engine.rng, mirror, "no splash/slide draws");
+        unit_assert_eq!(engine.pxs_system.iter().count() => 0, "CheckSlide=0 inserts without the slide check");
+        unit_assert_eq!(engine.rng => mirror, "no splash/slide draws");
     }
 
     #[test]
@@ -891,11 +827,8 @@
             Some(water),
             material::MaterialInteractionEvent::PxsMove,
         );
-        assert_eq!(reaction.kind, material::MaterialReactionKind::None);
-        assert!(
-            reaction.user_defined,
-            "the masked pair slot remains occupied"
-        );
+        unit_assert_eq!(reaction.kind => material::MaterialReactionKind::None);
+        unit_assert!(reaction.user_defined, "the masked pair slot remains occupied");
 
         let mut bytes = vec![0u8; 7 * 8];
         bytes[3 * 7 + 3] = 10;
@@ -905,23 +838,21 @@
         let mut engine = pxs_engine(22, materials);
         engine.set_landscape(world);
         engine.set_physics(PhysicsSettings::new(0, 12, -20));
-        assert!(engine
-            .pxs_system
-            .create(mist, itofix(3), itofix(2), C4Fixed::ZERO, itofix(1),));
+        unit_assert!(engine.pxs_system.create(mist, itofix(3), itofix(2), C4Fixed::ZERO, itofix(1),));
         let mirror = engine.rng.clone();
 
         engine.tick_pxs();
 
         let survivors = engine.pxs_system.iter().copied().collect::<Vec<_>>();
-        assert_eq!(survivors.len(), 1, "masked reaction keeps the PXS alive");
-        assert_eq!(survivors[0].mat, mist);
-        assert_eq!((fixtoi(survivors[0].x), fixtoi(survivors[0].y)), (3, 3));
-        assert_eq!(engine.rng, mirror, "masked mrfUserCheck draws no RNG");
+        unit_assert_eq!(survivors.len() => 1, "masked reaction keeps the PXS alive");
+        unit_assert_eq!(survivors[0].mat => mist);
+        unit_assert_eq!((fixtoi(survivors[0].x), fixtoi(survivors[0].y)) => (3, 3));
+        unit_assert_eq!(engine.rng => mirror, "masked mrfUserCheck draws no RNG");
         let world = engine.landscape().test_value();
-        assert_eq!(world.material_at(3, 2), None, "no builtin InsertMaterial");
-        assert_eq!(world.grid_byte_at(3, 2), Some(0));
-        assert_eq!(world.material_at(3, 3), Some(water));
-        assert_eq!(world.grid_byte_at(3, 3), Some(10));
+        unit_assert_eq!(world.material_at(3, 2) => None, "no builtin InsertMaterial");
+        unit_assert_eq!(world.grid_byte_at(3, 2) => Some(0));
+        unit_assert_eq!(world.material_at(3, 3) => Some(water));
+        unit_assert_eq!(world.grid_byte_at(3, 3) => Some(10));
     }
 
     #[test]
@@ -964,16 +895,12 @@
         world.set_pixel_grid(grid);
         engine.set_landscape(world);
 
-        assert!(create_test_pxs(&mut engine, acid, 3, 5, 0, 1));
+        unit_assert!(create_test_pxs(&mut engine, acid, 3, 5, 0, 1));
         engine.tick_pxs();
 
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
-        assert_eq!(survivors.len(), 1, "InsertMaterial re-created the droplet");
-        assert_eq!(
-            fixtoi(survivors[0].x),
-            7,
-            "failed-corrosion liquid slid to the open ledge"
-        );
+        unit_assert_eq!(survivors.len() => 1, "InsertMaterial re-created the droplet");
+        unit_assert_eq!(fixtoi(survivors[0].x) => 7, "failed-corrosion liquid slid to the open ledge");
     }
 
     #[test]
@@ -1005,16 +932,8 @@
         let [lava, oil] = pxs_material_ids(&materials, ["Lava", "Oil"]);
         let mut engine = pxs_engine(23, materials);
         engine.register_test_script_definition(FIRE_DEFINITION_ID, "Fire", "");
-        let blocking_flame = engine.spawn_test_object(
-            SpawnConfig::new(FIRE_DEFINITION_ID)
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(3, 7)),
-        );
-        assert!(engine
-            .object_snapshot(blocking_flame)
-            .expect("blocking FLAM remains live")
-            .status
-            .is_active());
+        let blocking_flame = spawn_fixture!(engine, FIRE_DEFINITION_ID, with_category: CATEGORY_OBJECT, with_position: Vector2::new(3, 7));
+        unit_assert!(engine.object_snapshot(blocking_flame).expect("blocking FLAM remains live").status.is_active());
 
         let mut bytes = vec![0u8; 9 * 12];
         for y in 6..12 {
@@ -1029,17 +948,17 @@
         world.set_pixel_grid(grid);
         engine.set_landscape(world);
 
-        assert!(create_test_pxs(&mut engine, lava, 3, 7, 0, 2));
+        unit_assert!(create_test_pxs(&mut engine, lava, 3, 7, 0, 2));
         let mut mirror = engine.rng.clone();
-        assert_eq!(mirror.random(100), 63, "failed splash gate draw");
-        assert_eq!(mirror.random(25), 0, "incendiary smoke gate draw");
-        assert_eq!(mirror.rnd3(), 1, "smoke level draw");
+        unit_assert_eq!(mirror.random(100) => 63, "failed splash gate draw");
+        unit_assert_eq!(mirror.random(25) => 0, "incendiary smoke gate draw");
+        unit_assert_eq!(mirror.rnd3() => 1, "smoke level draw");
 
         engine.tick_pxs();
 
-        assert_eq!(engine.rng, mirror, "exact mrfInsertCheck RNG ledger");
-        assert_eq!(engine.pxs_system.count(), 0, "original PXS is dead");
-        assert_eq!(
+        unit_assert_eq!(engine.rng => mirror, "exact mrfInsertCheck RNG ledger");
+        unit_assert_eq!(engine.pxs_system.count() => 0, "original PXS is dead");
+        unit_assert_eq!(
             engine
                 .objects
                 .iter()
@@ -1048,22 +967,18 @@
                         && object.state.status.is_active()
                         && object.definition_id == FIRE_DEFINITION_ID
                 })
-                .count(),
+                .count() =>
             1,
             "the existing FLAM blocks a second ignition"
         );
 
         let world = engine.landscape().test_value();
         let grid = world.pixel_grid().test_value();
-        assert_eq!(
-            grid.bytes()[5 * 9 + 3],
-            10 | 0x80,
-            "single SetPix keeps IFT"
-        );
-        assert_eq!(grid.bytes()[6 * 9 + 3], 20, "Oil above contact is intact");
-        assert_eq!(grid.bytes()[7 * 9 + 3], 20, "contact Oil is intact");
-        assert_eq!(world.material_at(3, 5), Some(lava));
-        assert_eq!(world.surface_height(3), Some(6), "no column-band rewrite");
+        unit_assert_eq!(grid.bytes()[5 * 9 + 3] => 10 | 0x80, "single SetPix keeps IFT");
+        unit_assert_eq!(grid.bytes()[6 * 9 + 3] => 20, "Oil above contact is intact");
+        unit_assert_eq!(grid.bytes()[7 * 9 + 3] => 20, "contact Oil is intact");
+        unit_assert_eq!(world.material_at(3, 5) => Some(lava));
+        unit_assert_eq!(world.surface_height(3) => Some(6), "no column-band rewrite");
     }
 
     #[test]
@@ -1113,10 +1028,7 @@
         world.set_pixel_grid(grid);
         engine.set_landscape(world);
 
-        assert_eq!(
-            engine.landscape().and_then(|world| world.material_at(3, 4)),
-            Some(oil)
-        );
+        unit_assert_eq!(engine.landscape().and_then(|world| world.material_at(3, 4)) => Some(oil));
         engine.apply_landscape_operations(vec![LandscapeOperation::InsertMaterial {
             material: acid.index() as i32,
             position: Vector2::new(3, 5),
@@ -1124,13 +1036,9 @@
         }]);
 
         let world = engine.landscape().test_value();
-        assert_eq!(world.material_at(3, 4), None, "Oil above was poofed");
-        assert_eq!(
-            world.material_at(3, 5),
-            None,
-            "the reacting Acid was not inserted"
-        );
-        assert_eq!(engine.pxs_system.count(), 0);
+        unit_assert_eq!(world.material_at(3, 4) => None, "Oil above was poofed");
+        unit_assert_eq!(world.material_at(3, 5) => None, "the reacting Acid was not inserted");
+        unit_assert_eq!(engine.pxs_system.count() => 0);
     }
 
     fn insert_material_convert_fixture(convert_to: &str) -> (Engine, MaterialId, MaterialId) {
@@ -1232,17 +1140,13 @@
         insert_source_over_old(&mut engine, source);
 
         let world = engine.landscape().test_value();
-        assert_eq!(world.material_at(3, 5), Some(source));
-        assert_eq!(world.grid_byte_at(3, 5), Some(10));
-        assert_eq!(
-            world.material_at(3, 4),
-            None,
-            "LandscapeInsertThrust=0 must not recursively reinsert Old"
-        );
-        assert_eq!(world.grid_byte_at(3, 4), Some(0));
-        assert_eq!(world.material_at(3, 6), Some(support));
-        assert_ne!(world.material_at(3, 4), Some(old));
-        assert_eq!(engine.pxs_system.count(), 0);
+        unit_assert_eq!(world.material_at(3, 5) => Some(source));
+        unit_assert_eq!(world.grid_byte_at(3, 5) => Some(10));
+        unit_assert_eq!(world.material_at(3, 4) => None, "LandscapeInsertThrust=0 must not recursively reinsert Old");
+        unit_assert_eq!(world.grid_byte_at(3, 4) => Some(0));
+        unit_assert_eq!(world.material_at(3, 6) => Some(support));
+        unit_assert_ne!(world.material_at(3, 4) => Some(old));
+        unit_assert_eq!(engine.pxs_system.count() => 0);
     }
 
     #[test]
@@ -1252,16 +1156,12 @@
         insert_source_over_old(&mut engine, source);
 
         let world = engine.landscape().test_value();
-        assert_eq!(world.material_at(3, 5), Some(source));
-        assert_eq!(world.grid_byte_at(3, 5), Some(10));
-        assert_eq!(
-            world.material_at(3, 4),
-            Some(old),
-            "LandscapeInsertThrust=1 preserves the recursive thrust behavior"
-        );
-        assert_eq!(world.grid_byte_at(3, 4), Some(20));
-        assert_eq!(world.material_at(3, 6), Some(support));
-        assert_eq!(engine.pxs_system.count(), 0);
+        unit_assert_eq!(world.material_at(3, 5) => Some(source));
+        unit_assert_eq!(world.grid_byte_at(3, 5) => Some(10));
+        unit_assert_eq!(world.material_at(3, 4) => Some(old), "LandscapeInsertThrust=1 preserves the recursive thrust behavior");
+        unit_assert_eq!(world.grid_byte_at(3, 4) => Some(20));
+        unit_assert_eq!(world.material_at(3, 6) => Some(support));
+        unit_assert_eq!(engine.pxs_system.count() => 0);
     }
 
     #[test]
@@ -1278,18 +1178,10 @@
         }]);
 
         let world = engine.landscape().test_value();
-        assert_eq!(world.material_at(3, 5), Some(water));
-        assert_eq!(
-            world.grid_byte_at(3, 5),
-            Some(20),
-            "Water default mattex byte"
-        );
-        assert_eq!(
-            engine.pxs_system.count(),
-            0,
-            "converted material is dead-inserted"
-        );
-        assert_eq!(engine.rng, mirror, "conversion and write-back draw no RNG");
+        unit_assert_eq!(world.material_at(3, 5) => Some(water));
+        unit_assert_eq!(world.grid_byte_at(3, 5) => Some(20), "Water default mattex byte");
+        unit_assert_eq!(engine.pxs_system.count() => 0, "converted material is dead-inserted");
+        unit_assert_eq!(engine.rng => mirror, "conversion and write-back draw no RNG");
     }
 
     #[test]
@@ -1360,29 +1252,13 @@
         }]);
 
         let world = engine.landscape().test_value();
-        assert_eq!(
-            world.material_at(2, 5),
-            None,
-            "original position stays empty"
-        );
-        assert_eq!(world.grid_byte_at(2, 5), Some(0));
-        assert_eq!(world.material_at(4, 4), Some(sand));
-        assert_eq!(
-            world.grid_byte_at(4, 4),
-            Some(10),
-            "Sand default mattex byte"
-        );
-        assert_eq!(
-            world.material_at(4, 3),
-            Some(old),
-            "thrust captures old material at the script-assigned destination"
-        );
-        assert_eq!(
-            engine.pxs_system.count(),
-            0,
-            "script result is dead-inserted"
-        );
-        assert_eq!(engine.rng, mirror, "falsy script write-back draws no RNG");
+        unit_assert_eq!(world.material_at(2, 5) => None, "original position stays empty");
+        unit_assert_eq!(world.grid_byte_at(2, 5) => Some(0));
+        unit_assert_eq!(world.material_at(4, 4) => Some(sand));
+        unit_assert_eq!(world.grid_byte_at(4, 4) => Some(10), "Sand default mattex byte");
+        unit_assert_eq!(world.material_at(4, 3) => Some(old), "thrust captures old material at the script-assigned destination");
+        unit_assert_eq!(engine.pxs_system.count() => 0, "script result is dead-inserted");
+        unit_assert_eq!(engine.rng => mirror, "falsy script write-back draws no RNG");
     }
 
     #[test]
@@ -1399,10 +1275,10 @@
             }]);
 
             let world = engine.landscape().test_value();
-            assert_eq!(world.material_at(3, 5), None, "target {convert_to}");
-            assert_eq!(world.grid_byte_at(3, 5), Some(0), "target {convert_to}");
-            assert_eq!(engine.pxs_system.count(), 0, "target {convert_to}");
-            assert_eq!(engine.rng, mirror, "target {convert_to} draws no RNG");
+            unit_assert_eq!(world.material_at(3, 5) => None, "target {convert_to}");
+            unit_assert_eq!(world.grid_byte_at(3, 5) => Some(0), "target {convert_to}");
+            unit_assert_eq!(engine.pxs_system.count() => 0, "target {convert_to}");
+            unit_assert_eq!(engine.rng => mirror, "target {convert_to} draws no RNG");
         }
     }
 
@@ -1450,7 +1326,7 @@
         let grid = pxs_grid(5, 6, bytes, &[(10, 10, "Trigger")]);
         let world = pxs_grid_world(5, 6, vec![6; 5], grid);
         engine.set_landscape(world);
-        assert!(create_test_pxs(&mut engine, source, 2, 2, 0, 0));
+        unit_assert!(create_test_pxs(&mut engine, source, 2, 2, 0, 0));
 
         (engine, source, target)
     }
@@ -1478,18 +1354,11 @@
         engine.tick_pxs();
 
         let pixels: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
-        assert_eq!(pixels.len(), 1);
-        assert_eq!(pixels[0].mat, target, "PXSPos converted the material");
-        assert_eq!(
-            pixels[0].xdir,
-            txdir * 20 * factor,
-            "same-tick drift uses Target WindDrift=40"
-        );
-        assert_eq!(pixels[0].ydir, tydir * 20 * factor);
-        assert_eq!(
-            engine.rng, mirror,
-            "Target Density=25 over density 10 takes both Random(1200) draws"
-        );
+        unit_assert_eq!(pixels.len() => 1);
+        unit_assert_eq!(pixels[0].mat => target, "PXSPos converted the material");
+        unit_assert_eq!(pixels[0].xdir => txdir * 20 * factor, "same-tick drift uses Target WindDrift=40");
+        unit_assert_eq!(pixels[0].ydir => tydir * 20 * factor);
+        unit_assert_eq!(engine.rng => mirror, "Target Density=25 over density 10 takes both Random(1200) draws");
     }
 
     #[test]
@@ -1510,14 +1379,11 @@
         engine.tick_pxs();
 
         let pixels: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
-        assert_eq!(pixels.len(), 1);
-        assert_eq!(pixels[0].mat, source);
-        assert_eq!(pixels[0].xdir, math::C4Fixed::ZERO);
-        assert_eq!(pixels[0].ydir, math::C4Fixed::ZERO);
-        assert_eq!(
-            engine.rng, mirror,
-            "Source Density=1 over density 10 stays out of free fall"
-        );
+        unit_assert_eq!(pixels.len() => 1);
+        unit_assert_eq!(pixels[0].mat => source);
+        unit_assert_eq!(pixels[0].xdir => math::C4Fixed::ZERO);
+        unit_assert_eq!(pixels[0].ydir => math::C4Fixed::ZERO);
+        unit_assert_eq!(engine.rng => mirror, "Source Density=1 over density 10 stays out of free fall");
     }
 
     #[test]
@@ -1533,7 +1399,7 @@
             "#,
             true,
         );
-        assert_eq!(
+        unit_assert_eq!(
             engine.install_global_scripts(&[(
                 "System.c4g/PxsPosReaction.c".to_string(),
                 format!(
@@ -1545,7 +1411,7 @@
                     "#,
                     target.index()
                 ),
-            )]),
+            )]) =>
             1,
             "System.c4g PxsPos callback installs without a scenario host"
         );
@@ -1559,14 +1425,11 @@
         engine.tick_pxs();
 
         let pixels: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
-        assert_eq!(pixels.len(), 1);
-        assert_eq!(pixels[0].mat, target, "script PxsMat writes back");
-        assert_eq!(pixels[0].xdir, txdir * 20 * factor);
-        assert_eq!(pixels[0].ydir, tydir * 20 * factor);
-        assert_eq!(
-            engine.rng, mirror,
-            "script Target Density=25 takes both same-tick jitter draws"
-        );
+        unit_assert_eq!(pixels.len() => 1);
+        unit_assert_eq!(pixels[0].mat => target, "script PxsMat writes back");
+        unit_assert_eq!(pixels[0].xdir => txdir * 20 * factor);
+        unit_assert_eq!(pixels[0].ydir => tydir * 20 * factor);
+        unit_assert_eq!(engine.rng => mirror, "script Target Density=25 takes both same-tick jitter draws");
     }
 
     #[test]
@@ -1606,14 +1469,14 @@
         world.set_world_height(20);
         engine.set_landscape(world);
         let mirror = engine.rng.clone();
-        assert!(create_test_pxs(&mut engine, slime, 2, 9, 0, 1));
+        unit_assert!(create_test_pxs(&mut engine, slime, 2, 9, 0, 1));
         engine.tick_pxs();
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
-        assert_eq!(survivors.len(), 1, "converted pixel lives on");
-        assert_eq!(survivors[0].mat, water, "converted to Water on hit");
-        assert_eq!(survivors[0].xdir, math::C4Fixed::ZERO);
-        assert_eq!(survivors[0].ydir, math::C4Fixed::ZERO);
-        assert_eq!(engine.rng, mirror, "no draws on the conversion path");
+        unit_assert_eq!(survivors.len() => 1, "converted pixel lives on");
+        unit_assert_eq!(survivors[0].mat => water, "converted to Water on hit");
+        unit_assert_eq!(survivors[0].xdir => math::C4Fixed::ZERO);
+        unit_assert_eq!(survivors[0].ydir => math::C4Fixed::ZERO);
+        unit_assert_eq!(engine.rng => mirror, "no draws on the conversion path");
     }
 
     #[test]
@@ -1666,20 +1529,12 @@
 
         // Sitting on the ground in the border column, pushing left.
         let mirror = engine.rng.clone();
-        assert!(create_test_pxs(&mut engine, water, 0, 5, -2, 0));
+        unit_assert!(create_test_pxs(&mut engine, water, 0, 5, -2, 0));
         engine.tick_pxs();
-        assert_eq!(
-            engine.pxs_system.iter().count(),
-            0,
-            "border contact inserts and deactivates the PXS"
-        );
+        unit_assert_eq!(engine.pxs_system.iter().count() => 0, "border contact inserts and deactivates the PXS");
         let landscape = engine.landscape().test_value();
-        assert_eq!(
-            landscape.material_at(0, 5),
-            Some(water),
-            "InsertMaterial landed the pixel against the border"
-        );
-        assert_eq!(engine.rng, mirror, "no synced draws on this path");
+        unit_assert_eq!(landscape.material_at(0, 5) => Some(water), "InsertMaterial landed the pixel against the border");
+        unit_assert_eq!(engine.rng => mirror, "no synced draws on this path");
     }
 
     #[test]
@@ -1723,29 +1578,21 @@
         // Slot 0: a submerged water PXS moving down — the water-vs-water
         // move contact inserts (killing it) and the insert slides to the
         // ledge, creating the droplet DURING slot 0's execution.
-        assert!(create_test_pxs(&mut engine, water, 3, 7, 0, 1));
+        unit_assert!(create_test_pxs(&mut engine, water, 3, 7, 0, 1));
         engine.tick_pxs();
 
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
-        assert_eq!(survivors.len(), 1, "only the droplet survives");
-        assert_eq!(fixtoi(survivors[0].x), 7, "droplet sits on the ledge");
-        assert_eq!(
-            engine.pxs_system.count(),
-            1,
-            "chunk counts stay exact through the mid-execute create"
-        );
+        unit_assert_eq!(survivors.len() => 1, "only the droplet survives");
+        unit_assert_eq!(fixtoi(survivors[0].x) => 7, "droplet sits on the ledge");
+        unit_assert_eq!(engine.pxs_system.count() => 1, "chunk counts stay exact through the mid-execute create");
 
         // The executing slot 0 freed on death; the droplet occupies slot 1
         // (C++ New() skipped the still-live slot 0). The next create must
         // reuse slot 0 and execute BEFORE the droplet.
-        assert!(create_test_pxs(&mut engine, water, 9, 2, 0, 0));
+        unit_assert!(create_test_pxs(&mut engine, water, 9, 2, 0, 0));
         let order: Vec<i32> = engine.pxs_system.iter().map(|pxs| fixtoi(pxs.x)).collect();
-        assert_eq!(
-            order,
-            [9, 7],
-            "slot 0 was free during the droplet's creation only in C++ terms — \
-             the droplet must sit in slot 1"
-        );
+        unit_assert_eq!(order => [9, 7], "slot 0 was free during the droplet's creation only in C++ terms — \
+             the droplet must sit in slot 1");
     }
 
     #[test]
@@ -1768,7 +1615,7 @@
         let mut engine = pxs_engine(5, materials);
 
         for x in 0..3 {
-            assert!(create_test_pxs(&mut engine, water, x, 0, 0, 0));
+            unit_assert!(create_test_pxs(&mut engine, water, x, 0, 0, 0));
         }
         // Kill the middle pixel: slot 1 becomes an MNone gap.
         engine.pxs_system.clear_slot(0, 1);
@@ -1778,9 +1625,9 @@
 
         // The gap must survive: the next create reuses slot 1, keeping
         // chunk-major order [slot0, slot1, slot2] = [0, 9, 2].
-        assert!(create_test_pxs(&mut engine, water, 9, 0, 0, 0));
+        unit_assert!(create_test_pxs(&mut engine, water, 9, 0, 0, 0));
         let order: Vec<i32> = engine.pxs_system.iter().map(|pxs| fixtoi(pxs.x)).collect();
-        assert_eq!(order, [0, 9, 2], "restore keeps the MNone gap at slot 1");
+        unit_assert_eq!(order => [0, 9, 2], "restore keeps the MNone gap at slot 1");
     }
 
     #[test]
@@ -1829,7 +1676,7 @@
         // flag computed from the parameters so the call is observable both
         // ways (kill for goo's column, survive elsewhere is not reachable
         // in this fixture — the unresolvable arm covers the no-op path).
-        assert_eq!(
+        unit_assert_eq!(
             engine.install_global_scripts(&[(
                 "System.c4g/MaterialReaction.c".to_string(),
                 r#"
@@ -1843,7 +1690,7 @@
                 }
                 "#
                 .to_string(),
-            )]),
+            )]) =>
             1,
             "System.c4g reaction script installs without a scenario host"
         );
@@ -1852,25 +1699,17 @@
             .test_value();
 
         let mirror = engine.rng.clone();
-        assert!(create_test_pxs(&mut engine, goo, 2, 9, 0, 1));
+        unit_assert!(create_test_pxs(&mut engine, goo, 2, 9, 0, 1));
         engine.tick_pxs();
-        assert_eq!(
-            engine.pxs_system.iter().count(),
-            0,
-            "a truthy script return kills the PXS"
-        );
-        assert_eq!(engine.rng, mirror, "no synced draws on this path");
+        unit_assert_eq!(engine.pxs_system.iter().count() => 0, "a truthy script return kills the PXS");
+        unit_assert_eq!(engine.rng => mirror, "no synced draws on this path");
 
         // An ordinary scenario-local function is not owned by
         // Game.ScriptEngine, so GetSFuncWarn cannot resolve it: null
         // pScriptFunc leaves the PXS alive.
-        assert!(create_test_pxs(&mut engine, ooze, 2, 9, 0, 1));
+        unit_assert!(create_test_pxs(&mut engine, ooze, 2, 9, 0, 1));
         engine.tick_pxs();
-        assert_eq!(
-            engine.pxs_system.iter().count(),
-            1,
-            "an unresolvable ScriptFunc leaves the PXS alive"
-        );
+        unit_assert_eq!(engine.pxs_system.iter().count() => 1, "an unresolvable ScriptFunc leaves the PXS alive");
     }
 
     #[test]
@@ -1922,27 +1761,16 @@
             )
             .test_value();
 
-        assert!(create_test_pxs(&mut engine, goo, 2, 9, 0, 1));
+        unit_assert!(create_test_pxs(&mut engine, goo, 2, 9, 0, 1));
         engine.tick_pxs();
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
-        assert_eq!(survivors.len(), 1, "falsy return keeps the pixel");
-        assert_eq!(
-            survivors[0].mat, water,
-            "PxsMat writes back unconditionally"
-        );
-        assert_eq!(
-            survivors[0].xdir,
-            math::fixed100(150),
-            "XDir writes back via FIXED100"
-        );
-        assert_eq!(
-            survivors[0].ydir,
-            math::fixed100(-100),
-            "YDir writes back via FIXED100"
-        );
+        unit_assert_eq!(survivors.len() => 1, "falsy return keeps the pixel");
+        unit_assert_eq!(survivors[0].mat => water, "PxsMat writes back unconditionally");
+        unit_assert_eq!(survivors[0].xdir => math::fixed100(150), "XDir writes back via FIXED100");
+        unit_assert_eq!(survivors[0].ydir => math::fixed100(-100), "YDir writes back via FIXED100");
         // pos_changed → fStopMovement: the pixel snapped to its int position
-        assert_eq!(survivors[0].x, math::itofix(2));
-        assert_eq!(survivors[0].y, math::itofix(9));
+        unit_assert_eq!(survivors[0].x => math::itofix(2));
+        unit_assert_eq!(survivors[0].y => math::itofix(9));
     }
 
     #[test]
@@ -1978,23 +1806,16 @@
         let expected_xdir = math::C4Fixed::from_raw(math::itofix(-1).val() / 11)
             + math::fixed10(mirror.random(5) - 2);
 
-        assert!(create_test_pxs(&mut engine, sand, 2, 9, 0, 1));
+        unit_assert!(create_test_pxs(&mut engine, sand, 2, 9, 0, 1));
         engine.tick_pxs();
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
-        assert_eq!(survivors.len(), 1, "slide path keeps the PXS alive");
-        assert_eq!(survivors[0].x, math::itofix(2), "snapped to int position");
-        assert_eq!(survivors[0].y, math::itofix(9));
-        assert_eq!(survivors[0].xdir, expected_xdir);
-        assert_eq!(survivors[0].ydir, math::C4Fixed::ZERO, "contact stops ydir");
-        assert_eq!(engine.rng, mirror, "exactly one Random(5) draw");
-        assert_eq!(
-            engine
-                .landscape
-                .as_ref()
-                .and_then(|landscape| landscape.surface_height(2)),
-            Some(10),
-            "nothing inserted while sliding"
-        );
+        unit_assert_eq!(survivors.len() => 1, "slide path keeps the PXS alive");
+        unit_assert_eq!(survivors[0].x => math::itofix(2), "snapped to int position");
+        unit_assert_eq!(survivors[0].y => math::itofix(9));
+        unit_assert_eq!(survivors[0].xdir => expected_xdir);
+        unit_assert_eq!(survivors[0].ydir => math::C4Fixed::ZERO, "contact stops ydir");
+        unit_assert_eq!(engine.rng => mirror, "exactly one Random(5) draw");
+        unit_assert_eq!(engine.landscape.as_ref().and_then(|landscape| landscape.surface_height(2)) => Some(10), "nothing inserted while sliding");
 
         // Enclosed: no slide anywhere → insertion proceeds and the PXS dies
         // (C4Material.cpp:788-790). The liquid column only extends the world
@@ -2004,14 +1825,10 @@
         landscape.set_liquid_column(0, vec![LiquidSegment::new(25, 28)]);
         engine.set_landscape(landscape);
         let mirror = engine.rng.clone();
-        assert!(create_test_pxs(&mut engine, sand, 2, 20, 0, 1));
+        unit_assert!(create_test_pxs(&mut engine, sand, 2, 20, 0, 1));
         engine.tick_pxs();
-        assert_eq!(
-            engine.pxs_system.count(),
-            0,
-            "enclosed PXS inserts and dies"
-        );
-        assert_eq!(engine.rng, mirror, "no synced draws while enclosed");
+        unit_assert_eq!(engine.pxs_system.count() => 0, "enclosed PXS inserts and dies");
+        unit_assert_eq!(engine.rng => mirror, "no synced draws while enclosed");
     }
 
     #[test]
@@ -2035,13 +1852,7 @@
         }]);
 
         let snapshot = engine.snapshot();
-        assert!(
-            snapshot
-                .particles
-                .iter()
-                .any(|particle| particle.definition_id == "material/pxs/earth"),
-            "shake operation should release earth particles"
-        );
+        unit_assert!(snapshot.particles.iter().any(|particle| particle.definition_id == "material/pxs/earth"), "shake operation should release earth particles");
         Ok(())
     }
 
@@ -2074,18 +1885,10 @@
         engine.execute_shake_circle_operation(Vector2::new(2, 2), 2);
 
         let landscape = engine.landscape().test_value();
-        assert_eq!(landscape.material_at(2, 2), None, "DigFree Earth clears");
-        assert_eq!(
-            landscape.material_at(3, 2),
-            Some(granite),
-            "non-DigFree Granite survives"
-        );
-        assert_eq!(engine.pxs_system.count(), 1);
-        assert_eq!(
-            engine.pxs_system.iter().next().map(|pxs| pxs.mat),
-            Some(earth),
-            "the cleared Earth becomes one zero-velocity PXS"
-        );
+        unit_assert_eq!(landscape.material_at(2, 2) => None, "DigFree Earth clears");
+        unit_assert_eq!(landscape.material_at(3, 2) => Some(granite), "non-DigFree Granite survives");
+        unit_assert_eq!(engine.pxs_system.count() => 1);
+        unit_assert_eq!(engine.pxs_system.iter().next().map(|pxs| pxs.mat) => Some(earth), "the cleared Earth becomes one zero-velocity PXS");
     }
 
     #[test]
@@ -2094,14 +1897,7 @@
         // C4Landscape::ShakeFreePix only checks materials marked Instable
         // (C4Landscape.cpp:928-938,861-878), so stable one-pixel Earth debris
         // otherwise remains in the collision raster forever.
-        let materials = materials_pxs_test_materials(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            DigFree=1
-        "#,
-        );
+        let materials = materials_pxs_test_materials(EARTH_DIG_FREE_MATERIAL_SOURCE);
         let earth = materials.id_of("Earth").test_value();
         let mut engine = pxs_engine(9, materials);
 
@@ -2111,36 +1907,17 @@
         let grid = pxs_grid(5, 6, bytes, &[(30, 100, "Earth")]);
         engine.set_landscape(pxs_grid_world(5, 6, vec![6; 5], grid));
 
-        assert_eq!(
-            engine.landscape().test_value().material_at(2, 1),
-            Some(earth),
-            "the upper Earth pixel starts supported"
-        );
+        unit_assert_eq!(engine.landscape().test_value().material_at(2, 1) => Some(earth), "the upper Earth pixel starts supported");
 
         engine.execute_shake_circle_operation(Vector2::new(2, 3), 1);
 
-        assert_eq!(
-            engine.landscape().test_value().material_at(2, 1),
-            None,
-            "the unsupported pixel must stop obstructing object movement"
-        );
-        assert_eq!(
-            engine.pxs_system.count(),
-            2,
-            "both the shaken support and newly isolated pixel continue as PXS"
-        );
+        unit_assert_eq!(engine.landscape().test_value().material_at(2, 1) => None, "the unsupported pixel must stop obstructing object movement");
+        unit_assert_eq!(engine.pxs_system.count() => 2, "both the shaken support and newly isolated pixel continue as PXS");
     }
 
     #[test]
     fn shake_circle_dislodges_a_two_pixel_fragment_with_its_removed_support() {
-        let materials = materials_pxs_test_materials(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            DigFree=1
-        "#,
-        );
+        let materials = materials_pxs_test_materials(EARTH_DIG_FREE_MATERIAL_SOURCE);
         let earth = materials.id_of("Earth").test_value();
         let mut engine = pxs_engine(9, materials);
 
@@ -2154,26 +1931,15 @@
         engine.execute_shake_circle_operation(Vector2::new(2, 4), 1);
 
         let landscape = engine.landscape().test_value();
-        assert_eq!(landscape.material_at(2, 1), None);
-        assert_eq!(landscape.material_at(2, 2), None);
-        assert_eq!(
-            engine.pxs_system.count(),
-            3,
-            "the support and both pixels in the detached fragment become PXS"
-        );
-        assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
+        unit_assert_eq!(landscape.material_at(2, 1) => None);
+        unit_assert_eq!(landscape.material_at(2, 2) => None);
+        unit_assert_eq!(engine.pxs_system.count() => 3, "the support and both pixels in the detached fragment become PXS");
+        unit_assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
     }
 
     #[test]
     fn shake_circle_preserves_terrain_fragments_larger_than_two_pixels() {
-        let materials = materials_pxs_test_materials(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            DigFree=1
-        "#,
-        );
+        let materials = materials_pxs_test_materials(EARTH_DIG_FREE_MATERIAL_SOURCE);
         let earth = materials.id_of("Earth").test_value();
         let mut engine = pxs_engine(9, materials);
 
@@ -2188,29 +1954,14 @@
 
         let landscape = engine.landscape().test_value();
         for (x, y) in [(2, 1), (3, 1), (2, 2)] {
-            assert_eq!(
-                landscape.material_at(x, y),
-                Some(earth),
-                "the product cleanup is bounded to one- and two-pixel debris"
-            );
+            unit_assert_eq!(landscape.material_at(x, y) => Some(earth), "the product cleanup is bounded to one- and two-pixel debris");
         }
-        assert_eq!(
-            engine.pxs_system.count(),
-            2,
-            "only the two pixels inside the shake circle become PXS"
-        );
+        unit_assert_eq!(engine.pxs_system.count() => 2, "only the two pixels inside the shake circle become PXS");
     }
 
     #[test]
     fn shake_circle_dislodges_a_horizontal_two_pixel_fragment() {
-        let materials = materials_pxs_test_materials(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            DigFree=1
-        "#,
-        );
+        let materials = materials_pxs_test_materials(EARTH_DIG_FREE_MATERIAL_SOURCE);
         let earth = materials.id_of("Earth").test_value();
         let mut engine = pxs_engine(9, materials);
 
@@ -2224,20 +1975,16 @@
         engine.execute_shake_circle_operation(Vector2::new(2, 3), 1);
 
         let landscape = engine.landscape().test_value();
-        assert_eq!(landscape.material_at(2, 1), None);
-        assert_eq!(landscape.material_at(3, 1), None);
-        assert_eq!(
-            engine.pxs_system.count(),
-            3,
-            "the removed support and both orientations of two-pixel debris become PXS"
-        );
-        assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
-        assert_eq!(
+        unit_assert_eq!(landscape.material_at(2, 1) => None);
+        unit_assert_eq!(landscape.material_at(3, 1) => None);
+        unit_assert_eq!(engine.pxs_system.count() => 3, "the removed support and both orientations of two-pixel debris become PXS");
+        unit_assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
+        unit_assert_eq!(
             engine
                 .pxs_system
                 .iter()
                 .map(|pxs| (pxs.x, pxs.y))
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>() =>
             vec![
                 (itofix(2), itofix(2)),
                 (itofix(2), itofix(1)),
@@ -2249,14 +1996,7 @@
 
     #[test]
     fn shake_circle_dislodges_a_pixel_after_removing_its_side_connection() {
-        let materials = materials_pxs_test_materials(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            DigFree=1
-        "#,
-        );
+        let materials = materials_pxs_test_materials(EARTH_DIG_FREE_MATERIAL_SOURCE);
         let earth = materials.id_of("Earth").test_value();
         let mut engine = pxs_engine(9, materials);
 
@@ -2268,25 +2008,18 @@
 
         engine.execute_shake_circle_operation(Vector2::new(2, 3), 1);
 
-        assert_eq!(
-            engine.landscape().test_value().material_at(3, 2),
+        unit_assert_eq!(
+            engine.landscape().test_value().material_at(3, 2) =>
             None,
             "a one-pixel fragment loses collision even when its removed connection was beside it"
         );
-        assert_eq!(engine.pxs_system.count(), 2);
-        assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
+        unit_assert_eq!(engine.pxs_system.count() => 2);
+        unit_assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
     }
 
     #[test]
     fn shake_circle_appends_dislodged_debris_in_stable_scan_order() {
-        let materials = materials_pxs_test_materials(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            DigFree=1
-        "#,
-        );
+        let materials = materials_pxs_test_materials(EARTH_DIG_FREE_MATERIAL_SOURCE);
         let mut engine = pxs_engine(9, materials);
 
         let mut bytes = vec![0; 7 * 7];
@@ -2299,12 +2032,12 @@
 
         engine.execute_shake_circle_operation(Vector2::new(3, 4), 2);
 
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .pxs_system
                 .iter()
                 .map(|pxs| (pxs.x, pxs.y, pxs.xdir, pxs.ydir))
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>() =>
             vec![
                 (itofix(2), itofix(3), C4Fixed::ZERO, C4Fixed::ZERO),
                 (itofix(3), itofix(2), C4Fixed::ZERO, C4Fixed::ZERO),
@@ -2313,25 +2046,12 @@
             ],
             "native circle PXS stay first, followed by debris bottom-to-top"
         );
-        assert_eq!(engine.rng, rng_before, "cleanup itself consumes no RNG");
+        unit_assert_eq!(engine.rng => rng_before, "cleanup itself consumes no RNG");
     }
 
     #[test]
     fn blast_circle_shifts_materials_with_blast_shift_to() -> Result<(), EngineError> {
-        let materials = materials_pxs_test_materials(
-            r#"
-            [Material Granite]
-            Name=Granite
-            Density=110
-            Friction=35
-            BlastShiftTo=Earth
-
-            [Material Earth]
-            Name=Earth
-            Density=90
-            Friction=25
-        "#,
-        );
+        let materials = materials_pxs_test_materials(GRANITE_BLAST_SHIFT_MATERIAL_SOURCE);
         let [granite, earth] = pxs_material_ids(&materials, ["Granite", "Earth"]);
         let mut engine = pxs_engine(29, materials);
         engine.set_landscape(Landscape::flat_with_material(25, 40, Some(granite)));
@@ -2347,10 +2067,7 @@
                 shifted_columns += 1;
             }
         }
-        assert!(
-            shifted_columns > 0,
-            "expected blast to shift some columns to target material"
-        );
+        unit_assert!(shifted_columns > 0, "expected blast to shift some columns to target material");
         Ok(())
     }
 
@@ -2362,20 +2079,7 @@
         // These equivalent column/raster worlds expose ten Granite pixels
         // in the complete r=2 scan, so both ledgers must advance by ten
         // identical LCG draws.
-        let materials = materials_pxs_test_materials(
-            r#"
-            [Material Granite]
-            Name=Granite
-            Density=110
-            Friction=35
-            BlastShiftTo=Earth
-
-            [Material Earth]
-            Name=Earth
-            Density=90
-            Friction=25
-        "#,
-        );
+        let materials = materials_pxs_test_materials(GRANITE_BLAST_SHIFT_MATERIAL_SOURCE);
         let granite = materials.id_of("Granite").test_value();
 
         let mut column_engine = Engine::with_seed(29);
@@ -2411,45 +2115,29 @@
         let column_result = column_engine.blast_circle(center, 2, None).test_value();
         let raster_result = raster_engine.blast_circle(center, 2, None).test_value();
 
-        assert_eq!(
-            column_result.pixel_count_by_material.get(&granite),
-            Some(&10)
-        );
-        assert_eq!(
+        unit_assert_eq!(column_result.pixel_count_by_material.get(&granite) => Some(&10));
+        unit_assert_eq!(
             column_result
                 .shift_candidates
                 .iter()
                 .map(|candidate| candidate.pixel_count)
-                .sum::<i32>(),
+                .sum::<i32>() =>
             10,
             "column approximation represents the same ten source pixels"
         );
-        assert_eq!(
+        unit_assert_eq!(
             column_result
                 .shift_candidates
                 .iter()
                 .map(|candidate| candidate.column)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>() =>
             vec![3, 2, 3, 1, 2, 3, 4, 2, 3, 3],
             "shift draws retain the C++ y/x scan order"
         );
-        assert_eq!(
-            raster_result.pixel_count_by_material.get(&granite),
-            Some(&10)
-        );
-        assert_eq!(
-            column_engine.rng.count - count_before,
-            10,
-            "one synced draw per BlastShiftTo pixel"
-        );
-        assert_eq!(
-            column_engine.rng, mirror,
-            "column ledger matches C++ Random"
-        );
-        assert_eq!(
-            raster_engine.rng, mirror,
-            "column and faithful raster paths finish on the same ledger"
-        );
+        unit_assert_eq!(raster_result.pixel_count_by_material.get(&granite) => Some(&10));
+        unit_assert_eq!(column_engine.rng.count - count_before => 10, "one synced draw per BlastShiftTo pixel");
+        unit_assert_eq!(column_engine.rng => mirror, "column ledger matches C++ Random");
+        unit_assert_eq!(raster_engine.rng => mirror, "column and faithful raster paths finish on the same ledger");
     }
 
     #[test]
@@ -2492,23 +2180,11 @@
                 .blast_circle(Vector2::new(1, 0), 0, None)
                 .test_value();
 
-            assert_eq!(
-                result.pixel_count_by_material.get(&granite),
-                Some(&1),
-                "{case}: source pixel is pre-counted"
-            );
-            assert_eq!(engine.rng, mirror, "{case}: one C++ Random draw");
+            unit_assert_eq!(result.pixel_count_by_material.get(&granite) => Some(&1), "{case}: source pixel is pre-counted");
+            unit_assert_eq!(engine.rng => mirror, "{case}: one C++ Random draw");
             let landscape = engine.landscape().test_value();
-            assert_eq!(
-                landscape.surface_height(1),
-                Some(expected_surface),
-                "{case}: BlastFree behavior is preserved"
-            );
-            assert_eq!(
-                landscape.solid_material_at(1),
-                Some(granite),
-                "{case}: a non-mutating shift must not recolor the remaining column"
-            );
+            unit_assert_eq!(landscape.surface_height(1) => Some(expected_surface), "{case}: BlastFree behavior is preserved");
+            unit_assert_eq!(landscape.solid_material_at(1) => Some(granite), "{case}: a non-mutating shift must not recolor the remaining column");
         }
     }
 
@@ -2566,21 +2242,15 @@
                 && object.state.status.is_active()
                 && object.definition_id == FIRE_DEFINITION_ID
         });
-        assert!(
-            flame_spawned,
-            "expected a flame to spawn from the embedded PXS"
-        );
-        assert_eq!(engine.pxs_system.count(), 0, "ignited PXS deactivates");
+        unit_assert!(flame_spawned, "expected a flame to spawn from the embedded PXS");
+        unit_assert_eq!(engine.pxs_system.count() => 0, "ignited PXS deactivates");
 
         let after_height = engine
             .landscape()
             .test_value()
             .surface_height(column_x)
             .test_value();
-        assert_eq!(
-            after_height, before_height,
-            "incineration should not erode the landscape surface"
-        );
+        unit_assert_eq!(after_height => before_height, "incineration should not erode the landscape surface");
 
         engine.pxs_system.create(
             flame,
@@ -2602,10 +2272,7 @@
                     && object.definition_id == FIRE_DEFINITION_ID
             })
             .count();
-        assert_eq!(
-            capped_flame_count, 1,
-            "incineration should respect the fire density cap"
-        );
+        unit_assert_eq!(capped_flame_count => 1, "incineration should respect the fire density cap");
 
         Ok(())
     }
@@ -2636,10 +2303,7 @@
             let landscape = snapshot.landscape.as_ref().test_value();
             landscape.surface()[6]
         };
-        assert!(
-            post_blast_surface > 30,
-            "blast should lower the surface before particles settle"
-        );
+        unit_assert!(post_blast_surface > 30, "blast should lower the surface before particles settle");
 
         for _ in 0..24 {
             engine.tick_without_snapshot().test_value();
@@ -2648,14 +2312,8 @@
         let snapshot = engine.snapshot();
         let landscape = snapshot.landscape.test_value();
         let final_surface = landscape.surface()[6];
-        assert!(
-            final_surface <= post_blast_surface + 1,
-            "expected particles to prevent the crater from deepening"
-        );
-        assert!(
-            final_surface >= 30,
-            "expected final surface to remain at or above the original baseline"
-        );
+        unit_assert!(final_surface <= post_blast_surface + 1, "expected particles to prevent the crater from deepening");
+        unit_assert!(final_surface >= 30, "expected final surface to remain at or above the original baseline");
         Ok(())
     }
 
@@ -2803,8 +2461,7 @@ func ReadWind()
     return(GetWind(0, 0, true));
 }
 "#;
-        let mut engine = Engine::with_seed(17);
-        engine.register_test_script_definition("WIND", "Wind probe", script);
+        let mut engine = script_engine(17, "WIND", "Wind probe", script);
 
         // Keep nonzero scenario variation so the legacy runtime-field
         // compatibility path cannot mask a stale TargetWind. SetWind must
@@ -2815,44 +2472,29 @@ func ReadWind()
 
         let probe = engine.spawn_test_object(SpawnConfig::new("WIND"));
         let probe_index = engine.test_object_index(probe);
-        assert_eq!(
-            engine
-                .call_object_function(probe_index, "ForceWind", Vec::new())
-                .expect("SetWind executes"),
-            Value::Int(80)
-        );
-        assert_eq!(
-            (engine.environment().wind, engine.environment().wind_target),
-            (80, 80)
-        );
-        assert_eq!(engine.environment().base_wind, 5);
+        unit_assert_eq!(engine.call_object_function(probe_index, "ForceWind", Vec::new()).expect("SetWind executes") => Value::Int(80));
+        unit_assert_eq!((engine.environment().wind, engine.environment().wind_target) => (80, 80));
+        unit_assert_eq!(engine.environment().base_wind => 5);
 
         for expected_frame in 1..1_000 {
             engine.tick_without_snapshot().test_value();
             let probe_index = engine.test_object_index(probe);
-            assert_eq!(
+            unit_assert_eq!(
                 engine
                     .call_object_function(probe_index, "ReadWind", Vec::new())
-                    .expect("GetWind executes"),
+                    .expect("GetWind executes") =>
                 Value::Int(80),
                 "script-set wind decayed on frame {expected_frame}"
             );
-            assert_eq!(engine.environment().wind_target, 80);
+            unit_assert_eq!(engine.environment().wind_target => 80);
         }
-        assert_eq!(engine.frame(), 999);
+        unit_assert_eq!(engine.frame() => 999);
 
         engine.tick_without_snapshot().test_value();
         let weather = engine.environment();
-        assert_eq!(weather.base_wind, 5);
-        assert!(
-            (1..=9).contains(&weather.wind_target),
-            "Tick1000 must evaluate around scenario Std 5 +/- Rnd 4, got {}",
-            weather.wind_target
-        );
-        assert_eq!(
-            weather.wind, 79,
-            "Tick1000 evaluates the scenario target, then steps toward it"
-        );
+        unit_assert_eq!(weather.base_wind => 5);
+        unit_assert!((1..=9).contains(&weather.wind_target), "Tick1000 must evaluate around scenario Std 5 +/- Rnd 4, got {}", weather.wind_target);
+        unit_assert_eq!(weather.wind => 79, "Tick1000 evaluates the scenario target, then steps toward it");
     }
 
     #[test]
@@ -2872,18 +2514,15 @@ func ReadWind()
         // Off-gate frames consume no draws and leave the wind unchanged.
         let before = settings;
         settings.advance_frame(&mut rng, 7);
-        assert_eq!(settings.wind, before.wind);
-        assert_eq!(settings.wind_target, before.wind_target);
+        unit_assert_eq!(settings.wind => before.wind);
+        unit_assert_eq!(settings.wind_target => before.wind_target);
 
         settings.advance_frame(&mut rng, 1000);
-        assert_eq!(
-            settings.wind_target, expected_target,
-            "Tick1000 target evaluation"
-        );
-        assert_eq!(rng, probe, "exactly one synced draw");
+        unit_assert_eq!(settings.wind_target => expected_target, "Tick1000 target evaluation");
+        unit_assert_eq!(rng => probe, "exactly one synced draw");
         let stepped = (before.wind + (expected_target - before.wind).signum())
             .clamp(settings.wind_min, settings.wind_max);
-        assert_eq!(settings.wind, stepped, "Tick10 step toward the target");
+        unit_assert_eq!(settings.wind => stepped, "Tick10 step toward the target");
     }
 
     #[test]
@@ -2901,9 +2540,9 @@ func ReadWind()
 
         settings.advance_frame(&mut rng, 1_000);
 
-        assert_eq!(settings.base_wind, 0, "scenario Std remains authoritative");
-        assert_eq!(settings.wind_target, expected_target);
-        assert_eq!(rng, probe, "Tick1000 consumes exactly one synced draw");
+        unit_assert_eq!(settings.base_wind => 0, "scenario Std remains authoritative");
+        unit_assert_eq!(settings.wind_target => expected_target);
+        unit_assert_eq!(rng => probe, "Tick1000 consumes exactly one synced draw");
     }
 
     #[test]
@@ -2915,37 +2554,33 @@ func ReadWind()
         settings.wind_target = 40;
         let mut rng = LcgRng::seed_from_u64(57);
         let mut probe = rng.clone();
-        assert_eq!(
-            probe.random(141),
-            70,
-            "fixture evaluates TargetWind to zero"
-        );
+        unit_assert_eq!(probe.random(141) => 70, "fixture evaluates TargetWind to zero");
 
         settings.advance_frame(&mut rng, 1_000);
-        assert_eq!(settings.wind_target, 0, "Tick1000 replaces TargetWind");
-        assert_eq!(settings.wind, 39, "coincident Tick10 uses the new target");
-        assert_eq!(settings.base_wind, 0, "scenario Wind.Std stays immutable");
-        assert_eq!(rng, probe, "Tick1000 consumes exactly one synced draw");
+        unit_assert_eq!(settings.wind_target => 0, "Tick1000 replaces TargetWind");
+        unit_assert_eq!(settings.wind => 39, "coincident Tick10 uses the new target");
+        unit_assert_eq!(settings.base_wind => 0, "scenario Wind.Std stays immutable");
+        unit_assert_eq!(rng => probe, "Tick1000 consumes exactly one synced draw");
 
         for frame in 1_001..=1_390 {
             // Engine construction, replacement, and restore normalize legacy
             // fixture fields here. They must not repair a legitimate zero
             // TargetWind back to the current Wind.
             settings.refresh_runtime_fields();
-            assert_eq!(settings.wind_target, 0, "TargetWind before frame {frame}");
-            assert_eq!(settings.base_wind, 0, "Wind.Std before frame {frame}");
+            unit_assert_eq!(settings.wind_target => 0, "TargetWind before frame {frame}");
+            unit_assert_eq!(settings.base_wind => 0, "Wind.Std before frame {frame}");
 
             let previous_wind = settings.wind;
             settings.advance_frame(&mut rng, frame);
             if frame % 10 == 0 {
-                assert_eq!(settings.wind, previous_wind - 1, "Tick10 frame {frame}");
+                unit_assert_eq!(settings.wind => previous_wind - 1, "Tick10 frame {frame}");
             } else {
-                assert_eq!(settings.wind, previous_wind, "off-gate frame {frame}");
+                unit_assert_eq!(settings.wind => previous_wind, "off-gate frame {frame}");
             }
-            assert_eq!(settings.wind_target, 0, "TargetWind on frame {frame}");
-            assert_eq!(settings.base_wind, 0, "Wind.Std on frame {frame}");
+            unit_assert_eq!(settings.wind_target => 0, "TargetWind on frame {frame}");
+            unit_assert_eq!(settings.base_wind => 0, "Wind.Std on frame {frame}");
         }
-        assert_eq!(settings.wind, 0, "Wind decays all the way to TargetWind");
+        unit_assert_eq!(settings.wind => 0, "Wind decays all the way to TargetWind");
     }
 
     #[test]
@@ -2957,29 +2592,23 @@ func ReadWind()
         settings.wind = 80;
         settings.wind_target = 80;
         settings.refresh_runtime_fields();
-        assert_eq!(
-            settings.base_wind, 0,
-            "script wind cannot replace scenario Std"
-        );
-        assert_eq!(
-            settings.wind_target, 80,
-            "normalization preserves TargetWind"
-        );
+        unit_assert_eq!(settings.base_wind => 0, "script wind cannot replace scenario Std");
+        unit_assert_eq!(settings.wind_target => 80, "normalization preserves TargetWind");
 
         let mut rng = LcgRng::seed_from_u64(9_001);
         settings.advance_frame(&mut rng, 1_000);
-        assert_eq!(settings.wind_target, 0, "Tick1000 evaluates scenario Std");
-        assert_eq!(settings.wind, 79, "Tick10 starts decay on the same frame");
+        unit_assert_eq!(settings.wind_target => 0, "Tick1000 evaluates scenario Std");
+        unit_assert_eq!(settings.wind => 79, "Tick10 starts decay on the same frame");
 
         for frame in 1_001..=1_790 {
             settings.refresh_runtime_fields();
-            assert_eq!(settings.base_wind, 0, "Wind.Std before frame {frame}");
-            assert_eq!(settings.wind_target, 0, "TargetWind before frame {frame}");
+            unit_assert_eq!(settings.base_wind => 0, "Wind.Std before frame {frame}");
+            unit_assert_eq!(settings.wind_target => 0, "TargetWind before frame {frame}");
             settings.advance_frame(&mut rng, frame);
         }
-        assert_eq!(settings.wind, 0, "script Wind decays back to scenario Std");
-        assert_eq!(settings.wind_target, 0);
-        assert_eq!(settings.base_wind, 0);
+        unit_assert_eq!(settings.wind => 0, "script Wind decays back to scenario Std");
+        unit_assert_eq!(settings.wind_target => 0);
+        unit_assert_eq!(settings.base_wind => 0);
     }
 
     #[test]
@@ -3005,8 +2634,8 @@ func ReadWind()
 
             settings.advance_frame(&mut rng, frame);
 
-            assert_eq!(settings.wind_target, expected, "frame {frame}");
-            assert_eq!(rng, mirror, "one Random(141) draw at frame {frame}");
+            unit_assert_eq!(settings.wind_target => expected, "frame {frame}");
+            unit_assert_eq!(rng => mirror, "one Random(141) draw at frame {frame}");
         }
     }
 
@@ -3021,27 +2650,24 @@ func ReadWind()
         let mut delta = clonk_engine::compat::EnvironmentDelta::default();
         delta.wind = Some(-50);
         delta.apply(&mut settings);
-        assert_eq!((settings.wind, settings.wind_target), (-50, -50));
+        unit_assert_eq!((settings.wind, settings.wind_target) => (-50, -50));
         let mut rng = LcgRng::seed_from_u64(0xC4);
         let before_tick10 = rng.clone();
 
         settings.advance_frame(&mut rng, 10);
 
-        assert_eq!(settings.wind, 0, "scenario Min clamps the SetWind value");
-        assert_eq!(settings.wind_target, -50, "Tick10 does not reroll target");
-        assert_eq!(rng, before_tick10, "Tick10 consumes no wind RNG");
+        unit_assert_eq!(settings.wind => 0, "scenario Min clamps the SetWind value");
+        unit_assert_eq!(settings.wind_target => -50, "Tick10 does not reroll target");
+        unit_assert_eq!(rng => before_tick10, "Tick10 consumes no wind RNG");
 
         let mut mirror = rng.clone();
         let _ = mirror.random(21);
 
         settings.advance_frame(&mut rng, 1_000);
 
-        assert_eq!(settings.wind_target, 20, "Std 50 always bounds to Max 20");
-        assert_eq!(
-            settings.wind, 1,
-            "Tick1000 rerolls to 20, then steps once up from the Min bound"
-        );
-        assert_eq!(rng, mirror, "Tick1000 preserves the one-draw ledger");
+        unit_assert_eq!(settings.wind_target => 20, "Std 50 always bounds to Max 20");
+        unit_assert_eq!(settings.wind => 1, "Tick1000 rerolls to 20, then steps once up from the Min bound");
+        unit_assert_eq!(rng => mirror, "Tick1000 preserves the one-draw ledger");
     }
 
     const SET_BRIDGE_ACTION_DATA_SCRIPT: &str = r#"#strict 3
@@ -3124,12 +2750,16 @@ func ReadWind()
     "#;
 
     fn build_lift_definition(id: &str) -> Definition {
-        let mut definition = test_definition(id, id, PROCEDURE_MOVEMENT_SCRIPT);
-        let mut actions = HashMap::new();
-        actions.insert("Idle".to_string(), ActionSpec::default());
-        actions.insert("Lift".to_string(), ActionSpec::for_procedure("lift"));
-        definition.configure_actions(Some("Idle".to_string()), actions);
-        definition
+        action_definition(
+            id,
+            id,
+            PROCEDURE_MOVEMENT_SCRIPT,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Lift", ActionSpec::for_procedure("lift")),
+            ],
+        )
     }
 
     fn build_idle_definition(id: &str) -> Definition {
@@ -3164,10 +2794,7 @@ func ReadWind()
         let mut engine = Engine::new();
         engine.register_test_definition(definition);
         let spawned = engine.spawn_object(SpawnConfig::new("CLNK").with_energy(50));
-        assert!(
-            spawned.is_ok(),
-            "Initialize returning an int must not error (C++ discards the return): {spawned:?}"
-        );
+        unit_assert!(spawned.is_ok(), "Initialize returning an int must not error (C++ discards the return): {spawned:?}");
     }
 
     #[test]
@@ -3182,12 +2809,7 @@ func ReadWind()
         crew.set_crew_member(true);
         engine.register_test_definition(crew);
         for owner in [1, 2] {
-            engine.spawn_test_object(
-                SpawnConfig::new("Test")
-                    .with_owner(owner)
-                    .with_alive(true)
-                    .with_crew_member(true),
-            );
+            spawn_fixture!(engine, "Test", with_owner: owner, with_alive: true, with_crew_member: true);
         }
 
         let mut production = HashMap::new();
@@ -3225,32 +2847,23 @@ func ReadWind()
         for _ in 0..2099 {
             engine.tick_without_snapshot().test_value();
         }
-        assert_eq!(engine.frame(), 2099);
+        unit_assert_eq!(engine.frame() => 2099);
 
         let leader = engine.player(1).test_value();
         let follower = engine.player(2).test_value();
-        assert!(leader.home_base_material().get("Brick").is_none());
-        assert!(follower.home_base_material().get("Brick").is_none());
-        assert_eq!(
-            (leader.production_delay(), follower.production_delay()),
-            (59, 59)
-        );
+        unit_assert!(leader.home_base_material().get("Brick").is_none());
+        unit_assert!(follower.home_base_material().get("Brick").is_none());
+        unit_assert_eq!((leader.production_delay(), follower.production_delay()) => (59, 59));
 
         engine.tick_without_snapshot().test_value();
-        assert_eq!(engine.frame(), 2100);
+        unit_assert_eq!(engine.frame() => 2100);
 
         let leader = engine.player(1).test_value();
         let follower = engine.player(2).test_value();
-        assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
-        assert_eq!(follower.home_base_material().get("Brick"), Some(&1));
-        assert_eq!(
-            (leader.production_delay(), follower.production_delay()),
-            (0, 60)
-        );
-        assert_eq!(
-            (leader.production_unit(), follower.production_unit()),
-            (1, 0)
-        );
+        unit_assert_eq!(leader.home_base_material().get("Brick") => Some(&1));
+        unit_assert_eq!(follower.home_base_material().get("Brick") => Some(&1));
+        unit_assert_eq!((leader.production_delay(), follower.production_delay()) => (0, 60));
+        unit_assert_eq!((leader.production_unit(), follower.production_unit()) => (1, 0));
     }
 
     #[test]
@@ -3269,12 +2882,7 @@ func ReadWind()
         crew.set_crew_member(true);
         engine.register_test_definition(crew);
         for owner in [1, 5] {
-            engine.spawn_test_object(
-                SpawnConfig::new("Test")
-                    .with_owner(owner)
-                    .with_alive(true)
-                    .with_crew_member(true),
-            );
+            spawn_fixture!(engine, "Test", with_owner: owner, with_alive: true, with_crew_member: true);
         }
         let production = HashMap::from([("Brick".to_string(), 10)]);
         engine.register_test_player(
@@ -3295,23 +2903,14 @@ func ReadWind()
         for _ in 0..34 {
             engine.tick_without_snapshot().test_value();
         }
-        assert_eq!(
-            (
-                engine.player(5).expect("leader").production_delay(),
-                engine.player(1).expect("follower").production_delay(),
-            ),
-            (59, 59),
-        );
+        unit_assert_eq!((engine.player(5).expect("leader").production_delay(), engine.player(1).expect("follower").production_delay(),) => (59, 59),);
         engine.tick_without_snapshot().test_value();
 
         let follower = engine.player(1).test_value();
         let leader = engine.player(5).test_value();
-        assert_eq!(
-            (leader.production_delay(), follower.production_delay()),
-            (0, 60)
-        );
-        assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
-        assert_eq!(follower.home_base_material().get("Brick"), Some(&1));
+        unit_assert_eq!((leader.production_delay(), follower.production_delay()) => (0, 60));
+        unit_assert_eq!(leader.home_base_material().get("Brick") => Some(&1));
+        unit_assert_eq!(follower.home_base_material().get("Brick") => Some(&1));
     }
 
     #[test]
@@ -3326,12 +2925,7 @@ func ReadWind()
         crew.set_crew_member(true);
         engine.register_test_definition(crew);
         for owner in [1, 5] {
-            engine.spawn_test_object(
-                SpawnConfig::new("Test")
-                    .with_owner(owner)
-                    .with_alive(true)
-                    .with_crew_member(true),
-            );
+            spawn_fixture!(engine, "Test", with_owner: owner, with_alive: true, with_crew_member: true);
         }
         engine.register_test_player(
             PlayerConfig::new(1, "Follower")
@@ -3352,16 +2946,10 @@ func ReadWind()
 
         let follower = engine.player(1).test_value();
         let leader = engine.player(5).test_value();
-        assert!(leader.home_base_production_entries().is_empty());
-        assert!(follower.home_base_production_entries().is_empty());
-        assert_eq!(
-            (leader.production_delay(), follower.production_delay()),
-            (0, 60)
-        );
-        assert_eq!(
-            (leader.production_unit(), follower.production_unit()),
-            (1, 0)
-        );
+        unit_assert!(leader.home_base_production_entries().is_empty());
+        unit_assert!(follower.home_base_production_entries().is_empty());
+        unit_assert_eq!((leader.production_delay(), follower.production_delay()) => (0, 60));
+        unit_assert_eq!((leader.production_unit(), follower.production_unit()) => (1, 0));
     }
 
     #[test]
@@ -3385,9 +2973,9 @@ func ReadWind()
         }
 
         let player = engine.player(1).test_value();
-        assert_eq!(player.production_delay(), 59);
-        assert_eq!(player.production_unit(), 0);
-        assert!(player.home_base_material().get("Brick").is_none());
+        unit_assert_eq!(player.production_delay() => 59);
+        unit_assert_eq!(player.production_unit() => 0);
+        unit_assert!(player.home_base_material().get("Brick").is_none());
     }
 
     #[test]
@@ -3398,12 +2986,7 @@ func ReadWind()
         crew.set_crew_member(true);
         engine.register_test_definition(crew);
         for owner in [1, 2] {
-            engine.spawn_test_object(
-                SpawnConfig::new("Test")
-                    .with_owner(owner)
-                    .with_alive(true)
-                    .with_crew_member(true),
-            );
+            spawn_fixture!(engine, "Test", with_owner: owner, with_alive: true, with_crew_member: true);
             engine.register_test_player(
                 PlayerConfig::new(owner, format!("Player {owner}")).with_team(Some(99)),
             );
@@ -3433,9 +3016,9 @@ func ReadWind()
 
         for owner in [1, 2] {
             let player = engine.player(owner).test_value();
-            assert_eq!(player.production_delay(), 0);
-            assert_eq!(player.production_unit(), 1);
-            assert_eq!(player.home_base_material().get("Brick"), Some(&1));
+            unit_assert_eq!(player.production_delay() => 0);
+            unit_assert_eq!(player.production_unit() => 1);
+            unit_assert_eq!(player.home_base_material().get("Brick") => Some(&1));
         }
     }
 
@@ -3451,12 +3034,7 @@ func ReadWind()
         crew.set_crew_member(true);
         engine.register_test_definition(crew);
         for owner in [1, 2] {
-            engine.spawn_test_object(
-                SpawnConfig::new("Test")
-                    .with_owner(owner)
-                    .with_alive(true)
-                    .with_crew_member(true),
-            );
+            spawn_fixture!(engine, "Test", with_owner: owner, with_alive: true, with_crew_member: true);
         }
 
         let mut production = HashMap::new();
@@ -3477,11 +3055,8 @@ func ReadWind()
         {
             let leader = engine.player(1).test_value();
             let follower = engine.player(2).test_value();
-            assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
-            assert!(
-                follower.home_base_material().get("Brick").is_none(),
-                "follower should not receive materials when rule disabled"
-            );
+            unit_assert_eq!(leader.home_base_material().get("Brick") => Some(&1));
+            unit_assert!(follower.home_base_material().get("Brick").is_none(), "follower should not receive materials when rule disabled");
         }
 
         engine.set_team_home_base_rule(true);
@@ -3491,7 +3066,7 @@ func ReadWind()
             .test_value();
 
         let follower_after = engine.player(2).test_value();
-        assert_eq!(follower_after.home_base_material().get("Brick"), Some(&1));
+        unit_assert_eq!(follower_after.home_base_material().get("Brick") => Some(&1));
     }
 
     #[test]
@@ -3508,7 +3083,7 @@ func ReadWind()
             .test_value();
 
         let player = engine.player(1).test_value();
-        assert_eq!(player.home_base_material().get("Brick"), Some(&3));
+        unit_assert_eq!(player.home_base_material().get("Brick") => Some(&3));
     }
 
     #[test]
@@ -3543,8 +3118,8 @@ func ReadWind()
             ("BRIK".to_string(), 0),
             ("ROCK".to_string(), 2),
         ];
-        assert_eq!(leader.home_base_material_entries(), expected);
-        assert_eq!(follower.home_base_material_entries(), expected);
+        unit_assert_eq!(leader.home_base_material_entries() => expected);
+        unit_assert_eq!(follower.home_base_material_entries() => expected);
     }
 
     #[test]
@@ -3560,10 +3135,7 @@ func ReadWind()
             .test_value();
 
         let player = engine.player(1).test_value();
-        assert!(
-            player.knowledge().any(|id| id == "BRIK"),
-            "player gains requested knowledge"
-        );
+        unit_assert!(player.knowledge().any(|id| id == "BRIK"), "player gains requested knowledge");
     }
 
     #[test]
@@ -3623,8 +3195,8 @@ func ReadWind()
             ],
         );
 
-        assert_eq!(
-            result,
+        unit_assert_eq!(
+            result =>
             Value::Array(vec![
                 Value::Bool(true),
                 Value::C4Id("HIGH".into()),
@@ -3639,13 +3211,13 @@ func ReadWind()
                 Value::Int(0),
             ])
         );
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .player(7)
                 .expect("player persists")
                 .magic()
                 .cloned()
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>() =>
             vec!["OBJE".to_string(), "LOWM".to_string(), "NEWM".to_string()]
         );
     }
@@ -3675,7 +3247,7 @@ func ReadWind()
         let object = engine.spawn_test_object(SpawnConfig::new("CALL"));
         let index = engine.test_object_index(object);
 
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(
                     index,
@@ -3685,7 +3257,7 @@ func ReadWind()
                         Value::C4Id("MISS".to_string()),
                     ],
                 )
-                .expect("Value host calls run"),
+                .expect("Value host calls run") =>
             Value::Array(vec![Value::Int(10), Value::Nil, Value::Nil])
         );
     }
@@ -3738,10 +3310,10 @@ func ReadWind()
             pxs_default_fixture(definition, SpawnConfig::new("CALL").with_owner(1));
         let index = engine.test_object_index(object);
 
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(index, "EmptyGlobal", vec![])
-                .expect("empty global check runs"),
+                .expect("empty global check runs") =>
             Value::Nil,
             "a missing effect-list head returns null, not integer zero"
         );
@@ -3751,10 +3323,10 @@ func ReadWind()
             other => panic!("AddEffect returns the Shield number, got {other:?}"),
         };
 
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(index, "Probe", vec![])
-                .expect("CheckEffect callback chain runs"),
+                .expect("CheckEffect callback chain runs") =>
             Value::Array(vec![
                 Value::Int(0),
                 Value::Int(-1),
@@ -3763,11 +3335,11 @@ func ReadWind()
                 Value::Int(0),
             ])
         );
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .object_snapshot(object)
                 .expect("caller remains live")
-                .rotation,
+                .rotation =>
             6,
             "FxShieldAdd received the proposed interval/value and ran synchronously"
         );
@@ -3810,10 +3382,10 @@ func ReadWind()
         let (mut engine, object) = pxs_default_fixture(definition, SpawnConfig::new("CALL"));
         let index = engine.test_object_index(object);
 
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(index, "RemoveAndReplace", vec![])
-                .expect("remove-and-replace call runs"),
+                .expect("remove-and-replace call runs") =>
             Value::Array(vec![
                 Value::Int(1),
                 Value::Int(2),
@@ -3823,10 +3395,10 @@ func ReadWind()
             ]),
             "the dead number and vars remain visible and reserve the next number"
         );
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(index, "RemoveWithoutCalls", vec![])
-                .expect("no-callback removal runs"),
+                .expect("no-callback removal runs") =>
             Value::Array(vec![
                 Value::Int(3),
                 Value::Bool(true),
@@ -3834,28 +3406,23 @@ func ReadWind()
                 Value::Int(88),
             ])
         );
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(index, "ProbeSilent", vec![])
-                .expect("dead effect remains visible before Execute"),
+                .expect("dead effect remains visible before Execute") =>
             Value::Array(vec![Value::Int(3), Value::Int(88)])
         );
 
         engine.tick_without_snapshot().test_value();
-        assert_eq!(
-            engine
-                .call_object_function(index, "ProbeSilent", vec![])
-                .expect("post-Execute probe runs"),
-            Value::Array(vec![Value::Nil, Value::Nil])
-        );
-        assert_eq!(
+        unit_assert_eq!(engine.call_object_function(index, "ProbeSilent", vec![]).expect("post-Execute probe runs") => Value::Array(vec![Value::Nil, Value::Nil]));
+        unit_assert_eq!(
             engine
                 .object_snapshot(object)
                 .expect("caller remains live")
                 .effects
                 .iter()
                 .map(|effect| (effect.name.clone(), effect.number))
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>() =>
             vec![("New".to_owned(), 2)]
         );
     }
@@ -3899,23 +3466,14 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
             .find(|effect| effect.name == "Twin" && effect.priority == 200)
             .test_value()
             .number;
-        assert!(first_number < second_number);
+        unit_assert!(first_number < second_number);
 
         engine.tick_without_snapshot().test_value();
         let after_remove = engine.test_object_snapshot(object);
-        assert!(after_remove.effects.iter().any(|effect| {
-            effect.number == first_number && effect.name == "Twin" && effect.priority == 100
-        }));
-        assert!(after_remove.effects.iter().any(|effect| {
-            effect.number == second_number && effect.name == "Twin" && effect.priority == 0
-        }));
+        unit_assert!(after_remove.effects.iter().any(|effect| {effect.number == first_number && effect.name == "Twin" && effect.priority == 100}));
+        unit_assert!(after_remove.effects.iter().any(|effect| {effect.number == second_number && effect.name == "Twin" && effect.priority == 0}));
         let index = engine.test_object_index(object);
-        assert_eq!(
-            engine
-                .call_object_function(index, "FirstTwin", vec![])
-                .expect("live name lookup succeeds"),
-            Value::Int(first_number)
-        );
+        unit_assert_eq!(engine.call_object_function(index, "FirstTwin", vec![]).expect("live name lookup succeeds") => Value::Int(first_number));
 
         let stop_calls = calls
             .lock()
@@ -3924,23 +3482,19 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
             .filter(|(name, _)| name == "FxTwinStop")
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(stop_calls.len(), 1);
-        assert_eq!(stop_calls[0].1.get(1), Some(&Value::Int(second_number)));
-        assert_eq!(
-            stop_calls[0].1.get(2),
-            None,
-            "C4Effect::Kill supplies only target and number; the typed script parameter nil-fills internally"
-        );
+        unit_assert_eq!(stop_calls.len() => 1);
+        unit_assert_eq!(stop_calls[0].1.get(1) => Some(&Value::Int(second_number)));
+        unit_assert_eq!(stop_calls[0].1.get(2) => None, "C4Effect::Kill supplies only target and number; the typed script parameter nil-fills internally");
 
         engine.tick_without_snapshot().test_value();
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .object_snapshot(object)
                 .expect("caller remains live")
                 .effects
                 .iter()
                 .map(|effect| effect.number)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>() =>
             vec![first_number]
         );
     }
@@ -3982,43 +3536,38 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
         engine.register_test_definition(definition);
         let removed = engine.spawn_test_object(SpawnConfig::new("CALL"));
         let removed_index = engine.test_object_index(removed);
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(removed_index, "RemoveOnlyThenCheck", vec![])
-                .expect("same-call removal check runs"),
+                .expect("same-call removal check runs") =>
             Value::Int(0),
             "a dead-but-not-yet-cleaned list head reaches C4Effect::Check"
         );
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(removed_index, "Walk", vec![])
-                .expect("pre-Execute dead-list check runs"),
+                .expect("pre-Execute dead-list check runs") =>
             Value::Int(0),
             "command folding keeps the dead list head linked"
         );
         engine.tick_without_snapshot().test_value();
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(removed_index, "Walk", vec![])
-                .expect("post-Execute empty-list check runs"),
+                .expect("post-Execute empty-list check runs") =>
             Value::Nil,
             "the next Execute unlinks the dead final node"
         );
 
-        let walked = engine.spawn_test_object(SpawnConfig::new("CALL").with_owner(1));
+        let walked = spawn_fixture!(engine, "CALL", with_owner: 1);
         let walked_index = engine.test_object_index(walked);
         engine.call_test_object_function(walked_index, "InstallWalk", vec![]);
-        assert_eq!(
-            engine
-                .call_object_function(walked_index, "Walk", vec![])
-                .expect("live checker walk runs"),
-            Value::Int(0)
-        );
-        assert_eq!(
+        unit_assert_eq!(engine.call_object_function(walked_index, "Walk", vec![]).expect("live checker walk runs") => Value::Int(0));
+        unit_assert_eq!(
             engine
                 .object_snapshot(walked)
                 .expect("caller remains live")
-                .rotation,
+                .rotation =>
             0,
             "the removed later Victim checker was not dispatched from a stale snapshot"
         );
@@ -4062,42 +3611,22 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
             other => panic!("second effect number missing: {other:?}"),
         };
 
-        assert_eq!(
-            engine
-                .call_object_function(index, "Probe", vec![])
-                .expect("annul/add-deny check runs"),
-            Value::Int(-2)
-        );
+        unit_assert_eq!(engine.call_object_function(index, "Probe", vec![]).expect("annul/add-deny check runs") => Value::Int(-2));
         let snapshot = engine.test_object_snapshot(object);
-        assert_eq!(snapshot.rotation, 2, "the acceptor Stop ran exactly once");
-        assert_eq!(
+        unit_assert_eq!(snapshot.rotation => 2, "the acceptor Stop ran exactly once");
+        unit_assert_eq!(
             snapshot
                 .effects
                 .iter()
                 .filter(|effect| effect.priority != 0)
                 .map(|effect| effect.number)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>() =>
             vec![first],
             "last-annul winner {second} is dead; its same-name peer survives"
         );
-        assert!(
-            snapshot
-                .effects
-                .iter()
-                .any(|effect| effect.number == second && effect.priority == 0),
-            "Kill leaves the annulled acceptor linked until Execute"
-        );
+        unit_assert!(snapshot.effects.iter().any(|effect| effect.number == second && effect.priority == 0), "Kill leaves the annulled acceptor linked until Execute");
         engine.tick_without_snapshot().test_value();
-        assert_eq!(
-            engine
-                .object_snapshot(object)
-                .expect("caller remains live")
-                .effects
-                .iter()
-                .map(|effect| effect.number)
-                .collect::<Vec<_>>(),
-            vec![first]
-        );
+        unit_assert_eq!(engine.object_snapshot(object).expect("caller remains live").effects.iter().map(|effect| effect.number).collect::<Vec<_>>() => vec![first]);
     }
 
     #[test]
@@ -4136,17 +3665,12 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
         let (mut engine, object) = pxs_default_fixture(definition, SpawnConfig::new("CALL"));
         let index = engine.test_object_index(object);
         let shield = engine.call_test_object_function(index, "Install", vec![]);
-        assert_eq!(
-            engine
-                .call_object_function(index, "Probe", vec![])
-                .expect("annul-calls check runs"),
-            shield
-        );
-        assert_eq!(
+        unit_assert_eq!(engine.call_object_function(index, "Probe", vec![]).expect("annul-calls check runs") => shield);
+        unit_assert_eq!(
             engine
                 .object_snapshot(object)
                 .expect("caller remains live")
-                .rotation,
+                .rotation =>
             123,
             "AnnulCalls orders Upper Stop, signed-priority count 2, Upper Start"
         );
@@ -4184,53 +3708,21 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
 
         for name in ["Explicit", "Default"] {
             engine
-                .join_player(JoinPlayerConfig {
-                    name: name.to_string(),
-                    player_info_id: 0,
-                    score: 0,
-                    rounds: 0,
-                    rounds_won: 0,
-                    rounds_lost: 0,
-                    total_playing_time: 0,
-                    team: None,
-                    color_dw: 0xff0000,
-                    pref_color: 0,
-                    pref_position: 0,
-                    crew: Vec::new(),
-                    control_style: false,
-                    auto_context_menu: false,
-                    startup_player_count: 1,
-                })
+                .join_player(test_join_config(name, 0, Vec::new()))
                 .test_value();
         }
 
-        assert_eq!(
-            engine
-                .player(0)
-                .expect("explicit player exists")
-                .magic()
-                .cloned()
-                .collect::<Vec<_>>(),
-            vec!["OBJE", "MIDM", "LOWM", "HIGM"]
-        );
-        assert_eq!(
-            engine
-                .player(1)
-                .expect("default player exists")
-                .magic()
-                .cloned()
-                .collect::<Vec<_>>(),
-            vec!["MIDM", "LOWM", "NEWM", "HIGM"]
-        );
+        unit_assert_eq!(engine.player(0).expect("explicit player exists").magic().cloned().collect::<Vec<_>>() => vec!["OBJE", "MIDM", "LOWM", "HIGM"]);
+        unit_assert_eq!(engine.player(1).expect("default player exists").magic().cloned().collect::<Vec<_>>() => vec!["MIDM", "LOWM", "NEWM", "HIGM"]);
 
         let captured = engine.capture_state();
-        assert_eq!(
+        unit_assert_eq!(
             captured
                 .players
                 .iter()
                 .find(|player| player.id == 0)
                 .expect("explicit state exists")
-                .magic_entries,
+                .magic_entries =>
             vec![
                 ("OBJE".into(), 3),
                 ("MIDM".into(), -2),
@@ -4238,13 +3730,13 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
                 ("HIGM".into(), 7),
             ]
         );
-        assert_eq!(
+        unit_assert_eq!(
             captured
                 .players
                 .iter()
                 .find(|player| player.id == 1)
                 .expect("default state exists")
-                .magic_entries,
+                .magic_entries =>
             vec![
                 ("MIDM".into(), 0),
                 ("LOWM".into(), 0),
@@ -4255,23 +3747,15 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
         let encoded = captured.to_json_string().test_value();
         let decoded = EngineState::from_json_str(&encoded).test_value();
         engine.restore_state(&decoded).test_value();
-        assert_eq!(
-            engine
-                .player(0)
-                .expect("restored player exists")
-                .magic()
-                .cloned()
-                .collect::<Vec<_>>(),
-            vec!["OBJE", "MIDM", "LOWM", "HIGM"]
-        );
-        assert_eq!(
+        unit_assert_eq!(engine.player(0).expect("restored player exists").magic().cloned().collect::<Vec<_>>() => vec!["OBJE", "MIDM", "LOWM", "HIGM"]);
+        unit_assert_eq!(
             engine
                 .capture_state()
                 .players
                 .into_iter()
                 .find(|player| player.id == 0)
                 .expect("restored state exists")
-                .magic_entries,
+                .magic_entries =>
             vec![
                 ("OBJE".into(), 3),
                 ("MIDM".into(), -2),
@@ -4296,10 +3780,7 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
             .test_value();
 
         let player = engine.player(1).test_value();
-        assert!(
-            player.knowledge().all(|id| id != "BRIK"),
-            "player no longer knows revoked definition"
-        );
+        unit_assert!(player.knowledge().all(|id| id != "BRIK"), "player no longer knows revoked definition");
     }
 
     #[test]
@@ -4318,32 +3799,31 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
         engine.register_test_player(follower);
 
         let follower_before = engine.player(2).test_value();
-        assert!(
-            follower_before.home_base_material().is_empty(),
-            "rule disabled keeps member inventory separate"
-        );
+        unit_assert!(follower_before.home_base_material().is_empty(), "rule disabled keeps member inventory separate");
 
         engine.set_team_home_base_rule(true);
 
         let follower_after = engine.player(2).test_value();
-        assert_eq!(follower_after.home_base_material().get("Brick"), Some(&5));
+        unit_assert_eq!(follower_after.home_base_material().get("Brick") => Some(&5));
     }
 
     #[test]
     fn path_free_host_function_queries_landscape() {
-        let mut definition = test_definition("PathTester", "PathTester", PATHFINDING_HELPER_SCRIPT);
-        let mut actions = HashMap::new();
-        actions.insert("Idle".to_string(), ActionSpec::default());
-        definition.configure_actions(Some("Idle".to_string()), actions);
+        let definition = action_definition(
+            "PathTester",
+            "PathTester",
+            PATHFINDING_HELPER_SCRIPT,
+            Some("Idle"),
+            [("Idle", ActionSpec::default())],
+        );
 
-        let mut engine = Engine::with_seed(0);
-        engine.register_test_definition(definition);
+        let mut engine = definition_engine(0, definition);
         engine.set_landscape(Landscape::flat(32, 8));
 
         let id = engine.spawn_test_object(SpawnConfig::new("PathTester"));
 
         let snapshot = engine.test_object_snapshot(id);
-        assert_eq!(snapshot.energy, 1);
+        unit_assert_eq!(snapshot.energy => 1);
     }
 
     #[test]
@@ -4362,12 +3842,8 @@ func Initialize()
         let index = engine.test_object_index(object);
         let locals = &engine.objects[index].state.local_vars;
 
-        assert_eq!(locals.get("short_result"), Some(&Value::Int(1)));
-        assert_eq!(
-            locals.get("overflow_result"),
-            Some(&Value::Int(i32::MIN)),
-            "2^31 wraps to the signed int32 minimum like C++"
-        );
+        unit_assert_eq!(locals.get("short_result") => Some(&Value::Int(1)));
+        unit_assert_eq!(locals.get("overflow_result") => Some(&Value::Int(i32::MIN)), "2^31 wraps to the signed int32 minimum like C++");
     }
 
     #[test]
@@ -4397,10 +3873,7 @@ func Initialize()
         let object = engine.spawn_test_object(SpawnConfig::new("F162"));
         let index = engine.test_object_index(object);
 
-        assert_eq!(
-            engine.objects[index].state.local_vars.get("short_path"),
-            Some(&Value::Bool(false))
-        );
+        unit_assert_eq!(engine.objects[index].state.local_vars.get("short_path") => Some(&Value::Bool(false)));
     }
 
     #[test]
@@ -4417,53 +3890,54 @@ func Initialize()
         let (engine, object) = pxs_default_fixture(definition, SpawnConfig::new("D162"));
         let index = engine.test_object_index(object);
 
-        assert_eq!(
-            engine.objects[index].state.local_vars.get("distance"),
-            Some(&Value::Nil)
-        );
+        unit_assert_eq!(engine.objects[index].state.local_vars.get("distance") => Some(&Value::Nil));
     }
 
     #[test]
     fn advances_actions_using_definition_map() {
         let mut definition = build_definition();
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default()
-                .with_length(2)
-                .with_delay(1)
-                .with_next("Idle"),
+        set_test_actions(
+            &mut definition,
+            Some("Walk"),
+            [
+                (
+                    "Walk",
+                    ActionSpec::default()
+                        .with_length(2)
+                        .with_delay(1)
+                        .with_next("Idle"),
+                ),
+                ("Idle", ActionSpec::default().with_length(1)),
+            ],
         );
-        actions.insert("Idle".to_string(), ActionSpec::default().with_length(1));
-        definition.configure_actions(Some("Walk".to_string()), actions);
 
         let (mut engine, id) = pxs_fixture(0, definition, SpawnConfig::new("Test"));
 
         let snapshot = engine.test_object_snapshot(id);
-        assert_eq!(snapshot.action.name, "Walk");
-        assert_eq!(snapshot.action.phase, 0);
-        assert_eq!(snapshot.action.ticks, 0);
+        unit_assert_eq!(snapshot.action.name => "Walk");
+        unit_assert_eq!(snapshot.action.phase => 0);
+        unit_assert_eq!(snapshot.action.ticks => 0);
 
-        let snapshot = engine.test_tick();
-        let object = snapshot.object(id).test_value();
-        assert_eq!(object.action.name, "Walk");
-        assert_eq!(object.action.phase, 1);
-        assert_eq!(object.action.ticks, 0);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.action.name => "Walk");
+        unit_assert_eq!(object.action.phase => 1);
+        unit_assert_eq!(object.action.ticks => 0);
 
-        let snapshot = engine.test_tick();
-        let object = snapshot.object(id).test_value();
-        assert_eq!(object.action.name, "Idle");
-        assert_eq!(object.action.phase, 0);
-        assert_eq!(object.action.ticks, 0);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.action.name => "Idle");
+        unit_assert_eq!(object.action.phase => 0);
+        unit_assert_eq!(object.action.ticks => 0);
     }
 
     #[test]
     fn menu_command_invokes_definition_script() {
         let mut definition = test_definition("Crew", "Crew", MENU_COMMAND_SCRIPT);
         definition.set_crew_member(true);
-        let mut actions = HashMap::new();
-        actions.insert("Idle".to_string(), ActionSpec::default());
-        definition.configure_actions(Some("Idle".to_string()), actions);
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [("Idle", ActionSpec::default())],
+        );
 
         let (mut engine, id) = pxs_fixture(0, definition, SpawnConfig::new("Crew").with_owner(1));
 
@@ -4477,50 +3951,42 @@ func Initialize()
         let handled = engine
             .menu_command(id, MenuCommandKind::Focus, selection)
             .test_value();
-        assert!(handled, "script should report handled command");
+        unit_assert!(handled, "script should report handled command");
 
         let snapshot = engine.test_object_snapshot(id);
-        assert_eq!(
-            snapshot.rotation, 42,
-            "script should update object rotation via SetR"
-        );
+        unit_assert_eq!(snapshot.rotation => 42, "script should update object rotation via SetR");
     }
 
     #[test]
     fn action_delay_requires_multiple_ticks() {
         let mut definition = build_definition();
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Loop".to_string(),
-            ActionSpec::default().with_length(3).with_delay(2),
+        set_test_actions(
+            &mut definition,
+            Some("Loop"),
+            [("Loop", ActionSpec::default().with_length(3).with_delay(2))],
         );
-        definition.configure_actions(Some("Loop".to_string()), actions);
 
         let (mut engine, id) = pxs_fixture(0, definition, SpawnConfig::new("Test"));
 
         let initial = engine.test_object_snapshot(id);
-        assert_eq!(initial.action.phase, 0);
-        assert_eq!(initial.action.ticks, 0);
+        unit_assert_eq!(initial.action.phase => 0);
+        unit_assert_eq!(initial.action.ticks => 0);
 
-        let after_first = engine.test_tick();
-        let object = after_first.object(id).test_value();
-        assert_eq!(object.action.phase, 0);
-        assert_eq!(object.action.ticks, 1);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.action.phase => 0);
+        unit_assert_eq!(object.action.ticks => 1);
 
-        let after_second = engine.test_tick();
-        let object = after_second.object(id).test_value();
-        assert_eq!(object.action.phase, 1);
-        assert_eq!(object.action.ticks, 0);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.action.phase => 1);
+        unit_assert_eq!(object.action.ticks => 0);
 
-        let after_third = engine.test_tick();
-        let object = after_third.object(id).test_value();
-        assert_eq!(object.action.phase, 1);
-        assert_eq!(object.action.ticks, 1);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.action.phase => 1);
+        unit_assert_eq!(object.action.ticks => 1);
 
-        let after_fourth = engine.test_tick();
-        let object = after_fourth.object(id).test_value();
-        assert_eq!(object.action.phase, 2);
-        assert_eq!(object.action.ticks, 0);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.action.phase => 2);
+        unit_assert_eq!(object.action.ticks => 0);
     }
 
     #[test]
@@ -4538,24 +4004,24 @@ func Initialize()
         let mut definition = test_definition("Actor", "Actor", script);
         definition.set_debugger_hooks(hooks);
 
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default()
-                .with_length(1)
-                .with_delay(1)
-                .with_next("Walk")
-                .with_start_call("OnIdleStart")
-                .with_end_call("OnIdleEnd"),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                (
+                    "Idle",
+                    ActionSpec::default()
+                        .with_length(1)
+                        .with_delay(1)
+                        .with_next("Walk")
+                        .with_start_call("OnIdleStart")
+                        .with_end_call("OnIdleEnd"),
+                ),
+                ("Walk", ActionSpec::default().with_start_call("OnWalkStart")),
+            ],
         );
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_start_call("OnWalkStart"),
-        );
-        definition.configure_actions(Some("Idle".to_string()), actions);
 
-        let mut engine = Engine::with_seed(5);
-        engine.register_test_definition(definition);
+        let mut engine = definition_engine(5, definition);
 
         engine.spawn_test_object(SpawnConfig::new("Actor"));
 
@@ -4564,9 +4030,9 @@ func Initialize()
             let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
             let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
             let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
-            assert_eq!(idle_start, 1);
-            assert_eq!(idle_end, 0);
-            assert_eq!(walk_start, 0);
+            unit_assert_eq!(idle_start => 1);
+            unit_assert_eq!(idle_end => 0);
+            unit_assert_eq!(walk_start => 0);
         }
 
         engine.tick_without_snapshot().test_value();
@@ -4576,9 +4042,9 @@ func Initialize()
             let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
             let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
             let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
-            assert_eq!(idle_start, 1);
-            assert_eq!(idle_end, 1);
-            assert_eq!(walk_start, 1);
+            unit_assert_eq!(idle_start => 1);
+            unit_assert_eq!(idle_end => 1);
+            unit_assert_eq!(walk_start => 1);
         }
 
         engine.tick_without_snapshot().test_value();
@@ -4588,9 +4054,9 @@ func Initialize()
             let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
             let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
             let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
-            assert_eq!(idle_start, 1);
-            assert_eq!(idle_end, 1);
-            assert_eq!(walk_start, 1);
+            unit_assert_eq!(idle_start => 1);
+            unit_assert_eq!(idle_end => 1);
+            unit_assert_eq!(walk_start => 1);
         }
     }
 
@@ -4617,15 +4083,10 @@ protected func OnOldAbort()
             matches!(name, "OnNewStart" | "OnOldAbort").then(|| name.to_string())
         });
         let definition = start_abort_definition("ACBI", "Action callback init", script, hooks);
-        let mut engine = Engine::with_seed(0);
-        engine.register_test_definition(definition);
+        let mut engine = definition_engine(0, definition);
         engine.spawn_test_object(SpawnConfig::new("ACBI"));
 
-        assert_eq!(
-            call_log.lock().unwrap().as_slice(),
-            ["OnNewStart", "OnOldAbort"],
-            "C4Object::SetAction runs one StartCall/AbortCall pair during Initialize"
-        );
+        unit_assert_eq!(call_log.lock().unwrap().as_slice() => ["OnNewStart", "OnOldAbort"], "C4Object::SetAction runs one StartCall/AbortCall pair during Initialize");
     }
 
     #[test]
@@ -4644,22 +4105,13 @@ func OnOldAbort() { return 1; }
             matches!(name, "OnNewStart" | "OnOldAbort").then(|| name.to_string())
         });
         let definition = start_abort_definition("ACEF", "Action callback effect", script, hooks);
-        let mut engine = Engine::with_seed(0);
-        engine.register_test_definition(definition);
+        let mut engine = definition_engine(0, definition);
         let object_id = ObjectId::new(77);
-        engine.spawn_test_object(
-            SpawnConfig::new("ACEF").with_id(object_id).add_effect(
-                EffectState::new("Switch")
-                    .with_priority(100)
-                    .with_command_target(Some(object_id.as_u64() as i32)),
-            ),
-        );
+        spawn_fixture!(engine, "ACEF", with_id: object_id, add_effect: EffectState::new("Switch")
+            .with_priority(100)
+            .with_command_target(Some(object_id.as_u64() as i32)));
 
-        assert_eq!(
-            call_log.lock().unwrap().as_slice(),
-            ["OnNewStart", "OnOldAbort"],
-            "initial FxStart SetAction is not replayed after insertion"
-        );
+        unit_assert_eq!(call_log.lock().unwrap().as_slice() => ["OnNewStart", "OnOldAbort"], "initial FxStart SetAction is not replayed after insertion");
     }
 
     #[test]
@@ -4675,14 +4127,15 @@ func OnOldAbort() { return 1; }
         let mut definition = test_definition("LOOP", "Loop actor", "#strict\npublic func ResetLoop() { return SetAction(\"Loop\"); }\npublic func ResetLoopForced() { var no_value; return SetAction(\"Loop\", no_value, no_value, true); }\nprotected func OnLoopStart() { return(1); }\nprotected func OnLoopAbort(int iPhase) { return(1); }\n");
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
-        definition.configure_actions(
-            Some("Loop".to_string()),
-            HashMap::from([(
-                "Loop".to_string(),
+        set_test_actions(
+            &mut definition,
+            Some("Loop"),
+            [(
+                "Loop",
                 ActionSpec::default()
                     .with_start_call("OnLoopStart")
                     .with_abort_call("OnLoopAbort"),
-            )]),
+            )],
         );
 
         let mut action = ActionState::new("Loop");
@@ -4697,31 +4150,21 @@ func OnOldAbort() { return 1; }
                 .with_loaded(true),
         )?;
         let index = engine.test_object_index(id);
-        assert_eq!(
-            engine.call_object_function(index, "ResetLoop", Vec::new())?,
-            Value::Bool(true)
-        );
+        unit_assert_eq!(engine.call_object_function(index, "ResetLoop", Vec::new())? => Value::Bool(true));
 
         let first_calls = calls.lock().test_value().clone();
-        assert_eq!(first_calls.len(), 2, "observed callbacks: {first_calls:?}");
-        assert_eq!(first_calls[0].0, "OnLoopStart");
-        assert_eq!(first_calls[1].0, "OnLoopAbort");
-        assert_eq!(first_calls[1].1.first(), Some(&Value::Int(7)));
+        unit_assert_eq!(first_calls.len() => 2, "observed callbacks: {first_calls:?}");
+        unit_assert_eq!(first_calls[0].0 => "OnLoopStart");
+        unit_assert_eq!(first_calls[1].0 => "OnLoopAbort");
+        unit_assert_eq!(first_calls[1].1.first() => Some(&Value::Int(7)));
         let action = &engine.objects[index].state.action;
-        assert_eq!(action.phase, 0, "same-name SetAction resets Phase");
-        assert_eq!(action.ticks, 0, "same-name SetAction resets PhaseDelay");
-        assert_eq!(action.time, 42, "same-name SetAction preserves Time");
+        unit_assert_eq!(action.phase => 0, "same-name SetAction resets Phase");
+        unit_assert_eq!(action.ticks => 0, "same-name SetAction resets PhaseDelay");
+        unit_assert_eq!(action.time => 42, "same-name SetAction preserves Time");
 
         calls.lock().test_value().clear();
-        assert_eq!(
-            engine.call_object_function(index, "ResetLoopForced", Vec::new())?,
-            Value::Bool(true)
-        );
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            &[("OnLoopStart".to_string(), Vec::new())],
-            "fDirect/fForce suppresses AbortCall but still runs StartCall"
-        );
+        unit_assert_eq!(engine.call_object_function(index, "ResetLoopForced", Vec::new())? => Value::Bool(true));
+        unit_assert_eq!(calls.lock().unwrap().as_slice() => &[("OnLoopStart".to_string(), Vec::new())], "fDirect/fForce suppresses AbortCall but still runs StartCall");
         Ok(())
     }
 
@@ -4790,9 +4233,9 @@ func OnOldAbort() { return 1; }
                 .map(|index| format!("Abort{index:02}")),
         );
         expected.push("EndRoot".to_string());
-        assert_eq!(callback_log.lock().unwrap().as_slice(), expected);
+        unit_assert_eq!(callback_log.lock().unwrap().as_slice() => expected);
         let index = engine.test_object_index(object);
-        assert_eq!(engine.objects[index].state.action.name, "A20");
+        unit_assert_eq!(engine.objects[index].state.action.name => "A20");
         Ok(())
     }
 
@@ -4824,14 +4267,15 @@ func OnOldAbort() { return 1; }
         );
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
-        definition.configure_actions(
-            Some("Loop".to_string()),
-            HashMap::from([(
-                "Loop".to_string(),
+        set_test_actions(
+            &mut definition,
+            Some("Loop"),
+            [(
+                "Loop",
                 ActionSpec::default()
                     .with_start_call("LoopStart")
                     .with_abort_call("LoopAbort"),
-            )]),
+            )],
         );
 
         let mut engine = Engine::new();
@@ -4853,28 +4297,19 @@ func OnOldAbort() { return 1; }
             engine.call_object_function(index, "Trigger", Vec::new())
         })?;
 
-        assert_eq!(result, Value::Bool(true));
-        assert!(
-            callback_count.load(std::sync::atomic::Ordering::Relaxed) > 16,
-            "callbacks continue beyond the removed Rust-only limit"
-        );
+        unit_assert_eq!(result => Value::Bool(true));
+        unit_assert!(callback_count.load(std::sync::atomic::Ordering::Relaxed) > 16, "callbacks continue beyond the removed Rust-only limit");
         let records = records.lock().test_value();
-        assert!(records.iter().any(|record| {
+        unit_assert!(records.iter().any(|record| {
             record.message == "SetAction callback error; continuing like the C++ fail-safe exec"
                 && record
                     .error
                     .as_deref()
                     .is_some_and(|error| error.contains("internal error: value stack overflow!"))
         }));
-        assert!(!records
-            .iter()
-            .any(|record| record.message.contains("recursion backstop")));
+        unit_assert!(!records.iter().any(|record| record.message.contains("recursion backstop")));
         drop(records);
-        assert_eq!(
-            engine.call_object_function(index, "Healthy", Vec::new())?,
-            Value::Int(73),
-            "the fail-safe unwind releases the shared VM stack"
-        );
+        unit_assert_eq!(engine.call_object_function(index, "Healthy", Vec::new())? => Value::Int(73), "the fail-safe unwind releases the shared VM stack");
         Ok(())
     }
 
@@ -4892,19 +4327,20 @@ func ReadSeen() { return seen_action; }
 "#;
         let mut definition = test_definition("PHCL", "Phase callback", script);
         definition.set_c4_callback_convention(true);
-        definition.configure_actions(
+        set_test_actions(
+            &mut definition,
             None,
-            HashMap::from([
+            [
                 (
-                    "Loop".to_string(),
+                    "Loop",
                     ActionSpec::default()
                         .with_length(1)
                         .with_delay(1)
                         .with_phase_call("OnPhase")
                         .with_next("Done"),
                 ),
-                ("Done".to_string(), ActionSpec::default()),
-            ]),
+                ("Done", ActionSpec::default()),
+            ],
         );
         let mut engine = Engine::new();
         engine.register_definition(definition)?;
@@ -4917,12 +4353,9 @@ func ReadSeen() { return seen_action; }
         engine.tick_without_snapshot()?;
 
         let index = engine.test_object_index(object);
-        assert_eq!(engine.objects[index].state.action.name, "Loop");
-        assert_eq!(engine.objects[index].state.action.phase, 0);
-        assert_eq!(
-            engine.call_object_function(index, "ReadSeen", Vec::new())?,
-            Value::String("Loop".to_string().into())
-        );
+        unit_assert_eq!(engine.objects[index].state.action.name => "Loop");
+        unit_assert_eq!(engine.objects[index].state.action.phase => 0);
+        unit_assert_eq!(engine.call_object_function(index, "ReadSeen", Vec::new())? => Value::String("Loop".to_string().into()));
         Ok(())
     }
 
@@ -4944,18 +4377,16 @@ func ReadSeen() { return seen_action; }
         let mut remove_def = test_definition("RMOV", "Remove on start", "#strict\npublic func Trigger() { return SetAction(\"New\"); }\nprotected func RemoveOnStart() { RemoveObject(); return(1); }\nprotected func OldAbort(int iPhase) { return(1); }\n");
         remove_def.set_c4_callback_convention(true);
         remove_def.set_debugger_hooks(hooks.clone());
-        remove_def.configure_actions(
-            Some("Old".to_string()),
-            HashMap::from([
+        set_test_actions(
+            &mut remove_def,
+            Some("Old"),
+            [
+                ("Old", ActionSpec::default().with_abort_call("OldAbort")),
                 (
-                    "Old".to_string(),
-                    ActionSpec::default().with_abort_call("OldAbort"),
-                ),
-                (
-                    "New".to_string(),
+                    "New",
                     ActionSpec::default().with_start_call("RemoveOnStart"),
                 ),
-            ]),
+            ],
         );
         let mut remove_engine = Engine::new();
         remove_engine.register_definition(remove_def)?;
@@ -4965,12 +4396,9 @@ func ReadSeen() { return seen_action; }
                 .with_loaded(true),
         )?;
         let remove_index = remove_engine.test_object_index(removed);
-        assert_eq!(
-            remove_engine.call_object_function(remove_index, "Trigger", Vec::new())?,
-            Value::Bool(true)
-        );
-        assert!(remove_engine.objects[remove_index].destroyed);
-        assert_eq!(calls.lock().unwrap().as_slice(), ["RemoveOnStart"]);
+        unit_assert_eq!(remove_engine.call_object_function(remove_index, "Trigger", Vec::new())? => Value::Bool(true));
+        unit_assert!(remove_engine.objects[remove_index].destroyed);
+        unit_assert_eq!(calls.lock().unwrap().as_slice() => ["RemoveOnStart"]);
 
         calls.lock().test_value().clear();
         let mut changed_def = test_definition(
@@ -4980,28 +4408,30 @@ func ReadSeen() { return seen_action; }
         );
         changed_def.set_c4_callback_convention(true);
         changed_def.set_debugger_hooks(hooks.clone());
-        changed_def.configure_actions(
-            Some("Rest".to_string()),
-            HashMap::from([
-                ("Rest".to_string(), ActionSpec::default()),
+        set_test_actions(
+            &mut changed_def,
+            Some("Rest"),
+            [
+                ("Rest", ActionSpec::default()),
                 (
-                    "Old".to_string(),
+                    "Old",
                     ActionSpec::default().with_abort_call("AbortAfterChange"),
                 ),
-            ]),
+            ],
         );
         let mut swap_def = test_definition("SWAP", "Change on start", "#strict\npublic func Trigger() { return SetAction(\"New\"); }\nprotected func ChangeOnStart() { ChangeDef(NEWD); return(1); }\n");
         swap_def.set_c4_callback_convention(true);
         swap_def.set_debugger_hooks(hooks);
-        swap_def.configure_actions(
-            Some("Old".to_string()),
-            HashMap::from([
-                ("Old".to_string(), ActionSpec::default()),
+        set_test_actions(
+            &mut swap_def,
+            Some("Old"),
+            [
+                ("Old", ActionSpec::default()),
                 (
-                    "New".to_string(),
+                    "New",
                     ActionSpec::default().with_start_call("ChangeOnStart"),
                 ),
-            ]),
+            ],
         );
         let mut swap_engine = Engine::new();
         swap_engine.register_definition(changed_def)?;
@@ -5012,12 +4442,9 @@ func ReadSeen() { return seen_action; }
                 .with_loaded(true),
         )?;
         let swap_index = swap_engine.test_object_index(swapped);
-        assert_eq!(
-            swap_engine.call_object_function(swap_index, "Trigger", Vec::new())?,
-            Value::Bool(true)
-        );
-        assert_eq!(swap_engine.objects[swap_index].definition_id, "NEWD");
-        assert_eq!(calls.lock().unwrap().as_slice(), ["ChangeOnStart"]);
+        unit_assert_eq!(swap_engine.call_object_function(swap_index, "Trigger", Vec::new())? => Value::Bool(true));
+        unit_assert_eq!(swap_engine.objects[swap_index].definition_id => "NEWD");
+        unit_assert_eq!(calls.lock().unwrap().as_slice() => ["ChangeOnStart"]);
         Ok(())
     }
 
@@ -5031,11 +4458,12 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
 "#;
         let mut target = test_definition("SDTG", "SetDir target", target_script);
         target.set_c4_callback_convention(true);
-        target.configure_actions(
+        set_test_actions(
+            &mut target,
             None,
-            HashMap::from([
+            [
                 (
-                    "Walk".to_string(),
+                    "Walk",
                     ActionSpec::default()
                         .with_procedure("WALK")
                         .with_directions(2)
@@ -5043,13 +4471,13 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
                         .with_abort_call("WalkAbort"),
                 ),
                 (
-                    "Turn".to_string(),
+                    "Turn",
                     ActionSpec::default()
                         .with_procedure("FLIGHT")
                         .with_directions(2)
                         .with_start_call("TurnStart"),
                 ),
-            ]),
+            ],
         );
         let caller = test_definition(
             "SDCL",
@@ -5077,31 +4505,13 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let caller = engine.spawn_object(SpawnConfig::new("SDCL"))?;
         let caller_index = engine.test_object_index(caller);
 
-        assert_eq!(
-            engine.call_object_function(
-                caller_index,
-                "TurnOther",
-                vec![Value::Object(target.as_u64())],
-            )?,
-            Value::Bool(true)
-        );
+        unit_assert_eq!(engine.call_object_function(caller_index, "TurnOther", vec![Value::Object(target.as_u64())],)? => Value::Bool(true));
         let target_index = engine.test_object_index(target);
         let state = &engine.objects[target_index].state;
-        assert_eq!(state.direction, Direction::Right);
-        assert_eq!(state.action.name, "Turn");
-        assert_eq!(
-            (
-                state.action.phase,
-                state.action.ticks,
-                state.action.time,
-                state.action.data
-            ),
-            (0, 0, 0, 0)
-        );
-        assert_eq!(
-            engine.call_object_function(target_index, "Read", Vec::new())?,
-            Value::Array(vec![Value::Int(1), Value::Int(7)])
-        );
+        unit_assert_eq!(state.direction => Direction::Right);
+        unit_assert_eq!(state.action.name => "Turn");
+        unit_assert_eq!((state.action.phase, state.action.ticks, state.action.time, state.action.data) => (0, 0, 0, 0));
+        unit_assert_eq!(engine.call_object_function(target_index, "Read", Vec::new())? => Value::Array(vec![Value::Int(1), Value::Int(7)]));
         Ok(())
     }
 
@@ -5121,20 +4531,21 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let mut definition = test_definition("Actor", "Actor", script);
         definition.set_debugger_hooks(hooks);
 
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default()
-                .with_length(20)
-                .with_start_call("OnIdleStart")
-                .with_end_call("OnIdleEnd")
-                .with_abort_call("OnIdleAbort"),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                (
+                    "Idle",
+                    ActionSpec::default()
+                        .with_length(20)
+                        .with_start_call("OnIdleStart")
+                        .with_end_call("OnIdleEnd")
+                        .with_abort_call("OnIdleAbort"),
+                ),
+                ("Run", ActionSpec::default().with_start_call("OnRunStart")),
+            ],
         );
-        actions.insert(
-            "Run".to_string(),
-            ActionSpec::default().with_start_call("OnRunStart"),
-        );
-        definition.configure_actions(Some("Idle".to_string()), actions);
 
         let (mut engine, id) = pxs_fixture(11, definition, SpawnConfig::new("Actor"));
 
@@ -5144,10 +4555,10 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             let idle_abort = calls.iter().filter(|name| *name == "OnIdleAbort").count();
             let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
             let run_start = calls.iter().filter(|name| *name == "OnRunStart").count();
-            assert_eq!(idle_start, 1);
-            assert_eq!(idle_abort, 0);
-            assert_eq!(idle_end, 0);
-            assert_eq!(run_start, 0);
+            unit_assert_eq!(idle_start => 1);
+            unit_assert_eq!(idle_abort => 0);
+            unit_assert_eq!(idle_end => 0);
+            unit_assert_eq!(run_start => 0);
         }
 
         engine
@@ -5160,10 +4571,10 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             let idle_abort = calls.iter().filter(|name| *name == "OnIdleAbort").count();
             let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
             let run_start = calls.iter().filter(|name| *name == "OnRunStart").count();
-            assert_eq!(idle_start, 1);
-            assert_eq!(idle_abort, 1);
-            assert_eq!(idle_end, 0);
-            assert_eq!(run_start, 1);
+            unit_assert_eq!(idle_start => 1);
+            unit_assert_eq!(idle_abort => 1);
+            unit_assert_eq!(idle_end => 0);
+            unit_assert_eq!(run_start => 1);
         }
     }
 
@@ -5186,16 +4597,20 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
 
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default()
-                .with_length(20)
-                .with_start_call("OnIdleStart")
-                .with_abort_call("OnIdleAbort"),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                (
+                    "Idle",
+                    ActionSpec::default()
+                        .with_length(20)
+                        .with_start_call("OnIdleStart")
+                        .with_abort_call("OnIdleAbort"),
+                ),
+                ("Run", ActionSpec::default()),
+            ],
         );
-        actions.insert("Run".to_string(), ActionSpec::default());
-        definition.configure_actions(Some("Idle".to_string()), actions);
 
         let (mut engine, id) = pxs_fixture(11, definition, SpawnConfig::new("Actor"));
         engine
@@ -5208,22 +4623,17 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             .find(|(name, _)| name == "OnIdleStart")
             .map(|(_, args)| args.clone())
             .test_value();
-        assert!(
-            start_args
-                .iter()
-                .all(|arg| matches!(arg, clonk_script::Value::Nil)),
-            "StartCall passes no parameters, got {start_args:?}"
-        );
+        unit_assert!(start_args.iter().all(|arg| matches!(arg, clonk_script::Value::Nil)), "StartCall passes no parameters, got {start_args:?}");
         let abort_args = calls
             .iter()
             .find(|(name, _)| name == "OnIdleAbort")
             .map(|(_, args)| args.clone())
             .test_value();
-        assert_eq!(
-            abort_args.first(),
-            Some(&clonk_script::Value::Nil),
-            "AbortCall passes phase 0, normalized to nil by the nonstrict callee, got {abort_args:?}"
-        );
+        unit_assert_eq!(
+        abort_args.first() =>
+        Some(&clonk_script::Value::Nil),
+        "AbortCall passes phase 0, normalized to nil by the nonstrict callee, got {abort_args:?}"
+    );
     }
 
     #[test]
@@ -5239,7 +4649,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             .test_value();
 
         let snapshot = engine.test_object_snapshot(id);
-        assert_eq!(snapshot.action.name, "Idle");
+        unit_assert_eq!(snapshot.action.name => "Idle");
     }
 
     #[test]
@@ -5251,7 +4661,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             .test_value();
 
         let snapshot = engine.test_object_snapshot(id);
-        assert_eq!(snapshot.action.name, "Run");
+        unit_assert_eq!(snapshot.action.name => "Run");
     }
 
     #[test]
@@ -5268,27 +4678,28 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let mut definition = test_definition("Actor", "Actor", script);
         definition.set_debugger_hooks(hooks);
 
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default()
-                .with_length(3)
-                .with_delay(1)
-                .with_next("Walk")
-                .with_phase_call("OnIdlePhase"),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                (
+                    "Idle",
+                    ActionSpec::default()
+                        .with_length(3)
+                        .with_delay(1)
+                        .with_next("Walk")
+                        .with_phase_call("OnIdlePhase"),
+                ),
+                ("Walk", ActionSpec::default().with_start_call("OnWalkStart")),
+            ],
         );
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_start_call("OnWalkStart"),
-        );
-        definition.configure_actions(Some("Idle".to_string()), actions);
 
         let (mut engine, id) = pxs_fixture(2, definition, SpawnConfig::new("Actor"));
 
         {
             let calls = call_log.lock().test_value().clone();
             let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
-            assert_eq!(idle_phase, 0);
+            unit_assert_eq!(idle_phase => 0);
         }
 
         engine.tick_without_snapshot().test_value();
@@ -5296,7 +4707,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         {
             let calls = call_log.lock().test_value().clone();
             let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
-            assert_eq!(idle_phase, 1);
+            unit_assert_eq!(idle_phase => 1);
         }
 
         engine.tick_without_snapshot().test_value();
@@ -5304,7 +4715,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         {
             let calls = call_log.lock().test_value().clone();
             let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
-            assert_eq!(idle_phase, 2);
+            unit_assert_eq!(idle_phase => 2);
         }
 
         engine.tick_without_snapshot().test_value();
@@ -5313,13 +4724,13 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             let calls = call_log.lock().test_value().clone();
             let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
             let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
-            assert_eq!(idle_phase, 3);
-            assert_eq!(walk_start, 1);
+            unit_assert_eq!(idle_phase => 3);
+            unit_assert_eq!(walk_start => 1);
         }
 
         let snapshot = engine.test_object_snapshot(id);
-        assert_eq!(snapshot.action.name, "Walk");
-        assert_eq!(snapshot.action.phase, 0);
+        unit_assert_eq!(snapshot.action.name => "Walk");
+        unit_assert_eq!(snapshot.action.phase => 0);
     }
 
     #[test]
@@ -5329,32 +4740,31 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         global func Step(state, frame, random) { return 0; }
         "#;
 
-        let mut definition = test_definition("Stepper", "Stepper", script);
-
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Pulse".to_string(),
-            ActionSpec::default()
-                .with_length(5)
-                .with_delay(1)
-                .with_step(2)
-                .with_next("Pulse"),
+        let definition = action_definition(
+            "Stepper",
+            "Stepper",
+            script,
+            Some("Pulse"),
+            [(
+                "Pulse",
+                ActionSpec::default()
+                    .with_length(5)
+                    .with_delay(1)
+                    .with_step(2)
+                    .with_next("Pulse"),
+            )],
         );
-        definition.configure_actions(Some("Pulse".to_string()), actions);
 
         let (mut engine, id) = pxs_fixture(7, definition, SpawnConfig::new("Stepper"));
 
-        let after_first = engine.test_tick();
-        let object = after_first.object(id).test_value();
-        assert_eq!(object.action.phase, 2);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.action.phase => 2);
 
-        let after_second = engine.test_tick();
-        let object = after_second.object(id).test_value();
-        assert_eq!(object.action.phase, 4);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.action.phase => 4);
 
-        let after_third = engine.test_tick();
-        let object = after_third.object(id).test_value();
-        assert_eq!(object.action.phase, 0);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.action.phase => 0);
     }
 
     #[test]
@@ -5368,12 +4778,12 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
 
         let snapshot = engine.test_object_snapshot(id);
         // C++ list order ascends by |priority| (C4Effect.cpp:80-94).
-        assert_eq!(snapshot.effects.len(), 2);
-        assert_eq!(snapshot.effects[0].name, "Spark");
-        assert_eq!(snapshot.effects[0].priority, 60);
-        assert_eq!(snapshot.effects[1].name, "Glow");
-        assert_eq!(snapshot.effects[1].priority, 150);
-        assert_eq!(snapshot.energy, 365);
+        unit_assert_eq!(snapshot.effects.len() => 2);
+        unit_assert_eq!(snapshot.effects[0].name => "Spark");
+        unit_assert_eq!(snapshot.effects[0].priority => 60);
+        unit_assert_eq!(snapshot.effects[1].name => "Glow");
+        unit_assert_eq!(snapshot.effects[1].priority => 150);
+        unit_assert_eq!(snapshot.energy => 365);
     }
 
     #[test]
@@ -5387,30 +4797,21 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let (mut engine, id) = pxs_fixture(0, definition, SpawnConfig::new("EffectBridge"));
 
         let snapshot = engine.test_object_snapshot(id);
-        assert_eq!(snapshot.effects.len(), 2);
-        assert_eq!(snapshot.effects[0].name, "Spark");
-        assert_eq!(snapshot.effects[1].name, "Glow");
+        unit_assert_eq!(snapshot.effects.len() => 2);
+        unit_assert_eq!(snapshot.effects[0].name => "Spark");
+        unit_assert_eq!(snapshot.effects[1].name => "Glow");
 
-        let first_tick = engine.test_tick();
-        let object = first_tick.object(id).test_value();
-        assert!(object
-            .effects
-            .iter()
-            .any(|effect| effect.name == "Spark" && effect.priority != 0));
-        assert!(object
-            .effects
-            .iter()
-            .any(|effect| effect.name == "Glow" && effect.priority == 0));
+        let object = tick_test_object(&mut engine, id);
+        unit_assert!(object.effects.iter().any(|effect| effect.name == "Spark" && effect.priority != 0));
+        unit_assert!(object.effects.iter().any(|effect| effect.name == "Glow" && effect.priority == 0));
 
-        let second_tick = engine.test_tick();
-        let object = second_tick.object(id).test_value();
-        assert_eq!(object.effects.len(), 1);
-        assert_eq!(object.effects[0].name, "Spark");
-        assert_eq!(object.effects[0].priority, 0);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.effects.len() => 1);
+        unit_assert_eq!(object.effects[0].name => "Spark");
+        unit_assert_eq!(object.effects[0].priority => 0);
 
-        let third_tick = engine.test_tick();
-        let object = third_tick.object(id).test_value();
-        assert!(object.effects.is_empty());
+        let object = tick_test_object(&mut engine, id);
+        unit_assert!(object.effects.is_empty());
     }
 
     #[test]
@@ -5418,23 +4819,22 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let definition =
             test_definition("GlobalEffect", "Global Effect", GLOBAL_EFFECT_HELPER_SCRIPT);
 
-        let mut engine = Engine::with_seed(0);
-        engine.register_test_definition(definition);
+        let mut engine = definition_engine(0, definition);
 
         engine.spawn_test_object(SpawnConfig::new("GlobalEffect"));
 
-        assert_eq!(engine.global_effects().len(), 1);
-        assert_eq!(engine.global_effects()[0].name, "WorldPulse");
+        unit_assert_eq!(engine.global_effects().len() => 1);
+        unit_assert_eq!(engine.global_effects()[0].name => "WorldPulse");
 
         engine.tick_without_snapshot().test_value();
 
-        assert!(engine.global_effects().is_empty());
+        unit_assert!(engine.global_effects().is_empty());
     }
 
     #[test]
     fn inactive_objects_skip_physics_and_step() {
         let mut definition = build_definition();
-        definition.configure_actions(Some("Idle".to_string()), HashMap::new());
+        set_test_actions(&mut definition, Some("Idle"), []);
 
         let (mut engine, id) = pxs_fixture(
             0,
@@ -5456,16 +4856,16 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
 
         let after = engine.test_object_snapshot(id);
 
-        assert_eq!(after.velocity, before.velocity);
-        assert_eq!(after.position, before.position);
-        assert_eq!(after.energy, before.energy);
-        assert_eq!(after.status, ObjectStatus::Inactive);
+        unit_assert_eq!(after.velocity => before.velocity);
+        unit_assert_eq!(after.position => before.position);
+        unit_assert_eq!(after.energy => before.energy);
+        unit_assert_eq!(after.status => ObjectStatus::Inactive);
     }
 
     #[test]
     fn engine_state_persists_object_status() {
         let mut definition = build_definition();
-        definition.configure_actions(Some("Idle".to_string()), HashMap::new());
+        set_test_actions(&mut definition, Some("Idle"), []);
 
         let (mut engine, id) = pxs_fixture(
             0,
@@ -5487,15 +4887,15 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         restored.restore_state(&state).test_value();
 
         let snapshot = restored.test_object_snapshot(id);
-        assert_eq!(snapshot.status, ObjectStatus::Inactive);
-        assert!(restored.crew_members(1).is_empty());
+        unit_assert_eq!(snapshot.status => ObjectStatus::Inactive);
+        unit_assert!(restored.crew_members(1).is_empty());
         // Elimination is Tick35-gated (C4Player.cpp:225-235): the restored
         // crewless owner eliminates once the game runs to the boundary.
-        assert!(!restored.is_owner_eliminated(1));
+        unit_assert!(!restored.is_owner_eliminated(1));
         for _ in 0..35 {
             restored.tick_without_snapshot().test_value();
         }
-        assert!(restored.is_owner_eliminated(1));
+        unit_assert!(restored.is_owner_eliminated(1));
     }
 
     #[test]
@@ -5509,42 +4909,46 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let _ = expected_rng.random(i32::MAX); // First tick random argument
         let first_expected = expected_rng.random(10);
 
-        let first_tick = engine.test_tick();
-        let object = first_tick.object(id).test_value();
-        assert_eq!(object.energy, first_expected);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.energy => first_expected);
 
         let _ = expected_rng.random(i32::MAX); // Second tick random argument
         let second_expected = expected_rng.random(10);
 
-        let second_tick = engine.test_tick();
-        let object = second_tick.object(id).test_value();
-        assert_eq!(object.energy, second_expected);
+        let object = tick_test_object(&mut engine, id);
+        unit_assert_eq!(object.energy => second_expected);
     }
 
     #[test]
     fn action_procedure_surfaces_in_state_value() {
-        let mut definition = test_definition("Airborne", "Airborne", PROCEDURE_STATE_SCRIPT);
-        let mut actions = HashMap::new();
-        actions.insert("Fly".to_string(), ActionSpec::for_procedure("flight"));
-        definition.configure_actions(Some("Fly".to_string()), actions);
+        let definition = procedure_definition(
+            "Airborne",
+            "Airborne",
+            PROCEDURE_STATE_SCRIPT,
+            "Fly",
+            "flight",
+        );
 
         let (engine, id) = pxs_fixture(0, definition, SpawnConfig::new("Airborne"));
 
         let snapshot = engine.test_object_snapshot(id);
-        assert_eq!(snapshot.energy, 7);
+        unit_assert_eq!(snapshot.energy => 7);
     }
 
     #[test]
     fn snapshot_includes_action_procedure() {
-        let mut definition = test_definition("Airborne", "Airborne", PROCEDURE_STATE_SCRIPT);
-        let mut actions = HashMap::new();
-        actions.insert("Fly".to_string(), ActionSpec::for_procedure("flight"));
-        definition.configure_actions(Some("Fly".to_string()), actions);
+        let definition = procedure_definition(
+            "Airborne",
+            "Airborne",
+            PROCEDURE_STATE_SCRIPT,
+            "Fly",
+            "flight",
+        );
 
         let (engine, id) = pxs_fixture(0, definition, SpawnConfig::new("Airborne"));
 
         let snapshot = engine.test_object_snapshot(id);
-        assert_eq!(snapshot.action_procedure.as_deref(), Some("flight"));
+        unit_assert_eq!(snapshot.action_procedure.as_deref() => Some("flight"));
     }
 
     /// clonk-org/clonk-rs#296: a pass no longer walks the empties between
@@ -5566,40 +4970,25 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         engine.set_landscape(Landscape::with_default_material(4, vec![40; 4], None).test_value());
 
         engine.tick_pxs();
-        assert_eq!(
-            engine.pxs_execute_scan_baseline(),
-            clonk_engine::pxs::PxsScanBaseline::default(),
-            "an empty system allocates no chunk and walks nothing"
-        );
+        unit_assert_eq!(engine.pxs_execute_scan_baseline() => clonk_engine::pxs::PxsScanBaseline::default(), "an empty system allocates no chunk and walks nothing");
 
-        assert!(create_test_pxs(&mut engine, sand, 1, 1, 0, 0));
+        unit_assert!(create_test_pxs(&mut engine, sand, 1, 1, 0, 0));
         engine.tick_pxs();
         let baseline = engine.pxs_execute_scan_baseline();
-        assert_eq!(baseline.allocated_chunks, 1);
-        assert_eq!(baseline.live, 1, "the one pixel executed");
-        assert_eq!(
-            baseline.visited_slots,
-            engine.pxs_last_inspected_slots(),
-            "the reported scan is the one the pass performed"
-        );
-        assert_eq!(
-            baseline.visited_slots, 1,
-            "one pixel costs one slot, where a whole 500-slot chunk was walked"
-        );
+        unit_assert_eq!(baseline.allocated_chunks => 1);
+        unit_assert_eq!(baseline.live => 1, "the one pixel executed");
+        unit_assert_eq!(baseline.visited_slots => engine.pxs_last_inspected_slots(), "the reported scan is the one the pass performed");
+        unit_assert_eq!(baseline.visited_slots => 1, "one pixel costs one slot, where a whole 500-slot chunk was walked");
 
         // A pixel in a later chunk keeps that chunk allocated for as long as
         // it lives, so the walked span used to grow to 1,000 slots while the
         // work stayed at two — the sparse case clonk-org/clonk-rs#296 is about.
         let pixel = engine.pxs_system.peek_slot(0, 0).test_value();
-        assert!(engine.pxs_system.create_at(3, 17, pixel));
+        unit_assert!(engine.pxs_system.create_at(3, 17, pixel));
         engine.tick_pxs();
         let baseline = engine.pxs_execute_scan_baseline();
-        assert_eq!(baseline.allocated_chunks, 2);
-        assert_eq!(baseline.live, 2);
-        assert_eq!(baseline.visited_slots, 2);
-        assert_eq!(
-            baseline.scanned_empty(),
-            0,
-            "every slot inspected now holds a live pixel"
-        );
+        unit_assert_eq!(baseline.allocated_chunks => 2);
+        unit_assert_eq!(baseline.live => 2);
+        unit_assert_eq!(baseline.visited_slots => 2);
+        unit_assert_eq!(baseline.scanned_empty() => 0, "every slot inspected now holds a live pixel");
     }

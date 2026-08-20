@@ -16,70 +16,32 @@
 use clonk_script::{Engine, Value};
 use std::collections::HashMap;
 
-fn eval(source: &str) -> Value {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("script should load");
-    engine.call("Test", &[]).expect("call succeeds")
-}
+eval_cases! {
+    var_slot_round_trips:
+        "func Test() { Var(0) = 7; return Var(0); }" => Value::Int(7);
 
-#[test]
-fn var_slot_round_trips() {
-    assert_eq!(
-        eval("func Test() { Var(0) = 7; return Var(0); }"),
-        Value::Int(7)
-    );
-}
-
-#[test]
-fn var_slot_is_separate_from_named_var() {
     // `var x` is named storage; `Var(0)` is the separate NumVars scratch.
-    assert_eq!(
-        eval("func Test() { var x = 5; Var(0) = 99; return x; }"),
-        Value::Int(5)
-    );
-}
+    var_slot_is_separate_from_named_var:
+        "func Test() { var x = 5; Var(0) = 99; return x; }" => Value::Int(5);
+    unset_var_slot_reads_as_nil:
+        "func Test() { return Var(3); }" => Value::Nil;
 
-#[test]
-fn unset_var_slot_reads_as_nil() {
-    assert_eq!(eval("func Test() { return Var(3); }"), Value::Nil);
-}
-
-#[test]
-fn nil_local_index_converts_to_zero() {
     // Typed C4ValueInt engine arguments call C4Value::getInt, so a nil loop
     // counter reaches FnLocal as index zero (C4Value.h:159,317-321;
     // C4Script.cpp:3423-3433). SLCR::CountTargets relies on `var i; Local(i)`.
-    assert_eq!(
-        eval("func Test() { Local(0) = 17; var i; return Local(i); }"),
-        Value::Int(17)
-    );
-}
+    nil_local_index_converts_to_zero:
+        "func Test() { Local(0) = 17; var i; return Local(i); }" => Value::Int(17);
 
-#[test]
-fn negative_var_index_clamps_to_zero() {
     // C4ValueList::GetItem clamps index < 0 to 0, so Var(-1) aliases Var(0).
-    assert_eq!(
-        eval("func Test() { Var(0) = 42; return Var(-1); }"),
-        Value::Int(42)
-    );
-}
+    negative_var_index_clamps_to_zero:
+        "func Test() { Var(0) = 42; return Var(-1); }" => Value::Int(42);
+    negative_local_index_clamps_to_zero:
+        "func Test() { Local(0) = 8; return Local(-1); }" => Value::Int(8);
 
-#[test]
-fn negative_local_index_clamps_to_zero() {
-    assert_eq!(
-        eval("func Test() { Local(0) = 8; return Local(-1); }"),
-        Value::Int(8)
-    );
-}
-
-#[test]
-fn slot_write_inside_block_is_visible_after() {
     // Var/Local slots are function-scoped, not block-scoped (C++ NumVars/Local are
     // flat per-call/object arrays), so a write inside a block persists after it.
-    assert_eq!(
-        eval("func Test() { if (1) { Var(0) = 11; } return Var(0); }"),
-        Value::Int(11)
-    );
+    slot_write_inside_block_is_visible_after:
+        "func Test() { if (1) { Var(0) = 11; } return Var(0); }" => Value::Int(11);
 }
 
 #[test]

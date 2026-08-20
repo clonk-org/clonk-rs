@@ -5,7 +5,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clonk_engine::LegacyCString;
 use clonk_network::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,
     HostResourceType, ResourceFileOwnership,
@@ -77,7 +76,7 @@ fn cpp_publishes_a_packed_scenario_with_separate_content_and_file_checksums() {
         .unwrap();
     let packed = group.pack().unwrap();
     fs::write(&scenario, &packed).unwrap();
-    let filename = LegacyCString::from_bytes(b"Missions.c4f/Arena.c4s".to_vec()).unwrap();
+    let filename = crate::c4(b"Missions.c4f/Arena.c4s");
 
     let publication = build_host_resource_core(
         &scenario,
@@ -142,7 +141,7 @@ fn cpp_packs_a_scenario_directory_into_a_temporary_standalone() {
     fs::create_dir(scenario.join("Objects.c4d")).unwrap();
     fs::write(scenario.join("Objects.c4d/DefCore.txt"), b"[DefCore]\n").unwrap();
     let expected_contents_crc = Group::open(&scenario).unwrap().contents_crc().unwrap();
-    let filename = LegacyCString::from_bytes(b"Arena.c4s".to_vec()).unwrap();
+    let filename = crate::c4(b"Arena.c4s");
 
     let publication = build_host_resource_core(
         &scenario,
@@ -190,7 +189,7 @@ fn cpp_keeps_an_oversize_definition_logical_but_unloadable() {
         HostResourceCoreSpec::new(
             HostResourceType::Definitions,
             9,
-            LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
+            crate::c4(b"Objects.c4d"),
             "Host Player",
         )
         .with_max_load_file_size(1),
@@ -238,10 +237,10 @@ fn cpp_keeps_a_definition_when_standalone_packing_fails() {
         HostResourceCoreSpec::new(
             HostResourceType::Definitions,
             10,
-            LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
+            crate::c4(b"Objects.c4d"),
             "Host Player",
         )
-        .with_standalone_name(LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap()),
+        .with_standalone_name(crate::c4(b"Objects.c4d")),
     )
     .expect("fAllowUnloadable retains definitions after GetStandalone failure");
 
@@ -269,7 +268,7 @@ fn cpp_definition_directory_size_limit_counts_files_group_packing_would_ignore()
         HostResourceCoreSpec::new(
             HostResourceType::Definitions,
             14,
-            LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
+            crate::c4(b"Objects.c4d"),
             "Host Player",
         )
         .with_max_load_file_size(1),
@@ -301,7 +300,7 @@ fn cpp_system_publication_never_creates_a_loadable_standalone() {
         HostResourceCoreSpec::new(
             HostResourceType::System,
             10,
-            LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+            crate::c4(b"System.c4g"),
             "Host Player",
         ),
     )
@@ -353,7 +352,7 @@ fn cpp_dangling_symlink_is_zero_sized_in_unpacked_system_crc() {
         HostResourceCoreSpec::new(
             HostResourceType::System,
             18,
-            LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+            crate::c4(b"System.c4g"),
             "Host Player",
         ),
     )
@@ -380,7 +379,7 @@ fn cpp_plain_dynamic_uses_the_whole_file_crc_for_both_checksums() {
         HostResourceCoreSpec::new(
             HostResourceType::Dynamic,
             11,
-            LegacyCString::from_bytes(b"ArenaDyn.c4s".to_vec()).unwrap(),
+            crate::c4(b"ArenaDyn.c4s"),
             "Host Player",
         )
         .with_source_ownership(ResourceFileOwnership::Temporary),
@@ -428,7 +427,7 @@ fn cpp_network_core_preserves_non_utf8_group_maker_bytes() {
         HostResourceCoreSpec::new(
             HostResourceType::Material,
             12,
-            LegacyCString::from_bytes(b"Material.c4g".to_vec()).unwrap(),
+            crate::c4(b"Material.c4g"),
             "Host Player",
         ),
     )
@@ -477,7 +476,7 @@ fn cpp_player_publication_copies_then_removes_portraits_and_oversize_bigicon() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             13,
-            LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            crate::c4(b"Player.c4p"),
             "Host Player",
         ),
     )
@@ -538,7 +537,7 @@ fn cpp_player_at_bigicon_limit_is_an_exact_collision_safe_copy() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             14,
-            LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            crate::c4(b"Player.c4p"),
             "Host Player",
         ),
     )
@@ -575,7 +574,7 @@ fn cpp_player_directory_is_packed_then_optimized_without_touching_source() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             15,
-            LegacyCString::from_bytes(b"DirectoryPlayer.c4p".to_vec()).unwrap(),
+            crate::c4(b"DirectoryPlayer.c4p"),
             "Host Player",
         ),
     )
@@ -620,7 +619,7 @@ fn cpp_player_directory_imports_packed_crew_before_recursive_optimization() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             18,
-            LegacyCString::from_bytes(b"DirectoryPlayer.c4p".to_vec()).unwrap(),
+            crate::c4(b"DirectoryPlayer.c4p"),
             "Host Player",
         ),
     )
@@ -657,7 +656,7 @@ fn cpp_rewritten_child_moves_to_unsorted_mother_tail() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             19,
-            LegacyCString::from_bytes(b"Player.bin".to_vec()).unwrap(),
+            crate::c4(b"Player.bin"),
             "Host Player",
         ),
     )
@@ -714,7 +713,7 @@ fn cpp_recursive_delete_preserves_a_non_raw_child_payload() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             20,
-            LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            crate::c4(b"Player.c4p"),
             "Host Player",
         ),
     )
@@ -770,7 +769,7 @@ fn opaque_child_with_old_crc_state_fails_typed_instead_of_silently_becoming_new(
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             24,
-            LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            crate::c4(b"Player.c4p"),
             "Host Player",
         ),
     )
@@ -818,7 +817,7 @@ fn directory_player_packing_shields_nested_opaque_old_crc() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             25,
-            LegacyCString::from_bytes(b"DirectoryPlayer.c4p".to_vec()).unwrap(),
+            crate::c4(b"DirectoryPlayer.c4p"),
             "Host Player",
         ),
     )
@@ -857,7 +856,7 @@ fn opaque_old_crc_without_a_rewrite_remains_an_exact_copy() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             26,
-            LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            crate::c4(b"Player.c4p"),
             "Host Player",
         ),
     )
@@ -909,7 +908,7 @@ fn new_parent_crc_shields_nested_opaque_old_crc_during_root_rewrite() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             27,
-            LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            crate::c4(b"Player.c4p"),
             "Host Player",
         ),
     )
@@ -943,7 +942,7 @@ fn cpp_duplicate_entry_marks_an_otherwise_unchanged_player_for_rewrite() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             21,
-            LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            crate::c4(b"Player.c4p"),
             "Host Player",
         ),
     )
@@ -990,7 +989,7 @@ fn cpp_player_rewrite_preserves_legacy_entry_name_bytes() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             22,
-            LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            crate::c4(b"Player.c4p"),
             "Host Player",
         ),
     )
@@ -1021,7 +1020,7 @@ fn temporary_directory_pack_staging_failure_preserves_source_contents() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             23,
-            LegacyCString::from_bytes(b"Temporary.c4p".to_vec()).unwrap(),
+            crate::c4(b"Temporary.c4p"),
             "Host Player",
         )
         .with_source_ownership(ResourceFileOwnership::Temporary),
@@ -1058,7 +1057,7 @@ fn cpp_temporary_packed_player_is_optimized_in_place() {
         HostResourceCoreSpec::new(
             HostResourceType::Player,
             16,
-            LegacyCString::from_bytes(b"Temporary.c4p".to_vec()).unwrap(),
+            crate::c4(b"Temporary.c4p"),
             "Host Player",
         )
         .with_source_ownership(ResourceFileOwnership::Temporary),
@@ -1153,7 +1152,7 @@ fn cpp_oracle_player_optimized_bytes_match_when_available() {
             HostResourceCoreSpec::new(
                 HostResourceType::Player,
                 17,
-                LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+                crate::c4(b"Player.c4p"),
                 "Host Player",
             ),
         )

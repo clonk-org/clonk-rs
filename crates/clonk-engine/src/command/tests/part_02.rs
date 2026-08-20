@@ -1,5 +1,5 @@
-// Contiguous slice 2 of 7 of the `command/tests` battery, spliced by
-// `include!` from the parent module so every test id is unchanged.
+    // Contiguous slice 2 of 7 of the `command/tests` battery, spliced by
+    // `include!` from the parent module so every test id is unchanged.
 
     #[test]
     fn wait_data_duration_completes_on_eleventh_execute() {
@@ -7,7 +7,7 @@
         let ctx = empty_command_ctx(&actor, 0);
         let mut stack = CommandStack::new();
         stack
-            .push_front(CommandRequest::new(CommandId::Wait).with_data(CommandData::Integer(10)))
+            .push_front(request!(Wait, with_data: CommandData::Integer(10)))
             .expect("Wait queues");
 
         for execution in 1..=10 {
@@ -36,12 +36,9 @@
         // draw advances the synced ledger.
         let actor_id = ObjectId::new(501);
         let target_id = ObjectId::new(502);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(100, 100);
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(300, 100);
-        target.collectible = true;
-        target.construction = FULL_CON;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(100, 100));
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(300, 100);
+            collectible = true; construction = FULL_CON);
 
         let objects = command_objects([actor, target]);
         let rng = std::cell::RefCell::new(crate::LcgRng::seed_from_u64(7));
@@ -50,12 +47,9 @@
             probe.random(15) - 7
         };
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = CommandRuntimeContext {
-            rng: Some(&rng),
-            ..command_ctx(actor_snapshot, &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(actor_snapshot, &objects, 0); rng: Some(&rng));
 
-        let parent_request = CommandRequest::new(CommandId::Get).with_target(Some(target_id));
+        let parent_request = request!(Get, with_target: Some(target_id));
         let mut state = GetState::from_request(&parent_request).expect("state created");
         let result = state.step(&ctx);
 
@@ -103,27 +97,19 @@
         // (C4Command.cpp:1272-1290).
         let actor_id = ObjectId::new(511);
         let target_id = ObjectId::new(512);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(100, 100);
-        actor.contents = vec![ObjectId::new(513), ObjectId::new(514)];
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(100, 100);
+            contents = vec![ObjectId::new(513), ObjectId::new(514)]);
         let actor_definition = actor.definition_id.clone();
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 60);
-        target.collectible = true;
-        target.construction = FULL_CON;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(100, 60);
+            collectible = true; construction = FULL_CON);
 
-        let mut first_content = snapshot_with_id(513);
-        first_content.container = Some(actor_id);
-        let mut second_content = snapshot_with_id(514);
-        second_content.container = Some(actor_id);
+        let first_content = command_object!(513; container = Some(actor_id));
+        let second_content = command_object!(514; container = Some(actor_id));
         let objects = command_objects([actor, target, first_content, second_content]);
         let definitions = HashMap::from([(
             actor_definition,
-            CommandDefinitionSnapshot {
-                collection_limit: 2,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { collection_limit: 2 },
         )]);
         let rng = std::cell::RefCell::new(crate::LcgRng::seed_from_u64(17));
         let (expected_side_x, expected_random_x) = {
@@ -132,14 +118,11 @@
             (100 + side * 40, 100 + probe.random(15) - 7)
         };
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = CommandRuntimeContext {
-            rng: Some(&rng),
-            ..command_ctx_with_definitions(actor_snapshot, &objects, &definitions, 0)
-        };
+        let ctx = command_context!(command_ctx_with_definitions(actor_snapshot, &objects, &definitions, 0); rng: Some(&rng));
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Get).with_target(Some(target_id)))
+            .push_back(request!(Get, with_target: Some(target_id)))
             .expect("Get queues");
         let result = stack.step(&ctx).expect("Get executes");
 
@@ -172,10 +155,7 @@
         );
 
         let mut counted = GetState::from_request(
-            &CommandRequest::new(CommandId::Get)
-                .with_target(Some(target_id))
-                .with_tx(Some(3))
-                .with_ty(Some(17)),
+            &request!(Get, with_target: Some(target_id), with_tx: Some(3), with_ty: Some(17)),
         )
         .expect("counted Get state");
         let counted_result = counted.step(&ctx);
@@ -191,10 +171,8 @@
         // The flat-landscape scans below both select (90,98). This is the
         // inclusive -15 horizontal edge of DigOutPositionRange.
         actor.position = Vector2::new(75, 98);
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 100);
-        target.collectible = true;
-        target.construction = FULL_CON;
+        let mut target = command_object!(target_id.as_u64(); position = Vector2::new(100, 100);
+            collectible = true; construction = FULL_CON);
         target.ocf |= ocf::IN_SOLID;
 
         let mut landscape = crate::Landscape::flat(300, 100);
@@ -210,14 +188,9 @@
 
         let objects = command_objects([actor, target]);
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = CommandRuntimeContext {
-            landscape: Some(&landscape),
-            ..command_ctx(actor, &objects, 10)
-        };
-        let mut state = GetState::from_request(
-            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
-        )
-        .expect("Get state");
+        let ctx = command_context!(command_ctx(actor, &objects, 10); landscape: Some(&landscape));
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(target_id)))
+            .expect("Get state");
 
         let first = state.step(&ctx);
         let first_dig = pushed_request(&first.operations, CommandId::Dig);
@@ -238,12 +211,9 @@
     fn get_in_solid_moves_to_the_preferred_free_staging_position() {
         let actor_id = ObjectId::new(505);
         let target_id = ObjectId::new(506);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(20, 20);
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 100);
-        target.collectible = true;
-        target.construction = FULL_CON;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(20, 20));
+        let mut target = command_object!(target_id.as_u64(); position = Vector2::new(100, 100);
+            collectible = true; construction = FULL_CON);
         target.ocf |= ocf::IN_SOLID;
 
         // The all-angle scan first reaches (100,90) at r=10,a=0. The
@@ -273,14 +243,9 @@
 
         let objects = command_objects([actor, target]);
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = CommandRuntimeContext {
-            landscape: Some(&landscape),
-            ..command_ctx(actor, &objects, 10)
-        };
-        let mut state = GetState::from_request(
-            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
-        )
-        .expect("Get state");
+        let ctx = command_context!(command_ctx(actor, &objects, 10); landscape: Some(&landscape));
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(target_id)))
+            .expect("Get state");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -334,12 +299,9 @@
     fn get_in_solid_fails_when_find_closest_free_finds_no_pixel() {
         let actor_id = ObjectId::new(507);
         let target_id = ObjectId::new(508);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(150, 150);
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(150, 150);
-        target.collectible = true;
-        target.construction = FULL_CON;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(150, 150));
+        let mut target = command_object!(target_id.as_u64(); position = Vector2::new(150, 150);
+            collectible = true; construction = FULL_CON);
         target.ocf |= ocf::IN_SOLID;
 
         let mut landscape = crate::Landscape::flat(300, 0);
@@ -351,14 +313,9 @@
 
         let objects = command_objects([actor, target]);
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = CommandRuntimeContext {
-            landscape: Some(&landscape),
-            ..command_ctx(actor, &objects, 10)
-        };
-        let mut state = GetState::from_request(
-            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
-        )
-        .expect("Get state");
+        let ctx = command_context!(command_ctx(actor, &objects, 10); landscape: Some(&landscape));
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(target_id)))
+            .expect("Get state");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Failed);
@@ -375,27 +332,20 @@
         let actor_id = ObjectId::new(100);
         let target_id = ObjectId::new(200);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(0, 0);
-        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        actor.collectible = false;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(0, 0);
+            ocf = ocf::AVAILABLE | ocf::ALIVE; collectible = false);
 
-        let mut item = snapshot_with_id(target_id.as_u64());
-        item.position = Vector2::new(8, 0);
-        item.ocf = ocf::AVAILABLE | ocf::CARRYABLE;
-        item.collectible = true;
-        item.construction = FULL_CON / 2;
-        item.alive = false;
+        let item = command_object!(target_id.as_u64(); position = Vector2::new(8, 0);
+            ocf = ocf::AVAILABLE | ocf::CARRYABLE; collectible = true; construction = FULL_CON / 2;
+            alive = false);
 
         let objects = command_objects([actor.clone(), item]);
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor_snapshot, &objects, 0);
 
-        let mut state = GetState::from_request(
-            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -420,25 +370,19 @@
     fn get_subcommand_rechecks_collection_on_next_execution() {
         let actor_id = ObjectId::new(101);
         let target_id = ObjectId::new(201);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        actor.collectible = false;
-        let mut item = snapshot_with_id(target_id.as_u64());
-        item.position = Vector2::new(8, 0);
-        item.collectible = true;
-        item.construction = FULL_CON;
+        let actor = command_object!(actor_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false);
+        let item = command_object!(target_id.as_u64(); position = Vector2::new(8, 0);
+            collectible = true; construction = FULL_CON);
         let mut objects = command_objects([actor, item]);
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .push_back(request!(Wait, with_mode: CommandMode::Base))
             .expect("base queues");
         stack
             .push_front(
-                CommandRequest::new(CommandId::Get)
-                    .with_target(Some(target_id))
-                    .with_update_interval(40)
-                    .with_mode(CommandMode::SilentSub),
+                request!(Get, with_target: Some(target_id), with_update_interval: 40, with_mode: CommandMode::SilentSub),
             )
             .expect("Get queues");
         let get_instance_id = stack.entries.front().expect("Get remains").instance_id;
@@ -481,22 +425,17 @@
         let actor_id = ObjectId::new(102);
         let target_id = ObjectId::new(202);
         let actor = snapshot_with_id(actor_id.as_u64());
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(300, 0);
-        target.collectible = true;
-        target.construction = FULL_CON;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(300, 0);
+            collectible = true; construction = FULL_CON);
         let objects = command_objects([actor, target]);
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .push_back(request!(Wait, with_mode: CommandMode::Base))
             .expect("base queues");
         stack
             .push_front(
-                CommandRequest::new(CommandId::Get)
-                    .with_target(Some(target_id))
-                    .with_update_interval(40)
-                    .with_mode(CommandMode::SilentSub),
+                request!(Get, with_target: Some(target_id), with_update_interval: 40, with_mode: CommandMode::SilentSub),
             )
             .expect("Get queues");
 
@@ -540,26 +479,19 @@
         let container_id = ObjectId::new(200);
         let item_id = ObjectId::new(300);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id));
 
         let mut container = snapshot_with_id(container_id.as_u64());
         container.contents.push(item_id);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "CNKT".into();
-        item.container = Some(container_id);
-        item.collectible = true;
-        item.construction = FULL_CON;
-        item.alive = false;
+        let item = command_object!(item_id.as_u64(); definition_id = "CNKT".into();
+            container = Some(container_id); collectible = true; construction = FULL_CON; alive = false);
 
         let objects = command_objects([actor, container, item]);
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor_snapshot, &objects, 0);
         let mut state = GetState::from_request(
-            &CommandRequest::new(CommandId::Get)
-                .with_target2(Some(container_id))
-                .with_data(CommandData::Text("CNKT".into())),
+            &request!(Get, with_target2: Some(container_id), with_data: CommandData::Text("CNKT".into())),
         )
         .expect("state created");
 
@@ -580,33 +512,23 @@
         let first_id = ObjectId::new(301);
         let later_id = ObjectId::new(302);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.contents = vec![first_id, later_id];
+        let container = command_object!(container_id.as_u64(); contents = vec![first_id, later_id]);
 
-        let mut first = snapshot_with_id(first_id.as_u64());
-        first.definition_id = "CNKT".into();
-        first.container = Some(container_id);
-        first.collectible = false;
-        first.construction = FULL_CON;
-        first.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        let first = command_object!(first_id.as_u64(); definition_id = "CNKT".into();
+            container = Some(container_id); collectible = false; construction = FULL_CON;
+            ocf = ocf::AVAILABLE | ocf::FULL_CON);
 
-        let mut later = snapshot_with_id(later_id.as_u64());
-        later.definition_id = "CNKT".into();
-        later.container = Some(container_id);
-        later.collectible = true;
-        later.construction = FULL_CON;
-        later.ocf = ocf::AVAILABLE | ocf::FULL_CON | ocf::CARRYABLE;
+        let later = command_object!(later_id.as_u64(); definition_id = "CNKT".into();
+            container = Some(container_id); collectible = true; construction = FULL_CON;
+            ocf = ocf::AVAILABLE | ocf::FULL_CON | ocf::CARRYABLE);
 
         let objects = command_objects([actor, container, first, later]);
         let actor = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor, &objects, 0);
         let mut state = GetState::from_request(
-            &CommandRequest::new(CommandId::Get)
-                .with_target2(Some(container_id))
-                .with_data(CommandData::Text("CNKT".into())),
+            &request!(Get, with_target2: Some(container_id), with_data: CommandData::Text("CNKT".into())),
         )
         .expect("Get state");
 
@@ -629,32 +551,22 @@
         let container_id = ObjectId::new(201);
         let item_id = ObjectId::new(301);
         let actor = snapshot_with_id(actor_id.as_u64());
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.definition_id = "BOX".into();
-        container.status = ObjectStatus::Inactive;
-        container.alive = false;
-        container.ocf = ocf::AVAILABLE | ocf::GRAB | ocf::ENTRANCE;
+        let mut container = command_object!(container_id.as_u64(); definition_id = "BOX".into();
+            status = ObjectStatus::Inactive; alive = false;
+            ocf = ocf::AVAILABLE | ocf::GRAB | ocf::ENTRANCE);
         container.contents.push(item_id);
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.alive = false;
-        item.collectible = true;
-        item.construction = FULL_CON;
-        item.container = Some(container_id);
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into(); alive = false;
+            collectible = true; construction = FULL_CON; container = Some(container_id));
         let mut objects = command_objects([actor, container, item]);
         let mut definitions = HashMap::from([(
             DefinitionId::from("BOX"),
-            CommandDefinitionSnapshot {
-                grab: 1,
-                grab_put_get: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { grab: 1,
+            grab_put_get: 0 },
         )]);
         let actor = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx_with_definitions(actor, &objects, &definitions, 0);
-        let mut state =
-            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
-                .expect("state created");
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(item_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
 
@@ -676,9 +588,8 @@
             .ocf &= !ocf::ENTRANCE;
         let actor = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx_with_definitions(actor, &objects, &definitions, 1);
-        let mut state =
-            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
-                .expect("state created");
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(item_id)))
+            .expect("state created");
         let sealed = state.step(&ctx);
         assert_eq!(sealed.status, CommandStatus::Failed);
         assert!(sealed.update.is_none());
@@ -691,9 +602,8 @@
             .grab_put_get = crate::GRAB_PUT_GET_GET;
         let actor = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx_with_definitions(actor, &objects, &definitions, 2);
-        let mut state =
-            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
-                .expect("state created");
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(item_id)))
+            .expect("state created");
         let grab_get = state.step(&ctx);
         assert_eq!(grab_get.status, CommandStatus::Running);
         assert!(grab_get.update.is_none());
@@ -713,27 +623,19 @@
         let actor_id = ObjectId::new(102);
         let container_id = ObjectId::new(202);
         let item_id = ObjectId::new(302);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id));
         let container = snapshot_with_id(container_id.as_u64());
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "LOCK".into();
-        item.container = Some(container_id);
-        item.collectible = true;
-        item.construction = FULL_CON;
+        let item = command_object!(item_id.as_u64(); definition_id = "LOCK".into();
+            container = Some(container_id); collectible = true; construction = FULL_CON);
         let objects = command_objects([actor, container, item]);
         let definitions = HashMap::from([(
             DefinitionId::from("LOCK"),
-            CommandDefinitionSnapshot {
-                no_get: true,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { no_get: true },
         )]);
         let actor = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx_with_definitions(actor, &objects, &definitions, 0);
-        let mut state =
-            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
-                .expect("state created");
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(item_id)))
+            .expect("state created");
 
         for _ in 0..2 {
             let result = state.step(&ctx);
@@ -750,29 +652,21 @@
         let container_id = ObjectId::new(2);
         let target_id = ObjectId::new(3);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
-        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        actor.collectible = false;
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id);
+            ocf = ocf::AVAILABLE | ocf::ALIVE; collectible = false);
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(0, 0);
+        let container = command_object!(container_id.as_u64(); position = Vector2::new(0, 0));
 
-        let mut item = snapshot_with_id(target_id.as_u64());
-        item.position = Vector2::new(20, 0);
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.collectible = true;
-        item.construction = FULL_CON;
+        let item = command_object!(target_id.as_u64(); position = Vector2::new(20, 0);
+            ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true; construction = FULL_CON);
 
         let objects = command_objects([actor.clone(), container, item]);
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor_snapshot, &objects, 0);
 
-        let mut state = GetState::from_request(
-            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -792,35 +686,25 @@
         let container_id = ObjectId::new(3);
         let target_id = ObjectId::new(4);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.action_procedure = ActionProcedure::Push;
-        actor.action_target = Some(pushed_id);
-        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        actor.collectible = false;
+        let actor = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Push;
+            action_target = Some(pushed_id); ocf = ocf::AVAILABLE | ocf::ALIVE; collectible = false);
 
-        let mut pushed = snapshot_with_id(pushed_id.as_u64());
-        pushed.position = Vector2::new(0, 0);
+        let pushed = command_object!(pushed_id.as_u64(); position = Vector2::new(0, 0));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.ocf = ocf::AVAILABLE | ocf::GRAB;
-        container.position = Vector2::new(10, 0);
+        let container = command_object!(container_id.as_u64(); ocf = ocf::AVAILABLE | ocf::GRAB;
+            position = Vector2::new(10, 0));
 
-        let mut item = snapshot_with_id(target_id.as_u64());
-        item.container = Some(container_id);
-        item.position = container.position;
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.collectible = true;
-        item.construction = FULL_CON;
+        let item = command_object!(target_id.as_u64(); container = Some(container_id);
+            position = container.position; ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true;
+            construction = FULL_CON);
 
         let objects = command_objects([actor.clone(), pushed, container, item]);
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor_snapshot, &objects, 0);
 
-        let mut state = GetState::from_request(
-            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -839,35 +723,26 @@
         let container_id = ObjectId::new(6);
         let item_id = ObjectId::new(7);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.action_procedure = ActionProcedure::Push;
-        actor.action_target = Some(container_id);
+        let actor = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Push;
+            action_target = Some(container_id));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.definition_id = "BOX".into();
-        container.ocf = ocf::AVAILABLE | ocf::GRAB | ocf::ENTRANCE;
+        let mut container = command_object!(container_id.as_u64(); definition_id = "BOX".into();
+            ocf = ocf::AVAILABLE | ocf::GRAB | ocf::ENTRANCE);
         container.contents.push(item_id);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.container = Some(container_id);
-        item.collectible = true;
-        item.construction = FULL_CON;
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into();
+            container = Some(container_id); collectible = true; construction = FULL_CON);
 
         let objects = command_objects([actor, container, item]);
         let mut definitions = HashMap::from([(
             DefinitionId::from("BOX"),
-            CommandDefinitionSnapshot {
-                grab: 1,
-                grab_put_get: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { grab: 1,
+            grab_put_get: 0 },
         )]);
         let actor = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx_with_definitions(actor, &objects, &definitions, 0);
-        let mut state =
-            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
-                .expect("state created");
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(item_id)))
+            .expect("state created");
 
         let blocked = state.step(&ctx);
         assert_eq!(blocked.status, CommandStatus::Running);
@@ -887,9 +762,8 @@
             .expect("container definition present")
             .grab_put_get = crate::GRAB_PUT_GET_GET;
         let ctx = command_ctx_with_definitions(actor, &objects, &definitions, 1);
-        let mut state =
-            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
-                .expect("state created");
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(item_id)))
+            .expect("state created");
         let allowed = state.step(&ctx);
         assert_eq!(allowed.status, CommandStatus::Running);
         assert!(allowed.operations.is_empty());
@@ -908,25 +782,19 @@
         let actor_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        actor.collectible = false;
+        let actor = command_object!(actor_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false);
 
-        let mut item = snapshot_with_id(target_id.as_u64());
-        item.position = Vector2::new(8, 0);
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.collectible = false;
-        item.construction = FULL_CON;
+        let item = command_object!(target_id.as_u64(); position = Vector2::new(8, 0);
+            ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = false; construction = FULL_CON);
 
         let objects = command_objects([actor.clone(), item]);
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor_snapshot, &objects, 0);
 
-        let mut state = GetState::from_request(
-            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = GetState::from_request(&request!(Get, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Failed);
@@ -940,12 +808,10 @@
         let item_id = ObjectId::new(591);
         let container_id = ObjectId::new(592);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.contents = vec![item_id];
+        let actor = command_object!(actor_id.as_u64(); contents = vec![item_id]);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "ROCK".into();
-        item.container = Some(actor_id);
+        let item = command_object!(item_id.as_u64(); definition_id = "ROCK".into();
+            container = Some(actor_id));
 
         let target_container = snapshot_with_id(container_id.as_u64());
 
@@ -954,9 +820,7 @@
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor_snapshot, &objects, 0);
         let mut state = PutState::from_request(
-            &CommandRequest::new(CommandId::Put)
-                .with_target(Some(container_id))
-                .with_data(CommandData::Text("WOOD".into())),
+            &request!(Put, with_target: Some(container_id), with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -972,9 +836,7 @@
             command_objects([empty_actor.clone(), snapshot_with_id(container_id.as_u64())]);
         let empty_ctx = command_ctx(&empty_actor, &empty_objects, 1);
         let mut empty_state = PutState::from_request(
-            &CommandRequest::new(CommandId::Put)
-                .with_target(Some(container_id))
-                .with_data(CommandData::Text("WOOD".into())),
+            &request!(Put, with_target: Some(container_id), with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
         assert_eq!(empty_state.step(&empty_ctx).status, CommandStatus::Failed);
@@ -986,27 +848,22 @@
         let item_id = ObjectId::new(601);
         let container_id = ObjectId::new(602);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(50, 50);
-        actor.container = Some(container_id);
-        actor.contents = vec![item_id];
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(50, 50);
+            container = Some(container_id); contents = vec![item_id]);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
-        item.position = actor.position;
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id);
+            position = actor.position);
 
-        let mut target_container = snapshot_with_id(container_id.as_u64());
-        target_container.position = Vector2::new(54, 80);
+        let target_container =
+            command_object!(container_id.as_u64(); position = Vector2::new(54, 80));
 
         let mut objects = command_objects([actor.clone(), item, target_container.clone()]);
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor_snapshot, &objects, 0);
 
-        let mut state = PutState::from_request(
-            &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
-        )
-        .expect("state created");
+        let mut state = PutState::from_request(&request!(Put, with_target: Some(container_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1041,28 +898,25 @@
         let target_container_id = ObjectId::new(612);
         let current_container_id = ObjectId::new(613);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(current_container_id);
-        actor.contents = vec![item_id];
+        let actor = command_object!(actor_id.as_u64(); container = Some(current_container_id);
+            contents = vec![item_id]);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id));
 
-        let mut target_container = snapshot_with_id(target_container_id.as_u64());
-        target_container.position = Vector2::new(0, 0);
+        let target_container = command_object!(target_container_id.as_u64();
+            position = Vector2::new(0, 0));
 
-        let mut current_container = snapshot_with_id(current_container_id.as_u64());
-        current_container.position = Vector2::new(-20, 0);
+        let current_container = command_object!(current_container_id.as_u64();
+            position = Vector2::new(-20, 0));
 
         let objects = command_objects([actor.clone(), item, target_container, current_container]);
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor_snapshot, &objects, 0);
 
-        let mut state = PutState::from_request(
-            &CommandRequest::new(CommandId::Put).with_target(Some(target_container_id)),
-        )
-        .expect("state created");
+        let mut state =
+            PutState::from_request(&request!(Put, with_target: Some(target_container_id)))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1081,11 +935,9 @@
         let item_id = ObjectId::new(621);
         let container_id = ObjectId::new(622);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(0, 0);
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(0, 0));
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.position = Vector2::new(79, 0);
+        let mut item = command_object!(item_id.as_u64(); position = Vector2::new(79, 0));
         item.ocf |= ocf::HIT_SPEED1;
 
         let container = snapshot_with_id(container_id.as_u64());
@@ -1093,9 +945,7 @@
         let mut objects = command_objects([actor.clone(), item, container]);
 
         let mut state = PutState::from_request(
-            &CommandRequest::new(CommandId::Put)
-                .with_target(Some(container_id))
-                .with_target2(Some(item_id)),
+            &request!(Put, with_target: Some(container_id), with_target2: Some(item_id)),
         )
         .expect("state created");
 
@@ -1126,9 +976,7 @@
             let actor_snapshot = objects.get(&actor_id).expect("actor present");
             let ctx = command_ctx(actor_snapshot, &objects, 1);
             let mut state = PutState::from_request(
-                &CommandRequest::new(CommandId::Put)
-                    .with_target(Some(container_id))
-                    .with_target2(Some(item_id)),
+                &request!(Put, with_target: Some(container_id), with_target2: Some(item_id)),
             )
             .expect("state created");
             let get = state.step(&ctx);
@@ -1151,24 +999,18 @@
         let container_id = ObjectId::new(625);
         let outer_id = ObjectId::new(626);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.action_procedure = ActionProcedure::Dig;
-        actor.command_direction = CommandDirection::Right;
-        actor.contents = vec![item_id];
+        let actor = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Dig;
+            command_direction = CommandDirection::Right; contents = vec![item_id]);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.container = Some(outer_id);
+        let container = command_object!(container_id.as_u64(); container = Some(outer_id));
         let outer = snapshot_with_id(outer_id.as_u64());
 
         let objects = command_objects([actor.clone(), item, container, outer]);
         let ctx = command_ctx(&actor, &objects, 0);
-        let mut state = PutState::from_request(
-            &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
-        )
-        .expect("state created");
+        let mut state = PutState::from_request(&request!(Put, with_target: Some(container_id)))
+            .expect("state created");
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Failed);
         assert!(result.update.is_none());
@@ -1182,54 +1024,37 @@
         let item_id = ObjectId::new(628);
         let target_id = ObjectId::new(629);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(40, 99);
-        actor.contents = vec![item_id];
+        let mut actor = command_object!(actor_id.as_u64(); position = Vector2::new(40, 99);
+            contents = vec![item_id]);
         actor.physical.throw = 50_000;
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "ITEM".into();
-        item.container = Some(actor_id);
+        let item = command_object!(item_id.as_u64(); definition_id = "ITEM".into();
+            container = Some(actor_id));
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.definition_id = "TARG".into();
-        target.position = Vector2::new(105, 75);
+        let mut target = command_object!(target_id.as_u64(); definition_id = "TARG".into();
+            position = Vector2::new(105, 75));
         target.ocf |= ocf::COLLECTION | ocf::ENTRANCE;
 
         let objects = command_objects([actor.clone(), item, target]);
         let players = HashMap::new();
         let definitions = HashMap::from([
-            (
-                "ITEM".into(),
-                CommandDefinitionSnapshot {
-                    fragile: false,
-                    ..CommandDefinitionSnapshot::default()
-                },
-            ),
+            ("ITEM".into(), command_definition! { fragile: false }),
             (
                 "TARG".into(),
-                CommandDefinitionSnapshot {
-                    collection_rect: Some(DefinitionRect::new(-15, -15, 20, 20)),
-                    ..CommandDefinitionSnapshot::default()
-                },
+                command_definition! { collection_rect: Some(DefinitionRect::new(-15, -15, 20, 20)) },
             ),
         ]);
         let mut landscape = crate::Landscape::flat(200, 100);
         landscape.set_world_height(150);
-        let ctx = CommandRuntimeContext {
-            landscape: Some(&landscape),
-            position: actor.position,
-            ..command_ctx_with_definitions(
-                objects.get(&actor_id).expect("actor present"),
-                &objects,
-                &definitions,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx_with_definitions(
+            objects.get(&actor_id).expect("actor present"),
+            &objects,
+            &definitions,
+            0,
+        ); landscape: Some(&landscape),
+        position: actor.position);
 
-        let request = CommandRequest::new(CommandId::Put)
-            .with_target(Some(target_id))
-            .with_target2(Some(item_id));
+        let request = request!(Put, with_target: Some(target_id), with_target2: Some(item_id));
         let mut state = PutState::from_request(&request).expect("Put state");
         let result = state.step_with_gravity(&ctx, math::fixed100(20));
         assert_eq!(
@@ -1333,56 +1158,39 @@
         let item_id = ObjectId::new(631);
         let target_id = ObjectId::new(632);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(40, 99);
-        actor.contents = vec![item_id];
+        let mut actor = command_object!(actor_id.as_u64(); position = Vector2::new(40, 99);
+            contents = vec![item_id]);
         actor.physical.throw = 50_000;
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "FRAG".into();
-        item.container = Some(actor_id);
+        let item = command_object!(item_id.as_u64(); definition_id = "FRAG".into();
+            container = Some(actor_id));
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.definition_id = "TARG".into();
-        target.position = Vector2::new(105, 75);
+        let mut target = command_object!(target_id.as_u64(); definition_id = "TARG".into();
+            position = Vector2::new(105, 75));
         target.ocf |= ocf::COLLECTION | ocf::ENTRANCE;
 
         let mut objects = command_objects([actor.clone(), item, target]);
         let definitions = HashMap::from([
-            (
-                "FRAG".into(),
-                CommandDefinitionSnapshot {
-                    fragile: true,
-                    ..CommandDefinitionSnapshot::default()
-                },
-            ),
+            ("FRAG".into(), command_definition! { fragile: true }),
             (
                 "TARG".into(),
-                CommandDefinitionSnapshot {
-                    collection_rect: Some(DefinitionRect::new(-15, -15, 20, 20)),
-                    grab_put_get: crate::GRAB_PUT_GET_PUT,
-                    ..CommandDefinitionSnapshot::default()
-                },
+                command_definition! { collection_rect: Some(DefinitionRect::new(-15, -15, 20, 20)),
+                grab_put_get: crate::GRAB_PUT_GET_PUT },
             ),
         ]);
         let mut landscape = crate::Landscape::flat(200, 100);
         landscape.set_world_height(150);
         let mut state = PutState::from_request(
-            &CommandRequest::new(CommandId::Put)
-                .with_target(Some(target_id))
-                .with_target2(Some(item_id)),
+            &request!(Put, with_target: Some(target_id), with_target2: Some(item_id)),
         )
         .expect("Put state");
         {
-            let ctx = CommandRuntimeContext {
-                landscape: Some(&landscape),
-                ..command_ctx_with_definitions(
-                    objects.get(&actor_id).expect("actor present"),
-                    &objects,
-                    &definitions,
-                    0,
-                )
-            };
+            let ctx = command_context!(command_ctx_with_definitions(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &definitions,
+                0,
+            ); landscape: Some(&landscape));
             let grab = state.step_with_gravity(&ctx, math::fixed100(20));
             assert_eq!(
                 grab.operations,
@@ -1399,15 +1207,12 @@
         let actor = objects.get_mut(&actor_id).expect("actor present");
         actor.action_procedure = ActionProcedure::Push;
         actor.action_target = Some(target_id);
-        let ctx = CommandRuntimeContext {
-            landscape: Some(&landscape),
-            ..command_ctx_with_definitions(
-                objects.get(&actor_id).expect("actor present"),
-                &objects,
-                &definitions,
-                1,
-            )
-        };
+        let ctx = command_context!(command_ctx_with_definitions(
+            objects.get(&actor_id).expect("actor present"),
+            &objects,
+            &definitions,
+            1,
+        ); landscape: Some(&landscape));
         let put = state.step_with_gravity(&ctx, math::fixed100(20));
         assert_eq!(
             put.events,
@@ -1429,13 +1234,10 @@
         let own_container_id = ObjectId::new(636);
         let pushed_id = ObjectId::new(637);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(own_container_id);
-        actor.contents = vec![item_id];
-        actor.action_procedure = ActionProcedure::Push;
-        actor.action_target = Some(pushed_id);
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let actor = command_object!(actor_id.as_u64(); container = Some(own_container_id);
+            contents = vec![item_id]; action_procedure = ActionProcedure::Push;
+            action_target = Some(pushed_id));
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id));
         let objects = command_objects([
             actor.clone(),
             item,
@@ -1445,9 +1247,7 @@
         ]);
         let ctx = command_ctx(&actor, &objects, 0);
         let mut state = PutState::from_request(
-            &CommandRequest::new(CommandId::Put)
-                .with_target(Some(target_id))
-                .with_target2(Some(item_id)),
+            &request!(Put, with_target: Some(target_id), with_target2: Some(item_id)),
         )
         .expect("Put state");
 
@@ -1467,14 +1267,11 @@
         let actor_id = ObjectId::new(630);
         let item_id = ObjectId::new(631);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(10, 10);
-        actor.contents = vec![item_id];
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(10, 10);
+            contents = vec![item_id]; command_direction = CommandDirection::Right);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
-        item.position = actor.position;
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id);
+            position = actor.position);
 
         let objects = command_objects([actor.clone(), item]);
 
@@ -1482,10 +1279,8 @@
         let ctx = command_ctx(actor_snapshot, &objects, 0);
 
         for request in [
-            CommandRequest::new(CommandId::Drop),
-            CommandRequest::new(CommandId::Drop)
-                .with_tx(Some(0))
-                .with_ty(Some(0)),
+            request!(Drop),
+            request!(Drop, with_tx: Some(0), with_ty: Some(0)),
         ] {
             let mut state = DropState::from_request(&request);
             let result = state.step(&ctx);
@@ -1506,9 +1301,7 @@
     #[test]
     fn pending_drop_finishes_only_after_callback_commands_clear() {
         let mut stack = CommandStack::new();
-        stack
-            .push_front(CommandRequest::new(CommandId::Drop))
-            .expect("Drop queues");
+        stack.push_front(request!(Drop)).expect("Drop queues");
         let drop_instance_id = stack.entries.front().expect("Drop remains").instance_id;
         let Some(ActiveCommand {
             state: CommandState::Drop(state),
@@ -1523,7 +1316,7 @@
         // Finish(true). The Drop is then finished below that new front and
         // must not report ControlCommandFinished until it is uncovered.
         stack
-            .push_front(CommandRequest::new(CommandId::Wait))
+            .push_front(request!(Wait))
             .expect("callback command queues");
         assert!(stack.finish_pending_drop(drop_instance_id));
         assert_eq!(stack.finished_front_view(), None);
@@ -1546,7 +1339,7 @@
     fn pending_put_take_resolution_matches_the_exact_command_instance() {
         let mut throws = CommandStack::new();
         throws
-            .push_front(CommandRequest::new(CommandId::Throw))
+            .push_front(request!(Throw))
             .expect("outer Throw queues");
         let outer_throw = throws
             .entries
@@ -1558,7 +1351,7 @@
         };
         state.put_take_pending = true;
         throws
-            .push_front(CommandRequest::new(CommandId::Throw))
+            .push_front(request!(Throw))
             .expect("inner Throw queues");
         let inner_throw = throws
             .entries
@@ -1584,9 +1377,7 @@
         assert!(throws.finish_pending_throw(outer_throw));
 
         let mut drops = CommandStack::new();
-        drops
-            .push_front(CommandRequest::new(CommandId::Drop))
-            .expect("outer Drop queues");
+        drops.push_front(request!(Drop)).expect("outer Drop queues");
         let outer_drop = drops
             .entries
             .front()
@@ -1596,9 +1387,7 @@
             panic!("outer command should be Drop");
         };
         state.completion_pending = true;
-        drops
-            .push_front(CommandRequest::new(CommandId::Drop))
-            .expect("inner Drop queues");
+        drops.push_front(request!(Drop)).expect("inner Drop queues");
         let inner_drop = drops
             .entries
             .front()
@@ -1621,11 +1410,11 @@
     fn exact_failed_result_does_not_touch_a_same_kind_replacement() {
         let mut stack = CommandStack::new();
         stack
-            .push_front(CommandRequest::new(CommandId::Exit))
+            .push_front(request!(Exit))
             .expect("original Exit queues");
         let original = stack.entries.front().expect("original Exit").instance_id;
         stack
-            .push_front(CommandRequest::new(CommandId::Exit))
+            .push_front(request!(Exit))
             .expect("replacement Exit queues");
         let replacement = stack.entries.front().expect("replacement Exit").instance_id;
 
@@ -1660,9 +1449,7 @@
     #[test]
     fn command_instance_ids_survive_live_restore_but_persisted_stacks_get_fresh_ids() {
         let mut stack = CommandStack::new();
-        stack
-            .push_front(CommandRequest::new(CommandId::Throw))
-            .expect("Throw queues");
+        stack.push_front(request!(Throw)).expect("Throw queues");
         let instance_id = stack.entries.front().expect("Throw remains").instance_id;
         let CommandState::Throw(state) = &mut stack.entries.front_mut().unwrap().state else {
             panic!("command should be Throw");
@@ -1692,7 +1479,7 @@
             serde_json::from_value(encoded.clone()).expect("snapshot deserializes");
         let mut restored = CommandStack::new();
         restored
-            .push_front(CommandRequest::new(CommandId::Wait))
+            .push_front(request!(Wait))
             .expect("allocator advances");
         restored.clear();
         restored.restore_from_snapshot(&decoded);
@@ -1701,7 +1488,7 @@
         assert_ne!(persisted_id, instance_id);
         assert!(restored.finish_pending_throw(persisted_id));
         restored
-            .push_front(CommandRequest::new(CommandId::Wait))
+            .push_front(request!(Wait))
             .expect("new command queues");
         assert_ne!(restored.entries.front().unwrap().instance_id, persisted_id);
 
@@ -1716,7 +1503,7 @@
             "a serialized legacy event with token zero uses the compatibility fallback"
         );
         restored_legacy
-            .push_front(CommandRequest::new(CommandId::Wait))
+            .push_front(request!(Wait))
             .expect("post-migration command queues");
         assert_ne!(
             restored_legacy.entries.front().unwrap().instance_id,
@@ -1729,9 +1516,7 @@
         let actor_id = ObjectId::new(621);
         let target_id = ObjectId::new(622);
         let mut original = CommandStack::new();
-        original
-            .push_front(CommandRequest::new(CommandId::Throw))
-            .expect("Throw queues");
+        original.push_front(request!(Throw)).expect("Throw queues");
         let original_id = original.entries.front().expect("Throw remains").instance_id;
         let CommandState::Throw(state) = &mut original.entries.front_mut().unwrap().state else {
             panic!("command should be Throw");
@@ -1763,7 +1548,7 @@
             serde_json::from_value(encoded_snapshot).expect("snapshot deserializes");
         let mut restored = CommandStack::new();
         restored
-            .push_front(CommandRequest::new(CommandId::Wait))
+            .push_front(request!(Wait))
             .expect("advance the allocator");
         restored.clear();
         restored.restore_from_snapshot(&decoded);
@@ -1795,7 +1580,7 @@
     fn zero_event_resolution_uses_the_event_specific_pending_marker() {
         let mut throws = CommandStack::new();
         throws
-            .push_front(CommandRequest::new(CommandId::Throw))
+            .push_front(request!(Throw))
             .expect("outer Throw queues");
         let pending_throw = throws.entries.front().expect("outer Throw").instance_id;
         let CommandState::Throw(state) = &mut throws.entries.front_mut().unwrap().state else {
@@ -1803,7 +1588,7 @@
         };
         state.put_take_pending = true;
         throws
-            .push_front(CommandRequest::new(CommandId::Throw))
+            .push_front(request!(Throw))
             .expect("inner Throw queues");
         let exact_throw = throws.entries.front().expect("inner Throw").instance_id;
         throws.entries.front_mut().unwrap().finished = Some(CommandStatus::Completed);
@@ -1820,14 +1605,13 @@
         );
 
         let mut digs = CommandStack::new();
-        digs.push_front(CommandRequest::new(CommandId::Dig))
-            .expect("outer Dig queues");
+        digs.push_front(request!(Dig)).expect("outer Dig queues");
         let pending_dig = digs.entries.front().expect("outer Dig").instance_id;
         let CommandState::Dig(state) = &mut digs.entries.front_mut().unwrap().state else {
             panic!("outer command should be Dig");
         };
         state.start_pending = true;
-        digs.push_front(CommandRequest::new(CommandId::Dig))
+        digs.push_front(request!(Dig))
             .expect("replacement Dig queues");
         assert_eq!(
             digs.resolve_event_instance_id(CommandEventInstanceKind::Dig, 0),
@@ -1836,14 +1620,14 @@
         );
 
         let mut gets = CommandStack::new();
-        gets.push_front(CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(91))))
+        gets.push_front(request!(Get, with_target: Some(ObjectId::new(91))))
             .expect("outer Get queues");
         let pending_get = gets.entries.front().expect("outer Get").instance_id;
         let CommandState::Get(state) = &mut gets.entries.front_mut().unwrap().state else {
             panic!("outer command should be Get");
         };
         state.enter_pending = true;
-        gets.push_front(CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(92))))
+        gets.push_front(request!(Get, with_target: Some(ObjectId::new(92))))
             .expect("replacement Get queues");
         assert_eq!(
             gets.resolve_event_instance_id(CommandEventInstanceKind::Get, 0),
@@ -1851,9 +1635,7 @@
             "Get skips a same-kind command without its in-flight marker"
         );
 
-        let acquire_request = || {
-            CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".to_owned()))
-        };
+        let acquire_request = || request!(Acquire, with_data: CommandData::Text("WOOD".to_owned()));
         let mut acquires = CommandStack::new();
         acquires
             .push_front(acquire_request())
@@ -1876,10 +1658,7 @@
 
         let mut constructs = CommandStack::new();
         constructs
-            .push_front(
-                CommandRequest::new(CommandId::Construct)
-                    .with_data(CommandData::Text("HUT1".to_owned())),
-            )
+            .push_front(request!(Construct, with_data: CommandData::Text("HUT1".to_owned())))
             .expect("Construct queues");
         let pending_construct = constructs
             .entries
@@ -1903,9 +1682,7 @@
     #[test]
     fn zero_event_resolution_finds_detached_preludes_and_exit_activation() {
         let mut exits = CommandStack::new();
-        exits
-            .push_front(CommandRequest::new(CommandId::Exit))
-            .expect("Exit queues");
+        exits.push_front(request!(Exit)).expect("Exit queues");
         let detached_exit = exits.entries.front().expect("Exit remains").instance_id;
         let CommandState::Exit(state) = &mut exits.entries.front_mut().unwrap().state else {
             panic!("command should be Exit");
@@ -1917,7 +1694,7 @@
             detached_exit
         );
         exits
-            .push_front(CommandRequest::new(CommandId::Exit))
+            .push_front(request!(Exit))
             .expect("replacement Exit queues");
         let attached_exit = exits.entries.front().expect("replacement Exit").instance_id;
         let CommandState::Exit(state) = &mut exits.entries.front_mut().unwrap().state else {
@@ -1931,9 +1708,7 @@
         );
 
         let mut throws = CommandStack::new();
-        throws
-            .push_front(CommandRequest::new(CommandId::Throw))
-            .expect("Throw queues");
+        throws.push_front(request!(Throw)).expect("Throw queues");
         let detached_throw = throws.entries.front().expect("Throw remains").instance_id;
         let CommandState::Throw(state) = &mut throws.entries.front_mut().unwrap().state else {
             panic!("command should be Throw");
@@ -1949,9 +1724,7 @@
         );
 
         let mut drops = CommandStack::new();
-        drops
-            .push_front(CommandRequest::new(CommandId::Drop))
-            .expect("Drop queues");
+        drops.push_front(request!(Drop)).expect("Drop queues");
         let detached_drop = drops.entries.front().expect("Drop remains").instance_id;
         let CommandState::Drop(state) = &mut drops.entries.front_mut().unwrap().state else {
             panic!("command should be Drop");
@@ -1966,9 +1739,7 @@
         );
 
         let mut activation = CommandStack::new();
-        activation
-            .push_front(CommandRequest::new(CommandId::Exit))
-            .expect("Exit queues");
+        activation.push_front(request!(Exit)).expect("Exit queues");
         let detached_activation = activation
             .entries
             .front()
@@ -1989,11 +1760,9 @@
     fn zero_token_throw_and_drop_preludes_pin_the_resolved_command_instance() {
         let actor_id = ObjectId::new(624);
         let item_id = ObjectId::new(625);
-        let mut digging = snapshot_with_id(actor_id.as_u64());
-        digging.action_procedure = ActionProcedure::Dig;
-        digging.contents = vec![item_id];
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let digging = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Dig;
+            contents = vec![item_id]);
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id));
         let digging_objects = command_objects([digging.clone(), item.clone()]);
         let digging_ctx = command_ctx(
             digging_objects.get(&actor_id).expect("actor present"),
@@ -2011,7 +1780,7 @@
 
         let mut throws = CommandStack::new();
         throws
-            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item_id)))
+            .push_front(request!(Throw, with_target: Some(item_id)))
             .expect("original Throw queues");
         let original_throw = throws.entries.front().expect("original Throw").instance_id;
         assert!(matches!(
@@ -2024,7 +1793,7 @@
         ));
         throws.clear();
         throws
-            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item_id)))
+            .push_front(request!(Throw, with_target: Some(item_id)))
             .expect("replacement Throw queues");
         let replacement_throw = throws
             .entries
@@ -2055,7 +1824,7 @@
 
         let mut drops = CommandStack::new();
         drops
-            .push_front(CommandRequest::new(CommandId::Drop).with_target(Some(item_id)))
+            .push_front(request!(Drop, with_target: Some(item_id)))
             .expect("original Drop queues");
         let original_drop = drops.entries.front().expect("original Drop").instance_id;
         assert!(matches!(
@@ -2068,7 +1837,7 @@
         ));
         drops.clear();
         drops
-            .push_front(CommandRequest::new(CommandId::Drop).with_target(Some(item_id)))
+            .push_front(request!(Drop, with_target: Some(item_id)))
             .expect("replacement Drop queues");
         let replacement_drop = drops.entries.front().expect("replacement Drop").instance_id;
         let CommandState::Drop(replacement_state) = &mut drops.entries.front_mut().unwrap().state
@@ -2095,8 +1864,7 @@
     #[test]
     fn detached_throw_prelude_retains_its_failure_feedback_context() {
         let actor_id = ObjectId::new(619);
-        let mut digging = snapshot_with_id(actor_id.as_u64());
-        digging.action_procedure = ActionProcedure::Dig;
+        let digging = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Dig);
         let digging_objects = command_objects([digging.clone()]);
         let digging_ctx = command_ctx(
             digging_objects.get(&actor_id).expect("actor present"),
@@ -2106,10 +1874,7 @@
         let mut stack = CommandStack::new();
         stack
             .push_front(
-                CommandRequest::new(CommandId::Throw)
-                    .with_tx(Some(100))
-                    .with_ty(Some(20))
-                    .with_mode(CommandMode::Base),
+                request!(Throw, with_tx: Some(100), with_ty: Some(20), with_mode: CommandMode::Base),
             )
             .expect("Throw queues");
         let command_instance_id = stack.entries.front().unwrap().instance_id;

@@ -1050,44 +1050,29 @@ impl LeagueSignupController {
         // adds that margin to rcBounds, so Screen::ShowDialog centers and
         // Dialog::DrawElement frames the combined caption + client bounds.
         let y = (screen_height - total_height) / 2 + self.dialog_offset.1;
-        let caption = IntRect {
-            x,
-            y,
-            w: DIALOG_WIDTH,
-            h: caption_height,
-        };
-        let close_button = IntRect {
-            x: caption.x + caption.w - 20,
-            y: caption.y + 4,
-            w: 16,
-            h: 16,
-        };
-        let client = IntRect {
-            x,
-            y: y + caption_height,
-            w: DIALOG_WIDTH,
-            h: client_height,
-        };
-        let icon = IntRect {
-            x: client.x + DIALOG_INDENT,
-            y: client.y + DIALOG_INDENT,
-            w: ICON_SIZE,
-            h: ICON_SIZE,
-        };
+        let caption = IntRect::new(x, y, DIALOG_WIDTH, caption_height);
+        let close_button = IntRect::new(caption.x + caption.w - 20, caption.y + 4, 16, 16);
+        let client = IntRect::new(x, y + caption_height, DIALOG_WIDTH, client_height);
+        let icon = IntRect::new(
+            client.x + DIALOG_INDENT,
+            client.y + DIALOG_INDENT,
+            ICON_SIZE,
+            ICON_SIZE,
+        );
         let mut cursor_y = client.y;
-        let message = IntRect {
-            x: client.x + form_x,
-            y: cursor_y + DIALOG_INDENT,
-            w: form_width,
-            h: message_height,
-        };
+        let message = IntRect::new(
+            client.x + form_x,
+            cursor_y + DIALOG_INDENT,
+            form_width,
+            message_height,
+        );
         cursor_y += message_height + 2 * DIALOG_INDENT;
-        let account_bounds = IntRect {
-            x: client.x + form_x,
-            y: cursor_y + DIALOG_INDENT,
-            w: form_width,
-            h: account_height,
-        };
+        let account_bounds = IntRect::new(
+            client.x + form_x,
+            cursor_y + DIALOG_INDENT,
+            form_width,
+            account_height,
+        );
         let account = labeled_edit_layout(
             account_bounds,
             font.measure(&self.strings.account_label, true).1,
@@ -1099,12 +1084,12 @@ impl LeagueSignupController {
         let mut password_confirmation = None;
         match self.mode() {
             LeagueSignupMode::Login => {
-                let bounds = IntRect {
-                    x: client.x + form_x,
-                    y: cursor_y + DIALOG_INDENT,
-                    w: form_width,
-                    h: password_height,
-                };
+                let bounds = IntRect::new(
+                    client.x + form_x,
+                    cursor_y + DIALOG_INDENT,
+                    form_width,
+                    password_height,
+                );
                 password = Some(labeled_edit_layout(
                     bounds,
                     font.measure(&self.strings.password_label, true).1,
@@ -1112,41 +1097,36 @@ impl LeagueSignupController {
                 cursor_y += password_height + 2 * DIALOG_INDENT;
             }
             LeagueSignupMode::Registration => {
-                let bounds = IntRect {
-                    x: client.x + form_x,
-                    y: cursor_y + DIALOG_INDENT,
-                    w: form_width,
-                    h: checkbox_height,
-                };
+                let bounds = IntRect::new(
+                    client.x + form_x,
+                    cursor_y + DIALOG_INDENT,
+                    form_width,
+                    checkbox_height,
+                );
                 password_checkbox = Some(LeagueSignupCheckboxLayout {
                     bounds,
-                    square: IntRect {
-                        x: bounds.x,
-                        y: bounds.y,
-                        w: bounds.h,
-                        h: bounds.h,
-                    },
+                    square: IntRect::new(bounds.x, bounds.y, bounds.h, bounds.h),
                     label_x: bounds.x + bounds.h + 4,
                 });
                 cursor_y += checkbox_height + 2 * DIALOG_INDENT;
                 if self.password_enabled {
-                    let bounds = IntRect {
-                        x: client.x + form_x,
-                        y: cursor_y + DIALOG_INDENT,
-                        w: form_width,
-                        h: password_height,
-                    };
+                    let bounds = IntRect::new(
+                        client.x + form_x,
+                        cursor_y + DIALOG_INDENT,
+                        form_width,
+                        password_height,
+                    );
                     password = Some(labeled_edit_layout(
                         bounds,
                         font.measure(&self.strings.password_label, true).1,
                     ));
                     cursor_y += password_height + 2 * DIALOG_INDENT;
-                    let bounds = IntRect {
-                        x: client.x + form_x,
-                        y: cursor_y + DIALOG_INDENT,
-                        w: form_width,
-                        h: confirmation_height,
-                    };
+                    let bounds = IntRect::new(
+                        client.x + form_x,
+                        cursor_y + DIALOG_INDENT,
+                        form_width,
+                        confirmation_height,
+                    );
                     password_confirmation = Some(labeled_edit_layout(
                         bounds,
                         font.measure(&self.strings.password_confirmation_label, true)
@@ -1157,32 +1137,19 @@ impl LeagueSignupController {
             }
         }
 
-        let button_area = IntRect {
-            x: client.x + form_x,
-            y: cursor_y + DIALOG_INDENT,
-            w: form_width,
-            h: BUTTON_AREA_HEIGHT,
-        };
+        let button_area = IntRect::new(
+            client.x + form_x,
+            cursor_y + DIALOG_INDENT,
+            form_width,
+            BUTTON_AREA_HEIGHT,
+        );
         let group_width = 2 * BUTTON_WIDTH + BUTTON_GAP;
         let button_x = button_area.x + (button_area.w - group_width) / 2;
         let button_y = button_area.y + (button_area.h - BUTTON_HEIGHT) / 2;
-        let ok_button = IntRect {
-            x: button_x,
-            y: button_y,
-            w: BUTTON_WIDTH,
-            h: BUTTON_HEIGHT,
-        };
-        let cancel_button = IntRect {
-            x: button_x + BUTTON_WIDTH + BUTTON_GAP,
-            ..ok_button
-        };
+        let ok_button = IntRect::new(button_x, button_y, BUTTON_WIDTH, BUTTON_HEIGHT);
+        let cancel_button = ok_button.with_x(button_x + BUTTON_WIDTH + BUTTON_GAP);
         LeagueSignupLayout {
-            bounds: IntRect {
-                x,
-                y,
-                w: DIALOG_WIDTH,
-                h: total_height,
-            },
+            bounds: IntRect::new(x, y, DIALOG_WIDTH, total_height),
             caption,
             close_button,
             client,
@@ -1875,12 +1842,12 @@ impl LeagueSignupController {
             {
                 draw_highlight(
                     surface,
-                    IntRect {
-                        x: checkbox.square.x + checkbox.square.w / 4,
-                        y: checkbox.square.y + checkbox.square.h / 4,
-                        w: checkbox.square.w / 2,
-                        h: checkbox.square.h / 2,
-                    },
+                    IntRect::new(
+                        checkbox.square.x + checkbox.square.w / 4,
+                        checkbox.square.y + checkbox.square.h / 4,
+                        checkbox.square.w / 2,
+                        checkbox.square.h / 2,
+                    ),
                     resources.button_highlight,
                     gamma,
                 );
@@ -2298,19 +2265,14 @@ fn valid_account_byte(byte: u8) -> bool {
 fn labeled_edit_layout(bounds: IntRect, label_height: i32) -> LeagueSignupEditLayout {
     LeagueSignupEditLayout {
         bounds,
-        label: IntRect {
-            x: bounds.x,
-            y: bounds.y,
-            w: bounds.w,
-            h: label_height,
-        },
+        label: IntRect::new(bounds.x, bounds.y, bounds.w, label_height),
         // `ExpandLeft(-2); ExpandTop(-2)` after taking the label.
-        edit: IntRect {
-            x: bounds.x + 2,
-            y: bounds.y + label_height + 2,
-            w: (bounds.w - 2).max(0),
-            h: (bounds.h - label_height - 2).max(0),
-        },
+        edit: IntRect::new(
+            bounds.x + 2,
+            bounds.y + label_height + 2,
+            (bounds.w - 2).max(0),
+            (bounds.h - label_height - 2).max(0),
+        ),
     }
 }
 
@@ -2395,12 +2357,12 @@ fn contains(rect: IntRect, point: GuiPoint) -> bool {
 }
 
 fn edit_client(rect: IntRect) -> IntRect {
-    IntRect {
-        x: rect.x + 4,
-        y: rect.y + 2,
-        w: (rect.w - 8).max(0),
-        h: (rect.h - 4).max(0),
-    }
+    IntRect::new(
+        rect.x + 4,
+        rect.y + 2,
+        (rect.w - 8).max(0),
+        (rect.h - 4).max(0),
+    )
 }
 
 fn is_word_spacer(character: Option<char>) -> bool {
@@ -2539,12 +2501,7 @@ fn render_edit(
             font.line_height - 2,
         )
     };
-    let clip = IntRect {
-        x: client.x - 2,
-        y: client.y,
-        w: client.w + 4,
-        h: client.h + 1,
-    };
+    let clip = IntRect::new(client.x - 2, client.y, client.w + 4, client.h + 1);
     let displayed = if password {
         "*".repeat(state.text.chars().count())
     } else {

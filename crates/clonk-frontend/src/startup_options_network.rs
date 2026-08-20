@@ -218,75 +218,61 @@ impl NetworkSheetLayout {
     pub fn from_sheet(sheet: IntRect, line_height: i32) -> Self {
         let margin_x = (sheet.w / 20).max(8);
         let margin_y = (sheet.h / 20).max(4);
-        let inner = IntRect {
-            x: sheet.x + margin_x,
-            y: sheet.y + margin_y,
-            w: sheet.w - margin_x * 2,
-            h: sheet.h - margin_y * 2,
-        };
+        let inner = IntRect::new(
+            sheet.x + margin_x,
+            sheet.y + margin_y,
+            sheet.w - margin_x * 2,
+            sheet.h - margin_y * 2,
+        );
         let gap = 12;
         let column_w = (inner.w - gap) / 2;
         let port_h = (line_height * 2 + 12).max(44);
         let port_controls = std::array::from_fn(|index| {
             let column = index % 2;
             let row = index / 2;
-            IntRect {
-                x: inner.x + column as i32 * (column_w + gap),
-                y: inner.y + row as i32 * (port_h + 4),
-                w: column_w,
-                h: port_h,
-            }
+            IntRect::new(
+                inner.x + column as i32 * (column_w + gap),
+                inner.y + row as i32 * (port_h + 4),
+                column_w,
+                port_h,
+            )
         });
-        let port_checks = std::array::from_fn(|index| IntRect {
-            x: port_controls[index].x,
-            y: port_controls[index].y + line_height + 4,
-            w: (column_w / 3).max(line_height),
-            h: line_height,
+        let port_checks = std::array::from_fn(|index| {
+            IntRect::new(
+                port_controls[index].x,
+                port_controls[index].y + line_height + 4,
+                (column_w / 3).max(line_height),
+                line_height,
+            )
         });
-        let port_edits = std::array::from_fn(|index| IntRect {
-            x: port_checks[index].x + port_checks[index].w + 4,
-            y: port_checks[index].y - 2,
-            w: port_controls[index].w - port_checks[index].w - 4,
-            h: line_height + 4,
+        let port_edits = std::array::from_fn(|index| {
+            IntRect::new(
+                port_checks[index].x + port_checks[index].w + 4,
+                port_checks[index].y - 2,
+                port_controls[index].w - port_checks[index].w - 4,
+                line_height + 4,
+            )
         });
         let below_ports = inner.y + 2 * (port_h + 4) + 4;
         let row_h = line_height + 8;
-        let alternate_check = IntRect {
-            x: inner.x,
-            y: below_ports,
-            w: column_w,
-            h: line_height,
-        };
-        let alternate_edit = IntRect {
-            x: inner.x + column_w,
-            y: below_ports - 2,
-            w: inner.w - column_w,
-            h: line_height + 4,
-        };
-        let automatic_update_check = IntRect {
-            x: inner.x,
-            y: below_ports + row_h,
-            w: inner.w,
-            h: line_height,
-        };
-        let upnp_check = IntRect {
-            x: inner.x,
-            y: below_ports + row_h * 2,
-            w: inner.w,
-            h: line_height,
-        };
-        let local_name_edit = IntRect {
-            x: inner.x,
-            y: below_ports + row_h * 3,
-            w: column_w,
-            h: line_height + 4,
-        };
-        let nick_edit = IntRect {
-            x: inner.x + column_w + gap,
-            y: local_name_edit.y,
-            w: column_w,
-            h: line_height + 4,
-        };
+        let alternate_check = IntRect::new(inner.x, below_ports, column_w, line_height);
+        let alternate_edit = IntRect::new(
+            inner.x + column_w,
+            below_ports - 2,
+            inner.w - column_w,
+            line_height + 4,
+        );
+        let automatic_update_check =
+            IntRect::new(inner.x, below_ports + row_h, inner.w, line_height);
+        let upnp_check = IntRect::new(inner.x, below_ports + row_h * 2, inner.w, line_height);
+        let local_name_edit =
+            IntRect::new(inner.x, below_ports + row_h * 3, column_w, line_height + 4);
+        let nick_edit = IntRect::new(
+            inner.x + column_w + gap,
+            local_name_edit.y,
+            column_w,
+            line_height + 4,
+        );
         Self {
             port_controls,
             port_checks,
@@ -406,15 +392,7 @@ mod tests {
 
     #[test]
     fn network_layout_routes_all_native_controls() {
-        let layout = NetworkSheetLayout::from_sheet(
-            IntRect {
-                x: 100,
-                y: 80,
-                w: 600,
-                h: 400,
-            },
-            20,
-        );
+        let layout = NetworkSheetLayout::from_sheet(IntRect::new(100, 80, 600, 400), 20);
         let state = NetworkSheetState::default();
         for id in NetworkPortId::ALL {
             let check = layout.port_check(id);
@@ -440,15 +418,7 @@ mod tests {
 
     #[test]
     fn disabled_port_and_alternate_server_edits_are_not_interactive() {
-        let layout = NetworkSheetLayout::from_sheet(
-            IntRect {
-                x: 100,
-                y: 80,
-                w: 600,
-                h: 400,
-            },
-            20,
-        );
+        let layout = NetworkSheetLayout::from_sheet(IntRect::new(100, 80, 600, 400), 20);
         let mut state = NetworkSheetState::new(
             [0, 0, 0, 0],
             false,

@@ -9,7 +9,7 @@ use crate::resource_packet::{
     encode_resource_packet, ResourceChunkAvailability, ResourceChunkRange, ResourceDiscoverPacket,
     ResourcePacket, ResourceRequestPacket, ResourceStatusPacket,
 };
-use clonk_engine::{LegacyCString, NetworkResourceCore};
+use clonk_engine::NetworkResourceCore;
 
 fn registration(resource_id: i32) -> ResourceRegistration {
     ResourceRegistration {
@@ -142,8 +142,8 @@ fn local_finish_derive_broadcast_matches_the_cpp_codec_fixture() {
         derived_id: 0x0102_0304,
         loadable: false,
         contents_crc: 0x1122_3344,
-        filename: LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
-        author: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+        filename: crate::c4(b"Scenario.c4s"),
+        author: crate::c4(b"Alice"),
         ..NetworkResourceCore::default()
     };
     let actions = catalog.finish_local_derived(&core);

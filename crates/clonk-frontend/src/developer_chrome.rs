@@ -62,12 +62,7 @@ pub fn fill(surface: &mut Surface, rect: IntRect, color: Color) {
 pub fn draw_bottom_line(surface: &mut Surface, rect: IntRect, color: Color) {
     fill(
         surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y + rect.h - 1,
-            w: rect.w,
-            h: 1,
-        },
+        IntRect::new(rect.x, rect.y + rect.h - 1, rect.w, 1),
         color,
     );
 }
@@ -75,44 +70,16 @@ pub fn draw_bottom_line(surface: &mut Surface, rect: IntRect, color: Color) {
 /// A button face: light on the top and left, dark on the bottom and right.
 pub fn draw_raised(surface: &mut Surface, rect: IntRect, color: Color) {
     fill(surface, rect, color);
+    fill(surface, IntRect::new(rect.x, rect.y, rect.w, 1), LIGHT_EDGE);
+    fill(surface, IntRect::new(rect.x, rect.y, 1, rect.h), LIGHT_EDGE);
     fill(
         surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: 1,
-        },
-        LIGHT_EDGE,
-    );
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y,
-            w: 1,
-            h: rect.h,
-        },
-        LIGHT_EDGE,
-    );
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y + rect.h - 1,
-            w: rect.w,
-            h: 1,
-        },
+        IntRect::new(rect.x, rect.y + rect.h - 1, rect.w, 1),
         DARK_EDGE,
     );
     fill(
         surface,
-        IntRect {
-            x: rect.x + rect.w - 1,
-            y: rect.y,
-            w: 1,
-            h: rect.h,
-        },
+        IntRect::new(rect.x + rect.w - 1, rect.y, 1, rect.h),
         DARK_EDGE,
     );
 }
@@ -121,44 +88,16 @@ pub fn draw_raised(surface: &mut Surface, rect: IntRect, color: Color) {
 /// button and an editable field look the same way in.
 pub fn draw_sunken(surface: &mut Surface, rect: IntRect, color: Color) {
     fill(surface, rect, color);
+    fill(surface, IntRect::new(rect.x, rect.y, rect.w, 1), DARK_EDGE);
+    fill(surface, IntRect::new(rect.x, rect.y, 1, rect.h), DARK_EDGE);
     fill(
         surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: 1,
-        },
-        DARK_EDGE,
-    );
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y,
-            w: 1,
-            h: rect.h,
-        },
-        DARK_EDGE,
-    );
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y + rect.h - 1,
-            w: rect.w,
-            h: 1,
-        },
+        IntRect::new(rect.x, rect.y + rect.h - 1, rect.w, 1),
         LIGHT_EDGE,
     );
     fill(
         surface,
-        IntRect {
-            x: rect.x + rect.w - 1,
-            y: rect.y,
-            w: 1,
-            h: rect.h,
-        },
+        IntRect::new(rect.x + rect.w - 1, rect.y, 1, rect.h),
         LIGHT_EDGE,
     );
 }

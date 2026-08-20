@@ -439,12 +439,12 @@ impl Aligner {
 
     /// C4Gui.cpp:975-990.
     pub(crate) fn get_from_top(&mut self, hgt: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.mx,
-            y: self.area.y + self.my,
-            w: self.area.w - 2 * self.mx,
-            h: hgt,
-        };
+        let out = IntRect::new(
+            self.area.x + self.mx,
+            self.area.y + self.my,
+            self.area.w - 2 * self.mx,
+            hgt,
+        );
         let d = hgt + self.my * 2;
         self.area.y += d;
         self.area.h -= d;
@@ -472,12 +472,12 @@ impl Aligner {
 
     /// C4Gui.cpp:992-1007 (`iHgt = -1` keeps the full height).
     pub(crate) fn get_from_left(&mut self, wdt: i32, hgt: i32) -> IntRect {
-        let mut out = IntRect {
-            x: self.area.x + self.mx,
-            y: self.area.y + self.my,
-            w: wdt,
-            h: self.area.h - 2 * self.my,
-        };
+        let mut out = IntRect::new(
+            self.area.x + self.mx,
+            self.area.y + self.my,
+            wdt,
+            self.area.h - 2 * self.my,
+        );
         let d = wdt + self.mx * 2;
         self.area.x += d;
         self.area.w -= d;
@@ -490,12 +490,12 @@ impl Aligner {
 
     /// C4Gui.cpp:1009-1023.
     pub(crate) fn get_from_right(&mut self, wdt: i32, hgt: i32) -> IntRect {
-        let mut out = IntRect {
-            x: self.area.x + self.area.w - wdt - self.mx,
-            y: self.area.y + self.my,
-            w: wdt,
-            h: self.area.h - 2 * self.my,
-        };
+        let mut out = IntRect::new(
+            self.area.x + self.area.w - wdt - self.mx,
+            self.area.y + self.my,
+            wdt,
+            self.area.h - 2 * self.my,
+        );
         self.area.w -= wdt + self.mx * 2;
         if hgt >= 0 {
             out.y += (out.h - hgt) / 2;
@@ -506,34 +506,34 @@ impl Aligner {
 
     /// C4Gui.cpp:1025-1041.
     pub(crate) fn get_from_bottom(&mut self, hgt: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.mx,
-            y: self.area.y + self.area.h - hgt - self.my,
-            w: self.area.w - 2 * self.mx,
-            h: hgt,
-        };
+        let out = IntRect::new(
+            self.area.x + self.mx,
+            self.area.y + self.area.h - hgt - self.my,
+            self.area.w - 2 * self.mx,
+            hgt,
+        );
         self.area.h -= hgt + self.my * 2;
         out
     }
 
     /// C4Gui.cpp:1043-1049.
     pub(crate) fn get_all(&self) -> IntRect {
-        IntRect {
-            x: self.area.x + self.mx,
-            y: self.area.y + self.my,
-            w: self.area.w - 2 * self.mx,
-            h: self.area.h - 2 * self.my,
-        }
+        IntRect::new(
+            self.area.x + self.mx,
+            self.area.y + self.my,
+            self.area.w - 2 * self.mx,
+            self.area.h - 2 * self.my,
+        )
     }
 
     /// C4Gui.cpp:1051-1060 (`GetMiddleX/Y` = origin + extent/2).
     pub(crate) fn get_centered(&self, wdt: i32, hgt: i32) -> IntRect {
-        IntRect {
-            x: self.area.x + self.area.w / 2 - wdt / 2,
-            y: self.area.y + self.area.h / 2 - hgt / 2,
-            w: wdt,
-            h: hgt,
-        }
+        IntRect::new(
+            self.area.x + self.area.w / 2 - wdt / 2,
+            self.area.y + self.area.h / 2 - hgt / 2,
+            wdt,
+            hgt,
+        )
     }
 
     /// C4Gui.h:1909 (`ExpandLeft`).
@@ -568,12 +568,12 @@ impl Aligner {
         } else {
             size_y.min(size_y_max)
         };
-        let mut out = IntRect {
-            x: sect_x * (cell_w + self.mx) + self.mx + self.area.x,
-            y: sect_y * (cell_h + self.my) + self.my + self.area.y,
-            w: cell_w * num_x + self.mx * (num_x - 1),
-            h: cell_h * num_y + self.my * (num_y - 1),
-        };
+        let mut out = IntRect::new(
+            sect_x * (cell_w + self.mx) + self.mx + self.area.x,
+            sect_y * (cell_h + self.my) + self.my + self.area.y,
+            cell_w * num_x + self.mx * (num_x - 1),
+            cell_h * num_y + self.my * (num_y - 1),
+        );
         if size_x >= 0 && center {
             out.x += (cell_w - size_x) / 2;
             out.w = size_x;
@@ -778,17 +778,13 @@ pub fn options_dlg_layout_for(
     // FullscreenDialog margins (C4GuiDialogs.cpp:816-823).
     let margin_x = if w < 500 { 2 } else { w / 50 };
     let margin_y = if h < 320 { 2 } else { h * 2 / 75 };
-    let client = IntRect {
-        x: margin_x,
-        y: 50 + margin_y,
-        w: w - 2 * margin_x,
-        h: h - (50 + margin_y) - margin_y,
-    };
-    let abs = |r: IntRect| IntRect {
-        x: r.x + client.x,
-        y: r.y + client.y,
-        ..r
-    };
+    let client = IntRect::new(
+        margin_x,
+        50 + margin_y,
+        w - 2 * margin_x,
+        h - (50 + margin_y) - margin_y,
+    );
+    let abs = |r: IntRect| r.with_position(r.x + client.x, r.y + client.y);
 
     let f_small = client.w < 750;
     // Title label (C4GuiDialogs.cpp:843-845): centered, y = 25 - lh/2 - top.
@@ -797,25 +793,16 @@ pub fn options_dlg_layout_for(
         client.y + 25 - gui.title.line_height / 2 - (50 + margin_y),
     );
     let (title_width, title_height) = gui.title.measure(&labels.title, true);
-    let title_label = IntRect {
-        x: title_center.0 - title_width / 2,
-        y: title_center.1,
-        w: title_width,
-        h: title_height,
-    };
+    let title_label = IntRect::new(
+        title_center.0 - title_width / 2,
+        title_center.1,
+        title_width,
+        title_height,
+    );
 
     // Back button (ctor 627-629, 655-657): 3*w("<< BACK") @ CaptionFont.
     let back_w = 3 * gui.caption.measure("<< BACK", true).0;
-    let mut ca_main = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: client.w,
-            h: client.h,
-        },
-        0,
-        0,
-    );
+    let mut ca_main = Aligner::new(IntRect::new(0, 0, client.w, client.h), 0, 0);
     let button_area = ca_main.get_from_bottom(ca_main.height() / if f_small { 20 } else { 7 });
     let mut ca_buttons = Aligner::new(
         Aligner::new(button_area, 0, 0).get_centered(client.w * 7 / 8, 32),
@@ -854,12 +841,7 @@ pub fn options_dlg_layout_for(
     // Tab strip (C4GuiTabular.cpp:380-462): x0 at the paper's left edge,
     // iSheetOff=20, iSheetSpacing=-10, advance (80-10)+2 = 72.
     let x0 = tabular.x + left_size;
-    let paper = IntRect {
-        x: x0,
-        y: tabular.y,
-        w: tabular.x + tabular.w - x0,
-        h: tabular.h,
-    };
+    let paper = IntRect::new(x0, tabular.y, tabular.x + tabular.w - x0, tabular.h);
     let cpt_x = x0 - left_size + 10;
     let mut tab_clips = [(0, 0); 6];
     let mut tab_icons = [(0, 0); 6];
@@ -877,37 +859,23 @@ pub fn options_dlg_layout_for(
     // iMaxTabWidth (115), but DrawCaption overrides `iMaxWdt = iTxtWdt` (95)
     // whenever clip gfx are present (C4GuiTabular.cpp:393) — so the additive
     // highlight is 95-10 = 85 wide (verified against ref-options.png).
-    let focus_highlight = IntRect {
-        x: cpt_x + 5,
-        y: tab_clips[0].1 + 3,
-        w: 95 - 10,
-        h: 80 - 6,
-    };
+    let focus_highlight = IntRect::new(cpt_x + 5, tab_clips[0].1 + 3, 95 - 10, 80 - 6);
 
     // Sheet client (tabular margins, C4GuiTabular.h:108-111, iSheetMargin=4).
-    let sheet = IntRect {
-        x: tabular.x + 4 + left_size + (tab.w - left_size) * 13 / 628,
-        y: tabular.y + 4 + tab.h * 30 / 483,
-        w: tab.w
+    let sheet = IntRect::new(
+        tabular.x + 4 + left_size + (tab.w - left_size) * 13 / 628,
+        tabular.y + 4 + tab.h * 30 / 483,
+        tab.w
             - (4 + left_size + (tab.w - left_size) * 13 / 628)
             - (4 + (tab.w - left_size) * 30 / 628),
-        h: tab.h - (4 + tab.h * 30 / 483) - (4 + tab.h * 32 / 483),
-    };
-    let sheet_abs = |r: IntRect| IntRect {
-        x: r.x + sheet.x,
-        y: r.y + sheet.y,
-        ..r
-    };
+        tab.h - (4 + tab.h * 30 / 483) - (4 + tab.h * 32 / 483),
+    );
+    let sheet_abs = |r: IntRect| r.with_position(r.x + sheet.x, r.y + sheet.y);
 
     // Program sheet (ctor 675-792): margins caMain w/20, h/20 (post-bar).
     let book_w = |s: &str| book.book.measure(s, true).0;
     let ca_sheet = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: sheet.w,
-            h: sheet.h,
-        },
+        IntRect::new(0, 0, sheet.w, sheet.h),
         ca_main.width() / 20,
         ca_main.height() / 20,
     );
@@ -966,27 +934,14 @@ pub fn options_dlg_layout_for(
     // confirms: weak/strong/slider sit 1px lower than a BookFont-margin
     // model would place them.
     let title_lh = gui.caption.line_height;
-    let group_client = IntRect {
-        x: group.x + 4,
-        y: group.y + 4 + title_lh,
-        w: group.w - 8,
-        h: group.h - 8 - title_lh,
-    };
-    let mut ca_group = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: group_client.w,
-            h: group_client.h,
-        },
-        1,
-        0,
+    let group_client = IntRect::new(
+        group.x + 4,
+        group.y + 4 + title_lh,
+        group.w - 8,
+        group.h - 8 - title_lh,
     );
-    let group_abs = |r: IntRect| IntRect {
-        x: r.x + group_client.x,
-        y: r.y + group_client.y,
-        ..r
-    };
+    let mut ca_group = Aligner::new(IntRect::new(0, 0, group_client.w, group_client.h), 1, 0);
+    let group_abs = |r: IntRect| r.with_position(r.x + group_client.x, r.y + group_client.y);
     let weak_label = group_abs(ca_group.get_from_left(book_w(&labels.fair_crew_weak), check_h));
     let strong_label =
         group_abs(ca_group.get_from_right(book_w(&labels.fair_crew_strong), check_h));
@@ -1027,16 +982,7 @@ pub fn options_dlg_layout_for(
     // titled GroupBox client windows.
     let indent_x1 = if f_small { 20 } else { client.w / 40 };
     let indent_y1 = if f_small { 1 } else { client.h / 200 };
-    let sound_sheet = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: sheet.w,
-            h: sheet.h,
-        },
-        indent_x1,
-        indent_y1,
-    );
+    let sound_sheet = Aligner::new(IntRect::new(0, 0, sheet.w, sheet.h), indent_x1, indent_y1);
     let (lorem_w, sound_check_h) = book.book.measure("Lorem ipsum", true);
     let sound_check_w = lorem_w + sound_check_h + 4;
     let grid_w = sound_check_w * 2;
@@ -1050,36 +996,25 @@ pub fn options_dlg_layout_for(
     // SetTitle relayouts before SetFont, so every group's stored client top
     // margin uses GUI CaptionFont even though its title later draws in BookFont
     // (C4Gui.h:993-1011). This is the same quirk as the Program group above.
-    let titled_client = |group: IntRect| IntRect {
-        x: group.x + 4,
-        y: group.y + 4 + title_lh,
-        w: group.w - 8,
-        h: group.h - 8 - title_lh,
+    let titled_client = |group: IntRect| {
+        IntRect::new(
+            group.x + 4,
+            group.y + 4 + title_lh,
+            group.w - 8,
+            group.h - 8 - title_lh,
+        )
     };
-    let child_abs = |client: IntRect, rect: IntRect| IntRect {
-        x: client.x + rect.x,
-        y: client.y + rect.y,
-        ..rect
-    };
+    let child_abs =
+        |client: IntRect, rect: IntRect| rect.with_position(client.x + rect.x, client.y + rect.y);
     let frontend_client = titled_client(frontend_group);
     let game_client = titled_client(game_group);
     let frontend_controls = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: frontend_client.w,
-            h: frontend_client.h,
-        },
+        IntRect::new(0, 0, frontend_client.w, frontend_client.h),
         indent_x1,
         indent_y2,
     );
     let game_controls = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: game_client.w,
-            h: game_client.h,
-        },
+        IntRect::new(0, 0, game_client.w, game_client.h),
         indent_x1,
         indent_y2,
     );
@@ -1104,12 +1039,7 @@ pub fn options_dlg_layout_for(
 
     let volume_client = titled_client(volume_group);
     let volume_controls = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: volume_client.w,
-            h: volume_client.h,
-        },
+        IntRect::new(0, 0, volume_client.w, volume_client.h),
         indent_x1,
         indent_y2,
     );
@@ -3748,12 +3678,7 @@ const fn network_port_tooltip_key(id: NetworkPortId) -> &'static str {
 
 fn left_label_bounds(font: &ClonkFont, position: (i32, i32), text: &str) -> IntRect {
     let (width, height) = font.measure(text, true);
-    IntRect {
-        x: position.0,
-        y: position.1,
-        w: width,
-        h: height,
-    }
+    IntRect::new(position.0, position.1, width, height)
 }
 
 fn enclosing_rect(first: IntRect, second: IntRect) -> IntRect {
@@ -3761,20 +3686,11 @@ fn enclosing_rect(first: IntRect, second: IntRect) -> IntRect {
     let top = first.y.min(second.y);
     let right = (first.x + first.w).max(second.x + second.w);
     let bottom = (first.y + first.h).max(second.y + second.h);
-    IntRect {
-        x: left,
-        y: top,
-        w: right - left,
-        h: bottom - top,
-    }
+    IntRect::new(left, top, right - left, bottom - top)
 }
 
 fn labeled_edit_bounds(edit: IntRect, label_line_height: i32) -> IntRect {
-    IntRect {
-        y: edit.y - label_line_height,
-        h: edit.h + label_line_height,
-        ..edit
-    }
+    edit.with_vertical(edit.y - label_line_height, edit.h + label_line_height)
 }
 
 fn options_tooltip_at(
@@ -4025,10 +3941,7 @@ fn options_hit_test(
                 OptionsProgramFocusTarget::Preloading,
             ),
         ] {
-            let square = IntRect {
-                w: bounds.h + 1,
-                ..bounds
-            };
+            let square = bounds.with_width(bounds.h + 1);
             if rect_contains(&square, point) {
                 return Some(OptionsHit::Program(target));
             }
@@ -4064,10 +3977,7 @@ fn options_hit_test(
             let bounds = layout.sound.checkbox(id);
             // CheckBox::MouseInput uses Inside(x, 0, Hgt), inclusive. Parent
             // dispatch still clips y to the control's half-open C4Rect.
-            let square = IntRect {
-                w: bounds.h + 1,
-                ..bounds
-            };
+            let square = bounds.with_width(bounds.h + 1);
             if rect_contains(&square, point) {
                 return Some(OptionsHit::SoundCheckbox(id));
             }
@@ -5661,12 +5571,12 @@ impl OptionsDlgScreen {
                 ControlDevice::Gamepad => assets.gamepad.as_ref().map(|image| {
                     (
                         image,
-                        IntRect {
-                            x: 0,
-                            y: 0,
-                            w: control_facets::GAMEPAD_PHASE_WIDTH,
-                            h: image.height() as i32,
-                        },
+                        IntRect::new(
+                            0,
+                            0,
+                            control_facets::GAMEPAD_PHASE_WIDTH,
+                            image.height() as i32,
+                        ),
                     )
                 }),
             };
@@ -7636,28 +7546,27 @@ mod tests {
 
         assert_eq!(
             sound.frontend_group,
-            IntRect {
-                x: layout.sheet.x + mx,
-                y: layout.sheet.y + my,
-                w: cell_w,
-                h: 2 * cell_h + my,
-            }
+            IntRect::new(
+                layout.sheet.x + mx,
+                layout.sheet.y + my,
+                cell_w,
+                2 * cell_h + my
+            )
         );
         assert_eq!(
             sound.game_group,
-            IntRect {
-                x: layout.sheet.x + cell_w + 2 * mx,
-                ..sound.frontend_group
-            }
+            sound
+                .frontend_group
+                .with_x(layout.sheet.x + cell_w + 2 * mx)
         );
         assert_eq!(
             sound.volume_group,
-            IntRect {
-                x: layout.sheet.x + mx,
-                y: layout.sheet.y + 2 * cell_h + 3 * my,
-                w: 2 * cell_w + mx,
-                h: 3 * cell_h + 2 * my,
-            }
+            IntRect::new(
+                layout.sheet.x + mx,
+                layout.sheet.y + 2 * cell_h + 3 * my,
+                2 * cell_w + mx,
+                3 * cell_h + 2 * my
+            )
         );
 
         // SetTitle runs before SetFont: controls are offset by CaptionFont's
