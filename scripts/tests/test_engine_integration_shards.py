@@ -122,7 +122,8 @@ class EngineIntegrationShardTests(unittest.TestCase):
 
         shard_one = set(assignments[SELECTORS[0]])
         shard_two = set(assignments[SELECTORS[1]])
-        self.assertIn("bird_flight", shard_one)
+        self.assertNotIn("bird_flight", shard_one)
+        self.assertIn("bird_flight", shard_two)
         self.assertTrue(REBALANCED_ROUTE_MODULES <= shard_one)
         self.assertTrue(REBALANCED_ROUTE_MODULES.isdisjoint(shard_two))
         self.assertTrue(RECORDING_HOST_TESTS.keys() <= shard_one)

@@ -45,7 +45,6 @@ shard_modules!(
     airbike_pilot_dismount,
     action_procedure,
     activate_entrance_native,
-    bird_flight,
     burning_clonk_fire_particles,
     column_landscape_reachability,
     component_natives,
@@ -101,6 +100,7 @@ shard_modules!(
 
 shard_modules!(
     "engine-it-shard-2",
+    bird_flight,
     blobby_soccer_effect_call,
     body_declarations,
     effect_command_target_context,

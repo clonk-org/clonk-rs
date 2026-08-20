@@ -241,24 +241,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: app 1+10/12
+          - name: app 1+12/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-1,app-test-shard-10 --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app --features app-test-shard-1,app-test-shard-12 --no-fail-fast --locked
+          - name: app 3+10/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-3,app-test-shard-10 --no-fail-fast --locked
           - name: app 2+7/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-2,app-test-shard-7 --no-fail-fast --locked
-          - name: app 3/12
-            apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-3 --no-fail-fast --locked
           - name: app 4+9/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked
           - name: app 5/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
-          - name: app 11+12/12
+          - name: app 11/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-11,app-test-shard-12 --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app --features app-test-shard-11 --no-fail-fast --locked
           - name: app 6+8/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-6,app-test-shard-8 --no-fail-fast --locked
@@ -277,11 +277,10 @@ jobs:
           - name: frontend unit
             command: cargo nextest run -p clonk-frontend-unit-tests --no-fail-fast --locked
           - name: remaining workspace 1/2
-            apt: mesa-vulkan-drivers
-            command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-app-render -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-network -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
           - name: remaining workspace 2/2
-            apt: libasound2-dev libxmp4
-            command: cargo nextest run -p clonk-app-menus -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-network -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
+            apt: libasound2-dev libxmp4 mesa-vulkan-drivers
+            command: cargo nextest run -p clonk-app-menus -p clonk-app-render -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
           - name: workspace quality
             apt: libasound2-dev libudev-dev python3-pil
             command: |

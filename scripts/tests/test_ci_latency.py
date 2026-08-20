@@ -410,12 +410,12 @@ class CiLatencyTests(unittest.TestCase):
         self.assertEqual(
             [tuple(command.split(",")) for command in app_commands],
             [
-                ("app-test-shard-1", "app-test-shard-10"),
+                ("app-test-shard-1", "app-test-shard-12"),
+                ("app-test-shard-3", "app-test-shard-10"),
                 ("app-test-shard-2", "app-test-shard-7"),
-                ("app-test-shard-3",),
                 ("app-test-shard-4", "app-test-shard-9"),
                 ("app-test-shard-5",),
-                ("app-test-shard-11", "app-test-shard-12"),
+                ("app-test-shard-11",),
                 ("app-test-shard-6", "app-test-shard-8"),
             ],
         )
@@ -504,6 +504,10 @@ class CiLatencyTests(unittest.TestCase):
         )
         self.assertIn("-p clonk-app-netplay", remaining_shards[0][2])
         self.assertNotIn("-p clonk-app-netplay", remaining_shards[1][2])
+        self.assertNotIn("-p clonk-app-render", remaining_shards[0][2])
+        self.assertIn("-p clonk-app-render", remaining_shards[1][2])
+        self.assertIn("-p clonk-network", remaining_shards[0][2])
+        self.assertNotIn("-p clonk-network", remaining_shards[1][2])
         self.assertNotIn("-p clonk-app-menus", remaining_shards[0][2])
         self.assertIn("-p clonk-app-menus", remaining_shards[1][2])
         self.assertNotIn(
@@ -557,12 +561,12 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04", linux)
         self.assertNotIn("filter: blob:none", linux)
         app_rows = [
-            "app 1+10/12",
+            "app 1+12/12",
+            "app 3+10/12",
             "app 2+7/12",
-            "app 3/12",
             "app 4+9/12",
             "app 5/12",
-            "app 11+12/12",
+            "app 11/12",
             "app 6+8/12",
         ]
         for name in app_rows:
@@ -571,12 +575,15 @@ class CiLatencyTests(unittest.TestCase):
                 matrix_entry(workflow, name),
             )
         expected_apt = {
-            "remaining workspace 1/2": "mesa-vulkan-drivers",
-            "remaining workspace 2/2": "libasound2-dev libxmp4",
+            "remaining workspace 2/2": "libasound2-dev libxmp4 mesa-vulkan-drivers",
             "workspace quality": "libasound2-dev libudev-dev python3-pil",
         }
         for name, packages in expected_apt.items():
             self.assertIn(f"apt: {packages}", matrix_entry(workflow, name))
+        self.assertNotIn(
+            "\n            apt:",
+            matrix_entry(workflow, "remaining workspace 1/2"),
+        )
         for name in (
             "engine integration 1/3",
             "engine integration 2/3",
