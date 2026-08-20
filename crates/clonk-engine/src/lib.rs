@@ -13625,6 +13625,10 @@ mod missing_include_regression;
 mod gather_task_script;
 
 #[cfg(test)]
+#[path = "lib_tests/goal_rule_activate_families.rs"]
+mod goal_rule_activate_families;
+
+#[cfg(test)]
 #[path = "lib_tests/script_relink_regression.rs"]
 mod script_relink_regression;
 
