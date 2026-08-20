@@ -2593,6 +2593,113 @@ mod tests {
     }
 
     #[test]
+    fn fractional_native_italics_shear_a_mixed_text_and_image_row_together() {
+        // The neighbouring subcase draws rows that are *either* glyphs or an
+        // inline image. A row carrying both is the case where a shear applied
+        // to one and not the other — or applied from a different origin —
+        // would show, and it is the shape Info menus actually use: prose with
+        // an icon in the middle of it (C4Menu.cpp:613-849; StdFont.cpp:817-929).
+        struct SolidImage(Vec<u8>);
+
+        impl FontImageProvider for SolidImage {
+            fn font_image(&self, tag: &str) -> Option<FontImageRef<'_>> {
+                (tag == "icon").then_some(FontImageRef {
+                    width: 19,
+                    height: 19,
+                    rgba: &self.0,
+                })
+            }
+        }
+
+        fn row_span(surface: &Surface, y: u32) -> Option<(u32, u32)> {
+            let changed = (0..surface.width())
+                .filter(|x| surface.get_pixel(*x, y).is_some_and(|pixel| pixel.a != 0))
+                .collect::<Vec<_>>();
+            changed.first().copied().zip(changed.last().copied())
+        }
+
+        let mut raster = ClonkFont::new(19);
+        raster.cell_height = 19;
+        raster.h_space = -2;
+        raster.add_glyph(
+            'A',
+            GlyphCell {
+                width: 19,
+                pixels: vec![Color::opaque(255, 255, 255); 19 * 19],
+            },
+        );
+        let font = NativeClonkFont {
+            raster,
+            application_scale: 1.5,
+            effective_scale: 19.0 / 13.0,
+            logical_height: 13,
+            raster_height: 19,
+            logical_h_space: -1,
+            snap_to_pixels: false,
+            retained_glyph_images: Mutex::new(HashMap::new()),
+        };
+        let images = SolidImage(vec![255; 19 * 19 * 4]);
+        let projection =
+            ClipperProjection::new(1.5, (127, 39), 59, clonk_graphics::Rect::new(0, 0, 127, 39));
+        let (_, scale_y) = projection.scale();
+
+        // Italic must not move the row's metrics, mixed content included.
+        // The tag is left open, as the neighbouring subcase does, so this
+        // isolates italic metrics from the native trailing-close-tag h-space
+        // quirk rather than re-measuring that.
+        assert_eq!(
+            font.measure_with_images("A{{icon}}A", true, &images),
+            font.measure_with_images("<i>A{{icon}}A", true, &images),
+            "shear is a draw-time transform, not a metric"
+        );
+
+        let mut plain = Surface::new(191, 59, clonk_graphics::PixelFormat::Rgba8888);
+        let mut italic = Surface::new(191, 59, clonk_graphics::PixelFormat::Rgba8888);
+        for (surface, text) in [(&mut plain, "A{{icon}}A"), (&mut italic, "<i>A{{icon}}A")] {
+            font.draw_to_physical_surface_with_clipper_and_images(
+                surface,
+                20,
+                2,
+                text,
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                true,
+                projection,
+                None,
+                &images,
+            );
+        }
+
+        let (_, physical_y) = projection.logical_to_physical(20.0, 2.0);
+        let physical_height = 19.0 / f64::from(font.effective_scale()) * scale_y;
+        let top_y = (physical_y - 0.5).ceil() as u32;
+        let bottom_y = (physical_y + physical_height - 0.5).ceil() as u32 - 1;
+        let plain_top = row_span(&plain, top_y).expect("plain top row");
+        let plain_bottom = row_span(&plain, bottom_y).expect("plain bottom row");
+        let italic_top = row_span(&italic, top_y).expect("italic top row");
+        let italic_bottom = row_span(&italic, bottom_y).expect("italic bottom row");
+
+        // The whole row leans as one: its top edge moves right and its bottom
+        // edge moves left, exactly as the glyph-only and image-only rows do.
+        assert!(
+            italic_top.0 > plain_top.0,
+            "the sheared row's top starts further right: {italic_top:?} vs {plain_top:?}"
+        );
+        assert!(
+            italic_bottom.0 < plain_bottom.0,
+            "and its bottom starts further left: {italic_bottom:?} vs {plain_bottom:?}"
+        );
+
+        // The lean is uniform across the row rather than applied to one kind of
+        // content: both edges shift by the same amount.
+        assert_eq!(
+            italic_top.0 - plain_top.0,
+            plain_bottom.0 - italic_bottom.0,
+            "glyphs and the inline image shear from the same origin"
+        );
+    }
+
+    #[test]
     fn fractional_native_italics_shear_glyphs_and_images_without_changing_metrics() {
         struct SolidImage(Vec<u8>);
 
