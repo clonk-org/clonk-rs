@@ -739,6 +739,10 @@ fn alchemy_real_scenario_subcases_batch_2() {
             alchemy_learned_heal_cast_sustains_magic_and_restores_the_casters_energy,
         ),
         (
+            "rock_strike_swaps_its_projectile_for_a_combo_arrow",
+            alchemy_rock_strike_swaps_its_projectile_for_a_combo_arrow,
+        ),
+        (
             "firefist_flame_consumes_inflammable_landscape",
             alchemy_firefist_flame_consumes_inflammable_landscape,
         ),
@@ -4284,6 +4288,83 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
             .is_none_or(|quake| !quake.status.is_active())
     });
     assert!(removed, "FXQ1 removes itself after its shipped lifetime");
+}
+
+fn alchemy_rock_strike_swaps_its_projectile_for_a_combo_arrow(
+    prepared: &PreparedInstalledScenario,
+) {
+    // MARK picks its projectile *after* the aim rather than before it:
+    // ActivateAngle defaults `rock_id` to BIRK and replaces it with a combo
+    // arrow when the caster has one, consuming the arrow
+    // (Fantasy.c4d/Magic.c4d/Rockstrike.c4d/Script.c:22,26-33).
+    //
+    // Note there are two shipped MARK definitions -- MetalMagic ships one too,
+    // with a different script and an indoor check this one does not have. The
+    // Fantasy definition is the one Alchemy loads, and it is the one pinned
+    // here.
+    for carries_arrow in [false, true] {
+        let mut engine = prepared.instantiate();
+        let owner = join_local_player(&mut engine, "Alchemy rock strike parity");
+        let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+        let mage_position = engine.test_object_snapshot(mage).position;
+        let arrow = carries_arrow.then(|| {
+            engine.spawn_test_object(clonk_engine::SpawnConfig::new("ARRW").with_container(mage))
+        });
+
+        let spell = engine.spawn_test_object(
+            clonk_engine::SpawnConfig::new("MARK")
+                .with_position(mage_position)
+                .with_owner(owner),
+        );
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(mage.as_u64())],
+        );
+
+        // Nothing is chosen yet -- the aim comes first.
+        assert_eq!(
+            engine
+                .test_object_snapshot(spell)
+                .local_vars
+                .get("rock_id")
+                .cloned(),
+            Some(Value::Nil),
+            "MARK has not picked a projectile before the aim is answered"
+        );
+        let aimer = crate::support::TestValueExt::test_value(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "AIMR" && object.status.is_active())
+                .map(|object| object.id),
+        );
+        assert_eq!(engine.crew_cursor(owner), Some(aimer));
+
+        crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_UP, 0));
+        crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+
+        let expected = if carries_arrow { "ARRW" } else { "BIRK" };
+        assert_eq!(
+            engine
+                .test_object_snapshot(spell)
+                .local_vars
+                .get("rock_id")
+                .cloned(),
+            Some(Value::C4Id(expected.into())),
+            "answering the aim with carries_arrow={carries_arrow} selects {expected}"
+        );
+        if carries_arrow {
+            let arrow = crate::support::TestValueExt::test_value(arrow);
+            assert!(
+                engine
+                    .object_snapshot(arrow)
+                    .is_none_or(|arrow| !arrow.status.is_active()),
+                "the combo arrow is consumed by the swap"
+            );
+        }
+    }
 }
 
 fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags(
