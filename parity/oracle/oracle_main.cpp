@@ -4278,11 +4278,53 @@ static int32_t g_call_count = 0;
 struct DefStub
 {
     int32_t id{};
+    // The C4Def state C4Object::ChangeDef moves across.
+    int32_t Count{};
+    bool Rotateable{};
+    int32_t BlitMode{};
+    int32_t SolidMask{};
+    int32_t Graphics{};
+
+    struct
+    {
+        int32_t LocalNamed{};
+    } Script;
+
     struct ActMapEntry
     {
         const char *Name{""};
     } ActMap[4];
 };
+
+// The lifted ChangeDef body names C4Def and C4ID.
+using C4Def = DefStub;
+using C4ID = int32_t;
+
+// The two definitions a ChangeDef case moves between, resolved by id.
+static DefStub *g_definitions[2] = {nullptr, nullptr};
+
+static DefStub *C4Id2Def(int32_t id)
+{
+    for (DefStub *definition : g_definitions)
+        if (definition && definition->id == id) return definition;
+    return nullptr;
+}
+
+const int32_t C4GFXBLIT_CUSTOM = 1 << 4; // C4Def.h
+
+struct PlayerColorStub
+{
+    int32_t ColorDw{};
+};
+
+struct PlayerColorListStub
+{
+    PlayerColorStub *Held{};
+
+    PlayerColorStub *Get(int32_t owner) { return owner >= 0 ? Held : nullptr; }
+};
+
+
 
 struct GameStub
 {
@@ -4337,6 +4379,14 @@ struct C4ObjectList
     };
 };
 
+// ChangeDef walks the master list to tell every object's effects that a
+// definition changed, so the link type has to be this namespace's.
+struct C4ObjectLink
+{
+    C4Object *Obj{};
+    C4ObjectLink *Next{};
+};
+
 struct C4Object
 {
     const char *Tag{""};
@@ -4372,6 +4422,42 @@ struct C4Object
     void CopyMotion(C4Object *) { record("CopyMotion"); }
     void BoundsCheck(int32_t &, int32_t &) { record("BoundsCheck"); }
     void AutoSellContents() { record("AutoSellContents"); }
+
+    // The rest of what C4Object::ChangeDef touches. `Unsorted` and the
+    // graphics/blit/colour fields are plain state the change carries across;
+    // the update chain records that it ran, in order.
+    int32_t id{};
+    int32_t Owner{-1};
+    int32_t Color{};
+    int32_t BlitMode{};
+    int32_t SolidMask{};
+    bool Unsorted{};
+    int32_t *pGraphics{};
+
+    // Every object's effects are told the definition changed; the scaffold
+    // records that walk rather than modelling effect internals.
+    struct EffectListStub
+    {
+        void OnObjectChangedDef(C4Object *) { record("EffectsOnChangedDef"); }
+    } *pEffects{};
+
+    struct SolidMaskDataStub
+    {
+        void Remove(bool, bool) { record("SolidMaskRemove"); }
+    } *pSolidMaskData{};
+
+    struct LocalNamedStub
+    {
+        int32_t *List{};
+
+        void SetNameList(int32_t *list) { List = list; }
+    } LocalNamed;
+
+    void SetAction(int32_t) { record("SetActionIdle"); }
+    void SetDir(int32_t) { record("SetDir"); }
+    void UpdateGraphics(bool) { record("UpdateGraphics"); }
+
+    bool ChangeDef(C4ID idNew);
 
     static void record(const char *what)
     {
@@ -4427,6 +4513,30 @@ inline int32_t C4Object::Call(const char *fn, ParSet)
 #include "object_exit.inc"
 #include "object_enter.inc"
 #include "object_collect.inc"
+
+// C4Object::ChangeDef, compiled beside the real Enter/Exit so its container
+// round-trip runs the production bodies with fCalls=false — which is exactly
+// the fact worth pinning: a definition change inside a container fires neither
+// Ejection/Departure on the way out nor Collection2/Entrance on the way back.
+static PlayerColorListStub g_player_colors;
+
+struct ChangeDefGameStub
+{
+    PlayerColorListStub &Players = g_player_colors;
+
+    struct
+    {
+        C4ObjectLink *First{};
+    } Objects;
+
+    C4Object::EffectListStub *pGlobalEffects{};
+};
+
+static ChangeDefGameStub ChangeDefGame;
+
+#define Game ChangeDefGame
+#include "object_change_def.inc"
+#undef Game
 } // namespace container_lifecycle
 
 
@@ -5582,6 +5692,134 @@ int main()
     // at the very END; and `Alive` is cleared BEFORE that clear so a dying
     // object cannot recurse into its own death. An effect that puts the object
     // back on its feet aborts the kill unless it was forced.
+    // C4Object::ChangeDef (C4Object.cpp:1207-1255), compiled beside the real
+    // Enter/Exit. The headline is the container round-trip: the object leaves
+    // and re-enters with fCalls=false, so a definition change inside a
+    // container fires NEITHER Ejection/Departure on the way out NOR
+    // Collection2/Entrance on the way back — a script watching its contents
+    // sees nothing at all.
+    arr_begin("object_change_def");
+    {
+        struct Case
+        {
+            const char *name;
+            bool contained;
+            bool rotateable;
+            int32_t start_rotation;
+            int32_t blit_mode;      // the object's, before the change
+            int32_t new_blit_mode;  // the new definition's
+            int32_t color;
+            int32_t owner;
+            int32_t player_color;
+            int32_t new_solid_mask;
+            bool has_solid_mask_data;
+            bool other_object_has_effects;
+            bool unknown_definition;
+        };
+
+        const int32_t Custom = container_lifecycle::C4GFXBLIT_CUSTOM;
+        const Case cases[] = {
+            // An unknown id changes nothing and reports failure.
+            {"unknown_definition", false, true, 90, 0, 7, 0, -1, 0, 5, false, false, true},
+            // The plain change: counts move, the new definition's state is
+            // adopted, and the update chain runs in order.
+            {"plain", false, true, 90, 0, 7, 0, -1, 0, 5, false, false, false},
+            // Inside a container: out and back with no callbacks either way.
+            {"contained_round_trip", true, true, 90, 0, 7, 0, -1, 0, 5, false, false, false},
+            // A non-rotateable target zeroes the rotation and its velocity.
+            {"non_rotateable_drops_rotation", false, false, 90, 0, 7, 0, -1, 0, 5, false, false,
+             false},
+            // The blit mode is taken from the definition unless the object set
+            // a custom one (C4Object.cpp:1233).
+            {"blit_mode_adopted", false, true, 0, 0, 7, 0, -1, 0, 5, false, false, false},
+            {"custom_blit_mode_kept", false, true, 0, Custom, 7, 0, -1, 0, 5, false, false,
+             false},
+            // A colourless object owned by a player picks up that player's
+            // colour; one that already has a colour keeps it.
+            {"colour_from_player", false, true, 0, 0, 7, 0, 0, 0x334455, 5, false, false, false},
+            {"existing_colour_kept", false, true, 0, 0, 7, 0x112233, 0, 0x334455, 5, false,
+             false, false},
+            // A live solid mask is removed before the definition's replaces it.
+            {"solid_mask_replaced", false, true, 0, 0, 7, 0, -1, 0, 5, true, false, false},
+            // Every object's effects are told, not just this one's.
+            {"effects_told", false, true, 0, 0, 7, 0, -1, 0, 5, false, true, false},
+        };
+
+        for (const Case &c : cases)
+        {
+            container_lifecycle::DefStub old_def, new_def;
+            old_def.id = 100;
+            old_def.Count = 4;
+            old_def.Rotateable = true;
+            new_def.id = 200;
+            new_def.Count = 1;
+            new_def.Rotateable = c.rotateable;
+            new_def.BlitMode = c.new_blit_mode;
+            new_def.SolidMask = c.new_solid_mask;
+            container_lifecycle::g_definitions[0] = &old_def;
+            container_lifecycle::g_definitions[1] = &new_def;
+
+            container_lifecycle::PlayerColorStub player;
+            player.ColorDw = c.player_color;
+            container_lifecycle::g_player_colors.Held = &player;
+
+            container_lifecycle::C4Object object;
+            object.Tag = "object";
+            object.Def = &old_def;
+            object.id = old_def.id;
+            object.r = c.start_rotation;
+            object.fix_r = itofix(c.start_rotation);
+            object.rdir = itofix(1);
+            object.BlitMode = c.blit_mode;
+            object.Color = c.color;
+            object.Owner = c.owner;
+            object.Action.Act = 0;
+            // The lifted body `delete`s the mask, so it has to be on the heap.
+            if (c.has_solid_mask_data)
+                object.pSolidMaskData = new container_lifecycle::C4Object::SolidMaskDataStub();
+
+            container_lifecycle::C4Object container;
+            container.Tag = "container";
+            container.Def = &old_def;
+            if (c.contained)
+            {
+                object.Contained = &container;
+                container.Contents.Add(&object, container_lifecycle::C4ObjectList::stContents);
+            }
+
+            // A second object whose effects must hear about the change.
+            container_lifecycle::C4Object other;
+            other.Tag = "other";
+            other.Def = &old_def;
+            container_lifecycle::C4Object::EffectListStub other_effects;
+            if (c.other_object_has_effects) other.pEffects = &other_effects;
+            container_lifecycle::C4ObjectLink other_link{&other, nullptr};
+            container_lifecycle::C4ObjectLink object_link{&object, &other_link};
+            container_lifecycle::ChangeDefGame.Objects.First = &object_link;
+
+            container_lifecycle::g_config_count = 0;
+            container_lifecycle::g_call_count = 0;
+
+            const bool changed = object.ChangeDef(c.unknown_definition ? 999 : new_def.id);
+
+            sep();
+            printf("{\"case\":\"%s\",\"changed\":%d,\"id\":%d,\"old_count\":%d,"
+                   "\"new_count\":%d,\"rotation\":%d,\"rdir\":%d,\"blit_mode\":%d,"
+                   "\"colour\":%d,\"solid_mask\":%d,\"unsorted\":%d,\"contained\":%d,"
+                   "\"calls\":[",
+                   c.name, changed ? 1 : 0, object.id, old_def.Count, new_def.Count, object.r,
+                   object.rdir.val, object.BlitMode, object.Color, object.SolidMask,
+                   object.Unsorted ? 1 : 0, object.Contained == &container ? 1 : 0);
+            for (int32_t i = 0; i < container_lifecycle::g_call_count
+                                && i < container_lifecycle::MaxCalls;
+                 ++i)
+                printf("%s\"%s\"", i ? "," : "", container_lifecycle::g_calls[i]);
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
     arr_begin("object_death");
     {
         struct Case

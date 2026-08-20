@@ -670,6 +670,13 @@ awk '
 #     the two objects. A port that ran the same calls in a different order, or
 #     skipped a re-check, would look right until a script used it.
 awk '
+  /^bool C4Object::ChangeDef\(C4ID idNew\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_change_def.inc"
+
+awk '
   /^bool C4Object::Enter\(C4Object \*pTarget, bool fCalls, bool fCopyMotion, bool \*pfRejectCollect\)$/ { p = 1 }
   p { print }
   p && /^}$/ { found = 1; exit }

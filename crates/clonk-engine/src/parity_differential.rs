@@ -3298,6 +3298,181 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
+    // 0o. C4Object::ChangeDef (C4Object.cpp:1207-1255), compiled beside the
+    //     real Enter/Exit so its container round-trip runs the production
+    //     bodies. The headline is what that round-trip does NOT do: the object
+    //     leaves and re-enters with `fCalls = false`, so a definition change
+    //     inside a container fires neither Ejection/Departure on the way out
+    //     nor Collection2/Entrance on the way back — a script watching its
+    //     contents sees nothing. `RejectEntrance` is the exception, because
+    //     Enter asks it before `fCalls` is ever consulted.
+    //
+    //     Two smaller facts ride along: that Exit is passed `0, 0, 0`, so a
+    //     contained object loses its rotation as a side effect of changing
+    //     definition; and a non-rotateable target zeroes `r`, `fix_r` and
+    //     `rdir` outright.
+    for (idx, case) in golden["object_change_def"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let name = case["case"].as_str().unwrap_or_default();
+        let contained = name == "contained_round_trip";
+        let rotateable = name != "non_rotateable_drops_rotation";
+        let start_rotation = i(case, "rotation");
+        let start_rotation = if name == "unknown_definition" || contained || !rotateable {
+            90
+        } else {
+            start_rotation
+        };
+
+        let container_script = "#strict 2\n\
+             static cd_log;\n\
+             protected func Collection2(pObj) { cd_log = cd_log * 11 + 3; }\n\
+             protected func Ejection(pObj) { cd_log = cd_log * 11 + 6; }\n\
+             public func ReadLog() { return cd_log; }\n\
+             public func ResetLog() { cd_log = 0; return 1; }\n";
+        // RejectEntrance is asked on the ENTERING object, not the container
+        // (C4Object.cpp:1578) — and because the re-entry happens after the
+        // definition has already changed, it resolves on the NEW definition's
+        // script.
+        let object_script = "#strict 2\n\
+             static cd_log;\n\
+             protected func RejectEntrance(pTarget) { cd_log = cd_log * 11 + 1; return 0; }\n\
+             protected func Entrance(pContainer) { cd_log = cd_log * 11 + 4; }\n\
+             protected func Departure(pContainer) { cd_log = cd_log * 11 + 7; }\n";
+
+        let mut engine = Engine::with_seed(0);
+        let mut target_definition = Definition::from_script("CDNW", "CDNW", object_script)
+            .expect("new definition compiles");
+        target_definition.set_rotateable(i32::from(rotateable));
+        engine
+            .register_definition(target_definition)
+            .expect("new definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("CDOB", "CDOB", object_script)
+                    .expect("old definition compiles"),
+            )
+            .expect("old definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("CDCN", "CDCN", container_script)
+                    .expect("container compiles"),
+            )
+            .expect("container registers");
+
+        let container = engine
+            .spawn_object(SpawnConfig::new("CDCN"))
+            .expect("container spawns");
+        let object = engine
+            .spawn_object(SpawnConfig::new("CDOB"))
+            .expect("object spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+        engine.objects[index].state.rotation = start_rotation as i32;
+        engine.objects[index].rotation_velocity = itofix(1);
+        if contained {
+            engine.objects[index].state.container = Some(container);
+        }
+
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine
+            .call_object_function(container_index, "ResetLog", Vec::new())
+            .expect("the log resets");
+
+        let runner_script = format!(
+            "#strict 2\npublic func Run(object pTarget) {{ return ChangeDef({}, pTarget); }}\n",
+            if name == "unknown_definition" {
+                "ZZZZ"
+            } else {
+                "CDNW"
+            }
+        );
+        engine
+            .register_definition(
+                Definition::from_script("CDRN", "CDRN", &runner_script).expect("runner compiles"),
+            )
+            .expect("runner registers");
+        let runner = engine
+            .spawn_object(SpawnConfig::new("CDRN"))
+            .expect("runner spawns");
+        let runner_index = engine.find_object_index(runner).expect("runner exists");
+        let changed = engine
+            .call_object_function(
+                runner_index,
+                "Run",
+                vec![crate::compat::object_reference_value(object)],
+            )
+            .expect("the change runs");
+        expect_eq(
+            "object_change_def",
+            idx,
+            "changed",
+            i(case, "changed"),
+            i64::from(
+                matches!(changed, ScriptValue::Bool(true))
+                    || matches!(changed, ScriptValue::Int(value) if value != 0),
+            ),
+        );
+
+        let index = engine.find_object_index(object).expect("object survives");
+        let expected_id = if i(case, "changed") != 0 {
+            "CDNW"
+        } else {
+            "CDOB"
+        };
+        assert_eq!(
+            expected_id, engine.objects[index].definition_id,
+            "PARITY DIVERGENCE in `object_change_def` entry {idx} definition"
+        );
+        expect_eq(
+            "object_change_def",
+            idx,
+            "rotation",
+            i(case, "rotation"),
+            i64::from(engine.objects[index].state.rotation),
+        );
+        expect_eq(
+            "object_change_def",
+            idx,
+            "rdir",
+            i(case, "rdir"),
+            i64::from(engine.objects[index].rotation_velocity.val()),
+        );
+
+        let expected_log = case["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|call| match call.as_str().unwrap_or_default() {
+                "~RejectEntrance" => Some(1_i64),
+                "~Collection2" => Some(3),
+                "~Entrance" => Some(4),
+                "~Ejection" => Some(6),
+                "~Departure" => Some(7),
+                _ => None,
+            })
+            .fold(0_i64, |log, digit| log * 11 + digit);
+        let log = match engine
+            .call_object_function(container_index, "ReadLog", Vec::new())
+            .expect("the log reads back")
+        {
+            ScriptValue::Int(value) => i64::from(value),
+            ScriptValue::Nil | ScriptValue::Bool(false) => 0,
+            other => panic!("unexpected change-def log value {other:?}"),
+        };
+        expect_eq(
+            "object_change_def",
+            idx,
+            "callback order",
+            expected_log,
+            log,
+        );
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
