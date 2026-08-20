@@ -240,13 +240,13 @@ shard-6 probe kept the current app test profile: opt-level 1, opt-level 0, and
 256 units. These samples prove the predecessor partitions exhaustive and green,
 not a robust five-minute latency bound on four-vCPU hosted runners.
 
-The candidate queue graph uses 16 Linux rows and three parallel Windows rows.
-Seven application rows cover all 12 compile-time feature selectors, including
-the two netplay modules. Three engine-integration rows, separate engine and
-frontend unit rows, two residual-workspace rows, and the quality and contract
-rows complete the Linux matrix. Windows runtime tests, network tests, and the
-quality/NSIS checks run independently instead of sharing one serial critical
-path. The ordinary unsharded suite remains the coverage reference.
+The candidate queue graph uses 17 Linux rows and two parallel Windows rows.
+Nine application rows cover all 12 compile-time feature selectors, including
+the two netplay modules. Three engine-integration rows, a combined engine and
+frontend unit/parity row, two residual-workspace rows, and the quality and
+contract rows complete the Linux matrix. The slow Windows network tests remain
+independent while the shorter runtime row also runs quality and NSIS checks.
+The ordinary unsharded suite remains the coverage reference.
 
 Hosted workflow-dispatch run `30702040649` exercised the predecessor 18-row
 Linux partition at commit `6dd2b490c`. All 18 jobs started within 20 seconds
@@ -262,17 +262,23 @@ portable timing guarantee.
 Across 88 successful ordinary, non-release merge-group `Landing` runs ending
 2026-08-20, workflow creation-to-completion had a p50 of 649 seconds. A full
 50% reduction therefore requires an ordinary p50 at or below 324.5 seconds
-(324 seconds when reported as a whole duration). The
-16-plus-three topology and cache changes are a projection toward that target;
-they have not yet produced a live merge-group sample, so do not report the
-target as achieved before a comparable live trial. Record queue delay, runner
-availability, cache state, and the exact content revision with that trial, and
-keep canceled, failed, and release runs separate from the ordinary sample.
+(324 seconds when reported as a whole duration). The first uncontended,
+fully seeded sample, run `32410157185`, finished in 354 seconds: 45.5% below
+baseline but short of the strict target. The revised 17-plus-two topology
+splits its longest application pairs, restores the trusted Linux archive
+without a cache-metadata scan, and overlaps content, native-package, and
+toolchain setup. Do not report the target as achieved before a comparable live
+trial. Record queue delay, runner availability, cache state, and the exact
+content revision with that trial, and keep canceled, failed, and release runs
+separate from the ordinary sample.
 
 Because the merge queue admits one candidate at a time, one Linux row and the
 Windows runtime row claim the rolling landing-cache lanes. Required queue work
 therefore preempts stale trusted-main producers, while the other rows use
 run-scoped lanes; release pushes use SHA-specific groups and are unaffected.
+Post-merge diagnostics first query active merge groups with read-only
+permissions and then enter a shared concurrency lane, so a later candidate
+cancels the diagnostic fan-out instead of waiting for its runners.
 
 The build values are single sequential directional samples from fresh Cargo
 targets; later arms benefited from warmer filesystem caches. The runtime

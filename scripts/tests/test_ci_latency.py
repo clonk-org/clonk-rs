@@ -1,9 +1,14 @@
 """Static guards for the landing path's coverage and latency budget."""
 
+import os
 import re
+import subprocess
+import tempfile
+import textwrap
 import tomllib
 import unittest
 from collections import Counter
+from pathlib import Path
 
 from _repo import REPOSITORY
 
@@ -58,11 +63,8 @@ class CiLatencyTests(unittest.TestCase):
         main = MAIN.read_text(encoding="utf-8")
 
         scopes = set(re.findall(r"shared-key: ([a-z0-9-]+)", landing))
-        self.assertEqual(
-            scopes,
-            {"full-parity", "windows-runtime-msvc-v2"},
-        )
-        self.assertEqual(landing.count("save-if: false"), 3)
+        self.assertEqual(scopes, {"full-parity", "windows-runtime-msvc-v2"})
+        self.assertEqual(landing.count("save-if: false"), 2)
         self.assertNotIn(
             "save-if: ${{ github.event_name == 'workflow_dispatch' }}",
             landing,
@@ -73,7 +75,7 @@ class CiLatencyTests(unittest.TestCase):
 
         linux_producer = main[
             main.index("  linux-landing-cache:") : main.index(
-                "  exact-sha-qualification:"
+                "  diagnostic-admission:"
             )
         ]
         self.assertIn("workspaces: . -> target", linux_producer)
@@ -152,7 +154,7 @@ class CiLatencyTests(unittest.TestCase):
         ]
         linux_producer = main[
             main.index("  linux-landing-cache:") : main.index(
-                "  exact-sha-qualification:"
+                "  diagnostic-admission:"
             )
         ]
         quality = landing[
@@ -165,6 +167,12 @@ class CiLatencyTests(unittest.TestCase):
         ]
 
         for consumer in (quality, linux, linux_producer):
+            content_cache = consumer[
+                consumer.index("      - name: Restore pinned content checkout") : consumer.index(
+                    "      - name:",
+                    consumer.index("      - name: Restore pinned content checkout") + 1,
+                )
+            ]
             self.assertNotIn("submodules: recursive", consumer)
             self.assertIn("actions/cache/restore@", consumer)
             self.assertIn(".git/modules/content", consumer)
@@ -181,7 +189,7 @@ class CiLatencyTests(unittest.TestCase):
             )
             self.assertIn('[[ "$actual" == "$CONTENT_REVISION" ]]', consumer)
             self.assertNotIn("actions/cache/save@", consumer)
-            self.assertNotIn("restore-keys:", consumer)
+            self.assertNotIn("restore-keys:", content_cache)
 
         self.assertIn("needs: content-landing-cache", linux_producer)
         self.assertNotIn("submodules: recursive", content_producer)
@@ -220,12 +228,12 @@ class CiLatencyTests(unittest.TestCase):
         self.assertNotRegex(main, r"(?m)^concurrency:\s*$")
         linux_producer = main[
             main.index("  linux-landing-cache:") : main.index(
-                "  exact-sha-qualification:"
+                "  diagnostic-admission:"
             )
         ]
         caller = main[
             main.index("  exact-sha-qualification:") : main.index(
-                "  windows-release-tools:"
+                "  windows-landing-cache:"
             )
         ]
         coverage_fragments = qualification[
@@ -282,7 +290,7 @@ class CiLatencyTests(unittest.TestCase):
             'group: "main-coverage-report-${{ inputs.concurrency-suffix }}"',
             coverage_report,
         )
-        self.assertIn("needs: linux-landing-cache", caller)
+        self.assertIn("needs: diagnostic-admission", caller)
         self.assertIn("save-if: false", developer_feedback)
         self.assertIn("publish-recording-host-cache: true", caller)
 
@@ -325,25 +333,87 @@ class CiLatencyTests(unittest.TestCase):
 
         qualification = main[
             main.index("  exact-sha-qualification:") : main.index(
-                "  windows-release-tools:"
+                "  windows-landing-cache:"
             )
         ]
-        self.assertIn("needs: linux-landing-cache", qualification)
+        admission = main[
+            main.index("  diagnostic-admission:") : main.index(
+                "  exact-sha-qualification:"
+            )
+        ]
+        self.assertIn("needs: linux-landing-cache", admission)
+        self.assertIn("needs: diagnostic-admission", qualification)
 
         triggers = dependency_guard[
             dependency_guard.index("on:\n") : dependency_guard.index("permissions:\n")
         ]
         self.assertNotIn("\n  push:\n", triggers)
 
-    def test_preinstalled_rust_probe_preserves_cache_toolchain_inventory(self):
+    def test_preinstalled_rust_probe_never_downloads_a_toolchain(self):
         landing = LANDING.read_text(encoding="utf-8")
         probe = landing[
-            landing.index("      - name: Reuse exact preinstalled Rust") : landing.index(
+            landing.index("      - name: Prepare content, dependencies, and exact Rust") : landing.index(
                 "      - name: Install exact Rust toolchain"
             )
         ]
 
-        self.assertNotIn("RUSTUP_AUTO_INSTALL", probe)
+        self.assertIn("RUSTUP_AUTO_INSTALL: '0'", probe)
+
+    def test_linux_preparation_overlaps_independent_setup_and_fails_closed(self):
+        landing = LANDING.read_text(encoding="utf-8")
+        linux = landing[landing.index("  linux:") : landing.index("  windows-smoke:")]
+        preparation = linux[
+            linux.index("      - name: Prepare content, dependencies, and exact Rust") : linux.index(
+                "      - name: Install exact Rust toolchain"
+            )
+        ]
+
+        self.assertIn("git submodule update", preparation)
+        self.assertIn("scripts/install-apt-packages.sh", preparation)
+        self.assertIn("content_pid=$!", preparation)
+        self.assertIn("apt_pid=$!", preparation)
+        self.assertIn('wait "$content_pid"', preparation)
+        self.assertIn('wait "$apt_pid"', preparation)
+        self.assertIn('[[ "$actual" == "$CONTENT_REVISION" ]]', preparation)
+        self.assertIn(
+            "if ! content_status=$(git -C content status "
+            "--porcelain --untracked-files=all); then",
+            preparation,
+        )
+        self.assertIn('[[ -z "$content_status" ]] || failed=1', preparation)
+        self.assertNotIn('[[ -z "$(git -C content status', preparation)
+        self.assertIn("failed=0", preparation)
+        self.assertIn('exit "$failed"', preparation)
+        self.assertNotIn("      - name: Install native dependencies", linux)
+        self.assertNotIn("      - name: Verify pinned content checkout", linux)
+
+    def test_linux_restores_the_producer_archive_without_a_metadata_scan(self):
+        landing = LANDING.read_text(encoding="utf-8")
+        linux = landing[landing.index("  linux:") : landing.index("  windows-smoke:")]
+        cache = linux[
+            linux.index("      - name: Restore Rust build cache") : linux.index(
+                "      - name: Run ${{ matrix.name }}"
+            )
+        ]
+        paths = [
+            "/home/runner/.cargo/bin",
+            "/home/runner/.cargo/.crates.toml",
+            "/home/runner/.cargo/.crates2.json",
+            "/home/runner/.cargo/registry",
+            "/home/runner/.cargo/git",
+            "${{ github.workspace }}/target",
+        ]
+
+        self.assertIn(
+            "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+            cache,
+        )
+        self.assertNotIn("Swatinem/rust-cache@", cache)
+        self.assertEqual(sorted(paths, key=cache.index), paths)
+        self.assertIn(
+            "v0-rust-full-parity-Linux-x64-e8b3ee54-", cache
+        )
+        self.assertIn("restore-keys:", cache)
 
     def test_merge_group_rows_share_only_non_cancelling_cache_lanes(self):
         landing = LANDING.read_text(encoding="utf-8")
@@ -351,7 +421,7 @@ class CiLatencyTests(unittest.TestCase):
 
         shared_lanes = {
             "linux-landing-cache-rolling": "app 2+7/12",
-            "windows-landing-cache-rolling": "runtime tests",
+            "windows-landing-cache-rolling": "runtime and quality",
         }
         self.assertEqual(
             set(re.findall(r"\b[a-z0-9-]+-rolling\b", landing)),
@@ -379,7 +449,7 @@ class CiLatencyTests(unittest.TestCase):
             landing,
         )
         self.assertIn(
-            "matrix.name == 'runtime tests' && "
+            "matrix.name == 'runtime and quality' && "
             "'windows-landing-cache-rolling'",
             landing,
         )
@@ -410,13 +480,15 @@ class CiLatencyTests(unittest.TestCase):
         self.assertEqual(
             [tuple(command.split(",")) for command in app_commands],
             [
-                ("app-test-shard-1", "app-test-shard-12"),
+                ("app-test-shard-1",),
+                ("app-test-shard-12",),
                 ("app-test-shard-3", "app-test-shard-10"),
                 ("app-test-shard-2", "app-test-shard-7"),
                 ("app-test-shard-4", "app-test-shard-9"),
                 ("app-test-shard-5",),
                 ("app-test-shard-11",),
-                ("app-test-shard-6", "app-test-shard-8"),
+                ("app-test-shard-6",),
+                ("app-test-shard-8",),
             ],
         )
         app_manifest = tomllib.loads(
@@ -455,19 +527,17 @@ class CiLatencyTests(unittest.TestCase):
                 "--no-fail-fast --locked",
                 entry,
             )
-        engine_unit_and_parity = matrix_entry(workflow, "engine unit and parity")
+        engine_unit_and_parity = matrix_entry(
+            workflow, "engine and frontend unit and parity"
+        )
         self.assertIn(
             "cargo nextest run -p clonk-engine-unit-tests "
+            "-p clonk-frontend-unit-tests "
             "--no-fail-fast --locked",
             engine_unit_and_parity,
         )
         self.assertIn("cargo xtask parity verify", engine_unit_and_parity)
-        frontend_unit = matrix_entry(workflow, "frontend unit")
-        self.assertIn(
-            "cargo nextest run -p clonk-frontend-unit-tests "
-            "--no-fail-fast --locked",
-            frontend_unit,
-        )
+        self.assertNotIn("          - name: frontend unit\n", workflow)
         dedicated_packages = {
             "clonk-app",
             "clonk-engine-integration-tests",
@@ -518,7 +588,9 @@ class CiLatencyTests(unittest.TestCase):
     def test_overlapping_linux_checks_share_setup_without_failing_open(self):
         workflow = LANDING.read_text(encoding="utf-8")
         linux = workflow[workflow.index("  linux:") : workflow.index("  windows-smoke:")]
-        unit_and_parity = matrix_entry(workflow, "engine unit and parity")
+        unit_and_parity = matrix_entry(
+            workflow, "engine and frontend unit and parity"
+        )
         quality = matrix_entry(workflow, "workspace quality")
 
         for entry in (unit_and_parity, quality):
@@ -561,13 +633,15 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04", linux)
         self.assertNotIn("filter: blob:none", linux)
         app_rows = [
-            "app 1+12/12",
+            "app 1/12",
+            "app 12/12",
             "app 3+10/12",
             "app 2+7/12",
             "app 4+9/12",
             "app 5/12",
             "app 11/12",
-            "app 6+8/12",
+            "app 6/12",
+            "app 8/12",
         ]
         for name in app_rows:
             self.assertIn(
@@ -588,19 +662,18 @@ class CiLatencyTests(unittest.TestCase):
             "engine integration 1/3",
             "engine integration 2/3",
             "engine integration 3/3",
-            "engine unit and parity",
-            "frontend unit",
+            "engine and frontend unit and parity",
             "engine contracts",
         ):
             self.assertNotIn("\n            apt:", matrix_entry(workflow, name))
 
         self.assertEqual(
             len(re.findall(r"(?m)^          - name: ", linux)),
-            16,
-            "16 Linux rows plus three Windows lanes and release context fit the runner pool",
+            17,
+            "17 Linux rows plus two Windows lanes and release context fit the runner pool",
         )
 
-        self.assertIn("if: matrix.apt != ''", linux)
+        self.assertIn('if [[ -n "$APT_PACKAGES" ]]', linux)
         self.assertIn("scripts/install-apt-packages.sh", linux)
         self.assertIn("timeout-minutes: 10", linux)
         self.assertIn("rustc 1.97.1", linux)
@@ -638,31 +711,34 @@ class CiLatencyTests(unittest.TestCase):
         self.assertNotIn("cargo build --release -p clonk-app", workflow)
         self.assertNotIn("scripts/configure-msvc-runtime.sh", workflow)
 
-    def test_windows_smoke_long_poles_run_on_three_parallel_rows(self):
+    def test_windows_smoke_packs_quality_with_the_shorter_runtime_pole(self):
         workflow = LANDING.read_text(encoding="utf-8")
         windows = workflow[
             workflow.index("  windows-smoke:") : workflow.index("  landing-gate:")
         ]
         rows = set(re.findall(r"(?m)^          - name: (.+)$", windows))
 
-        self.assertEqual(rows, {"runtime tests", "network tests", "quality"})
+        self.assertEqual(rows, {"runtime and quality", "network tests"})
         self.assertIn("name: Windows / ${{ matrix.name }}", windows)
         self.assertIn("if: matrix.nextest", windows)
         self.assertEqual(windows.count("if: matrix.installer"), 2)
 
-        runtime = matrix_entry(workflow, "runtime tests")
+        runtime = matrix_entry(workflow, "runtime and quality")
         self.assertIn("-p clonk-game -p clonk-c4group", runtime)
         self.assertIn("-p clonk-logging --test crash_log_descriptor", runtime)
-        self.assertNotIn("-p clonk-network", runtime)
+        self.assertNotIn("cargo nextest run -p clonk-network", runtime)
+        self.assertIn("cargo clippy --profile test --no-deps", runtime)
+        self.assertIn("nextest: true", runtime)
+        self.assertIn("installer: true", runtime)
+        self.assertIn("failed=0", runtime)
+        self.assertIn('exit "$failed"', runtime)
 
         network = matrix_entry(workflow, "network tests")
-        self.assertIn("-p clonk-network --lib", network)
+        self.assertIn("cargo nextest run -p clonk-network --lib", network)
+        self.assertIn("discovery_multicast_target_uses_cpp_default_interface", network)
         self.assertNotIn("cargo clippy", network)
-
-        quality = matrix_entry(workflow, "quality")
-        self.assertIn("nextest: false", quality)
-        self.assertIn("installer: true", quality)
-        self.assertIn("cargo clippy --profile test --no-deps", quality)
+        self.assertIn("nextest: true", network)
+        self.assertIn("installer: false", network)
 
     def test_literal_required_commands_remain_on_the_landing_tree(self):
         workflow = LANDING.read_text(encoding="utf-8")
@@ -686,9 +762,17 @@ class CiLatencyTests(unittest.TestCase):
         landing = LANDING.read_text(encoding="utf-8")
         main = MAIN.read_text(encoding="utf-8")
         qualification = QUALIFICATION.read_text(encoding="utf-8")
+        landing_concurrency = landing[
+            landing.index("concurrency:\n") : landing.index("env:\n")
+        ]
+        admission = main[
+            main.index("  diagnostic-admission:") : main.index(
+                "  exact-sha-qualification:"
+            )
+        ]
         main_caller = main[
             main.index("  exact-sha-qualification:") : main.index(
-                "  windows-release-tools:"
+                "  windows-landing-cache:"
             )
         ]
         release_caller = landing[
@@ -702,9 +786,80 @@ class CiLatencyTests(unittest.TestCase):
         )
         self.assertIn("cargo llvm-cov", qualification)
         self.assertIn("runs-on: macos-latest", qualification)
+        self.assertIn("github.event_name == 'merge_group'", landing_concurrency)
+        self.assertIn("landing-runner-priority", landing_concurrency)
+        self.assertIn("cancel-in-progress: true", landing_concurrency)
+        self.assertIn("needs: linux-landing-cache", admission)
+        self.assertIn("actions: read", admission)
+        self.assertNotIn("actions: write", admission)
+        self.assertIn("actions/workflows/landing.yml/runs", admission)
+        self.assertIn("event=merge_group", admission)
+        self.assertIn('.status != "completed"', admission)
+        self.assertIn("run_diagnostics", admission)
+        self.assertIn("needs: diagnostic-admission", main_caller)
+        self.assertIn(
+            "needs.diagnostic-admission.outputs.run_diagnostics == 'true'",
+            main_caller,
+        )
+        self.assertIn("group: landing-runner-priority", main_caller)
+        self.assertIn("cancel-in-progress: false", main_caller)
         self.assertIn("concurrency-suffix: rolling", main_caller)
         self.assertIn("concurrency-suffix: ${{ github.sha }}", release_caller)
         self.assertIn("cancel-in-progress: true", qualification)
+
+    def test_diagnostic_admission_fails_closed_around_merge_group_activity(self):
+        main = MAIN.read_text(encoding="utf-8")
+        admission = main[
+            main.index("  diagnostic-admission:") : main.index(
+                "  exact-sha-qualification:"
+            )
+        ]
+        script = textwrap.dedent(admission.split("        run: |\n", 1)[1])
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            fake_gh = temporary / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${FAKE_GH_FAILURE:-0}\" = 1 ]; then exit 42; fi\n"
+                "printf '%s' \"${FAKE_GH_OUTPUT:-}\"\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+
+            def admit(fake_output="", *, fail=False):
+                output = temporary / "github-output"
+                output.write_text("", encoding="utf-8")
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "PATH": f"{temporary}:{environment['PATH']}",
+                        "GH_TOKEN": "test-token",
+                        "REPOSITORY": "clonk-org/clonk-rs",
+                        "GITHUB_OUTPUT": str(output),
+                        "FAKE_GH_OUTPUT": fake_output,
+                        "FAKE_GH_FAILURE": "1" if fail else "0",
+                    }
+                )
+                completed = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", script],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                return completed, output.read_text(encoding="utf-8")
+
+            idle, idle_output = admit()
+            active, active_output = admit("32409353928")
+            failed, failed_output = admit(fail=True)
+
+        self.assertEqual(idle.returncode, 0)
+        self.assertEqual(idle_output, "run_diagnostics=true\n")
+        self.assertEqual(active.returncode, 0)
+        self.assertEqual(active_output, "run_diagnostics=false\n")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(failed_output, "")
 
     def test_post_merge_render_probe_consumes_a_fresh_deterministic_replay(self):
         workflow = QUALIFICATION.read_text(encoding="utf-8")
