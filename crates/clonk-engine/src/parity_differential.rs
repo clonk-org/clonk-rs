@@ -2369,6 +2369,238 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
+    // 0j. The container lifecycle: C4Object::Enter, Exit and Collect
+    //     (C4Object.cpp:1532-1563, 1566-1637, 5693-5717), all three compiled
+    //     from mechanically extracted bodies. What is pinned is the ORDER of
+    //     their script calls and the re-checks between them:
+    //
+    //       * the recursion guard runs AFTER RejectEntrance, and
+    //         RejectCollection only when the caller asked for the flag;
+    //       * a Collection2 that removes the object abandons Entrance;
+    //       * the re-check after Entrance tests the CONTAINER's status, not the
+    //         entering object's, so an Entrance that removes the object itself
+    //         still reaches the base auto-sell tail while one that removes the
+    //         container does not;
+    //       * Exit reports failure when a Departure callback put the object
+    //         back into a container, having already done everything; and
+    //       * Collect's three Hit calls are gated on their own OCF bits and
+    //         stop at the first that removes the object.
+    //
+    //     The oracle's `calls` list also records bookkeeping the port does not
+    //     expose (SetOCF, UpdateMass, CloseMenu, UpdateFace); those entries
+    //     document where the mutations sit between the script calls, and what
+    //     is compared here is the script calls, which both engines can name.
+    {
+        // Base-11 digits, one per script callback, in the order they ran. Eight
+        // calls is the longest sequence in the matrix, so the encoding stays
+        // inside i32.
+        let digit_of = |call: &str| -> Option<i64> {
+            Some(match call {
+                // The oracle records the PSF_ names verbatim, `~` and all.
+                "~RejectEntrance" => 1,
+                "~RejectCollect" => 2,
+                "~Collection2" => 3,
+                "~Entrance" => 4,
+                "~Collection" => 5,
+                "~Ejection" => 6,
+                "~Departure" => 7,
+                "~Hit" => 8,
+                "~Hit2" => 9,
+                "~Hit3" => 10,
+                _ => return None,
+            })
+        };
+
+        for (idx, case) in golden["container_lifecycle"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let name = case["case"].as_str().unwrap_or_default();
+            let op = case["op"].as_str().unwrap_or_default();
+
+            // Each configured callback's port-side effect, mirroring the
+            // oracle's Effect for this case.
+            let reject_entrance =
+                i64::from(name == "enter_rejected" || name == "collect_enter_refused");
+            let reject_collection = i64::from(name == "collect_rejected_by_container");
+            let entrance_body = match name {
+                "enter_entrance_clears_own_status" => "RemoveObject();",
+                "enter_entrance_clears_container" => "Exit();",
+                _ => "",
+            };
+            let departure_body = match name {
+                "exit_reentered_by_script" => "Enter(FindObject(OUTS));",
+                _ => "",
+            };
+            let hit_body = match name {
+                "collect_hit_kills" => "RemoveObject();",
+                _ => "",
+            };
+            let collection2_body = match name {
+                "enter_collection2_kills" => "Exit(pObj);",
+                _ => "",
+            };
+
+            let object_script = format!(
+                "#strict\n\
+                 static callback_log;\n\
+                 protected func RejectEntrance(pTarget) {{ callback_log = callback_log * 11 + 1; return {reject_entrance}; }}\n\
+                 protected func Entrance(pContainer) {{ callback_log = callback_log * 11 + 4; {entrance_body} }}\n\
+                 protected func Departure(pContainer) {{ callback_log = callback_log * 11 + 7; {departure_body} }}\n\
+                 protected func Hit() {{ callback_log = callback_log * 11 + 8; {hit_body} }}\n\
+                 protected func Hit2() {{ callback_log = callback_log * 11 + 9; }}\n\
+                 protected func Hit3() {{ callback_log = callback_log * 11 + 10; }}\n\
+                 public func DoEnterNull() {{ return Enter(0); }}\n\
+                 public func DoEnterSelf() {{ return Enter(this()); }}\n\
+                 public func DoEnter(pTarget) {{ return Enter(pTarget); }}\n\
+                 public func DoExit() {{ return Exit(this(), 11, 22, 33, 1, 2, 3); }}\n"
+            );
+            let container_script = format!(
+                "#strict\n\
+                 static callback_log;\n\
+                 protected func RejectCollect(idDef, pObj) {{ callback_log = callback_log * 11 + 2; return {reject_collection}; }}\n\
+                 protected func Collection2(pObj) {{ callback_log = callback_log * 11 + 3; {collection2_body} }}\n\
+                 protected func Collection(pObj) {{ callback_log = callback_log * 11 + 5; }}\n\
+                 protected func Ejection(pObj) {{ callback_log = callback_log * 11 + 6; }}\n\
+                 public func DoCollect(pItem) {{ return Collect(pItem); }}\n\
+                 public func ReadLog() {{ return callback_log; }}\n\
+                 public func ResetLog() {{ callback_log = 0; return 1; }}\n"
+            );
+
+            let mut engine = Engine::with_seed(0);
+            // The script-level Collect needs the collector to carry
+            // OCF_Collection before it will reach C4Object::Collect at all
+            // (C4Script.cpp:391-413), which a DefCore collection rect is what
+            // grants.
+            let mut container_definition =
+                Definition::from_script("CTCN", "CTCN", container_script.as_str())
+                    .expect("container lifecycle fixture compiles");
+            container_definition
+                .set_collection_rect(Some(crate::DefinitionRect::new(-12, -10, 24, 12)));
+            engine
+                .register_definition(container_definition)
+                .expect("container lifecycle fixture registers");
+            for (id, script) in [
+                ("CTOB", object_script.as_str()),
+                // The old container an already-contained object exits from.
+                // It needs the same recorder: the oracle logs every call, so a
+                // silent OUTS would drop Ejection from the sequence.
+                (
+                    "OUTS",
+                    "#strict\n\
+                     static callback_log;\n\
+                     protected func Ejection(pObj) { callback_log = callback_log * 11 + 6; }\n\
+                     protected func Collection2(pObj) { callback_log = callback_log * 11 + 3; }\n",
+                ),
+            ] {
+                engine
+                    .register_definition(
+                        Definition::from_script(id, id, script)
+                            .expect("container lifecycle fixture compiles"),
+                    )
+                    .expect("container lifecycle fixture registers");
+            }
+
+            let object = engine
+                .spawn_object(SpawnConfig::new("CTOB").with_controller(5))
+                .expect("lifecycle object spawns");
+            let container = engine
+                .spawn_object(SpawnConfig::new("CTCN").with_controller(9))
+                .expect("lifecycle container spawns");
+            let outside = engine
+                .spawn_object(SpawnConfig::new("OUTS").with_controller(2))
+                .expect("lifecycle outside container spawns");
+
+            // `exit_not_contained` is the one case that must start free.
+            if name == "enter_from_container" || (op == "exit" && name != "exit_not_contained") {
+                let index = engine.find_object_index(object).expect("object exists");
+                engine.objects[index].state.container = Some(outside);
+            }
+            if name == "enter_recursive" {
+                let index = engine
+                    .find_object_index(container)
+                    .expect("container exists");
+                engine.objects[index].state.container = Some(object);
+            }
+            // The oracle sets the hit-speed OCF bits directly; the port derives
+            // them from raw speed (|xdir| + |ydir| >= 1.5 / 2 / 6, see
+            // `movement_hit_speed_flags`), and Collect defers its CopyMotion
+            // until after the Hit calls precisely so they are still live there.
+            if name.starts_with("collect_hit") {
+                let index = engine.find_object_index(object).expect("object exists");
+                let speed = if name == "collect_hit_speeds" { 7 } else { 3 };
+                engine.objects[index].fixed_velocity = FixedVec2::new(itofix(speed), C4Fixed::ZERO);
+                engine.objects[index].state.ocf |=
+                    crate::movement_hit_speed_flags(engine.objects[index].fixed_velocity);
+            }
+
+            let object_index = engine.find_object_index(object).expect("object exists");
+            let container_index = engine
+                .find_object_index(container)
+                .expect("container exists");
+            engine
+                .call_object_function(container_index, "ResetLog", Vec::new())
+                .expect("the log resets");
+
+            let target_value = crate::compat::object_reference_value(container);
+            let (runner_index, function, arguments) = match op {
+                "enter" => match name {
+                    "enter_null_target" => (object_index, "DoEnterNull", Vec::new()),
+                    "enter_self" => (object_index, "DoEnterSelf", Vec::new()),
+                    _ => (object_index, "DoEnter", vec![target_value]),
+                },
+                "exit" => (object_index, "DoExit", Vec::new()),
+                _ => (
+                    container_index,
+                    "DoCollect",
+                    vec![crate::compat::object_reference_value(object)],
+                ),
+            };
+            let result = engine
+                .call_object_function(runner_index, function, arguments)
+                .expect("the lifecycle operation runs");
+
+            expect_eq(
+                "container_lifecycle",
+                idx,
+                "result",
+                i(case, "result"),
+                i64::from(
+                    matches!(result, ScriptValue::Bool(true))
+                        || matches!(result, ScriptValue::Int(value) if value != 0),
+                ),
+            );
+
+            // The script-call order, encoded the same way on both sides.
+            let expected_log = case["calls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|call| digit_of(call.as_str().unwrap_or_default()))
+                .fold(0_i64, |log, digit| log * 11 + digit);
+            // `callback_log = 0` folds its literal zero to nil below strict 3
+            // (see the `zero_literal` section), so an untouched log reads as
+            // Nil rather than Int(0).
+            let log = match engine
+                .call_object_function(container_index, "ReadLog", Vec::new())
+                .expect("the log reads back")
+            {
+                ScriptValue::Int(value) => i64::from(value),
+                ScriptValue::Nil | ScriptValue::Bool(false) => 0,
+                other => panic!("unexpected callback log value {other:?}"),
+            };
+            expect_eq(
+                "container_lifecycle",
+                idx,
+                "callback order",
+                expected_log,
+                log,
+            );
+        }
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));

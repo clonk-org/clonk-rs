@@ -52,6 +52,9 @@
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
 //     scaffold records low-speed `Disabled` contact transitions.
+//   * `C4Object::Enter`, `Exit` and `Collect` are mechanically extracted in
+//     full; a two-object scaffold with configurable script callbacks records
+//     their exact call order, rollback and post-callback Status re-checks.
 //   * `C4Shape::ContactCheck` is mechanically extracted in full; a 24x16
 //     material grid with configurable open borders records its per-vertex
 //     contact masks, materials and counts.
@@ -4167,6 +4170,259 @@ struct C4Object
 #include "target_bounds.inc"
 } // namespace shape_contact
 
+
+// ---------------------------------------------------------------------------
+// The container lifecycle: C4Object::Enter, Exit and Collect (src/C4Object.cpp).
+// What is pinned here is the SHAPE of three ordered state machines — which
+// script call runs before which mutation, which rollback undoes a failed
+// insert, and which `Status` re-check abandons the rest after a callback
+// removed one of the two objects.
+//
+// `C4ObjectList::Add`'s insert ORDER is deliberately not modelled: it sorts by
+// category through a linked list with its own invariants, and lifting it would
+// be a section of its own. `Contents` here is an append-only list whose `Add`
+// can be told to fail, which is what exercises Enter's rollback. Contents
+// ordering keeps its existing Rust-side coverage.
+//
+// Script calls are recorded rather than executed, and each can be configured to
+// return a value and to perform one side effect — clearing either object's
+// Status, or re-entering the object elsewhere — so the re-checks after
+// Collection2, Entrance, Ejection and Departure are reachable.
+namespace container_lifecycle
+{
+struct C4Object;
+
+const int32_t ActIdle = -1;
+const int32_t C4D_Living = 1 << 3;             // C4Def.h:47
+const int32_t C4ID_Flag = 1;                   // stands in for C4Id("FLAG")
+const int32_t C4RULE_FlagRemoveable = 1 << 0;  // C4Rules bit under test
+// OCF_HitSpeed1..3 and BASEFUNC_AutoSellContents come from the real
+// C4Constants.h / C4Scenario.h the oracle already includes.
+
+// The PSF_ names the lifted bodies call, copied verbatim from C4Script.h
+// (:48-50, 56-60, 82, 96). The leading `~` marks the callback optional and is
+// part of the name the engine looks up — note that the collection veto is
+// spelled `RejectCollect`, NOT `RejectCollection`.
+#define PSF_Hit "~Hit"
+#define PSF_Hit2 "~Hit2"
+#define PSF_Hit3 "~Hit3"
+#define PSF_Collection "~Collection"
+#define PSF_Collection2 "~Collection2"
+#define PSF_Ejection "~Ejection"
+#define PSF_Entrance "~Entrance"
+#define PSF_Departure "~Departure"
+#define PSF_RejectCollection "~RejectCollect"
+#define PSF_RejectEntrance "~RejectEntrance"
+
+struct C4Value
+{
+};
+
+static C4Value C4VObj(C4Object *) { return {}; }
+static C4Value C4VID(int32_t) { return {}; }
+
+struct ParSet
+{
+    ParSet() {}
+    ParSet(std::initializer_list<C4Value>) {}
+};
+
+// What a configured callback does besides returning its value.
+enum class Effect
+{
+    None,
+    ClearSelfStatus,
+    ClearOtherStatus,
+    ClearContainer,
+    ReEnter,
+    // A container callback (Collection2) that removes the object that just
+    // entered — the case Enter's post-callback re-check exists for.
+    ClearEnteringContainer,
+    ClearEnteringStatus,
+    // A callback that Exits the object it was told about, running the lifted
+    // Exit body — which is what a script doing the same would do, callbacks and
+    // all.
+    ExitEntering,
+};
+
+// The container an Effect::ReEnter callback drops the object into, standing in
+// for a script that called Enter from inside Departure.
+static C4Object *g_reenter_target = nullptr;
+
+// The object being entered/collected, so a callback made ON THE CONTAINER can
+// still act on it.
+static C4Object *g_entering_object = nullptr;
+
+struct CallConfig
+{
+    const char *tag;
+    const char *fn;
+    int32_t result;
+    Effect effect;
+};
+
+const int32_t MaxCalls = 32;
+const int32_t MaxConfigs = 8;
+
+static CallConfig g_configs[MaxConfigs];
+static int32_t g_config_count = 0;
+static const char *g_calls[MaxCalls];
+static int32_t g_call_count = 0;
+
+struct DefStub
+{
+    int32_t id{};
+    struct ActMapEntry
+    {
+        const char *Name{""};
+    } ActMap[4];
+};
+
+struct GameStub
+{
+    int32_t Rules{};
+    struct
+    {
+        struct
+        {
+            struct
+            {
+                int32_t BaseFunctionality{};
+            } Realism;
+        } Game;
+    } C4S;
+};
+
+static GameStub Game;
+
+static bool ValidPlr(int32_t player) { return player >= 0; }
+static bool SEqual(const char *a, const char *b) { return std::strcmp(a, b) == 0; }
+
+struct ContentsList
+{
+    C4Object *Items[8]{};
+    int32_t Count{};
+    bool RefuseAdd{false};
+
+    bool Add(C4Object *object, int32_t)
+    {
+        if (RefuseAdd || Count >= 8) return false;
+        Items[Count++] = object;
+        return true;
+    }
+
+    void Remove(C4Object *object)
+    {
+        int32_t write = 0;
+        for (int32_t read = 0; read < Count; ++read)
+            if (Items[read] != object) Items[write++] = Items[read];
+        Count = write;
+    }
+};
+
+struct C4ObjectList
+{
+    enum SortType
+    {
+        stNone = 0,
+        stMain = 1,
+        stContents = 2,
+        stReverse = 3,
+    };
+};
+
+struct C4Object
+{
+    const char *Tag{""};
+    int32_t Status{1};
+    C4Object *Contained{};
+    ContentsList Contents;
+    DefStub *Def{};
+    int32_t Alive{};
+    int32_t Category{};
+    int32_t Controller{-1};
+    int32_t Base{-1};
+    uint32_t OCF{};
+    int32_t Mobile{};
+    int32_t InLiquid{};
+    int32_t x{}, y{}, r{};
+    C4Fixed fix_x{Fix0}, fix_y{Fix0}, fix_r{Fix0};
+    C4Fixed xdir{Fix0}, ydir{Fix0}, rdir{Fix0};
+
+    struct ActionState
+    {
+        int32_t Act{ActIdle};
+    } Action;
+
+    int32_t Call(const char *fn, ParSet = {});
+
+    // Everything below is bookkeeping the lifted bodies invoke but this section
+    // does not pin; each records that it ran so a reordering is still visible.
+    void CloseMenu(bool) { record("CloseMenu"); }
+    void SetOCF() { record("SetOCF"); }
+    void UpdateFace(bool) { record("UpdateFace"); }
+    void UpdateMass() { record("UpdateMass"); }
+    void UpdateSolidMask(bool) { record("UpdateSolidMask"); }
+    void CopyMotion(C4Object *) { record("CopyMotion"); }
+    void BoundsCheck(int32_t &, int32_t &) { record("BoundsCheck"); }
+    void AutoSellContents() { record("AutoSellContents"); }
+
+    static void record(const char *what)
+    {
+        if (g_call_count < MaxCalls) g_calls[g_call_count] = what;
+        ++g_call_count;
+    }
+
+    bool Enter(
+        C4Object *pTarget, bool fCalls = true, bool fCopyMotion = true,
+        bool *pfRejectCollect = nullptr);
+    bool Exit(
+        int32_t iX = 0, int32_t iY = 0, int32_t iR = 0, C4Fixed iXDir = Fix0,
+        C4Fixed iYDir = Fix0, C4Fixed iRDir = Fix0, bool fCalls = true);
+    bool Collect(C4Object *pObj);
+};
+
+static void ObjectComCancelAttach(C4Object *) { C4Object::record("CancelAttach"); }
+
+inline int32_t C4Object::Call(const char *fn, ParSet)
+{
+    record(fn);
+    for (int32_t i = 0; i < g_config_count; ++i)
+    {
+        if (!SEqual(g_configs[i].tag, Tag) || !SEqual(g_configs[i].fn, fn)) continue;
+        switch (g_configs[i].effect)
+        {
+        case Effect::ClearSelfStatus: Status = 0; break;
+        case Effect::ClearOtherStatus:
+            if (Contained) Contained->Status = 0;
+            break;
+        case Effect::ClearContainer: Contained = nullptr; break;
+        case Effect::ReEnter:
+            // Run the real Enter, as a script calling it from inside Departure
+            // would: the whole point is that Exit then reports failure.
+            if (g_entering_object) g_entering_object->Enter(g_reenter_target);
+            break;
+        case Effect::ClearEnteringContainer:
+            if (g_entering_object) g_entering_object->Contained = nullptr;
+            break;
+        case Effect::ClearEnteringStatus:
+            if (g_entering_object) g_entering_object->Status = 0;
+            break;
+        case Effect::ExitEntering:
+            if (g_entering_object) g_entering_object->Exit();
+            break;
+        case Effect::None: break;
+        }
+        return g_configs[i].result;
+    }
+    return 0;
+}
+
+#include "object_exit.inc"
+#include "object_enter.inc"
+#include "object_collect.inc"
+} // namespace container_lifecycle
+
 int main()
 {
     printf("{\n");
@@ -4765,6 +5021,211 @@ int main()
             for (int32_t v = 0; v < c.vtx_num; ++v)
                 printf("%s{\"x\":%d,\"y\":%d,\"cnat\":%d}", v ? "," : "", c.vertices[v].x,
                        c.vertices[v].y, c.vertices[v].cnat);
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4Object::Enter, Exit and Collect (C4Object.cpp:1532-1563, 1566-1637,
+    // 5693-5717). Each case records the exact sequence of script calls and
+    // bookkeeping the lifted bodies performed, so a reordered mutation or a
+    // missing post-callback `Status` re-check shows up as a different list
+    // rather than as a subtly different end state.
+    arr_begin("container_lifecycle");
+    {
+        using namespace container_lifecycle;
+
+        struct Case
+        {
+            const char *name;
+            const char *op;      // enter | exit | collect
+            bool self_target;    // enter into itself
+            bool null_target;
+            bool start_contained;
+            bool recursive;      // target sits inside the object
+            bool want_reject_flag;
+            bool copy_motion;
+            bool refuse_add;
+            bool living;
+            int32_t base;
+            int32_t base_functionality;
+            int32_t rules;
+            int32_t object_id;
+            const char *action_name;
+            uint32_t ocf;
+            int32_t config_count;
+            CallConfig configs[MaxConfigs];
+        };
+
+        const Case cases[] = {
+            // --- Enter -----------------------------------------------------
+            {"enter_null_target", "enter", false, true, false, false, false, false, false, false,
+             -1, 0, 0, 0, "", 0, 0, {}},
+            {"enter_self", "enter", true, false, false, false, false, false, false, false, -1, 0,
+             0, 0, "", 0, 0, {}},
+            {"enter_rejected", "enter", false, false, false, false, false, false, false, false,
+             -1, 0, 0, 0, "", 0, 1,
+             {{"object", PSF_RejectEntrance, 1, Effect::None}}},
+            // The target already sits inside the object, so entering it would
+            // close a loop; the guard runs AFTER RejectEntrance.
+            {"enter_recursive", "enter", false, false, false, true, false, false, false, false,
+             -1, 0, 0, 0, "", 0, 0, {}},
+            // RejectCollection is consulted only when the caller asked for the
+            // flag — which C4Object::Collect does and a plain script Enter does
+            // not — so it is exercised through the collect cases below.
+            {"enter_plain", "enter", false, false, false, false, false, false, false, false, -1,
+             0, 0, 0, "", 0, 0, {}},
+            // fCopyMotion inserts the solid-mask removal and the motion copy
+            // BEFORE the OCF refresh (C4Object.cpp:1614-1620).
+            {"enter_copy_motion", "enter", false, false, false, false, false, true, false, false,
+             -1, 0, 0, 0, "", 0, 0, {}},
+            // A living object keeps its own controller; anything else inherits
+            // the container's (C4Object.cpp:1608-1609).
+            {"enter_living_keeps_controller", "enter", false, false, false, false, false, false,
+             false, true, -1, 0, 0, 0, "", 0, 0, {}},
+            // Already contained: Exit runs first, with its own two callbacks.
+            {"enter_from_container", "enter", false, false, true, false, false, false, false,
+             false, -1, 0, 0, 0, "", 0, 0, {}},
+            // Collection2 removing the object abandons the Entrance call.
+            {"enter_collection2_kills", "enter", false, false, false, false, false, false, false,
+             false, -1, 0, 0, 0, "", 0, 1,
+             {{"target", PSF_Collection2, 0, Effect::ExitEntering}}},
+            // The re-check after Entrance tests the CONTAINER's status, not the
+            // entering object's — so an Entrance that removes the object itself
+            // does NOT stop the auto-sell tail (C4Object.cpp:1629-1633).
+            {"enter_entrance_clears_own_status", "enter", false, false, false, false, false,
+             false, false, false, 3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 1,
+             {{"object", PSF_Entrance, 0, Effect::ClearSelfStatus}}},
+            // Removing the CONTAINER is what the re-check catches.
+            {"enter_entrance_clears_container", "enter", false, false, false, false, false, false,
+             false, false, 3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 1,
+             {{"object", PSF_Entrance, 0, Effect::ExitEntering}}},
+            // A valid base plus the realism bit runs the auto-sell tail.
+            {"enter_auto_sell", "enter", false, false, false, false, false, false, false, false,
+             3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 0, {}},
+            {"enter_base_without_realism", "enter", false, false, false, false, false, false,
+             false, false, 3, 0, 0, 0, "", 0, 0, {}},
+
+            // --- Exit ------------------------------------------------------
+            {"exit_not_contained", "exit", false, false, false, false, false, false, false, false,
+             -1, 0, 0, 0, "", 0, 0, {}},
+            {"exit_plain", "exit", false, false, true, false, false, false, false, false, -1, 0,
+             0, 0, "", 0, 0, {}},
+            // Departure putting the object back in a container makes Exit
+            // report failure even though it did everything (C4Object.cpp:1563).
+            {"exit_reentered_by_script", "exit", false, false, true, false, false, false, false,
+             false, -1, 0, 0, 0, "", 0, 1,
+             {{"object", PSF_Departure, 0, Effect::ReEnter}}},
+
+            // --- Collect ---------------------------------------------------
+            // Collect's FlyBase flag gate is a pure decision the port factors
+            // out as `flag_collection_blocked`, and it keeps its existing
+            // Rust-side coverage; driving it here would need a FLAG definition
+            // with a FlyBase action map and the cached rule, none of which this
+            // fixture models.
+            {"collect_plain", "collect", false, false, false, false, false, false, false, false,
+             -1, 0, 0, 0, "", 0, 0, {}},
+            // The three hit calls are gated on their own OCF bits and run in
+            // order (C4Object.cpp:5710-5712).
+            {"collect_hit_speeds", "collect", false, false, false, false, false, false, false,
+             false, -1, 0, 0, 0, "",
+             OCF_HitSpeed1 | OCF_HitSpeed2 | OCF_HitSpeed3, 0, {}},
+            // A Hit callback that removes the object skips the rest.
+            {"collect_hit_kills", "collect", false, false, false, false, false, false, false,
+             false, -1, 0, 0, 0, "", OCF_HitSpeed1 | OCF_HitSpeed2, 1,
+             {{"object", PSF_Hit, 0, Effect::ClearSelfStatus}}},
+            // A refused Enter stops Collect before CancelAttach.
+            {"collect_enter_refused", "collect", false, false, false, false, false, false, false,
+             false, -1, 0, 0, 0, "", 0, 1,
+             {{"object", PSF_RejectEntrance, 1, Effect::None}}},
+            // The container's own refusal reports through the RejectCollect
+            // flag, and Collect turns that into a plain failure.
+            {"collect_rejected_by_container", "collect", false, false, false, false, false, false,
+             false, false, -1, 0, 0, 0, "", 0, 1,
+             {{"target", PSF_RejectCollection, 1, Effect::None}}},
+        };
+
+        for (const Case &c : cases)
+        {
+            DefStub object_def;
+            object_def.id = c.object_id;
+            object_def.ActMap[0].Name = c.action_name;
+            DefStub target_def;
+            DefStub outside_def;
+
+            container_lifecycle::C4Object object;
+            object.Tag = "object";
+            object.Def = &object_def;
+            object.Controller = 5;
+            object.Base = c.base;
+            object.OCF = c.ocf;
+            object.Alive = c.living ? 1 : 0;
+            object.Category = c.living ? C4D_Living : 0;
+            if (c.action_name[0]) object.Action.Act = 0;
+
+            container_lifecycle::C4Object target;
+            target.Tag = "target";
+            target.Def = &target_def;
+            target.Controller = 9;
+            target.Base = c.base;
+            target.Contents.RefuseAdd = c.refuse_add;
+
+            container_lifecycle::C4Object outside;
+            outside.Tag = "outside";
+            outside.Def = &outside_def;
+            outside.Controller = 2;
+
+            g_reenter_target = &outside;
+            g_entering_object = &object;
+            Game.Rules = c.rules;
+            Game.C4S.Game.Realism.BaseFunctionality = c.base_functionality;
+            g_config_count = c.config_count;
+            for (int32_t i = 0; i < c.config_count; ++i) g_configs[i] = c.configs[i];
+            g_call_count = 0;
+
+            if (c.start_contained)
+            {
+                object.Contained = &outside;
+                outside.Contents.Add(&object, container_lifecycle::C4ObjectList::stContents);
+            }
+            if (c.recursive)
+            {
+                target.Contained = &object;
+                object.Contents.Add(&target, container_lifecycle::C4ObjectList::stContents);
+            }
+
+            bool reject_collect = false;
+            bool result = false;
+            if (SEqual(c.op, "enter"))
+            {
+                container_lifecycle::C4Object *destination = c.null_target ? nullptr : (c.self_target ? &object : &target);
+                result = object.Enter(
+                    destination, true, c.copy_motion,
+                    c.want_reject_flag ? &reject_collect : nullptr);
+            }
+            else if (SEqual(c.op, "exit"))
+            {
+                result = object.Exit(11, 22, 33, itofix(1), itofix(2), itofix(3) / 10, true);
+            }
+            else
+            {
+                result = target.Collect(&object);
+            }
+
+            sep();
+            printf("{\"case\":\"%s\",\"op\":\"%s\",\"result\":%d,\"reject_collect\":%d,"
+                   "\"contained_is_target\":%d,\"contained_is_outside\":%d,"
+                   "\"target_contents\":%d,\"controller\":%d,\"mobile\":%d,"
+                   "\"in_liquid\":%d,\"x\":%d,\"y\":%d,\"r\":%d,\"xdir\":%d,"
+                   "\"ydir\":%d,\"rdir\":%d,\"calls\":[",
+                   c.name, c.op, result ? 1 : 0, reject_collect ? 1 : 0,
+                   object.Contained == &target ? 1 : 0, object.Contained == &outside ? 1 : 0,
+                   target.Contents.Count, object.Controller, object.Mobile, object.InLiquid,
+                   object.x, object.y, object.r, object.xdir.val, object.ydir.val,
+                   object.rdir.val);
+            for (int32_t i = 0; i < g_call_count && i < MaxCalls; ++i)
+                printf("%s\"%s\"", i ? "," : "", g_calls[i]);
             printf("]}");
         }
     }
