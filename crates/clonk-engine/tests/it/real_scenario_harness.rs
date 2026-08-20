@@ -805,6 +805,10 @@ fn alchemy_real_scenario_subcases_batch_3() {
             alchemy_reincarnation_spell_revives_its_mage_during_assign_death,
         ),
         (
+            "cook_kills_a_live_carried_creature_and_survives",
+            alchemy_cook_kills_a_live_carried_creature_and_survives,
+        ),
+        (
             "combo_mode_opens_and_accepts_the_shipped_element_control",
             alchemy_combo_mode_opens_and_accepts_the_shipped_element_control,
         ),
@@ -6025,6 +6029,72 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step(
     let endboss = engine.test_object_snapshot(ObjectId::new(1758));
     assert_eq!(endboss.action.name, "RideMagic");
     assert_eq!(endboss.action.target, Some(ObjectId::new(202)));
+}
+
+fn alchemy_cook_kills_a_live_carried_creature_and_survives(prepared: &PreparedInstalledScenario) {
+    // MCOK looks at the caster's first contents slot and tries three things in
+    // order: Cook, then Bake, then -- if the thing is alive -- Kill it. Only a
+    // slot it can do none of those to counts as a failure
+    // (Cook.c4d/Script.c:12-18).
+    for carries_prey in [true, false] {
+        let mut engine = prepared.instantiate();
+        let owner = join_local_player(&mut engine, "Alchemy cook parity");
+        let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
+                mage,
+                ObjectUpdate::new()
+                    .with_position(Vector2::new(500, 200))
+                    .with_velocity(Vector2::ZERO)
+                    .with_action("Walk")
+                    .clear_container(),
+            ),
+        );
+        let prey = carries_prey.then(|| {
+            engine.spawn_test_object(
+                clonk_engine::SpawnConfig::new("WIPF")
+                    .with_alive(true)
+                    .with_container(mage),
+            )
+        });
+        if let Some(prey) = prey {
+            assert!(
+                engine.test_object_snapshot(prey).alive,
+                "the prey has to start alive for the Kill branch to be the one under test"
+            );
+        }
+
+        let spell = engine.spawn_test_object(
+            clonk_engine::SpawnConfig::new("MCOK")
+                .with_position(engine.test_object_snapshot(mage).position)
+                .with_owner(owner),
+        );
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(mage.as_u64())],
+        );
+
+        let spell_alive = engine
+            .object_snapshot(spell)
+            .is_some_and(|spell| spell.status.is_active());
+        if carries_prey {
+            let prey = crate::support::TestValueExt::test_value(prey);
+            assert!(
+                engine.object_snapshot(prey).is_none_or(|prey| !prey.alive),
+                "cooking something alive kills it"
+            );
+            // Like EXTG and DGCL, a successful MCOK is a bare `return(true)`
+            // with no RemoveObject -- only the failure path deletes the spell
+            // (Cook.c4d/Script.c:19,24).
+            assert!(spell_alive, "a successful MCOK survives its own cast");
+        } else {
+            assert!(
+                !spell_alive,
+                "with an empty slot MCOK reports $NoCook$ and removes itself"
+            );
+        }
+    }
 }
 
 fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row(
