@@ -817,7 +817,16 @@ fn capture_gpu_sprite_impl(
             GpuBlend::Normal
         };
         let gamma = gamma.is_some_and(|gamma| !gamma.is_passthrough());
-        if compact_object {
+        // clonk-org/clonk-rs#271: the compact record is not object-specific.
+        // Everything above has already excluded the semantics it cannot
+        // express — fog, precomputed fog modulation, a texture indent,
+        // physical texture tiles — and a non-object sprite additionally has no
+        // mask, because the gate requires `mask.is_none() || compact_object`.
+        //
+        // Owner layers stay gated on `compact_object`: pairing a base and an
+        // owner sprite is the one part of this block genuinely about objects,
+        // and compact owner masks are tracked separately.
+        if compact_object || owner_layers.is_none() {
             let texture = base_resource.id;
             let clip = surface.clip();
             let uv_rect = [uv[0][0], uv[0][1], uv[3][0], uv[3][1]];

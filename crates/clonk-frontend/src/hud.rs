@@ -2959,23 +2959,27 @@ mod tests {
             .into_scene([8, 4], Color::transparent(), &gamma);
         assert_eq!(scene.textures.len(), 1);
         assert_eq!(scene.commands.len(), 1);
-        let GpuCommand::Quad {
-            vertices,
-            sampler,
+        // clonk-org/clonk-rs#271: a compact instance rather than a generic
+        // quad. The geometry this test is about is unchanged — the compact
+        // record carries the same four corner positions and the same UV
+        // extent, as a rect rather than per-vertex pairs.
+        let GpuCommand::ObjectBatch {
+            sprites,
             blend,
             gamma,
             ..
         } = &scene.commands[0]
         else {
-            panic!("scaled command region did not lower to a textured quad");
+            panic!("scaled command region did not lower to a textured command");
         };
-        assert_eq!(*sampler, GpuSampler::Nearest);
+        assert_eq!(sprites.len(), 1);
+        let sprite = &sprites[0];
+        assert_eq!(sprite.sampler(), GpuSampler::Nearest);
         assert_eq!(*blend, GpuBlend::Normal);
         assert!(*gamma);
-        assert_eq!(vertices[0].position, [2.0, 1.0, 1.0]);
-        assert_eq!(vertices[3].position, [6.0, 3.0, 1.0]);
-        assert_eq!(vertices[0].uv, [0.25, 0.0]);
-        assert_eq!(vertices[3].uv, [0.75, 1.0]);
+        assert_eq!(sprite.positions[0], [2.0, 1.0, 1.0]);
+        assert_eq!(sprite.positions[3], [6.0, 3.0, 1.0]);
+        assert_eq!(sprite.uv, [0.25, 0.0, 0.75, 1.0]);
     }
 
     #[test]

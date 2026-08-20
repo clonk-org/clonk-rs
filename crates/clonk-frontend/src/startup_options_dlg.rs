@@ -6511,14 +6511,14 @@ mod tests {
         assert_eq!(scene.textures.len(), 1);
         assert_eq!(&scene.textures[0].pixels[0..4], &[0, 0, 0, 0]);
         assert_eq!(scene.commands.len(), 1);
-        let clonk_graphics::GpuCommand::Quad {
-            vertices, sampler, ..
-        } = &scene.commands[0]
-        else {
-            panic!("options paper was not retained as a texture quad");
+        // clonk-org/clonk-rs#271: a compact instance. The native tile size the
+        // generic path repeated per vertex is one per-instance scalar here.
+        let clonk_graphics::GpuCommand::ObjectBatch { sprites, .. } = &scene.commands[0] else {
+            panic!("options paper was not retained as a texture command");
         };
-        assert_eq!(*sampler, clonk_graphics::GpuSampler::Linear);
-        assert!(vertices.iter().all(|vertex| vertex.sample_tile[3] == 1.0));
+        assert_eq!(sprites.len(), 1);
+        assert_eq!(sprites[0].sampler(), clonk_graphics::GpuSampler::Linear);
+        assert!(sprites[0].sample_tile_size > 0.0);
     }
 
     #[test]
@@ -6597,9 +6597,10 @@ mod tests {
             .expect("capture remains active")
             .into_scene([64, 32], Color::transparent(), &GammaRamp::identity());
         assert_eq!(scene.commands.len(), 1);
+        // clonk-org/clonk-rs#271: a compact instance rather than a generic quad.
         assert!(matches!(
             &scene.commands[0],
-            clonk_graphics::GpuCommand::Quad { .. }
+            clonk_graphics::GpuCommand::ObjectBatch { .. }
         ));
     }
 

@@ -2269,10 +2269,12 @@ mod tests {
             .expect("capture remains active")
             .into_scene([220, 160], Color::transparent(), &GammaRamp::identity());
         assert_eq!(scene.commands.len(), 2);
-        let clonk_graphics::GpuCommand::Quad { sampler, .. } = &scene.commands[0] else {
-            panic!("scenario picture was not retained as a texture quad");
+        // clonk-org/clonk-rs#271: a compact instance rather than a generic quad.
+        let clonk_graphics::GpuCommand::ObjectBatch { sprites, .. } = &scene.commands[0] else {
+            panic!("scenario picture was not retained as a texture command");
         };
-        assert_eq!(*sampler, clonk_graphics::GpuSampler::Linear);
+        assert_eq!(sprites.len(), 1);
+        assert_eq!(sprites[0].sampler(), clonk_graphics::GpuSampler::Linear);
         assert!(matches!(
             &scene.commands[1],
             clonk_graphics::GpuCommand::Solid { .. }

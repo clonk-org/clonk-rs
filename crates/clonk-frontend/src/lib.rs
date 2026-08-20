@@ -2069,23 +2069,25 @@ mod tests {
         );
         assert_eq!(scene.textures.len(), 1);
         assert_eq!(scene.commands.len(), 1);
-        let GpuCommand::Quad {
-            vertices,
-            sampler,
+        // clonk-org/clonk-rs#271: a compact instance; same geometry and UV
+        // extent, carried as a rect rather than per-vertex pairs.
+        let GpuCommand::ObjectBatch {
+            sprites,
             blend,
             gamma,
             ..
         } = &scene.commands[0]
         else {
-            panic!("image strip did not lower to a textured quad");
+            panic!("image strip did not lower to a textured command");
         };
-        assert_eq!(*sampler, GpuSampler::Nearest);
+        assert_eq!(sprites.len(), 1);
+        let sprite = &sprites[0];
+        assert_eq!(sprite.sampler(), GpuSampler::Nearest);
         assert_eq!(*blend, GpuBlend::Normal);
         assert!(*gamma);
-        assert_eq!(vertices[0].position, [2.0, 1.0, 1.0]);
-        assert_eq!(vertices[3].position, [4.0, 3.0, 1.0]);
-        assert_eq!(vertices[0].uv, [0.25, 0.0]);
-        assert_eq!(vertices[3].uv, [0.75, 1.0]);
+        assert_eq!(sprite.positions[0], [2.0, 1.0, 1.0]);
+        assert_eq!(sprite.positions[3], [4.0, 3.0, 1.0]);
+        assert_eq!(sprite.uv, [0.25, 0.0, 0.75, 1.0]);
     }
 
     #[test]
@@ -2968,18 +2970,22 @@ mod tests {
         assert_eq!(scene.textures.len(), 1);
         assert_eq!(scene.commands.len(), 3);
         for (index, command) in scene.commands.iter().enumerate() {
-            let GpuCommand::Quad {
-                vertices,
-                sampler,
+            // clonk-org/clonk-rs#271: compact instances. Modulation is carried
+            // packed per corner rather than normalised per vertex, so the
+            // owner-colour assertion below compares the packed C4 value.
+            let GpuCommand::ObjectBatch {
+                sprites,
                 blend,
-                base_mod2,
                 gamma,
                 ..
             } = command
             else {
-                panic!("bilinear HUD draw {index} did not lower to a textured quad");
+                panic!("bilinear HUD draw {index} did not lower to a textured command");
             };
-            assert_eq!(*sampler, GpuSampler::Linear);
+            assert_eq!(sprites.len(), 1);
+            let sprite = &sprites[0];
+            let base_mod2 = &sprite.mod2();
+            assert_eq!(sprite.sampler(), GpuSampler::Linear);
             assert_eq!(
                 *blend,
                 if index == 1 {
@@ -2991,10 +2997,7 @@ mod tests {
             assert!(!*base_mod2);
             assert!(*gamma);
             if index == 2 {
-                assert_eq!(
-                    vertices[0].modulation,
-                    [128.0 / 255.0, 192.0 / 255.0, 240.0 / 255.0, 32.0 / 255.0]
-                );
+                assert_eq!(sprite.modulation[0], 0x2080_c0f0);
             }
         }
     }
@@ -3061,18 +3064,18 @@ mod tests {
             &clonk_graphics::GammaRamp::standard(),
         );
         assert_eq!(scene.commands.len(), 1);
-        let GpuCommand::Quad {
-            vertices, sampler, ..
-        } = &scene.commands[0]
-        else {
-            panic!("native texture tile did not lower to a quad");
+        // clonk-org/clonk-rs#271: a compact instance. The native tile size the
+        // generic path repeated on every vertex is one per-instance scalar
+        // here, which is the same number.
+        let GpuCommand::ObjectBatch { sprites, .. } = &scene.commands[0] else {
+            panic!("native texture tile did not lower to a textured command");
         };
-        assert_eq!(*sampler, GpuSampler::Linear);
-        assert_eq!(vertices[0].position[0], 0.0);
-        assert_eq!(vertices[3].position[0], 12.0);
-        assert!(vertices
-            .iter()
-            .all(|vertex| vertex.sample_tile == [0.0, 0.0, 2.0, 1.0]));
+        assert_eq!(sprites.len(), 1);
+        let sprite = &sprites[0];
+        assert_eq!(sprite.sampler(), GpuSampler::Linear);
+        assert_eq!(sprite.positions[0][0], 0.0);
+        assert_eq!(sprite.positions[3][0], 12.0);
+        assert_eq!(sprite.sample_tile_size, 2.0);
     }
 
     #[test]
@@ -6823,17 +6826,27 @@ mod tests {
         let mut replay = Surface::new(4, 4, PixelFormat::Rgba8888);
         replay.fill(scene.clear);
         for command in &scene.commands {
-            let GpuCommand::Quad {
+            // clonk-org/clonk-rs#271 routes eligible non-object sprites onto
+            // the compact record, so these are `ObjectBatch` runs rather than
+            // generic quads. The pixels below are what this test is about, and
+            // they are unchanged.
+            let GpuCommand::ObjectBatch {
                 texture,
-                sampler,
+                owner_texture,
+                sprites,
                 blend,
                 gamma,
                 ..
             } = command
             else {
-                panic!("column fallback must lower to retained source quads");
+                panic!("column fallback must lower to retained compact sprites");
             };
-            assert_eq!(*sampler, GpuSampler::Nearest);
+            assert!(
+                owner_texture.is_none(),
+                "no owner mask on a landscape layer"
+            );
+            assert_eq!(sprites.len(), 1, "one source layer is one sprite");
+            assert_eq!(sprites[0].sampler(), GpuSampler::Nearest);
             assert_eq!(*blend, GpuBlend::Normal);
             assert!(!*gamma);
             let resource = scene
@@ -9418,16 +9431,19 @@ mod tests {
             Color::transparent(),
             &gamma,
         );
-        let GpuCommand::Quad {
-            sampler,
+        // clonk-org/clonk-rs#271: a compact instance rather than a generic
+        // quad; blend and gamma are unchanged.
+        let GpuCommand::ObjectBatch {
+            sprites,
             blend,
             gamma,
             ..
         } = &scene.commands[0]
         else {
-            panic!("graphical PXS did not lower to a textured quad");
+            panic!("graphical PXS did not lower to a textured command");
         };
-        assert_eq!(*sampler, GpuSampler::Linear);
+        assert_eq!(sprites.len(), 1);
+        assert_eq!(sprites[0].sampler(), GpuSampler::Linear);
         assert_eq!(*blend, GpuBlend::Normal);
         assert!(*gamma);
     }
@@ -17883,13 +17899,20 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(index, command)| match command {
-                GpuCommand::Quad {
+                // clonk-org/clonk-rs#271: a compact instance now; the texture
+                // identity and painter order this test is about are unchanged.
+                GpuCommand::ObjectBatch {
                     texture,
-                    sampler: GpuSampler::Nearest,
+                    sprites,
                     blend: GpuBlend::Normal,
                     gamma: true,
                     ..
-                } => Some((index, *texture)),
+                } if sprites
+                    .iter()
+                    .all(|sprite| sprite.sampler() == GpuSampler::Nearest) =>
+                {
+                    Some((index, *texture))
+                }
                 _ => None,
             })
             .test_value();
@@ -19636,9 +19659,15 @@ mod tests {
     }
 
     #[test]
-    fn construction_sign_remains_a_generic_ordered_fallback() {
+    fn construction_sign_is_a_compact_instance_after_the_object_face() {
         // The construction facet is a global-resource draw at the start of
         // C4Object::DrawTopFace (src/C4Object.cpp:2617-2638).
+        //
+        // clonk-org/clonk-rs#271 names construction signs as one of the draws
+        // stranded on the 232-byte generic quad; they are compact instances
+        // now. The ordering is the part that still matters and is unchanged:
+        // the sign is its own command *after* the object face, because it
+        // draws from a different texture and so cannot coalesce into that run.
         let mut object = make_snapshot().objects.remove(0);
         object.definition_id = "Building".to_owned();
         object.crew_member = false;
@@ -19684,7 +19713,7 @@ mod tests {
         ));
         assert!(matches!(
             scene.commands.get(1),
-            Some(GpuCommand::Quad { .. })
+            Some(GpuCommand::ObjectBatch { .. })
         ));
         assert_eq!(scene.commands.len(), 2);
     }
