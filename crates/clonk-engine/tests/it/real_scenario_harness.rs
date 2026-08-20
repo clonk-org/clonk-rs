@@ -735,6 +735,10 @@ fn alchemy_real_scenario_subcases_batch_2() {
             alchemy_make_artefact_cast_opens_the_real_enchantment_menu,
         ),
         (
+            "learned_extinguish_puts_out_a_nearby_fire_and_spends_its_ashes",
+            alchemy_learned_extinguish_puts_out_a_nearby_fire_and_spends_its_ashes,
+        ),
+        (
             "shipped_invisibility_spell_hides_and_restores_its_mage",
             shipped_invisibility_spell_hides_and_restores_its_mage,
         ),
@@ -1433,6 +1437,134 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         .effects
         .iter()
         .all(|effect| effect.name != "WarpUSpellData"));
+}
+
+fn alchemy_learned_extinguish_puts_out_a_nearby_fire_and_spends_its_ashes(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy extinguish parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+
+    // EXTG costs IASH=3, which is exactly what the shipped bag carries, so
+    // ALC_::Transfer alone pays for it (Alchemy.c4s/Script.c:21-37;
+    // Extinguish.c4d/DefCore.txt; Bag.c4d/Script.c:148-160).
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("INEC") == Some(1)
+                    && object.components.get("IASH") == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(attached_bag),
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
+
+    // Something has to be alight for the spell to do anything: with nothing
+    // burning it reports $NoExtinguish$ and removes itself
+    // (Extinguish.c4d/Script.c:42). A shipped FLAM sets itself alight on
+    // completion, and sits inside the caster-height search radius.
+    let flame =
+        engine.spawn_test_object(SpawnConfig::new("FLAM").with_position(Vector2::new(510, 200)));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            flame,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(510, 200))
+                .with_velocity(Vector2::ZERO),
+        ),
+    );
+    engine.call_test_object_function(engine.test_object_index(flame), "Completion", Vec::new());
+    for _ in 0..5 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+    assert!(
+        engine.test_object_snapshot(flame).on_fire,
+        "the shipped FLAM lights itself, which is what EXTG is asked to undo"
+    );
+
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "EXTG"));
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let extinguish_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "EXTG"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        extinguish_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    for _ in 0..20 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+
+    // The spell walks outward from the caster and extinguishes what it finds
+    // inside three caster-heights (Extinguish.c4d/Script.c:28-41).
+    assert!(
+        engine
+            .object_snapshot(flame)
+            .is_none_or(|flame| !flame.status.is_active() || !flame.on_fire),
+        "EXTG puts the nearby flame out"
+    );
+
+    // EXTG is the odd one out among these spells: MFFS, MGWP and MDBT all
+    // delete themselves on the way out, and EXTG does too -- but only on the
+    // failure path, where nothing was burning. A cast that actually
+    // extinguished something falls through to `return(true)` with no
+    // RemoveObject at all, so the spell object survives its own success
+    // (Extinguish.c4d/Script.c:44-47).
+    assert_eq!(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "EXTG" && object.status.is_active())
+            .count(),
+        1,
+        "a successful EXTG survives its own cast"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IASH")),
+        Some(0),
+        "a successful EXTG cast consumes all three ashes"
+    );
 }
 
 fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
