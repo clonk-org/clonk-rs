@@ -1010,6 +1010,44 @@ mod tests {
         assert!(v1.len() <= MAX_VOICE_WIRE_BYTES, "and still inside the cap");
     }
 
+    /// The same diversion, for *every* version byte a release could carry
+    /// (clonk-org/clonk-rs#471).
+    ///
+    /// The test above pins V1, which is the version that actually shipped. This
+    /// one pins the rule rather than the instance: the transport must route on
+    /// the family so that a build we cannot compile here — older or newer — is
+    /// kept off `receive_at` whatever it stamps in the version byte.
+    ///
+    /// That is the difference between diverting on the family and diverting on
+    /// an exact signature. An exact match would let one unrecognised version
+    /// through, and the four bytes after the signature are the cookie's first
+    /// four — arbitrary, and read as a reliable packet number, which advances
+    /// the receive window to wherever those bytes happen to point.
+    #[test]
+    fn every_media_version_a_release_could_stamp_is_diverted() {
+        assert_eq!(
+            VOICE_MEDIA_FAMILY, b"\x7fC4V",
+            "the family must stop before the version byte, or this rule cannot hold",
+        );
+
+        for version in 0..=u8::MAX {
+            let mut wire = Vec::from(*VOICE_MEDIA_FAMILY);
+            wire.push(version);
+            wire.extend_from_slice(&[0x11; VOICE_ROUTE_COOKIE_BYTES]);
+            wire.extend_from_slice(&[0x5a; VOICE_PACKET_FIXED_HEADER + VOICE_PAYLOAD_BYTES]);
+            assert!(
+                is_voice_media_datagram(&wire),
+                "media version {version} would reach the reliable path",
+            );
+        }
+
+        // And the family is not so loose that it captures unrelated traffic
+        // that merely starts with the same reserved byte.
+        assert!(!is_voice_media_datagram(b"\x7fC4X\x02"));
+        assert!(!is_voice_media_datagram(b"\x7f"));
+        assert!(!is_voice_media_datagram(&[]));
+    }
+
     #[test]
     fn the_largest_sealed_packet_still_fits_the_transport_datagram_cap() {
         // The transport drops anything over this cap before parsing it, so a
