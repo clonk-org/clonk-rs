@@ -380,7 +380,7 @@
                 classifier.state.match_texture_names[slot].as_deref(),
                 Some(expected_texture)
             );
-            assert_eq!(classifier.density(slot as u8), *density);
+            assert_eq!(classifier.state.densities[slot], *density);
         }
         assert!(classifier.state.material_names[0].is_none());
         assert!(classifier.state.material_names[3].is_none());
@@ -596,7 +596,11 @@
             assert!(classifier.state.match_texture_names[slot].is_none());
             assert!(classifier.state.shapes[slot].is_none());
         }
-        assert!(!classifier.is_solid(30), "the invalid map byte is sky");
+        // DensitySolid: density >= C4M_Solid=50 (C4Wrappers.h:68-71).
+        assert!(
+            classifier.state.densities[30] < 50,
+            "the invalid map byte is sky"
+        );
         assert_eq!(
             classifier.state.default_material_entry("X"),
             Some(1),
@@ -642,7 +646,11 @@
         assert!(classifier.state.texture_names[25].is_none());
         assert!(classifier.state.match_texture_names[25].is_none());
         assert!(classifier.state.shapes[25].is_none());
-        assert!(!classifier.is_liquid(25), "the invalid map byte is sky");
+        // DensityLiquid: C4M_Liquid=25 <= density < 50 (C4Wrappers.h:78-81).
+        assert!(
+            !(25..50).contains(&classifier.state.densities[25]),
+            "the invalid map byte is sky"
+        );
     }
 
     #[test]

@@ -420,10 +420,6 @@ pub struct Scenario {
     pub(in crate::scenario) keep_map_creator: bool,
     pub(in crate::scenario) scenario_sections: Vec<ScenarioSectionSpec>,
     pub(in crate::scenario) physics: Option<PhysicsSettings>,
-    /// Runtime C4Landscape::CompileFunc state restored from a savegame's
-    /// Game.txt. Its presence also suppresses the fresh ScenarioInit gravity
-    /// overwrite when the scenario is applied.
-    pub(in crate::scenario) runtime_landscape: Option<LandscapeGameData>,
     /// The C4Aul string enumeration loaded from `Strings.txt`. Compiled
     /// Globals/GlobalNamed/effect variables refer to these integer IDs.
     pub(in crate::scenario) legacy_string_table: clonk_script::StringRegistrations,
@@ -3580,7 +3576,6 @@ impl Scenario {
             keep_map_creator: manifest.core.landscape.keep_map_creator,
             scenario_sections,
             physics,
-            runtime_landscape,
             legacy_string_table,
             round_results,
             gravity,
@@ -5176,7 +5171,6 @@ impl Scenario {
             keep_map_creator: false,
             scenario_sections: Vec::new(),
             physics,
-            runtime_landscape: None,
             legacy_string_table: clonk_script::new_string_registrations(),
             round_results: RoundResultsState::default(),
             gravity: LegacyC4SVal::new(100, 0, 10, 200),

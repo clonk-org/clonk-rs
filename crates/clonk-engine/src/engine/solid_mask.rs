@@ -683,12 +683,6 @@ impl Engine {
         })
     }
 
-    fn object_contacts_solid_mask(&self, index: usize, bake: &SolidMaskBake, vehicle: u8) -> bool {
-        self.objects
-            .get(index)
-            .is_some_and(|object| Self::object_contacts_solid_mask_bake(object, bake, vehicle))
-    }
-
     /// C4SolidMask::Put(..., fRestoreAttachment=true), including the
     /// destination contact probe, once-per-frame guard, and MovePosition's
     /// recursive mask lifecycle for stacked carriers (C4SolidMask.cpp:178-195;

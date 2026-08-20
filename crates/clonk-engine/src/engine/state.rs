@@ -3410,13 +3410,6 @@ impl Engine {
         })
     }
 
-    fn is_script_player_object_snapshot(&self, object: &ObjectSnapshot) -> bool {
-        self.players.get(&object.owner).is_some_and(|player| {
-            player.is_script_player()
-                && (object.definition_id.as_str() == "FLAG" || player.crew().contains(&object.id))
-        })
-    }
-
     fn apply_script_player_team(
         &mut self,
         player_id: i32,
@@ -4063,38 +4056,6 @@ impl Engine {
                 PlayerCommand::SetPlrView { player_id, object } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
                         player.set_view_target(object);
-                    }
-                }
-                PlayerCommand::ClearObjectPointers { object } => {
-                    if self
-                        .active_message_board_input
-                        .as_ref()
-                        .is_some_and(|input| input.target == Some(object))
-                    {
-                        self.active_message_board_input = None;
-                    }
-                    let owners = self.player_ids_in_order();
-                    for owner in owners {
-                        let removed_cursor = self.crew_cursor(owner) == Some(object);
-                        if removed_cursor {
-                            if let Some(selection) = self.crew_selection.get_mut(&owner) {
-                                selection.set_cursor(None);
-                            }
-                            if self
-                                .crew_selection
-                                .get(&owner)
-                                .is_some_and(CrewSelection::is_empty)
-                            {
-                                self.crew_selection.remove(&owner);
-                            }
-                        }
-                        if let Some(player) = self.players.get_mut(&owner) {
-                            player.clear_object_pointers(object);
-                        }
-                        self.remove_from_roles(owner, object);
-                        if removed_cursor {
-                            self.player_adjust_cursor_command(owner)?;
-                        }
                     }
                 }
                 PlayerCommand::ClearPlayerObjectPointersBeforeAdjust { player_id, object } => {

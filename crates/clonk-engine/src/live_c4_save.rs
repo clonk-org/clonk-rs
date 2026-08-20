@@ -1030,16 +1030,6 @@ impl LegacyStringTable {
         })
     }
 
-    fn push_unique(&mut self, bytes: Vec<u8>) {
-        if !self
-            .values
-            .iter()
-            .any(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
-        {
-            self.values.push(bytes);
-        }
-    }
-
     fn id_for(&mut self, value: &str) -> i32 {
         let bytes = clonk_script::c4_string_bytes(value);
         if let Some(index) = self
@@ -1081,10 +1071,6 @@ impl LegacyStringTable {
         }
         output.resize(encoded_size, 0);
         Some(output)
-    }
-
-    fn finish(self) -> Option<Vec<u8>> {
-        self.encoded()
     }
 
     fn enumeration(&self) -> LiveC4ValueEnumeration {

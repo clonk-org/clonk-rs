@@ -655,7 +655,6 @@ public func SeedFull()
             0,
             0, // action_phase
             None,
-            None,
         );
         let world = world_with(vec![existing], Some(landscape), definitions, HashMap::new());
         let args = [

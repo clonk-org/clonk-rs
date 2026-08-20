@@ -1307,14 +1307,13 @@
         write_test_file(scenario_dir.join("Strings.txt"), b"saved text\r\n");
 
         let resolver = test_resolver(vec![dir.path().to_path_buf()]);
-        let mut scenario =
-            load_test_scenario(&scenario_dir, &resolver);
-        // SaveGame alone selects Weather.Init(false). Keep this explicit
-        // zero-runtime-landscape shape as a regression for the old Rust gate.
-        scenario.runtime_landscape = None;
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
+        // SaveGame alone selects Weather.Init(false); Game.txt intentionally
+        // has no Landscape section.
         let mut engine = Engine::with_seed(0);
         scenario
-            .apply_before_network_final_init_with_game_data(&mut engine, &game_data, None, None).test_value();
+            .apply_before_network_final_init_with_game_data(&mut engine, &game_data, None, None)
+            .test_value();
 
         assert_eq!(
             engine

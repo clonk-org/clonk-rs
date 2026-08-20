@@ -8784,14 +8784,6 @@ impl ShapeContact {
     fn is_contact(&self) -> bool {
         self.contact_count != 0
     }
-
-    fn first_friction(&self) -> i32 {
-        if self.contact_count != 0 {
-            self.frictions[0]
-        } else {
-            0
-        }
-    }
 }
 
 fn sign_i32(value: i32) -> i32 {
@@ -11239,7 +11231,6 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.action.time,
                 object.action.phase,
                 object.container,
-                object.draw_transform,
             )
             .with_action_index(object.action.act_map_index)
             .with_fixed_motion(

@@ -1674,7 +1674,6 @@
             state.action.time,
             state.action.phase,
             None,
-            None,
         )
         .with_fixed_motion(fixed_position, fixed_velocity)
         .with_fixed_rotation(fixed_rotation)

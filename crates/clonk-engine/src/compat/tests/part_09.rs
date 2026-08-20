@@ -1282,7 +1282,6 @@ func ChangeAndProbe()
             0,
             0,
             None,
-            None,
         )
         .with_full_state(Rc::new(state));
         HostWorldContext::from_objects([target])

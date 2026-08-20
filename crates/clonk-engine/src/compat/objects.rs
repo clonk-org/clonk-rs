@@ -5091,7 +5091,6 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 0,
                 0,
                 None,
-                None,
             )
             .with_compiler_fields(
                 0,
@@ -5461,7 +5460,6 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 0,
                 0,
                 None,
-                None,
             )
             .with_compiler_fields(
                 0,
@@ -5821,7 +5819,6 @@ fn register_placement_object(
         0,
         0,
         0,
-        None,
         None,
     )
     .with_alive(initial_alive)
@@ -6441,7 +6438,6 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
             0,
             0,
             0,
-            None,
             None,
         )
         .with_compiler_fields(
@@ -7222,7 +7218,6 @@ pub(crate) fn create_native_object(
             0,
             0,
             0,
-            None,
             None,
         )
         .with_compiler_fields(

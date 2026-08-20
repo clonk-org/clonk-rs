@@ -842,6 +842,21 @@ fn run_prepared_scenario_batch(
     }
 }
 
+fn attached_alchemy_bag(engine: &Engine, mage: ObjectId) -> ObjectId {
+    crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    )
+}
+
 fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
     prepared: &PreparedInstalledScenario,
 ) {
@@ -869,18 +884,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     let attached_bag_index = engine.test_object_index(attached_bag);
     engine.call_test_object_function(
         attached_bag_index,
@@ -1221,18 +1225,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     let harvested_gold = engine.spawn_test_object(
         SpawnConfig::new("ALC_").with_ordered_components(vec![("IGOL".to_owned(), 1)]),
     );
@@ -1475,18 +1468,7 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     let extra_ingredients = engine.spawn_test_object(
         SpawnConfig::new("ALC_")
             .with_ordered_components(vec![("INEC".to_owned(), 1), ("IASH".to_owned(), 1)]),
@@ -1615,18 +1597,7 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     engine.call_test_object_function(
         engine.test_object_index(attached_bag),
         "Transfer",
@@ -1722,18 +1693,7 @@ fn alchemy_learned_heal_cast_sustains_magic_and_restores_the_casters_energy(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     engine.call_test_object_function(
         engine.test_object_index(attached_bag),
         "Transfer",
@@ -1867,18 +1827,7 @@ fn alchemy_learned_eternal_flame_scatters_its_shipped_flame_cast(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     let extra_sphere = engine.spawn_test_object(
         SpawnConfig::new("ALC_").with_ordered_components(vec![("ISPH".to_owned(), 1)]),
     );
@@ -1966,18 +1915,7 @@ fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     engine.call_test_object_function(
         engine.test_object_index(attached_bag),
         "Transfer",
@@ -2081,18 +2019,7 @@ fn alchemy_learned_small_force_field_binds_its_field_to_the_caster(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     engine.call_test_object_function(
         engine.test_object_index(attached_bag),
         "Transfer",
@@ -2194,18 +2121,7 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     engine.call_test_object_function(
         engine.test_object_index(attached_bag),
         "Transfer",
@@ -2354,18 +2270,7 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     assert_eq!(
         engine.call_test_object_function(
             engine.test_object_index(mage),
@@ -2638,18 +2543,7 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     engine.call_test_object_function(
         engine.test_object_index(attached_bag),
         "Transfer",
@@ -2774,18 +2668,7 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     engine.call_test_object_function(
         engine.test_object_index(attached_bag),
         "Transfer",
@@ -2898,18 +2781,7 @@ fn alchemy_learned_fireball_aims_steers_and_explodes_through_player_controls(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     let extra_sphere = engine.spawn_test_object(
         SpawnConfig::new("ALC_").with_ordered_components(vec![("ISPH".to_owned(), 1)]),
     );
@@ -3087,18 +2959,7 @@ fn alchemy_learned_firebreath_aims_and_attaches_its_breath_to_the_caster(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     let attached_bag_index = engine.test_object_index(attached_bag);
     let extra_spheres = [
         engine.spawn_test_object(
@@ -3253,18 +3114,7 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     let extra_sphere = engine.spawn_test_object(
         SpawnConfig::new("ALC_").with_ordered_components(vec![("ISPH".to_owned(), 1)]),
     );
@@ -3433,18 +3283,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
             })
             .map(|object| object.id),
     );
-    let attached_bag = crate::support::TestValueExt::test_value(
-        engine
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| {
-                object.definition_id == "ALC_"
-                    && object.action.name == "Belongs"
-                    && object.action.target == Some(mage)
-            })
-            .map(|object| object.id),
-    );
+    let attached_bag = attached_alchemy_bag(&engine, mage);
     engine.call_test_object_function(
         engine.test_object_index(attached_bag),
         "Transfer",

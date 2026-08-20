@@ -757,11 +757,6 @@ impl PlayerState {
         }
     }
 
-    pub(crate) fn clear_object_pointers(&mut self, object: ObjectId) {
-        self.clear_object_pointers_before_cursor_adjust(object);
-        self.clear_object_pointers_after_cursor_adjust(object);
-    }
-
     pub(crate) fn call_message_board(&mut self, query: MessageBoardQuery) {
         self.remove_message_board_query(query.target);
         self.message_board_queries.push(query);
@@ -2188,10 +2183,6 @@ impl Player {
 
     pub fn magic(&self) -> impl Iterator<Item = &DefinitionId> {
         self.magic_entries.iter().map(|(id, _)| id)
-    }
-
-    pub(crate) fn magic_entries(&self) -> &[(DefinitionId, i32)] {
-        &self.magic_entries
     }
 
     pub(crate) fn set_magic_entries(&mut self, entries: Vec<(DefinitionId, i32)>) {

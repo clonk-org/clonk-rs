@@ -100,12 +100,6 @@ impl SlotOccupancy {
         }
     }
 
-    fn is_live(&self, slot: usize) -> bool {
-        self.words
-            .get(slot / 64)
-            .is_some_and(|word| word & (1_u64 << (slot % 64)) != 0)
-    }
-
     /// Where an ascending scan arrives next: the first live slot at or after
     /// `slot`, or `None` once the array is exhausted.
     fn next_live_at_or_after(&self, slot: usize) -> Option<usize> {

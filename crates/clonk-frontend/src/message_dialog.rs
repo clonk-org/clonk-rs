@@ -4,6 +4,7 @@
 //! is an ordinary classic dialog, so this renderer deliberately leaves the
 //! underlying screen untouched and draws no dimming layer.
 
+use crate::caption_scroll::{advance_caption_scroll, CaptionScrollState};
 use crate::classic_gui::{
     draw_3d_frame, draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect,
 };
@@ -287,13 +288,6 @@ struct MessageDialogCheckbox {
     expanded_label: String,
     hotkey: Option<char>,
     checked: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct CaptionScrollState {
-    last_change: Option<Instant>,
-    position: i32,
-    direction: i8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1265,27 +1259,7 @@ impl MessageDialogState {
             (font.measure(&self.caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
                 - self.size.width())
             .max(0);
-        let mut state = self.caption_scroll.get();
-        let Some(last_change) = state.last_change else {
-            state.last_change = Some(now);
-            self.caption_scroll.set(state);
-            return 0;
-        };
-        if now.checked_duration_since(last_change).unwrap_or_default() >= TITLE_SCROLL_DELAY {
-            if state.direction == 0 {
-                state.direction = 1;
-            }
-            if max_scroll > 0 {
-                state.position += i32::from(state.direction);
-                if state.position >= max_scroll || state.position < 0 {
-                    state.direction = -state.direction;
-                    state.position += i32::from(state.direction);
-                    state.last_change = Some(now);
-                }
-            }
-        }
-        self.caption_scroll.set(state);
-        state.position
+        advance_caption_scroll(&self.caption_scroll, now, max_scroll, TITLE_SCROLL_DELAY)
     }
 }
 

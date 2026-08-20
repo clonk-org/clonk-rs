@@ -3319,6 +3319,13 @@ mod tests {
         ranges: Vec<i32>,
     }
 
+    fn recording_oracle<const N: usize>(outcomes: [i32; N]) -> RecordingTeamAssignmentOracle {
+        RecordingTeamAssignmentOracle {
+            outcomes: outcomes.into(),
+            ranges: Vec::new(),
+        }
+    }
+
     impl InitialHostTeamAssignmentOracle for RecordingTeamAssignmentOracle {
         fn safe_random(&mut self, range: i32) -> i32 {
             self.ranges.push(range);
@@ -3372,10 +3379,7 @@ mod tests {
 
     #[test]
     fn default_generated_team_uses_fixed_then_conflict_checked_process_colors() {
-        let mut fixed_oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut fixed_oracle = recording_oracle([]);
         let fixed =
             generate_default_initial_team(2, legacy_cstring(b"Team 2"), &[], &mut fixed_oracle);
         assert_eq!(fixed.name.as_bytes(), b"Team 2");
@@ -3383,10 +3387,7 @@ mod tests {
         assert!(fixed_oracle.ranges.is_empty());
 
         let first_candidate = 255;
-        let mut random_oracle = RecordingTeamAssignmentOracle {
-            outcomes: [255, 0, 0, 0, 0, 255].into(),
-            ranges: Vec::new(),
-        };
+        let mut random_oracle = recording_oracle([255, 0, 0, 0, 0, 255]);
         let generated = generate_default_initial_team(
             11,
             legacy_cstring(b"Team 11"),
@@ -3501,10 +3502,7 @@ mod tests {
             original_color: 0x0011_1111,
             ..Default::default()
         }];
-        let mut free_oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut free_oracle = recording_oracle([]);
         assign_initial_offline_player_teams(&mut free_teams, &mut free_players, &mut free_oracle);
 
         assert_eq!(free_players[0].team, 0);
@@ -3523,10 +3521,7 @@ mod tests {
             original_color: 0x0022_2222,
             ..Default::default()
         }];
-        let mut random_oracle = RecordingTeamAssignmentOracle {
-            outcomes: [0].into(),
-            ranges: Vec::new(),
-        };
+        let mut random_oracle = recording_oracle([0]);
         assign_initial_offline_player_teams(
             &mut random_teams,
             &mut random_players,
@@ -3560,10 +3555,7 @@ mod tests {
             player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
             ..Default::default()
         }];
-        let mut script_oracle = RecordingTeamAssignmentOracle {
-            outcomes: [1].into(),
-            ranges: Vec::new(),
-        };
+        let mut script_oracle = recording_oracle([1]);
         assign_initial_offline_player_teams(
             &mut script_teams,
             &mut script_players,
@@ -3575,10 +3567,7 @@ mod tests {
         let mut noncustom_teams = initial_teams;
         noncustom_teams.custom = false;
         let mut noncustom_players = [player(4)];
-        let mut noncustom_oracle = RecordingTeamAssignmentOracle {
-            outcomes: [0].into(),
-            ranges: Vec::new(),
-        };
+        let mut noncustom_oracle = recording_oracle([0]);
         assign_initial_offline_player_teams(
             &mut noncustom_teams,
             &mut noncustom_players,
@@ -3647,10 +3636,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [0, 2, 1, 0].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([0, 2, 1, 0]);
 
         assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
 
@@ -4753,10 +4739,7 @@ mod tests {
             vec![named(1, b"\xc4lice", 0x00f4_0000)],
         ));
         registry.reserve_player_ids_through(1);
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let admission = registry
             .admit_request_with_attributes(
@@ -4811,10 +4794,7 @@ mod tests {
             vec![named(2, crate::PLAYER_INFO_TYPE_SCRIPT, 0x0000_c800)],
         ));
         registry.reserve_player_ids_through(2);
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
         let admission = registry
             .admit_request_with_attributes(
                 PlayerInfoUpdateRequest::new(
@@ -4892,10 +4872,7 @@ mod tests {
             )],
         ));
         registry.reserve_player_ids_through(2);
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
         let mut fixed_incoming = named(0, PLAYER_INFO_TYPE_USER, b"Same", b"", 0x0000_00f4);
         fixed_incoming.flags |= PLAYER_INFO_FLAG_ATTRIBUTES_FIXED;
 
@@ -4970,10 +4947,7 @@ mod tests {
         let mut fixed = named(3, PLAYER_INFO_TYPE_USER, b"Same", b"", 0x0000_00f4);
         fixed.flags |= PLAYER_INFO_FLAG_ATTRIBUTES_FIXED;
         registry.apply(player_info_data(30, vec![fixed]));
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let updates = registry
             .refresh_player_attributes(None, &[], &mut oracle)
@@ -5003,10 +4977,7 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.apply(player_info_data(1, vec![named(1, b"One")]));
         registry.reserve_player_ids_through(1);
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [10, 20, 30].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([10, 20, 30]);
 
         let admission = registry
             .admit_request_with_attributes(
@@ -5047,10 +5018,7 @@ mod tests {
             }],
         ));
         registry.reserve_player_ids_through(1);
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let admission = registry
             .admit_request_with_attributes(
@@ -5098,10 +5066,7 @@ mod tests {
             )],
         );
         let before = registry.retained_rows_snapshot();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [10, 20, 30].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([10, 20, 30]);
 
         let error = registry
             .admit_request_with_attributes(
@@ -5145,10 +5110,7 @@ mod tests {
             }],
         ));
         registry.reserve_player_ids_through(1);
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [10, 20, 30].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([10, 20, 30]);
 
         let admission = registry
             .admit_request_with_attributes(
@@ -5198,10 +5160,7 @@ mod tests {
             )],
         );
         let before = registry.retained_rows_snapshot();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let error = registry
             .admit_request_with_attributes(
@@ -5250,10 +5209,7 @@ mod tests {
             )],
         );
         let resource_id = 77;
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
         let admission = registry
             .admit_request_with_attributes_and_alternate_colors(
                 PlayerInfoUpdateRequest::new(
@@ -5313,10 +5269,7 @@ mod tests {
                 ],
             )],
         );
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [10, 20, 30].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([10, 20, 30]);
 
         let admission = registry
             .admit_request_with_attributes_and_alternate_colors(
@@ -5368,10 +5321,7 @@ mod tests {
             ..initial_team_metadata()
         };
         let teams_before = teams.clone();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [1].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([1]);
 
         let error = registry
             .admit_remote_request_with_runtime_teams_and_attributes(
@@ -5419,10 +5369,7 @@ mod tests {
             vec![named(1, crate::PLAYER_INFO_TYPE_SCRIPT, 0x00f4_0000)],
         ));
         registry.reserve_player_ids_through(1);
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let admission = registry
             .admit_request_with_attributes(
@@ -5462,10 +5409,7 @@ mod tests {
             ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [0].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([0]);
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
@@ -5601,10 +5545,7 @@ mod tests {
             registry.replace_snapshot(10, [player_info_data(3, vec![existing.clone()])]);
             let mut requested = existing;
             requested.team = target_team;
-            let mut oracle = RecordingTeamAssignmentOracle {
-                outcomes: [].into(),
-                ranges: Vec::new(),
-            };
+            let mut oracle = recording_oracle([]);
 
             let admission = registry
                 .admit_request_with_teams_and_attributes(
@@ -5641,10 +5582,7 @@ mod tests {
             ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
@@ -5690,10 +5628,7 @@ mod tests {
         for (has_lobby, expected_team) in [(false, 0), (true, 2)] {
             let mut teams = base_teams.clone();
             let mut registry = ControlPlayerInfoRegistry::default();
-            let mut oracle = RecordingTeamAssignmentOracle {
-                outcomes: [].into(),
-                ranges: Vec::new(),
-            };
+            let mut oracle = recording_oracle([]);
             let admission = registry
                 .admit_request_with_teams_and_attributes(
                     PlayerInfoUpdateRequest::new(
@@ -5734,10 +5669,7 @@ mod tests {
         };
         let teams_before = teams.clone();
         let mut registry = ControlPlayerInfoRegistry::default();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
@@ -5802,10 +5734,7 @@ mod tests {
                 }],
             )],
         );
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
@@ -5865,10 +5794,7 @@ mod tests {
         };
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(7, [player_info_data(3, vec![joined.clone()])]);
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
@@ -5928,10 +5854,7 @@ mod tests {
             )],
         );
         let registry_before = registry.retained_rows_snapshot();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [0].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([0]);
 
         let error = registry
             .admit_request_with_teams_and_attributes(
@@ -5989,10 +5912,7 @@ mod tests {
             }],
         );
         let mut registry = ControlPlayerInfoRegistry::default();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [0].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([0]);
 
         let admitted = registry
             .admit_remote_request_with_runtime_teams(request, 8, &mut teams, &mut oracle)
@@ -6030,10 +5950,7 @@ mod tests {
             vec![player(0)],
         );
         let mut registry = ControlPlayerInfoRegistry::default();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [0].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([0]);
 
         let admitted = registry
             .admit_remote_request_with_runtime_teams(request, 8, &mut teams, &mut oracle)
@@ -6185,10 +6102,7 @@ mod tests {
                     })
                     .collect(),
             ));
-            let mut oracle = RecordingTeamAssignmentOracle {
-                outcomes: [].into(),
-                ranges: Vec::new(),
-            };
+            let mut oracle = recording_oracle([]);
 
             let updates = registry.recheck_random_teams(&mut teams, &mut oracle);
 
@@ -6238,10 +6152,7 @@ mod tests {
                 .collect(),
             0,
         ));
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let updates = registry.recheck_random_teams(&mut teams, &mut oracle);
 
@@ -6277,10 +6188,7 @@ mod tests {
         ));
         let reserved = registry.get(1).expect("reserved player exists").clone();
         registry.reserve_unjoined_player_snapshots(&[reserved]);
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         registry.recheck_random_teams(&mut teams, &mut oracle);
 
@@ -6317,10 +6225,7 @@ mod tests {
                 },
             ],
         ));
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [1].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([1]);
 
         let updates = registry.recheck_random_teams(&mut teams, &mut oracle);
 
@@ -6351,10 +6256,7 @@ mod tests {
             vec![info(2), info(3), info(4), info(5)],
         ));
         registry.apply(player_info_data(3, vec![info(1)]));
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let updates = registry.recheck_random_teams(&mut teams, &mut oracle);
 
@@ -6534,10 +6436,7 @@ mod tests {
         ));
         registry.apply(player_info_data(7, vec![info(5, 1, 0)]));
         registry.issued_join_ids.insert(5);
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [1].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([1]);
 
         let packets = registry.reassign_all_teams(&mut teams, &mut oracle, true);
 
@@ -7140,10 +7039,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let admission = registry
             .admit_request_with_attributes(
@@ -7215,10 +7111,7 @@ mod tests {
             teams: Vec::new(),
         };
         let teams_before = teams.clone();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
@@ -7274,10 +7167,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        let mut oracle = RecordingTeamAssignmentOracle {
-            outcomes: [].into(),
-            ranges: Vec::new(),
-        };
+        let mut oracle = recording_oracle([]);
 
         let admission = registry
             .admit_request_with_attributes(
@@ -7327,10 +7217,7 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(10, [player_info_data(3, vec![associated(10, b"Existing")])]);
         let admit = |registry: &mut ControlPlayerInfoRegistry, client_id, flags, name: &[u8]| {
-            let mut oracle = RecordingTeamAssignmentOracle {
-                outcomes: [].into(),
-                ranges: Vec::new(),
-            };
+            let mut oracle = recording_oracle([]);
             let admission = registry
                 .admit_request_with_attributes(
                     PlayerInfoUpdateRequest::new(client_id, flags, vec![associated(0, name)]),

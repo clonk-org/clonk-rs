@@ -675,7 +675,6 @@ dependencies = [
  "clonk-update",
  "clonk-update-net",
  "flate2",
- "freetype-rs",
  "gethostname",
  "gilrs",
  "image",
@@ -737,7 +736,6 @@ version = "0.16.0"
 dependencies = [
  "anyhow",
  "clonk-app-core",
- "clonk-core",
  "clonk-engine",
  "clonk-network",
  "clonk-platform",
@@ -798,7 +796,6 @@ dependencies = [
  "chrono",
  "indexmap",
  "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -812,11 +809,8 @@ dependencies = [
  "clonk-script",
  "criterion",
  "image",
- "indexmap",
  "once_cell",
  "proptest",
- "rand 0.10.2",
- "rand_core 0.10.1",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",

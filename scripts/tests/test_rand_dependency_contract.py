@@ -103,11 +103,6 @@ class RandDependencyContractTests(unittest.TestCase):
         self.assertEqual(
             self.direct_dependencies("rand"),
             {
-                ("crates/clonk-engine/Cargo.toml", "dependencies.rand"): (
-                    "0.10",
-                    False,
-                    frozenset({"std"}),
-                ),
                 (
                     "crates/clonk-engine-integration-tests/Cargo.toml",
                     "dev-dependencies.rand",
@@ -129,10 +124,6 @@ class RandDependencyContractTests(unittest.TestCase):
             {
                 (
                     "crates/clonk-engine-core/Cargo.toml",
-                    "dependencies.rand_core",
-                ): ("0.10", True, frozenset()),
-                (
-                    "crates/clonk-engine/Cargo.toml",
                     "dependencies.rand_core",
                 ): ("0.10", True, frozenset()),
                 (

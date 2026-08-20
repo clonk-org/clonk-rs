@@ -51,6 +51,28 @@ mod tests {
 
     use crate::ocf;
 
+    trait DefaultStateStep {
+        fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult;
+    }
+
+    impl DefaultStateStep for MoveToState {
+        fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+            self.step_with_waypoint(ctx, false)
+        }
+    }
+
+    impl DefaultStateStep for PutState {
+        fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+            self.step_with_gravity(ctx, crate::PhysicsSettings::default().gravity_as_c4fixed())
+        }
+    }
+
+    impl DefaultStateStep for ThrowState {
+        fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+            self.step_with_gravity(ctx, crate::PhysicsSettings::default().gravity_as_c4fixed())
+        }
+    }
+
     // Bodies live in byte-verbatim contiguous parts so the module — and
     // every test id it exports — stays exactly as it was.
     include!("command/tests/part_01.rs");
