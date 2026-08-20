@@ -229,10 +229,53 @@ jobs:
         if: steps.linux-cache.outputs.cache-hit != 'true'
         run: cargo nextest run --workspace --features xtask/engine-tools --no-run --locked
 
-  exact-sha-qualification:
-    name: Exact-SHA qualification
+  # Usually the Linux cache producer is preempted by an active merge group. If
+  # it finishes during the small gap before the next candidate, check again
+  # before admitting the expensive diagnostic fan-out. The shared concurrency
+  # lane below closes the race between this read and the next Landing run.
+  diagnostic-admission:
+    name: Admit post-merge diagnostics
     needs: linux-landing-cache
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.cache_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: read
+    outputs:
+      run_diagnostics: ${{ steps.queue.outputs.run_diagnostics }}
+    steps:
+      - name: Check merge-group activity
+        id: queue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          active=$(
+            gh api --method GET \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "repos/${REPOSITORY}/actions/workflows/landing.yml/runs" \
+              -f event=merge_group \
+              -f per_page=100 \
+              --jq '.workflow_runs[]
+                | select(.status != "completed")
+                | .id'
+          )
+          if [[ -z "$active" ]]; then
+            run_diagnostics=true
+          else
+            run_diagnostics=false
+          fi
+          printf 'run_diagnostics=%s\n' "$run_diagnostics" >> "$GITHUB_OUTPUT"
+
+  exact-sha-qualification:
+    name: Exact-SHA qualification
+    needs: diagnostic-admission
+    if: >-
+      ${{ (github.event_name != 'workflow_dispatch' || !inputs.cache_only)
+        && needs.diagnostic-admission.outputs.run_diagnostics == 'true' }}
+    concurrency:
+      group: landing-runner-priority
+      cancel-in-progress: false
     permissions:
       contents: read
     uses: ./.github/workflows/exact-sha-qualification.yml

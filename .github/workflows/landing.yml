@@ -15,7 +15,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: "landing-${{ github.event.pull_request.number || github.ref }}"
+  # Merge-group runs own this repository-wide lane. The read-only post-merge
+  # diagnostic caller waits behind an active candidate, while a newly queued
+  # candidate cancels that caller before its fan-out can occupy Landing slots.
+  # The merge queue admits one candidate at a time; revisit this shared group
+  # before raising its build-concurrency setting.
+  group: >-
+    ${{ github.event_name == 'merge_group'
+      && 'landing-runner-priority'
+      || format('landing-{0}', github.event.pull_request.number || github.ref) }}
   cancel-in-progress: true
 
 env:
@@ -241,9 +249,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: app 1+12/12
+          - name: app 1/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-1,app-test-shard-12 --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app --features app-test-shard-1 --no-fail-fast --locked
+          - name: app 12/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-12 --no-fail-fast --locked
           - name: app 3+10/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-3,app-test-shard-10 --no-fail-fast --locked
@@ -259,23 +270,24 @@ jobs:
           - name: app 11/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-11 --no-fail-fast --locked
-          - name: app 6+8/12
+          - name: app 6/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-6,app-test-shard-8 --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app --features app-test-shard-6 --no-fail-fast --locked
+          - name: app 8/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-8 --no-fail-fast --locked
           - name: engine integration 1/3
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
           - name: engine integration 2/3
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2 --no-fail-fast --locked
           - name: engine integration 3/3
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-3 --no-fail-fast --locked
-          - name: engine unit and parity
+          - name: engine and frontend unit and parity
             command: |
               failed=0
-              cargo nextest run -p clonk-engine-unit-tests --no-fail-fast --locked || failed=1
+              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked || failed=1
               cargo xtask parity verify || failed=1
               exit "$failed"
-          - name: frontend unit
-            command: cargo nextest run -p clonk-frontend-unit-tests --no-fail-fast --locked
           - name: remaining workspace 1/2
             command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-network -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
           - name: remaining workspace 2/2
@@ -331,29 +343,32 @@ jobs:
           path: .git/modules/content
           key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
 
-      - name: Materialize pinned content checkout
-        run: git submodule update --init --force --depth=1 --filter=blob:none content
-
-      - name: Verify pinned content checkout
+      # These operations touch independent state. Hiding content hydration and
+      # apt behind the hosted-toolchain probe removes setup from every shard's
+      # critical path while the waits and exact revision checks remain closed.
+      - name: Prepare content, dependencies, and exact Rust
+        id: preinstalled-rust
         env:
           CONTENT_REVISION: ${{ steps.content.outputs.revision }}
-        run: |
-          actual=$(git -C content rev-parse HEAD)
-          [[ "$actual" == "$CONTENT_REVISION" ]]
-          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
-
-      - name: Install native dependencies
-        if: matrix.apt != ''
-        env:
           APT_PACKAGES: ${{ matrix.apt }}
+          RUSTUP_AUTO_INSTALL: '0'
         timeout-minutes: 10
         run: |
-          read -r -a packages <<< "$APT_PACKAGES"
-          scripts/install-apt-packages.sh "${packages[@]}"
+          content_log="$RUNNER_TEMP/content-materialization.log"
+          git submodule update --init --force --depth=1 --filter=blob:none content \
+            >"$content_log" 2>&1 &
+          content_pid=$!
 
-      - name: Reuse exact preinstalled Rust
-        id: preinstalled-rust
-        run: |
+          apt_pid=
+          apt_log="$RUNNER_TEMP/native-dependencies.log"
+          if [[ -n "$APT_PACKAGES" ]]; then
+            (
+              read -r -a packages <<< "$APT_PACKAGES"
+              scripts/install-apt-packages.sh "${packages[@]}"
+            ) >"$apt_log" 2>&1 &
+            apt_pid=$!
+          fi
+
           required='rustc 1.97.1 '
           exact=false
           if command -v rustup >/dev/null; then
@@ -370,6 +385,27 @@ jobs:
           fi
           echo "exact=$exact" >> "$GITHUB_OUTPUT"
 
+          failed=0
+          if ! wait "$content_pid"; then
+            failed=1
+          fi
+          cat "$content_log"
+          if [[ "$failed" -eq 0 ]]; then
+            actual=$(git -C content rev-parse HEAD) || failed=1
+            [[ "$actual" == "$CONTENT_REVISION" ]] || failed=1
+            if ! content_status=$(git -C content status --porcelain --untracked-files=all); then
+              failed=1
+            fi
+            [[ -z "$content_status" ]] || failed=1
+          fi
+          if [[ -n "$apt_pid" ]]; then
+            if ! wait "$apt_pid"; then
+              failed=1
+            fi
+            cat "$apt_log"
+          fi
+          exit "$failed"
+
       - name: Install exact Rust toolchain
         if: steps.preinstalled-rust.outputs.exact != 'true'
         uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
@@ -382,13 +418,22 @@ jobs:
 
       # Restore the dependency cache produced from trusted main. Merge-queue
       # refs are short-lived and must not consume the repository's 10 GiB cache
-      # quota with immutable copies that no later candidate can restore.
+      # quota with immutable copies that no later candidate can restore. This
+      # path list deliberately matches rust-cache's archive version; keep the
+      # restore prefix aligned with the pinned Rust toolchain above.
       - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          workspaces: . -> target
-          shared-key: full-parity
-          save-if: false
+          path: |
+            /home/runner/.cargo/bin
+            /home/runner/.cargo/.crates.toml
+            /home/runner/.cargo/.crates2.json
+            /home/runner/.cargo/registry
+            /home/runner/.cargo/git
+            ${{ github.workspace }}/target
+          key: landing-full-parity-consumer-${{ github.run_id }}
+          restore-keys: |
+            v0-rust-full-parity-Linux-x64-e8b3ee54-
 
       - name: Run ${{ matrix.name }}
         env:
@@ -400,11 +445,11 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 15
-    # The runtime row may preempt the rolling trusted-main producer. The other
-    # rows use run-scoped lanes so all three smoke poles execute concurrently.
+    # The runtime/quality row may preempt the rolling trusted-main producer. The
+    # network row uses a run-scoped lane so both smoke poles execute concurrently.
     concurrency:
       group: >-
-        ${{ github.event_name == 'merge_group' && matrix.name == 'runtime tests' && 'windows-landing-cache-rolling'
+        ${{ github.event_name == 'merge_group' && matrix.name == 'runtime and quality' && 'windows-landing-cache-rolling'
           || format('landing-windows-{0}-{1}', github.run_id, matrix.name) }}
       cancel-in-progress: ${{ github.event_name == 'merge_group' }}
     defaults:
@@ -414,25 +459,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: runtime tests
+          - name: runtime and quality
             nextest: true
-            installer: false
+            installer: true
             command: |
               failed=0
               cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core --locked --no-fail-fast || failed=1
               cargo nextest run -p clonk-logging --test crash_log_descriptor --locked || failed=1
+              cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-network -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings || failed=1
               exit "$failed"
-          # clonk-network carries a Windows-only `GetAdaptersAddresses` arm for
-          # the IPv6 multicast discovery fallback; this row keeps it compiled
-          # and tested without serializing it behind the runtime packages.
+          # The network lib-test is the longest hot Windows compile and remains
+          # independent. Quality shares the shorter runtime package graph so
+          # neither serializes this critical pole.
           - name: network tests
             nextest: true
             installer: false
             command: cargo nextest run -p clonk-network --lib --locked -E 'test(/^search::tests::(discovery_multicast_target_uses_cpp_default_interface|an_accepted_default_multicast_join_enumerates_no_interfaces|a_refused_default_multicast_join_keeps_every_joinable_interface|a_scoped_join_set_sends_one_probe_per_joined_interface|an_unjoinable_host_still_probes_the_cpp_default_interface|the_cpp_default_interface_never_sets_ipv6_multicast_if|enumerated_multicast_interfaces_do_not_depend_on_kernel_listing_order)$/)'
-          - name: quality
-            nextest: false
-            installer: true
-            command: cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-network -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

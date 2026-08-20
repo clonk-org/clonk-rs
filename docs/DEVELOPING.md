@@ -188,12 +188,13 @@ a rebuilt live C++ comparison against an oracle checkout selected by
 the exhaustive workspace suite as compile-time shards against the exact merge
 queue tree. Twelve application feature selectors cover the exhaustive fragment
 inventory, with one route-support fragment shared by selectors 3 and 11; nine
-shared harness tests run once in selector 5. Seven
-application rows co-locate all 12 feature shards, including the two
-independently compiled netplay modules. Three engine-integration rows, separate
-engine and frontend unit rows, two disjoint residual-package rows, and dedicated
-quality and contract rows complete the 16-row Linux matrix. Three Windows rows
-run the runtime, network, and quality/NSIS checks in parallel. Formatting,
+shared harness tests run once in selector 5. Nine application rows distribute
+all 12 feature shards, including the two independently compiled netplay
+modules. Three engine-integration rows, one combined engine/frontend-unit and
+parity row, two disjoint residual-package rows, and dedicated quality and
+contract rows complete the 17-row Linux matrix. Two Windows rows keep the slow
+network compile independent while the shorter runtime row also runs quality
+and NSIS checks. Formatting,
 script tests, lints, parity, snapshots, packaging, and Windows checks feed one
 fail-closed `Landing gate`.
 
@@ -210,7 +211,9 @@ landing test/lint graph before publishing its reusable dependency artifacts as
 `windows-runtime-msvc-v2`, leaving shipped-runtime validation downstream.
 Selected merge-group rows may preempt the rolling Linux and Windows cache
 producers. Release commits use exact-SHA groups and remain isolated from that
-preemption.
+preemption. Before post-merge diagnostics fan out, a read-only admission job
+checks for an active merge group; a shared concurrency lane also lets any
+candidate arriving after that check cancel the diagnostic caller.
 
 After a landing-cache key change lands on `main`, seed it without running
 post-merge diagnostics:
@@ -229,11 +232,13 @@ report success.
 The measured baseline is a 649-second ordinary p50 across 88 successful,
 non-release merge-group `Landing` runs ending 2026-08-20; a full 50% reduction
 means an ordinary p50 at or below 324.5 seconds (324 seconds when reported as a
-whole duration). The 16-plus-three graph and cache
-changes are the candidate design, not an achieved result. Confirm them with a
-comparable live merge-group sample, recording queue delay, runner availability,
-cache state, and content revision while separating canceled, failed, and
-release runs.
+whole duration). The first uncontended fully seeded sample, run `32410157185`,
+finished in 354 seconds, 45.5% below baseline. The revised 17-plus-two graph
+splits that sample's longest application pairs, avoids serializing Windows
+network tests, and removes setup scans from Linux rows. It remains a candidate
+until a comparable live merge-group sample reaches the strict target; record
+queue delay, runner availability, cache state, and content revision while
+separating canceled, failed, and release runs.
 
 ## Cache and timing hygiene
 
