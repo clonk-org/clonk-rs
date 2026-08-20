@@ -1,13 +1,17 @@
 //! Shipped sailboat parity for a definition `SolidMask` across `ChangeDef`.
 //!
-//! `Sailing.c4d` (`SLBS`) declares `SolidMask=0,42,36,2,0,42`; its parent
-//! `Sailboat.c4d` (`SLBT`) declares none. `RaiseSail` ends in `LandOn`, which
-//! calls `ChangeDef(SLBT)`, so raising the sails takes the hull out of the
-//! landscape and crew standing in the boat fall through. That is shipped
-//! content behaviour, not an engine divergence: C++ `C4Object::ChangeDef`
-//! removes the live mask and adopts the new definition's
+//! `Sailing.c4d` (`SLBS`) and its parent `Sailboat.c4d` (`SLBT`) both declare
+//! `SolidMask=0,42,36,2,0,42`. `RaiseSail` ends in `LandOn`, which calls
+//! `ChangeDef(SLBT)`, and because the adopted definition carries the same mask
+//! the hull stays in the landscape and crew standing in the boat stay aboard.
+//!
+//! The engine behaviour under test is the same either way: C++
+//! `C4Object::ChangeDef` removes the live mask and puts the new definition's
 //! (C4Object.cpp:1220-1240), and `InLiquidAction` (C4Object.cpp:4758-4763)
-//! is what eventually returns the floating boat to `SLBS`.
+//! returns the floating boat to `SLBS`. What changed is the content — `SLBT`
+//! declared no mask until clonk-org/clonk-rs-content#21 gave it one, so
+//! raising the sails used to drop the hull and tip the crew into the water.
+//! This pins the corrected shape: adoption, not loss.
 
 use crate::support::real_scenario::{join_local_player, load_tutorial};
 use crate::support::EngineTestExt;
@@ -71,7 +75,7 @@ fn the_sailing_hull_mask_carries_crew_standing_in_the_boat() {
 }
 
 #[test]
-fn raising_the_sails_drops_the_hull_mask_until_the_boat_floats_again() {
+fn raising_the_sails_keeps_the_hull_mask_and_the_crew_aboard() {
     let mut engine = load_tutorial(7, 0);
     let owner = join_local_player(&mut engine, "sailboat hull parity");
     let (boat, at) = settled_sailboat(&mut engine);
@@ -93,10 +97,14 @@ fn raising_the_sails_drops_the_hull_mask_until_the_boat_floats_again() {
     assert_eq!(landed.definition_id, "SLBT");
     assert_eq!(landed.action.name, "JustLanded");
     assert!(
-        !hull_is_put(&engine, at),
-        "ChangeDef adopts SLBT's absent SolidMask, clearing the hull"
+        hull_is_put(&engine, at),
+        "ChangeDef adopts SLBT's matching SolidMask, so the hull survives"
     );
-    assert_eq!(engine.test_object_snapshot(clonk).action.name, "Swim");
+    assert_eq!(
+        engine.test_object_snapshot(clonk).action.name,
+        "Walk",
+        "crew stay on a hull that never left the landscape"
+    );
 
     // JustLanded holds for 150 ticks; OnLand's InLiquidAction then runs
     // Floating, which changes the upright boat back to SLBS.
@@ -108,6 +116,6 @@ fn raising_the_sails_drops_the_hull_mask_until_the_boat_floats_again() {
     assert_eq!(afloat.definition_id, "SLBS");
     assert!(
         hull_is_put(&engine, at),
-        "floating restores the sailing definition's hull mask"
+        "and the sailing definition's own mask is in place once it floats"
     );
 }
