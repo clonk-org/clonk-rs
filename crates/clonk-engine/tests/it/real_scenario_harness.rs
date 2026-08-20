@@ -701,6 +701,10 @@ fn alchemy_real_scenario_subcases_batch_1() {
             alchemy_tunnel_spell_opens_its_first_shipped_landscape_row,
         ),
         (
+            "fishskin_picks_its_revaluation_target_by_magic_physical",
+            alchemy_fishskin_picks_its_revaluation_target_by_magic_physical,
+        ),
+        (
             "firelump_collects_its_same_call_fireball_into_the_mage",
             alchemy_firelump_collects_its_same_call_fireball_into_the_mage,
         ),
@@ -3078,6 +3082,63 @@ fn alchemy_learned_firebreath_aims_and_attaches_its_breath_to_the_caster(
             .is_none_or(|breath| !breath.status.is_active())
     });
     assert!(expired, "FBRT expires instead of burning forever");
+}
+
+fn alchemy_fishskin_picks_its_revaluation_target_by_magic_physical(
+    prepared: &PreparedInstalledScenario,
+) {
+    // FHSK does not have one output, it has two: a caster with a Magic
+    // physical becomes a FCLK and everyone else becomes an ACLK
+    // (Fishskin.c4d/Script.c:17-19). The mage carries Magic=45000 from
+    // MagiClonk.c4d/DefCore.txt, so the two branches are reachable from the
+    // same scenario by choosing the target.
+    for (magic_caster, expected_definition) in [(true, "FCLK"), (false, "ACLK")] {
+        let mut engine = prepared.instantiate();
+        let owner = join_local_player(&mut engine, "Alchemy fishskin parity");
+        let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+        let mage_position = engine.test_object_snapshot(mage).position;
+        let target = if magic_caster {
+            mage
+        } else {
+            let plain = engine.spawn_test_object(
+                clonk_engine::SpawnConfig::new("CLNK")
+                    .with_position(Vector2::new(mage_position.x + 20, mage_position.y))
+                    .with_owner(owner)
+                    .with_action(ActionState::new("Walk")),
+            );
+            // A spawned clonk carries no crew info at all, so it has no
+            // Magic physical to read -- which is exactly the condition the
+            // contrast case needs.
+            assert!(
+                engine
+                    .test_object_snapshot(plain)
+                    .info_physical
+                    .is_none_or(|physical| physical.magic == 0),
+                "the contrast case has to be a clonk with no Magic physical"
+            );
+            plain
+        };
+
+        let spell = engine.spawn_test_object(
+            clonk_engine::SpawnConfig::new("FHSK")
+                .with_position(mage_position)
+                .with_owner(owner),
+        );
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(target.as_u64())],
+        );
+
+        // The revaluation is a ChangeDef in place: same object, new
+        // definition, put back into Walk (Fishskin.c4d/Script.c:30-34).
+        let revalued = engine.test_object_snapshot(target);
+        assert_eq!(
+            revalued.definition_id, expected_definition,
+            "a caster with magic_caster={magic_caster} revalues to {expected_definition}"
+        );
+        assert_eq!(revalued.action.name, "Walk");
+    }
 }
 
 fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
