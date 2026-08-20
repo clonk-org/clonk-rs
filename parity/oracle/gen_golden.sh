@@ -663,6 +663,65 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Shape.cpp" > "$gen/shape_contact_check.inc"
 
+# 3r. Lift the container lifecycle: C4Object::Enter, Exit and Collect. These are
+#     ordered state machines whose SHAPE is the parity fact — which script call
+#     runs before which mutation, which rollback undoes a failed insert, and
+#     which `Status` re-check aborts the rest after a callback removed one of
+#     the two objects. A port that ran the same calls in a different order, or
+#     skipped a re-check, would look right until a script used it.
+awk '
+  /^bool C4Object::Enter\(C4Object \*pTarget, bool fCalls, bool fCopyMotion, bool \*pfRejectCollect\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_enter.inc"
+
+awk '
+  /^bool C4Object::Exit\(int32_t iX, int32_t iY, int32_t iR, C4Fixed iXDir, C4Fixed iYDir, C4Fixed iRDir, bool fCalls\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_exit.inc"
+
+awk '
+  /^bool C4Object::Collect\(C4Object \*pObj\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_collect.inc"
+
+# 3q. Lift C4Effect::Check, the negotiation every AddEffect runs before an
+#     effect exists. It walks the whole list asking each live effect of at least
+#     the new priority whether it objects; a Deny short-circuits, while an Annul
+#     nominates that effect to absorb the new one — and the AnnulCalls form
+#     additionally brackets the FxAdd call in temp-remove/temp-readd of every
+#     effect above it. Which of those branches a port takes decides whether a
+#     second effect exists at all.
+# 3p. Lift C4Object::AssignRemoval, the object teardown. Every step is ordered
+#     against a script callback that may already have deleted the object, and
+#     the contents are torn down BEFORE the object leaves its own container —
+#     a sequence that decides which callbacks a dying object's cargo sees.
+awk '
+  /^void C4Object::AssignRemoval\(bool fExitContents\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_assign_removal.inc"
+
+awk '
+  /^void C4Effect::Execute\(C4Object \*pObj\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Effect.cpp" > "$gen/effect_execute.inc"
+
+awk '
+  /^int32_t C4Effect::Check\(C4Object \*pForObj, const char \*szCheckEffect/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Effect.cpp" > "$gen/effect_check.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

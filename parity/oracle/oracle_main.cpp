@@ -52,6 +52,15 @@
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
 //     scaffold records low-speed `Disabled` contact transitions.
+//   * `C4Object::AssignRemoval` is mechanically extracted in full; a
+//     container/contents scaffold records its teardown order and the Status
+//     re-checks between the callbacks.
+//   * `C4Effect::Check` is mechanically extracted in full; a configurable
+//     effect list records its negotiation order, the AnnulCalls temp bracket
+//     and the Start_Deny kill.
+//   * `C4Object::Enter`, `Exit` and `Collect` are mechanically extracted in
+//     full; a two-object scaffold with configurable script callbacks records
+//     their exact call order, rollback and post-callback Status re-checks.
 //   * `C4Shape::ContactCheck` is mechanically extracted in full; a 24x16
 //     material grid with configurable open borders records its per-vertex
 //     contact masks, materials and counts.
@@ -4167,6 +4176,703 @@ struct C4Object
 #include "target_bounds.inc"
 } // namespace shape_contact
 
+
+// ---------------------------------------------------------------------------
+// The container lifecycle: C4Object::Enter, Exit and Collect (src/C4Object.cpp).
+// What is pinned here is the SHAPE of three ordered state machines — which
+// script call runs before which mutation, which rollback undoes a failed
+// insert, and which `Status` re-check abandons the rest after a callback
+// removed one of the two objects.
+//
+// `C4ObjectList::Add`'s insert ORDER is deliberately not modelled: it sorts by
+// category through a linked list with its own invariants, and lifting it would
+// be a section of its own. `Contents` here is an append-only list whose `Add`
+// can be told to fail, which is what exercises Enter's rollback. Contents
+// ordering keeps its existing Rust-side coverage.
+//
+// Script calls are recorded rather than executed, and each can be configured to
+// return a value and to perform one side effect — clearing either object's
+// Status, or re-entering the object elsewhere — so the re-checks after
+// Collection2, Entrance, Ejection and Departure are reachable.
+namespace container_lifecycle
+{
+struct C4Object;
+
+const int32_t ActIdle = -1;
+const int32_t C4D_Living = 1 << 3;             // C4Def.h:47
+const int32_t C4ID_Flag = 1;                   // stands in for C4Id("FLAG")
+const int32_t C4RULE_FlagRemoveable = 1 << 0;  // C4Rules bit under test
+// OCF_HitSpeed1..3 and BASEFUNC_AutoSellContents come from the real
+// C4Constants.h / C4Scenario.h the oracle already includes.
+
+// The PSF_ names the lifted bodies call, copied verbatim from C4Script.h
+// (:48-50, 56-60, 82, 96). The leading `~` marks the callback optional and is
+// part of the name the engine looks up — note that the collection veto is
+// spelled `RejectCollect`, NOT `RejectCollection`.
+#define PSF_Hit "~Hit"
+#define PSF_Hit2 "~Hit2"
+#define PSF_Hit3 "~Hit3"
+#define PSF_Collection "~Collection"
+#define PSF_Collection2 "~Collection2"
+#define PSF_Ejection "~Ejection"
+#define PSF_Entrance "~Entrance"
+#define PSF_Departure "~Departure"
+#define PSF_RejectCollection "~RejectCollect"
+#define PSF_RejectEntrance "~RejectEntrance"
+
+struct C4Value
+{
+};
+
+static C4Value C4VObj(C4Object *) { return {}; }
+static C4Value C4VID(int32_t) { return {}; }
+
+struct ParSet
+{
+    ParSet() {}
+    ParSet(std::initializer_list<C4Value>) {}
+};
+
+// What a configured callback does besides returning its value.
+enum class Effect
+{
+    None,
+    ClearSelfStatus,
+    ClearOtherStatus,
+    ClearContainer,
+    ReEnter,
+    // A container callback (Collection2) that removes the object that just
+    // entered — the case Enter's post-callback re-check exists for.
+    ClearEnteringContainer,
+    ClearEnteringStatus,
+    // A callback that Exits the object it was told about, running the lifted
+    // Exit body — which is what a script doing the same would do, callbacks and
+    // all.
+    ExitEntering,
+};
+
+// The container an Effect::ReEnter callback drops the object into, standing in
+// for a script that called Enter from inside Departure.
+static C4Object *g_reenter_target = nullptr;
+
+// The object being entered/collected, so a callback made ON THE CONTAINER can
+// still act on it.
+static C4Object *g_entering_object = nullptr;
+
+struct CallConfig
+{
+    const char *tag;
+    const char *fn;
+    int32_t result;
+    Effect effect;
+};
+
+const int32_t MaxCalls = 32;
+const int32_t MaxConfigs = 8;
+
+static CallConfig g_configs[MaxConfigs];
+static int32_t g_config_count = 0;
+static const char *g_calls[MaxCalls];
+static int32_t g_call_count = 0;
+
+struct DefStub
+{
+    int32_t id{};
+    struct ActMapEntry
+    {
+        const char *Name{""};
+    } ActMap[4];
+};
+
+struct GameStub
+{
+    int32_t Rules{};
+    struct
+    {
+        struct
+        {
+            struct
+            {
+                int32_t BaseFunctionality{};
+            } Realism;
+        } Game;
+    } C4S;
+};
+
+static GameStub Game;
+
+static bool ValidPlr(int32_t player) { return player >= 0; }
+static bool SEqual(const char *a, const char *b) { return std::strcmp(a, b) == 0; }
+
+struct ContentsList
+{
+    C4Object *Items[8]{};
+    int32_t Count{};
+    bool RefuseAdd{false};
+
+    bool Add(C4Object *object, int32_t)
+    {
+        if (RefuseAdd || Count >= 8) return false;
+        Items[Count++] = object;
+        return true;
+    }
+
+    void Remove(C4Object *object)
+    {
+        int32_t write = 0;
+        for (int32_t read = 0; read < Count; ++read)
+            if (Items[read] != object) Items[write++] = Items[read];
+        Count = write;
+    }
+};
+
+struct C4ObjectList
+{
+    enum SortType
+    {
+        stNone = 0,
+        stMain = 1,
+        stContents = 2,
+        stReverse = 3,
+    };
+};
+
+struct C4Object
+{
+    const char *Tag{""};
+    int32_t Status{1};
+    C4Object *Contained{};
+    ContentsList Contents;
+    DefStub *Def{};
+    int32_t Alive{};
+    int32_t Category{};
+    int32_t Controller{-1};
+    int32_t Base{-1};
+    uint32_t OCF{};
+    int32_t Mobile{};
+    int32_t InLiquid{};
+    int32_t x{}, y{}, r{};
+    C4Fixed fix_x{Fix0}, fix_y{Fix0}, fix_r{Fix0};
+    C4Fixed xdir{Fix0}, ydir{Fix0}, rdir{Fix0};
+
+    struct ActionState
+    {
+        int32_t Act{ActIdle};
+    } Action;
+
+    int32_t Call(const char *fn, ParSet = {});
+
+    // Everything below is bookkeeping the lifted bodies invoke but this section
+    // does not pin; each records that it ran so a reordering is still visible.
+    void CloseMenu(bool) { record("CloseMenu"); }
+    void SetOCF() { record("SetOCF"); }
+    void UpdateFace(bool) { record("UpdateFace"); }
+    void UpdateMass() { record("UpdateMass"); }
+    void UpdateSolidMask(bool) { record("UpdateSolidMask"); }
+    void CopyMotion(C4Object *) { record("CopyMotion"); }
+    void BoundsCheck(int32_t &, int32_t &) { record("BoundsCheck"); }
+    void AutoSellContents() { record("AutoSellContents"); }
+
+    static void record(const char *what)
+    {
+        if (g_call_count < MaxCalls) g_calls[g_call_count] = what;
+        ++g_call_count;
+    }
+
+    bool Enter(
+        C4Object *pTarget, bool fCalls = true, bool fCopyMotion = true,
+        bool *pfRejectCollect = nullptr);
+    bool Exit(
+        int32_t iX = 0, int32_t iY = 0, int32_t iR = 0, C4Fixed iXDir = Fix0,
+        C4Fixed iYDir = Fix0, C4Fixed iRDir = Fix0, bool fCalls = true);
+    bool Collect(C4Object *pObj);
+};
+
+static void ObjectComCancelAttach(C4Object *) { C4Object::record("CancelAttach"); }
+
+inline int32_t C4Object::Call(const char *fn, ParSet)
+{
+    record(fn);
+    for (int32_t i = 0; i < g_config_count; ++i)
+    {
+        if (!SEqual(g_configs[i].tag, Tag) || !SEqual(g_configs[i].fn, fn)) continue;
+        switch (g_configs[i].effect)
+        {
+        case Effect::ClearSelfStatus: Status = 0; break;
+        case Effect::ClearOtherStatus:
+            if (Contained) Contained->Status = 0;
+            break;
+        case Effect::ClearContainer: Contained = nullptr; break;
+        case Effect::ReEnter:
+            // Run the real Enter, as a script calling it from inside Departure
+            // would: the whole point is that Exit then reports failure.
+            if (g_entering_object) g_entering_object->Enter(g_reenter_target);
+            break;
+        case Effect::ClearEnteringContainer:
+            if (g_entering_object) g_entering_object->Contained = nullptr;
+            break;
+        case Effect::ClearEnteringStatus:
+            if (g_entering_object) g_entering_object->Status = 0;
+            break;
+        case Effect::ExitEntering:
+            if (g_entering_object) g_entering_object->Exit();
+            break;
+        case Effect::None: break;
+        }
+        return g_configs[i].result;
+    }
+    return 0;
+}
+
+#include "object_exit.inc"
+#include "object_enter.inc"
+#include "object_collect.inc"
+} // namespace container_lifecycle
+
+
+// ---------------------------------------------------------------------------
+// C4Effect::Check (src/C4Effect.cpp), the negotiation every AddEffect runs
+// before a new effect exists. The branch it takes decides whether the effect is
+// created at all, absorbed into an existing one, or denied outright — and the
+// AnnulCalls form brackets its FxAdd in temp-remove/temp-readd of the effects
+// above the absorber.
+//
+// Each scaffolded effect answers the checker with a configured value, and every
+// call the body makes is recorded, so the SEQUENCE is what the section pins.
+namespace effect_check
+{
+struct C4Object;
+struct C4Effect;
+
+struct FnTimer;
+
+// C4Effects.h:34-43.
+const int32_t C4Fx_OK = 0;
+const int32_t C4Fx_Effect_Deny = -1;
+const int32_t C4Fx_Effect_Annul = -2;
+const int32_t C4Fx_Effect_AnnulCalls = -3;
+const int32_t C4Fx_Start_Deny = -1;
+
+#define PSFS_FxAdd "Add"
+
+// The lifted Execute `delete`s the effects it unlinks, so the scaffold's
+// effects are heap-allocated and their destruction is counted.
+static int32_t g_deleted = 0;
+
+const int32_t MaxTrace = 32;
+static const char *g_trace[MaxTrace];
+static int32_t g_trace_count = 0;
+
+static void trace(const char *what)
+{
+    if (g_trace_count < MaxTrace) g_trace[g_trace_count] = what;
+    ++g_trace_count;
+}
+
+struct C4Value
+{
+    int32_t value{};
+
+    int32_t getInt() const { return value; }
+};
+
+static C4Value C4VString(const char *) { return {}; }
+static C4Value C4VObj(C4Object *) { return {}; }
+static C4Value C4VInt(int32_t v) { return {v}; }
+
+struct ParSet
+{
+    ParSet() {}
+    ParSet(std::initializer_list<C4Value>) {}
+};
+
+// The checker's answer for one effect, plus what its FxAdd returns when it is
+// the one that absorbs the newcomer.
+struct EffectConfig
+{
+    const char *name;
+    int32_t priority;
+    bool dead;
+    bool has_function;
+    int32_t effect_result;
+    int32_t add_result;
+};
+
+struct C4Effect;
+
+struct FnEffect
+{
+    C4Effect *owner{};
+
+    C4Value Exec(C4Object *, ParSet, bool, bool);
+};
+
+struct FnTimer
+{
+    C4Effect *owner{};
+
+    C4Value Exec(C4Object *, ParSet, bool, bool);
+};
+
+struct C4Effect
+{
+    const char *Name{""};
+    int32_t iPriority{};
+    int32_t iNumber{};
+    int32_t EffectResult{C4Fx_OK};
+    int32_t AddResult{C4Fx_OK};
+    bool Killed{};
+    C4Effect *pNext{};
+    C4Object *pCommandTarget{};
+    FnEffect *pFnEffect{};
+    FnTimer *pFnTimer{};
+    int32_t iTime{};
+    int32_t iIntervall{};
+    int32_t TimerResult{C4Fx_OK};
+
+    // C4Effects.h:110 — a dead effect is one whose priority was zeroed, not a
+    // separate flag, which is also how the port marks it.
+    ~C4Effect() { ++g_deleted; }
+
+    // C4Effects.h:110 — a dead effect is one whose priority was zeroed, not a
+    // separate flag, which is also how the port marks it.
+    bool IsDead() const { return !iPriority; }
+
+    C4Value DoCall(C4Object *, const char *fn, C4Value &, C4Value &, const C4Value &,
+                   const C4Value &, const C4Value &, const C4Value &)
+    {
+        trace(fn);
+        return {AddResult};
+    }
+
+    void Kill(C4Object *)
+    {
+        trace("Kill");
+        Killed = true;
+        iPriority = 0;
+    }
+
+    void TempRemoveUpperEffects(C4Object *, bool, C4Effect **ppLastRemovedEffect)
+    {
+        trace("TempRemoveUpper");
+        if (ppLastRemovedEffect) *ppLastRemovedEffect = pNext;
+    }
+
+    void TempReaddUpperEffects(C4Object *, C4Effect *) { trace("TempReaddUpper"); }
+
+    int32_t Check(
+        C4Object *pForObj, const char *szCheckEffect, int32_t iPrio, int32_t iTimer,
+        const C4Value &rVal1, const C4Value &rVal2, const C4Value &rVal3, const C4Value &rVal4,
+        bool passErrors);
+    void Execute(C4Object *pObj);
+};
+
+// C4Effects.h: the timer's "finish me" answer.
+const int32_t C4Fx_Execute_Kill = -1;
+
+
+
+C4Value FnEffect::Exec(C4Object *, ParSet, bool, bool)
+{
+    trace(owner->Name);
+    return {owner->EffectResult};
+}
+
+// C4Effect::Execute's per-frame pass. It walks the list unlinking dead effects
+// as it goes, advances each survivor's clock, and fires the timer only on an
+// exact interval boundary — or kills the effect outright when it has no timer
+// function at all. Only the two members it reads are scaffolded on C4Object.
+struct C4Object
+{
+    int32_t Status{1};
+    C4Effect *pEffects{};
+};
+
+struct GameStub
+{
+    C4Effect *pGlobalEffects{};
+};
+
+static GameStub Game;
+
+C4Value FnTimer::Exec(C4Object *, ParSet, bool, bool)
+{
+    trace(owner->Name);
+    return {owner->TimerResult};
+}
+
+#include "effect_execute.inc"
+
+#include "effect_check.inc"
+} // namespace effect_check
+
+
+// ---------------------------------------------------------------------------
+// C4Object::AssignRemoval (src/C4Object.cpp), the object teardown. Its shape is
+// the parity fact: the container's ContentsDestruction runs before the object's
+// own Destruction, effects are cleared next, and EVERY one of those steps is
+// followed by a `Status` re-check because the callback may already have deleted
+// the object. The contents are then torn down BEFORE the object leaves its own
+// container — reversing those two would give a dying object's cargo a different
+// container to exit into.
+//
+// `fExitContents` chooses whether the cargo is Exited or removed recursively,
+// which is the difference between a destroyed lorry spilling its load and
+// taking it with it.
+namespace object_removal
+{
+struct C4Object;
+
+#define PSF_ContentsDestruction "~ContentsDestruction"
+#define PSF_Destruction "~Destruction"
+
+const int32_t C4OS_DELETED = 0;
+const int32_t C4OS_NORMAL = 1;
+const int32_t C4OS_INACTIVE = 2;
+const int32_t ActIdle = -1;
+const int32_t C4FxCall_RemoveClear = 5; // C4Effects.h
+
+const int32_t MaxTrace = 48;
+static const char *g_trace[MaxTrace];
+static int32_t g_trace_count = 0;
+
+static void trace(const char *what)
+{
+    if (g_trace_count < MaxTrace) g_trace[g_trace_count] = what;
+    ++g_trace_count;
+}
+
+struct C4Value
+{
+};
+
+static C4Value C4VObj(C4Object *) { return {}; }
+
+struct ParSet
+{
+    ParSet() {}
+    ParSet(std::initializer_list<C4Value>) {}
+};
+
+// What a configured callback does besides being recorded.
+enum class Effect
+{
+    None,
+    ClearSelfStatus,
+    // A callback made ON THE CONTAINER that removes the object being torn
+    // down — the case the re-check after ContentsDestruction exists for.
+    ClearRemovingStatus,
+    // A callback that removes the object being torn down by calling the real
+    // teardown on it, which is what a script doing the same would do —
+    // callbacks and all — rather than zeroing a flag.
+    RemoveRemoving,
+};
+
+struct CallConfig
+{
+    const char *tag;
+    const char *fn;
+    Effect effect;
+    // A nested teardown would re-enter the same callback forever; each
+    // configured effect fires once.
+    bool fired;
+};
+
+// The object currently being removed, so a container's callback can reach it.
+static C4Object *g_removing = nullptr;
+
+const int32_t MaxConfigs = 4;
+static CallConfig g_configs[MaxConfigs];
+static int32_t g_config_count = 0;
+
+struct DefStub
+{
+    int32_t Count{1};
+    bool Line{};
+};
+
+struct C4ObjectLink
+{
+    C4Object *Obj{};
+    C4ObjectLink *Next{};
+};
+
+struct ContentsList
+{
+    C4ObjectLink *First{};
+
+    void Add(C4Object *object);
+    void Remove(C4Object *object);
+    int32_t Count() const;
+};
+
+// The two particle chunks the teardown clears. Only the emptiness test and the
+// clear are modelled; particles are presentation.
+struct ParticleList
+{
+    bool Present{};
+
+    explicit operator bool() const { return Present; }
+
+    void Clear()
+    {
+        trace("ParticlesClear");
+        Present = false;
+    }
+};
+
+struct EffectsStub
+{
+    void ClearAll(C4Object *, int32_t) { trace("ClearAllEffects"); }
+};
+
+struct InactiveList
+{
+    bool Held{};
+
+    void Remove(C4Object *) { trace("InactiveRemove"); }
+};
+
+struct ObjectsStub
+{
+    InactiveList InactiveObjects;
+
+    void Add(C4Object *) { trace("MainListAdd"); }
+};
+
+struct GameStub
+{
+    ObjectsStub Objects;
+
+    void ClearPointers(C4Object *) { trace("ClearPointers"); }
+};
+
+static GameStub Game;
+
+struct InfoStub
+{
+    void Retire() { trace("InfoRetire"); }
+};
+
+struct C4Object
+{
+    const char *Tag{""};
+    int32_t Status{C4OS_NORMAL};
+    C4Object *Contained{};
+    ContentsList Contents;
+    EffectsStub *pEffects{};
+    DefStub *Def{};
+    InfoStub *Info{};
+
+    // The reference chain the teardown zeroes, and the solid mask it drops.
+    // Both are pointer bookkeeping outside this section; the stubs record that
+    // they ran, and the reference pops itself so the production
+    // `while (FirstRef)` loop terminates.
+    struct RefStub
+    {
+        RefStub *NextRef{};
+
+        void Set0();
+    } *FirstRef{};
+
+    struct SolidMaskStub
+    {
+        void Remove(bool, bool) { trace("SolidMaskRemove"); }
+    } *pSolidMaskData{};
+
+    ParticleList FrontParticles;
+    ParticleList BackParticles;
+    int32_t RemovalDelay{};
+    int32_t x{}, y{};
+
+    struct
+    {
+        int32_t Wdt{};
+    } SolidMask;
+
+    int32_t Call(const char *fn, ParSet = {});
+
+    void UpdateMass() { trace("UpdateMass"); }
+    void SetOCF() { trace("SetOCF"); }
+    void SetAction(int32_t) { trace("SetActionIdle"); }
+    void ClearCommands() { trace("ClearCommands"); }
+    bool Exit(int32_t, int32_t)
+    {
+        trace("ContentExit");
+        if (Contained) Contained->Contents.Remove(this);
+        Contained = nullptr;
+        return true;
+    }
+
+    void AssignRemoval(bool fExitContents = false);
+};
+
+void ContentsList::Add(C4Object *object)
+{
+    C4ObjectLink **tail = &First;
+    while (*tail) tail = &(*tail)->Next;
+    *tail = new C4ObjectLink{object, nullptr};
+}
+
+void ContentsList::Remove(C4Object *object)
+{
+    C4ObjectLink **link = &First;
+    while (*link)
+    {
+        if ((*link)->Obj == object)
+        {
+            C4ObjectLink *dead = *link;
+            *link = dead->Next;
+            delete dead;
+            return;
+        }
+        link = &(*link)->Next;
+    }
+}
+
+int32_t ContentsList::Count() const
+{
+    int32_t count = 0;
+    for (C4ObjectLink *link = First; link; link = link->Next) ++count;
+    return count;
+}
+
+// The owner whose reference chain a Set0 pops, so the production
+// `while (FirstRef)` loop ends.
+static C4Object *g_ref_owner = nullptr;
+
+void C4Object::RefStub::Set0()
+{
+    trace("RefSet0");
+    if (g_ref_owner) g_ref_owner->FirstRef = NextRef;
+}
+
+int32_t C4Object::Call(const char *fn, ParSet)
+{
+    // C4Object::Call (C4Object.cpp:2224-2228) drops the call outright when the
+    // callee's Status is zero, so a container that is itself already torn down
+    // receives nothing — the teardown reaches the call site either way, which
+    // is why the guard belongs here rather than at the caller.
+    if (!Status || !Def) return 0;
+    trace(fn);
+    for (int32_t i = 0; i < g_config_count; ++i)
+    {
+        if (std::strcmp(g_configs[i].tag, Tag) != 0 || std::strcmp(g_configs[i].fn, fn) != 0)
+            continue;
+        if (g_configs[i].fired) continue;
+        g_configs[i].fired = true;
+        if (g_configs[i].effect == Effect::ClearSelfStatus) Status = C4OS_DELETED;
+        if (g_configs[i].effect == Effect::ClearRemovingStatus && g_removing)
+            g_removing->Status = C4OS_DELETED;
+        if (g_configs[i].effect == Effect::RemoveRemoving && g_removing)
+            g_removing->AssignRemoval();
+    }
+    return 0;
+}
+
+#include "object_assign_removal.inc"
+} // namespace object_removal
+
 int main()
 {
     printf("{\n");
@@ -4765,6 +5471,564 @@ int main()
             for (int32_t v = 0; v < c.vtx_num; ++v)
                 printf("%s{\"x\":%d,\"y\":%d,\"cnat\":%d}", v ? "," : "", c.vertices[v].x,
                        c.vertices[v].y, c.vertices[v].cnat);
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4Object::Enter, Exit and Collect (C4Object.cpp:1532-1563, 1566-1637,
+    // 5693-5717). Each case records the exact sequence of script calls and
+    // bookkeeping the lifted bodies performed, so a reordered mutation or a
+    // missing post-callback `Status` re-check shows up as a different list
+    // rather than as a subtly different end state.
+    // C4Effect::Check (C4Effect.cpp:271-316). Three effects sit in the list at
+    // different priorities; each case configures what their checker callbacks
+    // answer and records the exact sequence of calls the negotiation made,
+    // together with the number it returned.
+    // C4Effect::Execute (C4Effect.cpp:319-363), the per-frame pass. It walks
+    // the list unlinking dead effects as it goes, advances each survivor's
+    // clock FIRST, then fires the timer only when the new time lands exactly on
+    // an interval boundary — and kills outright any effect that has an interval
+    // but no timer function at all.
+    // C4Object::AssignRemoval (C4Object.cpp:240-320), the object teardown. The
+    // order is the parity fact: the CONTAINER's ContentsDestruction runs before
+    // the object's own Destruction, effects clear next, and each of those steps
+    // is followed by a Status re-check because the callback may already have
+    // deleted the object. Contents are torn down BEFORE the object leaves its
+    // own container.
+    arr_begin("object_removal");
+    {
+        using namespace object_removal;
+
+        struct Case
+        {
+            const char *name;
+            bool contained;
+            bool has_effects;
+            bool has_particles;
+            bool has_info;
+            bool has_reference;
+            bool inactive;
+            int32_t contents;
+            bool exit_contents;
+            int32_t already_removed;
+            int32_t config_count;
+            CallConfig configs[MaxConfigs];
+        };
+
+        const Case cases[] = {
+            // The bare teardown, with nothing attached.
+            {"plain", false, false, false, false, false, false, 0, false, 0, 0, {}},
+            // Already deleted: the very first check returns and nothing runs.
+            {"already_deleted", false, true, true, true, true, false, 2, false, 1, 0, {}},
+            // Contained: the container's ContentsDestruction comes FIRST, and
+            // the object leaves the container only at the end.
+            {"contained", true, false, false, false, false, false, 0, false, 0, 0, {}},
+            // A ContentsDestruction that deletes the object stops everything
+            // else, including the object's own Destruction.
+            {"contents_destruction_deletes", true, true, false, false, false, false, 1, false, 0,
+             1, {{"container", PSF_ContentsDestruction, Effect::RemoveRemoving, false}}},
+            // Destruction deleting the object stops the effect clear.
+            {"destruction_deletes", false, true, false, false, false, false, 1, false, 0, 1,
+             {{"object", PSF_Destruction, Effect::RemoveRemoving, false}}},
+            // Effects are cleared after Destruction, and the particles after
+            // that.
+            {"effects_and_particles", false, true, true, false, false, false, 0, false, 0, 0, {}},
+            // An inactive object is put back on the main list before it is
+            // deleted (C4Object.cpp:277-283).
+            {"inactive_reactivated_first", false, false, false, false, false, true, 0, false, 0,
+             0, {}},
+            // Contents: removed recursively by default, so each one runs its
+            // own teardown...
+            {"contents_removed_recursively", false, false, false, false, false, false, 2, false,
+             0, 0, {}},
+            // ...or Exited when the caller asks, which spills them instead.
+            {"contents_exited", false, false, false, false, false, false, 2, true, 0, 0, {}},
+            // Contained WITH contents: the cargo is torn down before this
+            // object leaves its own container.
+            {"contained_with_contents", true, false, false, false, false, false, 2, false, 0, 0,
+             {}},
+            // The info retire and reference/pointer cleanup tail.
+            {"info_and_references", false, false, false, true, true, false, 0, false, 0, 0, {}},
+        };
+
+        for (const Case &c : cases)
+        {
+            DefStub object_def, container_def, content_def;
+            // The lifted teardown `delete`s the effect list, so it has to be
+            // heap-allocated.
+            EffectsStub *effects = c.has_effects ? new EffectsStub() : nullptr;
+            InfoStub info;
+
+            object_removal::C4Object object;
+            object.Tag = "object";
+            object.Def = &object_def;
+            object.Status = c.already_removed ? C4OS_DELETED
+                                              : (c.inactive ? C4OS_INACTIVE : C4OS_NORMAL);
+            object.pEffects = effects;
+            object.Info = c.has_info ? &info : nullptr;
+            object.FrontParticles.Present = c.has_particles;
+            object.BackParticles.Present = c.has_particles;
+            object.x = 40;
+            object.y = 50;
+
+            object_removal::C4Object::RefStub reference;
+            g_ref_owner = &object;
+            if (c.has_reference) object.FirstRef = &reference;
+
+            object_removal::C4Object container;
+            container.Tag = "container";
+            container.Def = &container_def;
+            if (c.contained)
+            {
+                object.Contained = &container;
+                container.Contents.Add(&object);
+            }
+
+            object_removal::C4Object contents[2];
+            for (int32_t i = 0; i < c.contents; ++i)
+            {
+                contents[i].Tag = "content";
+                contents[i].Def = &content_def;
+                contents[i].Contained = &object;
+                object.Contents.Add(&contents[i]);
+            }
+
+            g_config_count = c.config_count;
+            for (int32_t i = 0; i < c.config_count; ++i) g_configs[i] = c.configs[i];
+            g_trace_count = 0;
+            g_removing = &object;
+
+            object.AssignRemoval(c.exit_contents);
+
+            sep();
+            printf("{\"case\":\"%s\",\"status\":%d,\"removal_delay\":%d,"
+                   "\"still_contained\":%d,\"container_contents\":%d,\"own_contents\":%d,"
+                   "\"def_count\":%d,\"content_status\":[%d,%d],\"calls\":[",
+                   c.name, object.Status, object.RemovalDelay,
+                   object.Contained == &container ? 1 : 0, container.Contents.Count(),
+                   object.Contents.Count(), object_def.Count, contents[0].Status,
+                   contents[1].Status);
+            for (int32_t i = 0; i < g_trace_count && i < MaxTrace; ++i)
+                printf("%s\"%s\"", i ? "," : "", g_trace[i]);
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("effect_execute");
+    {
+        struct Row
+        {
+            int32_t priority; // zero marks it already dead
+            int32_t interval;
+            bool has_timer;
+            int32_t timer_result;
+            int32_t start_time;
+        };
+        struct Case
+        {
+            const char *name;
+            int32_t frames;
+            Row rows[3];
+        };
+        const int32_t Kill = effect_check::C4Fx_Execute_Kill;
+        const int32_t OK = effect_check::C4Fx_OK;
+
+        const Case cases[] = {
+            // An interval of zero never fires the timer, however long it runs.
+            {"interval_zero_never_fires", 4,
+             {{100, 0, true, OK, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            // Interval 2 fires on the even frames only, and the clock is
+            // advanced BEFORE the modulo, so frame 1 already counts as time 1.
+            {"interval_two_fires_every_other", 4,
+             {{100, 2, true, OK, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            {"interval_one_fires_every_frame", 3,
+             {{100, 1, true, OK, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            // A non-zero start time shifts which frames land on the boundary.
+            {"start_time_shifts_boundary", 4,
+             {{100, 3, true, OK, 1}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            // The timer answering Kill finishes the effect, which the NEXT
+            // frame's pass then unlinks.
+            {"timer_kills_then_unlinks", 3,
+             {{100, 1, true, Kill, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            // An interval with no timer function is killed the moment the
+            // boundary arrives (C4Effect.cpp:355-357).
+            {"interval_without_timer_dies", 3,
+             {{100, 2, false, OK, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            // Already-dead effects are unlinked on the first pass, wherever
+            // they sit in the list.
+            {"dead_head_unlinked", 2,
+             {{100, 0, true, OK, 0}, {60, 0, true, OK, 0}, {0, 0, true, OK, 0}}},
+            {"dead_middle_unlinked", 2,
+             {{100, 0, true, OK, 0}, {0, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            {"dead_tail_unlinked", 2,
+             {{0, 0, true, OK, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            {"all_dead_unlinked", 2,
+             {{0, 0, true, OK, 0}, {0, 0, true, OK, 0}, {0, 0, true, OK, 0}}},
+        };
+
+        for (const Case &c : cases)
+        {
+            // Same list shape as the check section: added A, B, C, kept sorted
+            // by ascending priority, so the pass visits C, then B, then A.
+            const char *names[3] = {"EffectA", "EffectB", "EffectC"};
+            const int32_t order[3] = {2, 1, 0};
+            effect_check::FnEffect checkers[3];
+            effect_check::FnTimer timers[3];
+            effect_check::C4Effect *effects[3];
+            for (int32_t i = 0; i < 3; ++i)
+            {
+                effects[i] = new effect_check::C4Effect();
+                effects[i]->Name = names[i];
+                effects[i]->iPriority = c.rows[i].priority;
+                effects[i]->iNumber = i + 1;
+                effects[i]->iIntervall = c.rows[i].interval;
+                effects[i]->iTime = c.rows[i].start_time;
+                effects[i]->TimerResult = c.rows[i].timer_result;
+                checkers[i].owner = effects[i];
+                timers[i].owner = effects[i];
+                effects[i]->pFnEffect = &checkers[i];
+                effects[i]->pFnTimer = c.rows[i].has_timer ? &timers[i] : nullptr;
+            }
+            for (int32_t i = 0; i < 3; ++i)
+                effects[order[i]]->pNext = i + 1 < 3 ? effects[order[i + 1]] : nullptr;
+
+            effect_check::C4Object object;
+            object.pEffects = effects[order[0]];
+            effect_check::g_trace_count = 0;
+            effect_check::g_deleted = 0;
+
+            sep();
+            printf("{\"case\":\"%s\",\"frames\":%d,\"passes\":[", c.name, c.frames);
+            for (int32_t frame = 0; frame < c.frames; ++frame)
+            {
+                const int32_t before = effect_check::g_trace_count;
+                if (object.pEffects) object.pEffects->Execute(&object);
+                if (frame) printf(",");
+                printf("{\"frame\":%d,\"deleted\":%d,\"live\":[", frame,
+                       effect_check::g_deleted);
+                {
+                    bool first_live = true;
+                    for (effect_check::C4Effect *live = object.pEffects; live; live = live->pNext)
+                    {
+                        printf("%s\"%s\"", first_live ? "" : ",", live->Name);
+                        first_live = false;
+                    }
+                }
+                printf("],\"calls\":[");
+                for (int32_t i = before; i < effect_check::g_trace_count
+                                         && i < effect_check::MaxTrace;
+                     ++i)
+                    printf("%s\"%s\"", i > before ? "," : "", effect_check::g_trace[i]);
+                printf("]}");
+            }
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("effect_check");
+    {
+        struct Case
+        {
+            const char *name;
+            int32_t priority;   // the incoming effect's priority
+            int32_t results[3]; // what each existing effect's checker answers
+            int32_t add_result; // what the absorbing effect's FxAdd returns
+            bool dead[3];
+            bool has_function[3];
+        };
+        const int32_t OK = effect_check::C4Fx_OK;
+        const int32_t Deny = effect_check::C4Fx_Effect_Deny;
+        const int32_t Annul = effect_check::C4Fx_Effect_Annul;
+        const int32_t AnnulCalls = effect_check::C4Fx_Effect_AnnulCalls;
+        const int32_t StartDeny = effect_check::C4Fx_Start_Deny;
+
+        const Case cases[] = {
+            // Priority 1 is always allowed and asks nobody (C4Effect.cpp:274).
+            {"priority_one_asks_nobody", 1, {Deny, Deny, Deny}, OK, {false, false, false},
+             {true, true, true}},
+            // Nobody objects: every checker of at least the new priority runs,
+            // in list order, and the answer is zero.
+            {"all_accept", 50, {OK, OK, OK}, OK, {false, false, false}, {true, true, true}},
+            // A Deny short-circuits the whole walk.
+            {"first_denies", 50, {Deny, OK, OK}, OK, {false, false, false}, {true, true, true}},
+            {"second_denies", 50, {OK, Deny, OK}, OK, {false, false, false}, {true, true, true}},
+            // Effects BELOW the new priority are never asked, so a low-priority
+            // denier cannot stop it.
+            {"low_priority_denier_ignored", 150, {Deny, Deny, Deny}, OK,
+             {false, false, false}, {true, true, true}},
+            // Dead effects and effects without a callback are skipped.
+            {"dead_effect_skipped", 50, {Deny, OK, OK}, OK, {true, false, false},
+             {true, true, true}},
+            {"functionless_effect_skipped", 50, {Deny, OK, OK}, OK, {false, false, false},
+             {false, true, true}},
+            // An Annul nominates its effect to absorb the newcomer; the walk
+            // CONTINUES, and the LAST annulling effect wins.
+            {"annul_absorbs", 50, {Annul, OK, OK}, OK, {false, false, false},
+             {true, true, true}},
+            // At priority 20 every effect is asked, so the LAST annulling one
+            // is the absorber — its number is what comes back, not the first's.
+            {"last_annul_wins", 20, {Annul, OK, Annul}, OK, {false, false, false},
+             {true, true, true}},
+            // A Deny after an Annul still wins outright.
+            {"deny_after_annul", 50, {Annul, Deny, OK}, OK, {false, false, false},
+             {true, true, true}},
+            // AnnulCalls brackets the FxAdd in temp remove/readd of the
+            // effects above the absorber.
+            {"annul_calls_brackets_add", 50, {AnnulCalls, OK, OK}, OK,
+             {false, false, false}, {true, true, true}},
+            // The same on the LAST effect, which has nothing above it: no
+            // bracket (C4Effect.cpp:298,303 both test pNext).
+            {"annul_calls_on_last_effect", 20, {OK, OK, AnnulCalls}, OK,
+             {false, false, false}, {true, true, true}},
+            // An FxAdd that denies kills the absorbing effect and reports
+            // Annul rather than its number.
+            {"add_denies_kills_absorber", 50, {Annul, OK, OK}, StartDeny,
+             {false, false, false}, {true, true, true}},
+            {"annul_calls_add_denies", 50, {AnnulCalls, OK, OK}, StartDeny,
+             {false, false, false}, {true, true, true}},
+        };
+
+        for (const Case &c : cases)
+        {
+            // A, B and C are added in that order — so those are their effect
+            // NUMBERS — but the engine keeps its list sorted by ascending
+            // priority, so the walk visits C, then B, then A.
+            effect_check::FnEffect functions[3];
+            effect_check::C4Effect effects[3];
+            const char *names[3] = {"EffectA", "EffectB", "EffectC"};
+            const int32_t priorities[3] = {100, 60, 20};
+            const int32_t order[3] = {2, 1, 0}; // C, B, A
+            for (int32_t i = 0; i < 3; ++i)
+            {
+                effects[i].Name = names[i];
+                effects[i].iPriority = c.dead[i] ? 0 : priorities[i];
+                effects[i].iNumber = i + 1;
+                effects[i].EffectResult = c.results[i];
+                effects[i].AddResult = c.add_result;
+                functions[i].owner = &effects[i];
+                effects[i].pFnEffect = c.has_function[i] ? &functions[i] : nullptr;
+            }
+            for (int32_t i = 0; i < 3; ++i)
+                effects[order[i]].pNext = i + 1 < 3 ? &effects[order[i + 1]] : nullptr;
+
+            effect_check::g_trace_count = 0;
+            effect_check::C4Value none;
+            const int32_t result = effects[order[0]].Check(
+                nullptr, "Newcomer", c.priority, 35, none, none, none, none, false);
+
+            sep();
+            printf("{\"case\":\"%s\",\"priority\":%d,\"result\":%d,\"killed\":[%d,%d,%d],"
+                   "\"trace\":[",
+                   c.name, c.priority, result, effects[0].Killed ? 1 : 0,
+                   effects[1].Killed ? 1 : 0, effects[2].Killed ? 1 : 0);
+            for (int32_t i = 0; i < effect_check::g_trace_count && i < effect_check::MaxTrace; ++i)
+                printf("%s\"%s\"", i ? "," : "", effect_check::g_trace[i]);
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("container_lifecycle");
+    {
+        using namespace container_lifecycle;
+
+        struct Case
+        {
+            const char *name;
+            const char *op;      // enter | exit | collect
+            bool self_target;    // enter into itself
+            bool null_target;
+            bool start_contained;
+            bool recursive;      // target sits inside the object
+            bool want_reject_flag;
+            bool copy_motion;
+            bool refuse_add;
+            bool living;
+            int32_t base;
+            int32_t base_functionality;
+            int32_t rules;
+            int32_t object_id;
+            const char *action_name;
+            uint32_t ocf;
+            int32_t config_count;
+            CallConfig configs[MaxConfigs];
+        };
+
+        const Case cases[] = {
+            // --- Enter -----------------------------------------------------
+            {"enter_null_target", "enter", false, true, false, false, false, false, false, false,
+             -1, 0, 0, 0, "", 0, 0, {}},
+            {"enter_self", "enter", true, false, false, false, false, false, false, false, -1, 0,
+             0, 0, "", 0, 0, {}},
+            {"enter_rejected", "enter", false, false, false, false, false, false, false, false,
+             -1, 0, 0, 0, "", 0, 1,
+             {{"object", PSF_RejectEntrance, 1, Effect::None}}},
+            // The target already sits inside the object, so entering it would
+            // close a loop; the guard runs AFTER RejectEntrance.
+            {"enter_recursive", "enter", false, false, false, true, false, false, false, false,
+             -1, 0, 0, 0, "", 0, 0, {}},
+            // RejectCollection is consulted only when the caller asked for the
+            // flag — which C4Object::Collect does and a plain script Enter does
+            // not — so it is exercised through the collect cases below.
+            {"enter_plain", "enter", false, false, false, false, false, false, false, false, -1,
+             0, 0, 0, "", 0, 0, {}},
+            // fCopyMotion inserts the solid-mask removal and the motion copy
+            // BEFORE the OCF refresh (C4Object.cpp:1614-1620).
+            {"enter_copy_motion", "enter", false, false, false, false, false, true, false, false,
+             -1, 0, 0, 0, "", 0, 0, {}},
+            // A living object keeps its own controller; anything else inherits
+            // the container's (C4Object.cpp:1608-1609).
+            {"enter_living_keeps_controller", "enter", false, false, false, false, false, false,
+             false, true, -1, 0, 0, 0, "", 0, 0, {}},
+            // Already contained: Exit runs first, with its own two callbacks.
+            {"enter_from_container", "enter", false, false, true, false, false, false, false,
+             false, -1, 0, 0, 0, "", 0, 0, {}},
+            // Collection2 removing the object abandons the Entrance call.
+            {"enter_collection2_kills", "enter", false, false, false, false, false, false, false,
+             false, -1, 0, 0, 0, "", 0, 1,
+             {{"target", PSF_Collection2, 0, Effect::ExitEntering}}},
+            // The re-check after Entrance tests the CONTAINER's status, not the
+            // entering object's — so an Entrance that removes the object itself
+            // does NOT stop the auto-sell tail (C4Object.cpp:1629-1633).
+            {"enter_entrance_clears_own_status", "enter", false, false, false, false, false,
+             false, false, false, 3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 1,
+             {{"object", PSF_Entrance, 0, Effect::ClearSelfStatus}}},
+            // Removing the CONTAINER is what the re-check catches.
+            {"enter_entrance_clears_container", "enter", false, false, false, false, false, false,
+             false, false, 3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 1,
+             {{"object", PSF_Entrance, 0, Effect::ExitEntering}}},
+            // A valid base plus the realism bit runs the auto-sell tail.
+            {"enter_auto_sell", "enter", false, false, false, false, false, false, false, false,
+             3, BASEFUNC_AutoSellContents, 0, 0, "", 0, 0, {}},
+            {"enter_base_without_realism", "enter", false, false, false, false, false, false,
+             false, false, 3, 0, 0, 0, "", 0, 0, {}},
+
+            // --- Exit ------------------------------------------------------
+            {"exit_not_contained", "exit", false, false, false, false, false, false, false, false,
+             -1, 0, 0, 0, "", 0, 0, {}},
+            {"exit_plain", "exit", false, false, true, false, false, false, false, false, -1, 0,
+             0, 0, "", 0, 0, {}},
+            // Departure putting the object back in a container makes Exit
+            // report failure even though it did everything (C4Object.cpp:1563).
+            {"exit_reentered_by_script", "exit", false, false, true, false, false, false, false,
+             false, -1, 0, 0, 0, "", 0, 1,
+             {{"object", PSF_Departure, 0, Effect::ReEnter}}},
+
+            // --- Collect ---------------------------------------------------
+            // Collect's FlyBase flag gate is a pure decision the port factors
+            // out as `flag_collection_blocked`, and it keeps its existing
+            // Rust-side coverage; driving it here would need a FLAG definition
+            // with a FlyBase action map and the cached rule, none of which this
+            // fixture models.
+            {"collect_plain", "collect", false, false, false, false, false, false, false, false,
+             -1, 0, 0, 0, "", 0, 0, {}},
+            // The three hit calls are gated on their own OCF bits and run in
+            // order (C4Object.cpp:5710-5712).
+            {"collect_hit_speeds", "collect", false, false, false, false, false, false, false,
+             false, -1, 0, 0, 0, "",
+             OCF_HitSpeed1 | OCF_HitSpeed2 | OCF_HitSpeed3, 0, {}},
+            // A Hit callback that removes the object skips the rest.
+            {"collect_hit_kills", "collect", false, false, false, false, false, false, false,
+             false, -1, 0, 0, 0, "", OCF_HitSpeed1 | OCF_HitSpeed2, 1,
+             {{"object", PSF_Hit, 0, Effect::ClearSelfStatus}}},
+            // A refused Enter stops Collect before CancelAttach.
+            {"collect_enter_refused", "collect", false, false, false, false, false, false, false,
+             false, -1, 0, 0, 0, "", 0, 1,
+             {{"object", PSF_RejectEntrance, 1, Effect::None}}},
+            // The container's own refusal reports through the RejectCollect
+            // flag, and Collect turns that into a plain failure.
+            {"collect_rejected_by_container", "collect", false, false, false, false, false, false,
+             false, false, -1, 0, 0, 0, "", 0, 1,
+             {{"target", PSF_RejectCollection, 1, Effect::None}}},
+        };
+
+        for (const Case &c : cases)
+        {
+            DefStub object_def;
+            object_def.id = c.object_id;
+            object_def.ActMap[0].Name = c.action_name;
+            DefStub target_def;
+            DefStub outside_def;
+
+            container_lifecycle::C4Object object;
+            object.Tag = "object";
+            object.Def = &object_def;
+            object.Controller = 5;
+            object.Base = c.base;
+            object.OCF = c.ocf;
+            object.Alive = c.living ? 1 : 0;
+            object.Category = c.living ? C4D_Living : 0;
+            if (c.action_name[0]) object.Action.Act = 0;
+
+            container_lifecycle::C4Object target;
+            target.Tag = "target";
+            target.Def = &target_def;
+            target.Controller = 9;
+            target.Base = c.base;
+            target.Contents.RefuseAdd = c.refuse_add;
+
+            container_lifecycle::C4Object outside;
+            outside.Tag = "outside";
+            outside.Def = &outside_def;
+            outside.Controller = 2;
+
+            g_reenter_target = &outside;
+            g_entering_object = &object;
+            Game.Rules = c.rules;
+            Game.C4S.Game.Realism.BaseFunctionality = c.base_functionality;
+            g_config_count = c.config_count;
+            for (int32_t i = 0; i < c.config_count; ++i) g_configs[i] = c.configs[i];
+            g_call_count = 0;
+
+            if (c.start_contained)
+            {
+                object.Contained = &outside;
+                outside.Contents.Add(&object, container_lifecycle::C4ObjectList::stContents);
+            }
+            if (c.recursive)
+            {
+                target.Contained = &object;
+                object.Contents.Add(&target, container_lifecycle::C4ObjectList::stContents);
+            }
+
+            bool reject_collect = false;
+            bool result = false;
+            if (SEqual(c.op, "enter"))
+            {
+                container_lifecycle::C4Object *destination = c.null_target ? nullptr : (c.self_target ? &object : &target);
+                result = object.Enter(
+                    destination, true, c.copy_motion,
+                    c.want_reject_flag ? &reject_collect : nullptr);
+            }
+            else if (SEqual(c.op, "exit"))
+            {
+                result = object.Exit(11, 22, 33, itofix(1), itofix(2), itofix(3) / 10, true);
+            }
+            else
+            {
+                result = target.Collect(&object);
+            }
+
+            sep();
+            printf("{\"case\":\"%s\",\"op\":\"%s\",\"result\":%d,\"reject_collect\":%d,"
+                   "\"contained_is_target\":%d,\"contained_is_outside\":%d,"
+                   "\"target_contents\":%d,\"controller\":%d,\"mobile\":%d,"
+                   "\"in_liquid\":%d,\"x\":%d,\"y\":%d,\"r\":%d,\"xdir\":%d,"
+                   "\"ydir\":%d,\"rdir\":%d,\"calls\":[",
+                   c.name, c.op, result ? 1 : 0, reject_collect ? 1 : 0,
+                   object.Contained == &target ? 1 : 0, object.Contained == &outside ? 1 : 0,
+                   target.Contents.Count, object.Controller, object.Mobile, object.InLiquid,
+                   object.x, object.y, object.r, object.xdir.val, object.ydir.val,
+                   object.rdir.val);
+            for (int32_t i = 0; i < g_call_count && i < MaxCalls; ++i)
+                printf("%s\"%s\"", i ? "," : "", g_calls[i]);
             printf("]}");
         }
     }
