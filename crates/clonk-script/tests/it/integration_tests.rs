@@ -478,6 +478,75 @@ fn return_statement_handles_parenthesized_expressions_with_operators() {
     );
 }
 
+/// C4Script arrays are **values**, not handles: `C4ValueArray` is copied when
+/// one is assigned to another name or passed to a function, so a write through
+/// the second name is invisible to the first
+/// (`C4Value.cpp:37-333`, storage and containers).
+///
+/// This is worth pinning on its own because it is the invariant that any
+/// copy-avoidance work has to preserve. clonk-org/clonk-rs#759 proposes making
+/// `a[i] = v` stop copying the array when it is uniquely referenced, and the
+/// whole risk in that change is turning one of these copies into sharing.
+/// Nothing else in the suite fails if aliasing silently appears — the existing
+/// array tests all mutate through a single name.
+#[test]
+fn arrays_are_copied_by_assignment_and_by_argument() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        #strict
+        global func Mutate(array taken) {
+            taken[0] = 99;
+            return taken[0];
+        }
+
+        // Assigning to a second name copies: the original keeps its element.
+        global func AssignmentCopies() {
+            var source = [1, 2, 3];
+            var copy = source;
+            copy[0] = 99;
+            return source[0];
+        }
+
+        // Passing to a function copies: the callee's write is not visible.
+        global func ArgumentCopies() {
+            var source = [1, 2, 3];
+            Mutate(source);
+            return source[0];
+        }
+
+        // The copy is deep enough that a nested element is not shared either.
+        global func NestedAssignmentCopies() {
+            var source = [[1, 2], [3, 4]];
+            var copy = source;
+            copy[0][0] = 99;
+            return source[0][0];
+        }
+
+        // And the callee really did write through its own copy, so these
+        // assertions are about isolation rather than the write failing.
+        global func CalleeSeesItsOwnWrite() {
+            var source = [1, 2, 3];
+            return Mutate(source);
+        }
+        "#,
+    );
+
+    for (function, expected) in [
+        ("AssignmentCopies", 1),
+        ("ArgumentCopies", 1),
+        ("NestedAssignmentCopies", 1),
+        ("CalleeSeesItsOwnWrite", 99),
+    ] {
+        assert_eq!(
+            engine.call(function, &[]).expect("call succeeds"),
+            Value::Int(expected),
+            "{function} must observe C4ValueArray value semantics"
+        );
+    }
+}
+
 #[test]
 fn array_index_assignment_works() {
     let mut engine = Engine::new();
