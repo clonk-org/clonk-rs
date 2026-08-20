@@ -839,6 +839,10 @@ fn alchemy_real_scenario_subcases_batch_4() {
             alchemy_learned_lightning_cast_launches_the_shipped_line_object,
         ),
         (
+            "magic_bow_loads_a_carried_arrow_and_spends_it",
+            alchemy_magic_bow_loads_a_carried_arrow_and_spends_it,
+        ),
+        (
             "seeded_bag_collects_and_activates_through_player_controls",
             alchemy_seeded_bag_collects_and_activates_through_player_controls,
         ),
@@ -1806,6 +1810,59 @@ fn alchemy_learned_extinguish_puts_out_a_nearby_fire_and_spends_its_ashes(
         Some(0),
         "a successful EXTG cast consumes all three ashes"
     );
+}
+
+fn alchemy_magic_bow_loads_a_carried_arrow_and_spends_it(prepared: &PreparedInstalledScenario) {
+    // MGBW is a bow, so what it fires depends on what the caster is carrying:
+    // an arrow in the first contents slot is identified, remembered as
+    // `idArrow`, and consumed before the aim is ever offered
+    // (MagicBow.c4d/Script.c:3,16-27).
+    for carries_arrow in [true, false] {
+        let mut engine = prepared.instantiate();
+        let owner = join_local_player(&mut engine, "Alchemy magic bow parity");
+        let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+        let mage_position = engine.test_object_snapshot(mage).position;
+        let arrow = carries_arrow.then(|| {
+            engine.spawn_test_object(clonk_engine::SpawnConfig::new("ARRW").with_container(mage))
+        });
+
+        let spell = engine.spawn_test_object(
+            clonk_engine::SpawnConfig::new("MGBW")
+                .with_position(mage_position)
+                .with_owner(owner),
+        );
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(mage.as_u64())],
+        );
+
+        let loaded = engine
+            .object_snapshot(spell)
+            .and_then(|spell| spell.local_vars.get("idArrow").cloned());
+        // Branch on the loop variable, not on `arrow`: keying the assertion
+        // off the Option lets a setup that silently stops handing over an
+        // arrow fall into the empty-quiver case and pass.
+        if carries_arrow {
+            let arrow = crate::support::TestValueExt::test_value(arrow);
+            assert_eq!(
+                loaded,
+                Some(Value::C4Id("ARRW".into())),
+                "a carried arrow is what the bow loads"
+            );
+            assert!(
+                engine
+                    .object_snapshot(arrow)
+                    .is_none_or(|arrow| !arrow.status.is_active()),
+                "loading the bow spends the arrow"
+            );
+        } else {
+            assert!(
+                matches!(loaded, None | Some(Value::Nil)),
+                "with nothing to load the bow remembers no arrow: {loaded:?}"
+            );
+        }
+    }
 }
 
 fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
