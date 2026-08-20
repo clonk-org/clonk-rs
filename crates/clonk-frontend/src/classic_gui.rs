@@ -832,6 +832,39 @@ pub fn draw_clipped_text(
     draw_clipped_text_with_markup(surface, font, x, y, text, color, align, gamma, clip, true);
 }
 
+pub(crate) fn with_surface_clip(
+    surface: &mut Surface,
+    clip: IntRect,
+    draw: impl FnOnce(&mut Surface),
+) {
+    let previous = surface.clip();
+    let mut left = i64::from(clip.x).max(0);
+    let mut top = i64::from(clip.y).max(0);
+    let mut right = (i64::from(clip.x) + i64::from(clip.w.max(0)))
+        .min(i64::from(surface.width().min(i32::MAX as u32)));
+    let mut bottom = (i64::from(clip.y) + i64::from(clip.h.max(0)))
+        .min(i64::from(surface.height().min(i32::MAX as u32)));
+    if let Some(existing) = previous {
+        left = left.max(i64::from(existing.x));
+        top = top.max(i64::from(existing.y));
+        right = right.min(i64::from(existing.x) + i64::from(existing.width));
+        bottom = bottom.min(i64::from(existing.y) + i64::from(existing.height));
+    }
+    if left < right && top < bottom {
+        surface.set_clip(clonk_graphics::Rect::new(
+            left as i32,
+            top as i32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ));
+        draw(surface);
+    }
+    match previous {
+        Some(existing) => surface.set_clip(existing),
+        None => surface.clear_clip(),
+    }
+}
+
 /// [`draw_clipped_text`] with the caller-selected `C4GUI::Label::fMarkup`
 /// mode. Text windows such as the license viewer deliberately draw literal
 /// markup separators even though their log buffer uses markup-aware wrapping.

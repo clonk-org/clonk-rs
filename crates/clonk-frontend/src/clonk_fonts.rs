@@ -1565,7 +1565,7 @@ pub fn expand_hotkey_markup(label: &str) -> (String, Option<char>) {
 /// Windows-1252 specials in 0x80..=0x9F; the rest of 0x80..=0xFF maps to the
 /// same Unicode scalar. Mirrors the C++ iconv conversion of the legacy
 /// charset (StdFont.cpp:386-401, default charset per C4Config).
-fn cp1252_to_char(byte: u8) -> Option<char> {
+pub(crate) fn cp1252_to_char(byte: u8) -> Option<char> {
     match byte {
         0x80 => Some('\u{20AC}'),
         0x82 => Some('\u{201A}'),
