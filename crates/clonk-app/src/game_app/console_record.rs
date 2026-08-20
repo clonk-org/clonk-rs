@@ -37,7 +37,7 @@ impl GameApp {
     /// rather than falling through to `Quit()`.
     ///
     /// `ParseCommandLine` computes it from the launch parameters
-    /// (C4Game.cpp:3299) — which is what
+    /// (C4Game.cpp:3321) — which is what
     /// [`Self::failed_open_game_returns_to_startup`] already reports — and a
     /// console `/open` or `/close` puts it back afterwards
     /// (C4Application.cpp:598-612,617-624).

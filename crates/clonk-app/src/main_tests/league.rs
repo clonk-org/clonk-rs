@@ -5354,3 +5354,97 @@ fn compat_profile_overlays_the_cpp_control_mode_without_touching_the_saved_key()
     );
     main_assert_eq!(before.as_deref() => Some("2"));
 }
+
+#[test]
+fn update_request_combined_with_a_direct_launch_keeps_the_launch() {
+    // `ParseCommandLine` ends with
+    //
+    //   UseStartupDialog = isFullScreen && !*DirectJoinAddress
+    //                      && !*ScenarioFilename && !RecordStream.getSize();
+    //
+    // (C4Game.cpp:3321), and `C4StartupMainDlg::OnShown` is the ONLY place an
+    // incoming package or a `/update` request is acted on
+    // (C4StartupMainDlg.cpp:258-276). So a scenario, a direct join or a record
+    // stream suppresses the startup generation and takes the update request
+    // down with it: the launch wins and the update is dropped. That is the
+    // C++-derived answer for every ordering of the two.
+    //
+    // The one combination that is not a combination at all is `clonk://update`.
+    // C++ reads it as a join URL, then recognises the literal target `update`,
+    // sets CheckForUpdates and **clears** DirectJoinAddress
+    // (C4Game.cpp:3267-3279) — so it leaves no launch intent behind, the
+    // startup dialog is shown, and the check runs.
+    for arguments in [
+        vec!["/update", "Melees.c4f/Queron3.c4s"],
+        vec!["Melees.c4f/Queron3.c4s", "/update"],
+    ] {
+        let parsed = parse_classic_command_line(
+            &arguments
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>(),
+        );
+        main_assert!(parsed.update_requested);
+        main_assert!(parsed.scenario.is_some());
+        // Order does not matter: both intents are recorded, and the
+        // suppression happens later, when the launch consumes the boot.
+        main_assert_eq!(parsed.direct_join => None);
+    }
+
+    for arguments in [
+        vec!["/update", "/join:127.0.0.1:11112"],
+        vec!["/join:127.0.0.1:11112", "/update"],
+    ] {
+        let parsed = parse_classic_command_line(
+            &arguments
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>(),
+        );
+        main_assert!(parsed.update_requested);
+        main_assert_eq!(parsed.direct_join.as_deref() => Some("127.0.0.1:11112"));
+        main_assert_eq!(parsed.network_active => Some(true));
+    }
+
+    // A join URL combined with `/update` keeps BOTH, because only the literal
+    // `clonk://update` target is the reclassified one.
+    let mixed = parse_classic_command_line(
+        &["/update", "clonk://host:11112/"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>(),
+    );
+    main_assert!(mixed.update_requested);
+    main_assert_eq!(mixed.direct_join.as_deref() => Some("host:11112"));
+
+    // And `clonk://update` after a real join URL clears the address, so the
+    // last word wins rather than the two being merged.
+    let reclassified = parse_classic_command_line(
+        &["clonk://host:11112/", "clonk://update/"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>(),
+    );
+    main_assert!(reclassified.update_requested);
+    main_assert_eq!(reclassified.direct_join => None);
+
+    // The suppression itself: a scenario or a direct join clears the startup
+    // generation, which is what strands the update request. `clonk://update`
+    // leaves it intact because it cleared the join address.
+    for (arguments, keeps_startup) in [
+        (vec!["/update"], true),
+        (vec!["clonk://update/"], true),
+        (vec!["/update", "Melees.c4f/Queron3.c4s"], false),
+        (vec!["/update", "/join:127.0.0.1:11112"], false),
+    ] {
+        let parsed = parse_classic_command_line(
+            &arguments.iter().map(OsString::from).collect::<Vec<_>>(),
+        );
+        let mut app = new_state_only_menu_app(320, 200);
+        app.apply_classic_command_line(&parsed).test_value();
+        main_assert_eq!(app.failed_open_game_returns_to_startup() => keeps_startup);
+        // The request is recorded either way; only the startup generation
+        // decides whether `OnShown` ever gets to act on it.
+        main_assert!(app.update_check_requested);
+    }
+}

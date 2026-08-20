@@ -5862,8 +5862,8 @@ impl GameApp {
         // `GameApp::update`, whose `poll_loading` reports an asynchronous
         // scenario-load failure through `finish_scenario_loading_failure`.
         // `!console_mode` is nonetheless the whole condition — `UseStartupDialog`
-        // is `isFullScreen && ...` (C4Game.cpp:3299) and only `/console` clears
-        // `isFullScreen` (C4Game.cpp:3295-3296), so a dedicated server keeps the
+        // is `isFullScreen && ...` (C4Game.cpp:3321) and only `/console` clears
+        // `isFullScreen` (C4Game.cpp:3317-3318), so a dedicated server keeps the
         // fullscreen lineage and the gate takes no `headless` term.
         !self.console_mode
             && self
