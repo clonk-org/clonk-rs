@@ -2803,6 +2803,7 @@ impl GameApp {
             auto_start_classic_command_line_scenario: false,
             incoming_update: None,
             update_check_requested: false,
+            compat_profile: crate::settings::CompatProfile::Normal,
             update_check: None,
             update_download: None,
             automatic_update_check_allowed: !cfg!(test),
@@ -2945,6 +2946,17 @@ impl GameApp {
         self.apply_classic_game_option_overrides();
         self.incoming_update = classic.incoming_update.clone();
         self.update_check_requested = classic.update_requested;
+        // One typed profile for the run: the launch override wins, otherwise
+        // the persisted key, otherwise Normal. The override is deliberately not
+        // written back into `self.config`.
+        let persisted_config = self
+            .app_paths
+            .as_ref()
+            .and_then(|paths| clonk_core::std_config::Config::load(paths.config_file()).ok());
+        self.compat_profile = crate::settings::resolve_compat_profile(
+            persisted_config.as_ref(),
+            classic.compat_profile,
+        );
 
         if let Some(screen) = classic.startup_screen.as_deref() {
             self.apply_classic_startup_screen(screen);
