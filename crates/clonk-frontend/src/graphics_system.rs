@@ -6099,6 +6099,29 @@ impl GraphicsSystem {
     /// same landscape modulation, FoW, gamma, clipping and alpha composition
     /// as the scalar oracle. This uploads source layers rather than a completed
     /// framebuffer and preserves their texture identities across frames.
+    ///
+    /// # Who reaches this (clonk-org/clonk-rs#285 phase 1)
+    ///
+    /// Only a landscape with no `pixel_grid()`, because `draw_ground` tries
+    /// `draw_ground_textured` first. Inventoried:
+    ///
+    /// - **Shipped scenarios: none.** Every pack checked — Tutorial, Hazard,
+    ///   Knights, Races and ClonkMars — authors a pixel grid, so Surface8
+    ///   handles them and this never runs. Pinned by
+    ///   `column_landscape_reachability::shipped_scenarios_never_reach_the_column_landscape_fallback`.
+    /// - **The built-in sandbox: yes.** It is described as "a flat test
+    ///   landscape" and carries no grid.
+    /// - **Synthetic fixtures: yes**, wherever a test builds a `Landscape`
+    ///   from surface heights alone.
+    ///
+    /// **Go/no-go: do not build the procedural renderer on this evidence.**
+    /// The threshold clonk-org/clonk-rs#285 asks to record before implementing
+    /// is that a *shipped* scenario reaches this path, or that the sandbox is
+    /// something a player runs rather than a developer demo. Neither holds, so
+    /// the viewport-sized clear/fill/upload — 63.3 MiB per plane at 4K — is
+    /// paid only by the sandbox and by tests, and replacing it would be
+    /// optimising a path no content takes. Revisit if a pack ever ships a
+    /// column-only landscape, which the test above is positioned to catch.
     fn capture_column_landscape_fallback(
         &mut self,
         ambient_temperature: i32,

@@ -42,6 +42,7 @@ shard_modules!(
     activate_entrance_native,
     bird_flight,
     burning_clonk_fire_particles,
+    column_landscape_reachability,
     component_natives,
     component_order,
     construction_check_feedback,
