@@ -690,6 +690,20 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/object_collect.inc"
 
+# 3q. Lift C4Effect::Check, the negotiation every AddEffect runs before an
+#     effect exists. It walks the whole list asking each live effect of at least
+#     the new priority whether it objects; a Deny short-circuits, while an Annul
+#     nominates that effect to absorb the new one — and the AnnulCalls form
+#     additionally brackets the FxAdd call in temp-remove/temp-readd of every
+#     effect above it. Which of those branches a port takes decides whether a
+#     second effect exists at all.
+awk '
+  /^int32_t C4Effect::Check\(C4Object \*pForObj, const char \*szCheckEffect/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Effect.cpp" > "$gen/effect_check.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

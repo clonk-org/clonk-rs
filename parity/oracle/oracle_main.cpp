@@ -52,6 +52,9 @@
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
 //     scaffold records low-speed `Disabled` contact transitions.
+//   * `C4Effect::Check` is mechanically extracted in full; a configurable
+//     effect list records its negotiation order, the AnnulCalls temp bracket
+//     and the Start_Deny kill.
 //   * `C4Object::Enter`, `Exit` and `Collect` are mechanically extracted in
 //     full; a two-object scaffold with configurable script callbacks records
 //     their exact call order, rollback and post-callback Status re-checks.
@@ -4423,6 +4426,130 @@ inline int32_t C4Object::Call(const char *fn, ParSet)
 #include "object_collect.inc"
 } // namespace container_lifecycle
 
+
+// ---------------------------------------------------------------------------
+// C4Effect::Check (src/C4Effect.cpp), the negotiation every AddEffect runs
+// before a new effect exists. The branch it takes decides whether the effect is
+// created at all, absorbed into an existing one, or denied outright — and the
+// AnnulCalls form brackets its FxAdd in temp-remove/temp-readd of the effects
+// above the absorber.
+//
+// Each scaffolded effect answers the checker with a configured value, and every
+// call the body makes is recorded, so the SEQUENCE is what the section pins.
+namespace effect_check
+{
+struct C4Object;
+
+// C4Effects.h:34-43.
+const int32_t C4Fx_OK = 0;
+const int32_t C4Fx_Effect_Deny = -1;
+const int32_t C4Fx_Effect_Annul = -2;
+const int32_t C4Fx_Effect_AnnulCalls = -3;
+const int32_t C4Fx_Start_Deny = -1;
+
+#define PSFS_FxAdd "Add"
+
+const int32_t MaxTrace = 32;
+static const char *g_trace[MaxTrace];
+static int32_t g_trace_count = 0;
+
+static void trace(const char *what)
+{
+    if (g_trace_count < MaxTrace) g_trace[g_trace_count] = what;
+    ++g_trace_count;
+}
+
+struct C4Value
+{
+    int32_t value{};
+
+    int32_t getInt() const { return value; }
+};
+
+static C4Value C4VString(const char *) { return {}; }
+static C4Value C4VObj(C4Object *) { return {}; }
+static C4Value C4VInt(int32_t v) { return {v}; }
+
+struct ParSet
+{
+    ParSet() {}
+    ParSet(std::initializer_list<C4Value>) {}
+};
+
+// The checker's answer for one effect, plus what its FxAdd returns when it is
+// the one that absorbs the newcomer.
+struct EffectConfig
+{
+    const char *name;
+    int32_t priority;
+    bool dead;
+    bool has_function;
+    int32_t effect_result;
+    int32_t add_result;
+};
+
+struct C4Effect;
+
+struct FnEffect
+{
+    C4Effect *owner{};
+
+    C4Value Exec(C4Object *, ParSet, bool, bool);
+};
+
+struct C4Effect
+{
+    const char *Name{""};
+    int32_t iPriority{};
+    int32_t iNumber{};
+    int32_t EffectResult{C4Fx_OK};
+    int32_t AddResult{C4Fx_OK};
+    bool Killed{};
+    C4Effect *pNext{};
+    C4Object *pCommandTarget{};
+    FnEffect *pFnEffect{};
+
+    // C4Effects.h:110 — a dead effect is one whose priority was zeroed, not a
+    // separate flag, which is also how the port marks it.
+    bool IsDead() const { return !iPriority; }
+
+    C4Value DoCall(C4Object *, const char *fn, C4Value &, C4Value &, const C4Value &,
+                   const C4Value &, const C4Value &, const C4Value &)
+    {
+        trace(fn);
+        return {AddResult};
+    }
+
+    void Kill(C4Object *)
+    {
+        trace("Kill");
+        Killed = true;
+        iPriority = 0;
+    }
+
+    void TempRemoveUpperEffects(C4Object *, bool, C4Effect **ppLastRemovedEffect)
+    {
+        trace("TempRemoveUpper");
+        if (ppLastRemovedEffect) *ppLastRemovedEffect = pNext;
+    }
+
+    void TempReaddUpperEffects(C4Object *, C4Effect *) { trace("TempReaddUpper"); }
+
+    int32_t Check(
+        C4Object *pForObj, const char *szCheckEffect, int32_t iPrio, int32_t iTimer,
+        const C4Value &rVal1, const C4Value &rVal2, const C4Value &rVal3, const C4Value &rVal4,
+        bool passErrors);
+};
+
+C4Value FnEffect::Exec(C4Object *, ParSet, bool, bool)
+{
+    trace(owner->Name);
+    return {owner->EffectResult};
+}
+
+#include "effect_check.inc"
+} // namespace effect_check
+
 int main()
 {
     printf("{\n");
@@ -5032,6 +5159,114 @@ int main()
     // bookkeeping the lifted bodies performed, so a reordered mutation or a
     // missing post-callback `Status` re-check shows up as a different list
     // rather than as a subtly different end state.
+    // C4Effect::Check (C4Effect.cpp:271-316). Three effects sit in the list at
+    // different priorities; each case configures what their checker callbacks
+    // answer and records the exact sequence of calls the negotiation made,
+    // together with the number it returned.
+    arr_begin("effect_check");
+    {
+        struct Case
+        {
+            const char *name;
+            int32_t priority;   // the incoming effect's priority
+            int32_t results[3]; // what each existing effect's checker answers
+            int32_t add_result; // what the absorbing effect's FxAdd returns
+            bool dead[3];
+            bool has_function[3];
+        };
+        const int32_t OK = effect_check::C4Fx_OK;
+        const int32_t Deny = effect_check::C4Fx_Effect_Deny;
+        const int32_t Annul = effect_check::C4Fx_Effect_Annul;
+        const int32_t AnnulCalls = effect_check::C4Fx_Effect_AnnulCalls;
+        const int32_t StartDeny = effect_check::C4Fx_Start_Deny;
+
+        const Case cases[] = {
+            // Priority 1 is always allowed and asks nobody (C4Effect.cpp:274).
+            {"priority_one_asks_nobody", 1, {Deny, Deny, Deny}, OK, {false, false, false},
+             {true, true, true}},
+            // Nobody objects: every checker of at least the new priority runs,
+            // in list order, and the answer is zero.
+            {"all_accept", 50, {OK, OK, OK}, OK, {false, false, false}, {true, true, true}},
+            // A Deny short-circuits the whole walk.
+            {"first_denies", 50, {Deny, OK, OK}, OK, {false, false, false}, {true, true, true}},
+            {"second_denies", 50, {OK, Deny, OK}, OK, {false, false, false}, {true, true, true}},
+            // Effects BELOW the new priority are never asked, so a low-priority
+            // denier cannot stop it.
+            {"low_priority_denier_ignored", 150, {Deny, Deny, Deny}, OK,
+             {false, false, false}, {true, true, true}},
+            // Dead effects and effects without a callback are skipped.
+            {"dead_effect_skipped", 50, {Deny, OK, OK}, OK, {true, false, false},
+             {true, true, true}},
+            {"functionless_effect_skipped", 50, {Deny, OK, OK}, OK, {false, false, false},
+             {false, true, true}},
+            // An Annul nominates its effect to absorb the newcomer; the walk
+            // CONTINUES, and the LAST annulling effect wins.
+            {"annul_absorbs", 50, {Annul, OK, OK}, OK, {false, false, false},
+             {true, true, true}},
+            // At priority 20 every effect is asked, so the LAST annulling one
+            // is the absorber — its number is what comes back, not the first's.
+            {"last_annul_wins", 20, {Annul, OK, Annul}, OK, {false, false, false},
+             {true, true, true}},
+            // A Deny after an Annul still wins outright.
+            {"deny_after_annul", 50, {Annul, Deny, OK}, OK, {false, false, false},
+             {true, true, true}},
+            // AnnulCalls brackets the FxAdd in temp remove/readd of the
+            // effects above the absorber.
+            {"annul_calls_brackets_add", 50, {AnnulCalls, OK, OK}, OK,
+             {false, false, false}, {true, true, true}},
+            // The same on the LAST effect, which has nothing above it: no
+            // bracket (C4Effect.cpp:298,303 both test pNext).
+            {"annul_calls_on_last_effect", 20, {OK, OK, AnnulCalls}, OK,
+             {false, false, false}, {true, true, true}},
+            // An FxAdd that denies kills the absorbing effect and reports
+            // Annul rather than its number.
+            {"add_denies_kills_absorber", 50, {Annul, OK, OK}, StartDeny,
+             {false, false, false}, {true, true, true}},
+            {"annul_calls_add_denies", 50, {AnnulCalls, OK, OK}, StartDeny,
+             {false, false, false}, {true, true, true}},
+        };
+
+        for (const Case &c : cases)
+        {
+            // A, B and C are added in that order — so those are their effect
+            // NUMBERS — but the engine keeps its list sorted by ascending
+            // priority, so the walk visits C, then B, then A.
+            effect_check::FnEffect functions[3];
+            effect_check::C4Effect effects[3];
+            const char *names[3] = {"EffectA", "EffectB", "EffectC"};
+            const int32_t priorities[3] = {100, 60, 20};
+            const int32_t order[3] = {2, 1, 0}; // C, B, A
+            for (int32_t i = 0; i < 3; ++i)
+            {
+                effects[i].Name = names[i];
+                effects[i].iPriority = c.dead[i] ? 0 : priorities[i];
+                effects[i].iNumber = i + 1;
+                effects[i].EffectResult = c.results[i];
+                effects[i].AddResult = c.add_result;
+                functions[i].owner = &effects[i];
+                effects[i].pFnEffect = c.has_function[i] ? &functions[i] : nullptr;
+            }
+            for (int32_t i = 0; i < 3; ++i)
+                effects[order[i]].pNext = i + 1 < 3 ? &effects[order[i + 1]] : nullptr;
+
+            effect_check::g_trace_count = 0;
+            effect_check::C4Value none;
+            const int32_t result = effects[order[0]].Check(
+                nullptr, "Newcomer", c.priority, 35, none, none, none, none, false);
+
+            sep();
+            printf("{\"case\":\"%s\",\"priority\":%d,\"result\":%d,\"killed\":[%d,%d,%d],"
+                   "\"trace\":[",
+                   c.name, c.priority, result, effects[0].Killed ? 1 : 0,
+                   effects[1].Killed ? 1 : 0, effects[2].Killed ? 1 : 0);
+            for (int32_t i = 0; i < effect_check::g_trace_count && i < effect_check::MaxTrace; ++i)
+                printf("%s\"%s\"", i ? "," : "", effect_check::g_trace[i]);
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
     arr_begin("container_lifecycle");
     {
         using namespace container_lifecycle;

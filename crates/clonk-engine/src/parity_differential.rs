@@ -2601,6 +2601,169 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
+    // 0k. C4Effect::Check (C4Effect.cpp:271-316), the negotiation every
+    //     AddEffect runs before a new effect exists. Three effects sit in the
+    //     list at priorities 100, 60 and 20 and each case configures what their
+    //     checker callbacks answer:
+    //
+    //       * priority 1 is always allowed and asks nobody;
+    //       * only effects of AT LEAST the incoming priority are asked, so a
+    //         low-priority denier cannot stop anything, and dead or
+    //         callback-less effects are skipped;
+    //       * a Deny short-circuits the walk, while an Annul only NOMINATES its
+    //         effect — the walk continues and the LAST annulling effect is the
+    //         one that absorbs, so `last_annul_wins` comes back with the third
+    //         effect's number;
+    //       * the AnnulCalls form brackets the FxAdd in temp-remove/temp-readd
+    //         of the effects above the absorber, and both halves of that
+    //         bracket test `pNext`, so an absorber at the end of the list gets
+    //         no bracket at all; and
+    //       * an FxAdd that answers Start_Deny kills the absorber and reports
+    //         Annul rather than a number.
+    //
+    //     The port shows the bracket as temp Stop/Start callbacks on the upper
+    //     effects rather than as one call, so the trace is normalised to the
+    //     oracle's markers: the fixture logs a temp Stop/Start only from the
+    //     middle effect, which is the one above the absorber in every bracketed
+    //     case here.
+    {
+        let digit_of = |call: &str| -> Option<i64> {
+            Some(match call {
+                "EffectA" => 1,
+                "EffectB" => 2,
+                "EffectC" => 3,
+                "Add" => 4,
+                "TempRemoveUpper" => 5,
+                "TempReaddUpper" => 6,
+                "Kill" => 7,
+                _ => return None,
+            })
+        };
+
+        for (idx, case) in golden["effect_check"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let name = case["case"].as_str().unwrap_or_default();
+            let priority = i(case, "priority") as i32;
+
+            // What each existing effect's checker answers, and what the
+            // absorbing effect's Add returns, recovered from the case name the
+            // oracle emitted.
+            let (results, add_result, dead, functionless) = match name {
+                "priority_one_asks_nobody" => ([-1, -1, -1], 0, [false; 3], false),
+                "all_accept" => ([0, 0, 0], 0, [false; 3], false),
+                "first_denies" => ([-1, 0, 0], 0, [false; 3], false),
+                "second_denies" => ([0, -1, 0], 0, [false; 3], false),
+                "low_priority_denier_ignored" => ([-1, -1, -1], 0, [false; 3], false),
+                "dead_effect_skipped" => ([-1, 0, 0], 0, [true, false, false], false),
+                "functionless_effect_skipped" => ([-1, 0, 0], 0, [false; 3], true),
+                "annul_absorbs" => ([-2, 0, 0], 0, [false; 3], false),
+                "last_annul_wins" => ([-2, 0, -2], 0, [false; 3], false),
+                "deny_after_annul" => ([-2, -1, 0], 0, [false; 3], false),
+                "annul_calls_brackets_add" => ([-3, 0, 0], 0, [false; 3], false),
+                "annul_calls_on_last_effect" => ([0, 0, -3], 0, [false; 3], false),
+                "add_denies_kills_absorber" => ([-2, 0, 0], -1, [false; 3], false),
+                "annul_calls_add_denies" => ([-3, 0, 0], -1, [false; 3], false),
+                other => panic!("unhandled effect_check case `{other}`"),
+            };
+
+            // Only the middle effect reports its temp bracket, matching the
+            // oracle's single TempRemoveUpper/TempReaddUpper markers.
+            let mut script = String::from("#strict 2\nstatic fx_log, fx_armed;\n");
+            for (index, id) in ["A", "B", "C"].into_iter().enumerate() {
+                let digit = index + 1;
+                let checker = if functionless && index == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        "func FxEffect{id}Effect(string name, object target, int number) {{ if (!fx_armed) return 0; fx_log = fx_log * 11 + {digit}; return {}; }}\n",
+                        results[index]
+                    )
+                };
+                script.push_str(&checker);
+                script.push_str(&format!(
+                    "func FxEffect{id}Add(object target, int number, string name, int interval) {{ fx_log = fx_log * 11 + 4; return {add_result}; }}\n"
+                ));
+                if index == 1 {
+                    script.push_str(&format!(
+                        "func FxEffect{id}Stop(object target, int number, int reason, bool temp) {{ if (temp) fx_log = fx_log * 11 + 5; return 0; }}\n"
+                    ));
+                    script.push_str(&format!(
+                        "func FxEffect{id}Start(object target, int number, int temp) {{ if (temp) fx_log = fx_log * 11 + 6; return 0; }}\n"
+                    ));
+                } else {
+                    // The absorber's own non-temp Stop is how a Kill shows.
+                    script.push_str(&format!(
+                        "func FxEffect{id}Stop(object target, int number, int reason, bool temp) {{ if (!temp) fx_log = fx_log * 11 + 7; return 0; }}\n"
+                    ));
+                }
+            }
+            script.push_str(
+                "func Arm() { AddEffect(\"EffectA\", this(), 100, 0, this()); AddEffect(\"EffectB\", this(), 60, 0, this()); AddEffect(\"EffectC\", this(), 20, 0, this()); fx_log = 0; fx_armed = 1; return 1; }\n",
+            );
+            script.push_str(&format!(
+                "func Run() {{ return CheckEffect(\"Newcomer\", this(), {priority}, 35); }}\n"
+            ));
+            script.push_str("func ReadLog() { return fx_log; }\n");
+
+            let mut engine = Engine::with_seed(0);
+            engine
+                .register_definition(
+                    Definition::from_script("EFCK", "Effect check", &script)
+                        .expect("effect check fixture compiles"),
+                )
+                .expect("effect check fixture registers");
+            let object = engine
+                .spawn_object(SpawnConfig::new("EFCK"))
+                .expect("effect check object spawns");
+            let index = engine.find_object_index(object).expect("object exists");
+            engine
+                .call_object_function(index, "Arm", Vec::new())
+                .expect("the three effects are added");
+            // A dead effect is one whose priority is zero (C4Effects.h:110),
+            // in both engines.
+            if dead[0] {
+                if let Some(effect) = engine.objects[index]
+                    .state
+                    .effects
+                    .iter_mut()
+                    .find(|effect| effect.name == "EffectA")
+                {
+                    effect.priority = 0;
+                }
+            }
+
+            let result = engine
+                .call_object_function(index, "Run", Vec::new())
+                .expect("CheckEffect runs");
+            let result = match result {
+                ScriptValue::Int(value) => i64::from(value),
+                ScriptValue::Nil | ScriptValue::Bool(false) => 0,
+                other => panic!("unexpected CheckEffect result {other:?}"),
+            };
+            expect_eq("effect_check", idx, "result", i(case, "result"), result);
+
+            let expected_log = case["trace"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|call| digit_of(call.as_str().unwrap_or_default()))
+                .fold(0_i64, |log, digit| log * 11 + digit);
+            let log = match engine
+                .call_object_function(index, "ReadLog", Vec::new())
+                .expect("the log reads back")
+            {
+                ScriptValue::Int(value) => i64::from(value),
+                ScriptValue::Nil | ScriptValue::Bool(false) => 0,
+                other => panic!("unexpected effect log value {other:?}"),
+            };
+            expect_eq("effect_check", idx, "callback order", expected_log, log);
+        }
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
