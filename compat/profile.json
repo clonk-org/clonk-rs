@@ -1,0 +1,770 @@
+{
+  "schema": "clonk-rs/compat-profile/v1",
+  "profile": {
+    "id": "legacy-clonk",
+    "name": "LegacyClonk compatibility",
+    "document": "docs/COMPAT_PROFILE.md"
+  },
+  "pinned": {
+    "engine": {
+      "xver": [
+        4,
+        9,
+        11,
+        0
+      ],
+      "build": 362,
+      "text": "4.9.11.0 [362]"
+    },
+    "oracle_commit": "7d43b47b7d789b533f32d005e64596e0a07019cd",
+    "content_commit": "2772c602a0142fcf50879a44bb64d6005ecbc7ab"
+  },
+  "promise": {
+    "simulation": {
+      "statement": "With a fixed seed and a fixed frame-counted control sequence, engine state is bit-identical to the pinned C++ oracle in every raw C4Fixed value, the Random/RandomCount/FRnd3 ledgers, landscape and material state, PXS execution, and C4Script VM semantics, except at the two accepted safety boundaries (sim-pxs-syncclearance, sim-s2-terminal-params). No intentional simulation divergence is retained by the profile, and every residual open gap blocks profile readiness until closed or proven unreachable.",
+      "evidence": [
+        {
+          "kind": "command",
+          "value": "cargo xtask parity verify",
+          "status": "held",
+          "note": "The C++-golden primitive sections: fixed-point math, RNG ledgers, movement, PXS/mass-mover, material reactions, blast, script semantics (parity/README.md)."
+        },
+        {
+          "kind": "command",
+          "value": "cargo xtask engine-snapshots verify",
+          "status": "held",
+          "note": "Rust self-consistency of the synthetic scenario snapshots."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#585",
+          "status": "pending",
+          "note": "A current-tree full-scenario C++ shadow diff is required. The historical Goldrush 15,000-frame report is scoped to its bundled Rust revision and does not satisfy this."
+        },
+        {
+          "kind": "document",
+          "value": "parity/reports/goldrush_seed_424242.json",
+          "status": "held",
+          "note": "Historical continuous shadow differential; scoped evidence only, not a claim about the current tree."
+        }
+      ]
+    },
+    "control": {
+      "statement": "Control events reach the engine with C++ semantics: AutoStop key routing is exactly C4Game::LocalControlKeyUp, and in the profile the classic-set key-up release is suppressed exactly as in C++ (the normal-mode emission, ctrl-keyup-release, is profile-reverted). Host-side latency pacing (transport-presend-envelope) selects no different synchronized events.",
+      "evidence": [
+        {
+          "kind": "test",
+          "value": "crates/clonk-app/src/main_tests.rs (classic key-up lockstep)",
+          "status": "held",
+          "note": "Key-up delivery is synchronized and identical across control styles; classic movement stays latched."
+        },
+        {
+          "kind": "test",
+          "value": "crates/clonk-app-netplay/src/network.rs (control PreSend and latency-budget tests)",
+          "status": "held",
+          "note": "The ACT rolling average and the 1..15 clamp stay bit-exact with C++; the divergent horizon sizing is pinned separately."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#586",
+          "status": "pending",
+          "note": "Real stock-C++/Rust host-client interoperation in both directions, including control delivery."
+        }
+      ]
+    },
+    "transport": {
+      "statement": "The port speaks the pinned C++ wire protocol: C4Network PID admission with the build check, ReliableUDP v2, and NetPuncher v1. The transport-quality divergences (repair interval, discovery intervals, announce repeats, PreSend sizing) are host-local or browser-local and change no synchronized data. Mixed C++/Rust connections are refused until real interoperation is proven.",
+      "evidence": [
+        {
+          "kind": "test",
+          "value": "crates/clonk-network (ReliableUDP, NetPuncher, and session protocol tests)",
+          "status": "held",
+          "note": "Wire-format conformance and version admission, including the C4Network2.cpp:1291-1299 build comparison."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#583",
+          "status": "pending",
+          "note": "Advertising and enforcing the profile during connection setup."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#586",
+          "status": "pending",
+          "note": "Real stock-C++/Rust interoperation, both directions."
+        },
+        {
+          "kind": "test",
+          "value": "crates/clonk-network/src/capabilities.rs (released-build wire reading)",
+          "status": "held",
+          "note": "What a released port build reads from this build's announcement and datagrams; landed for clonk-org/clonk-rs#471."
+        }
+      ]
+    },
+    "content": {
+      "statement": "Bundled content is exactly the pinned content commit, and the eight port-authored planet/System.c4g #appendto scripts are disabled, so definitions and scripts behave exactly as the shipped content specifies. Definition version gating prunes content newer than the engine exactly as C++ does.",
+      "evidence": [
+        {
+          "kind": "command",
+          "value": "cargo xtask scenario-sweep",
+          "status": "held",
+          "note": "Loads and applies every real scenario under content/ with real definitions and materials."
+        },
+        {
+          "kind": "command",
+          "value": "cargo xtask compat verify",
+          "status": "held",
+          "note": "Fails closed when the content submodule pin drifts from this manifest, so a content bump must restate (and re-verify) the pin."
+        },
+        {
+          "kind": "document",
+          "value": "crates/clonk-core/src/version.rs",
+          "status": "held",
+          "note": "Content gating compares against the pinned engine compatibility version."
+        }
+      ]
+    },
+    "presentation": {
+      "statement": "Painter order, coordinates, sampling, blending, gamma placement, and resource state equal the oracle; GPU sampling is verified by readback against the software renderer with the documented one-byte cross-driver tolerance (docs/RENDERING_PARITY.md). Every opt-in presentation divergence is forced off and every first-run configuration default equals the C++ default.",
+      "evidence": [
+        {
+          "kind": "document",
+          "value": "docs/RENDERING_PARITY.md",
+          "status": "held",
+          "note": "Integer color formulas and resource state transitions tested exactly; GPU composition checked by readback against the software oracle."
+        },
+        {
+          "kind": "test",
+          "value": "crates/clonk-frontend (F9 reference-capture pixel-parity suites)",
+          "status": "held",
+          "note": "Options, viewport, and GUI pixel parity against the C++ F9 captures."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#587",
+          "status": "pending",
+          "note": "C++/Rust presentation capture diffs for the profile."
+        }
+      ]
+    },
+    "save_replay": {
+      "statement": "Savegames carry the pinned C4XVer header and the C4GameSave component layout; recordings use the C4Record binary format (RCT_CTRL/RCT_CTRL_PKT/RCT_FRAME/RCT_END with 2-byte chunk heads). Interchange with a stock C++ build is claimed only as far as the stated differential evidence goes.",
+      "evidence": [
+        {
+          "kind": "test",
+          "value": "crates/clonk-engine/src/record.rs (C4Record format round-trips)",
+          "status": "held",
+          "note": "Chunk-head layout, 0xff filler framing, and the RCT_End truncation match C4Record.cpp:195-264."
+        },
+        {
+          "kind": "test",
+          "value": "crates/clonk-app/src/main_tests/saves.rs (savegame component serialization)",
+          "status": "held",
+          "note": "Component order, player-info embedding, and group layout."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#524",
+          "status": "pending",
+          "note": "Differential check of save serialization and restore ordering."
+        },
+        {
+          "kind": "issue",
+          "value": "clonk-org/clonk-rs#527",
+          "status": "pending",
+          "note": "Differential check of resync and post-mortem recovery."
+        }
+      ]
+    }
+  },
+  "divergences": [
+    {
+      "id": "sim-game-tick-38fps",
+      "area": "simulation",
+      "summary": "The default game tick is 26 ms (integer 1000/38) rather than the 28 ms application timer C4Game::OpenGame installs, so offline play and recordings advance about 7.7% faster in wall time; the state after a fixed frame/control sequence is unchanged.",
+      "cited_in": [
+        "crates/clonk-engine/src/lib.rs:418"
+      ],
+      "cpp_reference": "C4Game.cpp:443",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (product decision approved 2026-08-09)"
+    },
+    {
+      "id": "sim-pxs-syncclearance",
+      "area": "simulation",
+      "summary": "PXS SyncClearance compaction: C++ copies a surviving chunk pointer downward without clearing the moved-from slot, aliasing one allocation into two slots (double processing, double delete); Rust transfers unique ownership and clears the tail. Rust's single-copy survivor order is authoritative at this undefined-behavior boundary.",
+      "cited_in": [
+        "crates/clonk-engine/src/pxs.rs:362",
+        "parity/README.md"
+      ],
+      "cpp_reference": "C4PXS.cpp:406-424",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": true,
+      "owner": "parity/README.md (Accepted safety divergences)"
+    },
+    {
+      "id": "sim-s2-terminal-params",
+      "area": "simulation",
+      "summary": "S2 map-generator boundary inputs: C++ turns a negative Mandel alpha into a huge uint32 iteration budget, divides Gradient by a zero width, and takes a remainder by zero at alpha=-2. Rust bounds alpha to ten iterations, substitutes a denominator of one, and returns false from the raw algorithm. These inputs are excluded from the C++ differential runs.",
+      "cited_in": [
+        "parity/README.md"
+      ],
+      "cpp_reference": "C4MapCreatorS2.cpp:1357-1361,1422-1447",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": true,
+      "owner": "parity/README.md (Accepted safety divergences)"
+    },
+    {
+      "id": "sim-script-var-negative-slot",
+      "area": "simulation",
+      "summary": "Var(n)/Local(n) with a negative index: C++ clamps the index to slot 0 (C4ValueList::GetItem), the port's VM addresses a distinct __var_-1 key, so a negative-index read/writes differ.",
+      "cited_in": [
+        "crates/clonk-script/tests/it/test_var_local_slots.rs:14"
+      ],
+      "cpp_reference": "C4ValueList.cpp:50",
+      "disposition": "open-gap",
+      "profile_action": "blocked",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#523"
+    },
+    {
+      "id": "sim-script-nested-local-snapshot",
+      "area": "simulation",
+      "summary": "A call into an object whose own script is already in flight starts from the pre-call local snapshot; C++ keeps named locals on the C4Object and the nested call would read them live. The overlay_foreign_cells pass replays earlier cross-object LocalN writes onto the snapshot and narrows, but does not close, the gap.",
+      "cited_in": [
+        "crates/clonk-engine/src/compat/contexts.rs:5964"
+      ],
+      "cpp_reference": "C4AulExec.cpp:411",
+      "disposition": "open-gap",
+      "profile_action": "blocked",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#523"
+    },
+    {
+      "id": "sim-script-unwind-args",
+      "area": "simulation",
+      "summary": "When a script callback errors mid-call, the port unwinds the call with its original argument values; C++ keeps the parameter mutations made before the error, so post-error parameter reads differ.",
+      "cited_in": [
+        "crates/clonk-engine/src/lib.rs:6845"
+      ],
+      "cpp_reference": "C4AulExec.cpp (fail-safe exec)",
+      "disposition": "open-gap",
+      "profile_action": "blocked",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#385"
+    },
+    {
+      "id": "sim-findobject-layer-bbox",
+      "area": "simulation",
+      "summary": "FindObject: the Layer condition is unmodeled on host objects (never matches) and shape tests use the vertices bounding box rather than the layered shape, so Layer-scoped or shape-precise queries can select a different object set.",
+      "cited_in": [
+        "crates/clonk-engine/src/compat/objects.rs:3286"
+      ],
+      "cpp_reference": "C4FindObject.h:27-50",
+      "disposition": "open-gap",
+      "profile_action": "blocked",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#384"
+    },
+    {
+      "id": "sim-reloadparticle-io-failure",
+      "area": "simulation",
+      "summary": "ReloadParticle reports true when a reload passes all four C++ checks (network game, nil name, unknown name, missing Filename) and then fails on I/O; C++ reports false. The engine failure arm (clear every particle, remove the definition) runs identically on both sides.",
+      "cited_in": [
+        "crates/clonk-engine/src/compat/effects.rs:3995"
+      ],
+      "cpp_reference": "C4Game.cpp:2369-2394, C4Particles.cpp:197",
+      "disposition": "open-gap",
+      "profile_action": "blocked",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#384"
+    },
+    {
+      "id": "sim-containment-cycle-spawn",
+      "area": "simulation",
+      "summary": "A genuine containment cycle at scenario spawn time: C++'s two-phase denumeration keeps the mutual containment; the sequential spawn model breaks one edge and places that object uncontained.",
+      "cited_in": [
+        "crates/clonk-engine/src/scenario/core.rs:4668"
+      ],
+      "cpp_reference": "C4Game spawn denumeration",
+      "disposition": "open-gap",
+      "profile_action": "blocked",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#518"
+    },
+    {
+      "id": "sim-reload-graphics-dangling",
+      "area": "simulation",
+      "summary": "After a definition-graphics reload, a live object that can neither re-resolve its graphic by name nor fall back to its own definition is left holding a dangling name; C++ AssignRemovals the object instead.",
+      "cited_in": [
+        "crates/clonk-engine/src/lib.rs:10953"
+      ],
+      "cpp_reference": "C4DefGraphics.cpp:355-400",
+      "disposition": "open-gap",
+      "profile_action": "blocked",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#384"
+    },
+    {
+      "id": "ctrl-keyup-release",
+      "area": "control",
+      "summary": "Classic (non-AutoStop) control sets emit a synchronized Control*Released on key-up in both control styles; C4Game::LocalControlKeyUp routes a key-up only for AutoStop players, so C++ never delivers a release in classic style. The normal-mode emission lets scripts latch steering commands; the profile reverts it to C++.",
+      "cited_in": [
+        "crates/clonk-app/src/local_control.rs:221",
+        "crates/clonk-app/src/game_app/player.rs:550"
+      ],
+      "cpp_reference": "C4Game.cpp:3592-3605",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "ctrl-onmenustep-coms",
+      "area": "control",
+      "summary": "Before a menu selection move, the port offers the horizontal COM_MenuLeft/Right pair to the object's script through OnMenuStep; in C++'s single-column menu the horizontal pair carries nothing the vertical pair does not. Inert for content that does not implement the callback and answer it true.",
+      "cited_in": [
+        "crates/clonk-engine/src/direct_com.rs:4267"
+      ],
+      "cpp_reference": "C4Menu.cpp:359-365,433-457",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "transport-presend-envelope",
+      "area": "transport",
+      "summary": "The host sizes the control PreSend horizon from a decaying delivery-time envelope instead of C++'s 1/150 EWMA of the mean control-send time, so a jittery link no longer stalls every participant on about half its ticks. Host-local: it changes which horizon the host picks, never which data is synchronized.",
+      "cited_in": [
+        "crates/clonk-app-netplay/src/network.rs:435"
+      ],
+      "cpp_reference": "C4GameControlNetwork.cpp:382-447",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "transport-udp-repair-interval",
+      "area": "transport",
+      "summary": "Reliable-UDP repair re-request damping is 250 ms instead of C++'s one-second iReCheckInterval; only a repair request that is itself lost is affected, and the synchronized repair stream is unchanged.",
+      "cited_in": [
+        "crates/clonk-network/src/udp.rs:40"
+      ],
+      "cpp_reference": "C4NetIO.cpp:1914",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "transport-lan-probe-interval",
+      "area": "transport",
+      "summary": "LAN game discovery probes on its own (shorter) interval instead of C++'s single 30-second countdown that refreshes the LAN list and the masterserver row together; the masterserver keeps the oracle interval.",
+      "cited_in": [
+        "crates/clonk-network/src/search.rs:3023"
+      ],
+      "cpp_reference": "C4StartupNetDlg.cpp:1116-1131",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "transport-lan-failed-ref-backoff",
+      "area": "transport",
+      "summary": "A failed LAN reference query backs off for the error row's lifetime (C4NetErrorRefTimeout) instead of C++ re-probing a refusing host on every pass and stacking a duplicate row and connection attempt.",
+      "cited_in": [
+        "crates/clonk-network/src/search.rs:3090"
+      ],
+      "cpp_reference": "C4StartupNetDlg.cpp:590-600",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "transport-announce-burst",
+      "area": "transport",
+      "summary": "A host repeats its discovery announce on a burst interval after opening; C++ announces exactly once as the host opens and stays silent until probed, so one lost multicast datagram hides a C++ host until the browser's next probe.",
+      "cited_in": [
+        "crates/clonk-network/src/advertise.rs:678"
+      ],
+      "cpp_reference": "C4Network2IO.cpp:268-278, C4Network2Discover.cpp:67-72",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "transport-http-client",
+      "area": "transport",
+      "summary": "Update and league HTTP runs on a configured reqwest client rather than a hand-written libcurl twin; the residual is that reqwest cannot emit an HTTP/1.0 request line, so a version-distinguishing server sees HTTP/1.1 with Connection: close.",
+      "cited_in": [
+        "crates/clonk-network/src/http_backend.rs:25"
+      ],
+      "cpp_reference": "C4NetIO.cpp (libcurl configuration)",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "content-append-bird-flight",
+      "area": "content",
+      "summary": "planet/System.c4g/BirdFlight.c #appendto BIRD replaces the shipped four-coin-flip-per-tick bird steering with a continuous flight controller (separation plus weak alignment).",
+      "cited_in": [
+        "planet/System.c4g/BirdFlight.c",
+        "crates/clonk-engine/tests/it/bird_flight.rs:2"
+      ],
+      "cpp_reference": "Objects.c4d/Animals.c4d/Bird.c4d/Script.c:75-90",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (port content appends)"
+    },
+    {
+      "id": "content-append-airbike-steering",
+      "area": "content",
+      "summary": "planet/System.c4g/EkeAirbikeSteering.c #appendto AB5B adds hold-to-steer airbike handling with a double-integrator float model; every test has an A/B twin pinning what LegacyClonk does with the append removed.",
+      "cited_in": [
+        "planet/System.c4g/EkeAirbikeSteering.c",
+        "crates/clonk-engine/tests/it/airbike_hold_to_steer.rs:3"
+      ],
+      "cpp_reference": "C4Player.cpp:1522-1536, C4Movement.cpp:33",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (port content appends)"
+    },
+    {
+      "id": "content-append-gped-remote",
+      "area": "content",
+      "summary": "planet/System.c4g/EkeGpedRemoteControl.c #appendto SF5B keeps the pilot parked while the GPED steers an airbike, answering the stale Single-coms Jump'n'Run control would otherwise turn into movement.",
+      "cited_in": [
+        "planet/System.c4g/EkeGpedRemoteControl.c"
+      ],
+      "cpp_reference": "C4Object.cpp:3579-3593,3743-3755, C4Player.cpp:1212-1228",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (port content appends)"
+    },
+    {
+      "id": "content-append-guided-missile",
+      "area": "content",
+      "summary": "planet/System.c4g/EkeGuidedMissile.c #appendto RL5B stops a guided rocket's turn when the steering key comes up; the shipped launcher latches the turn into the missile's command local until a straighten key clears it.",
+      "cited_in": [
+        "planet/System.c4g/EkeGuidedMissile.c"
+      ],
+      "cpp_reference": "EkeReloaded.c4d/Weapons.c4d/RocketLauncher.c4d/Script.c:9-49",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (port content appends)"
+    },
+    {
+      "id": "content-append-sft-release",
+      "area": "content",
+      "summary": "planet/System.c4g/EkeSftRelease.c #appendto SF5B completes the missing Control*Released pair for the Eke SFT's forwarded controls, so the airbike and the selected item learn a steering key came up.",
+      "cited_in": [
+        "planet/System.c4g/EkeSftRelease.c"
+      ],
+      "cpp_reference": "EkeReloaded.c4d/Creatures.c4d/SFT.c4d/Script.c:40-104,279-295",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (port content appends)"
+    },
+    {
+      "id": "content-append-fow-reveal",
+      "area": "content",
+      "summary": "planet/System.c4g/FoWReveal.c #appendto _FOW lifts Dragon Rock's map-authored shadow volume before a Clonk enters it; the shipped generator overrides the Clonk's own light and holds the interior objects inactive until it removes itself.",
+      "cited_in": [
+        "planet/System.c4g/FoWReveal.c"
+      ],
+      "cpp_reference": "C4Player.cpp:1949-1957, Fantasy.c4f/Drachenfels.c4s/FoWGenerator.c4d/Script.c:96-124",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (port content appends)"
+    },
+    {
+      "id": "content-append-mars-capsule",
+      "area": "content",
+      "summary": "planet/System.c4g/MarsOrderCapsule.c #appendto BASE pays for a ClonkMars supply order atomically with an error report; the shipped commit spends one item at a time silently and abandons the rest when the first does not fit.",
+      "cited_in": [
+        "planet/System.c4g/MarsOrderCapsule.c"
+      ],
+      "cpp_reference": "ClonkMars.c4d/Structures.c4d/Base.c4d/Script.c:133-155, C4Player.cpp:849-853",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (port content appends)"
+    },
+    {
+      "id": "content-append-menu-range-row",
+      "area": "content",
+      "summary": "planet/System.c4g/MenuRangeRow.c #appendto MS4C collapses a ClonkMars range choice from three rows (value, Increase by 1, Decrease by 1) into one row with primary/secondary stepping.",
+      "cited_in": [
+        "planet/System.c4g/MenuRangeRow.c"
+      ],
+      "cpp_reference": "ClonkMars.c4d/Helpers.c4d/Menu2.c4d/Menu.c4d/Script.c:108-125, C4Menu.cpp:512-514",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (port content appends)"
+    },
+    {
+      "id": "pres-remaster-family",
+      "area": "presentation",
+      "summary": "Graphics.Remaster is the master switch for ten opt-in presentation divergences (HighDpiCursor, Mipmaps, SmoothLandscape, FineFogOfWar, HDExactBlits, ShaderLandscape, LoaderAspect, SnapTextToPixels, SkyDither, SmoothPresentation); each is off by default and the profile forces the whole family off.",
+      "cited_in": [
+        "crates/clonk-app/src/main_parts/assets.rs:8655"
+      ],
+      "cpp_reference": "C4Config.cpp (Graphics defaults)",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "pres-render-inactive",
+      "area": "presentation",
+      "summary": "Graphics.RenderInactive defaults to both bits (Fullscreen|Console) so an Alt-Tabbed game keeps drawing; C++ adapts Console alone. Only the default diverges: a written value is honoured verbatim and RenderInactive=2 restores C++ exactly.",
+      "cited_in": [
+        "crates/clonk-app/src/main_parts/resources.rs:3826"
+      ],
+      "cpp_reference": "C4Config.cpp:481",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": false,
+      "owner": "clonk-org/clonk-rs#57"
+    },
+    {
+      "id": "pres-first-run-scale",
+      "area": "presentation",
+      "summary": "The first-run application scale is seeded from the monitor's pixel density (rounded, integer); C++ starts every install at Scale=100, which on a 2x panel is an 800x600 device-pixel window with a 14px font.",
+      "cited_in": [
+        "crates/clonk-app/src/settings.rs:1208"
+      ],
+      "cpp_reference": "C4Config.cpp:480",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "pres-scale-cap",
+      "area": "presentation",
+      "summary": "The Options scale spinbox and slider cap at 400 instead of C++'s 300, so a 4x panel can express the classic 800x600 logical layout; the slider mapping and scale-test flow are unchanged.",
+      "cited_in": [
+        "crates/clonk-frontend/src/startup_options_graphics.rs:14"
+      ],
+      "cpp_reference": "C4StartupOptionsDlg.cpp:131-132",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "pres-monitor-selection",
+      "area": "presentation",
+      "summary": "Config.Graphics.Monitor selects the startup monitor; the oracle's SDL/GL build stores the row but never reads it back, so zero (the default) and every written value below it keep the pre-existing behaviour and only an explicit positive index diverges.",
+      "cited_in": [
+        "crates/clonk-app/src/main_parts/resources.rs:9085"
+      ],
+      "cpp_reference": "C4Config.h:162, C4Config.cpp:483",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "pres-main-version-text",
+      "area": "presentation",
+      "summary": "The startup main dialog draws the port's release version in C++'s exact placement, font, colour, and markup; C++ draws C4VERSION. Protocol identification and content gating still use the engine compatibility version.",
+      "cited_in": [
+        "crates/clonk-app/src/main_parts/render_io.rs:1210"
+      ],
+      "cpp_reference": "C4StartupMainDlg.cpp:121",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "pres-new-player-name",
+      "area": "presentation",
+      "summary": "The new-player dialog starts from the localized rank-0 name (\"Novice\" in English); C++ hardcodes the German \"Neuling\" and shows it to every language. The Player.txt omit-if-equal write default and the missing-Name= read fallback both stay \"Neuling\", so the file round-trips byte-identically with C++.",
+      "cited_in": [
+        "crates/clonk-app/src/game_app/startup.rs:3288"
+      ],
+      "cpp_reference": "C4InfoCore.cpp:69",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "pres-detail-governor",
+      "area": "presentation",
+      "summary": "A presentation-detail governor drops fire-particle drawing and gamma steps automatically from measured cost; C++ exposes the same two steps (FireParticles, DisableGamma) only as static config. The governor skips the draw of a burning object's flames rather than stopping emission, so the engine's particle list is untouched and clients at different detail levels stay in lockstep.",
+      "cited_in": [
+        "crates/clonk-app/src/main_parts/app_state.rs:2935"
+      ],
+      "cpp_reference": "C4Config.cpp:481-485",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "pres-draw-time-share",
+      "area": "presentation",
+      "summary": "One application pass may drain a clamped 250 ms simulation backlog but reserves a share of the pass for drawing; C++ runs at most one Game.Execute per pass and a machine slow enough to spend the whole pass in the simulation never repaints. Simulation state is unchanged by the split.",
+      "cited_in": [
+        "crates/clonk-app/src/main_parts/assets.rs:15"
+      ],
+      "cpp_reference": "C4Application.cpp:463-476,451-478",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "pres-userdata-directory",
+      "area": "presentation",
+      "summary": "User-data directories are named \"Clonk Rust\" while the window caption stays \"LegacyClonk\"; a C++ install's user directory is not read or written by the port.",
+      "cited_in": [
+        "crates/clonk-app/src/main_tests/runtime.rs:7821"
+      ],
+      "cpp_reference": "C4Application user-data path",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
+      "id": "save-mission-access",
+      "area": "save_replay",
+      "summary": "Config.General.MissionAccess is persisted as soon as the shared mission list the engine mutates differs from the file; C++ leaves the write to Config.Save() on a clean quit, so a round that ends any other way relocks a mission C++ would have kept.",
+      "cited_in": [
+        "crates/clonk-app/src/game_app/config.rs:2005"
+      ],
+      "cpp_reference": "C4Script.cpp:2466-2471, C4Application.cpp:367",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "clonk-org/clonk-rs#50"
+    }
+  ],
+  "port_only_features": [
+    {
+      "id": "local-voice-chat",
+      "area": "presentation",
+      "summary": "Proximity voice chat: microphone input, the push-to-talk rebind dialog, the port-only Voice.* config rows, and the \"Audio\" options-sheet group placed in the slack below C++'s own grid. No C++ counterpart; no game-control or lockstep effect.",
+      "cited_in": [
+        "crates/clonk-frontend/src/startup_options_voice.rs:4",
+        "crates/clonk-frontend/src/startup_options_dlg.rs:6",
+        "crates/clonk-app/src/main_parts/resources.rs:3266"
+      ],
+      "profile_action": "kept",
+      "owner": "clonk-org/clonk-rs#452"
+    },
+    {
+      "id": "local-stats-overlay",
+      "area": "presentation",
+      "summary": "The Graphics.ShowStats diagnostics overlay and its default-unbound StatsToggle key; C++ draws exactly one frame rate (game FPS) on the upper board and has no overlay. Presentation-only by construction.",
+      "cited_in": [
+        "crates/clonk-app/src/game_app/render.rs:13",
+        "crates/clonk-app/src/main_parts/assets.rs:4562"
+      ],
+      "profile_action": "kept",
+      "owner": "clonk-org/clonk-rs#158"
+    },
+    {
+      "id": "local-dock-icon",
+      "area": "presentation",
+      "summary": "The per-platform dock/taskbar icon; C4FullScreen has no reconciliation step to match.",
+      "cited_in": [
+        "crates/clonk-app/src/dock_icon.rs:12"
+      ],
+      "profile_action": "kept",
+      "owner": "docs/COMPAT_PROFILE.md (port-only features)"
+    },
+    {
+      "id": "local-f11-screenshot",
+      "area": "presentation",
+      "summary": "F11 as a screenshot shortcut; C++ maps F11 as an ordinary physical key with no special role.",
+      "cited_in": [
+        "crates/clonk-app/src/main_tests/input.rs:5375"
+      ],
+      "profile_action": "kept",
+      "owner": "docs/COMPAT_PROFILE.md (port-only features)"
+    },
+    {
+      "id": "local-update-check",
+      "area": "presentation",
+      "summary": "The in-app update flow: an incoming .c4u package is refused rather than applied (C++ extracts and executes its update program), an engine change gets its own message instead of reading as \"no update\", and the up-to-date case states the running version.",
+      "cited_in": [
+        "crates/clonk-app/src/game_app/update.rs:8"
+      ],
+      "profile_action": "kept",
+      "owner": "docs/COMPAT_PROFILE.md (port-only features)"
+    },
+    {
+      "id": "local-app-icon",
+      "area": "presentation",
+      "summary": "Windows icon slot 0 is the port's own mark generated from the logo; C++ puts lc.ico (LegacyClonk branding) there. The thirteen file-class icons are the engine's own, recovered from the pinned snapshot.",
+      "cited_in": [
+        "crates/clonk-icon/src/lib.rs:110"
+      ],
+      "profile_action": "kept",
+      "owner": "docs/COMPAT_PROFILE.md (port-only features)"
+    }
+  ],
+  "fail_closed": [
+    {
+      "id": "fc-profile-peer",
+      "combination": "A peer that does not advertise the profile, or advertises a profile version this build does not support.",
+      "behavior": "Refuse the connection with the named reason; never fall back silently to the normal profile or to an unproven mixed session.",
+      "basis": "clonk-org/clonk-rs#583, clonk-org/clonk-rs#588"
+    },
+    {
+      "id": "fc-build-mismatch",
+      "combination": "A peer whose PID_Conn build number differs from the pinned build.",
+      "behavior": "Refuse the connection; C++'s own admission rule compares only the build against C4XVERBUILD.",
+      "basis": "C4Network2.cpp:1291-1299"
+    },
+    {
+      "id": "fc-content-drift",
+      "combination": "The local content submodule pin or the in-repo planet tree differs from the manifest pins, or a scenario is loaded from any other content source.",
+      "behavior": "Refuse to start in the profile; cargo xtask compat verify fails the gate on pin drift, so a content bump must restate and re-verify the contract in the same change.",
+      "basis": "compat/profile.json pinned.content_commit"
+    },
+    {
+      "id": "fc-readiness",
+      "combination": "Any promise evidence is pending, or any divergence is open-gap/blocked, in the machine-readable manifest.",
+      "behavior": "The profile may not be advertised as compatible (clonk-org/clonk-rs#498 completion rule); it is either not offered or offered as explicitly experimental, never as \"legacy mode\".",
+      "basis": "clonk-org/clonk-rs#498"
+    },
+    {
+      "id": "fc-save-version",
+      "combination": "A savegame, recording, or scenario whose C4XVer header or record type does not match the pinned engine version.",
+      "behavior": "Refuse to load, exactly as C++ does; no attempt to repair or reinterpret foreign-version data.",
+      "basis": "crates/clonk-engine/src/record.rs, C4Record.h"
+    },
+    {
+      "id": "fc-config-conflict",
+      "combination": "A saved configuration sets a profile-forced key (the Remaster family, RenderInactive, the scale cap, the first-run scale seed, or the game tick delay).",
+      "behavior": "The profile value wins and shadows the saved value for the duration of the profile; the saved value is never merged in, and the normal profile is left untouched on exit.",
+      "basis": "clonk-org/clonk-rs#584"
+    }
+  ]
+}

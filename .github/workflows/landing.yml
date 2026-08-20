@@ -320,6 +320,7 @@ jobs:
             command: |
               cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
               cargo xtask engine-snapshots verify
+              cargo xtask compat verify
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

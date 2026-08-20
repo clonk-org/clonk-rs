@@ -747,6 +747,7 @@ class CiLatencyTests(unittest.TestCase):
             "cargo xtask parity verify",
             "cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked",
             "cargo xtask engine-snapshots verify",
+            "cargo xtask compat verify",
             "cargo fmt --all -- --check",
             "python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py'",
         )
