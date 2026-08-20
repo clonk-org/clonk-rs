@@ -735,6 +735,10 @@ fn alchemy_real_scenario_subcases_batch_2() {
             alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls,
         ),
         (
+            "firewall_disowns_itself_and_keeps_the_casters_controller",
+            alchemy_firewall_disowns_itself_and_keeps_the_casters_controller,
+        ),
+        (
             "make_artefact_cast_opens_the_real_enchantment_menu",
             alchemy_make_artefact_cast_opens_the_real_enchantment_menu,
         ),
@@ -1966,6 +1970,46 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
             .and_then(|bag| bag.components.get("IGOL")),
         Some(2),
         "a successful GGHG cast consumes one gold"
+    );
+}
+
+fn alchemy_firewall_disowns_itself_and_keeps_the_casters_controller(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy firewall parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let caster_controller = engine.test_object_snapshot(mage).controller;
+
+    // The mage is left where the scenario put it: MFWL walks itself down to
+    // solid ground and gives up after 60 steps, so a caster parked in mid-air
+    // would simply delete the spell (Firewall.c4d/Script.c:18-28).
+    let mage_position = engine.test_object_snapshot(mage).position;
+    let spell = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("MFWL")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+
+    // MFWL is not a spell that creates a wall -- it *is* the wall. It settles
+    // onto the ground, disowns itself so the fire does not score settlement
+    // points, adopts the caster's controller so kills are still traced to the
+    // right player, and then sets itself alight
+    // (Firewall.c4d/Script.c:15-16,35-39).
+    let wall = engine.test_object_snapshot(spell);
+    assert!(wall.on_fire, "MFWL incinerates itself: {wall:?}");
+    assert_eq!(
+        wall.owner, OWNER_NONE,
+        "the wall disowns itself so it does not count as a settlement"
+    );
+    assert_eq!(
+        wall.controller, caster_controller,
+        "but it keeps the caster's controller, so what it burns is still traced"
     );
 }
 
