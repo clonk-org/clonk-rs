@@ -552,10 +552,29 @@ fn check_effect_with_policy(
     let values: Vec<Value> = (4..8)
         .map(|index| args.get(index).cloned().unwrap_or(Value::Nil))
         .collect();
-    let effects = match snapshot_effects_from_context(scope) {
-        Some(effects) => effects,
+    // Only two things are wanted from the list here: whether it is empty, and
+    // the number of each entry to re-read live in the loop below. Taking a
+    // full snapshot to get them deep-copies every `EffectState` — name string,
+    // stored vars and all — once per `CheckEffect`, and `CheckEffect` runs
+    // once per `AddEffect`. On the global scope, where the list accumulates
+    // instead of staying per-object, that is what made building a set of
+    // effects quadratic in the *contents* of the list rather than its length
+    // (clonk-org/clonk-rs#749).
+    let checker_numbers: Vec<i32> = match with_effects_from_context(scope, |effects| {
+        effects
+            .iter()
+            .map(|effect| effect.number)
+            .collect::<Vec<_>>()
+    }) {
+        Some(numbers) => numbers,
         None => match scope {
-            EffectScope::Object(_) => extract_effects_from_state(target_state)?,
+            // The loop re-reads each entry from the live context, which is
+            // absent in this branch, so every checker is skipped either way.
+            // The numbers still decide emptiness below.
+            EffectScope::Object(_) => extract_effects_from_state(target_state)?
+                .iter()
+                .map(|effect| effect.number)
+                .collect(),
             EffectScope::Global => Vec::new(),
         },
     };
@@ -566,7 +585,7 @@ fn check_effect_with_policy(
             .as_ref()
             .and_then(|context| context.effect_list_had_head(scope))
     });
-    if !had_list_head.unwrap_or(!effects.is_empty()) {
+    if !had_list_head.unwrap_or(!checker_numbers.is_empty()) {
         return Ok(Value::Nil);
     }
     if priority == 1 {
@@ -575,7 +594,6 @@ fn check_effect_with_policy(
 
     let target = target_id.map(object_reference_value).unwrap_or(Value::Nil);
     let mut acceptor: Option<(EffectState, bool)> = None;
-    let checker_numbers: Vec<i32> = effects.iter().map(|effect| effect.number).collect();
     for checker_number in checker_numbers {
         // C++ re-tests IsDead and signed priority as it reaches each linked
         // node. An earlier checker may synchronously remove a later one, so
@@ -628,6 +646,11 @@ fn check_effect_with_policy(
         return Ok(Value::Int(0));
     };
     let uppers = if do_temp_calls {
+        // Only this branch needs the entries themselves, and it is reached
+        // only once an acceptor asked for the temporary removal. Snapshotting
+        // here keeps the ordinary no-acceptor CheckEffect free of the copy
+        // (clonk-org/clonk-rs#749).
+        let effects = snapshot_effects_from_context(scope).unwrap_or_default();
         temp_remove_upper_effects(scope, &target, &effects, acceptor.number)?
     } else {
         Vec::new()
