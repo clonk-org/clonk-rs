@@ -501,10 +501,7 @@ fn lazy_get_inserts_objects_in_canonical_index_order() {
     let mut world = HostWorldContext::default().with_lazy_world_provider(provider);
     world.seed_object(2, source[2].clone());
 
-    assert_eq!(
-        world.object_store.borrow().order.as_slice(),
-        &[ObjectId::new(30)]
-    );
+    assert_eq!(world.materialized_order(), vec![ObjectId::new(30)]);
     for (id, expected) in [
         (20, vec![30, 20]),
         (40, vec![40, 30, 20]),
@@ -513,10 +510,7 @@ fn lazy_get_inserts_objects_in_canonical_index_order() {
         let id = ObjectId::new(id);
         assert_eq!(world.get(id).map(|object| object.id), Some(id));
         let expected = expected.into_iter().map(ObjectId::new).collect::<Vec<_>>();
-        assert_eq!(
-            world.object_store.borrow().order.as_slice(),
-            expected.as_slice()
-        );
+        assert_eq!(world.materialized_order(), expected);
     }
 }
 
