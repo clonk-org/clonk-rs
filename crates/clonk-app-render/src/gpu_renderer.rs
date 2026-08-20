@@ -9700,6 +9700,60 @@ mod tests {
         );
     }
 
+    /// Nothing samples the mip chain `upload_mip_chain` builds, because the
+    /// shaders that read mip-capable textures pin the LOD to zero.
+    ///
+    /// clonk-org/clonk-rs#288 makes this its phase-1 question: "the renderer
+    /// must prove that an eligible draw actually selects lower LODs; otherwise
+    /// the project is spending load time to generate levels it never samples."
+    ///
+    /// The two halves have to be read together, because the renderer does use
+    /// automatic-LOD sampling — just never on a texture that has mips:
+    ///
+    /// - **Mip-capable textures are the immutable art ones**, which is exactly
+    ///   what `wants_mipmaps` gates on (`base_revision.is_none()` and no dirty
+    ///   rects). They are read by the quad, sprite and object-sprite shaders,
+    ///   and every one of those reads is `textureSampleLevel(..., 0.0)` or
+    ///   `textureLoad(..., 0)` — an explicit level, so no LOD is ever selected.
+    /// - **The shaders that do use automatic-LOD `textureSample`** — landscape
+    ///   and presentation — sample revisioned surfaces and the composition
+    ///   target. Those are single-level by construction (`mip_level_count: 1`),
+    ///   so automatic selection has nothing to choose and resolves to level 0.
+    ///
+    /// So with `Graphics.Mipmaps` on, `wants_mipmaps` still allocates the full
+    /// chain, `generate_mip_chain` still builds every level on the CPU, and
+    /// `upload_mip_chain` still uploads them — for data no draw can read.
+    ///
+    /// This fails the moment an art shader gains real LOD selection, which is
+    /// the event that would make clonk-org/clonk-rs#288's optimisation worth
+    /// anything. Until then it records why it is not.
+    #[test]
+    fn no_shader_that_reads_a_mip_capable_texture_selects_a_level() {
+        // The shaders that sample immutable art, i.e. the only textures
+        // `wants_mipmaps` ever gives a chain to.
+        for (name, source) in [
+            ("quad", QUAD_SHADER),
+            ("sprite", SPRITE_SHADER),
+            ("object_sprite", OBJECT_SPRITE_SHADER),
+        ] {
+            assert!(
+                !source.contains("textureSample("),
+                "{name} shader gained an automatic-LOD textureSample; it reads \
+                 mip-capable art, so clonk-org/clonk-rs#288's premise now holds \
+                 and its mip work becomes worth measuring",
+            );
+            for capture in source.split("textureSampleLevel(").skip(1) {
+                let level = capture
+                    .split(')')
+                    .next()
+                    .and_then(|args| args.rsplit(',').next())
+                    .map(str::trim)
+                    .unwrap_or_default();
+                assert_eq!(level, "0.0", "{name} shader samples a non-zero LOD");
+            }
+        }
+    }
+
     #[test]
     fn mip_chain_averages_in_premultiplied_space_and_halves_to_one_texel() {
         // Straight-alpha averaging is the classic sprite-halo bug: three
