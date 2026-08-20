@@ -270,6 +270,140 @@ mod tests {
         );
     }
 
+    /// What a *previously released* build concludes from this build's
+    /// announcement (clonk-org/clonk-rs#471).
+    ///
+    /// Every other test in the tree pairs this revision with itself. The two
+    /// defects that reached a green gate set in clonk-org/clonk-rs#465 were both
+    /// about the older peer's behaviour, which nothing could express: bumping
+    /// the media wire signature did not stop a released build transmitting,
+    /// because that build acts on the capability *bit*, not on the datagram
+    /// signature.
+    ///
+    /// So the property under test is the one that matters to a peer we cannot
+    /// build here: a released decoder reads the bitset out of our announcement
+    /// and acts on each bit it recognises. Reading it is trivial — the field is
+    /// at a fixed offset and every release has had it there — which is what
+    /// makes the cheap harness possible without compiling a second revision.
+    ///
+    /// A retired bit must therefore read as *clear* to that build, for every
+    /// announcement this build can produce. Bit 3 is the concrete case: an
+    /// older build reads it as "this peer accepts my voice", marks the route
+    /// negotiated on the cookie alone, and opens its microphone onto a
+    /// cleartext lane this build can no longer receive.
+    #[test]
+    fn a_released_build_reads_no_retired_capability_from_this_builds_announcement() {
+        /// The one field a released build is guaranteed to read the same way:
+        /// `bits` as little-endian at offset 3. Deliberately not
+        /// `decode_port_capabilities` — the point is to read the wire the way
+        /// another build would, not the way this one does.
+        fn bits_as_a_released_build_reads_them(wire: &[u8]) -> u32 {
+            assert_eq!(wire[0], PID_PORT_CAPABILITIES, "not an announcement");
+            u32::from_le_bytes(wire[3..7].try_into().expect("announcement carries bits"))
+        }
+
+        // Every retired bit, and what a released build would do with it.
+        const RETIRED: [(u32, &str); 1] = [(
+            PortCapabilities::RETIRED_CLEARTEXT_VOICE_CHAT,
+            "opens its microphone onto a cleartext lane this build cannot receive",
+        )];
+
+        // Both shapes this build announces: bare, and with a voice route
+        // offered. The cookie and key ride *after* the bitset, so neither can
+        // change what a released build reads out of it — assert that rather
+        // than assume it.
+        let bare = PortCapabilities::supported();
+        let announcements = [
+            ("bare", encode_port_capabilities(bare)),
+            (
+                "with a voice route",
+                encode_port_capabilities(
+                    bare.with_voice_cookie(crate::voice::VoiceRouteCookie::from_bytes(
+                        [0x5a; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+                    ))
+                    .with_voice_public_key([0x27; crate::voice::VOICE_KEY_AGREEMENT_PUBLIC_BYTES]),
+                ),
+            ),
+        ];
+
+        for (label, wire) in &announcements {
+            let seen = bits_as_a_released_build_reads_them(wire);
+            for (bit, consequence) in RETIRED {
+                assert_eq!(
+                    seen & bit,
+                    0,
+                    "the {label} announcement sets retired bit {bit:#x}, so a released \
+                     build {consequence}"
+                );
+            }
+        }
+
+        // The bitset a released build reads must not depend on what rides after
+        // it, or the check above would only cover the shape it happened to see.
+        let [(_, bare_wire), (_, voice_wire)] = &announcements;
+        assert_eq!(
+            bits_as_a_released_build_reads_them(bare_wire),
+            bits_as_a_released_build_reads_them(voice_wire),
+            "trailing fields must not move or alter the bitset"
+        );
+    }
+
+    /// The announcement's byte layout, pinned so a change to it cannot land
+    /// without a reviewer seeing the wire move (clonk-org/clonk-rs#471).
+    ///
+    /// A released build has no `decode_port_capabilities` of ours to call — it
+    /// has its own, compiled against the layout that shipped. So the layout is
+    /// the interface, and a golden is the cheapest way to make a change to it
+    /// visible without compiling a second revision. Anything this diff shows
+    /// moving is something an older peer will read at the wrong offset.
+    ///
+    /// `decode_port_capabilities` ignores trailing bytes by design, which is
+    /// what makes the format extensible — and is exactly why *appending* is
+    /// safe while *moving* or *reusing* is not.
+    #[test]
+    fn the_announcement_wire_shape_is_pinned_byte_for_byte() {
+        assert_eq!(
+            encode_port_capabilities(PortCapabilities::supported()),
+            vec![
+                // Packet ID, above every ID C++ dispatches.
+                0x70, // Vocabulary version 1, little-endian u16.
+                0x01, 0x00,
+                // Bits, little-endian u32: VOICE_CHAT (1 << 5) |
+                // CONTROL_WAIT_ATTRIBUTION (1 << 4). Bit 3 is retired and
+                // stays clear — see the retired-capability test above.
+                0x30, 0x00, 0x00, 0x00,
+            ],
+            "the bare announcement moved; an older peer reads these offsets",
+        );
+
+        // With a voice route offered, the cookie and then the public key are
+        // appended — in that order, and only together.
+        let cookie = [0x5a; crate::voice::VOICE_ROUTE_COOKIE_BYTES];
+        let public_key = [0x27; crate::voice::VOICE_KEY_AGREEMENT_PUBLIC_BYTES];
+        let offered = PortCapabilities::supported()
+            .with_voice_cookie(crate::voice::VoiceRouteCookie::from_bytes(cookie))
+            .with_voice_public_key(public_key);
+
+        let mut expected = vec![0x70, 0x01, 0x00, 0x30, 0x00, 0x00, 0x00];
+        expected.extend_from_slice(&cookie);
+        expected.extend_from_slice(&public_key);
+        assert_eq!(
+            encode_port_capabilities(offered),
+            expected,
+            "the voice route rides after the bitset, cookie before key",
+        );
+
+        // A key with no cookie derives nothing, so it is never sent alone —
+        // and a released build must not find one where it expects the cookie.
+        assert_eq!(
+            encode_port_capabilities(
+                PortCapabilities::supported().with_voice_public_key(public_key)
+            ),
+            vec![0x70, 0x01, 0x00, 0x30, 0x00, 0x00, 0x00],
+            "a public key without its cookie must not reach the wire",
+        );
+    }
+
     #[test]
     fn a_silent_peer_is_treated_as_stock_cpp() {
         // The whole safety argument: a stock peer cannot produce this ID — it
