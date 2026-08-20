@@ -4,6 +4,12 @@
 //! weather-created object, so a profile does not depend on waiting for the
 //! random weather trigger. It is a measurement tool only: the final state is
 //! printed as a checksum and no simulation behavior is changed.
+//!
+//! The elapsed span is reported twice: `advance` covers the FXV1 `Advance`
+//! calls alone, and the unqualified figures add the render dirty-rect scan that
+//! follows them. Keeping them apart is what settles whether a frame cost is
+//! simulation or presentation — for clonk-org/clonk-rs#497 the two are equal to
+//! within a microsecond, which places the whole cost in the script.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -183,6 +189,7 @@ fn main() {
     }
 
     let mut samples = Vec::with_capacity(frames);
+    let mut advance_samples = Vec::with_capacity(frames);
     let mut render_anchor = engine
         .landscape()
         .and_then(|landscape| landscape.pixel_grid())
@@ -213,6 +220,7 @@ fn main() {
                 .call_object_function(index, "Advance", Vec::new())
                 .expect("FXV1 Advance succeeds");
         }
+        let advanced = started.elapsed();
         let grid = engine
             .landscape()
             .and_then(|landscape| landscape.pixel_grid())
@@ -230,6 +238,7 @@ fn main() {
             }
         }
         render_anchor = Some(grid.render_anchor());
+        advance_samples.push(advanced);
         samples.push(started.elapsed());
     }
     let mut sorted = samples.clone();
@@ -254,6 +263,17 @@ fn main() {
         percentile(&sorted, 0.95),
         percentile(&sorted, 0.99),
         sorted.last().copied().unwrap_or_default()
+    );
+    let mut advance_sorted = advance_samples.clone();
+    advance_sorted.sort_unstable();
+    let advance_total: Duration = advance_samples.iter().sum();
+    println!(
+        "advance mean={:?} p50={:?} p95={:?} p99={:?} max={:?}",
+        advance_total / advance_samples.len().max(1) as u32,
+        percentile(&advance_sorted, 0.50),
+        percentile(&advance_sorted, 0.95),
+        percentile(&advance_sorted, 0.99),
+        advance_sorted.last().copied().unwrap_or_default()
     );
     println!("surface32_pixels={surface32_pixels} surface32_checksum=0x{surface32_checksum:016x}");
 }
