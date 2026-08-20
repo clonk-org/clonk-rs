@@ -795,6 +795,10 @@ fn alchemy_real_scenario_subcases_batch_4() {
             alchemy_possession_uses_the_shipped_selector_control,
         ),
         (
+            "blackout_rock_combo_exactly_doubles_the_sleep_it_inflicts",
+            alchemy_blackout_rock_combo_exactly_doubles_the_sleep_it_inflicts,
+        ),
+        (
             "curse_family_selects_a_foreign_target_through_the_shipped_selector",
             alchemy_curse_family_selects_a_foreign_target_through_the_shipped_selector,
         ),
@@ -2564,6 +2568,99 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
     panic!(
         "C++ Mode0 must cast LGCN after the thrown ROCK hits; ROCK={:?}",
         engine.object_snapshot(carried)
+    );
+}
+
+fn alchemy_blackout_rock_combo_exactly_doubles_the_sleep_it_inflicts(
+    prepared: &PreparedInstalledScenario,
+) {
+    // MBOT's sleep duration is `iDuration` scaled by how far the victim is
+    // from full energy (Blackout.c4d/Script.c:45), so its absolute value is
+    // not a constant worth pinning. The ROCK combo is: it doubles `iDuration`
+    // and nothing else (`:12-17`). Running the same cast twice against the
+    // same victim holds the energy term fixed, which turns the combo into an
+    // exact factor of two.
+    let mut durations = Vec::new();
+    for carries_rock in [false, true] {
+        let mut engine = prepared.instantiate();
+        let owner = join_local_player(&mut engine, "Alchemy blackout parity");
+        let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+        let mage_position = engine.test_object_snapshot(mage).position;
+
+        // The victim has to be inside the 100-pixel box, and is only eligible
+        // at all because Alchemy ships NTMG -- otherwise a friendly clonk is
+        // skipped and the spell finds nobody (`:41-44`).
+        let victim = crate::support::TestValueExt::test_value(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| {
+                    object.definition_id == "CLNK"
+                        && object.owner == owner
+                        && object.status.is_active()
+                })
+                .map(|object| object.id),
+        );
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
+                victim,
+                ObjectUpdate::new()
+                    .with_position(Vector2::new(mage_position.x + 20, mage_position.y))
+                    .with_velocity(Vector2::ZERO)
+                    .with_action("Walk")
+                    .clear_container(),
+            ),
+        );
+
+        let rock = carries_rock.then(|| {
+            engine.spawn_test_object(clonk_engine::SpawnConfig::new("ROCK").with_container(mage))
+        });
+        let spell = engine.spawn_test_object(
+            clonk_engine::SpawnConfig::new("MBOT")
+                .with_position(mage_position)
+                .with_owner(owner),
+        );
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(mage.as_u64())],
+        );
+
+        // The effect lays the victim out as `Dead` and stores its wake-up time
+        // in EffectVar(0) (`:49-59`).
+        let sleeper = engine.test_object_snapshot(victim);
+        assert_eq!(
+            sleeper.action.name, "Dead",
+            "a blacked-out clonk is put into the Dead action"
+        );
+        let duration = crate::support::TestValueExt::test_value(
+            sleeper
+                .effects
+                .iter()
+                .find(|effect| effect.name == "SleepNSpell")
+                .map(|effect| effect.var(0)),
+        );
+        let EffectVarValue::Int(duration) = duration else {
+            panic!("SleepNSpell stores an integer wake-up time, got {duration:?}");
+        };
+        assert!(duration > 0, "the sleep has to last a positive time");
+        durations.push(duration);
+
+        if let Some(rock) = rock {
+            assert!(
+                engine
+                    .object_snapshot(rock)
+                    .is_none_or(|rock| !rock.status.is_active()),
+                "the rock combo is consumed by the cast"
+            );
+        }
+    }
+
+    assert_eq!(
+        durations[1],
+        durations[0] * 2,
+        "carrying a rock exactly doubles the blackout: {durations:?}"
     );
 }
 
