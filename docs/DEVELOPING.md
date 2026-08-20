@@ -186,22 +186,54 @@ a rebuilt live C++ comparison against an oracle checkout selected by
 
 `.github/workflows/landing.yml` keeps pull-request admission small, then runs
 the exhaustive workspace suite as compile-time shards against the exact merge
-queue tree. Eleven application feature selectors cover disjoint, exhaustive
-included fragments; eight shared harness tests run in every selector. Netplay
-is divided into two independently compiled modules, while the ordinary
-unsharded target still contains both. Two engine-integration
-selectors, two disjoint residual-package rows, and dedicated unit/parity,
-quality, and contract rows complete the 18-row Linux matrix. The two Windows
-jobs fill the initial 20-job fan-out. Formatting, script tests, lints, parity,
-snapshots, packaging, Windows smoke tests, and the shipped MSVC runtime feed one
+queue tree. Twelve application feature selectors cover the exhaustive fragment
+inventory, with one route-support fragment shared by selectors 3 and 11; nine
+shared harness tests run once in selector 5. Seven
+application rows co-locate all 12 feature shards, including the two
+independently compiled netplay modules. Three engine-integration rows, separate
+engine and frontend unit rows, two disjoint residual-package rows, and dedicated
+quality and contract rows complete the 16-row Linux matrix. Three Windows rows
+run the runtime, network, and quality/NSIS checks in parallel. Formatting,
+script tests, lints, parity, snapshots, packaging, and Windows checks feed one
 fail-closed `Landing gate`.
 
 `.github/workflows/rust.yml` runs slower diagnostic coverage, macOS
-recording-host oracles, and Windows release tooling after that SHA lands;
-releases wait for both exact-SHA workflow results. Selected merge-group rows
-claim the four rolling post-merge concurrency groups, preempting obsolete
-ordinary validation before it competes with the one-at-a-time queue. Release
-commits use exact-SHA groups and remain isolated from that preemption.
+recording-host oracles, and Windows release tooling after an ordinary SHA
+lands. Release candidates instead run exact-SHA qualification inside their
+merge-group `Landing` run, and release publication resolves only those
+queue-qualified artifacts. A short, non-preempted trusted-main job publishes
+an exact content Git-object cache keyed by
+`.gitmodules` and the pinned gitlink. Landing consumers restore it, materialize
+the submodule, and verify its exact
+revision and clean state. A separate trusted-main Windows producer compiles the
+landing test/lint graph before publishing its reusable dependency artifacts as
+`windows-runtime-msvc-v2`, leaving shipped-runtime validation downstream.
+Selected merge-group rows may preempt the rolling Linux and Windows cache
+producers. Release commits use exact-SHA groups and remain isolated from that
+preemption.
+
+After a landing-cache key change lands on `main`, seed it without running
+post-merge diagnostics:
+
+```sh
+gh workflow run rust.yml --repo clonk-org/clonk-rs --ref main \
+  -f cache_only=true
+```
+
+The explicit dispatch gives all three producers exact-SHA concurrency lanes
+that a busy merge queue or newer push cannot preempt or replace. Ordinary
+content publishers still coalesce safely on their rolling lane. Fresh dependent
+Linux and Windows jobs must restore both Rust caches before the bootstrap can
+report success.
+
+The measured baseline is a 649-second ordinary p50 across 88 successful,
+non-release merge-group `Landing` runs ending 2026-08-20; a full 50% reduction
+means an ordinary p50 at or below 324.5 seconds (324 seconds when reported as a
+whole duration). The 16-plus-three graph and cache
+changes are the candidate design, not an achieved result. Confirm them with a
+comparable live merge-group sample, recording queue delay, runner availability,
+cache state, and content revision while separating canceled, failed, and
+release runs.
 
 ## Cache and timing hygiene
 

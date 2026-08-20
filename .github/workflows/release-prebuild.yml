@@ -188,7 +188,7 @@ jobs:
         if: matrix.name == 'windows'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: windows-runtime-msvc
+          shared-key: windows-runtime-msvc-v2
           save-if: false
 
       - name: Restore trusted-main macOS build cache
@@ -313,7 +313,7 @@ jobs:
         if: matrix.name == 'windows'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: windows-runtime-msvc
+          shared-key: windows-runtime-msvc-v2
           save-if: false
 
       - name: Restore trusted-main macOS runtime cache

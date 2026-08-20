@@ -80,8 +80,10 @@ samples. Always retain sample counts and raw samples; a single mean hides stalls
 
 ## Baseline collection
 
-There is no portable measured CI baseline yet. Do not turn timings from an
-arbitrary laptop or a shared hosted runner into a blocking threshold.
+There is no portable compile or runtime CI baseline yet. Do not turn timings
+from an arbitrary laptop or a shared hosted runner into a blocking threshold.
+The merge-queue service baseline below is deliberately scoped to comparable
+hosted `Landing` runs rather than presented as a portable machine benchmark.
 
 ### Release codegen parallelism
 
@@ -224,8 +226,9 @@ landing target even with both caches exact. The remaining cost is application
 frontend and code generation, not linking. The bounded queue therefore retains
 Windows tests, path linting, and an NSIS installer smoke compile, while trusted
 post-merge validation performs the exact static-CRT release build and runtime
-inspection. Release remains fail-closed on both the merge-group Landing run and
-the exact-SHA post-merge validation run.
+inspection. Release remains fail-closed on the merge-group `Landing` run,
+whose release path performs exact-SHA qualification before the commit may
+land; post-merge validation is diagnostic only.
 
 Two exhaustive standard-runner Linux samples of the predecessor graph, runs
 `30693625838` and `30693995330`, passed every row, but shared-runner execution
@@ -237,28 +240,39 @@ shard-6 probe kept the current app test profile: opt-level 1, opt-level 0, and
 256 units. These samples prove the predecessor partitions exhaustive and green,
 not a robust five-minute latency bound on four-vCPU hosted runners.
 
-The replacement queue graph uses 18 Linux rows and one Windows smoke row. It turns
-the two netplay runtime hash partitions into independent compile-time modules,
-splits and rebalances the other application tests across ten selectors, splits
-engine integration across its two feature selectors, and partitions all 27
-remaining workspace packages exactly once across two rows. The ordinary
-unsharded suite remains the coverage reference.
+The candidate queue graph uses 16 Linux rows and three parallel Windows rows.
+Seven application rows cover all 12 compile-time feature selectors, including
+the two netplay modules. Three engine-integration rows, separate engine and
+frontend unit rows, two residual-workspace rows, and the quality and contract
+rows complete the Linux matrix. Windows runtime tests, network tests, and the
+quality/NSIS checks run independently instead of sharing one serial critical
+path. The ordinary unsharded suite remains the coverage reference.
 
-Hosted workflow-dispatch run `30702040649` exercised the final Linux partition
-at commit `6dd2b490c`. All 18 jobs started within 20 seconds and passed; workflow
-creation to the last Linux completion was 4m55s. The slowest row was remaining
-workspace 1/2 at 4m51s. Moving the eight `bird_flight` cases between the
-existing engine selectors left their paired rows at 4m00s and 3m46s instead of
-the predecessor's 4m56s critical row. Every row retained the trusted-main Rust
-cache identity, though each restored a compatible prefix rather than an exact
-file-hash key. This is a shared-runner sample with five seconds of end-to-end
-margin, not a portable timing guarantee.
+Hosted workflow-dispatch run `30702040649` exercised the predecessor 18-row
+Linux partition at commit `6dd2b490c`. All 18 jobs started within 20 seconds
+and passed; workflow creation to the last Linux completion was 4m55s. The
+slowest row was remaining workspace 1/2 at 4m51s. Moving the eight `bird_flight`
+cases between the existing engine selectors left their paired rows at 4m00s
+and 3m46s instead of the predecessor's 4m56s critical row. Every row retained
+the trusted-main Rust cache identity, though each restored a compatible prefix
+rather than an exact file-hash key. This is a shared-runner sample with five
+seconds of end-to-end margin, not a measurement of the candidate graph or a
+portable timing guarantee.
 
-Because the merge queue admits one candidate at a time, three Linux
-merge-group rows and Windows smoke claim the rolling Linux-cache, coverage,
-recording-host, and Windows-cache concurrency groups. Required queue work
-therefore preempts stale ordinary post-merge owners; release pushes use
-SHA-specific groups and are unaffected.
+Across 88 successful ordinary, non-release merge-group `Landing` runs ending
+2026-08-20, workflow creation-to-completion had a p50 of 649 seconds. A full
+50% reduction therefore requires an ordinary p50 at or below 324.5 seconds
+(324 seconds when reported as a whole duration). The
+16-plus-three topology and cache changes are a projection toward that target;
+they have not yet produced a live merge-group sample, so do not report the
+target as achieved before a comparable live trial. Record queue delay, runner
+availability, cache state, and the exact content revision with that trial, and
+keep canceled, failed, and release runs separate from the ordinary sample.
+
+Because the merge queue admits one candidate at a time, one Linux row and the
+Windows runtime row claim the rolling landing-cache lanes. Required queue work
+therefore preempts stale trusted-main producers, while the other rows use
+run-scoped lanes; release pushes use SHA-specific groups and are unaffected.
 
 The build values are single sequential directional samples from fresh Cargo
 targets; later arms benefited from warmer filesystem caches. The runtime
@@ -1449,18 +1463,38 @@ sample.
 
 ## CI cache interpretation
 
-Landing jobs restore the existing trusted-main `full-parity` and
-`windows-runtime-msvc` caches without saving short-lived merge-queue copies.
-A post-merge Linux producer compiles the complete locked workspace graph before
-it may publish; canceled runs cannot leave an incomplete immutable cache.
+Landing jobs restore the trusted-main `full-parity` and
+`windows-runtime-msvc-v2` caches without saving short-lived merge-queue copies.
+The short, non-preempted trusted-main content publisher stores
+`.git/modules/content` under an exact key containing the runner OS,
+`.gitmodules` hash, and pinned content gitlink. Landing restores that Git-object
+cache, materializes the submodule, and verifies both its exact revision and
+clean state; a miss may fetch the pinned object but cannot publish from an
+untrusted merge-group tree. The Linux producer compiles the complete locked
+workspace graph before publishing its Rust cache, so canceled runs cannot
+leave an incomplete immutable entry.
 Replay/render work restores that ordinary target read-only while instrumented
-coverage stays in a different target. Post-merge Windows validation refreshes
-smoke, packaging-tool, and exact static-CRT runtime artifacts only after all
-three succeed, then publishes the shipped-runtime dependency cache and bounded
-linker cache. Release restores those trusted caches. Recording-host oracles
-retain their own cache. The keys include the Rust dependency/build inputs
-maintained by the Rust cache action; the ThinLTO key additionally pins the Rust
-and LLVM versions plus manifests and the shared configuration script.
+coverage stays in a different target.
+
+An isolated trusted-main Windows landing-cache producer compiles the Windows
+test and lint graph before publishing its reusable dependency artifacts as
+`windows-runtime-msvc-v2`.
+Windows release tooling follows separately and owns the shipped-runtime
+dependency and bounded ThinLTO caches, so its longer static-CRT build is not on
+the landing-cache producer's critical path. Release restores the applicable
+trusted caches, and recording-host oracles retain their own cache. The Rust
+cache keys include the dependency/build inputs maintained by the cache action;
+the ThinLTO key additionally pins the Rust and LLVM versions plus manifests and
+the shared configuration script.
+
+After a landing-cache key change lands, dispatch `rust.yml` on `main` with
+`cache_only=true`. That mode gives the content, Linux, and Windows producers
+exact-SHA concurrency lanes and skips the release tooling and post-merge
+diagnostics, so a busy queue cannot preempt the bootstrap and a newer push
+cannot replace its pending content prerequisite. Ordinary content publishers
+continue to coalesce on one non-preempted rolling lane. Fresh dependent Linux
+and Windows jobs must restore the two published Rust entries before the
+bootstrap reports success.
 `CARGO_INCREMENTAL=0` keeps CI artifacts reproducible and smaller; the local
 development, play, and test profiles retain incremental behavior.
 

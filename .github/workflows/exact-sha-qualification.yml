@@ -74,14 +74,14 @@ jobs:
             artifact: app-6-8
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-6,app-test-shard-8 --no-fail-fast --locked
-          - name: engine integration 1/2
+          - name: engine integration 1/3
             artifact: engine-1
             apt: ''
             command: cargo llvm-cov --no-report nextest -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
-          - name: engine integration 2/2
-            artifact: engine-2
+          - name: engine integration 2+3/3
+            artifact: engine-2-3
             apt: ''
-            command: cargo llvm-cov --no-report nextest -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2 --no-fail-fast --locked
+            command: cargo llvm-cov --no-report nextest -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2,engine-it-shard-3 --no-fail-fast --locked
           - name: engine and frontend units
             artifact: engine-and-frontend-units
             apt: ''
@@ -199,7 +199,7 @@ jobs:
             app-11-12
             app-6-8
             engine-1
-            engine-2
+            engine-2-3
             engine-and-frontend-units
             remaining-1
             remaining-2
@@ -262,7 +262,7 @@ jobs:
             app-11-12
             app-6-8
             engine-1
-            engine-2
+            engine-2-3
             engine-and-frontend-units
             remaining-1
             remaining-2

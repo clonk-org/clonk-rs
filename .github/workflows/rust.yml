@@ -7,6 +7,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      cache_only:
+        description: Publish landing caches without post-merge diagnostics
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,15 +22,144 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Swatinem saves in a post-job hook and reports cache-service failures
+  # without failing its producer. A cache-only bootstrap therefore proves both
+  # Rust entries are visible from fresh dependent jobs before reporting green.
+  verify-landing-cache-bootstrap:
+    name: Verify landing cache bootstrap / ${{ matrix.name }}
+    needs:
+      - linux-landing-cache
+      - windows-landing-cache
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.cache_only }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-latest
+          - name: Windows
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - name: Look up the published Linux cache
+        if: matrix.name == 'Linux'
+        id: linux-cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: . -> target
+          shared-key: full-parity
+          lookup-only: true
+          save-if: false
+
+      - name: Look up the published Windows cache
+        if: matrix.name == 'Windows'
+        id: windows-cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: . -> target
+          shared-key: windows-runtime-msvc-v2
+          lookup-only: true
+          save-if: false
+
+      - name: Require the published ${{ matrix.name }} cache
+        env:
+          CACHE_HIT: >-
+            ${{ matrix.name == 'Linux'
+              && steps.linux-cache.outputs.cache-hit
+              || steps.windows-cache.outputs.cache-hit }}
+        run: '[[ "$CACHE_HIT" == "true" ]]'
+
+  # This short publisher is never preempted by Landing. Ordinary pushes
+  # coalesce to one rolling lane; an explicit bootstrap keeps an exact-SHA lane
+  # so a newer push cannot replace its pending prerequisite.
+  content-landing-cache:
+    name: Publish the pinned content checkout
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: >-
+        main-content-landing-cache-${{ github.event_name == 'workflow_dispatch'
+          && github.sha || 'rolling' }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve pinned content revision
+        id: content
+        run: |
+          revision=$(git rev-parse HEAD:content)
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid content gitlink: $revision" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Find the pinned content checkout
+        id: content-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .git/modules/content
+          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
+          lookup-only: true
+
+      - name: Materialize pinned content checkout
+        if: steps.content-cache.outputs.cache-hit != 'true'
+        run: git submodule update --init --force --depth=1 --filter=blob:none content
+
+      - name: Verify pinned content checkout
+        if: steps.content-cache.outputs.cache-hit != 'true'
+        env:
+          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
+        run: |
+          actual=$(git -C content rev-parse HEAD)
+          [[ "$actual" == "$CONTENT_REVISION" ]]
+          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
+
+      - name: Publish pinned content checkout
+        if: steps.content-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .git/modules/content
+          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
+
+      # cache/save reports service failures as warnings. Fail this producer if
+      # the immutable object store was not actually published.
+      - name: Verify pinned content checkout publication
+        if: steps.content-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .git/modules/content
+          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
+          fail-on-cache-miss: true
+          lookup-only: true
+
   linux-landing-cache:
     name: Warm the Linux landing cache
+    needs: content-landing-cache
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
       # Ordinary main runs finish the current authoritative cache before moving
-      # on. A queue candidate may preempt this rolling lane; release commits
-      # keep an exact-SHA lane of their own.
-      group: "linux-landing-cache-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
+      # on. A queue candidate may preempt this rolling lane; releases and
+      # explicit cache-bootstrap dispatches keep an exact-SHA lane.
+      group: "linux-landing-cache-${{ (github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: release ')) && github.sha || 'rolling' }}"
       cancel-in-progress: false
     defaults:
       run:
@@ -33,7 +168,34 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          submodules: recursive
+
+      - name: Resolve pinned content revision
+        id: content
+        run: |
+          revision=$(git rev-parse HEAD:content)
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid content gitlink: $revision" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pinned content checkout
+        id: content-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .git/modules/content
+          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
+
+      - name: Materialize pinned content checkout
+        run: git submodule update --init --force --depth=1 --filter=blob:none content
+
+      - name: Verify pinned content checkout
+        env:
+          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
+        run: |
+          actual=$(git -C content rev-parse HEAD)
+          [[ "$actual" == "$CONTENT_REVISION" ]]
+          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
 
       - name: Install native Rust dependencies
         run: |
@@ -70,6 +232,7 @@ jobs:
   exact-sha-qualification:
     name: Exact-SHA qualification
     needs: linux-landing-cache
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.cache_only }}
     permissions:
       contents: read
     uses: ./.github/workflows/exact-sha-qualification.yml
@@ -81,15 +244,14 @@ jobs:
       publish-recording-host-cache: true
       upload-diagnostics: true
 
-  windows-release-tools:
-    name: Windows release tooling
+  windows-landing-cache:
+    name: Warm the Windows landing cache
     runs-on: windows-latest
     timeout-minutes: 45
     concurrency:
-      # Ordinary main runs do not interrupt this authoritative cache producer.
-      # Queue Windows smoke may preempt its rolling lane; release commits use
-      # an exact-SHA lane that cannot be interrupted.
-      group: "windows-landing-cache-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
+      # Queue Windows smoke may preempt this rolling producer. Releases and
+      # explicit cache-bootstrap dispatches use an exact-SHA lane.
+      group: "windows-landing-cache-${{ (github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: release ')) && github.sha || 'rolling' }}"
       cancel-in-progress: false
     defaults:
       run:
@@ -107,11 +269,39 @@ jobs:
           fallback: none
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        id: windows-cache
         with:
-          shared-key: windows-runtime-msvc
+          shared-key: windows-runtime-msvc-v2
 
-      - name: Refresh Windows smoke-test cache
-        run: cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core -p clonk-logging --locked --no-fail-fast
+      # Swatinem intentionally drops workspace crates whose checkout mtimes
+      # make them stale. Compiling every landing package here still publishes
+      # their reusable registry and non-workspace dependency artifacts.
+      - name: Warm dependencies for the Windows landing graph
+        if: steps.windows-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core -p clonk-logging -p clonk-network --locked --no-fail-fast --no-run
+          cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-network -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
+
+  windows-release-tools:
+    name: Windows release tooling
+    needs: windows-landing-cache
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.cache_only }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    concurrency:
+      # Smoke may also preempt this post-cache validation so the next queue
+      # candidate never waits behind the longer shipped-runtime build.
+      group: "windows-landing-cache-${{ (github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: release ')) && github.sha || 'rolling' }}"
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
       # Release invokes this binary on the Windows host. Build its real release
       # graph here without serializing it ahead of the merge-critical runtime.
@@ -131,9 +321,9 @@ jobs:
           # LLD independently hashes every input before reusing an entry.
           key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs') }}
 
-      # The earlier cache serves smoke tests and the native packaging tool.
-      # Re-enter it after setting target flags so this producer has the same
-      # dependency-cache identity as the merge queue's shipped build.
+      # Keep the shipped graph in its own write-capable cache action. Swatinem
+      # cleans target in its post step, so nesting it with the landing-cache
+      # producer would erase that producer's artifacts before publication.
       - name: Restore or publish the shipped MSVC dependency cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
