@@ -279,7 +279,7 @@ jobs:
       - name: Warm dependencies for the Windows landing graph
         if: steps.windows-cache.outputs.cache-hit != 'true'
         run: |
-          cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core -p clonk-logging -p clonk-network --locked --no-fail-fast --no-run
+          cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core -p clonk-logging -p clonk-network --locked --no-run
           cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-network -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
 
   windows-release-tools:

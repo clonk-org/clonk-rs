@@ -99,6 +99,12 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("shared-key: windows-runtime-msvc-v2", windows_producer)
         self.assertIn("-p clonk-network", windows_producer)
         self.assertIn("cargo clippy --profile test --no-deps", windows_producer)
+        compile_only = next(
+            line
+            for line in windows_producer.splitlines()
+            if "cargo nextest run" in line and "--no-run" in line
+        )
+        self.assertNotIn("--no-fail-fast", compile_only)
         self.assertNotIn("cache-on-failure:", windows_producer)
         self.assertNotIn("cache-workspace-crates: true", windows_producer)
         self.assertIn("needs: windows-landing-cache", release_tools)
