@@ -2031,6 +2031,65 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
     main_assert_eq!(second.path => install.path().join("Screenshots/Screenshot002.png"));
 }
 
+/// F9 copies the physical presented frame; only Ctrl+F9 re-renders and scales
+/// (`C4GraphicsSystem::SaveScreenshot(false)`; `game_app/saves.rs`
+/// `save_next_screenshot`). So a non-integer window scale must not reach the
+/// presented-frame branch at all: the saved image stays the physical buffer,
+/// byte for byte and at physical extent.
+///
+/// That is the whole difference between a screenshot and a resample. Anything
+/// that scaled here would resample glyph and facet edges, which is exactly the
+/// clipped-text and edge-bleeding failure this path is supposed to rule out
+/// (clonk-org/clonk-rs#579).
+#[test]
+fn f9_capture_ignores_window_scale_and_stays_the_physical_frame() {
+    let install = tempdir();
+    let user_data = tempdir();
+    fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
+    fs::write(install.path().join("planet/System.c4g/LanguageUS.txt"), b"IDS_PRC_SCREENSHOT=Saved screenshot %s.\nIDS_PRC_SCREENSHOTERROR=Failure creating screenshot %s.\n").test_value();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
+
+    let mut app = new_menu_app(320, 200);
+    app.app_paths = Some(paths);
+
+    // Deliberately asymmetric and fully saturated so a resample of any kind
+    // would disturb the bytes rather than average into itself.
+    let presented = vec![
+        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255, 1, 2, 3, 255, 250, 240,
+        230, 255, 9, 8, 7, 255, 16, 32, 64, 255,
+    ];
+    let expected: Vec<u8> = presented
+        .chunks_exact(4)
+        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .collect();
+
+    // 1.0 is the baseline the other F9 tests already use; the rest are the
+    // fractional and integer window scales a real display can hand over.
+    for scale in [1.0_f32, 1.25, 1.5, 2.0, 2.5] {
+        app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::F9, ElementState::Released);
+        let outcome = app
+            .save_next_screenshot(Some(&presented), 4, 2, scale)
+            .test_value();
+        main_assert!(
+            outcome.result.is_ok(),
+            "F9 at scale {scale} failed: {:?}",
+            outcome.result
+        );
+        let (width, height, pixels) = decode_rgb_screenshot(&outcome.path);
+        main_assert_eq!(
+            (width, height) => (4, 2),
+            "scale {scale} must not change the captured extent"
+        );
+        main_assert_eq!(
+            pixels => expected.clone(),
+            "scale {scale} must not resample the captured pixels"
+        );
+    }
+}
+
 #[test]
 fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     let install = tempdir();
