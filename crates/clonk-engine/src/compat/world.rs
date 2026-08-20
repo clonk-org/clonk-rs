@@ -2089,23 +2089,47 @@ impl LazyHostWorldProvider {
 #[derive(Clone, Default)]
 pub(crate) struct HostWorldObjectStore {
     objects: HashMap<ObjectId, Rc<HostWorldObject>>,
-    pub(crate) order: Vec<ObjectId>,
+    /// Storage order. Valid only after [`Self::ensure_ordered`]; between a
+    /// materialization and the next read this holds materialization order.
+    order: Vec<ObjectId>,
+    order_dirty: bool,
     indices: HashMap<ObjectId, usize>,
     removed: HashSet<ObjectId>,
     complete: bool,
 }
 
 impl HostWorldObjectStore {
-    fn insert_ordered_by_index(&mut self, id: ObjectId, index: usize) {
-        // `get` materializes a previously absent object, so the id is not
-        // already in `order`. Insert after equal indices to match appending
-        // followed by stable `sort_by_key`, without re-sorting every prior
-        // materialization.
-        let indices = &self.indices;
-        let insert_at = self.order.partition_point(|object_id| {
-            indices.get(object_id).copied().unwrap_or(usize::MAX) <= index
-        });
-        self.order.insert(insert_at, id);
+    /// Record a newly materialized object. `get` materializes a previously
+    /// absent object, so the id is not already in `order`.
+    ///
+    /// Ordering is deferred rather than maintained: a lazy world materializes
+    /// far more often than anything reads storage order — 622,893 against 30
+    /// over 201 frames of the volcano scenario in clonk-org/clonk-rs#497 — and
+    /// splicing into the middle of `order` moved ~9.3 MB per frame to keep a
+    /// 492-element list sorted.
+    fn record_materialized(&mut self, id: ObjectId) {
+        self.order.push(id);
+        self.order_dirty = true;
+    }
+
+    /// Restore storage order. Appending and then stably sorting on the
+    /// materialization index reproduces the previous insert-after-equal-indices
+    /// splice exactly: the keys are `enumerate` indices and so unique, and ties
+    /// against an absent index keep materialization order either way.
+    fn ensure_ordered(&mut self) {
+        if !self.order_dirty {
+            return;
+        }
+        let mut order = std::mem::take(&mut self.order);
+        order.sort_by_key(|id| self.indices.get(id).copied().unwrap_or(usize::MAX));
+        self.order = order;
+        self.order_dirty = false;
+    }
+
+    /// Storage order, sorted.
+    pub(crate) fn ordered(&mut self) -> &[ObjectId] {
+        self.ensure_ordered();
+        &self.order
     }
 }
 
@@ -2566,10 +2590,7 @@ impl HostWorldContext {
         store.indices.insert(id, index);
         store.objects.insert(id, Rc::new(object));
         if !store.order.contains(&id) {
-            store.order.push(id);
-            store.order.sort_by_key(|object_id| {
-                store.indices.get(object_id).copied().unwrap_or(usize::MAX)
-            });
+            store.record_materialized(id);
         }
     }
 
@@ -2780,6 +2801,7 @@ impl HostWorldContext {
                     .map(|(index, id)| (id, index))
                     .collect(),
                 removed: HashSet::new(),
+                order_dirty: false,
                 complete: true,
             })),
             lazy_world: None,
@@ -3646,10 +3668,11 @@ impl HostWorldContext {
             store.indices.insert(id, index);
             store.objects.insert(id, Rc::new(object));
         }
+        // `keys()` is unordered, so this is only a set; `ensure_ordered`
+        // imposes the storage order.
         store.order = store.objects.keys().copied().collect();
-        store
-            .order
-            .sort_by_key(|id| store.indices.get(id).copied().unwrap_or(usize::MAX));
+        store.order_dirty = true;
+        store.ensure_ordered();
         store.complete = true;
     }
 
@@ -3678,7 +3701,7 @@ impl HostWorldContext {
         #[cfg(test)]
         crate::HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(|count| count.set(count.get() + 1));
         store.objects.insert(id, Rc::new(object.clone()));
-        store.insert_ordered_by_index(id, index);
+        store.record_materialized(id);
         Some(object)
     }
 
@@ -3704,7 +3727,7 @@ impl HostWorldContext {
         }
         store.indices.insert(id, index);
         store.objects.insert(id, Rc::clone(&object));
-        store.insert_ordered_by_index(id, index);
+        store.record_materialized(id);
         Some(object)
     }
 
@@ -4084,8 +4107,31 @@ impl HostWorldContext {
         self.solid_mask_instance_sequences.borrow_mut().remove(&id);
     }
 
+    /// Impose storage order before a reader observes `order`.
+    ///
+    /// Materialization defers sorting (see
+    /// [`HostWorldObjectStore::record_materialized`]), so every path that reads
+    /// `order` as a sequence goes through here first. Membership tests and
+    /// removals do not, being order-independent.
+    fn ensure_order_sorted(&self) {
+        let mut store = self.object_store.borrow_mut();
+        if store.order_dirty {
+            Rc::make_mut(&mut store).ensure_ordered();
+        }
+    }
+
+    /// Storage order of the objects materialized *so far*, without forcing the
+    /// rest of a lazy world into existence — which is what distinguishes it
+    /// from [`Self::object_ids`].
+    #[cfg(test)]
+    pub(crate) fn materialized_order(&self) -> Vec<ObjectId> {
+        self.ensure_order_sorted();
+        self.object_store.borrow().order.clone()
+    }
+
     pub(crate) fn object_ids(&self) -> Vec<ObjectId> {
         self.materialize_objects();
+        self.ensure_order_sorted();
         self.object_store.borrow().order.clone()
     }
 
@@ -4097,6 +4143,7 @@ impl HostWorldContext {
         let Some(provider) = self.lazy_world else {
             return self.object_ids();
         };
+        self.ensure_order_sorted();
         let store = self.object_store.borrow();
         if store.complete {
             return store.order.clone();
@@ -4125,6 +4172,7 @@ impl HostWorldContext {
         let Some(provider) = self.lazy_world else {
             return self.object_ids();
         };
+        self.ensure_order_sorted();
         let store = self.object_store.borrow();
         if store.complete {
             return store.order.clone();
@@ -4884,6 +4932,7 @@ impl HostWorldContext {
         self.materialize_objects();
         let mut cache = self.sectors.borrow_mut();
         if cache.is_none() {
+            self.ensure_order_sorted();
             let store = self.object_store.borrow();
             // `C4LSectors::Add` receives the live forward master list, so each
             // sector's own list carries master-list order (C4Sector.cpp:88-101;
