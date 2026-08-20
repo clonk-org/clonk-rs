@@ -2464,9 +2464,11 @@ mod tests {
 
         let first = capture();
         let second = capture();
+        // clonk-org/clonk-rs#271: a compact instance rather than a generic
+        // quad. The texture identity this test is about is unchanged.
         let texture = |scene: &clonk_graphics::GpuScene| match scene.commands.as_slice() {
-            [clonk_graphics::GpuCommand::Quad { texture, .. }] => *texture,
-            commands => panic!("expected one retained custom-image quad, got {commands:?}"),
+            [clonk_graphics::GpuCommand::ObjectBatch { texture, .. }] => *texture,
+            commands => panic!("expected one retained custom-image command, got {commands:?}"),
         };
         assert_eq!(texture(&first), texture(&second));
     }

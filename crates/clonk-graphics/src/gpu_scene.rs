@@ -1878,6 +1878,28 @@ mod tests {
         assert_eq!(std::mem::size_of::<GpuObjectSprite>(), 88);
     }
 
+    /// The compact record is smaller than the four vertices a generic quad
+    /// spends on the same sprite, which is the whole point of routing eligible
+    /// non-object draws through it (clonk-org/clonk-rs#271).
+    ///
+    /// Pinned as a comparison rather than two loose numbers so the saving
+    /// cannot quietly invert: a future field added to `GpuObjectSprite`
+    /// without one added to `GpuVertex` would fail here rather than in a
+    /// benchmark nobody runs.
+    #[test]
+    fn a_compact_instance_costs_less_than_the_quad_it_replaces() {
+        let compact = std::mem::size_of::<GpuObjectSprite>();
+        let generic = std::mem::size_of::<GpuVertex>() * 4;
+        assert!(
+            compact < generic,
+            "compact instance is {compact} bytes against {generic} for four vertices",
+        );
+        assert!(
+            compact <= 96,
+            "clonk-org/clonk-rs#271 budgets the generalized instance at 96 bytes, got {compact}",
+        );
+    }
+
     #[test]
     fn object_sprite_rejects_reserved_packed_flags() {
         let valid = GpuObjectSprite::new(

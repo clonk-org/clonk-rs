@@ -1345,17 +1345,21 @@ mod tests {
             .expect("capture remains active")
             .into_scene([5, 3], Color::transparent(), &GammaRamp::identity());
         assert_eq!(scene.commands.len(), 2);
-        let clonk_graphics::GpuCommand::Quad {
+        // clonk-org/clonk-rs#271: an eligible non-object sprite is a compact
+        // instance rather than a generic quad. Still one ordered textured
+        // command in painter order — the record it carries is smaller.
+        let clonk_graphics::GpuCommand::ObjectBatch {
+            sprites,
             blend,
-            sampler,
             gamma,
             ..
         } = &scene.commands[1]
         else {
             panic!("nearest facet did not remain a textured painter command");
         };
+        assert_eq!(sprites.len(), 1);
         assert_eq!(*blend, clonk_graphics::GpuBlend::Normal);
-        assert_eq!(*sampler, clonk_graphics::GpuSampler::Nearest);
+        assert_eq!(sprites[0].sampler(), clonk_graphics::GpuSampler::Nearest);
         assert!(!*gamma);
     }
 

@@ -3413,10 +3413,12 @@ mod tests {
             &scene.commands[0],
             clonk_graphics::GpuCommand::Solid { .. }
         ));
-        let clonk_graphics::GpuCommand::Quad { sampler, .. } = &scene.commands[1] else {
-            panic!("owner portrait overlay was not retained as a texture quad");
+        // clonk-org/clonk-rs#271: a compact instance rather than a generic quad.
+        let clonk_graphics::GpuCommand::ObjectBatch { sprites, .. } = &scene.commands[1] else {
+            panic!("owner portrait overlay was not retained as a texture command");
         };
-        assert_eq!(*sampler, clonk_graphics::GpuSampler::Linear);
+        assert_eq!(sprites.len(), 1);
+        assert_eq!(sprites[0].sampler(), clonk_graphics::GpuSampler::Linear);
     }
 
     // Pixel-exact C4StartupPlrSelDlg geometry at 1280x720, derived from
