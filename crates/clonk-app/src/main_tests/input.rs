@@ -5409,6 +5409,56 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
     main_assert!(!app.display_flags.is_fullscreen, "dispatching the bound action must not change the display mode");
 }
 
+/// A rebound `FullscreenPauseToggle` **replaces** the Pause key rather than
+/// joining it: `runtime_keyboard_binding_matches` only falls back to the
+/// default when no override exists for the action, so once KeyConfig names a
+/// key, the native default stops pausing
+/// (`C4Game::TogglePause`; `game_app/input.rs` pause dispatch).
+///
+/// The existing pause coverage all drives the default Pause key, at which a
+/// port that ignored KeyConfig entirely and one that honours it are
+/// indistinguishable (clonk-org/clonk-rs#577).
+#[test]
+fn rebound_pause_toggle_replaces_the_default_pause_key() {
+    let mut app = new_running_sandbox_app();
+    main_assert!(!app.runtime_halt_active(), "the round starts running");
+
+    // Default binding: the Pause key halts and resumes.
+    app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Pause, ElementState::Released);
+    main_assert!(app.runtime_halt_active(), "the default Pause key halts the round");
+    app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Pause, ElementState::Released);
+    main_assert!(!app.runtime_halt_active(), "and resumes it");
+
+    // Rebind the action to F8.
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(parse_runtime_key_config(
+            b"[Keys]\nFullscreenPauseToggle=F8\n",
+        )
+        .expect("parse an F8 pause binding")))
+        .test_value();
+
+    app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F8, ElementState::Released);
+    main_assert!(
+        app.runtime_halt_active(),
+        "the rebound key halts the round"
+    );
+    app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F8, ElementState::Released);
+    main_assert!(!app.runtime_halt_active(), "and resumes it");
+
+    // The displaced default is inert: it must not pause any more.
+    app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Pause, ElementState::Released);
+    main_assert!(
+        !app.runtime_halt_active(),
+        "a rebound pause action leaves the native default key inert"
+    );
+}
+
 /// On the SDL backend `C4KeyCodeEx::String2KeyCode` delegates every physical
 /// key name to `SDL_GetScancodeFromName` and accepts any non-UNKNOWN result
 /// (C4KeyboardInput.cpp:315-330), so a migrated `KeyConfig.txt` may legitimately
