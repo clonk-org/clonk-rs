@@ -1970,6 +1970,60 @@ mod fine_fog_tests {
         let map = ClrModMap::reset(resolution, resolution, 256, 256, 0, 0, 0, 0, 0).unwrap();
         assert_eq!((map.resolution_x, map.resolution_y), (16, 16));
     }
+
+    /// Splitting the screen does **not** multiply the fog map budget, which is
+    /// the "multiple viewports" half of clonk-org/clonk-rs#300's first
+    /// criterion and the reason its threshold does not scale with player count.
+    ///
+    /// The grid is sized from the *viewport*, not the screen, so two
+    /// half-height viewports carve up the same area into the same number of
+    /// cells. All that is added is one extra row of boundary cells per split,
+    /// because each viewport rounds its own edge up.
+    ///
+    /// Phase profile behind the threshold, measured at 3840x2160 (test profile,
+    /// which is optimized here; M-series). `reset` is `ClrModMap::reset` alone,
+    /// `loop` is the remainder — source resolution plus `reduce_modulation`:
+    ///
+    /// | sources | grid | cells  | reset | loop     |
+    /// |---------|------|--------|-------|----------|
+    /// | 1       | 64px | 2,135  | 0.1us | 3.1us    |
+    /// | 8       | 64px | 2,135  | 0.1us | 18.2us   |
+    /// | 32      | 64px | 2,135  | 0.1us | 66.7us   |
+    /// | 1       | 16px | 32,776 | 1.0us | 35.2us   |
+    /// | 8       | 16px | 32,776 | 1.0us | 254.0us  |
+    /// | 32      | 16px | 32,776 | 0.9us | 1018.2us |
+    ///
+    /// The reset the issue names as a suspect is 0.09%-2.8% of the build; the
+    /// per-cell source loop is everything else and scales as cells x sources.
+    /// At the shipped C++ 64px grid the worst case above is 67us, or 0.4% of a
+    /// 16.7ms frame.
+    #[test]
+    fn split_screen_viewports_do_not_multiply_the_fog_cell_budget() {
+        let fine = fog_cell_resolution(64, FINE_FOG_CELL_DIVISOR);
+        let cells = |resolution, width, height| {
+            ClrModMap::reset(resolution, resolution, width, height, 0, 0, 0, 0, 0)
+                .expect("4K fog grid resets")
+                .cells
+                .len()
+        };
+
+        for (label, resolution, whole) in [("coarse", 64, 2135), ("fine", fine, 32776)] {
+            let full = cells(resolution, 3840, 2160);
+            assert_eq!(full, whole, "{label} whole-screen budget moved");
+            // Two stacked viewports covering the same 4K area.
+            let split = 2 * cells(resolution, 3840, 1080);
+            assert!(
+                split > full,
+                "{label}: each split viewport rounds its own edge up, so the \
+                 total must grow slightly: {split} vs {full}"
+            );
+            assert!(
+                split * 100 < full * 105,
+                "{label}: splitting the screen must stay within 5% of the whole-screen \
+                 budget rather than multiplying it: {split} vs {full}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
