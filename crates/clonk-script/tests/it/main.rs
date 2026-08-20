@@ -9,6 +9,7 @@ mod integration_tests;
 mod test_any_type;
 mod test_appendto;
 mod test_array_append;
+mod test_array_assignment_scaling;
 mod test_assignment_in_if;
 mod test_assignment_in_unary;
 mod test_body_declarations;
