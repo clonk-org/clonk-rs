@@ -970,6 +970,13 @@ impl GraphicsSystem {
         self.point_filtering
     }
 
+    /// `pApp->GetScale()`, the other half of the `StdGL.cpp:527` filtering
+    /// decision. Screens that blit their own images need it to reach the same
+    /// verdict the runtime sprite path does.
+    pub fn presentation_scale(&self) -> f32 {
+        self.presentation_scale
+    }
+
     pub fn set_sky_dither(&mut self, dither: bool) {
         self.sky_dither = dither;
     }

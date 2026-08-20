@@ -468,6 +468,11 @@ pub struct PlayerPropertiesAssets {
     /// word and the top-right "x" are painted into this sheet; the matching
     /// `CloseIconButton`s carry `Ico_None` and draw nothing themselves.
     pub background: ImageData,
+    /// `Config.Graphics.PointFiltering` and `pApp->GetScale()`, carried here
+    /// because the nested portrait selector's thumbnail blits obey
+    /// `StdGL.cpp:527` like every other textured blit.
+    pub point_filtering: bool,
+    pub application_scale: f32,
     /// `GUIBigArrows.png` — `fctBigArrows`, four 19x40 phases:
     /// Left, Right, Left-down, Right-down (`C4GuiButton.cpp:262-269`).
     pub big_arrows: ImageData,
@@ -1670,6 +1675,8 @@ impl PlayerPropertiesScreen {
             scroll: &assets.scroll,
             control: &assets.control,
             button_highlight: &assets.button_highlight,
+            point_filtering: assets.point_filtering,
+            application_scale: assets.application_scale,
         }
     }
 }

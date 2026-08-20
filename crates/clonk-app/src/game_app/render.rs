@@ -1769,6 +1769,9 @@ impl GameApp {
                     self.begin_native_text_capture(true);
                 }
                 let startup_assets = Arc::clone(&self.assets);
+                // Read before the surface is borrowed mutably below.
+                let point_filtering = self.graphics.point_filtering();
+                let application_scale = self.graphics.presentation_scale();
                 let portrait_selector_open = self
                     .startup_player_properties_dialog
                     .as_ref()
@@ -1779,7 +1782,7 @@ impl GameApp {
                     .and_then(|pending| pending.controller.portrait_selector())
                     .is_some_and(|selector| selector.is_location_popup_open());
                 if let (Some(properties_assets), Some(fonts), Some(book)) = (
-                    startup_assets.plrprop_assets(),
+                    startup_assets.plrprop_assets(point_filtering, application_scale),
                     startup_assets.clonk_fonts.as_deref(),
                     startup_assets.options_book_fonts.as_deref(),
                 ) {
@@ -1852,7 +1855,7 @@ impl GameApp {
                         self.next_pending_native_overlay();
                     }
                     if let (Some(properties_assets), Some(fonts), Some(pending)) = (
-                        startup_assets.plrprop_assets(),
+                        startup_assets.plrprop_assets(point_filtering, application_scale),
                         startup_assets.clonk_fonts.as_deref(),
                         self.startup_player_properties_dialog.as_ref(),
                     ) {

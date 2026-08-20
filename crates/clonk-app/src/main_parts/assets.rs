@@ -6523,11 +6523,17 @@ impl FrontendAssets {
         })
     }
 
+    /// The nested portrait selector blits thumbnails, so it needs the same
+    /// filtering inputs every other textured blit takes (`StdGL.cpp:527`).
     pub(crate) fn plrprop_assets(
         &self,
+        point_filtering: bool,
+        application_scale: f32,
     ) -> Option<clonk_frontend::startup_plrproperties::PlayerPropertiesAssets> {
         Some(
             clonk_frontend::startup_plrproperties::PlayerPropertiesAssets {
+                point_filtering,
+                application_scale,
                 background: self.dialog_image("StartupPlrPropBG.png")?,
                 big_arrows: self.dialog_image("GUIBigArrows.png")?,
                 book_scroll: self.dialog_image("StartupBookScroll.png")?,

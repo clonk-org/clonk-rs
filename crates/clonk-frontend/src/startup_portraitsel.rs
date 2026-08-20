@@ -1627,7 +1627,26 @@ impl PortraitSelController {
         match &item.thumbnail {
             PortraitThumbnail::Ready(image) => {
                 let fitted = aspect_fit(image, picture);
-                crate::draw_image_bilinear(surface, &gui_rect(fitted), image, gamma);
+                // A thumbnail only escapes filtering when it is already the
+                // right size, or when `PointFiltering` is set at scale 1 —
+                // the same `StdGL.cpp:527` rule the runtime sprite path uses.
+                let exact = fitted.w == image.width() as i32 && fitted.h == image.height() as i32;
+                if clonk_graphics::sampling::stdgl_blit_sampling(
+                    resources.application_scale,
+                    resources.point_filtering,
+                    exact,
+                ) == clonk_graphics::sampling::BlitSampling::Linear
+                {
+                    crate::draw_image_bilinear(surface, &gui_rect(fitted), image, gamma);
+                } else {
+                    draw_facet_nearest(
+                        surface,
+                        image,
+                        SurfaceRect::new(0, 0, image.width(), image.height()),
+                        SurfaceRect::new(fitted.x, fitted.y, fitted.w as u32, fitted.h as u32),
+                        gamma,
+                    );
+                }
             }
             PortraitThumbnail::Pending | PortraitThumbnail::Loading => {
                 resources.fonts.mini.draw_with_gamma(
@@ -1753,6 +1772,13 @@ pub struct PortraitSelResources<'a> {
     pub scroll: &'a ImageData,
     pub control: &'a ImageData,
     pub button_highlight: &'a ImageData,
+    /// `Config.Graphics.PointFiltering`. `StdGL.cpp:527` drops linear
+    /// filtering only when the application scale is exactly 1, so this is
+    /// consulted together with [`Self::application_scale`], never on its own.
+    pub point_filtering: bool,
+    /// `pApp->GetScale()`. Any value other than 1 filters regardless of
+    /// `PointFiltering`.
+    pub application_scale: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2180,6 +2206,21 @@ mod tests {
     }
 
     fn render_test_controller(controller: &mut PortraitSelController) -> Surface {
+        render_test_controller_with_filtering(controller, false)
+    }
+
+    fn render_test_controller_with_filtering(
+        controller: &mut PortraitSelController,
+        point_filtering: bool,
+    ) -> Surface {
+        render_test_controller_scaled(controller, point_filtering, 1.0)
+    }
+
+    fn render_test_controller_scaled(
+        controller: &mut PortraitSelController,
+        point_filtering: bool,
+        application_scale: f32,
+    ) -> Surface {
         let caption = crate::test_support::load_graphics_png("GUICaption.png");
         let button = crate::test_support::load_graphics_png("GUIButton.png");
         let button_down = crate::test_support::load_graphics_png("GUIButtonDown.png");
@@ -2202,6 +2243,8 @@ mod tests {
                 scroll: &scroll,
                 control: &control,
                 button_highlight: &highlight,
+                point_filtering,
+                application_scale,
             },
             None,
         );
@@ -3967,6 +4010,84 @@ mod tests {
         );
         assert!(
             !controller.complete_thumbnail(&stale, Ok(ImageData::new(1, 1, vec![1, 2, 3, 255])),)
+        );
+    }
+
+    /// `PointFiltering` turns thumbnail upscaling into nearest-neighbour
+    /// (clonk-org/clonk-rs#571).
+    ///
+    /// `StdGL.cpp:527` decides filtering once for every textured blit:
+    ///
+    /// ```text
+    /// enableTextureFiltering = (scale != 1) || (!exact && !PointFiltering)
+    /// ```
+    ///
+    /// so linear filtering survives `PointFiltering=true` at any scale other
+    /// than 1, and is dropped only when the application scale is exactly 1.
+    /// The port drew every thumbnail bilinear regardless, which is right for
+    /// the default (`PointFiltering=false`) and wrong for the players who set
+    /// it — the setting exists for cards that filter badly, so ignoring it
+    /// takes away the sharp upscale they asked for.
+    #[test]
+    fn point_filtering_upscales_thumbnails_without_blending_at_scale_one() {
+        // Two flat, maximally distinct texels. Nearest-neighbour can only ever
+        // emit these two colours; bilinear must invent intermediate ones
+        // across the seam, so the two paths are distinguishable by colour
+        // alone without depending on any particular tile geometry.
+        let red = [255_u8, 0, 0, 255];
+        let blue = [0_u8, 0, 255, 255];
+        let source = ImageData::new(2, 1, [red.as_slice(), blue.as_slice()].concat());
+
+        let rendered_at = |point_filtering: bool, application_scale: f32| {
+            let mut controller = PortraitSelController::new(
+                vec![PortraitLocation::new("User Path", "/portraits")],
+                0,
+                vec![PortraitFileEntry {
+                    full_path: PathBuf::from("/portraits/a.png"),
+                    filename: "a.png".to_string(),
+                    label: "a".to_string(),
+                }],
+                true,
+                true,
+            );
+            // The decode cadence releases one request per idle interval.
+            let request = (0..LOAD_IDLE_INTERVAL + 1)
+                .find_map(|_| controller.advance_idle())
+                .expect("the file entry queues a thumbnail");
+            assert!(controller.complete_thumbnail(&request, Ok(source.clone())));
+            render_test_controller_scaled(&mut controller, point_filtering, application_scale)
+        };
+        let rendered = |point_filtering: bool| rendered_at(point_filtering, 1.0);
+
+        // Scan only the thumbnail grid: the surrounding wooden chrome is full
+        // of pixels that mix red and blue and would swamp the signal.
+        let grid = portrait_sel_layout(640, 480, 1).grid;
+        let blended = |surface: &Surface| {
+            (grid.x.max(0)..(grid.x + grid.w).min(surface.width() as i32))
+                .flat_map(|x| {
+                    (grid.y.max(0)..(grid.y + grid.h).min(surface.height() as i32))
+                        .map(move |y| (x as u32, y as u32))
+                })
+                .filter_map(|(x, y)| surface.get_pixel(x, y))
+                // A nearest upscale of these two texels can only emit pure red
+                // or pure blue; any pixel carrying both is interpolated.
+                .any(|pixel| pixel.a != 0 && pixel.r != 0 && pixel.b != 0 && pixel.g == 0)
+        };
+
+        assert!(
+            blended(&rendered(false)),
+            "the default PointFiltering=false keeps the linear blend"
+        );
+        assert!(
+            !blended(&rendered(true)),
+            "PointFiltering=true at scale 1 must upscale without inventing colours"
+        );
+        // The half that is easy to get backwards: the setting is honoured
+        // *only* at scale 1. Any other scale resamples anyway, so C++ keeps
+        // GL_LINEAR regardless of PointFiltering.
+        assert!(
+            blended(&rendered_at(true, 2.0)),
+            "PointFiltering must not survive a non-unit application scale"
         );
     }
 }
