@@ -2031,7 +2031,14 @@ pub(crate) fn draw_image_region_rotated(
         0.0,
         1.0,
     );
-    if capture_gpu_sprite(
+    // A rotated sprite is a transformed sprite with no owner mask, which the
+    // compact record already represents: projective positions, reversed UV
+    // edges, per-corner packed modulation, MOD2 and per-instance sampling. The
+    // only caller is the rotated definition-particle path, whose 40-byte
+    // axis-aligned batch cannot express rotation and so fell back to a
+    // 232-byte generic quad — for 59 of the 130 particle definitions in the
+    // current content snapshot (clonk-org/clonk-rs#271).
+    if capture_gpu_object_sprite(
         surface,
         (
             center_x - half_w,

@@ -13473,6 +13473,88 @@ mod tests {
         );
     }
 
+    /// A rotated definition particle lowers to the compact transformed-sprite
+    /// record rather than a generic quad.
+    ///
+    /// The 40-byte axis-aligned particle batch cannot express rotation, so a
+    /// nonzero `RByV` drops out of it — and it used to land on the 232-byte
+    /// generic quad. The compact record already carries everything a rotated
+    /// sprite needs (projective positions, reversed UV edges, per-corner packed
+    /// modulation, MOD2, per-instance sampling), and 59 of the 130 particle
+    /// definitions in the current content snapshot rotate
+    /// (clonk-org/clonk-rs#271).
+    #[test]
+    fn a_rotated_definition_particle_lowers_to_a_compact_sprite() {
+        let mut graphics = test_graphics_with(
+            32,
+            32,
+            16,
+            "rotated-particle",
+            Arc::new(HashMap::new()),
+            Arc::new(CursorAtlas::default()),
+            Arc::new(HudGraphics::default()),
+        );
+        let mut definitions = HashMap::new();
+        definitions.insert(
+            "SPIN".to_string(),
+            ParticleRenderDefinition {
+                image: ImageData::new(1, 1, vec![200, 0, 0, 255]),
+                facet: ParticleFacet::new(0, 0, 1, 1),
+                length: 1,
+                aspect: 4.0,
+                core: ParticleDefCore {
+                    name: "SPIN".to_string(),
+                    // Rotate by velocity: this is what leaves the batch.
+                    r_by_v: 1,
+                    ..ParticleDefCore::default()
+                },
+                draw_proc: ParticleDrawProc::Std,
+            },
+        );
+        graphics.set_particle_sprites(Arc::new(definitions));
+
+        let particles = vec![ParticleSnapshot {
+            definition_id: "SPIN".to_string(),
+            position: FloatVector2::new(16.0, 14.0),
+            // A nonzero velocity is what makes `c4_particle_angle` nonzero.
+            velocity: FloatVector2::new(1.0, 0.0),
+            life: 0,
+            parameter_a: 2.0,
+            parameter_b: 0x00ff_ffff,
+            layer: ParticleLayer::Global,
+            pxs_fixed: None,
+            pxs_slot: None,
+        }];
+
+        graphics.surface_mut().begin_gpu_scene_capture();
+        graphics.draw_definition_particles(&particles, &ParticleLayer::Global, None, None);
+        let scene = graphics
+            .surface_mut()
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene(
+                [32, 32],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::identity(),
+            );
+
+        let mut object_sprites = 0;
+        let mut quads = 0;
+        for command in &scene.commands {
+            match command {
+                clonk_graphics::GpuCommand::ObjectBatch { .. } => object_sprites += 1,
+                clonk_graphics::GpuCommand::Quad { .. } => quads += 1,
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            object_sprites, 1,
+            "the rotated particle takes the compact transformed-sprite record"
+        );
+        assert_eq!(quads, 0, "and emits no generic quad");
+    }
+
     #[test]
     fn std_particles_apply_aspect_parallax_velocity_rotation_and_packed_modulation() {
         fn definition(
