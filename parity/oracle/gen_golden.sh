@@ -650,6 +650,13 @@ awk '
 ' "$src/C4Movement.cpp" > "$gen/target_bounds.inc"
 
 awk '
+  /^bool C4Shape::Attach\(int32_t &cx, int32_t &cy, uint8_t cnat_pos\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Shape.cpp" > "$gen/shape_attach.inc"
+
+awk '
   /^bool C4Shape::ContactCheck\(int32_t cx, int32_t cy\)$/ { p = 1 }
   p { print }
   p && /^}$/ { found = 1; exit }

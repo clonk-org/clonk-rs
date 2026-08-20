@@ -4081,6 +4081,8 @@ const int32_t MNone = -1;
 const int32_t MVehicle = 3;
 const int32_t SolidDensity = 50;   // C4M_Solid, C4Material.h:201
 const int32_t VehicleDensity = 100; // C4M_Vehicle, C4Material.h:200
+const int32_t AttachRange = 5;      // C4Physics.h:24
+const int32_t GBackWdt = GridWdt;   // C4Wrappers.h:86
 
 // 0 sky, 1 earth, 2 water, 3 vehicle (what a closed border answers).
 const int32_t g_density[4] = {0, 50, 30, VehicleDensity};
@@ -4093,30 +4095,25 @@ static int32_t g_right_open = 0;
 static bool g_top_open = true;
 static bool g_bottom_open = false;
 
-// The GetPix border cascade, returning a material rather than a texmap byte:
-// the scaffold's grid stores materials directly.
-static int32_t border_material(int32_t x, int32_t y, bool &out_of_bounds)
+// The GetPix border cascade (C4Landscape.h:163-180). The grid stores texmap
+// bytes, and this fixture maps byte to material one to one, so PixCol2Mat is
+// the identity outside sky.
+static uint8_t GBackPix(int32_t x, int32_t y)
 {
-    out_of_bounds = true;
-    if (x < 0) return y < g_left_open ? MNone : MVehicle;
-    if (x >= GridWdt) return y < g_right_open ? MNone : MVehicle;
-    if (y < 0) return g_top_open ? MNone : MVehicle;
-    if (y >= GridHgt) return g_bottom_open ? MNone : MVehicle;
-    out_of_bounds = false;
-    return g_grid[y][x];
+    if (x < 0) return y < g_left_open ? 0 : MVehicle;
+    if (x >= GridWdt) return y < g_right_open ? 0 : MVehicle;
+    if (y < 0) return g_top_open ? 0 : MVehicle;
+    if (y >= GridHgt) return g_bottom_open ? 0 : MVehicle;
+    return static_cast<uint8_t>(g_grid[y][x]);
 }
 
-static int32_t GBackMat(int32_t x, int32_t y)
-{
-    bool out_of_bounds = false;
-    return border_material(x, y, out_of_bounds);
-}
+static int32_t PixCol2Mat(uint8_t pix) { return pix ? pix : MNone; }
 
-static int32_t GBackDensity(int32_t x, int32_t y)
-{
-    const int32_t mat = GBackMat(x, y);
-    return mat < 0 ? 0 : g_density[mat];
-}
+static int32_t MatDensity(int32_t mat) { return mat < 0 ? 0 : g_density[mat]; }
+
+static int32_t GBackMat(int32_t x, int32_t y) { return PixCol2Mat(GBackPix(x, y)); }
+
+static int32_t GBackDensity(int32_t x, int32_t y) { return MatDensity(GBackMat(x, y)); }
 
 const int32_t MaxVertex = 8;
 
@@ -4132,10 +4129,18 @@ struct C4Shape
     int32_t ContactCNAT{};
     int32_t ContactCount{};
 
+    // C4Shape::Attach's outputs (C4Shape.cpp:176, 217-219, 253-255).
+    int32_t AttachMat{MNone};
+    int32_t iAttachX{};
+    int32_t iAttachY{};
+    int32_t iAttachVtx{};
+
     bool ContactCheck(int32_t cx, int32_t cy);
+    bool Attach(int32_t &cx, int32_t &cy, uint8_t cnat_pos);
 };
 
 #include "shape_contact_check.inc"
+#include "shape_attach.inc"
 
 // C4Object::TargetBounds (C4Movement.cpp:128-164), the clamp SideBounds and
 // VerticalBounds run the movement target through. It decides which velocity
@@ -4613,7 +4618,7 @@ int main()
             for (int32_t y = 0; y < GridHgt; ++y)
                 for (int32_t x = 0; x < GridWdt; ++x)
                 {
-                    int32_t mat = y >= 10 ? 1 : MNone;
+                    int32_t mat = y >= 10 ? 1 : 0;
                     if (y >= 11 && x >= 3 && x <= 5) mat = 2;
                     if (x >= 17 && x <= 18 && y >= 6) mat = 1;
                     g_grid[y][x] = mat;
@@ -4658,6 +4663,114 @@ int main()
     // decides which velocity component is zeroed — CNAT_Left/CNAT_Right clear
     // xdir, anything else clears ydir — and fires a Contact call. The crossed
     // case pins that both bounds fire, low first.
+    // C4Shape::Attach (C4Shape.cpp:165-271), the search attached movement runs
+    // instead of the ordinary collision loop. The two branches differ in a way
+    // that matters: the old-style search loops vertices OUTSIDE and the range
+    // inside, so a second matching vertex starts from the position the first
+    // one already moved to, while CNAT_MultiAttach loops the range outside and
+    // takes the nearest attachment across all vertices, breaking both loops.
+    arr_begin("shape_attach");
+    {
+        using namespace shape_contact;
+
+        struct Vertex
+        {
+            int32_t x, y, cnat;
+        };
+        struct Case
+        {
+            const char *name;
+            int32_t at_x, at_y;
+            int32_t attach;
+            int32_t left_open, right_open;
+            bool top_open, bottom_open;
+            int32_t vtx_num;
+            Vertex vertices[MaxVertex];
+        };
+
+        const int32_t Left = CNAT_Left, Right = CNAT_Right, Top = CNAT_Top, Bottom = CNAT_Bottom;
+        const int32_t Multi = CNAT_MultiAttach;
+        const Case cases[] = {
+            // Standing three pixels above the earth surface: the downward scan
+            // starts five above and walks down, so it lands on the surface and
+            // corrects cy.
+            {"bottom_from_above", 8, 7, Bottom, 0, 0, true, false, 1, {{0, 0, Bottom}}},
+            // Already resting on it: the scan still runs and still reports the
+            // pixel it attached to.
+            {"bottom_on_surface", 8, 9, Bottom, 0, 0, true, false, 1, {{0, 0, Bottom}}},
+            // Too far above for the range to reach.
+            {"bottom_out_of_range", 8, 2, Bottom, 0, 0, true, false, 1, {{0, 0, Bottom}}},
+            // Sideways onto the pillar at x=17..18.
+            {"right_onto_pillar", 14, 8, Right, 0, 0, true, false, 1, {{0, 0, Right}}},
+            {"left_onto_pillar", 21, 8, Left, 0, 0, true, false, 1, {{0, 0, Left}}},
+            // Upward against the pillar's underside.
+            {"top_under_pillar", 17, 10, Top, 0, 0, true, false, 1, {{0, 0, Top}}},
+            // A vertex whose CNAT does not match the requested direction is
+            // never considered.
+            {"cnat_mismatch", 8, 7, Bottom, 0, 0, true, false, 1, {{0, 0, Top}}},
+            // Two matching vertices, old style: the loop moves the position for
+            // the first, then runs the second from THERE.
+            {"two_vertices_old_style", 8, 7, Bottom, 0, 0, true, false, 2,
+             {{-4, 0, Bottom}, {4, -2, Bottom}}},
+            // The same shape and position with CNAT_MultiAttach: the range is
+            // the outer loop, so the nearest match across both vertices wins.
+            {"two_vertices_multi", 8, 7, Bottom | Multi, 0, 0, true, false, 2,
+             {{-4, 0, Bottom}, {4, -2, Bottom}}},
+            // A closed left border answers solid to a density probe, but Attach
+            // additionally requires `ax >= 0`, so an object can CONTACT the
+            // edge of the map without attaching to it.
+            {"closed_border_no_attach", 0, 4, Left, 0, 0, true, false, 1, {{0, 0, Left}}},
+            // No direction bits at all: the switch leaves xcd and ycd zero, so
+            // the range is empty and nothing is searched.
+            {"no_direction", 8, 7, 0, 0, 0, true, false, 1, {{0, 0, Bottom}}},
+        };
+
+        for (const Case &c : cases)
+        {
+            for (int32_t y = 0; y < GridHgt; ++y)
+                for (int32_t x = 0; x < GridWdt; ++x)
+                {
+                    int32_t byte = y >= 10 ? 1 : 0;
+                    if (y >= 11 && x >= 3 && x <= 5) byte = 2;
+                    if (x >= 17 && x <= 18 && y >= 6) byte = 1;
+                    g_grid[y][x] = byte;
+                }
+
+            g_left_open = c.left_open;
+            g_right_open = c.right_open;
+            g_top_open = c.top_open;
+            g_bottom_open = c.bottom_open;
+
+            C4Shape shape;
+            shape.VtxNum = c.vtx_num;
+            shape.ContactDensity = SolidDensity;
+            for (int32_t v = 0; v < c.vtx_num; ++v)
+            {
+                shape.VtxX[v] = c.vertices[v].x;
+                shape.VtxY[v] = c.vertices[v].y;
+                shape.VtxCNAT[v] = c.vertices[v].cnat;
+            }
+
+            int32_t cx = c.at_x, cy = c.at_y;
+            const bool attached = shape.Attach(cx, cy, static_cast<uint8_t>(c.attach));
+
+            sep();
+            printf("{\"case\":\"%s\",\"at_x\":%d,\"at_y\":%d,\"attach\":%d,"
+                   "\"left_open\":%d,\"right_open\":%d,\"top_open\":%d,\"bottom_open\":%d,"
+                   "\"attached\":%d,\"x\":%d,\"y\":%d,\"attach_mat\":%d,\"attach_x\":%d,"
+                   "\"attach_y\":%d,\"attach_vtx\":%d,\"vertices\":[",
+                   c.name, c.at_x, c.at_y, c.attach, c.left_open, c.right_open,
+                   c.top_open ? 1 : 0, c.bottom_open ? 1 : 0, attached ? 1 : 0, cx, cy,
+                   shape.AttachMat, shape.iAttachX, shape.iAttachY, shape.iAttachVtx);
+            for (int32_t v = 0; v < c.vtx_num; ++v)
+                printf("%s{\"x\":%d,\"y\":%d,\"cnat\":%d}", v ? "," : "", c.vertices[v].x,
+                       c.vertices[v].y, c.vertices[v].cnat);
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
     arr_begin("target_bounds");
     {
         struct Case

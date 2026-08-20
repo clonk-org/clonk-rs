@@ -236,6 +236,78 @@ impl crate::engine_splash::SplashHost for SplashProbe {
     }
 }
 
+/// The 24x16 landscape `parity/oracle/oracle_main.cpp`'s `shape_contact`
+/// scaffolds: sky above y=10, earth below, a water pocket at x=3..5 and a
+/// pillar at x=17..18, with the border configuration under test. Installing it
+/// on the engine is what resolves the grid's material names.
+fn install_contact_oracle_landscape(
+    engine: &mut Engine,
+    left_open: i32,
+    right_open: i32,
+    top_open: bool,
+    bottom_open: bool,
+) {
+    const WIDTH: u32 = 24;
+    const HEIGHT: i32 = 16;
+
+    let mut bytes = vec![0u8; WIDTH as usize * HEIGHT as usize];
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH as i32 {
+            let mut byte = u8::from(y >= 10);
+            if y >= 11 && (3..=5).contains(&x) {
+                byte = 2;
+            }
+            if (17..=18).contains(&x) && y >= 6 {
+                byte = 1;
+            }
+            bytes[y as usize * WIDTH as usize + x as usize] = byte;
+        }
+    }
+    let mut densities = vec![0; 128];
+    densities[1] = 50;
+    densities[2] = 30;
+    let mut material_names = vec![None; 128];
+    material_names[1] = Some("Earth".to_string());
+    material_names[2] = Some("Water".to_string());
+
+    let mut landscape = Landscape::flat(WIDTH, HEIGHT);
+    landscape.set_pixel_grid(PixelGrid::new(
+        WIDTH,
+        HEIGHT as u32,
+        bytes,
+        densities,
+        material_names,
+        vec![None; 128],
+    ));
+    landscape.set_border_open(left_open, right_open, top_open, bottom_open);
+    let vehicle = engine
+        .materials
+        .id_of("Vehicle")
+        .expect("the fixture declares Vehicle");
+    landscape.set_vehicle_material(Some(vehicle));
+    engine.set_landscape(landscape);
+}
+
+/// The material library the `shape_contact` grid's bytes map onto.
+fn contact_oracle_materials() -> clonk_resources::MaterialLibrary {
+    clonk_resources::MaterialLibrary::parse(
+        r#"
+        [Material Earth]
+        Name=Earth
+        Density=50
+
+        [Material Water]
+        Name=Water
+        Density=30
+
+        [Material Vehicle]
+        Name=Vehicle
+        Density=100
+        "#,
+    )
+    .expect("contact oracle materials parse")
+}
+
 fn expect_json_eq(section: &str, index: usize, field: &str, cpp: Value, rust: Value) {
     if cpp != rust {
         write_parity_diff_from_environment(section, index, field, cpp.clone(), rust.clone());
@@ -2021,27 +2093,7 @@ fn parity_differential_matches_cpp_golden() {
     //     the map instead of letting it walk out of the world, and the
     //     `*_border` cases pin it from both sides.
     {
-        // The oracle's grid: 0 sky, 1 earth (density 50), 2 water (30), and
-        // vehicle for what a closed border answers.
-        let library = clonk_resources::MaterialLibrary::parse(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=50
-
-            [Material Water]
-            Name=Water
-            Density=30
-
-            [Material Vehicle]
-            Name=Vehicle
-            Density=100
-            "#,
-        )
-        .expect("contact check oracle materials parse");
-
-        const WIDTH: u32 = 24;
-        const HEIGHT: i32 = 16;
+        let library = contact_oracle_materials();
 
         for (idx, case) in golden["shape_contact_check"]
             .as_array()
@@ -2051,52 +2103,13 @@ fn parity_differential_matches_cpp_golden() {
         {
             let mut engine = Engine::with_seed(0);
             engine.configure_materials_from_library(&library);
-
-            // Sky above y=10, earth below, a water pocket at x=3..5 and a
-            // granite-shaped earth pillar at x=17..18.
-            let mut bytes = vec![0u8; WIDTH as usize * HEIGHT as usize];
-            for y in 0..HEIGHT {
-                for x in 0..WIDTH as i32 {
-                    let mut byte = if y >= 10 { 1 } else { 0 };
-                    if y >= 11 && (3..=5).contains(&x) {
-                        byte = 2;
-                    }
-                    if (17..=18).contains(&x) && y >= 6 {
-                        byte = 1;
-                    }
-                    bytes[y as usize * WIDTH as usize + x as usize] = byte;
-                }
-            }
-            let mut densities = vec![0; 128];
-            densities[1] = 50;
-            densities[2] = 30;
-            let mut material_names = vec![None; 128];
-            material_names[1] = Some("Earth".to_string());
-            material_names[2] = Some("Water".to_string());
-
-            let mut landscape = Landscape::flat(WIDTH, HEIGHT);
-            landscape.set_pixel_grid(PixelGrid::new(
-                WIDTH,
-                HEIGHT as u32,
-                bytes,
-                densities,
-                material_names,
-                vec![None; 128],
-            ));
-            landscape.set_border_open(
+            install_contact_oracle_landscape(
+                &mut engine,
                 i(case, "left_open") as i32,
                 i(case, "right_open") as i32,
                 i(case, "top_open") != 0,
                 i(case, "bottom_open") != 0,
             );
-            let vehicle = engine
-                .materials
-                .id_of("Vehicle")
-                .expect("the fixture declares Vehicle");
-            landscape.set_vehicle_material(Some(vehicle));
-            // Installing the landscape is what resolves the grid's material
-            // names against the engine's MaterialSet.
-            engine.set_landscape(landscape);
             let landscape = engine
                 .landscape()
                 .expect("contact oracle landscape remains");
@@ -2231,6 +2244,129 @@ fn parity_differential_matches_cpp_golden() {
             expected, actual,
             "PARITY DIVERGENCE in `target_bounds` entry {idx} contacts"
         );
+    }
+
+    // 0i. C4Shape::Attach (C4Shape.cpp:165-271), the search attached movement
+    //     runs instead of the ordinary collision loop. The two branches differ
+    //     in a way that shows up in play: the old-style search loops vertices
+    //     OUTSIDE and the range inside, so a second matching vertex starts from
+    //     the position the first already moved to — `two_vertices_old_style`
+    //     ends up BELOW the surface at y=11 — while CNAT_MultiAttach loops the
+    //     range outside and takes the nearest attachment across all vertices,
+    //     landing on the surface at y=9. That is the "stucking" the C++ comment
+    //     at C4Shape.cpp:179-194 describes, and it is why both branches exist.
+    //
+    //     `closed_border_no_attach` pins the other asymmetry worth knowing: a
+    //     closed border answers solid to a density probe, but Attach also
+    //     requires `ax >= 0`, so an object can CONTACT the edge of the map
+    //     without attaching to it.
+    {
+        let library = contact_oracle_materials();
+
+        for (idx, case) in golden["shape_attach"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let mut engine = Engine::with_seed(0);
+            engine.configure_materials_from_library(&library);
+            install_contact_oracle_landscape(
+                &mut engine,
+                i(case, "left_open") as i32,
+                i(case, "right_open") as i32,
+                i(case, "top_open") != 0,
+                i(case, "bottom_open") != 0,
+            );
+            let landscape = engine.landscape().expect("attach oracle landscape remains");
+
+            let vertices = case["vertices"]
+                .as_array()
+                .expect("case vertices")
+                .iter()
+                .map(|row| {
+                    crate::ObjectVertex::new(i(row, "x") as i32, i(row, "y") as i32)
+                        .with_cnat(i(row, "cnat") as u32)
+                })
+                .collect::<Vec<_>>();
+            let mut position = crate::Vector2::new(i(case, "at_x") as i32, i(case, "at_y") as i32);
+            let mut record = crate::ShapeAttachRecord::default();
+            let attached = crate::shape_attach(
+                &vertices,
+                &mut position,
+                i(case, "attach") as u32,
+                landscape,
+                &engine.materials,
+                &[],
+                None,
+                50,
+                &mut record,
+            );
+
+            expect_eq(
+                "shape_attach",
+                idx,
+                "attached",
+                i(case, "attached"),
+                i64::from(u8::from(attached)),
+            );
+            expect_eq(
+                "shape_attach",
+                idx,
+                "x",
+                i(case, "x"),
+                i64::from(position.x),
+            );
+            expect_eq(
+                "shape_attach",
+                idx,
+                "y",
+                i(case, "y"),
+                i64::from(position.y),
+            );
+            // C4Shape keeps AttachMat itself; the port keeps only whether the
+            // attachment landed on a valid material and whether that material
+            // is Vehicle, so the oracle's index is compared through those two.
+            expect_eq(
+                "shape_attach",
+                idx,
+                "attach_mat valid",
+                i64::from(i(case, "attach_mat") >= 0),
+                i64::from(u8::from(record.mat_valid)),
+            );
+            expect_eq(
+                "shape_attach",
+                idx,
+                "attach_mat vehicle",
+                i64::from(i(case, "attach_mat") == 3),
+                i64::from(u8::from(record.mat_vehicle)),
+            );
+            // The position fields only overwrite on success
+            // (C4Shape.cpp:217-219, 253-255).
+            if attached {
+                expect_eq(
+                    "shape_attach",
+                    idx,
+                    "attach_x",
+                    i(case, "attach_x"),
+                    i64::from(record.x),
+                );
+                expect_eq(
+                    "shape_attach",
+                    idx,
+                    "attach_y",
+                    i(case, "attach_y"),
+                    i64::from(record.y),
+                );
+                expect_eq(
+                    "shape_attach",
+                    idx,
+                    "attach_vtx",
+                    i(case, "attach_vtx"),
+                    i64::from(record.vtx),
+                );
+            }
+        }
     }
 
     // 1. itofix (whole-integer + precision-denominated).
