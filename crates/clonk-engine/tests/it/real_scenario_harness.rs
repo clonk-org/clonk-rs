@@ -724,6 +724,10 @@ fn alchemy_real_scenario_subcases_batch_2() {
             alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew,
         ),
         (
+            "learned_heal_cast_sustains_magic_and_restores_the_casters_energy",
+            alchemy_learned_heal_cast_sustains_magic_and_restores_the_casters_energy,
+        ),
+        (
             "firefist_flame_consumes_inflammable_landscape",
             alchemy_firefist_flame_consumes_inflammable_landscape,
         ),
@@ -1663,6 +1667,146 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
             .and_then(|bag| bag.components.get("IGOL")),
         Some(2),
         "a successful GGHG cast consumes one gold"
+    );
+}
+
+fn alchemy_learned_heal_cast_sustains_magic_and_restores_the_casters_energy(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy heal parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+    // MGHL's Activate returns without adding its effect when the target is
+    // already at full energy, so the caster has to be hurt for the cast to do
+    // anything at all (Heal.c4d/Script.c:16).
+    let full_energy = engine.test_object_snapshot(mage).energy;
+    crate::support::TestValueExt::test_value(engine.change_object_energy(
+        engine.test_object_index(mage),
+        -20,
+        0,
+        -1,
+    ));
+    let energy_before = engine.test_object_snapshot(mage).energy;
+    assert_eq!(energy_before, full_energy - 20_000);
+
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("IMUS") == Some(4)
+                    && object.components.get("IGOL") == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(attached_bag),
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
+
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "MGHL"));
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let heal_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MGHL"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        heal_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    for _ in 0..50 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+
+    let caster = engine.test_object_snapshot(mage);
+    assert_eq!(caster.action.name, "Magic");
+    // The effect is added to the caster and remembers its target separately,
+    // because the caster is not always the patient -- the wizard tower casts
+    // it on someone else (Heal.c4d/Script.c:18,22-26).
+    assert!(
+        caster
+            .effects
+            .iter()
+            .any(|effect| effect.name == "HealPSpell"),
+        "MGHL adds HealPSpell to the caster: {caster:?}"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IMUS")),
+        Some(2),
+        "a successful MGHL cast consumes two mushrooms (Heal.c4d/DefCore.txt:7)"
+    );
+    // Healing lands in whole `DoEnergy(+2)` steps on the roughly one timer tick
+    // in three that `!Random(3)` selects, so the amount restored so far is a
+    // positive multiple of two energy points and nothing finer
+    // (Heal.c4d/Script.c:43-45). Pinning the step rather than the total keeps
+    // this on what C++ guarantees: the count of steps is drawn from the
+    // synchronized stream, the size of one is not.
+    let restored = caster.energy - energy_before;
+    assert!(
+        restored > 0 && restored % 2_000 == 0,
+        "MGHL restores whole DoEnergy(+2) steps: before={energy_before}; after={}",
+        caster.energy
+    );
+
+    // Left running, the effect stops itself the moment the target is full
+    // rather than overshooting the physical maximum, and takes its own slot
+    // with it (Heal.c4d/Script.c:50).
+    for _ in 0..400 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        if !engine
+            .test_object_snapshot(mage)
+            .effects
+            .iter()
+            .any(|effect| effect.name == "HealPSpell")
+        {
+            break;
+        }
+    }
+    let finished = engine.test_object_snapshot(mage);
+    assert_eq!(
+        finished.energy, full_energy,
+        "MGHL heals up to exactly the physical maximum: {finished:?}"
+    );
+    assert!(
+        !finished
+            .effects
+            .iter()
+            .any(|effect| effect.name == "HealPSpell"),
+        "a fully healed target ends the spell instead of leaving it running: {finished:?}"
     );
 }
 
