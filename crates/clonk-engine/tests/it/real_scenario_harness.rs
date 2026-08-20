@@ -732,6 +732,10 @@ fn alchemy_real_scenario_subcases_batch_2() {
             alchemy_firefist_flame_consumes_inflammable_landscape,
         ),
         (
+            "learned_small_force_field_binds_its_field_to_the_caster",
+            alchemy_learned_small_force_field_binds_its_field_to_the_caster,
+        ),
+        (
             "learned_icestrike_aims_steers_and_impacts_through_player_controls",
             alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls,
         ),
@@ -2050,6 +2054,131 @@ fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu(
             .and_then(|object| object.container),
         Some(mage),
         "opening MART's mode selector does not consume the artefact target"
+    );
+}
+
+fn alchemy_learned_small_force_field_binds_its_field_to_the_caster(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy force field parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+
+    // MFFS is the one sphere-free spell in this set: IMUS=1 plus ILOA=1, and
+    // Alchemy seeds no loam at all, so the mushrooms come from the shipped bag
+    // and the loam is harvested (Alchemy.c4s/Script.c:21-37;
+    // ForceFieldSmall.c4d/DefCore.txt; Bag.c4d/Script.c:148-160).
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("IMUS") == Some(4)
+                    && object.components.get("IGOL") == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(attached_bag),
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
+    // CheckMagicRequirements answers with the number of casts the mage can
+    // afford -- Min(mana casts, ingredient casts) -- not a flag, so the
+    // requirement is met whenever it is positive
+    // (MagiClonk.c4d/Script.c:264-283). Four transferred mushrooms cover four
+    // casts at IMUS=1 each, so it is mana that decides the answer here; the
+    // ingredient half still gates, which is why withholding the transfer
+    // fails this assertion outright.
+    assert!(
+        matches!(
+            engine.call_test_object_function(
+                engine.test_object_index(mage),
+                "CheckMagicRequirements",
+                vec![Value::C4Id("MFFS".into()), Value::Bool(true)],
+            ),
+            Value::Int(casts) if casts >= 1
+        ),
+        "the transferred mushrooms pay for at least one MFFS cast"
+    );
+
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "MFFS"));
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let field_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MFFS"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        field_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    for _ in 0..20 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+
+    // Activate creates the field and immediately binds it with
+    // ObjectSetAction(..., "Field", pCaster), which is what its timer reads
+    // back to find whom to protect (ForceFieldSmall.c4d/Script.c:16-20).
+    let field = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "FRCS" && object.status.is_active())
+            .map(|object| object.id),
+    );
+    let field_state = engine.test_object_snapshot(field);
+    assert_eq!(field_state.action.name, "Field");
+    assert_eq!(
+        field_state.action.target,
+        Some(mage),
+        "the field hangs off its caster: {field_state:?}"
+    );
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "MFFS" && object.status.is_active()),
+        "MFFS removes itself once the field exists"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IMUS")),
+        Some(3),
+        "a successful MFFS cast consumes one mushroom"
     );
 }
 
