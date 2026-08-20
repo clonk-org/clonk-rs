@@ -793,6 +793,10 @@ fn alchemy_real_scenario_subcases_batch_3() {
             alchemy_stone_shield_reads_its_rock_combo_into_the_shield_strength,
         ),
         (
+            "summon_ice_crow_binds_the_summoned_crow_to_its_summoner",
+            alchemy_summon_ice_crow_binds_the_summoned_crow_to_its_summoner,
+        ),
+        (
             "raise_undead_selects_a_dead_clonk_and_animates_it",
             alchemy_raise_undead_selects_a_dead_clonk_and_animates_it,
         ),
@@ -2057,6 +2061,59 @@ fn alchemy_dragon_call_commands_a_grown_riderless_dragon_to_follow(
             .count(),
         1,
         "a successful DGCL survives its own cast"
+    );
+}
+
+fn alchemy_summon_ice_crow_binds_the_summoned_crow_to_its_summoner(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy ice crow parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let mage_position = engine.test_object_snapshot(mage).position;
+    let spell = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("SMIC")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+
+    // Activate is three statements: create the crow, bind it, delete the
+    // spell (SummonIceCrow.c4d/Script.c:14-17).
+    let crow = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "ICCR" && object.status.is_active())
+            .map(|object| object.id),
+    );
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "SMIC" && object.status.is_active()),
+        "SMIC removes itself once the crow is summoned"
+    );
+
+    // The binding is the whole point of the summon: `SetMaser` stores the
+    // summoner in the crow's `pMaster` local, which its Activity AI reads back
+    // every timer tick to decide whom to escort
+    // (IceCrow.c4d/Script.c:5,16,20-).
+    assert_eq!(
+        engine
+            .test_object_snapshot(crow)
+            .local_vars
+            .get("pMaster")
+            .cloned(),
+        Some(Value::Object(mage.as_u64())),
+        "the summoned crow knows its summoner"
     );
 }
 
