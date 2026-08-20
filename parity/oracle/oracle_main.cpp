@@ -52,6 +52,9 @@
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
 //     scaffold records low-speed `Disabled` contact transitions.
+//   * `C4Weather::Execute` and `C4SVal::Evaluate` are mechanically extracted in
+//     full; a tick scaffold records the disaster stream and the RNG ledger per
+//     tick, including the level tests that draw even at level zero.
 //   * `Splash` is mechanically extracted in full; an 8x40 material grid records
 //     its bubble/cast stream and the RNG ledger, including the draw-count drop
 //     once its own extraction has emptied the pixel it tests.
@@ -3918,6 +3921,148 @@ struct C4Object
 
 } // namespace splash_effect
 
+
+// ---------------------------------------------------------------------------
+// C4Weather::Execute (src/C4Weather.cpp). The disaster block is what makes this
+// determinism-critical: four gates in a fixed order, each drawing its
+// `Random(100)` level test EVEN WHEN the level is zero, so the number of draws
+// a tick takes is decided by which outer gates hit rather than by which
+// disasters happen. Three of the four then use the same forced r2-before-r1
+// evaluation order seen elsewhere in the engine.
+//
+// Scaffolded rather than run: `SetSeasonGamma` (with `NoGamma`, which
+// C4Weather::Default sets, the production body returns immediately at
+// C4Weather.cpp:261, so an empty stub is exact for this configuration),
+// `SoundLevel` (presentation), and the three `Launch*` helpers plus
+// `CreateObject` (their production bodies are a CreateObject and an Activate
+// call with no draws of their own, so recording their arguments is what they
+// would have passed on). Nothing here consumes RNG that the production path
+// would not.
+namespace weather_execute
+{
+// The lifted body declares `C4Object *meto;`; nothing is ever read back through
+// it, so an incomplete type is all the scaffold owes it.
+struct C4Object;
+
+int32_t Tick10 = 1;
+int32_t Tick35 = 1;
+int32_t Tick1000 = 1;
+
+const int32_t GBackWdt = 200;
+const int32_t GBackHgt = 100;
+const int32_t NO_OWNER = -1;
+const int32_t MNone = -1;
+const int32_t LavaMaterial = 3;
+
+struct C4SVal
+{
+    int32_t Std{};
+    int32_t Rnd{};
+    int32_t Min{};
+    int32_t Max{};
+
+    int32_t Evaluate();
+};
+
+#include "c4sval_evaluate.inc"
+
+// Recorded effects, in the order Execute produces them.
+struct Event
+{
+    const char *kind;
+    int32_t a, b, c, d;
+};
+
+const int32_t MaxEvents = 32;
+static Event g_events[MaxEvents];
+static int32_t g_event_count = 0;
+
+static void record(const char *kind, int32_t a, int32_t b, int32_t c, int32_t d)
+{
+    if (g_event_count < MaxEvents) g_events[g_event_count] = {kind, a, b, c, d};
+    ++g_event_count;
+}
+
+struct GameStub
+{
+    struct
+    {
+        struct
+        {
+            C4SVal StartSeason;
+            C4SVal Wind;
+        } Weather;
+    } C4S;
+
+    struct
+    {
+        int32_t TopOpen{};
+    } Landscape;
+
+    struct
+    {
+        int32_t Get(const char *name) { return name[0] == 'L' ? LavaMaterial : MNone; }
+    } Material;
+
+    // The meteor arm's CreateObject. Only the arguments are kept: the
+    // production call returns an object this block never reads again.
+    C4Object *CreateObject(unsigned long, void *, int32_t, int32_t x, int32_t y, int32_t,
+                           C4Fixed xdir, C4Fixed ydir, C4Fixed rdir)
+    {
+        record("meteorite", x, y, xdir.val, ydir.val);
+        record("meteorite_rdir", rdir.val, 0, 0, 0);
+        return nullptr;
+    }
+};
+
+static GameStub Game;
+
+static void SoundLevel(const char *, void *, int32_t) {}
+
+struct C4Weather
+{
+    int32_t Season{};
+    int32_t YearSpeed{};
+    int32_t SeasonDelay{};
+    int32_t Wind{};
+    int32_t TargetWind{};
+    int32_t Temperature{};
+    int32_t Climate{};
+    int32_t TemperatureRange{30};
+    int32_t MeteoriteLevel{};
+    int32_t VolcanoLevel{};
+    int32_t EarthquakeLevel{};
+    int32_t LightningLevel{};
+    bool NoGamma{true};
+
+    void Execute();
+    void SetSeasonGamma() {}
+
+    bool LaunchLightning(
+        int32_t x, int32_t y, int32_t xdir, int32_t xrange, int32_t ydir, int32_t yrange, bool)
+    {
+        record("lightning", x, y, xdir, ydir);
+        return true;
+    }
+
+    bool LaunchEarthquake(int32_t x, int32_t y)
+    {
+        record("earthquake", x, y, 0, 0);
+        return true;
+    }
+
+    bool LaunchVolcano(int32_t mat, int32_t x, int32_t y, int32_t size)
+    {
+        record("volcano", x, y, size, mat);
+        return true;
+    }
+};
+
+const unsigned long C4ID_Meteor = 0;
+
+#include "weather_execute.inc"
+} // namespace weather_execute
+
 int main()
 {
     printf("{\n");
@@ -4206,6 +4351,92 @@ int main()
                    c.name, c.seed, probe_y, wet ? 1 : 0, c.in_liquid, obj.InLiquid,
                    splash_effect::g_bubble_count, splash_effect::g_cast_count, RandomCount,
                    static_cast<unsigned>(RandomHold));
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4Weather::Execute's disaster block (C4Weather.cpp:104-148). Each case
+    // runs twenty Tick10 ticks on one seeded stream and records the events and
+    // the ledger after every tick, so a port that reordered the four gates, or
+    // skipped a level test at level zero, diverges on the very first tick that
+    // differs.
+    arr_begin("weather_execute");
+    {
+        struct Case
+        {
+            const char *name;
+            int32_t seed;
+            int32_t meteorite;
+            int32_t lightning;
+            int32_t earthquake;
+            int32_t volcano;
+            int32_t top_open;
+        };
+        const Case cases[] = {
+            // Every level zero: no disaster can fire, yet each gate that opens
+            // still spends its second draw on the level test.
+            {"all_levels_zero", 3, 0, 0, 0, 0, 1},
+            // Everything certain once the outer gate opens.
+            {"all_levels_full", 3, 100, 100, 100, 100, 1},
+            // A cave landscape moves the meteor's spawn and gives it a
+            // downward ydir (C4Weather.cpp:117-119).
+            {"all_levels_full_cave", 3, 100, 100, 100, 100, 0},
+            // Mixed levels, including one zero, so the tick's draw count and
+            // its event list come apart.
+            {"mixed_levels", 11, 50, 100, 0, 25, 1},
+        };
+
+        for (const Case &c : cases)
+        {
+            FixedRandom(c.seed);
+            // The engine fills the Rnd3 table at startup, which spends 500
+            // draws. Execute never reads that table, but the port's
+            // Engine::with_seed fills it too, so the ledgers only line up if
+            // the oracle does the same.
+            Randomize3();
+            weather_execute::Tick10 = 0;
+            weather_execute::Tick35 = 1;
+            weather_execute::Tick1000 = 1;
+            weather_execute::Game.Landscape.TopOpen = c.top_open;
+
+            weather_execute::C4Weather weather;
+            weather.MeteoriteLevel = c.meteorite;
+            weather.LightningLevel = c.lightning;
+            weather.EarthquakeLevel = c.earthquake;
+            weather.VolcanoLevel = c.volcano;
+
+            sep();
+            printf("{\"case\":\"%s\",\"seed\":%d,\"width\":%d,\"height\":%d,"
+                   "\"top_open\":%d,\"meteorite\":%d,\"lightning\":%d,\"earthquake\":%d,"
+                   "\"volcano\":%d,\"ticks\":[",
+                   c.name, c.seed, weather_execute::GBackWdt, weather_execute::GBackHgt,
+                   c.top_open, c.meteorite, c.lightning, c.earthquake, c.volcano);
+            // Four hundred ticks: the outer gates are one in thirty-five to one
+            // in sixty, so a short run would pin nothing but "four draws a
+            // tick". Only the ticks that produced an event are recorded, plus
+            // the ledger sampled every fortieth tick and at the end — enough to
+            // catch a reordered gate or a missing level test without carrying
+            // four hundred rows per case.
+            bool first_tick = true;
+            for (int32_t tick = 0; tick < 400; ++tick)
+            {
+                weather_execute::g_event_count = 0;
+                weather.Execute();
+                const bool sampled = (tick % 40 == 39) || tick == 399;
+                if (!weather_execute::g_event_count && !sampled) continue;
+                if (!first_tick) printf(",");
+                first_tick = false;
+                printf("{\"tick\":%d,\"random_count\":%d,\"random_hold\":%u,\"events\":[",
+                       tick, RandomCount, static_cast<unsigned>(RandomHold));
+                for (int32_t e = 0; e < weather_execute::g_event_count; ++e)
+                    printf("%s{\"kind\":\"%s\",\"a\":%d,\"b\":%d,\"c\":%d,\"d\":%d}",
+                           e ? "," : "", weather_execute::g_events[e].kind,
+                           weather_execute::g_events[e].a, weather_execute::g_events[e].b,
+                           weather_execute::g_events[e].c, weather_execute::g_events[e].d);
+                printf("]}");
+            }
+            printf("]}");
         }
     }
     arr_end();

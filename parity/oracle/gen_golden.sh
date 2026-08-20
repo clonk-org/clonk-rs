@@ -616,6 +616,26 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/object_blast.inc"
 
+# 3t. Lift C4Weather::Execute and the C4SVal::Evaluate the wind target reads
+#     through. The disaster block is four gates in a fixed order, and each gate
+#     draws its `Random(100)` test EVEN WHEN the level is zero — so how many
+#     draws a tick takes depends on which outer gates hit, not on which
+#     disasters happen. Three of the four then use the same forced
+#     r2-before-r1 evaluation order seen elsewhere.
+awk '
+  /^void C4Weather::Execute\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Weather.cpp" > "$gen/weather_execute.inc"
+
+awk '
+  /^int32_t C4SVal::Evaluate\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Scenario.cpp" > "$gen/c4sval_evaluate.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;
