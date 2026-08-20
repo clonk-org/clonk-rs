@@ -4029,6 +4029,204 @@ mod tests {
         );
     }
 
+    /// The change-request gate at the top of `RecheckPlayerInfoTeams`
+    /// (`src/C4Teams.cpp:481-497`, oracle `7d43b47`):
+    ///
+    /// ```cpp
+    /// if (rNewJoin.GetTeam())
+    /// {
+    ///     if (idCurrentTeam == rNewJoin.GetTeam()) return true;
+    ///     if (eTeamDist == TEAMDIST_Free || (eTeamDist == TEAMDIST_Host && fByHost))
+    ///         if (rNewJoin.GetTeam() != TEAMID_New && IsJoin2TeamAllowed(rNewJoin.GetTeam()))
+    ///             return true;
+    ///     rNewJoin.SetTeam(idCurrentTeam);
+    ///     if (idCurrentTeam) return true;
+    /// }
+    /// ```
+    ///
+    /// Accepting a change means *leaving the info alone* — C++ returns true
+    /// without moving the player between team lists, because membership is
+    /// `AddPlayer`'s job later. So the observable difference between accept and
+    /// reject is whether `player.team` survives, which is what these assert.
+    ///
+    /// Note the first case pins the *outcome*, not the short circuit itself:
+    /// removing `idCurrentTeam == rNewJoin.GetTeam()` is unobservable here,
+    /// because a request for the held team then falls through to the accept
+    /// path and is allowed on its own merits. Do not expect a test to catch
+    /// that line going missing — it saves work rather than deciding anything.
+    #[test]
+    fn team_change_request_is_accepted_unchanged_or_when_the_distribution_allows_it() {
+        let base = || crate::InitialNetworkTeamMetadata {
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            teams: vec![
+                initial_team(1, vec![10], 0x00f4_0000, 0),
+                initial_team(2, vec![], 0x0000_c800, 0),
+            ],
+            ..initial_team_metadata()
+        };
+
+        // Requesting the team already held: C++ returns true immediately, so
+        // nothing is drawn, generated, or moved.
+        let mut teams = base();
+        let mut players = vec![ControlPlayerInfoEntry {
+            id: 10,
+            team: 1,
+            ..Default::default()
+        }];
+        let mut oracle = GeneratingTeamAssignmentOracle::default();
+        assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
+        assert_eq!(players[0].team, 1, "the held team is kept");
+        assert!(oracle.ranges.is_empty() && oracle.generation_calls.is_empty());
+        assert_eq!(
+            teams
+                .teams
+                .iter()
+                .map(|t| t.player_ids.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![10], vec![]],
+        );
+
+        // Requesting a different, joinable team under TEAMDIST_Free: accepted,
+        // and the team lists stay exactly as they were.
+        let mut teams = base();
+        let mut players = vec![ControlPlayerInfoEntry {
+            id: 10,
+            team: 2,
+            ..Default::default()
+        }];
+        let mut oracle = GeneratingTeamAssignmentOracle::default();
+        assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
+        assert_eq!(players[0].team, 2, "the requested team survives");
+        assert!(oracle.ranges.is_empty() && oracle.generation_calls.is_empty());
+        assert_eq!(
+            teams
+                .teams
+                .iter()
+                .map(|t| t.player_ids.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![10], vec![]],
+            "accepting a change does not move the player between team lists",
+        );
+    }
+
+    /// `TEAMDIST_Host` admits a change only when the host is the one asking,
+    /// and the random distributions admit none at all — the `eTeamDist` half of
+    /// the same condition.
+    #[test]
+    fn team_change_request_follows_the_distribution_and_host_authority() {
+        let teams_for = |distribution| crate::InitialNetworkTeamMetadata {
+            last_team_id: 2,
+            team_distribution: distribution,
+            teams: vec![
+                initial_team(1, vec![10], 0x00f4_0000, 0),
+                initial_team(2, vec![], 0x0000_c800, 0),
+            ],
+            ..initial_team_metadata()
+        };
+        let requesting_player = || {
+            vec![ControlPlayerInfoEntry {
+                id: 10,
+                team: 2,
+                ..Default::default()
+            }]
+        };
+
+        // Host distribution, host asking: accepted.
+        let mut teams = teams_for(crate::InitialNetworkTeamDistribution::Host);
+        let mut players = requesting_player();
+        let mut oracle = GeneratingTeamAssignmentOracle::default();
+        assign_initial_player_teams(&mut teams, &mut players, &mut oracle, true, true);
+        assert_eq!(
+            players[0].team, 2,
+            "the host may reassign under TEAMDIST_Host"
+        );
+
+        // Host distribution, someone else asking: rejected back to the team
+        // actually held.
+        let mut teams = teams_for(crate::InitialNetworkTeamDistribution::Host);
+        let mut players = requesting_player();
+        let mut oracle = GeneratingTeamAssignmentOracle::default();
+        assign_initial_player_teams(&mut teams, &mut players, &mut oracle, true, false);
+        assert_eq!(
+            players[0].team, 1,
+            "a non-host request under TEAMDIST_Host is reassigned to the current team",
+        );
+
+        // Random distributions admit no change from anyone, host included.
+        for distribution in [
+            crate::InitialNetworkTeamDistribution::Random,
+            crate::InitialNetworkTeamDistribution::RandomInvisible,
+        ] {
+            let mut teams = teams_for(distribution);
+            let mut players = requesting_player();
+            let mut oracle = GeneratingTeamAssignmentOracle::default();
+            assign_initial_player_teams(&mut teams, &mut players, &mut oracle, true, true);
+            assert_eq!(
+                players[0].team, 1,
+                "{distribution:?} admits no team choice at all",
+            );
+        }
+    }
+
+    /// The two rejections that are not about the distribution: a request for
+    /// `TEAMID_New` and a request for a full team.
+    ///
+    /// `TEAMID_New` (-1) is the subtle one. `IsJoin2TeamAllowed` *would* allow
+    /// it whenever teams are auto-generated (`C4Teams.cpp:548`), so the caller
+    /// guards ahead of it — `rNewJoin.GetTeam() != TEAMID_New &&` — with the
+    /// comment that it "would accept TEAMID_New, which shouldn't be used in
+    /// player infos!". An implementation that simply called the helper would
+    /// therefore accept it exactly when auto-generation is on, which is why
+    /// this case pairs the request with `auto_generate_teams: true`.
+    #[test]
+    fn team_change_request_rejects_the_new_team_id_and_full_teams() {
+        let base = |auto_generate| crate::InitialNetworkTeamMetadata {
+            auto_generate_teams: auto_generate,
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            teams: vec![
+                initial_team(1, vec![10], 0x00f4_0000, 0),
+                initial_team(2, vec![12], 0x0000_c800, 1),
+            ],
+            ..initial_team_metadata()
+        };
+
+        // TEAMID_New, with auto-generation on so the helper alone would say yes.
+        let mut teams = base(true);
+        let mut players = vec![ControlPlayerInfoEntry {
+            id: 10,
+            team: -1,
+            ..Default::default()
+        }];
+        let mut oracle = GeneratingTeamAssignmentOracle::default();
+        assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
+        assert_eq!(
+            players[0].team, 1,
+            "TEAMID_New is refused before IsJoin2TeamAllowed is consulted",
+        );
+        assert!(
+            oracle.generation_calls.is_empty(),
+            "and refusing it must not generate the team it asked for",
+        );
+
+        // A full team is refused by IsJoin2TeamAllowed itself.
+        let mut teams = base(false);
+        let mut players = vec![ControlPlayerInfoEntry {
+            id: 10,
+            team: 2,
+            ..Default::default()
+        }];
+        let mut oracle = GeneratingTeamAssignmentOracle::default();
+        assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
+        assert_eq!(players[0].team, 1, "team 2 is at its cap");
+        assert_eq!(
+            teams.teams[1].player_ids,
+            vec![12],
+            "and gains nobody past it",
+        );
+    }
+
     #[test]
     fn initial_host_team_assignment_generates_empty_active_teams_at_cpp_timing() {
         // Existing Teams.txt with no Team sections forces AutoGenerateTeams
