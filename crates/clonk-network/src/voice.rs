@@ -662,6 +662,25 @@ pub(crate) fn voice_datagram_has_cookie(wire: &[u8], expected: VoiceRouteCookie)
         .is_some_and(|candidate| expected.matches(candidate))
 }
 
+/// Opens one sealed datagram.
+///
+/// Every read here is a checked `get`, so nothing a sender controls can panic
+/// this path -- which matters because everything it is handed came off the
+/// network. Two costs are paid before the seal has proved anything, and both
+/// are bounded rather than absent (clonk-org/clonk-rs#469):
+///
+/// - **One copy of the sealed body**, because ring opens in place. Its size is
+///   attacker-chosen, but the receive path drops any datagram longer than
+///   `MAX_VOICE_WIRE_BYTES` before it reaches this function, so the copy is
+///   bounded by that constant and not by what the sender claims.
+/// - **One AEAD open**, for any datagram carrying a cookie that matches the
+///   route. The cookie travels in the clear, so reading one earlier datagram
+///   is enough to keep producing datagrams that reach this point, and the
+///   ingress limiter is deliberately not spent until the seal verifies -- the
+///   alternative lets an on-path forger drain a peer's budget and silence it.
+///   What bounds this is the transport: media is only accepted from a source
+///   already in `Working` status, so the work is charged to an admitted peer
+///   rather than to anyone who can reach the port.
 pub(crate) fn decode_authenticated_voice_packet(
     wire: &[u8],
     cipher: &VoiceMediaCipher,

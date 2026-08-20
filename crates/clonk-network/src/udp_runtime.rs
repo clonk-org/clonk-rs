@@ -38,6 +38,18 @@ pub const RELIABLE_UDP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// (clonk-org/clonk-rs#469).
 const RECEIVE_BUFFER_BYTES: usize = u16::MAX as usize + 1;
 
+/// The voice size gate is what rejects an oversized datagram, and it can only
+/// do that if the datagram arrived whole.
+///
+/// The receive path reads into `receive_buffer` and then compares the length
+/// it got against `MAX_VOICE_WIRE_BYTES`. Were the buffer the smaller of the
+/// two, a sender could push a datagram past the cap and have it trimmed down
+/// to something the gate waves through -- the gate would be measuring the
+/// truncation rather than what was sent. This is a compile-time assertion
+/// rather than a test because both sides are constants: neither can drift into
+/// the other without the crate failing to build (clonk-org/clonk-rs#469).
+const _: () = assert!(crate::voice::MAX_VOICE_WIRE_BYTES < RECEIVE_BUFFER_BYTES);
+
 #[cfg(test)]
 thread_local! {
     static NEXT_DEADLINE_PEER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
