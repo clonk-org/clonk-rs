@@ -190,6 +190,90 @@
         ));
     }
 
+
+    /// The half of `FnMessage`'s speech branch that *does* abort
+    /// (`src/C4Script.cpp:2415-2432`, oracle `7d43b47`):
+    ///
+    /// ```cpp
+    /// bool fSpoken = false;
+    /// if (SCopySegment(FnStringPar(szMessage), 1, buf, '$', MaxFnStringParLen))
+    ///     if (StartSoundEffect(buf, false, 100, cthr->Obj))
+    ///         fSpoken = true;
+    /// if (!fSpoken)
+    ///     if (SCopySegment(FnStringFormat(cthr, ...).c_str(), 0, buf, '$', MaxFnStringParLen))
+    /// ```
+    ///
+    /// `FnStringFormat` runs **only when the speech did not start**, and it
+    /// `throw`s `C4AulExecError("format placeholder without parameter")` on a
+    /// placeholder with no argument — aborting the script, not just the message.
+    ///
+    /// `message_family_speech_uses_cpp_anchor_precedence` pins the other side:
+    /// with the sample present the format is never evaluated, so a missing
+    /// argument is harmless. That test alone cannot distinguish "the error is
+    /// correctly skipped" from "the error is always swallowed", which is what
+    /// this one settles — the same malformed string, the only difference being
+    /// whether the sample exists.
+    ///
+    /// It matters beyond the text: aborting ends the calling script, so a
+    /// divergence here changes which later callbacks run
+    /// (clonk-org/clonk-rs#569).
+    #[test]
+    fn unspoken_message_aborts_on_a_malformed_format_like_cpp() {
+        let mut audio = AudioRegistry::new();
+        // Deliberately not the sample the message advertises.
+        audio.set_available_samples(["somethingelse.wav"]);
+        let audio_guard = enter_audio_context(audio);
+        let (result, outcome) = with_object_host_context(|| {
+            message(&[Value::String("Hello %d$MissingSpeech".into())])
+        });
+        let _ = audio_guard.finish();
+
+        let error = result.expect_err("an unspoken malformed format aborts the script");
+        assert!(
+            error.message().contains("format placeholder without parameter"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            outcome.messages.is_empty(),
+            "the aborted call must not queue a message",
+        );
+    }
+
+    /// The same conditional abort for the rest of the message family, since
+    /// each has its own speech anchor but shares `FnStringFormat`
+    /// (`C4Script.cpp:2445-2462`).
+    #[test]
+    fn unspoken_player_message_family_aborts_on_a_malformed_format() {
+        let mut audio = AudioRegistry::new();
+        audio.set_available_samples(["somethingelse.wav"]);
+        let audio_guard = enter_audio_context(audio);
+        let target = ObjectId::new(2);
+        let (player_result, _) = with_object_host_context(|| {
+            player_message(&[
+                Value::Int(0),
+                Value::String("Hello %d$MissingSpeech".into()),
+                object_reference_value(target),
+            ])
+        });
+        let (plr_result, _) = with_object_host_context(|| {
+            plr_message(&[
+                Value::String("Hello %d$MissingSpeech".into()),
+                Value::Int(0),
+            ])
+        });
+        let _ = audio_guard.finish();
+
+        for (label, result) in [("PlayerMessage", player_result), ("PlrMessage", plr_result)] {
+            let error = result.unwrap_err();
+            assert!(
+                error.message().contains("format placeholder without parameter"),
+                "{label} did not abort: {}",
+                error.message()
+            );
+        }
+    }
+
     #[test]
     fn message_family_speech_keeps_null_definition_caller_anchor() {
         // Definition-commanded effects carry a mutable affected object while
