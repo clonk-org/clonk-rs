@@ -731,6 +731,10 @@ fn alchemy_real_scenario_subcases_batch_2() {
             alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew,
         ),
         (
+            "meditation_is_gated_on_the_no_magic_energy_rule",
+            alchemy_meditation_is_gated_on_the_no_magic_energy_rule,
+        ),
+        (
             "guarding_zaps_turns_carried_gold_into_a_nest_instead_of_zaps",
             alchemy_guarding_zaps_turns_carried_gold_into_a_nest_instead_of_zaps,
         ),
@@ -3504,6 +3508,68 @@ fn alchemy_guarding_zaps_turns_carried_gold_into_a_nest_instead_of_zaps(
             .any(|object| object.definition_id == "GZ9Z" && object.status.is_active()),
         "GZ9Z removes itself on the gold branch"
     );
+}
+
+fn alchemy_meditation_is_gated_on_the_no_magic_energy_rule(prepared: &PreparedInstalledScenario) {
+    // MMED costs no ingredients at all and has exactly one precondition: it
+    // does nothing while any NMGE object exists
+    // (Meditation.c4d/Script.c:10). Alchemy ships `NMGE=1` in its Rules, so
+    // the shipped scenario is the *refusing* case -- which makes the rule
+    // object the variable to move, not the caster.
+    for rule_present in [true, false] {
+        let mut engine = prepared.instantiate();
+        let owner = join_local_player(&mut engine, "Alchemy meditation parity");
+        let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+
+        let rule = crate::support::TestValueExt::test_value(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "NMGE" && object.status.is_active())
+                .map(|object| object.id),
+        );
+        if !rule_present {
+            // FindObject only sees active objects, so deactivating the shipped
+            // rule is what an Alchemy round without it would look like.
+            crate::support::TestValueExt::test_value(engine.apply_object_update(
+                rule,
+                ObjectUpdate::new().with_status(clonk_engine::ObjectStatus::Inactive),
+            ));
+        }
+
+        let spell = engine.spawn_test_object(
+            clonk_engine::SpawnConfig::new("MMED")
+                .with_position(engine.test_object_snapshot(mage).position)
+                .with_owner(owner),
+        );
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(mage.as_u64())],
+        );
+
+        let meditating = engine
+            .test_object_snapshot(mage)
+            .effects
+            .iter()
+            .any(|effect| effect.name == "MeditationPSpell");
+        let spell_alive = engine
+            .object_snapshot(spell)
+            .is_some_and(|spell| spell.status.is_active());
+
+        if rule_present {
+            assert!(!meditating, "NMGE blocks the meditation outright");
+            // The early return is before RemoveObject, so a refused MMED is
+            // also a leftover object -- worth pinning because it is the
+            // difference between "did nothing" and "did nothing and cleaned
+            // up" (Meditation.c4d/Script.c:10,16).
+            assert!(spell_alive, "a refused MMED does not remove itself");
+        } else {
+            assert!(meditating, "without the rule the caster starts meditating");
+            assert!(!spell_alive, "a successful MMED removes itself");
+        }
+    }
 }
 
 fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
