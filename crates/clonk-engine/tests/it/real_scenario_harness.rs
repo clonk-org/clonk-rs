@@ -807,6 +807,10 @@ fn alchemy_real_scenario_subcases_batch_4() {
             "learned_fireball_aims_steers_and_explodes_through_player_controls",
             alchemy_learned_fireball_aims_steers_and_explodes_through_player_controls,
         ),
+        (
+            "learned_eternal_flame_scatters_its_shipped_flame_cast",
+            alchemy_learned_eternal_flame_scatters_its_shipped_flame_cast,
+        ),
     ]);
 }
 
@@ -1815,6 +1819,131 @@ fn alchemy_learned_heal_cast_sustains_magic_and_restores_the_casters_energy(
             .iter()
             .any(|effect| effect.name == "HealPSpell"),
         "a fully healed target ends the spell instead of leaving it running: {finished:?}"
+    );
+}
+
+fn alchemy_learned_eternal_flame_scatters_its_shipped_flame_cast(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy eternal flame parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+
+    // ETFL is the only spell in this set that spends out of both seeded bags:
+    // ISPH=2 against a seeded ISPH=1, and IASH=2 against a seeded IASH=3. Both
+    // go through ALC_::Transfer, plus one harvested sphere
+    // (Alchemy.c4s/Script.c:21-37; EternalFlame.c4d/DefCore.txt;
+    // Bag.c4d/Script.c:148-160).
+    let sphere_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("ISPH") == Some(1)
+                    && object.components.get("IGOL") == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let ash_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("INEC") == Some(1)
+                    && object.components.get("IASH") == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    let extra_sphere = engine.spawn_test_object(
+        SpawnConfig::new("ALC_").with_ordered_components(vec![("ISPH".to_owned(), 1)]),
+    );
+    let attached_bag_index = engine.test_object_index(attached_bag);
+    for source in [sphere_bag, ash_bag, extra_sphere] {
+        engine.call_test_object_function(
+            attached_bag_index,
+            "Transfer",
+            vec![Value::Object(source.as_u64())],
+        );
+    }
+
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "ETFL"));
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let flame_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "ETFL"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        flame_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    for _ in 0..20 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    }
+
+    // The cast is a single CastObjects of six MFLM, thrown to the side the
+    // mage faces, after which the spell deletes itself
+    // (EternalFlame.c4d/Script.c:13-18).
+    let flames = engine
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "MFLM" && object.status.is_active())
+        .count();
+    assert_eq!(flames, 6, "ETFL casts six flames");
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "ETFL" && object.status.is_active()),
+        "ETFL removes itself once the flames are away"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("ISPH")),
+        Some(0),
+        "a successful ETFL cast consumes both spheres"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IASH")),
+        Some(1),
+        "a successful ETFL cast consumes two of the three ashes"
     );
 }
 
