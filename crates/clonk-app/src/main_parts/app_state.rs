@@ -5062,7 +5062,6 @@ pub(crate) struct IngameButtonMouseState {
 pub(crate) struct LobbyParticipantState {
     pub(crate) name: String,
     pub(crate) ready: bool,
-    #[allow(dead_code)]
     pub(crate) kind: ParticipantKind,
 }
 

@@ -1291,7 +1291,6 @@ fn interpret_base_command(base: u8, kind: CommandKind) -> Option<ControlEvent> {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RawPacket {
     id: Option<u8>,
@@ -1303,7 +1302,6 @@ struct RawPacket {
     sections: Vec<(String, Vec<(String, String)>)>,
 }
 
-#[allow(dead_code)]
 impl RawPacket {
     fn new() -> Self {
         Self {
@@ -2200,7 +2198,6 @@ fn parse_player_info_client_data(
     })
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ControlParseError {
     #[error("control log did not start with [Control] section")]
@@ -2264,7 +2261,6 @@ pub enum ControlParseError {
 /// The writer on the C++ side always produces CRLF separated output. The parser is permissive with
 /// respect to whitespace and therefore also accepts LF-only line endings which is convenient for
 /// unit tests.
-#[allow(dead_code)]
 pub fn parse_control_ini(input: &str) -> Result<Vec<ControlPacket>, ControlParseError> {
     enum ParserState {
         Start,
@@ -3587,7 +3583,6 @@ fn normalize_network_filename(value: &str) -> String {
     value.replace('\\', "/")
 }
 
-#[allow(dead_code)]
 fn unescape_value(value: &str) -> String {
     let trimmed = value.trim();
     if !trimmed.starts_with('"') || !trimmed.ends_with('"') {

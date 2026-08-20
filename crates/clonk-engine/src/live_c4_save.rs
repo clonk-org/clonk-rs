@@ -3325,7 +3325,6 @@ struct SerializedLandscape {
     mat_map_txt: Vec<u8>,
     pxs_c4b: Option<Vec<u8>>,
     mass_mover_c4b: Option<Vec<u8>>,
-    saves_auxiliary_systems: bool,
     delete_sky_entry: bool,
 }
 
@@ -3356,7 +3355,6 @@ fn serialize_landscape_for_policy(
                 mat_map_txt: Vec::new(),
                 pxs_c4b: None,
                 mass_mover_c4b: None,
-                saves_auxiliary_systems: false,
                 delete_sky_entry: false,
             });
         }
@@ -3570,7 +3568,6 @@ fn serialize_landscape_for_policy(
         .unwrap_or_default(),
         pxs_c4b,
         mass_mover_c4b,
-        saves_auxiliary_systems,
         delete_sky_entry,
     })
 }
@@ -4158,7 +4155,6 @@ mod tests {
         assert!(saved.landscape_bmp.is_none());
         assert!(saved.diff_landscape_bmp.is_none());
         assert!(saved.map_bmp.is_none());
-        assert!(!saved.saves_auxiliary_systems);
 
         assert!(matches!(
             serialize_landscape_for_policy(&Engine::new(), LiveC4SavePolicy::RuntimeNetwork, false,),

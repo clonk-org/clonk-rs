@@ -66,9 +66,6 @@ impl Engine {
                             line: definition.line(),
                             vertices: definition.shape_vertices().to_vec(),
                             contact_density: Some(definition.contact_density()),
-                            clonk_name_newlines: definition
-                                .clonk_names()
-                                .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32),
                             fire: compat::DefinitionFireMetadata {
                                 def_core_values: compat::DefCoreValueStore::from_definition(
                                     definition,

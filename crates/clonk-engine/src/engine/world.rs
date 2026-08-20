@@ -550,7 +550,6 @@ impl Engine {
         ))
     }
 
-    #[allow(dead_code)]
     #[doc(hidden)]
     pub fn at_object(
         &self,

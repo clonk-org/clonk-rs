@@ -68,22 +68,6 @@ pub(crate) fn entry_crc(name: &str, data: &[u8]) -> u32 {
     crc32_continue(crc32_continue(0, data), name.as_bytes())
 }
 
-/// `C4Group::EntryCRC32(nullptr)` (`C4Group.cpp`) — the **XOR** of every
-/// entry's CRC, which `C4Group_GetFileContentsCRC` returns.
-///
-/// Being an XOR makes it order- and packing-independent, and that is exactly
-/// why it exists: `C4UpdatePackage::Execute`'s verdict accepts a result whose
-/// *contents* CRC matches `GrpContentsCRC2` **or** whose *file* CRC matches
-/// `GrpChks2`. Without the contents CRC an update can only succeed by
-/// reproducing the target byte for byte; with it, an equivalent repack passes.
-pub(crate) fn group_contents_crc<'a>(
-    entries: impl IntoIterator<Item = (&'a str, &'a [u8])>,
-) -> u32 {
-    entries
-        .into_iter()
-        .fold(0, |crc, (name, data)| crc ^ entry_crc(name, data))
-}
-
 fn crc32_continue(initial: u32, data: &[u8]) -> u32 {
     let mut crc = initial ^ u32::MAX;
     for byte in data {
@@ -281,23 +265,12 @@ mod tests {
         // C4Group::EntryCRC32 XORs entry CRCs, and each entry's CRC continues
         // over its filename. Checked against the fixture: the oracle wrote
         // GrpContentsCRC2=3949291798 for g2.c4f's three entries.
-        assert_eq!(
-            group_contents_crc([
-                ("a.txt", b"alpha two\n".as_slice()),
-                ("added.txt", b"new file\n".as_slice()),
-                ("keep.txt", b"shared\n".as_slice()),
-            ]),
-            3_949_291_798
-        );
+        let a_crc = entry_crc("a.txt", b"alpha two\n");
+        let added_crc = entry_crc("added.txt", b"new file\n");
+        let keep_crc = entry_crc("keep.txt", b"shared\n");
+        assert_eq!(a_crc ^ added_crc ^ keep_crc, 3_949_291_798);
         // Order-independent, which is what lets an equivalent repack pass.
-        assert_eq!(
-            group_contents_crc([
-                ("keep.txt", b"shared\n".as_slice()),
-                ("a.txt", b"alpha two\n".as_slice()),
-                ("added.txt", b"new file\n".as_slice()),
-            ]),
-            3_949_291_798
-        );
+        assert_eq!(keep_crc ^ a_crc ^ added_crc, 3_949_291_798);
         // Dropping the filename from the entry CRC gives a different, wrong
         // value — the trap this pins.
         assert_ne!(

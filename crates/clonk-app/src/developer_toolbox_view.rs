@@ -348,13 +348,6 @@ impl ToolsPageModel {
         self.materials.iter().map(String::as_str).collect()
     }
 
-    fn texture_names(&self) -> Vec<&str> {
-        self.textures
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect()
-    }
-
     /// Whether `control` currently reads as pressed. C++ uses radio buttons
     /// for all three groups, so exactly one of each is down at any time.
     fn pressed(&self, control: ToolsControl) -> bool {
