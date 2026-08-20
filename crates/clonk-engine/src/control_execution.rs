@@ -3697,6 +3697,128 @@ mod tests {
         );
     }
 
+    /// The reservoir draw sequence for an n-way tie
+    /// (`src/C4Teams.cpp:446-463`, oracle `7d43b47`).
+    ///
+    /// ```cpp
+    /// else if (pLowestTeam->GetPlayerCount() == (*ppCheck)->GetPlayerCount())
+    ///     if (!SafeRandom(++iLowestTeamCount))
+    ///         pLowestTeam = *ppCheck;
+    /// ```
+    ///
+    /// The first candidate is taken outright, so the k-th *tied* team draws
+    /// `SafeRandom(k)` — 2, 3, 4 — and replaces the incumbent only on a zero.
+    /// Both the ranges and the timing are part of parity: a draw that is
+    /// skipped, doubled, or bounded differently leaves the process `rand()`
+    /// stream at a different position for every later team decision.
+    #[test]
+    fn initial_host_team_tie_draws_the_cpp_reservoir_sequence() {
+        let tied = || {
+            vec![
+                initial_team(1, vec![], 0x00f4_0000, 0),
+                initial_team(2, vec![], 0x0000_c800, 0),
+                initial_team(3, vec![], 0x0020_20ff, 0),
+                initial_team(4, vec![], 0x00fc_f41c, 0),
+            ]
+        };
+
+        // Every draw returns zero, so every tied team displaces the incumbent
+        // and the last one standing wins.
+        let mut always_replace = recording_oracle([0, 0, 0]);
+        assert_eq!(
+            initial_random_smallest_team(&tied(), false, 0, &mut always_replace),
+            Some(3),
+        );
+        assert_eq!(
+            always_replace.ranges,
+            vec![2, 3, 4],
+            "one draw per tied team after the first, bounded by the running count",
+        );
+
+        // No draw returns zero, so the first candidate is never displaced —
+        // same draws, opposite outcome.
+        let mut never_replace = recording_oracle([1, 1, 1]);
+        assert_eq!(
+            initial_random_smallest_team(&tied(), false, 0, &mut never_replace),
+            Some(0),
+        );
+        assert_eq!(
+            never_replace.ranges,
+            vec![2, 3, 4],
+            "the draws happen either way"
+        );
+
+        // Zero-way tie: strictly distinct sizes, so nothing is ever drawn.
+        let mut unique = recording_oracle([]);
+        let distinct = vec![
+            initial_team(1, vec![10, 11, 12], 0x00f4_0000, 0),
+            initial_team(2, vec![13, 14], 0x0000_c800, 0),
+            initial_team(3, vec![], 0x0020_20ff, 0),
+            initial_team(4, vec![15], 0x00fc_f41c, 0),
+        ];
+        assert_eq!(
+            initial_random_smallest_team(&distinct, false, 0, &mut unique),
+            Some(2),
+        );
+        assert!(unique.ranges.is_empty(), "no tie, no draw");
+    }
+
+    /// A strictly smaller team **restarts** the reservoir count
+    /// (`src/C4Teams.cpp:453-456`: `pLowestTeam = *ppCheck; iLowestTeamCount = 1;`).
+    ///
+    /// The bound is a running count of teams tied *with the current minimum*,
+    /// not of candidates seen. Carrying the old count forward would draw
+    /// `SafeRandom(3)` where C++ draws `SafeRandom(2)`, which both biases the
+    /// choice and desynchronizes the stream — and no existing test distinguishes
+    /// the two, because none has a tie *before* a new minimum.
+    #[test]
+    fn initial_host_team_reservoir_count_restarts_on_a_new_minimum() {
+        let teams = vec![
+            initial_team(1, vec![10], 0x00f4_0000, 0),
+            initial_team(2, vec![11], 0x0000_c800, 0),
+            initial_team(3, vec![], 0x0020_20ff, 0),
+            initial_team(4, vec![], 0x00fc_f41c, 0),
+        ];
+        let mut oracle = recording_oracle([1, 1]);
+
+        assert_eq!(
+            initial_random_smallest_team(&teams, false, 0, &mut oracle),
+            Some(2),
+            "the first empty team holds against a losing draw",
+        );
+        assert_eq!(
+            oracle.ranges,
+            vec![2, 2],
+            "the second draw is bounded by the restarted count, not by 3",
+        );
+    }
+
+    /// A full team never advances the reservoir count
+    /// (`src/C4Teams.cpp:451`: `if ((*ppCheck)->IsFull()) continue;` precedes
+    /// the tie arm entirely).
+    ///
+    /// Counting it would bound the next draw by 3 rather than 2 — a team the
+    /// player cannot join changing the odds for the teams they can.
+    #[test]
+    fn initial_host_team_reservoir_skips_full_teams_without_counting_them() {
+        let teams = vec![
+            initial_team(1, vec![], 0x00f4_0000, 0),
+            initial_team(2, vec![11], 0x0000_c800, 1),
+            initial_team(3, vec![], 0x0020_20ff, 0),
+        ];
+        let mut oracle = recording_oracle([1]);
+
+        assert_eq!(
+            initial_random_smallest_team(&teams, false, 0, &mut oracle),
+            Some(0),
+        );
+        assert_eq!(
+            oracle.ranges,
+            vec![2],
+            "the full team between the two empties is not a reservoir candidate",
+        );
+    }
+
     #[test]
     fn initial_host_team_assignment_matches_cpp_order_full_skip_and_team_colors() {
         // RecheckPlayerInfoTeams processes the packet in order. Its
