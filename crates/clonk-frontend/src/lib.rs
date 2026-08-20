@@ -13205,6 +13205,79 @@ mod tests {
         front_assert! {CursorAtlas::new(sparse).image_for_scaled_resolution(320, 1.0).is_none(), "C++ does not substitute a nearby loaded cursor sheet"};
     }
 
+    /// Every cursor phase's atlas index against the literal `C4MC_Cursor_*`
+    /// constant it mirrors (`src/C4MouseControl.cpp:43-76`, oracle `7d43b47`).
+    ///
+    /// `all_cursor_phases_use_cpp_cells_and_hotspots` already sweeps all 34
+    /// phases through a real draw, but it derives the expected pixel from
+    /// `phase.atlas_phase()` — the same function under test — so it proves the
+    /// draw is *self-consistent* and cannot notice `atlas_phase` returning the
+    /// wrong number. Every index here is therefore written out as a literal
+    /// taken from the C++ table rather than computed.
+    ///
+    /// The atlas is one strip indexed by this value, so an index that drifts
+    /// selects a neighbouring cell: the player sees a plausible cursor that
+    /// means something else, which is precisely the "false feedback about what
+    /// a click will do" the issue is about.
+    #[test]
+    fn cursor_phase_atlas_indices_match_the_cpp_constants() {
+        let cases = [
+            (MouseCursorPhase::Region, 0),
+            (MouseCursorPhase::Crosshair, 1),
+            (MouseCursorPhase::Enter, 2),
+            (MouseCursorPhase::Grab, 3),
+            (MouseCursorPhase::Chop, 4),
+            (MouseCursorPhase::Dig, 5),
+            (MouseCursorPhase::Build, 6),
+            (MouseCursorPhase::Select, 7),
+            (MouseCursorPhase::Object, 8),
+            (MouseCursorPhase::Ungrab, 9),
+            (MouseCursorPhase::Up, 10),
+            (MouseCursorPhase::Down, 11),
+            (MouseCursorPhase::Left, 12),
+            (MouseCursorPhase::Right, 13),
+            (MouseCursorPhase::UpLeft, 14),
+            (MouseCursorPhase::UpRight, 15),
+            (MouseCursorPhase::DownLeft, 16),
+            (MouseCursorPhase::DownRight, 17),
+            (MouseCursorPhase::JumpLeft, 18),
+            (MouseCursorPhase::JumpRight, 19),
+            (MouseCursorPhase::Drop, 20),
+            (MouseCursorPhase::ThrowRight, 21),
+            (MouseCursorPhase::Put, 22),
+            // 23 is absent from the C++ table; see the gap assertion below.
+            (MouseCursorPhase::Vehicle, 24),
+            (MouseCursorPhase::VehiclePut, 25),
+            (MouseCursorPhase::ThrowLeft, 26),
+            (MouseCursorPhase::Point, 27),
+            (MouseCursorPhase::DigObject, 28),
+            (MouseCursorPhase::Help, 29),
+            (MouseCursorPhase::DigMaterial, 30),
+            (MouseCursorPhase::Add, 31),
+            (MouseCursorPhase::Construct, 32),
+            (MouseCursorPhase::Attack, 33),
+            (MouseCursorPhase::Nothing, 34),
+        ];
+
+        for (phase, expected) in cases {
+            front_assert_eq! {phase.atlas_phase() => expected, "C4MC_Cursor for {phase:?}"};
+        }
+
+        // The C++ table jumps from Put (22) straight to Vehicle (24): 23 is a
+        // retired identifier and its atlas cell belongs to no cursor. Closing
+        // the gap would silently shift every phase from Vehicle onward by one.
+        let indices = cases.map(|(_, index)| index);
+        front_assert! {!indices.contains(&23), "23 is retired and must stay unused"};
+
+        // And the mapping must stay injective, since two phases sharing a cell
+        // would draw the same picture for different meanings.
+        let mut sorted = indices;
+        sorted.sort_unstable();
+        let mut deduped = sorted.to_vec();
+        deduped.dedup();
+        front_assert_eq! {deduped.len() => sorted.len(), "atlas indices must be distinct"};
+    }
+
     #[test]
     fn all_cursor_phases_use_cpp_cells_and_hotspots() {
         front_assert_eq! {MouseCursorPhase::Down.hotspot(15) => (7, 14)};
