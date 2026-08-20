@@ -8066,3 +8066,106 @@ fn logging_section_sets_stdout_level_and_per_component_overrides() {
         assert!(!target.is_empty(), "{component} has no target");
     }
 }
+
+/// `LoadLanguage`'s hardcoded US fallback, which runs when *nothing* in the
+/// configured sequence resolves (`src/C4Language.cpp:262-263`, oracle
+/// `7d43b47`):
+///
+/// ```cpp
+/// for (int i = 0; SCopySegment(strLanguages, i, strLanguageCode, ',', 2, true); i++)
+///     if (InitStringTable(strLanguageCode)) return true;
+/// // No matching string table found: hardcoded fallback to US
+/// if (InitStringTable("US")) return true;
+/// ```
+///
+/// Every existing language test here has a code in the sequence that resolves,
+/// so the fallback has never been the thing under test — "US" simply happened
+/// to be requested. Here nothing in the sequence exists, which is the only way
+/// to tell the fallback from an ordinary hit.
+///
+/// It also has to be a *full* `InitStringTable("US")`, walking System.c4g and
+/// then the registered packs — not a System-only read — so the pack case is
+/// covered too.
+#[test]
+fn runtime_language_falls_back_to_us_when_no_requested_code_resolves() {
+    let _lock = env_lock().lock();
+    let fixture = runtime_install_fixture(Some("[General]\nLanguageEx=ZZ,QQ\n"));
+    fs::write(
+        fixture.system.join("LanguageUS.txt"),
+        "IDS_LANG_CHARSET=UTF-8\nProbe=fallback from System\n",
+    )
+    .test_value();
+
+    let table = load_runtime_language_table(Some(&fixture.paths)).test_value();
+    runtime_assert_eq!(
+        table.entries.get("Probe").map(String::as_str) => Some("fallback from System");
+    );
+
+    // The same fallback, with LanguageUS.txt only inside a registered pack.
+    let pack = runtime_install_fixture(Some("[General]\nLanguageEx=ZZ,QQ\n"));
+    let pack_system = pack
+        .install
+        .path()
+        .join("planet/Language.c4g/Finnish.c4g/System.c4g");
+    fs::create_dir_all(&pack_system).test_value();
+    fs::write(
+        pack_system.join("LanguageUS.txt"),
+        "IDS_LANG_CHARSET=UTF-8\nProbe=fallback from pack\n",
+    )
+    .test_value();
+
+    let table = load_runtime_language_table(Some(&pack.paths)).test_value();
+    runtime_assert_eq!(
+        table.entries.get("Probe").map(String::as_str) => Some("fallback from pack");
+    );
+}
+
+/// The other arm of the same tail: with no string table anywhere, C++ logs
+/// `Error loading language string table.` and returns false
+/// (`src/C4Language.cpp:264-266`).
+///
+/// The distinction worth pinning is that a missing table is an *error* rather
+/// than an empty table — an empty one would silently render every UI string as
+/// its raw identifier.
+#[test]
+fn runtime_language_reports_an_error_when_even_us_is_missing() {
+    let _lock = env_lock().lock();
+    let fixture = runtime_install_fixture(Some("[General]\nLanguageEx=ZZ,QQ\n"));
+    // A decoy that is not a string table, so the group exists but resolves
+    // nothing.
+    fs::write(fixture.system.join("Probe.c"), "// not a string table\n").test_value();
+
+    let error = load_runtime_language_table(Some(&fixture.paths))
+        .expect_err("no string table is an error, not an empty table");
+    assert!(
+        error.to_string().contains("LanguageUS.txt is unavailable"),
+        "the failure must name the missing fallback: {error}",
+    );
+}
+
+/// `C4Group::LoadEntryString` fails outright on a zero-length entry
+/// (`src/C4Group.cpp:2260-2261`: "other parts crash when they get a zero length
+/// buffer, so fail here"), so an empty `LanguageXX.txt` is a miss rather than an
+/// empty table — and the search continues past it, all the way to the US
+/// fallback if need be.
+///
+/// `runtime_f1_language_lookup_is_case_insensitive_and_skips_empty_candidates`
+/// covers an empty file being skipped in favour of a *later sequence entry*.
+/// This covers it being skipped in favour of the fallback, which is the path
+/// where an "accept the empty table" bug would strand the UI on raw identifiers.
+#[test]
+fn runtime_language_treats_an_empty_table_as_a_miss_not_an_empty_table() {
+    let _lock = env_lock().lock();
+    let fixture = runtime_install_fixture(Some("[General]\nLanguageEx=ZZ\n"));
+    fs::write(fixture.system.join("LanguageZZ.txt"), []).test_value();
+    fs::write(
+        fixture.system.join("LanguageUS.txt"),
+        "IDS_LANG_CHARSET=UTF-8\nProbe=US after the empty ZZ\n",
+    )
+    .test_value();
+
+    let table = load_runtime_language_table(Some(&fixture.paths)).test_value();
+    runtime_assert_eq!(
+        table.entries.get("Probe").map(String::as_str) => Some("US after the empty ZZ");
+    );
+}
