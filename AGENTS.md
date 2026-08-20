@@ -290,6 +290,7 @@ cargo nextest run --workspace --no-fail-fast
 cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
 cargo xtask engine-snapshots verify
 cargo xtask parity verify
+cargo xtask compat verify
 ```
 
 `.github/workflows/landing.yml` additionally runs `cargo fmt --all -- --check`,
@@ -364,6 +365,7 @@ cargo dev-check --base origin/main --plan                # inspect without runni
 cargo nextest run -p <crate>                             # focused
 cargo xtask engine-snapshots record|verify               # Rust self-consistency
 cargo xtask parity record|verify                         # C++↔Rust differential
+cargo xtask compat verify                                # compatibility-profile contract
 ```
 
 Live full-scenario C++ shadow-diff is **not wired**: no crate exposes a C-ABI
