@@ -52,6 +52,9 @@
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
 //     scaffold records low-speed `Disabled` contact transitions.
+//   * `C4Object::AssignRemoval` is mechanically extracted in full; a
+//     container/contents scaffold records its teardown order and the Status
+//     re-checks between the callbacks.
 //   * `C4Effect::Check` is mechanically extracted in full; a configurable
 //     effect list records its negotiation order, the AnnulCalls temp bracket
 //     and the Start_Deny kill.
@@ -4603,6 +4606,273 @@ C4Value FnTimer::Exec(C4Object *, ParSet, bool, bool)
 #include "effect_check.inc"
 } // namespace effect_check
 
+
+// ---------------------------------------------------------------------------
+// C4Object::AssignRemoval (src/C4Object.cpp), the object teardown. Its shape is
+// the parity fact: the container's ContentsDestruction runs before the object's
+// own Destruction, effects are cleared next, and EVERY one of those steps is
+// followed by a `Status` re-check because the callback may already have deleted
+// the object. The contents are then torn down BEFORE the object leaves its own
+// container — reversing those two would give a dying object's cargo a different
+// container to exit into.
+//
+// `fExitContents` chooses whether the cargo is Exited or removed recursively,
+// which is the difference between a destroyed lorry spilling its load and
+// taking it with it.
+namespace object_removal
+{
+struct C4Object;
+
+#define PSF_ContentsDestruction "~ContentsDestruction"
+#define PSF_Destruction "~Destruction"
+
+const int32_t C4OS_DELETED = 0;
+const int32_t C4OS_NORMAL = 1;
+const int32_t C4OS_INACTIVE = 2;
+const int32_t ActIdle = -1;
+const int32_t C4FxCall_RemoveClear = 5; // C4Effects.h
+
+const int32_t MaxTrace = 48;
+static const char *g_trace[MaxTrace];
+static int32_t g_trace_count = 0;
+
+static void trace(const char *what)
+{
+    if (g_trace_count < MaxTrace) g_trace[g_trace_count] = what;
+    ++g_trace_count;
+}
+
+struct C4Value
+{
+};
+
+static C4Value C4VObj(C4Object *) { return {}; }
+
+struct ParSet
+{
+    ParSet() {}
+    ParSet(std::initializer_list<C4Value>) {}
+};
+
+// What a configured callback does besides being recorded.
+enum class Effect
+{
+    None,
+    ClearSelfStatus,
+    // A callback made ON THE CONTAINER that removes the object being torn
+    // down — the case the re-check after ContentsDestruction exists for.
+    ClearRemovingStatus,
+    // A callback that removes the object being torn down by calling the real
+    // teardown on it, which is what a script doing the same would do —
+    // callbacks and all — rather than zeroing a flag.
+    RemoveRemoving,
+};
+
+struct CallConfig
+{
+    const char *tag;
+    const char *fn;
+    Effect effect;
+    // A nested teardown would re-enter the same callback forever; each
+    // configured effect fires once.
+    bool fired;
+};
+
+// The object currently being removed, so a container's callback can reach it.
+static C4Object *g_removing = nullptr;
+
+const int32_t MaxConfigs = 4;
+static CallConfig g_configs[MaxConfigs];
+static int32_t g_config_count = 0;
+
+struct DefStub
+{
+    int32_t Count{1};
+    bool Line{};
+};
+
+struct C4ObjectLink
+{
+    C4Object *Obj{};
+    C4ObjectLink *Next{};
+};
+
+struct ContentsList
+{
+    C4ObjectLink *First{};
+
+    void Add(C4Object *object);
+    void Remove(C4Object *object);
+    int32_t Count() const;
+};
+
+// The two particle chunks the teardown clears. Only the emptiness test and the
+// clear are modelled; particles are presentation.
+struct ParticleList
+{
+    bool Present{};
+
+    explicit operator bool() const { return Present; }
+
+    void Clear()
+    {
+        trace("ParticlesClear");
+        Present = false;
+    }
+};
+
+struct EffectsStub
+{
+    void ClearAll(C4Object *, int32_t) { trace("ClearAllEffects"); }
+};
+
+struct InactiveList
+{
+    bool Held{};
+
+    void Remove(C4Object *) { trace("InactiveRemove"); }
+};
+
+struct ObjectsStub
+{
+    InactiveList InactiveObjects;
+
+    void Add(C4Object *) { trace("MainListAdd"); }
+};
+
+struct GameStub
+{
+    ObjectsStub Objects;
+
+    void ClearPointers(C4Object *) { trace("ClearPointers"); }
+};
+
+static GameStub Game;
+
+struct InfoStub
+{
+    void Retire() { trace("InfoRetire"); }
+};
+
+struct C4Object
+{
+    const char *Tag{""};
+    int32_t Status{C4OS_NORMAL};
+    C4Object *Contained{};
+    ContentsList Contents;
+    EffectsStub *pEffects{};
+    DefStub *Def{};
+    InfoStub *Info{};
+
+    // The reference chain the teardown zeroes, and the solid mask it drops.
+    // Both are pointer bookkeeping outside this section; the stubs record that
+    // they ran, and the reference pops itself so the production
+    // `while (FirstRef)` loop terminates.
+    struct RefStub
+    {
+        RefStub *NextRef{};
+
+        void Set0();
+    } *FirstRef{};
+
+    struct SolidMaskStub
+    {
+        void Remove(bool, bool) { trace("SolidMaskRemove"); }
+    } *pSolidMaskData{};
+
+    ParticleList FrontParticles;
+    ParticleList BackParticles;
+    int32_t RemovalDelay{};
+    int32_t x{}, y{};
+
+    struct
+    {
+        int32_t Wdt{};
+    } SolidMask;
+
+    int32_t Call(const char *fn, ParSet = {});
+
+    void UpdateMass() { trace("UpdateMass"); }
+    void SetOCF() { trace("SetOCF"); }
+    void SetAction(int32_t) { trace("SetActionIdle"); }
+    void ClearCommands() { trace("ClearCommands"); }
+    bool Exit(int32_t, int32_t)
+    {
+        trace("ContentExit");
+        if (Contained) Contained->Contents.Remove(this);
+        Contained = nullptr;
+        return true;
+    }
+
+    void AssignRemoval(bool fExitContents = false);
+};
+
+void ContentsList::Add(C4Object *object)
+{
+    C4ObjectLink **tail = &First;
+    while (*tail) tail = &(*tail)->Next;
+    *tail = new C4ObjectLink{object, nullptr};
+}
+
+void ContentsList::Remove(C4Object *object)
+{
+    C4ObjectLink **link = &First;
+    while (*link)
+    {
+        if ((*link)->Obj == object)
+        {
+            C4ObjectLink *dead = *link;
+            *link = dead->Next;
+            delete dead;
+            return;
+        }
+        link = &(*link)->Next;
+    }
+}
+
+int32_t ContentsList::Count() const
+{
+    int32_t count = 0;
+    for (C4ObjectLink *link = First; link; link = link->Next) ++count;
+    return count;
+}
+
+// The owner whose reference chain a Set0 pops, so the production
+// `while (FirstRef)` loop ends.
+static C4Object *g_ref_owner = nullptr;
+
+void C4Object::RefStub::Set0()
+{
+    trace("RefSet0");
+    if (g_ref_owner) g_ref_owner->FirstRef = NextRef;
+}
+
+int32_t C4Object::Call(const char *fn, ParSet)
+{
+    // C4Object::Call (C4Object.cpp:2224-2228) drops the call outright when the
+    // callee's Status is zero, so a container that is itself already torn down
+    // receives nothing — the teardown reaches the call site either way, which
+    // is why the guard belongs here rather than at the caller.
+    if (!Status || !Def) return 0;
+    trace(fn);
+    for (int32_t i = 0; i < g_config_count; ++i)
+    {
+        if (std::strcmp(g_configs[i].tag, Tag) != 0 || std::strcmp(g_configs[i].fn, fn) != 0)
+            continue;
+        if (g_configs[i].fired) continue;
+        g_configs[i].fired = true;
+        if (g_configs[i].effect == Effect::ClearSelfStatus) Status = C4OS_DELETED;
+        if (g_configs[i].effect == Effect::ClearRemovingStatus && g_removing)
+            g_removing->Status = C4OS_DELETED;
+        if (g_configs[i].effect == Effect::RemoveRemoving && g_removing)
+            g_removing->AssignRemoval();
+    }
+    return 0;
+}
+
+#include "object_assign_removal.inc"
+} // namespace object_removal
+
 int main()
 {
     printf("{\n");
@@ -5221,6 +5491,133 @@ int main()
     // clock FIRST, then fires the timer only when the new time lands exactly on
     // an interval boundary — and kills outright any effect that has an interval
     // but no timer function at all.
+    // C4Object::AssignRemoval (C4Object.cpp:240-320), the object teardown. The
+    // order is the parity fact: the CONTAINER's ContentsDestruction runs before
+    // the object's own Destruction, effects clear next, and each of those steps
+    // is followed by a Status re-check because the callback may already have
+    // deleted the object. Contents are torn down BEFORE the object leaves its
+    // own container.
+    arr_begin("object_removal");
+    {
+        using namespace object_removal;
+
+        struct Case
+        {
+            const char *name;
+            bool contained;
+            bool has_effects;
+            bool has_particles;
+            bool has_info;
+            bool has_reference;
+            bool inactive;
+            int32_t contents;
+            bool exit_contents;
+            int32_t already_removed;
+            int32_t config_count;
+            CallConfig configs[MaxConfigs];
+        };
+
+        const Case cases[] = {
+            // The bare teardown, with nothing attached.
+            {"plain", false, false, false, false, false, false, 0, false, 0, 0, {}},
+            // Already deleted: the very first check returns and nothing runs.
+            {"already_deleted", false, true, true, true, true, false, 2, false, 1, 0, {}},
+            // Contained: the container's ContentsDestruction comes FIRST, and
+            // the object leaves the container only at the end.
+            {"contained", true, false, false, false, false, false, 0, false, 0, 0, {}},
+            // A ContentsDestruction that deletes the object stops everything
+            // else, including the object's own Destruction.
+            {"contents_destruction_deletes", true, true, false, false, false, false, 1, false, 0,
+             1, {{"container", PSF_ContentsDestruction, Effect::RemoveRemoving, false}}},
+            // Destruction deleting the object stops the effect clear.
+            {"destruction_deletes", false, true, false, false, false, false, 1, false, 0, 1,
+             {{"object", PSF_Destruction, Effect::RemoveRemoving, false}}},
+            // Effects are cleared after Destruction, and the particles after
+            // that.
+            {"effects_and_particles", false, true, true, false, false, false, 0, false, 0, 0, {}},
+            // An inactive object is put back on the main list before it is
+            // deleted (C4Object.cpp:277-283).
+            {"inactive_reactivated_first", false, false, false, false, false, true, 0, false, 0,
+             0, {}},
+            // Contents: removed recursively by default, so each one runs its
+            // own teardown...
+            {"contents_removed_recursively", false, false, false, false, false, false, 2, false,
+             0, 0, {}},
+            // ...or Exited when the caller asks, which spills them instead.
+            {"contents_exited", false, false, false, false, false, false, 2, true, 0, 0, {}},
+            // Contained WITH contents: the cargo is torn down before this
+            // object leaves its own container.
+            {"contained_with_contents", true, false, false, false, false, false, 2, false, 0, 0,
+             {}},
+            // The info retire and reference/pointer cleanup tail.
+            {"info_and_references", false, false, false, true, true, false, 0, false, 0, 0, {}},
+        };
+
+        for (const Case &c : cases)
+        {
+            DefStub object_def, container_def, content_def;
+            // The lifted teardown `delete`s the effect list, so it has to be
+            // heap-allocated.
+            EffectsStub *effects = c.has_effects ? new EffectsStub() : nullptr;
+            InfoStub info;
+
+            object_removal::C4Object object;
+            object.Tag = "object";
+            object.Def = &object_def;
+            object.Status = c.already_removed ? C4OS_DELETED
+                                              : (c.inactive ? C4OS_INACTIVE : C4OS_NORMAL);
+            object.pEffects = effects;
+            object.Info = c.has_info ? &info : nullptr;
+            object.FrontParticles.Present = c.has_particles;
+            object.BackParticles.Present = c.has_particles;
+            object.x = 40;
+            object.y = 50;
+
+            object_removal::C4Object::RefStub reference;
+            g_ref_owner = &object;
+            if (c.has_reference) object.FirstRef = &reference;
+
+            object_removal::C4Object container;
+            container.Tag = "container";
+            container.Def = &container_def;
+            if (c.contained)
+            {
+                object.Contained = &container;
+                container.Contents.Add(&object);
+            }
+
+            object_removal::C4Object contents[2];
+            for (int32_t i = 0; i < c.contents; ++i)
+            {
+                contents[i].Tag = "content";
+                contents[i].Def = &content_def;
+                contents[i].Contained = &object;
+                object.Contents.Add(&contents[i]);
+            }
+
+            g_config_count = c.config_count;
+            for (int32_t i = 0; i < c.config_count; ++i) g_configs[i] = c.configs[i];
+            g_trace_count = 0;
+            g_removing = &object;
+
+            object.AssignRemoval(c.exit_contents);
+
+            sep();
+            printf("{\"case\":\"%s\",\"status\":%d,\"removal_delay\":%d,"
+                   "\"still_contained\":%d,\"container_contents\":%d,\"own_contents\":%d,"
+                   "\"def_count\":%d,\"content_status\":[%d,%d],\"calls\":[",
+                   c.name, object.Status, object.RemovalDelay,
+                   object.Contained == &container ? 1 : 0, container.Contents.Count(),
+                   object.Contents.Count(), object_def.Count, contents[0].Status,
+                   contents[1].Status);
+            for (int32_t i = 0; i < g_trace_count && i < MaxTrace; ++i)
+                printf("%s\"%s\"", i ? "," : "", g_trace[i]);
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
     arr_begin("effect_execute");
     {
         struct Row

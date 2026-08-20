@@ -697,6 +697,17 @@ awk '
 #     additionally brackets the FxAdd call in temp-remove/temp-readd of every
 #     effect above it. Which of those branches a port takes decides whether a
 #     second effect exists at all.
+# 3p. Lift C4Object::AssignRemoval, the object teardown. Every step is ordered
+#     against a script callback that may already have deleted the object, and
+#     the contents are torn down BEFORE the object leaves its own container —
+#     a sequence that decides which callbacks a dying object's cargo sees.
+awk '
+  /^void C4Object::AssignRemoval\(bool fExitContents\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_assign_removal.inc"
+
 awk '
   /^void C4Effect::Execute\(C4Object \*pObj\)$/ { p = 1 }
   p { print }

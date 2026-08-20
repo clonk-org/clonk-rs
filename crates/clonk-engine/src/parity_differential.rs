@@ -2938,6 +2938,190 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
+    // 0m. C4Object::AssignRemoval (C4Object.cpp:240-320), the object teardown.
+    //     The order is what this pins:
+    //
+    //       * the CONTAINER's ContentsDestruction runs before the object's own
+    //         Destruction, and each is followed by a `Status` re-check because
+    //         the callback may already have removed the object — a callback
+    //         that does so stops everything after it;
+    //       * the object's contents are torn down BEFORE it leaves its own
+    //         container, so a dying object's cargo still sees it as their
+    //         container; and
+    //       * `fExitContents` decides whether that cargo is Exited (spilled) or
+    //         removed recursively, each one running its own full teardown.
+    //
+    //     The oracle also records bookkeeping the port does not expose
+    //     (SetOCF, UpdateMass, SetActionIdle, ClearPointers, particles, the
+    //     info retire); those entries document where the mutations sit between
+    //     the script calls, and the comparison here is over the script calls
+    //     plus the end state both engines can name.
+    for (idx, case) in golden["object_removal"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let name = case["case"].as_str().unwrap_or_default();
+        let contents = i(case, "own_contents");
+        let _ = contents;
+
+        // Which fixture shape this case needs.
+        let contained = matches!(
+            name,
+            "contained" | "contents_destruction_deletes" | "contained_with_contents"
+        );
+        let cargo = match name {
+            "already_deleted"
+            | "contents_removed_recursively"
+            | "contents_exited"
+            | "contained_with_contents" => 2,
+            "contents_destruction_deletes" | "destruction_deletes" => 1,
+            _ => 0,
+        };
+        let exit_contents = name == "contents_exited";
+        let destruction_body = if name == "destruction_deletes" {
+            "if (!rm_fired) { rm_fired = 1; RemoveObject(); }"
+        } else {
+            ""
+        };
+        let contents_destruction_body = if name == "contents_destruction_deletes" {
+            "if (!rm_fired) { rm_fired = 1; RemoveObject(pObj); }"
+        } else {
+            ""
+        };
+
+        let object_script = format!(
+            "#strict 2\n\
+             static rm_log, rm_fired;\n\
+             protected func Destruction() {{ rm_log = rm_log * 11 + 2; {destruction_body} }}\n\
+             protected func ContentsDestruction(pObj) {{ rm_log = rm_log * 11 + 1; }}\n\
+             public func ReadLog() {{ return rm_log; }}\n"
+        );
+        let container_script = format!(
+            "#strict 2\n\
+             static rm_log, rm_fired;\n\
+             protected func ContentsDestruction(pObj) {{ rm_log = rm_log * 11 + 1; {contents_destruction_body} }}\n\
+             protected func Destruction() {{ rm_log = rm_log * 11 + 2; }}\n\
+             public func ReadLog() {{ return rm_log; }}\n\
+             public func ResetLog() {{ rm_log = 0; return 1; }}\n"
+        );
+        // The cargo carries the same recorders, so a recursive teardown shows.
+        let cargo_script = "#strict 2\n\
+             static rm_log;\n\
+             protected func Destruction() { rm_log = rm_log * 11 + 2; }\n\
+             protected func ContentsDestruction(pObj) { rm_log = rm_log * 11 + 1; }\n";
+
+        let mut engine = Engine::with_seed(0);
+        for (id, script) in [
+            ("RMOB", object_script.as_str()),
+            ("RMCN", container_script.as_str()),
+            ("RMCG", cargo_script),
+        ] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, script).expect("removal fixture compiles"),
+                )
+                .expect("removal fixture registers");
+        }
+
+        let container = engine
+            .spawn_object(SpawnConfig::new("RMCN"))
+            .expect("removal container spawns");
+        let object = engine
+            .spawn_object(SpawnConfig::new("RMOB"))
+            .expect("removal object spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+        if contained {
+            engine.objects[index].state.container = Some(container);
+        }
+        let mut cargo_ids = Vec::new();
+        for _ in 0..cargo {
+            let id = engine
+                .spawn_object(SpawnConfig::new("RMCG").with_container(object))
+                .expect("cargo spawns");
+            cargo_ids.push(id);
+        }
+        if name == "inactive_reactivated_first" {
+            engine.objects[index].state.status = ObjectStatus::Inactive;
+        }
+        // The oracle's `already_deleted` row is an object whose status is
+        // already zero while its cargo is still attached — a state a real first
+        // removal cannot leave behind, so it is set directly.
+        if name == "already_deleted" {
+            engine.objects[index].state.status = ObjectStatus::Deleted;
+        }
+
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine
+            .call_object_function(container_index, "ResetLog", Vec::new())
+            .expect("the log resets");
+
+        // `already_deleted` is the second removal of an object already gone.
+        let runner_script = format!(
+            "#strict 2\npublic func Run(object pTarget) {{ RemoveObject(pTarget, {}); return 1; }}\n",
+            i32::from(exit_contents)
+        );
+        engine
+            .register_definition(
+                Definition::from_script("RMRN", "RMRN", &runner_script)
+                    .expect("removal runner compiles"),
+            )
+            .expect("removal runner registers");
+        let runner = engine
+            .spawn_object(SpawnConfig::new("RMRN"))
+            .expect("removal runner spawns");
+        let runner_index = engine.find_object_index(runner).expect("runner exists");
+        let target = crate::compat::object_reference_value(object);
+        let _ = &target;
+        engine
+            .call_object_function(runner_index, "Run", vec![target])
+            .expect("the removal runs");
+
+        let expected_log = case["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|call| match call.as_str().unwrap_or_default() {
+                "~ContentsDestruction" => Some(1_i64),
+                "~Destruction" => Some(2),
+                _ => None,
+            })
+            .fold(0_i64, |log, digit| log * 11 + digit);
+        let log = match engine
+            .call_object_function(container_index, "ReadLog", Vec::new())
+            .expect("the log reads back")
+        {
+            ScriptValue::Int(value) => i64::from(value),
+            ScriptValue::Nil | ScriptValue::Bool(false) => 0,
+            other => panic!("unexpected removal log value {other:?}"),
+        };
+        expect_eq("object_removal", idx, "callback order", expected_log, log);
+
+        // The cargo's fate: removed with the object, or spilled into the world.
+        let surviving_cargo = cargo_ids
+            .iter()
+            .filter(|id| {
+                engine
+                    .find_object_index(**id)
+                    .is_some_and(|index| engine.objects[index].state.status.is_active())
+            })
+            .count();
+        let expected_cargo = case["content_status"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(cargo as usize)
+            .filter(|status| status.as_i64() != Some(0))
+            .count();
+        assert_eq!(
+            expected_cargo, surviving_cargo,
+            "PARITY DIVERGENCE in `object_removal` entry {idx} surviving cargo"
+        );
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
