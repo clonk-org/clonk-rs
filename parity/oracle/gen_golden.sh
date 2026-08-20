@@ -562,6 +562,39 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4MassMover.cpp" > "$gen/mass_mover_create.inc"
 
+# 3w. Lift Splash. It is the only liquid-entry effect that draws from the
+#     synchronised stream, and its draw COUNT is landscape-dependent: the
+#     extraction inside the loop empties the pixel it is drawing from, so the
+#     second iteration takes two draws where the first took four. The two
+#     "force argument evaluation order" pairs are the reason the body is lifted
+#     rather than restated — the r2-before-r1 order is the parity fact.
+awk '
+  /^void Splash\(int32_t tx, int32_t ty, int32_t amt, C4Object \*pByObj\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Effect.cpp" > "$gen/splash.inc"
+
+# 3v. Lift C4Object::UpdateInLiquid and IsInLiquidCheck. The probe is taken at
+#     `y + Def->Float * Con / FullCon - 1`, so a growing or shrinking object
+#     starts swimming at a different pixel; entry is edge-triggered, and the
+#     splash it fires on that edge is the draw that has to land on the same
+#     frame in both engines. C4Movement's copy of this block additionally clears
+#     `fNoAttach`, which is why the movement path is compared separately.
+awk '
+  /^void C4Object::UpdateInLiquid\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/update_in_liquid.inc"
+
+awk '
+  /^bool C4Object::IsInLiquidCheck\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/is_in_liquid_check.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

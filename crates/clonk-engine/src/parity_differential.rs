@@ -128,6 +128,114 @@ fn expect_eq_u64(section: &str, index: usize, field: &str, cpp: u64, rust: u64) 
     );
 }
 
+/// The 8x40 material grid `parity/oracle/oracle_main.cpp`'s `splash_effect`
+/// scaffolds, and the `SplashHost` over it: water (liquid and instable), a
+/// liquid that is NOT instable, and granite.
+struct SplashProbe {
+    grid: [[i32; SplashProbe::WIDTH as usize]; SplashProbe::HEIGHT as usize],
+    rng: LcgRng,
+    bubbles: Vec<[i32; 2]>,
+    casts: Vec<[i32; 5]>,
+    extractions: i64,
+}
+
+impl SplashProbe {
+    const WIDTH: i32 = 8;
+    const HEIGHT: i32 = 40;
+    const MAP: [(i32, bool); 3] = [(25, true), (25, false), (50, false)];
+
+    /// Water at or below `water_top`, granite at or below `floor_top`, sky
+    /// above, using material `liquid_mat` for the water body.
+    fn new(water_top: i32, floor_top: i32, liquid_mat: i32) -> Self {
+        let mut grid = [[-1; Self::WIDTH as usize]; Self::HEIGHT as usize];
+        for (y, row) in grid.iter_mut().enumerate() {
+            let y = y as i32;
+            row.fill(if y >= floor_top {
+                2
+            } else if y >= water_top {
+                liquid_mat
+            } else {
+                -1
+            });
+        }
+        Self {
+            grid,
+            rng: LcgRng::new(0),
+            bubbles: Vec::new(),
+            casts: Vec::new(),
+            extractions: 0,
+        }
+    }
+
+    fn water_column(water_top: i32) -> Self {
+        Self::new(water_top, Self::HEIGHT, 0)
+    }
+
+    fn material(&self, x: i32, y: i32) -> Option<usize> {
+        (0..Self::WIDTH).contains(&x).then_some(())?;
+        (0..Self::HEIGHT).contains(&y).then_some(())?;
+        usize::try_from(self.grid[y as usize][x as usize]).ok()
+    }
+
+    fn density(&self, x: i32, y: i32) -> i32 {
+        self.material(x, y).map_or(0, |mat| Self::MAP[mat].0)
+    }
+}
+
+impl crate::engine_splash::SplashHost for SplashProbe {
+    type Error = std::convert::Infallible;
+
+    fn splash_is_semi_solid(&self, x: i32, y: i32) -> bool {
+        self.density(x, y) >= 25
+    }
+
+    fn splash_material_is_liquid(&self, x: i32, y: i32) -> bool {
+        self.material(x, y)
+            .map(|mat| Self::MAP[mat])
+            .is_some_and(|(density, instable)| (25..50).contains(&density) && instable)
+    }
+
+    fn splash_is_liquid(&self, x: i32, y: i32) -> bool {
+        (25..50).contains(&self.density(x, y))
+    }
+
+    fn splash_random(&mut self, upper_bound: i32) -> Result<i32, Self::Error> {
+        Ok(self.rng.random(upper_bound))
+    }
+
+    fn splash_bubble_out(&mut self, x: i32, y: i32) -> Result<(), Self::Error> {
+        self.bubbles.push([x, y]);
+        Ok(())
+    }
+
+    /// C++ hands `PXS::Create` whatever `ExtractMaterial` returned, and
+    /// `Create` drops an invalid material (C4PXS.cpp:210) — so the extraction
+    /// is counted either way and only a real material casts.
+    fn splash_extract_and_cast(
+        &mut self,
+        source: crate::Vector2,
+        destination: crate::Vector2,
+        velocity: FixedVec2,
+    ) -> Result<(), Self::Error> {
+        self.extractions += 1;
+        let Some(material) = self
+            .material(source.x, source.y)
+            .filter(|mat| (25..50).contains(&Self::MAP[*mat].0))
+        else {
+            return Ok(());
+        };
+        self.grid[source.y as usize][source.x as usize] = -1;
+        self.casts.push([
+            material as i32,
+            destination.x,
+            destination.y,
+            fixtoi_prec(velocity.x, 100),
+            fixtoi_prec(velocity.y, 100),
+        ]);
+        Ok(())
+    }
+}
+
 fn expect_json_eq(section: &str, index: usize, field: &str, cpp: Value, rust: Value) {
     if cpp != rust {
         write_parity_diff_from_environment(section, index, field, cpp.clone(), rust.clone());
@@ -1599,6 +1707,176 @@ fn parity_differential_matches_cpp_golden() {
                 i64::from(set.create_ptr()),
             );
         }
+    }
+
+    // 0d. Splash's draw stream (C4Effect.cpp:801-836), the liquid-entry effect
+    //     that `C4Object::UpdateInLiquid` and the movement InLiquid check fire
+    //     on entry. Two things make it worth pinning against the real body
+    //     rather than a restatement:
+    //
+    //     * both `Random` pairs are written with an explicit r2-before-r1
+    //       temporary to force the evaluation order, so a port that draws them
+    //       left to right swaps every bubble's x and y offset; and
+    //     * the extraction inside the loop empties the very pixel the liquid
+    //       test reads, so the first iteration takes four draws and every later
+    //       one takes two. The draw COUNT is landscape-dependent, which is what
+    //       makes a wrong one desynchronise everything downstream rather than
+    //       merely move some spray.
+    for (idx, e) in golden["splash_effect"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        // The grid the oracle scaffolds for each case.
+        let mut probe = match e["case"].as_str().unwrap_or_default() {
+            "roofed" => SplashProbe::water_column(4),
+            "not_instable" => SplashProbe::new(18, SplashProbe::HEIGHT, 1),
+            "in_sky" => SplashProbe::water_column(30),
+            "shallow" => SplashProbe::new(19, 22, 0),
+            _ => SplashProbe::water_column(18),
+        };
+        probe.rng = LcgRng::new(i(e, "seed") as u32);
+        crate::engine_splash::run_splash(&mut probe, 4, 20, i(e, "amt") as i32)
+            .expect("the probe is infallible");
+
+        expect_json_eq(
+            "splash_effect",
+            idx,
+            "bubbles",
+            e["bubbles"].clone(),
+            serde_json::json!(probe.bubbles),
+        );
+        expect_json_eq(
+            "splash_effect",
+            idx,
+            "casts",
+            e["casts"].clone(),
+            serde_json::json!(probe.casts),
+        );
+        expect_eq(
+            "splash_effect",
+            idx,
+            "extractions",
+            i(e, "extractions"),
+            probe.extractions,
+        );
+        expect_eq(
+            "splash_effect",
+            idx,
+            "random_count",
+            i(e, "random_count"),
+            i64::from(probe.rng.count),
+        );
+        expect_eq(
+            "splash_effect",
+            idx,
+            "random_hold",
+            i(e, "random_hold"),
+            i64::from(probe.rng.hold),
+        );
+    }
+
+    // 0e. C4Object::UpdateInLiquid (C4Object.cpp:6093-6110) and the probe it
+    //     reads through (:5632-5635), driven through the same helpers both live
+    //     call sites use (`engine/movement.rs`, `compat/object_state.rs`).
+    //     Entry is edge-triggered and carries the splash; leaving is a bare flag
+    //     clear. The probe sits at `y + Float * Con / FullCon - 1`, so a
+    //     half-built object starts swimming at a different pixel — while the
+    //     splash still originates at the object's own `y + 1`, which is why
+    //     `float_reaches_water` enters the liquid and splashes nothing.
+    for (idx, e) in golden["in_liquid_transition"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        // (water_top, y, was_in_liquid, con, float, mass, hit_speed, wdt, hgt)
+        let full = crate::FULL_CON;
+        let case = e["case"].as_str().unwrap_or_default();
+        let (water_top, y, was, con, float_line, mass, hit, wdt, hgt) = match case {
+            "enter_splash" => (18, 20, false, full, 0, 10, true, 8, 10),
+            "enter_no_hitspeed" => (18, 20, false, full, 0, 10, false, 8, 10),
+            "enter_mass_boundary" => (18, 20, false, full, 0, 3, true, 8, 10),
+            "enter_mass_above" => (18, 20, false, full, 0, 4, true, 8, 10),
+            "stays_wet" => (18, 20, true, full, 0, 10, true, 8, 10),
+            "stays_dry" => (30, 20, false, full, 0, 10, true, 8, 10),
+            "leaves" => (30, 20, true, full, 0, 10, true, 8, 10),
+            "float_reaches_water" => (18, 14, false, full, 6, 10, true, 8, 10),
+            "half_con_falls_short" => (18, 14, false, full / 2, 6, 10, true, 8, 10),
+            "large_object_clamps" => (18, 20, false, full, 0, 10, true, 40, 40),
+            "small_object_amount" => (18, 20, false, full, 0, 10, true, 5, 6),
+            other => panic!("unhandled in_liquid_transition case `{other}`"),
+        };
+
+        let mut probe = SplashProbe::water_column(water_top);
+        probe.rng = LcgRng::new(i(e, "seed") as u32);
+
+        let probe_y = crate::engine_splash::liquid_probe_y(y, float_line, con);
+        let wet = crate::engine_splash::SplashHost::splash_is_liquid(&probe, 4, probe_y);
+
+        let mut in_liquid = was;
+        if crate::engine_splash::entered_liquid(wet, was) {
+            let ocf = if hit { crate::ocf::HIT_SPEED2 } else { 0 };
+            if crate::engine_splash::should_splash(wet, was, ocf, mass) {
+                let amount = crate::engine_splash::splash_amount(wdt, hgt);
+                crate::engine_splash::run_splash(&mut probe, 4, y + 1, amount)
+                    .expect("the probe is infallible");
+            }
+            in_liquid = true;
+        } else if !wet && was {
+            in_liquid = false;
+        }
+
+        expect_eq(
+            "in_liquid_transition",
+            idx,
+            "probe_y",
+            i(e, "probe_y"),
+            i64::from(probe_y),
+        );
+        expect_eq(
+            "in_liquid_transition",
+            idx,
+            "wet",
+            i(e, "wet"),
+            i64::from(wet),
+        );
+        expect_eq(
+            "in_liquid_transition",
+            idx,
+            "in_liquid",
+            i(e, "in_liquid"),
+            i64::from(in_liquid),
+        );
+        expect_eq(
+            "in_liquid_transition",
+            idx,
+            "bubbles",
+            i(e, "bubbles"),
+            probe.bubbles.len() as i64,
+        );
+        expect_eq(
+            "in_liquid_transition",
+            idx,
+            "casts",
+            i(e, "casts"),
+            probe.casts.len() as i64,
+        );
+        expect_eq(
+            "in_liquid_transition",
+            idx,
+            "random_count",
+            i(e, "random_count"),
+            i64::from(probe.rng.count),
+        );
+        expect_eq(
+            "in_liquid_transition",
+            idx,
+            "random_hold",
+            i(e, "random_hold"),
+            i64::from(probe.rng.hold),
+        );
     }
 
     // 1. itofix (whole-integer + precision-denominated).
