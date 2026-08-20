@@ -1014,6 +1014,32 @@ fn fs_monitor_srgb(input: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(image, image_sampler, input.uv);
     return vec4<f32>(srgb_to_linear(apply_gamma(color.rgb)), color.a);
 }
+
+// The fused entry points below replace a monitor-gamma pass plus a
+// presentation pass with one draw. They exist as separate entry points rather
+// than replacing the two above because the two-pass path is still taken
+// whenever a readback needs the intermediate target.
+//
+// `quantize8` is what makes the fused result byte-identical to the two passes.
+// The intermediate is `Rgba8Unorm`, so the old path rounded the gamma-mapped
+// colour to 8 bits *before* the surface conversion read it back. Sampling the
+// composition directly skips that rounding, and on an sRGB surface the
+// difference survives to the stored pixel.
+fn quantize8(color: vec3<f32>) -> vec3<f32> {
+    return round(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0) / 255.0;
+}
+
+@fragment
+fn fs_monitor_linear_fused(input: VertexOutput) -> @location(0) vec4<f32> {
+    let color = textureSample(image, image_sampler, input.uv);
+    return vec4<f32>(quantize8(apply_gamma(color.rgb)), color.a);
+}
+
+@fragment
+fn fs_monitor_srgb_fused(input: VertexOutput) -> @location(0) vec4<f32> {
+    let color = textureSample(image, image_sampler, input.uv);
+    return vec4<f32>(srgb_to_linear(quantize8(apply_gamma(color.rgb))), color.a);
+}
 "#;
 
 /// Area ("box") reduction of a presented composition, reproducing
@@ -2512,6 +2538,9 @@ pub struct RetainedGpuRenderer {
     solid_rect_non_separate_normal_pipeline: wgpu::RenderPipeline,
     solid_rect_additive_pipeline: wgpu::RenderPipeline,
     monitor_gamma_pipeline: wgpu::RenderPipeline,
+    /// Monitor LUT and surface conversion in one draw, for frames that do not
+    /// need the intermediate target read back.
+    monitor_fused_present_pipeline: wgpu::RenderPipeline,
     present_pipeline: wgpu::RenderPipeline,
 
     nearest_sampler: wgpu::Sampler,
@@ -2557,6 +2586,9 @@ pub struct RetainedGpuRenderer {
     draw_call_scratch: Vec<DrawCall>,
     composition: Option<CompositionTarget>,
     last_presented_monitor_gamma: Option<bool>,
+    /// Whether the gamma-resolved intermediate holds the frame that was last
+    /// presented. False after a fused frame, which never wrote it.
+    gamma_resolved_holds_last_frame: bool,
     /// Built the first time a caller asks for a reduced presentation, so a
     /// session that never saves a thumbnail owns no reduction pipeline.
     presentation_reducer: Option<PresentationReducer>,
@@ -2879,14 +2911,23 @@ impl RetainedGpuRenderer {
             &monitor_gamma_pipeline_layout,
             &present_shader,
             wgpu::TextureFormat::Rgba8Unorm,
-            true,
+            PresentKind::MonitorResolve,
+        );
+        // Same two bind groups as the resolve pass — image and LUT — but
+        // targeting the surface, which is what lets one draw replace two.
+        let monitor_fused_present_pipeline = present_pipeline(
+            device,
+            &monitor_gamma_pipeline_layout,
+            &present_shader,
+            surface_format,
+            PresentKind::MonitorFused,
         );
         let present_pipeline = present_pipeline(
             device,
             &present_pipeline_layout,
             &present_shader,
             surface_format,
-            false,
+            PresentKind::Plain,
         );
 
         let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -3034,6 +3075,8 @@ impl RetainedGpuRenderer {
             solid_rect_non_separate_normal_pipeline,
             solid_rect_additive_pipeline,
             monitor_gamma_pipeline,
+            monitor_fused_present_pipeline,
+            gamma_resolved_holds_last_frame: false,
             present_pipeline,
             nearest_sampler,
             linear_sampler,
@@ -3237,6 +3280,41 @@ impl RetainedGpuRenderer {
 
     /// Encodes a copy of the most recently presented composition before the
     /// next render pass overwrites its retained target.
+    /// Rebuilds the gamma-resolved intermediate from the retained composition.
+    ///
+    /// A fused monitor frame never wrote it (clonk-org/clonk-rs#274), so a
+    /// readback that arrives afterwards materialises it here instead. This is
+    /// the same pass the two-pass path runs, against the same retained
+    /// composition, so the pixels a readback sees are unchanged — the cost
+    /// simply moves from every frame to the frames that are actually captured.
+    fn encode_monitor_gamma_resolve(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        composition: &CompositionTarget,
+    ) {
+        let attachments = [Some(wgpu::RenderPassColorAttachment {
+            view: &composition.gamma_resolved_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })];
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lc_gpu_monitor_gamma_readback_pass"),
+            color_attachments: &attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.monitor_gamma_pipeline);
+        pass.set_bind_group(0, &composition.present_bind_group, &[]);
+        pass.set_bind_group(1, &self.gamma_bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     pub fn readback_last_presentation(
         &self,
         device: &wgpu::Device,
@@ -3248,6 +3326,9 @@ impl RetainedGpuRenderer {
             return Ok(None);
         };
         let texture = if monitor_gamma {
+            if !self.gamma_resolved_holds_last_frame {
+                self.encode_monitor_gamma_resolve(encoder, composition);
+            }
             &composition.gamma_resolved_texture
         } else {
             &composition.texture
@@ -3274,6 +3355,13 @@ impl RetainedGpuRenderer {
         dest_extent: [u32; 2],
     ) -> Result<Option<GpuReadbackTicket>, GpuRendererError> {
         let monitor_gamma = self.last_presented_monitor_gamma;
+        // Materialise before taking the reducer, which needs `&mut self`: a
+        // fused frame left the intermediate holding an older one.
+        if monitor_gamma == Some(true) && !self.gamma_resolved_holds_last_frame {
+            if let Some(composition) = self.composition.as_ref() {
+                self.encode_monitor_gamma_resolve(encoder, composition);
+            }
+        }
         let (Some(composition), Some(monitor_gamma)) = (self.composition.as_ref(), monitor_gamma)
         else {
             return Ok(None);
@@ -3477,7 +3565,15 @@ impl RetainedGpuRenderer {
                 solid_rect_instance_bytes,
             );
         }
-        self.last_stats.monitor_gamma_draw_calls = usize::from(scene.gamma_mode.monitor_postpass());
+        // Monitor gamma normally resolves into an `Rgba8Unorm` intermediate and
+        // then presents that. The intermediate exists only so a readback can
+        // see the gamma-mapped frame, so a frame nobody reads back does not
+        // need it: the LUT folds into the presentation draw and one full-frame
+        // write and read of the intermediate disappear
+        // (clonk-org/clonk-rs#274).
+        let fuse_monitor_gamma = scene.gamma_mode.monitor_postpass() && !request_readback;
+        self.last_stats.monitor_gamma_draw_calls =
+            usize::from(scene.gamma_mode.monitor_postpass() && !fuse_monitor_gamma);
         self.last_stats.presentation_draw_calls = 1;
         self.last_stats.total_draw_calls = calls.len()
             + shader_landscape_draw_calls
@@ -3529,7 +3625,7 @@ impl RetainedGpuRenderer {
             self.encode_draw_calls(&mut pass, &calls);
         }
 
-        if scene.gamma_mode.monitor_postpass() {
+        if scene.gamma_mode.monitor_postpass() && !fuse_monitor_gamma {
             let gamma_timestamp_pair = timestamp_frame
                 .as_mut()
                 .map(|timestamp| timestamp.reserve(GpuTimestampPass::MonitorGamma));
@@ -3562,15 +3658,20 @@ impl RetainedGpuRenderer {
             pass.draw(0..3, 0..1);
         }
 
-        let (presented_texture, presented_bind_group) = if scene.gamma_mode.monitor_postpass() {
-            (
-                &composition.gamma_resolved_texture,
-                &composition.gamma_resolved_present_bind_group,
-            )
-        } else {
-            (&composition.texture, &composition.present_bind_group)
-        };
+        let (presented_texture, presented_bind_group) =
+            if scene.gamma_mode.monitor_postpass() && !fuse_monitor_gamma {
+                (
+                    &composition.gamma_resolved_texture,
+                    &composition.gamma_resolved_present_bind_group,
+                )
+            } else {
+                (&composition.texture, &composition.present_bind_group)
+            };
         self.last_presented_monitor_gamma = Some(scene.gamma_mode.monitor_postpass());
+        // A fused frame leaves whatever the last resolve wrote in the
+        // intermediate, so a later readback has to rebuild it rather than
+        // trust it.
+        self.gamma_resolved_holds_last_frame = !fuse_monitor_gamma;
         let readback = request_readback
             .then(|| encode_readback(device, encoder, presented_texture, composition.extent))
             .transpose()?;
@@ -3602,8 +3703,14 @@ impl RetainedGpuRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.present_pipeline);
-            pass.set_bind_group(0, presented_bind_group, &[]);
+            if fuse_monitor_gamma {
+                pass.set_pipeline(&self.monitor_fused_present_pipeline);
+                pass.set_bind_group(0, presented_bind_group, &[]);
+                pass.set_bind_group(1, &self.gamma_bind_group, &[]);
+            } else {
+                pass.set_pipeline(&self.present_pipeline);
+                pass.set_bind_group(0, presented_bind_group, &[]);
+            }
             pass.draw(0..3, 0..1);
         }
 
@@ -7164,12 +7271,24 @@ fn scene_pipeline_with_vertex_layout(
     })
 }
 
+/// Which presentation pipeline to build.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresentKind {
+    /// Straight composition to surface.
+    Plain,
+    /// Composition to the `Rgba8Unorm` intermediate, applying the monitor LUT.
+    MonitorResolve,
+    /// Composition straight to the surface, applying the monitor LUT and the
+    /// intermediate's 8-bit rounding in one draw.
+    MonitorFused,
+}
+
 fn present_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     surface_format: wgpu::TextureFormat,
-    monitor_gamma: bool,
+    kind: PresentKind,
 ) -> wgpu::RenderPipeline {
     let targets = [Some(wgpu::ColorTargetState {
         format: surface_format,
@@ -7177,10 +7296,10 @@ fn present_pipeline(
         write_mask: wgpu::ColorWrites::ALL,
     })];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(if monitor_gamma {
-            "lc_gpu_monitor_gamma_pipeline"
-        } else {
-            "lc_gpu_present_pipeline"
+        label: Some(match kind {
+            PresentKind::MonitorResolve => "lc_gpu_monitor_gamma_pipeline",
+            PresentKind::MonitorFused => "lc_gpu_monitor_fused_present_pipeline",
+            PresentKind::Plain => "lc_gpu_present_pipeline",
         }),
         layout: Some(layout),
         vertex: wgpu::VertexState {
@@ -7194,11 +7313,13 @@ fn present_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some(match (monitor_gamma, surface_format.is_srgb()) {
-                (false, false) => "fs_linear",
-                (false, true) => "fs_srgb",
-                (true, false) => "fs_monitor_linear",
-                (true, true) => "fs_monitor_srgb",
+            entry_point: Some(match (kind, surface_format.is_srgb()) {
+                (PresentKind::Plain, false) => "fs_linear",
+                (PresentKind::Plain, true) => "fs_srgb",
+                (PresentKind::MonitorResolve, false) => "fs_monitor_linear",
+                (PresentKind::MonitorResolve, true) => "fs_monitor_srgb",
+                (PresentKind::MonitorFused, false) => "fs_monitor_linear_fused",
+                (PresentKind::MonitorFused, true) => "fs_monitor_srgb_fused",
             }),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &targets,
@@ -8586,7 +8707,12 @@ mod tests {
                 &target_view,
                 &scene,
                 &GpuPresentation::identity(1, 1),
-                false,
+                // Requesting a readback keeps this frame on the two-pass
+                // monitor path, which is the one that has a MonitorGamma pass
+                // to profile at all. A fused frame folds it into presentation
+                // (clonk-org/clonk-rs#274), so asking for the timestamp there
+                // would be asking about a pass that no longer runs.
+                true,
             )
             .expect("encode timestamped retained frame");
         queue.submit(Some(encoder.finish()));
@@ -15319,6 +15445,216 @@ mod tests {
             textures,
             commands,
         }
+    }
+
+    /// Renders one scene to a surface of `format` and returns the surface
+    /// bytes.
+    ///
+    /// The shared test target is `RENDER_ATTACHMENT` only, so this makes its
+    /// own `COPY_SRC` one: comparing the fused and two-pass paths means
+    /// comparing what actually reached the surface, not what a readback of the
+    /// intermediate says.
+    fn render_surface_pixels(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        scene: &GpuScene,
+        request_readback: bool,
+    ) -> Vec<u8> {
+        let extent = scene.logical_extent;
+        let mut renderer = RetainedGpuRenderer::new(device, queue, format);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lc_gpu_fused_monitor_surface"),
+            size: wgpu::Extent3d {
+                width: extent[0],
+                height: extent[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_fused_monitor_encoder"),
+        });
+        renderer
+            .render(
+                device,
+                queue,
+                &mut encoder,
+                &target_view,
+                scene,
+                &GpuPresentation::identity(extent[0], extent[1]),
+                request_readback,
+            )
+            .expect("encode monitor gamma frame");
+        let ticket = encode_readback(device, &mut encoder, &target, extent)
+            .expect("encode surface readback");
+        queue.submit(Some(encoder.finish()));
+        ticket.read(device).expect("map surface readback").rgba
+    }
+
+    /// clonk-org/clonk-rs#274: an ordinary Monitor frame folds the LUT into the
+    /// presentation draw, and must land on exactly the pixels the two passes
+    /// produced.
+    ///
+    /// The intermediate is `Rgba8Unorm`, so the two-pass path rounded the
+    /// gamma-mapped colour to eight bits *before* the surface conversion read
+    /// it back. The fused shader reproduces that rounding explicitly; without
+    /// it an sRGB surface stores a different byte, which is the whole reason
+    /// this comparison runs on both formats.
+    #[test]
+    fn a_fused_monitor_frame_matches_the_two_pass_result_byte_for_byte() {
+        let Some((_runtime, _instance, _adapter, device, queue)) =
+            test_wgpu_device("lc_gpu_fused_monitor_test_device", true)
+        else {
+            eprintln!("no wgpu adapter; skipping fused monitor gamma comparison");
+            return;
+        };
+
+        let ramps = [
+            ("identity", GammaRamp::standard()),
+            (
+                "nonlinear",
+                GammaRamp::from_control_points([0x102030, 0x708090, 0xd0e0f0]),
+            ),
+            (
+                "extreme",
+                GammaRamp::from_control_points([0x000000, 0x00ff00, 0xffffff]),
+            ),
+        ];
+        // Several clear colours rather than one: each lands on a different
+        // point of the LUT and a different rounding boundary.
+        let colors = [
+            Color::new(11, 19, 31, 255),
+            Color::new(128, 128, 128, 255),
+            Color::new(1, 254, 127, 255),
+            Color::new(255, 0, 3, 255),
+        ];
+
+        for format in [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ] {
+            for (name, ramp) in &ramps {
+                for color in colors {
+                    let mut scene = test_scene([3, 2], color, Vec::new(), Vec::new());
+                    scene.gamma = GpuGammaLut::from_ramp(ramp);
+                    scene.gamma_mode = GpuGammaMode::Monitor;
+
+                    let two_pass = render_surface_pixels(&device, &queue, format, &scene, true);
+                    let fused = render_surface_pixels(&device, &queue, format, &scene, false);
+                    assert_eq!(
+                        fused, two_pass,
+                        "fused monitor gamma diverged for {name} at {color:?} on {format:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The point of the fusion: one presentation draw instead of a resolve and
+    /// a presentation.
+    #[test]
+    fn an_ordinary_monitor_frame_presents_in_one_draw() {
+        let Some((_runtime, _instance, _adapter, device, queue)) =
+            test_wgpu_device("lc_gpu_fused_monitor_draws_device", true)
+        else {
+            eprintln!("no wgpu adapter; skipping fused monitor gamma draw count");
+            return;
+        };
+        let mut scene = test_scene([3, 2], Color::new(11, 19, 31, 255), Vec::new(), Vec::new());
+        scene.gamma = GpuGammaLut::from_ramp(&GammaRamp::from_control_points([
+            0x102030, 0x708090, 0xd0e0f0,
+        ]));
+        scene.gamma_mode = GpuGammaMode::Monitor;
+
+        let mut renderer = test_renderer(&device, &queue);
+        let _ = render_surface_pixels_with(
+            &mut renderer,
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8Unorm,
+            &scene,
+            false,
+        );
+        assert_eq!(
+            renderer.last_stats().monitor_gamma_draw_calls,
+            0,
+            "the resolve pass does not run for a frame nobody reads back"
+        );
+        assert_eq!(renderer.last_stats().presentation_draw_calls, 1);
+        assert_eq!(
+            renderer.last_stats().total_draw_calls,
+            renderer.last_stats().draw_calls + 1,
+            "one fixed presentation draw on top of the scene's own"
+        );
+        assert!(renderer.last_stats().has_exact_draw_call_counts());
+
+        // Asking for a readback puts the same scene back on the two-pass path.
+        let _ = render_surface_pixels_with(
+            &mut renderer,
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8Unorm,
+            &scene,
+            true,
+        );
+        assert_eq!(renderer.last_stats().monitor_gamma_draw_calls, 1);
+        assert_eq!(
+            renderer.last_stats().total_draw_calls,
+            renderer.last_stats().draw_calls + 2
+        );
+    }
+
+    /// Same as [`render_surface_pixels`] but against a caller-owned renderer,
+    /// so a test can read its statistics afterwards.
+    fn render_surface_pixels_with(
+        renderer: &mut RetainedGpuRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        scene: &GpuScene,
+        request_readback: bool,
+    ) -> Vec<u8> {
+        let extent = scene.logical_extent;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lc_gpu_fused_monitor_surface"),
+            size: wgpu::Extent3d {
+                width: extent[0],
+                height: extent[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_fused_monitor_encoder"),
+        });
+        renderer
+            .render(
+                device,
+                queue,
+                &mut encoder,
+                &target_view,
+                scene,
+                &GpuPresentation::identity(extent[0], extent[1]),
+                request_readback,
+            )
+            .expect("encode monitor gamma frame");
+        let ticket = encode_readback(device, &mut encoder, &target, extent)
+            .expect("encode surface readback");
+        queue.submit(Some(encoder.finish()));
+        ticket.read(device).expect("map surface readback").rgba
     }
 
     fn render_identity_readback(
