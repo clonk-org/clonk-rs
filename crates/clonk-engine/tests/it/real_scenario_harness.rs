@@ -723,6 +723,10 @@ fn alchemy_real_scenario_subcases_batch_2() {
             alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew,
         ),
         (
+            "guarding_zaps_turns_carried_gold_into_a_nest_instead_of_zaps",
+            alchemy_guarding_zaps_turns_carried_gold_into_a_nest_instead_of_zaps,
+        ),
+        (
             "learned_heal_cast_sustains_magic_and_restores_the_casters_energy",
             alchemy_learned_heal_cast_sustains_magic_and_restores_the_casters_energy,
         ),
@@ -2965,6 +2969,64 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
             .and_then(|bag| bag.components.get("IROC")),
         Some(2),
         "the combo cast consumes MGUP's one IROC ingredient"
+    );
+}
+
+fn alchemy_guarding_zaps_turns_carried_gold_into_a_nest_instead_of_zaps(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy guarding zaps parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let mage_position = engine.test_object_snapshot(mage).position;
+
+    // The gold combo is checked before anything else, and it short-circuits
+    // the whole spell: carried GOLD is turned into a ZAPN in place and GZ9Z
+    // returns without ever offering a selector or creating a single zap
+    // (GuardingZaps.c4d/Script.c:12-17).
+    let gold =
+        engine.spawn_test_object(clonk_engine::SpawnConfig::new("GOLD").with_container(mage));
+    let spell = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("GZ9Z")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+
+    // Same object, new definition -- the gold is converted, not consumed and
+    // replaced.
+    assert_eq!(
+        engine.test_object_snapshot(gold).definition_id,
+        "ZAPN",
+        "carried gold becomes the zap nest itself"
+    );
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "ZAP2" && object.status.is_active()),
+        "the gold branch returns before CreateZaps, so no loose zaps exist"
+    );
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "SLCR" && object.status.is_active()),
+        "the gold branch returns before DoSpellSelect, so no selector opens"
+    );
+    assert!(
+        !engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "GZ9Z" && object.status.is_active()),
+        "GZ9Z removes itself on the gold branch"
     );
 }
 
