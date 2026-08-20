@@ -423,6 +423,15 @@ impl MessageDialogState {
         }
     }
 
+    /// Drops the progress bar from the layout entirely.
+    ///
+    /// The bar is already optional here — `is_progress` at the layout site
+    /// keys off `self.progress.is_some()` — so a transfer whose length is
+    /// unknown suppresses it rather than showing a bar that cannot move.
+    pub fn hide_progress(&mut self) {
+        self.progress = None;
+    }
+
     pub const fn progress(&self) -> Option<u8> {
         self.progress
     }

@@ -43,6 +43,11 @@ impl ProgressDialogState {
         self.dialog.set_progress(progress);
     }
 
+    /// Suppresses the bar for a transfer whose total length is unknown.
+    pub fn hide_progress(&mut self) {
+        self.dialog.hide_progress();
+    }
+
     pub fn dialog(&self) -> &MessageDialogState {
         &self.dialog
     }
