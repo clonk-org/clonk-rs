@@ -890,6 +890,10 @@ fn alchemy_real_scenario_subcases_batch_4() {
             "replication_combo_decides_how_many_copies_it_makes",
             alchemy_replication_combo_decides_how_many_copies_it_makes,
         ),
+        (
+            "thermal_pair_warms_off_the_shipped_freeze_effect",
+            alchemy_thermal_pair_warms_off_the_shipped_freeze_effect,
+        ),
     ]);
 }
 
@@ -3797,6 +3801,129 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
             .and_then(|bag| bag.components.get("IBON")),
         Some(0),
         "the successful MLGT cast consumes its shipped two-bone recipe"
+    );
+}
+
+fn alchemy_thermal_pair_warms_off_the_shipped_freeze_effect(prepared: &PreparedInstalledScenario) {
+    // FREZ is a library, not a castable spell: Freeze.c4d/Script.c defines only
+    // the `Freeze`/`Unfreeze`/`Frozen` globals and the `FxFreeze*` callbacks, so
+    // the pair has to be exercised through content that installs the effect.
+    // MFWV (Frostwave) is the shipped caster, and MWTH is the warming half that
+    // consumes the state again (Warm.c4d/Script.c:14-16).
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy thermal parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+    let mage_position = engine.test_object_snapshot(mage).position;
+
+    // The wave freezes on an expanding *ring* — `Inside(Distance(...),
+    // iRaduis-5, iRaduis+5)` starting at 20 (Frostwave.c4d/Script.c:19,61) — so
+    // the caster at distance 0 is never caught. Put a second crew member on the
+    // opening ring instead, which also gives MWTH's radius search something to
+    // find rather than exercising only its self-case.
+    let patient = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "CLNK"
+                    && object.owner == owner
+                    && object.status.is_active()
+                    && object.id != mage
+            })
+            .map(|object| object.id),
+    );
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
+            patient,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(mage_position.x + 20, mage_position.y))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        ),
+    );
+
+    let frost = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("MFWV")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(frost),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+
+    // The wave installs a global FrostwaveNSpell that freezes what its ring
+    // reaches (Frostwave.c4d/Script.c:8,68).
+    let mut frozen = false;
+    for _ in 0..400 {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        if engine
+            .test_object_snapshot(patient)
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Freeze")
+        {
+            frozen = true;
+            break;
+        }
+    }
+    assert!(
+        frozen,
+        "the shipped Frostwave cast never installed FREZ's Freeze effect on the ring target"
+    );
+
+    let installed = engine.test_object_snapshot(patient);
+    let freeze = crate::support::TestValueExt::test_value(
+        installed
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Freeze"),
+    );
+    assert_eq!(
+        (freeze.priority, freeze.interval),
+        (111, 5),
+        "FREZ's shipped AddEffect arguments (Freeze.c4d/Script.c:22)"
+    );
+
+    // MWTH walks outward from the caster while `ObjectDistance` stays inside
+    // `GetObjHeight(oCaller) * 3` and unfreezes what it finds
+    // (Warm.c4d/Script.c:26-34). `Unfreeze` loops
+    // `while(RemoveEffect("Freeze", ...))` so no duplicate survives (:31-32).
+    let warm = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("MWTH")
+            .with_position(engine.test_object_snapshot(mage).position)
+            .with_owner(owner),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(warm),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+
+    // `RemoveEffect` kills rather than unlinks: a zero priority is C4Effect's
+    // IsDead marker and the entry survives until the next cleanup pass, so the
+    // check is for a *live* Freeze rather than an absent one.
+    let warmed = engine.test_object_snapshot(patient);
+    assert!(
+        !warmed
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Freeze" && effect.priority != 0),
+        "MWTH must kill every Freeze effect its search reaches: {:?}",
+        warmed.effects
     );
 }
 
