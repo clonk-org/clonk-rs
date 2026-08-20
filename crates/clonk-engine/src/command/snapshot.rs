@@ -356,7 +356,6 @@ impl CommandId {
         }
     }
 
-    #[allow(dead_code)]
     pub fn to_name(self) -> &'static str {
         match self {
             Self::Follow => "Follow",

@@ -6,8 +6,8 @@
 //! previews, matching `C4PortraitSelDlg::ImageLoader`'s incremental worklist.
 
 use crate::classic_gui::{
-    draw_3d_frame, draw_engine_box, draw_facet_nearest, draw_facet_stretch, ClassicButtonState,
-    ClassicGuiSkin, IntRect,
+    draw_3d_frame, draw_engine_box, draw_facet_nearest, draw_facet_stretch, with_surface_clip,
+    ClassicButtonState, ClassicGuiSkin, IntRect,
 };
 use crate::startup_main_menu::StartupTooltip;
 use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode};
@@ -2117,36 +2117,6 @@ fn draw_scrollbar(
 
 fn checkbox_square(rect: IntRect) -> IntRect {
     rect.with_width(rect.h)
-}
-
-fn with_surface_clip(surface: &mut Surface, clip: IntRect, draw: impl FnOnce(&mut Surface)) {
-    let previous = surface.clip();
-    let mut left = i64::from(clip.x).max(0);
-    let mut top = i64::from(clip.y).max(0);
-    let mut right = (i64::from(clip.x) + i64::from(clip.w.max(0)))
-        .min(i64::from(surface.width().min(i32::MAX as u32)));
-    let mut bottom = (i64::from(clip.y) + i64::from(clip.h.max(0)))
-        .min(i64::from(surface.height().min(i32::MAX as u32)));
-    if let Some(existing) = previous {
-        left = left.max(i64::from(existing.x));
-        top = top.max(i64::from(existing.y));
-        right = right.min(i64::from(existing.x) + i64::from(existing.width));
-        bottom = bottom.min(i64::from(existing.y) + i64::from(existing.height));
-    }
-    if left < right && top < bottom {
-        surface.set_clip(clonk_graphics::Rect::new(
-            left as i32,
-            top as i32,
-            (right - left) as u32,
-            (bottom - top) as u32,
-        ));
-        draw(surface);
-    }
-    if let Some(existing) = previous {
-        surface.set_clip(existing);
-    } else {
-        surface.clear_clip();
-    }
 }
 
 fn draw_icon_phase(

@@ -878,7 +878,6 @@ impl PreparedHostBootstrap {
 
 #[cfg(test)]
 impl PreparedHostBootstrap {
-    #[allow(dead_code)]
     pub(crate) fn transport_test_fixture(
         configured_tcp_port: u16,
         configured_udp_port: u16,

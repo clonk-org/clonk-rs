@@ -66,8 +66,6 @@ pub(crate) fn retain_post_failure_packet(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-// The session router consumes this in the next multi-route integration slice.
-#[allow(dead_code)]
 pub(crate) struct PostMortemReplay {
     pub connection_id: u32,
     pub client_id: ClientId,
@@ -75,7 +73,6 @@ pub(crate) struct PostMortemReplay {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 struct ClosedConnection {
     client_id: ClientId,
     next_inbound_packet: u32,
@@ -83,12 +80,10 @@ struct ClosedConnection {
 }
 
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 pub(crate) struct ClosedConnectionRouter {
     connections: BTreeMap<u32, ClosedConnection>,
 }
 
-#[allow(dead_code)]
 impl ClosedConnectionRouter {
     pub fn retain(
         &mut self,

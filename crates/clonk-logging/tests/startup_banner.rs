@@ -1,15 +1,14 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    process,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::fs;
+
+mod common;
+
+use common::unique_temp_dir;
 
 #[test]
 fn the_startup_banner_records_the_build_and_platform() {
     // The port version and the engine version diverge deliberately, so a log
     // that quotes neither cannot be matched to a build at all.
-    let directory = unique_temp_dir();
+    let directory = unique_temp_dir("clonk-logging-banner");
     let log_path = directory.join("Clonk.log");
     clonk_logging::init_verbose_with_file(false, &log_path).expect("initialize the session log");
     clonk_logging::log_startup_banner("0.4.0", "4.9.11");
@@ -29,14 +28,4 @@ fn the_startup_banner_records_the_build_and_platform() {
     }
 
     let _ = fs::remove_dir_all(&directory);
-}
-
-fn unique_temp_dir() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after epoch")
-        .as_nanos();
-    let directory = env::temp_dir().join(format!("clonk-logging-banner-{}-{nonce}", process::id()));
-    fs::create_dir_all(&directory).expect("create test directory");
-    directory
 }

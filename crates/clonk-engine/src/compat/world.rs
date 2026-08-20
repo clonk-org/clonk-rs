@@ -42,7 +42,6 @@ pub(crate) struct HostWorldObject {
     /// Current C4Shape::ContactDensity. Dynamic SetContactDensity is not yet
     /// modeled, so engine contexts seed this from the parsed definition.
     contact_density: i32,
-    #[allow(dead_code)]
     pub damage: i32,
     pub ocf: u32,
     pub(crate) move_to_range: i32,
@@ -51,7 +50,6 @@ pub(crate) struct HostWorldObject {
     pub(crate) no_push_enter: i32,
     pub position: Vector2,
     pub(crate) fixed_position: FixedVec2,
-    #[allow(dead_code)]
     pub velocity: Vector2,
     pub(crate) fixed_velocity: FixedVec2,
     pub(crate) motion_x: i32,
@@ -65,7 +63,6 @@ pub(crate) struct HostWorldObject {
     pub rotation: i32,
     pub vertices: Vec<ObjectVertex>,
     pub(crate) own_vertices: bool,
-    #[allow(dead_code)]
     pub action_data: i32,
     pub action_ticks: i32,
     pub action_phase: i32,
@@ -646,12 +643,10 @@ pub(crate) struct DefinitionMetadata {
     pub control_transfer_callback: Option<ScriptCallbackTarget>,
     /// Presentation facets used by FrameDecoration::SetByDef.
     pub action_graphics: HashMap<String, crate::DefinitionActionGraphics>,
-    #[allow(dead_code)]
     pub value: i32,
     /// DefCore AllowPictureStack APS_* exception bits, used by the live
     /// internal object-menu row grouping path.
     pub allow_picture_stack: i32,
-    #[allow(dead_code)]
     pub mass: i32,
     /// DefCore `Float`, the vertical liquid probe offset.
     pub float_line: i32,
@@ -667,7 +662,6 @@ pub(crate) struct DefinitionMetadata {
     /// in C4Game::PlaceVegetation.
     pub growth: i32,
     pub construction_offset: i32,
-    #[allow(dead_code)]
     pub basement: i32,
     /// The `[Physical]` section (GetPhysical's def form, C4Script.cpp:652).
     pub physical: PhysicalInfo,
@@ -683,9 +677,6 @@ pub(crate) struct DefinitionMetadata {
     /// DefCore `LineConnect` bits (C4D_Power_Consumer etc.;
     /// FnEnergyCheck, C4Script.cpp:1845-1856).
     pub line_connect: u32,
-    /// ClonkNames newline count (C4ObjectInfoList::New's name draw range,
-    /// C4InfoCore.cpp:411); None = use the game standard names.
-    pub clonk_name_newlines: Option<i32>,
     /// DefCore StretchGrowth (the con-scaling mode; DoCon's bottom
     /// adjust shape math).
     pub stretch_growth: bool,
@@ -1535,7 +1526,6 @@ impl HostWorldObject {
         self.contact_density
     }
 
-    #[allow(dead_code)]
     pub fn damage(&self) -> i32 {
         self.damage
     }
@@ -1581,7 +1571,6 @@ impl HostWorldObject {
         self.action_ticks
     }
 
-    #[allow(dead_code)]
     pub fn action_data(&self) -> i32 {
         self.action_data
     }

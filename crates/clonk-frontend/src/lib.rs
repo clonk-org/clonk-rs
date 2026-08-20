@@ -11463,7 +11463,7 @@ mod tests {
         let mut definitions = HashMap::new();
         for name in ["Fire", "Fire2"] {
             let shipped = load_shipped(name);
-            let core = ParticleDefCore::from(&shipped.core);
+            let core = shipped.core.clone();
             front_assert_eq! {core.name => name, "SetDefParticles resolves pFire1/pFire2 by this name \
             (src/C4Particles.cpp:485-486)",};
             // One flat opaque phase, so the blend is the only variable.

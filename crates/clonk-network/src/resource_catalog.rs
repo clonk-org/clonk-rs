@@ -329,10 +329,6 @@ impl ResourceCatalog {
         self.max_loads = max_loads.max(1);
     }
 
-    pub fn max_loads(&self) -> usize {
-        self.max_loads
-    }
-
     pub fn new(local_client_id: i32) -> Self {
         Self {
             local_client_id,

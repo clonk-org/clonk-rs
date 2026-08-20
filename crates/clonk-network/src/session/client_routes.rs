@@ -870,34 +870,6 @@ impl ClientRouteManager {
         )
     }
 
-    #[allow(clippy::too_many_arguments, dead_code)]
-    pub(crate) fn add_udp_peer_route<S>(
-        &mut self,
-        peer_id: ClientId,
-        initiator_id: ClientId,
-        local_connection_id: u32,
-        remote_connection_id: u32,
-        peer_addr: Option<SocketAddr>,
-        transport: crate::ControlTransport<S>,
-        liveness: ConnectionLivenessState,
-        outbound: crate::udp_session::ReliableUdpRouteSender,
-    ) -> bool
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        self.add_peer_route_with_udp(
-            peer_id,
-            initiator_id,
-            local_connection_id,
-            remote_connection_id,
-            crate::NetworkProtocol::Udp,
-            peer_addr,
-            transport,
-            liveness,
-            Some(outbound),
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_udp_peer_route_with_peer_capabilities<S>(
         &mut self,

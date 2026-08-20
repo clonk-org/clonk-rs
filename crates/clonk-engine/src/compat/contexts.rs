@@ -7485,7 +7485,6 @@ impl EffectHostContext {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn audio_mut(&mut self) -> &mut AudioRegistry {
         &mut self.audio
     }
@@ -9399,7 +9398,6 @@ impl ObjectScopeContext {
             .procedure_for_entry(action, self.effective_action_index())
     }
 
-    #[allow(dead_code)]
     pub(crate) fn effective_action_data(&self) -> i32 {
         if let Some(update) = self.pending_update.action.as_ref() {
             if let Some(data) = update.data {

@@ -1,9 +1,8 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    process,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::fs;
+
+mod common;
+
+use common::unique_temp_dir;
 
 #[test]
 fn the_session_log_strips_renderer_markup_from_every_field() {
@@ -14,7 +13,7 @@ fn the_session_log_strips_renderer_markup_from_every_field() {
     // writes the payload rather than at each call site
     // (src/C4Log.cpp:103-135,302-303), which is also what keeps a message
     // nobody thought to strip — here the title quoted inside an error — clean.
-    let directory = unique_temp_dir();
+    let directory = unique_temp_dir("clonk-logging-stripped");
     let log_path = directory.join("Clonk.log");
     clonk_logging::init_verbose_with_file(false, &log_path).expect("initialize the session log");
 
@@ -42,15 +41,4 @@ fn the_session_log_strips_renderer_markup_from_every_field() {
     );
 
     let _ = fs::remove_dir_all(&directory);
-}
-
-fn unique_temp_dir() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after epoch")
-        .as_nanos();
-    let directory =
-        env::temp_dir().join(format!("clonk-logging-stripped-{}-{nonce}", process::id()));
-    fs::create_dir_all(&directory).expect("create test directory");
-    directory
 }

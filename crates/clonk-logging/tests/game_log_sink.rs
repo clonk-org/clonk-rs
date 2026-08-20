@@ -1,12 +1,11 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    process,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::fs;
 
 use clonk_core::log_target::{SCRIPT_LOG_TARGET, SCRIPT_TRACE_TARGET};
 use clonk_logging::GameLogCapture;
+
+mod common;
+
+use common::unique_temp_dir;
 
 #[test]
 fn only_c4script_log_lines_reach_the_message_board_sink() {
@@ -15,7 +14,7 @@ fn only_c4script_log_lines_reach_the_message_board_sink() {
     // such as Hazard's kill messages (src/C4Log.cpp:226-240;
     // src/C4Script.cpp FnLog). Engine-internal Rust tracing has no C++
     // counterpart and must stay out of the message board.
-    let log_path = unique_temp_dir().join("Clonk.log");
+    let log_path = unique_temp_dir("clonk-logging-gamelog").join("Clonk.log");
     let capture = GameLogCapture::default();
     clonk_logging::init_verbose_with_file_and_capture(
         false,
@@ -42,15 +41,4 @@ fn only_c4script_log_lines_reach_the_message_board_sink() {
     if let Some(parent) = log_path.parent() {
         let _ = fs::remove_dir_all(parent);
     }
-}
-
-fn unique_temp_dir() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after epoch")
-        .as_nanos();
-    let directory =
-        env::temp_dir().join(format!("clonk-logging-gamelog-{}-{nonce}", process::id()));
-    fs::create_dir_all(&directory).expect("create test directory");
-    directory
 }

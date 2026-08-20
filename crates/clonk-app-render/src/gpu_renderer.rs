@@ -3533,19 +3533,43 @@ impl RetainedGpuRenderer {
             .retain(|key, _| used_object_bindings.contains(key));
         self.landscape_bind_groups
             .retain(|key, _| used_landscape_bindings.contains(key));
-        self.ensure_vertex_buffer(device, vertex_bytes.len())?;
+        Self::ensure_vertex_buffer_capacity(
+            device,
+            &mut self.vertex_buffer,
+            &mut self.vertex_buffer_size,
+            vertex_bytes.len(),
+            "lc_gpu_scene_vertices",
+        )?;
         if !vertex_bytes.is_empty() {
             queue.write_buffer(&self.vertex_buffer, 0, vertex_bytes);
         }
-        self.ensure_quad_instance_buffer(device, quad_instance_bytes.len())?;
+        Self::ensure_vertex_buffer_capacity(
+            device,
+            &mut self.quad_instance_buffer,
+            &mut self.quad_instance_buffer_size,
+            quad_instance_bytes.len(),
+            "lc_gpu_quad_instances",
+        )?;
         if !quad_instance_bytes.is_empty() {
             queue.write_buffer(&self.quad_instance_buffer, 0, quad_instance_bytes);
         }
-        self.ensure_sprite_instance_buffer(device, sprite_instance_bytes.len())?;
+        Self::ensure_vertex_buffer_capacity(
+            device,
+            &mut self.sprite_instance_buffer,
+            &mut self.sprite_instance_buffer_size,
+            sprite_instance_bytes.len(),
+            "lc_gpu_sprite_instances",
+        )?;
         if !sprite_instance_bytes.is_empty() {
             queue.write_buffer(&self.sprite_instance_buffer, 0, sprite_instance_bytes);
         }
-        self.ensure_object_sprite_instance_buffer(device, object_sprite_instance_bytes.len())?;
+        Self::ensure_vertex_buffer_capacity(
+            device,
+            &mut self.object_sprite_instance_buffer,
+            &mut self.object_sprite_instance_buffer_size,
+            object_sprite_instance_bytes.len(),
+            "lc_gpu_object_sprite_instances",
+        )?;
         if !object_sprite_instance_bytes.is_empty() {
             queue.write_buffer(
                 &self.object_sprite_instance_buffer,
@@ -3553,11 +3577,23 @@ impl RetainedGpuRenderer {
                 object_sprite_instance_bytes,
             );
         }
-        self.ensure_landscape_instance_buffer(device, landscape_instance_bytes.len())?;
+        Self::ensure_vertex_buffer_capacity(
+            device,
+            &mut self.landscape_instance_buffer,
+            &mut self.landscape_instance_buffer_size,
+            landscape_instance_bytes.len(),
+            "lc_gpu_landscape_instances",
+        )?;
         if !landscape_instance_bytes.is_empty() {
             queue.write_buffer(&self.landscape_instance_buffer, 0, landscape_instance_bytes);
         }
-        self.ensure_solid_rect_instance_buffer(device, solid_rect_instance_bytes.len())?;
+        Self::ensure_vertex_buffer_capacity(
+            device,
+            &mut self.solid_rect_instance_buffer,
+            &mut self.solid_rect_instance_buffer_size,
+            solid_rect_instance_bytes.len(),
+            "lc_gpu_solid_rect_instances",
+        )?;
         if !solid_rect_instance_bytes.is_empty() {
             queue.write_buffer(
                 &self.solid_rect_instance_buffer,
@@ -4691,147 +4727,29 @@ impl RetainedGpuRenderer {
         Ok(())
     }
 
-    fn ensure_vertex_buffer(
-        &mut self,
+    fn ensure_vertex_buffer_capacity(
         device: &wgpu::Device,
+        buffer: &mut wgpu::Buffer,
+        capacity: &mut u64,
         required: usize,
+        label: &str,
     ) -> Result<(), GpuRendererError> {
         let required =
             u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
-        if required <= self.vertex_buffer_size {
+        if required <= *capacity {
             return Ok(());
         }
         let size = required
             .checked_next_power_of_two()
             .ok_or(GpuRendererError::VertexRangeOverflow)?
             .max(INITIAL_VERTEX_BUFFER_SIZE);
-        self.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("lc_gpu_scene_vertices"),
+        *buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
             size,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.vertex_buffer_size = size;
-        Ok(())
-    }
-
-    fn ensure_quad_instance_buffer(
-        &mut self,
-        device: &wgpu::Device,
-        required: usize,
-    ) -> Result<(), GpuRendererError> {
-        let required =
-            u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
-        if required <= self.quad_instance_buffer_size {
-            return Ok(());
-        }
-        let size = required
-            .checked_next_power_of_two()
-            .ok_or(GpuRendererError::VertexRangeOverflow)?
-            .max(INITIAL_VERTEX_BUFFER_SIZE);
-        self.quad_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("lc_gpu_quad_instances"),
-            size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.quad_instance_buffer_size = size;
-        Ok(())
-    }
-
-    fn ensure_sprite_instance_buffer(
-        &mut self,
-        device: &wgpu::Device,
-        required: usize,
-    ) -> Result<(), GpuRendererError> {
-        let required =
-            u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
-        if required <= self.sprite_instance_buffer_size {
-            return Ok(());
-        }
-        let size = required
-            .checked_next_power_of_two()
-            .ok_or(GpuRendererError::VertexRangeOverflow)?
-            .max(INITIAL_VERTEX_BUFFER_SIZE);
-        self.sprite_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("lc_gpu_sprite_instances"),
-            size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.sprite_instance_buffer_size = size;
-        Ok(())
-    }
-
-    fn ensure_object_sprite_instance_buffer(
-        &mut self,
-        device: &wgpu::Device,
-        required: usize,
-    ) -> Result<(), GpuRendererError> {
-        let required =
-            u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
-        if required <= self.object_sprite_instance_buffer_size {
-            return Ok(());
-        }
-        let size = required
-            .checked_next_power_of_two()
-            .ok_or(GpuRendererError::VertexRangeOverflow)?
-            .max(INITIAL_VERTEX_BUFFER_SIZE);
-        self.object_sprite_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("lc_gpu_object_sprite_instances"),
-            size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.object_sprite_instance_buffer_size = size;
-        Ok(())
-    }
-
-    fn ensure_landscape_instance_buffer(
-        &mut self,
-        device: &wgpu::Device,
-        required: usize,
-    ) -> Result<(), GpuRendererError> {
-        let required =
-            u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
-        if required <= self.landscape_instance_buffer_size {
-            return Ok(());
-        }
-        let size = required
-            .checked_next_power_of_two()
-            .ok_or(GpuRendererError::VertexRangeOverflow)?
-            .max(INITIAL_VERTEX_BUFFER_SIZE);
-        self.landscape_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("lc_gpu_landscape_instances"),
-            size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.landscape_instance_buffer_size = size;
-        Ok(())
-    }
-
-    fn ensure_solid_rect_instance_buffer(
-        &mut self,
-        device: &wgpu::Device,
-        required: usize,
-    ) -> Result<(), GpuRendererError> {
-        let required =
-            u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
-        if required <= self.solid_rect_instance_buffer_size {
-            return Ok(());
-        }
-        let size = required
-            .checked_next_power_of_two()
-            .ok_or(GpuRendererError::VertexRangeOverflow)?
-            .max(INITIAL_VERTEX_BUFFER_SIZE);
-        self.solid_rect_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("lc_gpu_solid_rect_instances"),
-            size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.solid_rect_instance_buffer_size = size;
+        *capacity = size;
         Ok(())
     }
 

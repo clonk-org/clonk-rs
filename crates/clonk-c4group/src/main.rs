@@ -12,7 +12,6 @@ mod apply_update;
 mod cli;
 mod edit;
 mod make_update;
-#[allow(dead_code)]
 mod update_core;
 mod update_entries;
 mod wildcard;

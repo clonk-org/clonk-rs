@@ -95,7 +95,6 @@ impl LegacyHatValue {
     const DOWN_BIT: u8 = 0x04;
     const LEFT_BIT: u8 = 0x08;
 
-    pub(crate) const CENTERED: Self = Self(0);
     pub(crate) const UP: Self = Self(Self::UP_BIT);
     pub(crate) const RIGHT: Self = Self(Self::RIGHT_BIT);
     pub(crate) const DOWN: Self = Self(Self::DOWN_BIT);

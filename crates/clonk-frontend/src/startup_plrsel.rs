@@ -7,7 +7,7 @@
 //! widgets it instantiates. All geometry uses C++ integer math; all blits go
 //! through the CStdDDraw-faithful helpers in this crate.
 
-use crate::clonk_fonts::{advance_pixels, expand_hotkey_markup, ClonkFontSet};
+use crate::clonk_fonts::{advance_pixels, cp1252_to_char, expand_hotkey_markup, ClonkFontSet};
 use crate::rename_edit::RenameEdit;
 use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
@@ -327,42 +327,6 @@ fn build_book_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
         );
     }
     Ok(font)
-}
-
-/// Windows-1252 specials in 0x80..=0x9F (StdFont.cpp:386-401); identical to
-/// the table in `clonk_fonts` (private there).
-fn cp1252_to_char(byte: u8) -> Option<char> {
-    match byte {
-        0x80 => Some('\u{20AC}'),
-        0x82 => Some('\u{201A}'),
-        0x83 => Some('\u{0192}'),
-        0x84 => Some('\u{201E}'),
-        0x85 => Some('\u{2026}'),
-        0x86 => Some('\u{2020}'),
-        0x87 => Some('\u{2021}'),
-        0x88 => Some('\u{02C6}'),
-        0x89 => Some('\u{2030}'),
-        0x8A => Some('\u{0160}'),
-        0x8B => Some('\u{2039}'),
-        0x8C => Some('\u{0152}'),
-        0x8E => Some('\u{017D}'),
-        0x91 => Some('\u{2018}'),
-        0x92 => Some('\u{2019}'),
-        0x93 => Some('\u{201C}'),
-        0x94 => Some('\u{201D}'),
-        0x95 => Some('\u{2022}'),
-        0x96 => Some('\u{2013}'),
-        0x97 => Some('\u{2014}'),
-        0x98 => Some('\u{02DC}'),
-        0x99 => Some('\u{2122}'),
-        0x9A => Some('\u{0161}'),
-        0x9B => Some('\u{203A}'),
-        0x9C => Some('\u{0153}'),
-        0x9E => Some('\u{017E}'),
-        0x9F => Some('\u{0178}'),
-        0x81 | 0x8D | 0x8F | 0x90 | 0x9D => None,
-        b => Some(b as char),
-    }
 }
 
 /// Builds the two book fonts from a TTF (C4Startup.cpp:94-105: Caption 16 and

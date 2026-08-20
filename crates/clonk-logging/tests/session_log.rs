@@ -1,9 +1,8 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    process::{self, Command},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{env, fs, path::PathBuf, process::Command};
+
+mod common;
+
+use common::unique_temp_dir;
 
 const CHILD_MODE: &str = "LC_L029_CHILD_MODE";
 const CHILD_LOG_PATH: &str = "LC_L029_CHILD_LOG_PATH";
@@ -31,8 +30,7 @@ fn session_log_is_overwritten_and_verbose_tees_to_stderr() {
         return;
     }
 
-    let temp_dir = unique_temp_dir();
-    fs::create_dir_all(&temp_dir).expect("create test directory");
+    let temp_dir = unique_temp_dir("clonk-logging-l029");
 
     for (mode, expect_debug) in [("normal", false), ("verbose", true)] {
         let log_path = temp_dir.join(mode).join("Clonk.log");
@@ -90,12 +88,4 @@ fn session_log_is_overwritten_and_verbose_tees_to_stderr() {
     }
 
     let _ = fs::remove_dir_all(temp_dir);
-}
-
-fn unique_temp_dir() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after epoch")
-        .as_nanos();
-    env::temp_dir().join(format!("clonk-logging-l029-{}-{nonce}", process::id()))
 }
