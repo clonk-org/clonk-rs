@@ -3359,4 +3359,174 @@ mod tests {
         // tiny button: falls back to text font.
         assert_eq!(set.button_font(20).line_height, 22);
     }
+
+    /// The same five Info-row forms at **scale 1** (clonk-org/clonk-rs#563).
+    ///
+    /// The neighbouring fractional subcases run an anisotropic projection,
+    /// where `native_physical_shear` divides by `scale_y` and multiplies by
+    /// `scale_x`. At scale 1 that correction is the identity, so this is the
+    /// case that pins the *raw* `mat[1] -= 0.3` per tag
+    /// (`StdMarkup.cpp:24-28`) with nothing to hide a wrong constant or a
+    /// dropped scale term: one tag leans by 0.3, two lean by exactly twice
+    /// that, and an inline image leans with the glyphs beside it.
+    #[test]
+    fn native_italics_shear_cumulatively_at_scale_one() {
+        struct SolidImage(Vec<u8>);
+
+        impl FontImageProvider for SolidImage {
+            fn font_image(&self, tag: &str) -> Option<FontImageRef<'_>> {
+                (tag == "icon").then_some(FontImageRef {
+                    width: 13,
+                    height: 13,
+                    rgba: &self.0,
+                })
+            }
+        }
+
+        fn row_start(surface: &Surface, y: u32) -> Option<u32> {
+            (0..surface.width())
+                .find(|x| surface.get_pixel(*x, y).is_some_and(|pixel| pixel.a != 0))
+        }
+
+        let mut raster = ClonkFont::new(13);
+        raster.cell_height = 13;
+        raster.h_space = -1;
+        raster.add_glyph(
+            'A',
+            GlyphCell {
+                width: 13,
+                pixels: vec![Color::opaque(255, 255, 255); 13 * 13],
+            },
+        );
+        let font = NativeClonkFont {
+            raster,
+            application_scale: 1.0,
+            effective_scale: 1.0,
+            logical_height: 13,
+            raster_height: 13,
+            logical_h_space: -1,
+            snap_to_pixels: false,
+            retained_glyph_images: Mutex::new(HashMap::new()),
+        };
+        let images = SolidImage(vec![255; 13 * 13 * 4]);
+        let projection =
+            ClipperProjection::new(1.0, (64, 40), 64, clonk_graphics::Rect::new(0, 0, 64, 40));
+        let (scale_x, scale_y) = projection.scale();
+        assert_eq!(
+            (scale_x, scale_y),
+            (1.0, 1.0),
+            "this subcase is the isotropic one"
+        );
+
+        // One tag is 0.3; the correction term is the identity here, so the
+        // physical shear must be the bare constant.
+        assert_eq!(
+            native_physical_shear(
+                &[NativeMarkupTag::Italic],
+                NativeDrawProjection::clipper(projection)
+            ),
+            f64::from(-0.3_f32),
+        );
+        assert_eq!(
+            native_physical_shear(
+                &[NativeMarkupTag::Italic, NativeMarkupTag::Italic],
+                NativeDrawProjection::clipper(projection)
+            ),
+            f64::from(-0.3_f32 - 0.3),
+            "a nested tag leans exactly twice as far, not once and not thrice"
+        );
+
+        let mut plain = Surface::new(64, 40, clonk_graphics::PixelFormat::Rgba8888);
+        let mut italic = Surface::new(64, 40, clonk_graphics::PixelFormat::Rgba8888);
+        let mut nested = Surface::new(64, 40, clonk_graphics::PixelFormat::Rgba8888);
+        let mut image = Surface::new(64, 40, clonk_graphics::PixelFormat::Rgba8888);
+        for (surface, text) in [
+            (&mut plain, "A"),
+            (&mut italic, "<i>A</i>"),
+            (&mut nested, "<i><i>A</i></i>"),
+            (&mut image, "<i>{{icon}}</i>"),
+        ] {
+            font.draw_to_physical_surface_with_clipper_and_images(
+                surface,
+                10,
+                2,
+                text,
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                true,
+                projection,
+                None,
+                &images,
+            );
+        }
+
+        // Markup never changes advance widths, so measuring is unaffected.
+        // The tag is left open to isolate this from the trailing-close-tag
+        // h-space quirk the fractional subcase documents.
+        assert_eq!(font.measure("A", true), font.measure("<i>A", true));
+        assert_eq!(font.measure("A", true), font.measure("<i><i>A", true));
+
+        // The clipper offsets the row within the surface, so the glyph band is
+        // taken from the plain render rather than assumed.
+        let rows: Vec<u32> = (0..40)
+            .filter(|y| row_start(&plain, *y).is_some())
+            .collect();
+        let (top, bottom) = (
+            *rows.first().expect("the plain row drew something"),
+            *rows.last().expect("the plain row drew something"),
+        );
+        assert!(bottom > top, "the glyph spans more than one row");
+        let plain_top = row_start(&plain, top).expect("plain top row");
+        let italic_top = row_start(&italic, top).expect("italic top row");
+        let nested_top = row_start(&nested, top).expect("nested top row");
+        assert!(
+            italic_top > plain_top,
+            "italic leans the top of the glyph to the right"
+        );
+        assert!(
+            nested_top > italic_top,
+            "a nested tag leans it further still"
+        );
+        assert!(
+            row_start(&italic, bottom).expect("italic bottom row")
+                < row_start(&plain, bottom).expect("plain bottom row"),
+            "and leans the bottom the other way, so the row shears rather than shifting"
+        );
+        assert_eq!(
+            row_start(&image, top),
+            Some(italic_top),
+            "an inline image shears with the glyphs it sits among"
+        );
+
+        // A row carrying glyphs *and* an image is the form Info menus actually
+        // use — prose with an icon in it — and the case where a shear applied
+        // to one but not the other would show. Both ends of the row must lean,
+        // and by the same amount as the glyph-only row.
+        let mut mixed = Surface::new(64, 40, clonk_graphics::PixelFormat::Rgba8888);
+        font.draw_to_physical_surface_with_clipper_and_images(
+            &mut mixed,
+            10,
+            2,
+            "<i>A{{icon}}</i>",
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            true,
+            projection,
+            None,
+            &images,
+        );
+        assert_eq!(
+            row_start(&mixed, top),
+            Some(italic_top),
+            "the mixed row starts where the glyph-only italic row starts"
+        );
+        let mixed_lean = i64::from(row_start(&mixed, top).expect("mixed top"))
+            - i64::from(row_start(&mixed, bottom).expect("mixed bottom"));
+        let plain_lean =
+            i64::from(italic_top) - i64::from(row_start(&italic, bottom).expect("italic bottom"));
+        assert_eq!(
+            mixed_lean, plain_lean,
+            "text and image in one row lean together, not by different amounts"
+        );
+    }
 }

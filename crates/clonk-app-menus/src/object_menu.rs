@@ -7604,4 +7604,112 @@ mod tests {
             ["640x480#067a8001", "640x480#f445457b", "640x480#34adb1cd"]
         );
     }
+
+    /// Markup is free; images are not (clonk-org/clonk-rs#563).
+    ///
+    /// `CMarkup` tags carry no advance of their own — `CMarkupTagItalic::Apply`
+    /// only shears the blit transform (`StdMarkup.cpp:24-28`), and
+    /// `GetTextExtent` measures with markup stripped — so wrapping an Info row
+    /// in `<i>`, nesting it, or coloring it must leave the line widths, the
+    /// wrap points and therefore the row's hit rectangle exactly where the
+    /// plain text put them.
+    ///
+    /// An inline `{{image}}` is the deliberate counter-case: it *does* occupy
+    /// width, so it must move them. Asserting only the first half would pass
+    /// against a layout that ignored every markup construct including images.
+    #[test]
+    fn info_markup_leaves_row_geometry_alone_while_inline_images_move_it() {
+        let font_bytes = std::fs::read(repository_root().join("planet/System.c4g/Endeavour.ttf"))
+            .expect("Endeavour.ttf reads");
+        let fonts = clonk_frontend::clonk_fonts::build_font_set(&font_bytes)
+            .expect("Endeavour fonts build");
+        let font = HudFont::Clonk(&fonts.text);
+        let images = HashMap::from([(
+            "TEST".to_string(),
+            solid_image(12, 6, Color::opaque(240, 20, 20)),
+        )]);
+
+        // One wrap width for every form, chosen narrow enough that the text
+        // actually wraps — a width that fits on one line would make the
+        // "wrap points are unchanged" half vacuous.
+        let width = 60;
+        let plain = layout_info_text(&font, "supercalifragilistic expialidocious", width, &images);
+        assert!(
+            plain.lines.len() > 1,
+            "the sample must wrap for this test to say anything about wrap points"
+        );
+        let shape = |layout: &InfoTextLayout| {
+            (
+                layout.width,
+                layout
+                    .lines
+                    .iter()
+                    .map(|line| line.width)
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        for markup in [
+            "<i>supercalifragilistic expialidocious</i>",
+            "<i><i>supercalifragilistic expialidocious</i></i>",
+            "<c 00ff00>supercalifragilistic expialidocious</c>",
+            "<i><c 00ff00>supercalifragilistic expialidocious</c></i>",
+        ] {
+            let decorated = layout_info_text(&font, markup, width, &images);
+            assert_eq!(
+                shape(&decorated),
+                shape(&plain),
+                "{markup} must not move a single wrap point"
+            );
+        }
+
+        let with_image = layout_info_text(
+            &font,
+            "{{TEST}}supercalifragilistic expialidocious",
+            width,
+            &images,
+        );
+        assert_ne!(
+            shape(&with_image),
+            shape(&plain),
+            "an inline image occupies width and must reflow the row"
+        );
+
+        // The same claim where the player actually feels it: the row rectangle
+        // the pointer is tested against.
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Information", 0, 2);
+            AddMenuItem("Row", "", MENU, this(), 0, 0, "plain instruction text");
+        }
+        "#;
+        let menu = script_menu_fixture("MENU", "Menu", script);
+        let area = Rect::new(0, 0, 320, 200);
+        let rect_for = |caption: &str| {
+            let mut variant = menu.clone();
+            variant.items[0].info_caption = caption.to_string();
+            engine_script_menu_layout_with_images(area, &font, &variant, false, &images, None)
+                .item_rect(0)
+        };
+        let plain_rect = rect_for("plain instruction text").expect("the row is laid out");
+        for markup in [
+            "<i>plain instruction text</i>",
+            "<i><i>plain instruction text</i></i>",
+            "<c 00ff00>plain instruction text</c>",
+        ] {
+            assert_eq!(
+                rect_for(markup),
+                Some(plain_rect),
+                "{markup} must leave the row's hit rectangle identical"
+            );
+        }
+        // The rectangle is content-derived, not a fixed grid cell, so the
+        // equalities above are a real constraint rather than a tautology.
+        assert_ne!(
+            rect_for("{{TEST}}plain instruction text"),
+            Some(plain_rect),
+            "an inline image widens the row, proving the rect tracks content"
+        );
+    }
 }
