@@ -4,6 +4,57 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-08-20
+
+### Documentation
+
+- Record the snapshot materiality threshold before optimising it (#756)
+
+### Features
+
+- Offer a gather order only for items a clonk can fetch and carry home (#770)
+- Erase voice media key material when a route ends (#768)
+- Make the toolbox material and texture selectors pop-up combos (#760)
+- Render the toolbox preview as the patterned disc C++ draws (#752)
+- Give the component editor selection, clipboard, undo and a measured caret (#750)
+
+### Performance
+
+- Route eligible non-object sprites onto the compact instance (#777)
+- Fold the monitor gamma resolve into the presentation draw (#762)
+- Lower a rotated definition particle to a compact sprite instance (#761)
+- Read one effect per checker instead of copying the whole list (#751)
+- Test effect priorities without copying the effect stack (#748)
+
+### Refactoring
+
+- Remove residual unused code (#795)
+- Remove obsolete code and consolidate test fixtures (#794)
+
+### Testing
+
+- Drive the shipped MFFS force field through real player controls (#779)
+- Drive the shipped Alchemy curse family through its selector (#788)
+- Pin that split screens do not multiply the fog cell budget (#787)
+- Drive the shipped ETFL eternal flame through real player controls (#786)
+- Drive the shipped MDBT firebreath through real player controls (#775)
+- Pin that shipped scenarios never animate the sky lighting factor (#780)
+- Differential-check the PXS slot allocator against C++ (#774)
+- Drive the shipped MFRB fireball through real player controls (#773)
+- Drive the shipped MGHL heal through real player controls (#771)
+- Pin the fog quad diagonal a shader lookup must reproduce (#769)
+- Pin that no shader reading mip-capable art selects a level (#766)
+- Pin the 32-bit envelope the fog falloff is exact in (#767)
+- Pin that modulate rounds ties away from zero (#765)
+- Pin what a string of distinct native glyphs costs today (#764)
+- Pin that shipped scenarios never reach the column landscape fallback (#763)
+- Pin that every live newgfx particle reaches the snapshot (#758)
+- Split the SimulationSnapshot projection by section (#757)
+- Pin that a machine with neither presentation path is told it was both (#755)
+- Trace identifier lookups over a scenario activation (#754)
+- Pin that a group outside the stock sort table packs in insertion order (#753)
+- Pin that a retained snapshot survives the engine advancing past it (#747)
+
 ## [0.16.0] - 2026-08-19
 
 ### Bug fixes
