@@ -177,6 +177,59 @@ impl Default for Color {
 mod tests {
     use super::Color;
 
+    /// `modulate` rounds ties **away from zero**, and a GPU port has to do the
+    /// same explicitly.
+    ///
+    /// Generating lit sky texels on the GPU (clonk-org/clonk-rs#287) requires
+    /// reproducing this byte-for-byte, and its acceptance criteria call for
+    /// "explicit integer/rounding rules rather than implementation-dependent
+    /// float conversion" — this is why. Rust's `f32::round` rounds halves away
+    /// from zero; WGSL's `round` rounds halves to **even**. They disagree on a
+    /// quarter of all component values at `lighting = 0.5`, so a shader written
+    /// with a bare `round()` would be off by one on those texels — 64 of the
+    /// 256 component values at that lighting. A shader must spell the tie out,
+    /// e.g. `floor(x + 0.5)` for non-negative input.
+    #[test]
+    fn modulate_rounds_ties_away_from_zero() {
+        // 1 * 0.5 = 0.5 exactly: away-from-zero gives 1, ties-to-even gives 0.
+        assert_eq!(Color::new(1, 5, 9, 255).modulate(0.5).r, 1);
+        assert_eq!(Color::new(1, 5, 9, 255).modulate(0.5).g, 3);
+        assert_eq!(Color::new(1, 5, 9, 255).modulate(0.5).b, 5);
+        // 3 * 1.5 = 4.5: away gives 5, ties-to-even gives 4.
+        assert_eq!(Color::new(3, 0, 0, 255).modulate(1.5).r, 5);
+        // 2 * 0.25 = 0.5.
+        assert_eq!(Color::new(2, 0, 0, 255).modulate(0.25).r, 1);
+
+        // The disagreement is systematic rather than a corner case: at 0.5 it
+        // covers every odd component, a quarter of the whole range.
+        let ties_to_even = |value: f32| {
+            let floor = value.floor();
+            let fraction = value - floor;
+            if fraction > 0.5 || (fraction == 0.5 && (floor as i32) % 2 != 0) {
+                floor + 1.0
+            } else {
+                floor
+            }
+        };
+        let divergent = (0_u8..=255)
+            .filter(|component| {
+                let exact = f32::from(*component) * 0.5;
+                let away = f32::from(Color::new(*component, 0, 0, 255).modulate(0.5).r);
+                (away - ties_to_even(exact)).abs() > f32::EPSILON
+            })
+            .count();
+        assert_eq!(
+            divergent, 64,
+            "a quarter of the range: every odd component is a tie at lighting \
+             0.5, and the two rules disagree on the half of those whose floor \
+             is even"
+        );
+
+        // Alpha is carried through untouched, and negative factors clamp.
+        assert_eq!(Color::new(10, 10, 10, 77).modulate(0.5).a, 77);
+        assert_eq!(Color::new(200, 200, 200, 255).modulate(-1.0).r, 0);
+    }
+
     #[test]
     fn modulate_scales_rgb_channels() {
         let color = Color::new(100, 150, 200, 255);
