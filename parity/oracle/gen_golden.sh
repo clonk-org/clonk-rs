@@ -849,6 +849,20 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Config.cpp" > "$gen/config_language_sequence.inc"
 
+# 3r. Lift C4Value::operator== whole. It is a nested switch on the LEFT tag and
+#     then the right, which is what makes it asymmetric: the object arm demands
+#     an equal tag as well as an equal payload, so `nil == object_zero` is true
+#     while `object_zero == nil` is false. Generating the full ordered matrix is
+#     the point -- that turns out to be the ONLY asymmetric pair, and a port
+#     that assumed the differing arms produce more asymmetry than they do would
+#     look reasonable and be wrong.
+awk '
+  /^bool C4Value::operator==\(const C4Value &Value2\) const$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Value.cpp" > "$gen/c4value_operator_equal.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

@@ -5296,6 +5296,106 @@ struct C4ConfigGeneral
 
 } // namespace config_language
 
+// C4Value::operator==, lifted whole. The scaffold supplies only what the
+// operator itself touches: the tag enum, the C4V_Data union (compared as one
+// word, and contextually convertible to bool for the `assert(!Data)` arms) and
+// the three container types it dereferences. C4ValueList's real comparison is
+// `= default` over a `std::vector<C4Value>` (C4ValueList.h:49,:67), so the
+// array arm recurses back through this same operator element-wise.
+namespace c4value_equal
+{
+
+enum C4V_Type
+{
+	C4V_Any = 0,
+	C4V_Int,
+	C4V_Bool,
+	C4V_C4ID,
+	C4V_C4Object,
+	C4V_String,
+	C4V_Array,
+	C4V_Map,
+	C4V_Ref,
+};
+
+struct C4Value;
+
+struct C4String
+{
+	std::string Data;
+};
+
+struct C4ValueArray
+{
+	std::vector<C4Value> values;
+	bool operator==(const C4ValueArray &other) const;
+};
+
+struct C4ValueMapData
+{
+	std::vector<std::pair<std::string, C4Value>> entries;
+	bool operator==(const C4ValueMapData &other) const;
+};
+
+union C4V_Data
+{
+	std::intptr_t Int;
+	C4String *Str;
+	C4ValueArray *Array;
+	C4ValueMapData *Map;
+
+	bool operator==(const C4V_Data &other) const { return Int == other.Int; }
+	explicit operator bool() const { return Int != 0; }
+};
+
+struct C4Value
+{
+	C4V_Data Data;
+	C4V_Type Type;
+
+	C4V_Data GetData() const { return Data; }
+	bool operator==(const C4Value &Value2) const;
+};
+
+#include "c4value_operator_equal.inc"
+
+inline bool C4ValueArray::operator==(const C4ValueArray &other) const
+{
+	return values == other.values;
+}
+
+inline bool C4ValueMapData::operator==(const C4ValueMapData &other) const
+{
+	return entries == other.entries;
+}
+
+inline C4Value scalar(C4V_Type type, std::intptr_t payload)
+{
+	C4Value value;
+	value.Data.Int = payload;
+	value.Type = type;
+	return value;
+}
+
+inline C4Value string_value(C4String *str)
+{
+	C4Value value;
+	value.Data.Str = str;
+	value.Type = C4V_String;
+	return value;
+}
+
+inline C4Value array_value(C4ValueArray *array)
+{
+	C4Value value;
+	value.Data.Array = array;
+	value.Type = C4V_Array;
+	return value;
+}
+
+} // namespace c4value_equal
+
+
 
 
 
@@ -6226,6 +6326,61 @@ int main()
             sep();
             printf("{\"case\":\"%s\",\"source\":\"%s\",\"count\":%d,\"target\":\"%s\"}", c.name,
                    c.source, count, target);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("c4value_operator_equal");
+    {
+        using namespace c4value_equal;
+
+        // Distinct allocations holding equal content, to show that strings and
+        // arrays compare by CONTENT rather than by backing pointer.
+        static C4String abc_one{"abc"};
+        static C4String abc_two{"abc"};
+        static C4String xyz{"xyz"};
+
+        static C4ValueArray one_two{{scalar(C4V_Int, 1), scalar(C4V_Int, 2)}};
+        static C4ValueArray one_two_copy{{scalar(C4V_Int, 1), scalar(C4V_Int, 2)}};
+        static C4ValueArray one_three{{scalar(C4V_Int, 1), scalar(C4V_Int, 3)}};
+
+        struct Named
+        {
+            const char *name;
+            C4Value value;
+        };
+
+        // C4IDs carry only payloads the port can also build: an all-digit id of
+        // four or more characters parses numerically, so these are reachable
+        // from both sides and let a Bool and a C4ID share a word.
+        const Named values[] = {
+            {"nil", scalar(C4V_Any, 0)},
+            {"int_zero", scalar(C4V_Int, 0)},
+            {"int_one", scalar(C4V_Int, 1)},
+            {"int_minus_one", scalar(C4V_Int, -1)},
+            {"bool_false", scalar(C4V_Bool, 0)},
+            {"bool_true", scalar(C4V_Bool, 1)},
+            {"c4id_zero", scalar(C4V_C4ID, 0)},
+            {"c4id_one", scalar(C4V_C4ID, 1)},
+            {"object_zero", scalar(C4V_C4Object, 0)},
+            {"object_five", scalar(C4V_C4Object, 5)},
+            {"string_abc", string_value(&abc_one)},
+            {"string_abc_other_allocation", string_value(&abc_two)},
+            {"string_xyz", string_value(&xyz)},
+            {"array_one_two", array_value(&one_two)},
+            {"array_one_two_other_allocation", array_value(&one_two_copy)},
+            {"array_one_three", array_value(&one_three)},
+        };
+
+        for (const Named &left : values)
+        {
+            for (const Named &right : values)
+            {
+                sep();
+                printf("{\"left\":\"%s\",\"right\":\"%s\",\"equal\":%d}", left.name, right.name,
+                       left.value == right.value ? 1 : 0);
+            }
         }
     }
     arr_end();
