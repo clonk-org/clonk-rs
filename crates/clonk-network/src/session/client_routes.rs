@@ -1359,7 +1359,7 @@ impl ClientRouteManager {
                 if !route.voice_auth.is_negotiated() {
                     return None;
                 }
-                let cipher = route.voice_auth.send_cipher()?;
+                let cipher = route.voice_auth.send_cipher()?.clone();
                 (route.protocol == crate::NetworkProtocol::Udp
                     && !route.outbound.is_closed()
                     && selected.insert(route.peer_id))
@@ -1394,7 +1394,7 @@ impl ClientRouteManager {
                     route
                         .voice_auth
                         .receive_cipher()
-                        .map(|cipher| (route.peer_id, cipher))
+                        .map(|cipher| (route.peer_id, cipher.clone()))
                 })
                 .flatten()
         })

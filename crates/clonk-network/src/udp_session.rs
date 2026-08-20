@@ -3213,12 +3213,12 @@ mod tests {
         incoming_route.set_voice_receive_cookie(expected.cookie());
         let frame = crate::voice::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap();
         let forged_packet = crate::voice::encode_authenticated_voice_packet(
-            forged,
+            &forged,
             &crate::voice::VoicePacket::Direct(frame.clone()),
         )
         .unwrap();
         let packet = crate::voice::encode_authenticated_voice_packet(
-            expected,
+            &expected,
             &crate::voice::VoicePacket::Direct(frame),
         )
         .unwrap();

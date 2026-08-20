@@ -544,7 +544,6 @@ fn send_client_voice_frame_to_routes(
 ) {
     let host_route = routes
         .iter()
-        .copied()
         .find(|(peer_id, _, _)| *peer_id == HOST_CLIENT_ID);
     // Direct fanout and the host relay share one bounded hub queue. Hold the
     // relay's slot before filling the rest: without it, a burst of direct
@@ -561,7 +560,6 @@ fn send_client_voice_frame_to_routes(
     let mut direct_recipients = Vec::new();
     for (peer_id, peer, cipher) in routes
         .iter()
-        .copied()
         .filter(|(peer_id, _, _)| *peer_id != HOST_CLIENT_ID)
     {
         if direct_recipients.len() == crate::voice::MAX_VOICE_DIRECT_RECIPIENTS {
@@ -573,8 +571,8 @@ fn send_client_voice_frame_to_routes(
         ) else {
             continue;
         };
-        if udp_handle.try_send_voice_media(peer, wire) {
-            direct_recipients.push(peer_id);
+        if udp_handle.try_send_voice_media(*peer, wire) {
+            direct_recipients.push(*peer_id);
         }
     }
     let Some(((_, host_peer, host_cipher), relay_permit)) = host_route.zip(relay_permit) else {
@@ -585,7 +583,7 @@ fn send_client_voice_frame_to_routes(
         direct_recipients,
     };
     if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(host_cipher, &relay) {
-        relay_permit.send(host_peer, wire);
+        relay_permit.send(*host_peer, wire);
     }
 }
 
@@ -601,7 +599,7 @@ fn handle_client_voice_media(
         return;
     };
     let Ok(packet) =
-        crate::voice::decode_authenticated_voice_packet(&media.payload, receive_cipher)
+        crate::voice::decode_authenticated_voice_packet(&media.payload, &receive_cipher)
     else {
         return;
     };
@@ -2781,11 +2779,11 @@ mod tests {
                 (
                     client_id,
                     SocketAddr::from(([127, 0, 0, 1], 40_000 + client_id as u16)),
-                    cipher,
+                    cipher.clone(),
                 )
             })
             .collect::<Vec<_>>();
-        routes.push((HOST_CLIENT_ID, host_peer, cipher));
+        routes.push((HOST_CLIENT_ID, host_peer, cipher.clone()));
         let peer_ids = routes
             .iter()
             .map(|(client_id, peer, _)| (*peer, *client_id))
@@ -2801,7 +2799,7 @@ mod tests {
         let mut direct_recipients = Vec::new();
         let mut relayed_recipients = None;
         while let Ok(datagram) = queued.try_recv() {
-            match crate::voice::decode_authenticated_voice_packet(&datagram.payload, cipher)
+            match crate::voice::decode_authenticated_voice_packet(&datagram.payload, &cipher)
                 .unwrap()
             {
                 crate::voice::VoicePacket::Direct(_) => {
