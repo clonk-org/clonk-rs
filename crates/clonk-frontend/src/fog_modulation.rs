@@ -1842,3 +1842,87 @@ mod fine_fog_tests {
         assert_eq!((map.resolution_x, map.resolution_y), (16, 16));
     }
 }
+
+#[cfg(test)]
+mod thirty_two_bit_bounds_tests {
+    /// The exact envelope in which `reduce_modulation`'s falloff survives being
+    /// rewritten in 32-bit math, which is what a GPU generator would have
+    /// (clonk-org/clonk-rs#300).
+    ///
+    /// Portable WGSL has no `i64`, and this builder leans on it twice:
+    ///
+    /// * `distance = dx * dx + dy * dy` over map-space coordinates, and
+    /// * `(radius2_sq - distance) * 255`, the widest term.
+    ///
+    /// Both are exactly representable in 32 bits, but only within bounds worth
+    /// writing down, because **`radius2` is `plr_view_range`, which script
+    /// sets** (`SetPlrViewRange`) and nothing here clamps. A scenario asking for
+    /// a 5,000-pixel view range is not exotic, and it would wrap a 32-bit
+    /// generator while the `i64` builder stays exact.
+    #[test]
+    fn falloff_is_32_bit_exact_only_within_these_bounds() {
+        // (radius^2) * 255 must fit: the last radius that does.
+        const MAX_I32_RADIUS: i64 = 2_901;
+        // dx^2 + dy^2 must fit: the last offset that does.
+        const MAX_I32_OFFSET: i64 = 32_767;
+
+        let product = |radius: i64| radius * radius * 255;
+        assert!(
+            product(MAX_I32_RADIUS) <= i64::from(i32::MAX),
+            "radius {MAX_I32_RADIUS} is the boundary and must still fit"
+        );
+        assert!(
+            product(MAX_I32_RADIUS + 1) > i64::from(i32::MAX),
+            "one past the boundary must not fit, or the bound is wrong"
+        );
+
+        let squared = |offset: i64| offset * offset * 2;
+        assert!(squared(MAX_I32_OFFSET) <= i64::from(i32::MAX));
+        assert!(squared(MAX_I32_OFFSET + 1) > i64::from(i32::MAX));
+
+        // A radius a scenario could plausibly ask for overflows by a wide
+        // margin, so this is a real constraint rather than a theoretical one.
+        assert!(product(3_000) > i64::from(i32::MAX));
+
+        // Unsigned buys a little headroom but does not remove the ceiling.
+        assert!(product(4_104) <= i64::from(u32::MAX));
+        assert!(product(4_105) > i64::from(u32::MAX));
+
+        // Inside the envelope the two widths agree exactly. Sweep the falloff
+        // against a 32-bit evaluation across radii, offsets and the boundary
+        // itself rather than trusting the algebra above.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let radius2 = (next() % MAX_I32_RADIUS as u64) as i64 + 1;
+            let radius1 = (next() % radius2 as u64) as i64;
+            let dx = (next() % 4_096) as i64 - 2_048;
+            let dy = (next() % 4_096) as i64 - 2_048;
+
+            let radius1_sq = radius1 * radius1;
+            let radius2_sq = radius2 * radius2;
+            let denominator = radius2_sq - radius1_sq;
+            let distance = dx * dx + dy * dy;
+            if distance >= radius2_sq || distance < radius1_sq || denominator == 0 {
+                continue;
+            }
+
+            let wide = (radius2_sq - distance) * 255 / denominator;
+            let narrow = {
+                let radius1_sq = (radius1 as i32) * (radius1 as i32);
+                let radius2_sq = (radius2 as i32) * (radius2 as i32);
+                let distance = (dx as i32) * (dx as i32) + (dy as i32) * (dy as i32);
+                i64::from((radius2_sq - distance) * 255 / (radius2_sq - radius1_sq))
+            };
+            assert_eq!(
+                wide, narrow,
+                "radius1 {radius1} radius2 {radius2} dx {dx} dy {dy}"
+            );
+        }
+    }
+}
