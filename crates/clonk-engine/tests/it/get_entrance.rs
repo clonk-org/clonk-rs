@@ -1,6 +1,8 @@
 use crate::support::real_scenario::content_root;
 use crate::support::EngineTestExt;
-use clonk_engine::{AudioCommand, Definition, Engine, SpawnConfig};
+use clonk_engine::{
+    AudioCommand, CommandDirection, Definition, Engine, ObjectUpdate, SpawnConfig, COM_RIGHT,
+};
 use clonk_resources::Group;
 use clonk_script::Value;
 
@@ -104,6 +106,71 @@ fn scenario_set_entrance_updates_explicit_targets_without_context_object() {
     assert!(
         entrance_status(&engine, witness),
         "the witness proves the first SetEntrance returned true"
+    );
+}
+
+/// Shipped `SUB1` steers from its passenger, and the two control styles reach
+/// that through **different shipped callbacks** which must agree.
+///
+/// Classic control goes through `ContainedRight`, which guards its call on
+/// `!GetPlrJumpAndRunControl(clonk->GetController())` and composes the new
+/// heading out of the current one with `ComDirTransform(GetComDir(),
+/// COMD_Right)`. Jump'n'Run is deliberately deferred past that guard to
+/// `ContainedUpdate`, which calls `SetDirection(comdir)` with the aggregated
+/// direction instead (`Objects.c4d/Vehicles.c4d/Sub.c4d/Script.c:66-69,93-101`).
+/// Either way `SetDirection` only reaches `SetComDir` while the boat is in its
+/// `Swim` action (`:27-45`).
+///
+/// `C4Object::ContainedControl` is what routes a contained crew member's
+/// command to its container at all (C4Object.cpp:3246-3282). The airlock
+/// subcase below covers the entrance toggle; this covers the other half the
+/// vehicle matrix names — a passenger actually steering.
+///
+/// Asserting the two styles land on the *same* heading is the point. Each
+/// alone would pass with one path silently broken, and Jump'n'Run is the
+/// default a new player gets while classic is what the guard is written for.
+#[test]
+fn shipped_sub_passenger_steering_agrees_across_control_styles() {
+    let mut headings = Vec::new();
+    for jump_and_run in [false, true] {
+        let mut engine = crate::support::real_scenario::load_tutorial(7, 0);
+        let owner = crate::support::real_scenario::join_local_player(&mut engine, "sub control");
+        crate::support::TestValueExt::test_value(engine.player_mut(owner))
+            .control
+            .control_style = jump_and_run;
+        let pilot = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+
+        let sub = engine.spawn_test_object(
+            SpawnConfig::new("SUB1")
+                .with_loaded(true)
+                .with_owner(owner)
+                .with_in_liquid(true),
+        );
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
+                sub,
+                ObjectUpdate::new()
+                    .with_action("Swim")
+                    .with_command_direction(CommandDirection::Stop),
+            ),
+        );
+        engine.debug_set_in_liquid(sub, true);
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(pilot, ObjectUpdate::new().with_container(sub)),
+        );
+
+        crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_RIGHT, 0));
+        headings.push(engine.test_object_snapshot(sub).command_direction);
+    }
+
+    assert_ne!(
+        headings[0],
+        CommandDirection::Stop,
+        "classic control routes ContainedRight into SetDirection"
+    );
+    assert_eq!(
+        headings[0], headings[1],
+        "Jump'n'Run reaches the same heading through ContainedUpdate: {headings:?}"
     );
 }
 
