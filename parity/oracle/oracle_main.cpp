@@ -3391,6 +3391,81 @@ public:
 #include "pxs_delete.inc"
 } // namespace pxs_allocation
 
+
+// ---------------------------------------------------------------------------
+// C4MaterialMap::mrfPoof (src/C4Material.cpp). The mass-move and PXS-position
+// arms extract the landscape material, then draw Rnd3 twice: a smoke puff on
+// the first zero and a positional sound on the second. Both draws happen
+// unconditionally and in that order, which is what makes them synchronised
+// state rather than presentation — a port that skips the sound's draw when it
+// has no sound to play desynchronises every later draw.
+//
+// Only the two arms that need no landscape traversal are exercised here.
+// `meePXSMove` first runs `mrfInsertCheck`, which walks the landscape through
+// `FindMatSlide`, and that wants scaffolding this section deliberately avoids.
+namespace poof_reaction
+{
+enum MaterialInteractionEvent
+{
+    meePXSPos = 0,
+    meePXSMove = 1,
+    meeMassMove = 2,
+};
+
+struct C4MaterialReaction
+{
+    bool fUserDefined;
+};
+
+// Side effects the arms perform, recorded rather than done.
+static int g_extractions = 0;
+static int g_smoke = 0;
+static int g_sound = 0;
+
+struct LandscapeStub
+{
+    int32_t ExtractMaterial(int32_t, int32_t)
+    {
+        g_extractions++;
+        return 0;
+    }
+};
+
+struct GameStub
+{
+    LandscapeStub Landscape;
+} Game;
+
+static void Smoke(int32_t, int32_t, int32_t) { g_smoke++; }
+static void StartSoundEffectAt(const char *, int32_t, int32_t) { g_sound++; }
+
+struct C4MaterialMap;
+
+// Named by the lifted body on paths this section does not take: `fUserDefined`
+// is always false here, and `meePXSMove` (the only caller of the insert check)
+// is excluded because it walks the landscape. Aborting keeps that honest — if
+// a future case reaches them, the oracle stops rather than inventing a result.
+static bool mrfUserCheck(C4MaterialReaction *, int32_t &, int32_t &, int32_t, int32_t, C4Fixed &,
+                         C4Fixed &, int32_t &, int32_t, MaterialInteractionEvent, bool *)
+{
+    abort();
+}
+
+static bool mrfInsertCheck(int32_t &, int32_t &, C4Fixed &, C4Fixed &, int32_t &, int32_t, bool *)
+{
+    abort();
+}
+
+struct C4MaterialMap
+{
+    bool mrfPoof(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY, int32_t iLSPosX,
+                 int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir, int32_t &iPxsMat,
+                 int32_t iLsMat, MaterialInteractionEvent evEvent, bool *pfPosChanged);
+};
+
+#include "mrf_poof.inc"
+} // namespace poof_reaction
+
 int main()
 {
     printf("{\n");
@@ -3443,6 +3518,46 @@ int main()
         take("reuse_a");
         take("reuse_b");
         take("append");
+    }
+    arr_end();
+    printf(",\n");
+
+    // mrfPoof's synchronised draws (C4Material.cpp:663-688). Each case runs
+    // the real arm from a known RNG seed and records what it consumed.
+    arr_begin("material_poof_reaction");
+    {
+        const int seeds[] = {0, 1, 2, 3, 7, 11, 42, 1234};
+        // `meePXSMove` is excluded: it runs the insert check, which walks the
+        // landscape through FindMatSlide.
+        const poof_reaction::MaterialInteractionEvent events[] = {
+            poof_reaction::meeMassMove,
+            poof_reaction::meePXSPos,
+        };
+        poof_reaction::C4MaterialMap map;
+        for (int seed : seeds)
+            for (poof_reaction::MaterialInteractionEvent event : events)
+            {
+                FixedRandom(seed);
+                // Rnd3 reads a table Randomize3 fills; without this it is all
+                // zeros and every draw answers 0, which would pin an artefact
+                // of the harness rather than the reaction.
+                Randomize3();
+                poof_reaction::g_extractions = 0;
+                poof_reaction::g_smoke = 0;
+                poof_reaction::g_sound = 0;
+                poof_reaction::C4MaterialReaction reaction{false};
+                int32_t x = 30, y = 40, pxs_mat = 1;
+                C4Fixed xdir = itofix(0), ydir = itofix(0);
+                bool pos_changed = false;
+                const bool handled = map.mrfPoof(&reaction, x, y, 11, 12, xdir, ydir, pxs_mat, 2,
+                                                 event, &pos_changed);
+                sep();
+                printf("{\"seed\":%d,\"event\":%d,\"handled\":%d,\"extractions\":%d,"
+                       "\"smoke\":%d,\"sound\":%d,\"random_count\":%d,\"random_hold\":%u}",
+                       seed, static_cast<int>(event), handled ? 1 : 0,
+                       poof_reaction::g_extractions, poof_reaction::g_smoke,
+                       poof_reaction::g_sound, RandomCount, static_cast<unsigned>(RandomHold));
+            }
     }
     arr_end();
     printf(",\n");
