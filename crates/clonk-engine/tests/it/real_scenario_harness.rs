@@ -797,6 +797,10 @@ fn alchemy_real_scenario_subcases_batch_3() {
             alchemy_summon_ice_crow_binds_the_summoned_crow_to_its_summoner,
         ),
         (
+            "thermal_pair_freezes_a_clonk_and_the_warm_spell_thaws_it",
+            alchemy_thermal_pair_freezes_a_clonk_and_the_warm_spell_thaws_it,
+        ),
+        (
             "raise_undead_selects_a_dead_clonk_and_animates_it",
             alchemy_raise_undead_selects_a_dead_clonk_and_animates_it,
         ),
@@ -7179,5 +7183,124 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
     assert_eq!(
         engine.call_test_object_function(rank_probe_index, "Read", Vec::new()),
         Value::Int(5)
+    );
+}
+
+/// FREZ and MWTH are a matched pair: FREZ is a pure library of global funcs --
+/// `Freeze` installs the effect, `Frozen` reports it and `Unfreeze` tears it
+/// down -- and MWTH is the content-facing way to drive that teardown
+/// (Freeze.c4d/Script.c:5-44,53-66; Warm.c4d/Script.c:5-63).
+///
+/// Three things are worth pinning together, because each is easy to get
+/// individually right and jointly wrong:
+///
+/// * `Freeze` refuses anything that is not alive, and installs the effect at
+///   priority **111** on a five-frame timer with FREZ as the command target --
+///   which is what makes its `Fx*` globals resolve.
+/// * `Frozen` answers on **either** a `Freeze` effect or any `*Ice*` effect,
+///   so the two spells agree on what "frozen" means.
+/// * MWTH's `DoUnfreeze` calls `Unfreeze`, which loops
+///   `while(RemoveEffect(...))` and therefore clears **every** stacked
+///   instance rather than one.
+///
+/// FREZ carries no `Activate` of its own -- only Iceball and Frostwave cast it
+/// -- so the freeze half is driven through a probe definition whose script
+/// calls the same globals the shipped spells do.
+fn alchemy_thermal_pair_freezes_a_clonk_and_the_warm_spell_thaws_it(
+    prepared: &PreparedInstalledScenario,
+) {
+    const PROBE: &str = r#"#strict
+public func DoFreeze(object target, object from) { return Freeze(target, from); }
+public func IsFrozen(object target) { return Frozen(target); }
+"#;
+
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player(&mut engine, "Alchemy thermal pair parity");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let mage_position = engine.test_object_snapshot(mage).position;
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "THRM",
+        "Alchemy thermal pair probe",
+        PROBE,
+    ));
+    let probe = engine.spawn_test_object(clonk_engine::SpawnConfig::new("THRM"));
+
+    // Close enough to fall inside MWTH's search radius, which is the caller's
+    // height times three (Warm.c4d/Script.c:27).
+    let subject = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("CLNK")
+            .with_position(Vector2::new(mage_position.x + 10, mage_position.y))
+            .with_owner(OWNER_NONE)
+            .with_action(ActionState::new("Walk")),
+    );
+    assert!(
+        engine.test_object_snapshot(subject).alive,
+        "Freeze only touches a living object (Freeze.c4d/Script.c:9)"
+    );
+
+    engine.call_test_object_function(
+        engine.test_object_index(probe),
+        "DoFreeze",
+        vec![
+            Value::Object(subject.as_u64()),
+            Value::Object(mage.as_u64()),
+        ],
+    );
+
+    let frozen = crate::support::TestValueExt::test_value(
+        engine
+            .test_object_snapshot(subject)
+            .effects
+            .into_iter()
+            .find(|effect| effect.name == "Freeze" && effect.priority != 0),
+    );
+    assert_eq!(
+        frozen.priority, 111,
+        "Freeze installs at the priority the spell hard-codes"
+    );
+    assert_eq!(frozen.interval, 5, "and on its five-frame timer");
+    assert_eq!(
+        frozen.command_id.as_deref(),
+        Some("FREZ"),
+        "with FREZ as the command target, so its Fx globals resolve there"
+    );
+    assert_eq!(
+        engine.call_test_object_function(
+            engine.test_object_index(probe),
+            "IsFrozen",
+            vec![Value::Object(subject.as_u64())],
+        ),
+        Value::Int(1),
+        "and `Frozen` agrees, which is what MWTH tests before thawing"
+    );
+
+    // Now the other half of the pair thaws it.
+    let spell = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("MWTH")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64())],
+    );
+
+    assert!(
+        !engine
+            .test_object_snapshot(subject)
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Freeze" && effect.priority != 0),
+        "MWTH's DoUnfreeze clears the Freeze effect (Warm.c4d/Script.c:47-59)"
+    );
+    assert_eq!(
+        engine.call_test_object_function(
+            engine.test_object_index(probe),
+            "IsFrozen",
+            vec![Value::Object(subject.as_u64())],
+        ),
+        Value::Nil,
+        "so `Frozen` stops reporting it"
     );
 }
