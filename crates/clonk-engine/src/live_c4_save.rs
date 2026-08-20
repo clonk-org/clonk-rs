@@ -4804,6 +4804,48 @@ mod tests {
     }
 
     #[test]
+    fn in_liquid_survives_a_save_and_load_and_is_omitted_when_dry() {
+        // C++ compiles InLiquid with a `false` default
+        // (C4Object.cpp:2802), so a dry object writes no field at all and a
+        // wet one has to record it — a loaded Clonk that lost the flag would
+        // re-enter the water it is already in, splashing and drawing from the
+        // synchronised stream a frame late.
+        let spawn = |in_liquid: bool| {
+            let mut engine = Engine::new();
+            engine
+                .register_definition(
+                    crate::Definition::from_script("WETX", "Wet", "")
+                        .expect("fixture definition compiles"),
+                )
+                .expect("fixture definition registers");
+            engine
+                .spawn_object(crate::SpawnConfig::new("WETX").with_in_liquid(in_liquid))
+                .expect("fixture object spawns");
+            engine
+        };
+
+        let wet = spawn(true);
+        assert!(
+            wet.objects[0].state.in_liquid,
+            "the load path has to restore the flag"
+        );
+        let wet_text =
+            String::from_utf8(serialize_objects(&wet, &mut LegacyStringTable::default()))
+                .expect("Objects.txt is UTF-8");
+        assert!(wet_text.lines().any(|line| line == "InLiquid=true"));
+
+        let dry = spawn(false);
+        assert!(!dry.objects[0].state.in_liquid);
+        let dry_text =
+            String::from_utf8(serialize_objects(&dry, &mut LegacyStringTable::default()))
+                .expect("Objects.txt is UTF-8");
+        assert!(
+            !dry_text.contains("InLiquid"),
+            "the C++ default suppresses the field entirely"
+        );
+    }
+
+    #[test]
     fn live_save_enumerates_only_listed_object_pointer_caches_before_serializing() {
         let mut engine = test_engine("CACH", "Cache");
         let object = spawn_with_id(&mut engine, "CACH", 1);

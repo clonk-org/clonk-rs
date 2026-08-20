@@ -52,6 +52,9 @@
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
 //     scaffold records low-speed `Disabled` contact transitions.
+//   * `Splash` is mechanically extracted in full; an 8x40 material grid records
+//     its bubble/cast stream and the RNG ledger, including the draw-count drop
+//     once its own extraction has emptied the pixel it tests.
 //   * `Randomize3`/`Rnd3` are reproduced verbatim from `src/C4Random.cpp`
 //     (10 trivial lines around the real `Random()`); kept in sync via the
 //     provenance comment below.
@@ -3510,6 +3513,183 @@ struct C4MassMoverSet
 #include "mass_mover_create.inc"
 } // namespace mover_allocation
 
+
+// ---------------------------------------------------------------------------
+// Splash (src/C4Effect.cpp), the liquid-entry effect that C4Object's
+// UpdateInLiquid and C4Movement's InLiquid check fire on entry. It is lifted
+// rather than restated for two reasons: both `Random` pairs are written with an
+// explicit r2-before-r1 temporary to force evaluation order, and the extraction
+// inside the loop empties the very pixel the liquid test reads, so how many
+// draws the call takes depends on the landscape changing underneath it.
+//
+// The scaffold is an 8x40 material grid. `BubbleOut`, `PXS::Create` and
+// `ExtractMaterial` record into fixed buffers rather than simulate;
+// `StartSoundEffect` is presentation and only records which cue was chosen.
+namespace splash_effect
+{
+struct C4Object;
+
+const int32_t MNone = -1;
+const int32_t GridWdt = 8;
+const int32_t GridHgt = 40;
+const int32_t MaxEvents = 64;
+
+struct MatEntry
+{
+    int32_t Density;
+    bool Instable;
+};
+
+// 0: water (liquid and instable, the only combination Splash acts on),
+// 1: a liquid that is NOT instable, 2: granite.
+static MatEntry g_map[3] = {{25, true}, {25, false}, {50, false}};
+
+static int32_t g_grid[GridHgt][GridWdt];
+
+struct Bubble
+{
+    int32_t x, y;
+};
+
+struct Cast
+{
+    int32_t mat, x, y, xdir, ydir;
+};
+
+static Bubble g_bubbles[MaxEvents];
+static Cast g_casts[MaxEvents];
+static int32_t g_bubble_count = 0;
+static int32_t g_cast_count = 0;
+static int32_t g_extractions = 0;
+static const char *g_sound = "";
+
+struct LandscapeStub
+{
+    int32_t ExtractMaterial(int32_t x, int32_t y);
+};
+
+struct PXSStub
+{
+    void Create(int32_t mat, C4Fixed x, C4Fixed y, C4Fixed xdir, C4Fixed ydir);
+};
+
+struct GameStub
+{
+    struct
+    {
+        MatEntry *Map = g_map;
+    } Material;
+
+    LandscapeStub Landscape;
+    PXSStub PXS;
+};
+
+static GameStub Game;
+
+static bool MatValid(int32_t mat) { return mat >= 0 && mat < 3; }
+static bool DensityLiquid(int32_t dens) { return dens >= 25 && dens < 50; }
+static bool DensitySemiSolid(int32_t dens) { return dens >= 25; }
+
+static int32_t GBackMat(int32_t x, int32_t y)
+{
+    if (x < 0 || y < 0 || x >= GridWdt || y >= GridHgt) return MNone;
+    return g_grid[y][x];
+}
+
+static int32_t GBackDensity(int32_t x, int32_t y)
+{
+    const int32_t mat = GBackMat(x, y);
+    return MatValid(mat) ? g_map[mat].Density : 0;
+}
+
+static bool GBackLiquid(int32_t x, int32_t y) { return DensityLiquid(GBackDensity(x, y)); }
+static bool GBackSemiSolid(int32_t x, int32_t y) { return DensitySemiSolid(GBackDensity(x, y)); }
+
+int32_t LandscapeStub::ExtractMaterial(int32_t x, int32_t y)
+{
+    ++g_extractions;
+    if (!GBackLiquid(x, y)) return MNone;
+    const int32_t mat = g_grid[y][x];
+    g_grid[y][x] = MNone;
+    return mat;
+}
+
+void PXSStub::Create(int32_t mat, C4Fixed x, C4Fixed y, C4Fixed xdir, C4Fixed ydir)
+{
+    // The real C4PXSSystem::Create rejects an invalid material before doing
+    // anything (C4PXS.cpp:210), and Splash hands it ExtractMaterial's result
+    // unconditionally. No case here reaches that, since the extraction is
+    // guarded by the same liquid test, but the stub must not record a cast the
+    // engine would have dropped.
+    if (!MatValid(mat)) return;
+    if (g_cast_count < MaxEvents)
+        g_casts[g_cast_count] = {mat, fixtoi(x), fixtoi(y), fixtoi(xdir, 100), fixtoi(ydir, 100)};
+    ++g_cast_count;
+}
+
+static void BubbleOut(int32_t tx, int32_t ty)
+{
+    if (g_bubble_count < MaxEvents) g_bubbles[g_bubble_count] = {tx, ty};
+    ++g_bubble_count;
+}
+
+static void StartSoundEffect(const char *name, bool, int32_t, C4Object *) { g_sound = name; }
+
+#include "splash.inc"
+
+// Water everywhere at or below `water_top`, granite below `floor_top`, with an
+// optional granite plug at (plug_x, plug_y) and an optional non-instable liquid
+// column. Everything else is sky.
+static void reset_grid(int32_t water_top, int32_t floor_top, int32_t liquid_mat)
+{
+    for (int32_t y = 0; y < GridHgt; ++y)
+        for (int32_t x = 0; x < GridWdt; ++x)
+            g_grid[y][x] = y >= floor_top ? 2 : (y >= water_top ? liquid_mat : MNone);
+    g_bubble_count = 0;
+    g_cast_count = 0;
+    g_extractions = 0;
+    g_sound = "";
+}
+
+// C4Object::UpdateInLiquid and IsInLiquidCheck live in the same namespace so
+// that the splash they fire on entry is the real `Splash` above, over the same
+// grid, rather than a second stand-in. Only the fields the two bodies read are
+// scaffolded; `Def->Float` and `Con` are what move the probe off the object's
+// own y.
+const int32_t FullCon = 100000;
+const uint32_t OCF_HitSpeed2 = 1 << 12;
+
+struct DefStub
+{
+    int32_t Float = 0;
+};
+
+struct ShapeStub
+{
+    int32_t Wdt = 0;
+    int32_t Hgt = 0;
+};
+
+struct C4Object
+{
+    int32_t x = 0;
+    int32_t y = 0;
+    int32_t Con = FullCon;
+    int32_t Mass = 0;
+    int32_t InLiquid = 0;
+    uint32_t OCF = 0;
+    ShapeStub Shape;
+    DefStub *Def = nullptr;
+
+    bool IsInLiquidCheck();
+    void UpdateInLiquid();
+};
+
+#include "is_in_liquid_check.inc"
+#include "update_in_liquid.inc"
+
+} // namespace splash_effect
+
 int main()
 {
     printf("{\n");
@@ -3649,6 +3829,156 @@ int main()
         printf("{\"step\":\"full\",\"ok\":0,\"create_ptr\":%d}", set.CreatePtr);
         free_slot(1, "free_for_wrap");
         take("wraps_to_freed");
+    }
+    arr_end();
+    printf(",\n");
+
+    // Splash's draw stream (C4Effect.cpp:801-836). Each case records every
+    // bubble and cast in order plus the synchronised ledger, because the number
+    // of draws is not a function of `amt` alone: the first iteration's
+    // extraction empties the pixel the liquid test reads, so later iterations
+    // take two draws instead of four.
+    arr_begin("splash_effect");
+    {
+        struct Case
+        {
+            const char *name;
+            int32_t seed;
+            int32_t water_top;
+            int32_t floor_top;
+            int32_t liquid_mat;
+            int32_t tx, ty;
+            int32_t amt;
+        };
+        const Case cases[] = {
+            // Deep water, free sky above: the full four-draw first iteration
+            // followed by two-draw iterations once the pixel is gone.
+            {"deep_water", 1, 18, splash_effect::GridHgt, 0, 4, 20, 5},
+            // One bubble only — the boundary where the draw count drops.
+            {"single_bubble", 1, 18, splash_effect::GridHgt, 0, 4, 20, 1},
+            // Loud splash: the >= 20 sound branch, and enough iterations to
+            // show the stream settling at two draws each.
+            {"loud", 7, 18, splash_effect::GridHgt, 0, 4, 20, 20},
+            // Nothing to splash into: amt of zero still probes the landscape
+            // but must draw nothing.
+            {"no_amount", 7, 18, splash_effect::GridHgt, 0, 4, 20, 0},
+            // Roofed over: GBackSemiSolid(tx, ty - 15) returns before any draw.
+            {"roofed", 3, 4, splash_effect::GridHgt, 0, 4, 20, 5},
+            // Liquid but not instable: the loop is skipped entirely, yet the
+            // sound still plays. No draws either way.
+            {"not_instable", 3, 18, splash_effect::GridHgt, 1, 4, 20, 5},
+            // Above the water line: GBackMat is sky, so MatValid fails.
+            {"in_sky", 3, 30, splash_effect::GridHgt, 0, 4, 20, 5},
+            // Shallow pool over granite: the surface scan stops at the water
+            // top rather than running the full 20 rows.
+            {"shallow", 11, 19, 22, 0, 4, 20, 4},
+        };
+
+        for (const Case &c : cases)
+        {
+            FixedRandom(c.seed);
+            splash_effect::reset_grid(c.water_top, c.floor_top, c.liquid_mat);
+            splash_effect::Splash(c.tx, c.ty, c.amt, nullptr);
+
+            sep();
+            printf("{\"case\":\"%s\",\"seed\":%d,\"amt\":%d,\"bubbles\":[", c.name, c.seed,
+                   c.amt);
+            for (int32_t i = 0; i < splash_effect::g_bubble_count; ++i)
+                printf("%s[%d,%d]", i ? "," : "", splash_effect::g_bubbles[i].x,
+                       splash_effect::g_bubbles[i].y);
+            printf("],\"casts\":[");
+            for (int32_t i = 0; i < splash_effect::g_cast_count; ++i)
+                printf("%s[%d,%d,%d,%d,%d]", i ? "," : "", splash_effect::g_casts[i].mat,
+                       splash_effect::g_casts[i].x, splash_effect::g_casts[i].y,
+                       splash_effect::g_casts[i].xdir, splash_effect::g_casts[i].ydir);
+            printf("],\"extractions\":%d,\"sound\":\"%s\",\"random_count\":%d,"
+                   "\"random_hold\":%u}",
+                   splash_effect::g_extractions, splash_effect::g_sound, RandomCount,
+                   static_cast<unsigned>(RandomHold));
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4Object::UpdateInLiquid (C4Object.cpp:6093-6110) and the probe it reads
+    // through (:5632-5635). Entry is edge-triggered and carries the splash;
+    // leaving is a bare flag clear. The probe is `y + Def->Float * Con /
+    // FullCon - 1`, so construction and Float move the moment an object counts
+    // as swimming.
+    arr_begin("in_liquid_transition");
+    {
+        struct Case
+        {
+            const char *name;
+            int32_t seed;
+            int32_t water_top;
+            int32_t y;
+            int32_t in_liquid;
+            int32_t con;
+            int32_t float_line;
+            int32_t mass;
+            uint32_t ocf;
+            int32_t wdt, hgt;
+        };
+        const uint32_t hit = splash_effect::OCF_HitSpeed2;
+        const int32_t full = splash_effect::FullCon;
+        const Case cases[] = {
+            // Enters: fast and heavy enough, so the splash fires.
+            {"enter_splash", 1, 18, 20, 0, full, 0, 10, hit, 8, 10},
+            // Enters without the hit-speed flag: no splash, no draws.
+            {"enter_no_hitspeed", 1, 18, 20, 0, full, 0, 10, 0, 8, 10},
+            // Enters at the mass boundary: `Mass > 3` excludes exactly 3.
+            {"enter_mass_boundary", 1, 18, 20, 0, full, 0, 3, hit, 8, 10},
+            {"enter_mass_above", 1, 18, 20, 0, full, 0, 4, hit, 8, 10},
+            // Already wet: entry is edge-triggered, so nothing happens.
+            {"stays_wet", 1, 18, 20, 1, full, 0, 10, hit, 8, 10},
+            // Dry and stays dry.
+            {"stays_dry", 1, 30, 20, 0, full, 0, 10, hit, 8, 10},
+            // Leaves: the flag clears and nothing else runs.
+            {"leaves", 1, 30, 20, 1, full, 0, 10, hit, 8, 10},
+            // Float lifts the probe INTO the water for an object whose own y is
+            // still above it.
+            {"float_reaches_water", 1, 18, 14, 0, full, 6, 10, hit, 8, 10},
+            // Half-built, so Float * Con / FullCon halves and the same object
+            // no longer reaches it.
+            {"half_con_falls_short", 1, 18, 14, 0, full / 2, 6, 10, hit, 8, 10},
+            // The splash amount is min(Wdt * Hgt / 10, 20): a large object
+            // clamps, and the clamp is what decides the draw count.
+            {"large_object_clamps", 5, 18, 20, 0, full, 0, 10, hit, 40, 40},
+            // A small one takes the unclamped amount.
+            {"small_object_amount", 5, 18, 20, 0, full, 0, 10, hit, 5, 6},
+        };
+
+        for (const Case &c : cases)
+        {
+            FixedRandom(c.seed);
+            splash_effect::reset_grid(c.water_top, splash_effect::GridHgt, 0);
+
+            splash_effect::DefStub def;
+            def.Float = c.float_line;
+            splash_effect::C4Object obj;
+            obj.x = 4;
+            obj.y = c.y;
+            obj.Con = c.con;
+            obj.Mass = c.mass;
+            obj.InLiquid = c.in_liquid;
+            obj.OCF = c.ocf;
+            obj.Shape.Wdt = c.wdt;
+            obj.Shape.Hgt = c.hgt;
+            obj.Def = &def;
+
+            const int32_t probe_y = obj.y + def.Float * obj.Con / splash_effect::FullCon - 1;
+            const bool wet = obj.IsInLiquidCheck();
+            obj.UpdateInLiquid();
+
+            sep();
+            printf("{\"case\":\"%s\",\"seed\":%d,\"probe_y\":%d,\"wet\":%d,"
+                   "\"in_liquid_before\":%d,\"in_liquid\":%d,\"bubbles\":%d,\"casts\":%d,"
+                   "\"random_count\":%d,\"random_hold\":%u}",
+                   c.name, c.seed, probe_y, wet ? 1 : 0, c.in_liquid, obj.InLiquid,
+                   splash_effect::g_bubble_count, splash_effect::g_cast_count, RandomCount,
+                   static_cast<unsigned>(RandomHold));
+        }
     }
     arr_end();
     printf(",\n");
