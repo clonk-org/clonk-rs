@@ -46,95 +46,7 @@ pub const C4PX_MAX_PARTICLE: i32 = 256;
 /// the C++ constructor (C4Particles.cpp:58-74) plus the `CompileFunc` INI
 /// defaults (C4Particles.cpp:30-56); `WindDrift` is only initialized by
 /// `CompileFunc` (default 0).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ParticleDefCore {
-    pub name: String,
-    pub max_count: i32,
-    pub min_lifetime: i32,
-    pub max_lifetime: i32,
-    pub y_off: i32,
-    pub delay: i32,
-    pub repeats: i32,
-    pub reverse: i32,
-    pub fade_out_len: i32,
-    pub fade_out_delay: i32,
-    pub r_by_v: i32,
-    pub placement: i32,
-    pub gravity_acc: i32,
-    pub wind_drift: i32,
-    pub vertex_count: i32,
-    pub vertex_y: i32,
-    pub additive: i32,
-    pub attach: i32,
-    pub alpha_fade: i32,
-    pub parallaxity: [i32; 2],
-    pub init_fn: String,
-    pub exec_fn: String,
-    pub draw_fn: String,
-    pub collision_fn: String,
-}
-
-impl Default for ParticleDefCore {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            max_count: C4PX_MAX_PARTICLE,
-            min_lifetime: 0,
-            max_lifetime: 0,
-            y_off: 0,
-            delay: 0,
-            repeats: 0,
-            reverse: 0,
-            fade_out_len: 0,
-            fade_out_delay: 0,
-            r_by_v: 0,
-            placement: 0,
-            gravity_acc: 0,
-            wind_drift: 0,
-            vertex_count: 0,
-            vertex_y: 0,
-            additive: 0,
-            attach: 0,
-            alpha_fade: 0,
-            parallaxity: [100, 100],
-            init_fn: String::new(),
-            exec_fn: String::new(),
-            draw_fn: String::new(),
-            collision_fn: String::new(),
-        }
-    }
-}
-
-impl From<&clonk_resources::ParticleDefinitionCore> for ParticleDefCore {
-    fn from(core: &clonk_resources::ParticleDefinitionCore) -> Self {
-        Self {
-            name: core.name.clone(),
-            max_count: core.max_count,
-            min_lifetime: core.min_lifetime,
-            max_lifetime: core.max_lifetime,
-            y_off: core.y_off,
-            delay: core.delay,
-            repeats: core.repeats,
-            reverse: core.reverse,
-            fade_out_len: core.fade_out_len,
-            fade_out_delay: core.fade_out_delay,
-            r_by_v: core.r_by_v,
-            placement: core.placement,
-            gravity_acc: core.gravity_acc,
-            wind_drift: core.wind_drift,
-            vertex_count: core.vertex_count,
-            vertex_y: core.vertex_y,
-            additive: core.additive,
-            attach: core.attach,
-            alpha_fade: core.alpha_fade,
-            parallaxity: core.parallaxity,
-            init_fn: core.init_fn.clone(),
-            exec_fn: core.exec_fn.clone(),
-            draw_fn: core.draw_fn.clone(),
-            collision_fn: core.collision_fn.clone(),
-        }
-    }
-}
+pub use clonk_resources::ParticleDefinitionCore as ParticleDefCore;
 
 /// `LightenClrBy` (StdColors.h:216-223): per-RGB-byte saturating add, alpha
 /// byte unchanged.
@@ -611,7 +523,7 @@ impl ParticleSystem {
             },
         };
         self.register_def_with_graphics(
-            ParticleDefCore::from(&resource.core),
+            resource.core.clone(),
             columns,
             aspect,
             Some(graphics),
@@ -1328,6 +1240,12 @@ impl ParticleSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn particle_core_is_the_resource_core_type() {
+        let resource_core = clonk_resources::ParticleDefinitionCore::default();
+        let _: ParticleDefCore = resource_core;
+    }
 
     /// Every live newgfx particle is projected into `SimulationSnapshot`.
     ///
