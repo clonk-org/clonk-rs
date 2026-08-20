@@ -2672,6 +2672,7 @@ impl GameApp {
             developer_console_edit_mode: ConsoleEditMode::Play,
             developer_selection: Default::default(),
             developer_tools: Default::default(),
+            developer_tools_open_combo: None,
             console_viewport_projections: Default::default(),
             edit_cursor_drop_target: None,
             edit_cursor_tick_frame: None,

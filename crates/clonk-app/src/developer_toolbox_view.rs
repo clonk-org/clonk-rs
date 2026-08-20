@@ -52,6 +52,13 @@ const LIST_ROW_HEIGHT: i32 = 14;
 
 /// Everything the Tools page draws, resolved by the caller so the view never
 /// reaches into the engine.
+/// Which of the two combo selectors is open.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolsCombo {
+    Materials,
+    Textures,
+}
+
 /// `Eq` is deliberately absent: the model now carries a rendered sample, and
 /// `ImageData` compares structurally without claiming total equality.
 #[derive(Clone, Debug, PartialEq)]
@@ -70,6 +77,13 @@ pub(crate) struct ToolsPageModel {
     pub(crate) materials: Vec<String>,
     /// `C4ToolsDlg::UpdateTextures`' combo contents (`:517-548`).
     pub(crate) textures: Vec<ToolTextureEntry>,
+    /// Which selector is showing its list, if either.
+    ///
+    /// The open list is an **overlay**, not a control: it is absent from
+    /// [`Self::layout`] so the page's controls stay non-overlapping, and it is
+    /// drawn and hit-tested after them so it can cover them the way a real
+    /// combo does.
+    pub(crate) open_combo: Option<ToolsCombo>,
     /// The rendered material sample `UpdatePreview` draws, already resolved
     /// against the material and texture catalogues.
     ///
@@ -103,6 +117,11 @@ pub(crate) enum ToolsPageAction {
     SetGrade(i32),
     SetMaterial(String),
     SetTexture(String),
+    /// Show a selector's list. C++'s combo does this itself; here the open
+    /// state lives with the console so the model stays a fresh projection.
+    OpenCombo(ToolsCombo),
+    /// Dismiss it without selecting, which is what a click off the list does.
+    CloseCombo,
 }
 
 impl ToolsPageModel {
@@ -253,6 +272,22 @@ impl ToolsPageModel {
         point: (i32, i32),
     ) -> Option<ToolsPageAction> {
         let position = GuiPoint::new(point.0 as f32, point.1 as f32);
+        // An open list covers the page, so it answers first. Anywhere off it
+        // dismisses rather than acting on whatever it was covering — clicking
+        // "away" from a combo should not also press the control underneath.
+        if let (Some(combo), Some(popup)) = (self.open_combo, self.combo_popup(width, height)) {
+            if !contains(popup, position) {
+                return Some(ToolsPageAction::CloseCombo);
+            }
+            return match combo {
+                ToolsCombo::Materials => self
+                    .combo_row_at(popup, point.1, self.materials.len())
+                    .map(|index| ToolsPageAction::SetMaterial(self.materials[index].clone())),
+                ToolsCombo::Textures => self
+                    .combo_row_at(popup, point.1, self.textures.len())
+                    .map(|index| ToolsPageAction::SetTexture(self.textures[index].name.clone())),
+            };
+        }
         let slot = self
             .layout(width, height)
             .into_iter()
@@ -267,19 +302,56 @@ impl ToolsPageModel {
             ToolsControl::Ift => Some(ToolsPageAction::SetIft(true)),
             ToolsControl::NoIft => Some(ToolsPageAction::SetIft(false)),
             ToolsControl::Grade => Some(ToolsPageAction::SetGrade(grade_at(slot.rect, point.1))),
-            ToolsControl::Materials => {
-                let names = self.material_names();
-                list_index_at(slot.rect, point.1, &names, &self.material)
-                    .map(|index| ToolsPageAction::SetMaterial(self.materials[index].clone()))
-            }
-            ToolsControl::Textures => {
-                let names = self.texture_names();
-                list_index_at(slot.rect, point.1, &names, &self.texture)
-                    .map(|index| ToolsPageAction::SetTexture(self.textures[index].name.clone()))
-            }
+            // Closed, these are combo boxes: clicking one opens its list
+            // rather than selecting whatever row happened to be under the
+            // pointer.
+            ToolsControl::Materials => Some(ToolsPageAction::OpenCombo(ToolsCombo::Materials)),
+            ToolsControl::Textures => Some(ToolsPageAction::OpenCombo(ToolsCombo::Textures)),
             // The preview is a picture, not a control.
             _ => None,
         }
+    }
+
+    /// Where an open combo's list is drawn, if one is open.
+    ///
+    /// Anchored under its own control and clamped to the page, so a long
+    /// catalogue scrolls rather than spilling off the window.
+    pub(crate) fn combo_popup(&self, width: u32, height: u32) -> Option<IntRect> {
+        let combo = self.open_combo?;
+        let control = match combo {
+            ToolsCombo::Materials => ToolsControl::Materials,
+            ToolsCombo::Textures => ToolsControl::Textures,
+        };
+        let anchor = self
+            .layout(width, height)
+            .into_iter()
+            .find(|slot| slot.control == control)?;
+        let rows = match combo {
+            ToolsCombo::Materials => self.materials.len(),
+            ToolsCombo::Textures => self.textures.len(),
+        };
+        let wanted = (rows as i32).max(1) * LIST_ROW_HEIGHT + 2;
+        let top = anchor.rect.y;
+        let available = (height as i32 - top).max(LIST_ROW_HEIGHT + 2);
+        Some(IntRect {
+            x: anchor.rect.x,
+            y: top,
+            w: anchor.rect.w,
+            h: wanted.min(available),
+        })
+    }
+
+    /// The row an open combo's list puts under a point, if any.
+    fn combo_row_at(&self, popup: IntRect, y: i32, rows: usize) -> Option<usize> {
+        if rows == 0 {
+            return None;
+        }
+        let offset = y - (popup.y + 1);
+        if offset < 0 {
+            return None;
+        }
+        let index = (offset / LIST_ROW_HEIGHT) as usize;
+        (index < rows).then_some(index)
     }
 
     fn material_names(&self) -> Vec<&str> {
@@ -331,26 +403,111 @@ impl ToolsPageModel {
                 ToolsControl::Preview => self.render_preview(surface, font, slot.rect),
                 ToolsControl::Grade => self.render_grade(surface, slot),
                 ToolsControl::Materials => {
-                    // Every material in the catalogue is selectable; only the
-                    // texture list has an invalid section (`:517-548`).
-                    let entries = self
-                        .material_names()
-                        .into_iter()
-                        .map(|name| (name, true))
-                        .collect::<Vec<_>>();
-                    self.render_list(surface, font, slot, &entries, &self.material);
+                    self.render_closed_combo(surface, font, slot, &self.material)
                 }
                 ToolsControl::Textures => {
-                    let entries = self
-                        .textures
-                        .iter()
-                        .map(|entry| (entry.name.as_str(), entry.valid))
-                        .collect::<Vec<_>>();
-                    self.render_list(surface, font, slot, &entries, &self.texture);
+                    self.render_closed_combo(surface, font, slot, &self.texture)
                 }
                 control => self.render_button(surface, font, slot, self.label(control)),
             }
         }
+        // Last, and over everything: an open list is an overlay, so it draws
+        // after the controls it covers.
+        self.render_open_combo(surface, font);
+    }
+
+    /// A closed selector: the current value and the drop marker beside it.
+    fn render_closed_combo(
+        &self,
+        surface: &mut Surface,
+        font: &dyn TextFont,
+        slot: ToolsPageSlot,
+        value: &str,
+    ) {
+        draw_sunken(
+            surface,
+            slot.rect,
+            if slot.enabled {
+                CONTROL_BACKGROUND
+            } else {
+                WINDOW_BACKGROUND
+            },
+        );
+        let marker = LIST_ROW_HEIGHT;
+        draw_fitted_text(
+            surface,
+            font,
+            IntRect {
+                w: (slot.rect.w - marker).max(1),
+                ..slot.rect
+            },
+            value,
+            if slot.enabled {
+                CONTROL_TEXT
+            } else {
+                DISABLED_TEXT
+            },
+            SMALL_FONT_SIZE,
+            3,
+        );
+        // A plain wedge rather than a glyph: the page's font has no arrow, and
+        // a letter would read as part of the value.
+        let center_x = slot.rect.x + slot.rect.w - marker / 2;
+        let center_y = slot.rect.y + slot.rect.h / 2;
+        for step in 0..(marker / 4).max(1) {
+            let half = (marker / 4).max(1) - step;
+            for x in (center_x - half)..=(center_x + half) {
+                let _ = surface.set_pixel(
+                    x.max(0) as u32,
+                    (center_y - 1 + step).max(0) as u32,
+                    if slot.enabled {
+                        CONTROL_TEXT
+                    } else {
+                        DISABLED_TEXT
+                    },
+                );
+            }
+        }
+    }
+
+    /// The open list, drawn over the page.
+    fn render_open_combo(&self, surface: &mut Surface, font: &dyn TextFont) {
+        let (Some(combo), Some(popup)) = (
+            self.open_combo,
+            self.combo_popup(surface.width(), surface.height()),
+        ) else {
+            return;
+        };
+        let (entries, selected) = match combo {
+            ToolsCombo::Materials => (
+                self.material_names()
+                    .into_iter()
+                    .map(|name| (name, true))
+                    .collect::<Vec<_>>(),
+                self.material.as_str(),
+            ),
+            ToolsCombo::Textures => (
+                self.textures
+                    .iter()
+                    .map(|entry| (entry.name.as_str(), entry.valid))
+                    .collect::<Vec<_>>(),
+                self.texture.as_str(),
+            ),
+        };
+        self.render_list(
+            surface,
+            font,
+            ToolsPageSlot {
+                control: match combo {
+                    ToolsCombo::Materials => ToolsControl::Materials,
+                    ToolsCombo::Textures => ToolsControl::Textures,
+                },
+                rect: popup,
+                enabled: true,
+            },
+            &entries,
+            selected,
+        );
     }
 
     fn render_button(
@@ -608,6 +765,7 @@ mod tests {
             ift: true,
             material: "Earth".to_owned(),
             texture: "Rough".to_owned(),
+            open_combo: None,
             // The layout and hit-test tests do not need a rendered sample; the
             // swatch itself is pinned in clonk-frontend where it is composed.
             preview: None,
@@ -643,6 +801,63 @@ mod tests {
             TOOLBOX_HEIGHT,
             (rect.x + rect.w / 2, rect.y + rect.h / 2),
         )
+    }
+
+    /// `C4ToolsDlg` builds the material and texture selectors as **combo
+    /// boxes** (`:305-372`), so a closed one shows the current selection and
+    /// clicking it opens the list; the open list is an overlay, not a control
+    /// in the box tree (clonk-org/clonk-rs#398).
+    #[test]
+    fn a_closed_combo_opens_and_an_open_one_selects_or_closes() {
+        let model = model();
+        assert_eq!(model.open_combo, None, "the page opens with both closed");
+        assert_eq!(
+            click(&model, slot(&model, ToolsControl::Materials).rect),
+            Some(ToolsPageAction::OpenCombo(ToolsCombo::Materials)),
+            "a closed combo opens rather than selecting whatever was under the pointer"
+        );
+
+        let mut open = model.clone();
+        open.open_combo = Some(ToolsCombo::Materials);
+        let popup = open
+            .combo_popup(TOOLBOX_WIDTH, TOOLBOX_HEIGHT)
+            .expect("an open combo has a popup");
+
+        // The second row of the open list selects the second material.
+        let second = (popup.x + popup.w / 2, popup.y + LIST_ROW_HEIGHT + 1);
+        assert_eq!(
+            open.hit(TOOLBOX_WIDTH, TOOLBOX_HEIGHT, second),
+            Some(ToolsPageAction::SetMaterial(open.materials[1].clone())),
+            "an open combo's rows select"
+        );
+
+        // Anywhere outside the popup dismisses it instead of acting on the
+        // control that happens to sit there.
+        let outside = (popup.x + popup.w / 2, popup.y - 2);
+        assert_eq!(
+            open.hit(TOOLBOX_WIDTH, TOOLBOX_HEIGHT, outside),
+            Some(ToolsPageAction::CloseCombo),
+            "a click off an open combo closes it and does nothing else"
+        );
+    }
+
+    /// The popup overlays the page, so it must not join the box tree — the
+    /// no-overlap invariant below is about controls, and an open list is
+    /// allowed to cover them.
+    #[test]
+    fn an_open_combo_popup_is_not_a_control_in_the_box_tree() {
+        let mut open = model();
+        open.open_combo = Some(ToolsCombo::Textures);
+        assert_eq!(
+            open.layout(TOOLBOX_WIDTH, TOOLBOX_HEIGHT).len(),
+            TOOLS_PAGE_CONTROLS.len(),
+            "opening a combo adds no control"
+        );
+        assert!(open.combo_popup(TOOLBOX_WIDTH, TOOLBOX_HEIGHT).is_some());
+        assert!(
+            model().combo_popup(TOOLBOX_WIDTH, TOOLBOX_HEIGHT).is_none(),
+            "a closed page has no popup"
+        );
     }
 
     // C4ToolsDlg.cpp:289-377 — every control in the box tree is placed, once,
@@ -725,16 +940,22 @@ mod tests {
             ),
             None
         );
+        // The material selector beside it stays live. It is a combo now, so a
+        // click on it opens its list wherever it lands — there are no longer
+        // rows on the closed control to miss.
         let materials = slot(&model, ToolsControl::Materials).rect;
-        assert!(matches!(
+        assert_eq!(
             model.hit(
                 TOOLBOX_WIDTH,
                 TOOLBOX_HEIGHT,
                 (materials.x + 2, materials.y + 2)
             ),
-            Some(ToolsPageAction::SetMaterial(_))
-        ));
-        assert_eq!(click(&model, materials), None, "a click past the last row");
+            Some(ToolsPageAction::OpenCombo(ToolsCombo::Materials))
+        );
+        assert_eq!(
+            click(&model, materials),
+            Some(ToolsPageAction::OpenCombo(ToolsCombo::Materials))
+        );
     }
 
     // C4ToolsDlg.cpp:719 — `TBM_SETPOS` receives `C4TLS_GradeMax - Grade`, so
@@ -771,14 +992,23 @@ mod tests {
             None
         );
 
-        // A list row resolves to the name it drew, and a click past the last
-        // row selects nothing rather than the nearest.
+        // Selection lives in the open list now: the closed control opens, and a
+        // row of the list resolves to the name it drew.
         let materials = slot(&model, ToolsControl::Materials).rect;
-        let first = model.hit(
-            TOOLBOX_WIDTH,
-            TOOLBOX_HEIGHT,
-            (materials.x + 2, materials.y + 2),
+        assert_eq!(
+            model.hit(
+                TOOLBOX_WIDTH,
+                TOOLBOX_HEIGHT,
+                (materials.x + 2, materials.y + 2),
+            ),
+            Some(ToolsPageAction::OpenCombo(ToolsCombo::Materials))
         );
+        let mut model = model.clone();
+        model.open_combo = Some(ToolsCombo::Materials);
+        let popup = model
+            .combo_popup(TOOLBOX_WIDTH, TOOLBOX_HEIGHT)
+            .expect("an open combo has a popup");
+        let first = model.hit(TOOLBOX_WIDTH, TOOLBOX_HEIGHT, (popup.x + 2, popup.y + 2));
         assert!(
             matches!(first, Some(ToolsPageAction::SetMaterial(ref name)) if model.materials.contains(name)),
             "a material row selects one of the catalogue's own names: {first:?}"

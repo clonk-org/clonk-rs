@@ -3520,8 +3520,19 @@ impl GameApp {
             ToolsPageAction::SetMaterial(material) => {
                 self.developer_tools.set_material(material);
                 self.assert_valid_developer_texture();
+                self.developer_tools_open_combo = None;
             }
-            ToolsPageAction::SetTexture(texture) => self.developer_tools.set_texture(texture),
+            ToolsPageAction::SetTexture(texture) => {
+                self.developer_tools.set_texture(texture);
+                // Selecting closes the list, as a combo does.
+                self.developer_tools_open_combo = None;
+            }
+            ToolsPageAction::OpenCombo(combo) => {
+                self.developer_tools_open_combo = Some(combo);
+            }
+            ToolsPageAction::CloseCombo => {
+                self.developer_tools_open_combo = None;
+            }
         }
     }
 
@@ -3609,6 +3620,7 @@ impl GameApp {
                 .as_ref()
                 .map(|state| state.texture_catalog(&material))
                 .unwrap_or_default(),
+            open_combo: self.developer_tools_open_combo,
             preview: self.developer_tools_preview_sample(&material),
             texture: self.developer_tools.texture().to_owned(),
             material,
