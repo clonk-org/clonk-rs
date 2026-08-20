@@ -13678,6 +13678,10 @@ mod material_colorization_regression {
 mod missing_include_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/gather_task_script.rs"]
+mod gather_task_script;
+
+#[cfg(test)]
 #[path = "lib_tests/script_relink_regression.rs"]
 mod script_relink_regression;
 
