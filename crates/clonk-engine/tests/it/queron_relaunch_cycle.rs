@@ -23,6 +23,8 @@ public func CrewOf(int plr) { return GetCrew(plr, 0); }
 public func CrewId(int plr) { return GetID(GetCrew(plr, 0)); }
 public func Waiting() { return GetEffect("IntWait2Launch"); }
 public func Inactive(object target) { return GetEffect("IntInactive", target); }
+
+public func VanishOnly(object target) { return RemoveObject(target); }
 "#;
 
 fn ask(engine: &mut Engine, probe: ObjectId, function: &str, args: Vec<Value>) -> Value {
@@ -144,5 +146,56 @@ fn queron_assassin_death_relaunches_a_visible_paladin() {
     assert!(
         snapshot.object(focus).is_some(),
         "the player's view centers on a live object rather than a stale pointer"
+    );
+}
+
+/// A crew clonk can leave the world without dying — removed by script or by
+/// the world rather than killed — and `Cycle` only ever reacts to
+/// `PlrClonkDied` (Queron3.c4s/Script.c:566-601). That asymmetry is the shape
+/// of the black-screen report in clonk-org/clonk-rs#590: a player whose clonk
+/// goes away without the death callback would get no replacement, no
+/// countdown, and a fog that never reopens.
+///
+/// It does not happen — the relaunch runs anyway — and this pins that, because
+/// the failure mode it rules out is invisible from the existing
+/// kill-driven subcase.
+#[test]
+fn queron_removed_crew_still_reaches_the_relaunch_countdown() {
+    let mut engine = load_installed_scenario("Melees.c4f/Queron3.c4s", 4);
+    let host = join_local_player_on_team(&mut engine, "Host", 1);
+    let _guest = join_local_player_on_team(&mut engine, "Guest", 2);
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "QPRB",
+        "Queron relaunch probe",
+        PROBE,
+    ));
+    let probe =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("QPRB")));
+    ask(&mut engine, probe, "Options", vec![]);
+    tick(&mut engine, 120);
+
+    let victim = ask(&mut engine, probe, "CrewOf", vec![Value::Int(host)]);
+    assert!(
+        !matches!(victim, Value::Nil),
+        "the host owns a live clonk before it is removed"
+    );
+    ask(&mut engine, probe, "VanishOnly", vec![victim]);
+
+    let mut saw_countdown = false;
+    for _ in 0..900 {
+        tick(&mut engine, 1);
+        if !matches!(ask(&mut engine, probe, "Waiting", vec![]), Value::Nil) {
+            saw_countdown = true;
+        }
+    }
+    assert!(
+        saw_countdown,
+        "a removed crew member still runs the relaunch countdown"
+    );
+
+    let replacement = ask(&mut engine, probe, "CrewOf", vec![Value::Int(host)]);
+    assert!(
+        !matches!(replacement, Value::Nil),
+        "and the player is given a live clonk again rather than left empty"
     );
 }
