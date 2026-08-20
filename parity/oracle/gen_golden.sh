@@ -753,6 +753,53 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4MouseControl.cpp" > "$gen/mouse_cursor_cascade.inc"
 
+# 3o. Lift the C4GameSave save-policy query functions and each specialization's
+#     overrides. Every one is a pure function of Sync, fInitial and the ctor
+#     flags, so the whole five-variant decision matrix extracts as header
+#     fragments and needs no engine link -- the out-of-line virtuals
+#     (AdjustCore/WriteDesc/SaveComponents/OnSaving) are never called here.
+#
+#     This is the matrix that decides what a saved file actually contains, and
+#     several entries are non-obvious inversions: GetKeepTitle is !IsExact() so
+#     a scenario save keeps the localized title a savegame deletes, and
+#     C4GameSaveScenario overrides GetClearOrigin to a flat false so that a
+#     scenario save NEVER clears an existing origin even when it is not saving
+#     one -- the base class would clear it.
+awk '
+  /^\tvirtual bool GetSaveRuntimeData\(\) \{ return !fInitial; \}/ { p = 1 }
+  p { print }
+  p && /^\tvirtual bool GetSaveScriptPlayerFiles\(\) \{ return IsExact\(\); \}/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4GameSave.h" > "$gen/game_save_base_queries.inc"
+
+awk '
+  /^\tvirtual bool GetSaveOrigin\(\) override \{ return fSaveOrigin; \}$/ { p = 1 }
+  p { print }
+  p && /^\tvirtual bool GetSaveScriptPlayerFiles\(\) override \{ return true; \}/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4GameSave.h" > "$gen/game_save_scenario_queries.inc"
+
+awk '
+  /^\tvirtual bool GetSaveOrigin\(\) override \{ return true; \} \/\/ origin must be saved in savegames$/ { p = 1 }
+  p { print }
+  p && /^\tvirtual bool GetSaveUserPlayerFiles\(\) override \{ return false; \}/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4GameSave.h" > "$gen/game_save_savegame_queries.inc"
+
+awk '
+  /^\tvirtual bool GetSaveDesc\(\) override \{ return false; \} \/\/ desc is saved by external call/ { p = 1 }
+  p { print }
+  p && /^\tvirtual bool GetCopyScenario\(\) override \{ return fCopyScenario; \}/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4GameSave.h" > "$gen/game_save_record_queries.inc"
+
+awk '
+  /^\tvirtual bool GetSaveOrigin\(\) override \{ return true; \} \/\/ clients must know where to get music/ { p = 1 }
+  p { print }
+  p && /^\tvirtual bool GetCopyScenario\(\) override \{ return false; \}/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4GameSave.h" > "$gen/game_save_network_queries.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;
