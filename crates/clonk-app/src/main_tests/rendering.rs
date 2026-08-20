@@ -5006,3 +5006,73 @@ fn the_presentation_path_never_reaches_the_simulation() {
     let software = advance(false);
     main_assert_eq!(gpu => software, "presentation path changed the simulation: snapshot, RNG or frame diverged");
 }
+
+/// The per-frame draw baseline clonk-org/clonk-rs#286's first criterion asks
+/// for, which is what its go/no-go threshold has to be set against.
+///
+/// Native text is retained one textured quad per glyph, and every distinct
+/// character owns its own GPU texture identity. Repeats share that identity,
+/// so a frame's *bindings* are bounded by the character repertoire while its
+/// *draws* grow with every glyph put on screen. Those two numbers move
+/// independently, and an atlas collapses only the first — so the baseline has
+/// to report both, from a real menu rather than a synthetic string.
+///
+/// The floors are deliberately loose: the exact counts follow shipped content
+/// and font metrics, and pinning them exactly would make this a tripwire for
+/// unrelated content edits. What is being pinned is the shape — a static menu
+/// screen costs hundreds of individually bound draws, and nothing batches
+/// them today.
+#[test]
+fn native_menu_text_baseline_is_one_bound_draw_per_glyph() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup_dialog_fade = None;
+    app.graphics.set_runtime_sprite_filtering(1.0, false);
+    app.configure_native_startup_fonts(1.0, false);
+    app.handle_main_menu_activation(MainMenuItem::About)
+        .test_value();
+    let presentation = retained_test_presentation(&app);
+    let frame = app
+        .render_retained_gpu_frame(presentation)
+        .test_value();
+
+    let commands = frame
+        .layers
+        .iter()
+        .flat_map(|layer| layer.scene.commands.iter());
+    let mut quads = 0_usize;
+    let mut batches = 0_usize;
+    let mut textures = std::collections::HashSet::new();
+    for command in commands {
+        match command {
+            clonk_graphics::GpuCommand::Quad { texture, .. } => {
+                quads += 1;
+                textures.insert(*texture);
+            }
+            clonk_graphics::GpuCommand::ObjectBatch { .. } => batches += 1,
+            _ => {}
+        }
+    }
+
+    // Measured at 640x480: 1070 commands over 149 distinct textures, every one
+    // of them a separate quad.
+    assert!(
+        quads >= 400,
+        "a text-heavy menu screen must cost hundreds of draws today, saw {quads}"
+    );
+    assert!(
+        textures.len() >= 100,
+        "and bind a texture per distinct glyph and facet, saw {}",
+        textures.len()
+    );
+    assert!(
+        quads > textures.len(),
+        "repeated characters already share a retained identity, so draws must \
+         outnumber bindings: {quads} draws over {} bindings",
+        textures.len()
+    );
+    assert_eq!(
+        batches, 0,
+        "nothing batches menu text today — that is what clonk-org/clonk-rs#286 \
+         would change, and this baseline is what its win is measured against"
+    );
+}
