@@ -65,7 +65,7 @@ pub fn command(args: &[String]) -> Result<()> {
     }
 }
 
-fn workspace_dir() -> Result<PathBuf> {
+pub fn workspace_dir() -> Result<PathBuf> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map(PathBuf::from)
