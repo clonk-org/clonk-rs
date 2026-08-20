@@ -52,6 +52,9 @@
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
 //     scaffold records low-speed `Disabled` contact transitions.
+//   * `C4Shape::ContactCheck` is mechanically extracted in full; a 24x16
+//     material grid with configurable open borders records its per-vertex
+//     contact masks, materials and counts.
 //   * `C4Weather::Execute` and `C4SVal::Evaluate` are mechanically extracted in
 //     full; a tick scaffold records the disaster stream and the RNG ledger per
 //     tick, including the level tests that draw even at level zero.
@@ -4063,6 +4066,102 @@ const unsigned long C4ID_Meteor = 0;
 #include "weather_execute.inc"
 } // namespace weather_execute
 
+
+// ---------------------------------------------------------------------------
+// C4Shape::ContactCheck (src/C4Shape.cpp), the per-pixel probe every step of
+// C4Object::DoMovement runs. Its density reads go through GetPix's border rules
+// (C4Landscape.h:163-180), where a CLOSED border answers MCVehic — solid —
+// instead of sky, so an object walking off the map edge stops there rather than
+// falling out of the world.
+namespace shape_contact
+{
+const int32_t GridWdt = 24;
+const int32_t GridHgt = 16;
+const int32_t MNone = -1;
+const int32_t MVehicle = 3;
+const int32_t SolidDensity = 50;   // C4M_Solid, C4Material.h:201
+const int32_t VehicleDensity = 100; // C4M_Vehicle, C4Material.h:200
+
+// 0 sky, 1 earth, 2 water, 3 vehicle (what a closed border answers).
+const int32_t g_density[4] = {0, 50, 30, VehicleDensity};
+static int32_t g_grid[GridHgt][GridWdt];
+
+// C4Landscape's border configuration: LeftOpen/RightOpen are HEIGHTS (a pixel
+// is open while y is above them), TopOpen/BottomOpen are flags.
+static int32_t g_left_open = 0;
+static int32_t g_right_open = 0;
+static bool g_top_open = true;
+static bool g_bottom_open = false;
+
+// The GetPix border cascade, returning a material rather than a texmap byte:
+// the scaffold's grid stores materials directly.
+static int32_t border_material(int32_t x, int32_t y, bool &out_of_bounds)
+{
+    out_of_bounds = true;
+    if (x < 0) return y < g_left_open ? MNone : MVehicle;
+    if (x >= GridWdt) return y < g_right_open ? MNone : MVehicle;
+    if (y < 0) return g_top_open ? MNone : MVehicle;
+    if (y >= GridHgt) return g_bottom_open ? MNone : MVehicle;
+    out_of_bounds = false;
+    return g_grid[y][x];
+}
+
+static int32_t GBackMat(int32_t x, int32_t y)
+{
+    bool out_of_bounds = false;
+    return border_material(x, y, out_of_bounds);
+}
+
+static int32_t GBackDensity(int32_t x, int32_t y)
+{
+    const int32_t mat = GBackMat(x, y);
+    return mat < 0 ? 0 : g_density[mat];
+}
+
+const int32_t MaxVertex = 8;
+
+struct C4Shape
+{
+    int32_t VtxNum{};
+    int32_t VtxX[MaxVertex]{};
+    int32_t VtxY[MaxVertex]{};
+    int32_t VtxCNAT[MaxVertex]{};
+    int32_t VtxContactCNAT[MaxVertex]{};
+    int32_t VtxContactMat[MaxVertex]{};
+    int32_t ContactDensity{SolidDensity};
+    int32_t ContactCNAT{};
+    int32_t ContactCount{};
+
+    bool ContactCheck(int32_t cx, int32_t cy);
+};
+
+#include "shape_contact_check.inc"
+
+// C4Object::TargetBounds (C4Movement.cpp:128-164), the clamp SideBounds and
+// VerticalBounds run the movement target through. It decides which velocity
+// component is zeroed and fires a Contact call per bound crossed — and when the
+// two limits cross each other, BOTH fire, in low-then-high order.
+struct C4Object
+{
+    C4Fixed xdir{Fix0};
+    C4Fixed ydir{Fix0};
+    int32_t ContactCalls[4]{};
+    int32_t ContactCallCount{};
+
+    bool Contact(int32_t cnat)
+    {
+        if (ContactCallCount < 4) ContactCalls[ContactCallCount] = cnat;
+        ++ContactCallCount;
+        return false;
+    }
+
+    void TargetBounds(
+        int32_t &ctco, int32_t limit_low, int32_t limit_hi, int32_t cnat_low, int32_t cnat_hi);
+};
+
+#include "target_bounds.inc"
+} // namespace shape_contact
+
 int main()
 {
     printf("{\n");
@@ -4436,6 +4535,171 @@ int main()
                            weather_execute::g_events[e].c, weather_execute::g_events[e].d);
                 printf("]}");
             }
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4Shape::ContactCheck (C4Shape.cpp:370-406) over a 24x16 material grid.
+    // The landscape is earth from y=10 down with a water pocket and a granite
+    // pillar, and every case probes one shape at one position: the vertex loop
+    // order, the four neighbour probes per contacting vertex, the
+    // CNAT_NoCollision skip, and the closed-border MCVehic answer.
+    arr_begin("shape_contact_check");
+    {
+        using namespace shape_contact;
+
+        struct Vertex
+        {
+            int32_t x, y, cnat;
+        };
+        struct Case
+        {
+            const char *name;
+            int32_t at_x, at_y;
+            int32_t contact_density;
+            int32_t left_open, right_open;
+            bool top_open, bottom_open;
+            int32_t vtx_num;
+            Vertex vertices[MaxVertex];
+        };
+
+        const int32_t Left = CNAT_Left, Right = CNAT_Right, Top = CNAT_Top, Bottom = CNAT_Bottom;
+        const int32_t NoCollision = CNAT_NoCollision;
+        const Case cases[] = {
+            // A single bottom vertex resting on the earth surface: centre plus
+            // the bottom neighbour, and nothing else.
+            {"on_surface", 8, 10, SolidDensity, 0, 0, true, false, 1, {{0, 0, Bottom}}},
+            // One pixel higher it is in sky, so no contact at all.
+            {"above_surface", 8, 9, SolidDensity, 0, 0, true, false, 1, {{0, 0, Bottom}}},
+            // Buried: every neighbour answers solid too.
+            {"buried", 8, 12, SolidDensity, 0, 0, true, false, 1, {{0, 0, Bottom}}},
+            // Water is density 30. At the solid threshold it is not contact; at
+            // a liquid threshold the SAME pixel is.
+            {"water_solid_threshold", 4, 12, SolidDensity, 0, 0, true, false, 1, {{0, 0, Bottom}}},
+            {"water_liquid_threshold", 4, 12, 25, 0, 0, true, false, 1, {{0, 0, Bottom}}},
+            // Four vertices around a Clonk-like shape standing on the surface:
+            // ContactCNAT is the OR of the CONTACTING vertices' own CNATs, and
+            // ContactCount counts them.
+            {"standing_shape", 8, 8, SolidDensity, 0, 0, true, false, 4,
+             {{-3, 2, Left}, {3, 2, Right}, {0, -3, Top}, {0, 2, Bottom}}},
+            // The same shape pushed into the granite pillar so a side vertex
+            // contacts as well.
+            {"against_pillar", 15, 8, SolidDensity, 0, 0, true, false, 4,
+             {{-3, 2, Left}, {3, 2, Right}, {0, -3, Top}, {0, 2, Bottom}}},
+            // A CNAT_NoCollision vertex sitting in solid ground is skipped
+            // entirely — it neither contacts nor gets a material recorded.
+            {"no_collision_vertex", 8, 12, SolidDensity, 0, 0, true, false, 2,
+             {{0, 0, Bottom | NoCollision}, {2, -4, Bottom}}},
+            // Off the left edge with the border CLOSED: the border answers
+            // MCVehic, so the vertex contacts empty space.
+            {"closed_left_border", 0, 4, SolidDensity, 0, 0, true, false, 1, {{-1, 0, Left}}},
+            // The same position with the left border open to y=8 is sky.
+            {"open_left_border", 0, 4, SolidDensity, 8, 0, true, false, 1, {{-1, 0, Left}}},
+            // Above the map with TopOpen is sky; with it closed the ceiling is
+            // solid.
+            {"open_top_border", 8, 0, SolidDensity, 0, 0, true, false, 1, {{0, -1, Top}}},
+            {"closed_top_border", 8, 0, SolidDensity, 0, 0, false, false, 1, {{0, -1, Top}}},
+            // Below the map: BottomOpen is false in these fixtures, so the
+            // floor of the world is solid.
+            {"closed_bottom_border", 8, 15, SolidDensity, 0, 0, true, false, 1, {{0, 1, Bottom}}},
+        };
+
+        for (const Case &c : cases)
+        {
+            // Sky above y=10, earth below, a water pocket at x=3..5 and a
+            // granite pillar at x=17..18.
+            for (int32_t y = 0; y < GridHgt; ++y)
+                for (int32_t x = 0; x < GridWdt; ++x)
+                {
+                    int32_t mat = y >= 10 ? 1 : MNone;
+                    if (y >= 11 && x >= 3 && x <= 5) mat = 2;
+                    if (x >= 17 && x <= 18 && y >= 6) mat = 1;
+                    g_grid[y][x] = mat;
+                }
+
+            g_left_open = c.left_open;
+            g_right_open = c.right_open;
+            g_top_open = c.top_open;
+            g_bottom_open = c.bottom_open;
+
+            C4Shape shape;
+            shape.VtxNum = c.vtx_num;
+            shape.ContactDensity = c.contact_density;
+            for (int32_t v = 0; v < c.vtx_num; ++v)
+            {
+                shape.VtxX[v] = c.vertices[v].x;
+                shape.VtxY[v] = c.vertices[v].y;
+                shape.VtxCNAT[v] = c.vertices[v].cnat;
+                shape.VtxContactMat[v] = MNone;
+            }
+
+            const bool any = shape.ContactCheck(c.at_x, c.at_y);
+
+            sep();
+            printf("{\"case\":\"%s\",\"at_x\":%d,\"at_y\":%d,\"contact_density\":%d,"
+                   "\"left_open\":%d,\"right_open\":%d,\"top_open\":%d,\"bottom_open\":%d,"
+                   "\"any\":%d,\"contact_cnat\":%d,\"contact_count\":%d,\"vertices\":[",
+                   c.name, c.at_x, c.at_y, c.contact_density, c.left_open, c.right_open,
+                   c.top_open ? 1 : 0, c.bottom_open ? 1 : 0, any ? 1 : 0, shape.ContactCNAT,
+                   shape.ContactCount);
+            for (int32_t v = 0; v < c.vtx_num; ++v)
+                printf("%s{\"x\":%d,\"y\":%d,\"cnat\":%d,\"contact_cnat\":%d,\"mat\":%d}",
+                       v ? "," : "", c.vertices[v].x, c.vertices[v].y, c.vertices[v].cnat,
+                       shape.VtxContactCNAT[v], shape.VtxContactMat[v]);
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4Object::TargetBounds (C4Movement.cpp:128-164). The bound that fires
+    // decides which velocity component is zeroed — CNAT_Left/CNAT_Right clear
+    // xdir, anything else clears ydir — and fires a Contact call. The crossed
+    // case pins that both bounds fire, low first.
+    arr_begin("target_bounds");
+    {
+        struct Case
+        {
+            const char *name;
+            int32_t target;
+            int32_t low, high;
+            int32_t cnat_low, cnat_hi;
+            int32_t xdir_raw, ydir_raw;
+        };
+        const Case cases[] = {
+            {"inside", 50, 0, 100, CNAT_Left, CNAT_Right, 65536, -65536},
+            {"below_left", -10, 0, 100, CNAT_Left, CNAT_Right, 65536, -65536},
+            {"above_right", 140, 0, 100, CNAT_Left, CNAT_Right, 65536, -65536},
+            // The vertical pair clears ydir instead.
+            {"below_top", -10, 0, 100, CNAT_Top, CNAT_Bottom, 65536, -65536},
+            {"above_bottom", 140, 0, 100, CNAT_Top, CNAT_Bottom, 65536, -65536},
+            // The comparisons are strict, so sitting exactly on a limit is not
+            // a bound crossing.
+            {"exactly_low", 0, 0, 100, CNAT_Left, CNAT_Right, 65536, -65536},
+            {"exactly_high", 100, 0, 100, CNAT_Left, CNAT_Right, 65536, -65536},
+            // Crossed limits: clamping to low puts the target above high, so
+            // the second arm fires too and the low contact is reported first.
+            {"crossed_limits", 50, 80, 20, CNAT_Left, CNAT_Right, 65536, -65536},
+        };
+
+        for (const Case &c : cases)
+        {
+            shape_contact::C4Object object;
+            object.xdir.val = c.xdir_raw;
+            object.ydir.val = c.ydir_raw;
+            int32_t target = c.target;
+            object.TargetBounds(target, c.low, c.high, c.cnat_low, c.cnat_hi);
+
+            sep();
+            printf("{\"case\":\"%s\",\"target\":%d,\"low\":%d,\"high\":%d,"
+                   "\"cnat_low\":%d,\"cnat_hi\":%d,\"xdir_before\":%d,\"ydir_before\":%d,"
+                   "\"bounded\":%d,\"xdir_after\":%d,\"ydir_after\":%d,\"contacts\":[",
+                   c.name, c.target, c.low, c.high, c.cnat_low, c.cnat_hi, c.xdir_raw, c.ydir_raw,
+                   target, object.xdir.val, object.ydir.val);
+            for (int32_t i = 0; i < object.ContactCallCount; ++i)
+                printf("%s%d", i ? "," : "", object.ContactCalls[i]);
             printf("]}");
         }
     }

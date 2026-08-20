@@ -2008,6 +2008,231 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
+    // 0g. C4Shape::ContactCheck (C4Shape.cpp:370-406), the per-pixel probe every
+    //     step of C4Object::DoMovement runs — the explicit Phase 2 per-pixel
+    //     collision gap in parity/README.md, for this bounded matrix. It decides
+    //     ContactCNAT, ContactCount and the per-vertex VtxContactCNAT, so a
+    //     vertex that answers differently by one pixel moves the object
+    //     differently for the rest of the frame.
+    //
+    //     Its density reads go through GetPix's border rules
+    //     (C4Landscape.h:163-180), where a CLOSED border answers MCVehic —
+    //     solid — rather than sky. That is what stops an object at the edge of
+    //     the map instead of letting it walk out of the world, and the
+    //     `*_border` cases pin it from both sides.
+    {
+        // The oracle's grid: 0 sky, 1 earth (density 50), 2 water (30), and
+        // vehicle for what a closed border answers.
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=50
+
+            [Material Water]
+            Name=Water
+            Density=30
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            "#,
+        )
+        .expect("contact check oracle materials parse");
+
+        const WIDTH: u32 = 24;
+        const HEIGHT: i32 = 16;
+
+        for (idx, case) in golden["shape_contact_check"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let mut engine = Engine::with_seed(0);
+            engine.configure_materials_from_library(&library);
+
+            // Sky above y=10, earth below, a water pocket at x=3..5 and a
+            // granite-shaped earth pillar at x=17..18.
+            let mut bytes = vec![0u8; WIDTH as usize * HEIGHT as usize];
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH as i32 {
+                    let mut byte = if y >= 10 { 1 } else { 0 };
+                    if y >= 11 && (3..=5).contains(&x) {
+                        byte = 2;
+                    }
+                    if (17..=18).contains(&x) && y >= 6 {
+                        byte = 1;
+                    }
+                    bytes[y as usize * WIDTH as usize + x as usize] = byte;
+                }
+            }
+            let mut densities = vec![0; 128];
+            densities[1] = 50;
+            densities[2] = 30;
+            let mut material_names = vec![None; 128];
+            material_names[1] = Some("Earth".to_string());
+            material_names[2] = Some("Water".to_string());
+
+            let mut landscape = Landscape::flat(WIDTH, HEIGHT);
+            landscape.set_pixel_grid(PixelGrid::new(
+                WIDTH,
+                HEIGHT as u32,
+                bytes,
+                densities,
+                material_names,
+                vec![None; 128],
+            ));
+            landscape.set_border_open(
+                i(case, "left_open") as i32,
+                i(case, "right_open") as i32,
+                i(case, "top_open") != 0,
+                i(case, "bottom_open") != 0,
+            );
+            let vehicle = engine
+                .materials
+                .id_of("Vehicle")
+                .expect("the fixture declares Vehicle");
+            landscape.set_vehicle_material(Some(vehicle));
+            // Installing the landscape is what resolves the grid's material
+            // names against the engine's MaterialSet.
+            engine.set_landscape(landscape);
+            let landscape = engine
+                .landscape()
+                .expect("contact oracle landscape remains");
+
+            let rows = case["vertices"].as_array().expect("case vertices");
+            let vertices = rows
+                .iter()
+                .map(|row| {
+                    crate::ObjectVertex::new(i(row, "x") as i32, i(row, "y") as i32)
+                        .with_cnat(i(row, "cnat") as u32)
+                })
+                .collect::<Vec<_>>();
+            let position = crate::Vector2::new(i(case, "at_x") as i32, i(case, "at_y") as i32);
+            let contact = crate::shape_contact_check(
+                &vertices,
+                position,
+                landscape,
+                &engine.materials,
+                &[],
+                None,
+                i(case, "contact_density") as i32,
+            );
+
+            expect_eq(
+                "shape_contact_check",
+                idx,
+                "any",
+                i(case, "any"),
+                i64::from(u8::from(contact.is_contact())),
+            );
+            expect_eq(
+                "shape_contact_check",
+                idx,
+                "contact_cnat",
+                i(case, "contact_cnat"),
+                i64::from(contact.contact_cnat),
+            );
+            expect_eq(
+                "shape_contact_check",
+                idx,
+                "contact_count",
+                i(case, "contact_count"),
+                i64::from(contact.count()),
+            );
+            for (vertex_index, row) in rows.iter().enumerate() {
+                expect_eq(
+                    "shape_contact_check",
+                    idx,
+                    "vertex contact_cnat",
+                    i(row, "contact_cnat"),
+                    i64::from(contact.vertex_contacts[vertex_index]),
+                );
+                // C4Shape stores VtxContactMat, which the port does not carry on
+                // ShapeContact — so the material is compared through the
+                // landscape probe both sides read, GBackMat
+                // (C4Wrappers.h:179-182). A CNAT_NoCollision vertex is skipped
+                // before that assignment, so its golden value is the fixture's
+                // own initialiser rather than an engine answer.
+                if i(row, "cnat") & 64 != 0 {
+                    continue;
+                }
+                let expected = match i(row, "mat") {
+                    -1 => None,
+                    1 => Some("Earth"),
+                    2 => Some("Water"),
+                    3 => Some("Vehicle"),
+                    other => panic!("unmapped oracle material index {other}"),
+                };
+                let actual = landscape
+                    .border_material_at(
+                        position.x + i(row, "x") as i32,
+                        position.y + i(row, "y") as i32,
+                    )
+                    .and_then(|id| engine.materials.get_by_id(id))
+                    .map(|material| material.name().to_owned());
+                assert_eq!(
+                    expected,
+                    actual.as_deref(),
+                    "PARITY DIVERGENCE in `shape_contact_check` entry {idx} vertex \
+                     {vertex_index} material"
+                );
+            }
+        }
+    }
+
+    // 0h. C4Object::TargetBounds (C4Movement.cpp:128-164), the clamp
+    //     SideBounds and VerticalBounds run every movement target through. Both
+    //     comparisons are strict, so sitting exactly on a limit is not a
+    //     crossing; and when the limits cross each other, clamping to the low
+    //     one puts the target above the high one, so BOTH bounds fire with the
+    //     low contact first.
+    //
+    //     The port splits the C++ body: `target_bounds` returns which bounds
+    //     fired, and its callers clear `fixed_velocity.x` for the side pair and
+    //     `.y` for the vertical one. The golden records the C++ zeroing for the
+    //     record; what is compared here is the clamp and the contact order the
+    //     shared function decides.
+    for (idx, case) in golden["target_bounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let mut target = i(case, "target") as i32;
+        let contacts = crate::target_bounds(
+            &mut target,
+            i(case, "low") as i32,
+            i(case, "high") as i32,
+            i(case, "cnat_low") as u32,
+            i(case, "cnat_hi") as u32,
+        );
+
+        expect_eq(
+            "target_bounds",
+            idx,
+            "bounded",
+            i(case, "bounded"),
+            i64::from(target),
+        );
+        let expected = case["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_i64().unwrap())
+            .collect::<Vec<_>>();
+        let actual = contacts
+            .into_iter()
+            .flatten()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected, actual,
+            "PARITY DIVERGENCE in `target_bounds` entry {idx} contacts"
+        );
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
