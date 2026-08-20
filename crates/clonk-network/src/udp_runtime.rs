@@ -31,6 +31,13 @@ pub const RELIABLE_UDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub const RELIABLE_UDP_CONNECT_RETRIES: u8 = 5;
 pub const RELIABLE_UDP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The socket's receive buffer is sized to the largest payload a UDP datagram
+/// can carry, so an inbound datagram is never truncated on its way in: what
+/// arrives is either taken whole or rejected by a length check that can see
+/// its real size. Every size gate downstream depends on that
+/// (clonk-org/clonk-rs#469).
+const RECEIVE_BUFFER_BYTES: usize = u16::MAX as usize + 1;
+
 #[cfg(test)]
 thread_local! {
     static NEXT_DEADLINE_PEER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1065,7 +1072,7 @@ impl ReliableUdpSocketDriver {
             peer_statistics: BTreeMap::new(),
             statistics_topology_epoch: 0,
             started_at,
-            receive_buffer: vec![0; u16::MAX as usize + 1],
+            receive_buffer: vec![0; RECEIVE_BUFFER_BYTES],
             pending_voice_media: None,
             protocol_timer: None,
             last_send: None,
