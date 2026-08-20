@@ -1,6 +1,7 @@
 use crate::far_worlds_deep_lorry_acquire::deep_hydroclonk_finds_coral_inside_a_submerged_lorry;
 use crate::support::real_scenario::{prepare_installed_scenario, PreparedInstalledScenario};
 use crate::support::PreparedScenarioSubcase;
+use crate::wagon_grab_put_get::deep_hydroclonk_reaches_wagon_cargo_through_its_entrance;
 use clonk_engine::landscape::PixelGrid;
 use clonk_engine::{Landscape, MaterialId, SpawnConfig, Vector2};
 
@@ -62,6 +63,10 @@ fn far_worlds_deep_shared_scenario_subcases() {
         (
             "deep_hydroclonk_finds_coral_inside_a_submerged_lorry",
             deep_hydroclonk_finds_coral_inside_a_submerged_lorry,
+        ),
+        (
+            "deep_hydroclonk_reaches_wagon_cargo_through_its_entrance",
+            deep_hydroclonk_reaches_wagon_cargo_through_its_entrance,
         ),
     ];
     let mut failures = Vec::new();
