@@ -736,6 +736,23 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Effect.cpp" > "$gen/effect_check.inc"
 
+# 3n. Lift C4MouseControl::UpdateCursorTarget's OCF priority cascade. It is a
+#     run of UNCONDITIONAL overwrites, so the LAST matching rule wins, not the
+#     first — Enter, then Grab/Ungrab, then Carryable, then Chop's reduced
+#     range, then Entrance, Build, the two Selects and finally Attack. A port
+#     that turned it into a first-match chain would show the wrong cursor for
+#     every object matching more than one rule, which is most of them.
+#
+#     Extracted as a fragment between its own comment markers, the way the
+#     DFA_PUSH/PULL/FIGHT direction blocks already are: the surrounding function
+#     handles regions, captions and drag state that this section does not pin.
+awk '
+  /^\t\t\/\/ Enter \(containers\)$/ { p = 1 }
+  p { print }
+  /^\t\t\t\t\tCursor = C4MC_Cursor_Attack;$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4MouseControl.cpp" > "$gen/mouse_cursor_cascade.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

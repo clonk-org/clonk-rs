@@ -52,6 +52,9 @@
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
 //     scaffold records low-speed `Disabled` contact transitions.
+//   * `C4MouseControl::UpdateCursorTarget`'s OCF priority cascade is
+//     mechanically extracted as a fragment; a candidate scaffold records which
+//     cursor the ladder of unconditional overwrites ends on.
 //   * `C4Object::AssignRemoval` is mechanically extracted in full; a
 //     container/contents scaffold records its teardown order and the Status
 //     re-checks between the callbacks.
@@ -5062,6 +5065,102 @@ void EffectsStub::ClearAll(C4Object *object, int32_t)
 #include "object_assign_death.inc"
 } // namespace object_removal
 
+
+// ---------------------------------------------------------------------------
+// C4MouseControl::UpdateCursorTarget's OCF priority cascade (src/
+// C4MouseControl.cpp). Every rule is an UNCONDITIONAL overwrite, so the LAST
+// one that matches decides the cursor — not the first. An object that is at
+// once carryable, choppable and alive walks the whole ladder and ends on the
+// rule furthest down it.
+//
+// Only the cascade is lifted; the surrounding function handles regions,
+// captions and drag state this section does not pin.
+namespace mouse_cursor
+{
+struct C4Object;
+
+// C4MouseControl.h's cursor ids, in the order the cascade assigns them.
+const int32_t C4MC_Cursor_Crosshair = 0;
+const int32_t C4MC_Cursor_Enter = 1;
+const int32_t C4MC_Cursor_Grab = 2;
+const int32_t C4MC_Cursor_Ungrab = 3;
+const int32_t C4MC_Cursor_Object = 4;
+const int32_t C4MC_Cursor_DigObject = 5;
+const int32_t C4MC_Cursor_Chop = 6;
+const int32_t C4MC_Cursor_Build = 7;
+const int32_t C4MC_Cursor_Select = 8;
+const int32_t C4MC_Cursor_Attack = 9;
+
+// The OCF bits come from the real C4Constants.h the oracle already includes.
+const int32_t C4D_MouseSelect = 1 << 22; // C4Def.h:73
+const int32_t DFA_PUSH = 6;              // C4Def.h:436
+
+struct ShapeStub
+{
+    int32_t Wdt{20};
+};
+
+struct ActionStub
+{
+    C4Object *Target{};
+};
+
+struct C4Object
+{
+    uint32_t OCF{};
+    int32_t Category{};
+    int32_t Owner{-1};
+    bool Alive{};
+    int32_t Procedure{-1};
+    ShapeStub Shape;
+    ActionStub Action;
+
+    int32_t GetProcedure() const { return Procedure; }
+    bool GetAlive() const { return Alive; }
+};
+
+struct PlayerStub
+{
+    C4Object *CrewMember{};
+
+    bool ObjectInCrew(C4Object *object) const { return object && object == CrewMember; }
+};
+
+struct PlayerListStub
+{
+    PlayerStub *Held{};
+
+    PlayerStub *Get(int32_t player) { return player >= 0 ? Held : nullptr; }
+};
+
+struct GameStub
+{
+    PlayerListStub Players;
+};
+
+static GameStub Game;
+
+static bool ValidPlr(int32_t player) { return player >= 0; }
+
+// Hostility is a player-relation question the cascade only consults; the
+// fixture states the answer directly rather than modelling C4PlayerList.
+static bool g_hostile = false;
+
+static bool Hostile(int32_t, int32_t) { return g_hostile; }
+
+// Run the lifted cascade against one candidate.
+static int32_t run(
+    uint32_t ocf, C4Object *TargetObject, C4Object *pPlrCursor, int32_t Player, int32_t X,
+    int32_t Y, int32_t iObjX, int32_t iObjY)
+{
+    // The cascade's entry state: the default object cursor, set just above the
+    // lifted fragment (C4MouseControl.cpp:478).
+    int32_t Cursor = C4MC_Cursor_Crosshair;
+#include "mouse_cursor_cascade.inc"
+    return Cursor;
+}
+} // namespace mouse_cursor
+
 int main()
 {
     printf("{\n");
@@ -5698,6 +5797,115 @@ int main()
     // container fires NEITHER Ejection/Departure on the way out NOR
     // Collection2/Entrance on the way back — a script watching its contents
     // sees nothing at all.
+    // C4MouseControl::UpdateCursorTarget's OCF priority cascade
+    // (C4MouseControl.cpp:481-521). Every rule is an unconditional overwrite,
+    // so the LAST match wins: a candidate carrying several OCF bits ends on the
+    // rule furthest down the ladder, and adding a bit can only move the cursor
+    // later in that order, never earlier.
+    arr_begin("mouse_cursor_cascade");
+    {
+        using namespace mouse_cursor;
+
+        struct Case
+        {
+            const char *name;
+            uint32_t ocf;          // the mask UpdateCursorTarget assembled
+            uint32_t target_ocf;   // the candidate's own OCF
+            int32_t category;
+            int32_t owner;
+            bool alive;
+            bool hostile;
+            bool in_crew;
+            bool pushing_target;   // the player's cursor is pushing this object
+            bool has_player_cursor;
+            int32_t player;
+            int32_t x, y;          // pointer position
+        };
+
+        const int32_t ObjX = 100, ObjY = 100;
+        const Case cases[] = {
+            // Nothing matches: the default object cursor stands.
+            {"no_match_keeps_crosshair", 0, 0, 0, -1, false, false, false, false, false, -1,
+             ObjX, ObjY},
+            // A container the candidate can be entered through.
+            {"container_with_entrance", OCF_Container, OCF_Entrance, 0, -1, false, false, false,
+             false, false, -1, ObjX, ObjY},
+            // The container rule needs the candidate's OWN entrance bit.
+            {"container_without_entrance", OCF_Container, 0, 0, -1, false, false, false, false,
+             false, -1, ObjX, ObjY},
+            // Grab, and its Ungrab form when the player's cursor is already
+            // pushing this very object.
+            {"grab", OCF_Grab, 0, 0, -1, false, false, false, false, true, 0, ObjX, ObjY},
+            {"ungrab_when_pushing_it", OCF_Grab, 0, 0, -1, false, false, false, true, true, 0,
+             ObjX, ObjY},
+            // Carryable overwrites grab, and the in-solid form overwrites that.
+            {"carryable_beats_grab", OCF_Grab | OCF_Carryable, 0, 0, -1, false, false, false,
+             false, false, -1, ObjX, ObjY},
+            {"dig_object_when_in_solid", OCF_Carryable | OCF_InSolid, 0, 0, -1, false, false,
+             false, false, false, -1, ObjX, ObjY},
+            // Chop has a REDUCED range: a third of the shape's width either
+            // side, and vertically from half the width above to a third below.
+            {"chop_inside_range", OCF_Carryable | OCF_Chop, 0, 0, -1, false, false, false, false,
+             false, -1, ObjX, ObjY},
+            {"chop_outside_range", OCF_Carryable | OCF_Chop, 0, 0, -1, false, false, false,
+             false, false, -1, ObjX + 15, ObjY},
+            // The second Entrance rule reads the ASSEMBLED mask, not the
+            // candidate's own bit, and sits below chop.
+            {"entrance_beats_chop", OCF_Chop | OCF_Entrance, 0, 0, -1, false, false, false, false,
+             false, -1, ObjX, ObjY},
+            // Build overwrites everything above it.
+            {"construct_beats_entrance", OCF_Entrance | OCF_Construct, 0, 0, -1, false, false,
+             false, false, false, -1, ObjX, ObjY},
+            // Select for a crew member of this player...
+            {"crew_member_selects", OCF_Construct | OCF_Alive, 0, 0, 0, true, false, true, false,
+             false, 0, ObjX, ObjY},
+            // ...and for anything carrying the MouseSelect category, with no
+            // player needed at all.
+            {"mouse_select_category", OCF_Construct, 0, C4D_MouseSelect, -1, false, false, false,
+             false, false, -1, ObjX, ObjY},
+            // Attack is last, so a hostile living candidate outranks even a
+            // crew Select — and it needs the candidate to be actually alive.
+            {"hostile_alive_attacks", OCF_Alive, 0, C4D_MouseSelect, 1, true, true, true, false,
+             false, 0, ObjX, ObjY},
+            {"hostile_dead_does_not_attack", OCF_Alive, 0, C4D_MouseSelect, 1, false, true, true,
+             false, false, 0, ObjX, ObjY},
+            {"friendly_alive_does_not_attack", OCF_Alive, 0, C4D_MouseSelect, 0, true, false,
+             true, false, false, 0, ObjX, ObjY},
+        };
+
+        for (const Case &c : cases)
+        {
+            mouse_cursor::C4Object target;
+            target.OCF = c.target_ocf;
+            target.Category = c.category;
+            target.Owner = c.owner;
+            target.Alive = c.alive;
+
+            mouse_cursor::C4Object cursor_object;
+            cursor_object.Procedure = DFA_PUSH;
+            cursor_object.Action.Target = c.pushing_target ? &target : nullptr;
+
+            mouse_cursor::PlayerStub player;
+            player.CrewMember = c.in_crew ? &target : nullptr;
+            Game.Players.Held = &player;
+            g_hostile = c.hostile;
+
+            const int32_t result = run(
+                c.ocf, &target, c.has_player_cursor || c.pushing_target ? &cursor_object : nullptr,
+                c.player, c.x, c.y, ObjX, ObjY);
+
+            sep();
+            printf("{\"case\":\"%s\",\"ocf\":%u,\"target_ocf\":%u,\"category\":%d,"
+                   "\"owner\":%d,\"alive\":%d,\"hostile\":%d,\"in_crew\":%d,"
+                   "\"pushing\":%d,\"player\":%d,\"dx\":%d,\"cursor\":%d}",
+                   c.name, c.ocf, c.target_ocf, c.category, c.owner, c.alive ? 1 : 0,
+                   c.hostile ? 1 : 0, c.in_crew ? 1 : 0, c.pushing_target ? 1 : 0, c.player,
+                   c.x - ObjX, result);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
     arr_begin("object_change_def");
     {
         struct Case

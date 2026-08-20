@@ -3473,6 +3473,163 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
+    // 0p. C4MouseControl::UpdateCursorTarget's OCF priority cascade
+    //     (C4MouseControl.cpp:481-521). Every rule is an UNCONDITIONAL
+    //     overwrite, so the LAST match wins rather than the first: a candidate
+    //     that is at once carryable, choppable and alive walks the whole ladder
+    //     and ends on the rule furthest down it. Adding an OCF bit can only
+    //     move the cursor later in that order, never earlier.
+    //
+    //     The `ocf` the cascade tests is NOT the search mask it started from:
+    //     `GetTargetObject` takes it by reference and `GetOCFForPos` overwrites
+    //     it with the target's position-filtered OCF (`:1318-1326`), which is
+    //     what the port computes as `object_ocf_for_pos`. The first Enter rule
+    //     is the one place that reads the object's CACHED OCF instead, so
+    //     containers stay enterable across their whole shape.
+    {
+        for (idx, case) in golden["mouse_cursor_cascade"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let name = case["case"].as_str().unwrap_or_default();
+            let filtered_ocf = i(case, "ocf") as u32;
+            let cached_entrance = i(case, "target_ocf") as u32 & crate::ocf::ENTRANCE != 0;
+            let owner = i(case, "owner") as i32;
+            let player = i(case, "player") as i32;
+            let dx = i(case, "dx") as i32;
+
+            let mut engine = Engine::with_seed(0);
+            let mut definition = Definition::from_script("MCUR", "MCUR", "#strict 2\n")
+                .expect("cursor fixture compiles");
+            definition.set_category(i(case, "category") as i32);
+            // A twenty-wide shape, which is what the chop rule's thirds are
+            // measured against.
+            definition.set_shape_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+            // `object_ocf_for_pos` position-filters the Entrance bit, so
+            // whether the definition has an entrance area is what decides if
+            // that bit survives into the mask the cascade tests. The oracle
+            // states the filtered mask directly; this is how the port is made
+            // to produce it — an entrance area covering the pointer when the
+            // filtered mask kept the bit, and none when it did not.
+            if filtered_ocf & crate::ocf::ENTRANCE != 0 {
+                definition.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+            }
+            engine
+                .register_definition(definition)
+                .expect("cursor fixture registers");
+            // The Ungrab rule asks the crew cursor's PROCEDURE, which resolves
+            // through the definition's action map — an action merely named
+            // "Push" is not enough.
+            let mut crew_definition = Definition::from_script("MCLK", "MCLK", "#strict 2\n")
+                .expect("crew fixture compiles");
+            crew_definition.configure_actions(
+                Some("Push".to_owned()),
+                HashMap::from([(
+                    "Push".to_owned(),
+                    crate::ActionSpec::default().with_procedure("PUSH"),
+                )]),
+            );
+            engine
+                .register_definition(crew_definition)
+                .expect("crew fixture registers");
+            let target = engine
+                .spawn_object(
+                    SpawnConfig::new("MCUR")
+                        .with_owner(owner)
+                        .with_alive(i(case, "alive") != 0),
+                )
+                .expect("target spawns");
+            let index = engine.find_object_index(target).expect("target exists");
+            // Set the position rather than spawning at it: a spawn y is the
+            // object's BOTTOM, and this shape has an offset, so passing it
+            // through SpawnConfig would put the object ten pixels off and move
+            // the chop rule's range with it.
+            engine.objects[index].state.position = crate::Vector2::new(100, 100);
+            engine.objects[index].state.category = i(case, "category") as i32;
+            // `object_ocf_for_pos` returns the cached OCF untouched unless
+            // Entrance or Collection is set, so the cached and filtered masks
+            // are the same everywhere except the container cases — where the
+            // definition has no entrance rect, so the position filter clears
+            // that bit exactly as the oracle's two columns describe.
+            engine.objects[index].state.ocf = if cached_entrance {
+                filtered_ocf | crate::ocf::ENTRANCE
+            } else {
+                filtered_ocf
+            };
+
+            // Hostility needs both players registered, which in turn makes
+            // `player_crew_roster` read the registered (empty) crew instead of
+            // falling back to the owned-crew scan. The hostile cases do not
+            // need the crew rule — their Select comes from the MouseSelect
+            // category — so the two setups are kept apart.
+            let hostile = i(case, "hostile") != 0;
+            if hostile {
+                for id in [owner, player] {
+                    if id >= 0 {
+                        engine
+                            .register_player(PlayerConfig::new(id, "cursor player"))
+                            .expect("player registers");
+                    }
+                }
+                if let Some(first) = engine.players.get_mut(&player.max(0)) {
+                    first.set_hostile_towards(owner, true);
+                }
+            }
+
+            // The player's own cursor: pushing this target turns Grab into
+            // Ungrab, and being a crew member turns the Alive rule into Select.
+            if !hostile && (i(case, "pushing") != 0 || i(case, "in_crew") != 0) {
+                let crew = if i(case, "in_crew") != 0 {
+                    target
+                } else {
+                    engine
+                        .spawn_object(SpawnConfig::new("MCLK").with_owner(player.max(0)))
+                        .expect("crew spawns")
+                };
+                // The cursor has to be an owned crew member of that player.
+                let crew_index = engine.find_object_index(crew).expect("crew exists");
+                engine.objects[crew_index].state.owner = player.max(0);
+                engine.objects[crew_index].state.crew_member = true;
+                engine
+                    .set_crew_cursor(player.max(0), Some(crew))
+                    .expect("the crew cursor is set");
+                if i(case, "pushing") != 0 {
+                    engine.objects[crew_index].state.action.name = "Push".to_owned();
+                    engine.objects[crew_index].state.action.target = Some(target);
+                }
+            }
+
+            let cursor = engine.mouse_world_cursor(
+                player,
+                Some(target),
+                crate::Vector2::new(100 + dx, 100),
+                false,
+            );
+            let actual = match cursor {
+                crate::MouseWorldCursor::Crosshair => 0,
+                crate::MouseWorldCursor::Enter(_) => 1,
+                crate::MouseWorldCursor::Grab(_) => 2,
+                crate::MouseWorldCursor::Ungrab(_) => 3,
+                crate::MouseWorldCursor::Carryable(_) => 4,
+                crate::MouseWorldCursor::DigObject(_) => 5,
+                crate::MouseWorldCursor::Chop(_) => 6,
+                crate::MouseWorldCursor::Build(_) => 7,
+                crate::MouseWorldCursor::Select(_) => 8,
+                crate::MouseWorldCursor::Attack(_) => 9,
+                other => panic!("unexpected cursor {other:?} for `{name}`"),
+            };
+            expect_eq(
+                "mouse_cursor_cascade",
+                idx,
+                "cursor",
+                i(case, "cursor"),
+                actual,
+            );
+        }
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));
