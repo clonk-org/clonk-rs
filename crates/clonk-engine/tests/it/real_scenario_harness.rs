@@ -784,6 +784,10 @@ fn alchemy_real_scenario_subcases_batch_4() {
             alchemy_possession_uses_the_shipped_selector_control,
         ),
         (
+            "curse_family_selects_a_foreign_target_through_the_shipped_selector",
+            alchemy_curse_family_selects_a_foreign_target_through_the_shipped_selector,
+        ),
+        (
             "mage_uses_context_magic_and_casts_the_shipped_gravity_spells",
             alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells,
         ),
@@ -2246,6 +2250,121 @@ fn alchemy_possession_uses_the_shipped_selector_control(prepared: &PreparedInsta
         }),
         "POSE::ActivateTarget installs PossessionSpell on the selected animal"
     );
+}
+
+fn alchemy_curse_family_selects_a_foreign_target_through_the_shipped_selector(
+    prepared: &PreparedInstalledScenario,
+) {
+    // The four curses are one implementation with four names: each supplies
+    // `GetCurseName` and inherits the shared Activate/SelectorTarget/
+    // ActivateTarget path, which builds the effect name as
+    // `Format("Curse%s", GetCurseName())`
+    // (Curses.c4d/CurseAntiheal.c4d/Script.c:11-37,124).
+    for (curse, effect_name) in [
+        ("CAHE", "CurseAntiheal"),
+        ("CCNF", "CurseControlConfusion"),
+        ("CFAL", "CurseFalling"),
+        ("CPAN", "CursePain"),
+    ] {
+        let mut engine = prepared.instantiate();
+        let owner = join_local_player(&mut engine, "Alchemy curse parity");
+        let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+        let mage_position = engine.test_object_snapshot(mage).position;
+
+        // SelectorTarget refuses a friendly target unless the NTMG rule is in
+        // play, and single-player Alchemy has no hostile crew at all -- so this
+        // subcase exists only because the scenario ships
+        // `Rules=...;NTMG=1;` and legalises exactly that
+        // (Alchemy.c4s/Scenario.txt; Curses.c4d/CurseAntiheal.c4d/Script.c:48).
+        // What the test still has to arrange is range: the shipped second crew
+        // member starts too far away for the search box, and with nobody in it
+        // the spell deletes itself and no selector ever opens.
+        let patient = crate::support::TestValueExt::test_value(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| {
+                    object.definition_id == "CLNK"
+                        && object.owner == owner
+                        && object.status.is_active()
+                })
+                .map(|object| object.id),
+        );
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
+                patient,
+                ObjectUpdate::new()
+                    .with_position(Vector2::new(mage_position.x + 30, mage_position.y))
+                    .with_velocity(Vector2::ZERO)
+                    .with_action("Walk")
+                    .clear_container(),
+            ),
+        );
+
+        let spell = engine.spawn_test_object(
+            clonk_engine::SpawnConfig::new(curse)
+                .with_position(mage_position)
+                .with_owner(owner),
+        );
+
+        // Going through Activate rather than straight to DoSpellSelect is the
+        // point: Activate is what records the caster in `pCasterClonk`, and
+        // SelectorTarget refuses that object, so a mage can never curse
+        // itself (Curses.c4d/CurseAntiheal.c4d/Script.c:17-19,40-48).
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(mage.as_u64())],
+        );
+        let selector = crate::support::TestValueExt::test_value(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "SLCR" && object.status.is_active())
+                .map(|object| object.id),
+        );
+        assert_eq!(
+            engine.crew_cursor(owner),
+            Some(selector),
+            "{curse} hands the cursor to the shipped selector"
+        );
+
+        crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_RIGHT, 0));
+        crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+        assert_eq!(engine.crew_cursor(owner), Some(mage));
+
+        let cursed: Vec<_> = engine
+            .snapshot()
+            .objects
+            .iter()
+            .filter(|object| {
+                object
+                    .effects
+                    .iter()
+                    .any(|effect| effect.name == effect_name)
+            })
+            .map(|object| object.id)
+            .collect();
+        assert_eq!(
+            cursed.len(),
+            1,
+            "{curse} curses exactly one target with {effect_name}: {cursed:?}"
+        );
+        assert_ne!(
+            cursed[0], mage,
+            "{curse} must not curse its own caster: SelectorTarget excludes pCasterClonk"
+        );
+        assert!(
+            !engine
+                .snapshot()
+                .objects
+                .iter()
+                .any(|object| object.definition_id == curse && object.status.is_active()),
+            "{curse} removes itself once the curse is placed"
+        );
+    }
 }
 
 fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
