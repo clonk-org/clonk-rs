@@ -2889,6 +2889,74 @@ mod tests {
         );
     }
 
+    /// What a realistic label costs, which is the number
+    /// clonk-org/clonk-rs#286's threshold has to be set against.
+    ///
+    /// `distinct_native_glyphs_bind_one_texture_each` shows the rule on eight
+    /// characters; the question the atlas decision turns on is how the two
+    /// counts diverge on real text, because repeated characters already share
+    /// a retained identity and only *distinct* ones cost a binding.
+    ///
+    /// A label of this shape spends one command per glyph drawn but only one
+    /// binding per distinct character — so an atlas would collapse the second
+    /// number to one page, not the first. That ratio, not the glyph count, is
+    /// what an atlas is worth.
+    #[test]
+    fn a_realistic_label_costs_one_binding_per_distinct_character() {
+        // Ordinary UI text: far more glyphs drawn than distinct characters.
+        // Kept within ten distinct characters because `solid_multi_glyph_native_font`
+        // shades each glyph `40 + index * 20`, which leaves the `u8` past that.
+        let label = "Round 3 - Round 4";
+        let distinct_characters: std::collections::BTreeSet<char> = label.chars().collect();
+        let alphabet: String = distinct_characters.iter().collect();
+        let font = solid_multi_glyph_native_font(&alphabet);
+
+        let mut surface = Surface::new(256, 8, clonk_graphics::PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        font.draw_to_physical_surface_with_offset(
+            &mut surface,
+            1,
+            1,
+            label,
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            false,
+            (0, 0),
+            None,
+        );
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([256, 8], Color::transparent(), &GammaRamp::identity());
+
+        let textures = scene
+            .commands
+            .iter()
+            .map(|command| match command {
+                GpuCommand::Quad { texture, .. } => *texture,
+                other => panic!("native glyph was CPU-rasterized instead of retained: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        let distinct: std::collections::HashSet<_> = textures.iter().collect();
+
+        assert_eq!(
+            textures.len(),
+            label.chars().count(),
+            "one command per glyph drawn"
+        );
+        assert_eq!(
+            distinct.len(),
+            distinct_characters.len(),
+            "one binding per distinct character, however often it repeats"
+        );
+        // The gap is the point: this label draws far more glyphs than it binds
+        // textures, and an atlas removes bindings rather than draws.
+        assert!(
+            distinct.len() < textures.len(),
+            "a realistic label must repeat characters, or it is not realistic",
+        );
+    }
+
     #[test]
     fn native_gpu_text_is_one_stable_textured_quad_per_glyph() {
         let font = solid_fractional_native_font();
