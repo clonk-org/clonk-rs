@@ -1314,7 +1314,9 @@ fn group_name_eq(left: &[u8], right: &[u8]) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
-fn group_name_wildcard_match(pattern: &[u8], name: &[u8]) -> bool {
+/// `WildcardMatch` (StdFile.cpp:337), the matcher `C4Group::GetEntry` applies
+/// while walking stored entry order.
+pub fn group_name_wildcard_match(pattern: &[u8], name: &[u8]) -> bool {
     pattern.len() == name.len()
         && pattern
             .iter()
