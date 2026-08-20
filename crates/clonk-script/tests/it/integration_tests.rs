@@ -2,7 +2,7 @@ use clonk_script::{DebuggerHooks, Engine, RuntimeError, Value};
 use std::sync::{Arc, Mutex};
 
 fn load_script(engine: &mut Engine, source: &str) {
-    engine.load_script(source).expect("script should load");
+    crate::support::load_script(engine, source);
 }
 
 #[test]
@@ -101,11 +101,8 @@ fn nonstrict_standalone_goto_returns_immediately() {
     );
 }
 
-#[test]
-fn handles_conditionals_and_loops() {
-    let mut engine = Engine::new();
-    load_script(
-        &mut engine,
+run_cases! {
+    handles_conditionals_and_loops:
         r#"
         global func SumUntil(limit) {
             var acc = 0;
@@ -117,37 +114,18 @@ fn handles_conditionals_and_loops() {
             return acc;
         }
         "#,
-    );
+        "SumUntil", &[Value::Int(5)] => Value::Int(15);
 
-    let sum = engine
-        .call("SumUntil", &[Value::Int(5)])
-        .expect("call succeeds");
-    assert_eq!(sum, Value::Int(15));
-}
-
-#[test]
-fn supports_strings_and_concatenation() {
-    let mut engine = Engine::new();
-    load_script(
-        &mut engine,
+    supports_strings_and_concatenation:
         r#"
         global func Greeting(name) {
             var message = "Hello, " .. name;
             return message .. "!";
         }
         "#,
-    );
+        "Greeting", &[Value::String("World".into())] => Value::String("Hello, World!".into());
 
-    let name = Value::String("World".into());
-    let greeting = engine.call("Greeting", &[name]).expect("call succeeds");
-    assert_eq!(greeting, Value::String("Hello, World!".into()));
-}
-
-#[test]
-fn handles_recursion() {
-    let mut engine = Engine::new();
-    load_script(
-        &mut engine,
+    handles_recursion:
         r#"
         global func Factorial(n) {
             if (n <= 1) {
@@ -156,12 +134,7 @@ fn handles_recursion() {
             return n * Factorial(n - 1);
         }
         "#,
-    );
-
-    let result = engine
-        .call("Factorial", &[Value::Int(5)])
-        .expect("call succeeds");
-    assert_eq!(result, Value::Int(120));
+        "Factorial", &[Value::Int(5)] => Value::Int(120);
 }
 
 #[test]
@@ -247,11 +220,8 @@ fn host_function_errors_propagate() {
     assert!(format!("{error}").contains("host failure"));
 }
 
-#[test]
-fn supports_arrays_and_indexing() {
-    let mut engine = Engine::new();
-    load_script(
-        &mut engine,
+run_cases! {
+    supports_arrays_and_indexing:
         r#"
         #strict
         global func ThirdElement() {
@@ -259,28 +229,16 @@ fn supports_arrays_and_indexing() {
             return arr[2];
         }
         "#,
-    );
+        "ThirdElement", &[] => Value::Int(3);
 
-    let result = engine.call("ThirdElement", &[]).expect("call succeeds");
-    assert_eq!(result, Value::Int(3));
-}
-
-#[test]
-fn array_literal_empty_slots_match_cpp() {
-    let mut engine = Engine::new();
-    load_script(
-        &mut engine,
+    array_literal_empty_slots_match_cpp:
         r#"
         #strict
         global func EmptySlots() {
             return [[], [,], [,,], [1,], [1,,2], [,1,,], [[,],[2,]], [3,4]];
         }
         "#,
-    );
-
-    let result = engine.call("EmptySlots", &[]).expect("call succeeds");
-    assert_eq!(
-        result,
+        "EmptySlots", &[] =>
         Value::Array(vec![
             Value::Array(vec![]),
             Value::Array(vec![Value::Nil, Value::Nil]),
@@ -293,15 +251,9 @@ fn array_literal_empty_slots_match_cpp() {
                 Value::Array(vec![Value::Int(2), Value::Nil]),
             ]),
             Value::Array(vec![Value::Int(3), Value::Int(4)]),
-        ])
-    );
-}
+        ]);
 
-#[test]
-fn supports_proplists_and_nested_access() {
-    let mut engine = Engine::new();
-    load_script(
-        &mut engine,
+    supports_proplists_and_nested_access:
         r#"
         #strict 3
         global func ProplistQuery() {
@@ -309,17 +261,9 @@ fn supports_proplists_and_nested_access() {
             return data.foo + data.nested.value + data.numbers[1];
         }
         "#,
-    );
+        "ProplistQuery", &[] => Value::Int(58);
 
-    let result = engine.call("ProplistQuery", &[]).expect("call succeeds");
-    assert_eq!(result, Value::Int(58));
-}
-
-#[test]
-fn statement_map_literal_evaluates_key_and_value_side_effects() {
-    let mut engine = Engine::new();
-    load_script(
-        &mut engine,
+    statement_map_literal_evaluates_key_and_value_side_effects:
         r#"
         #strict 3
         static calls;
@@ -330,17 +274,9 @@ fn statement_map_literal_evaluates_key_and_value_side_effects() {
             return calls;
         }
         "#,
-    );
+        "StatementMap", &[] => Value::Int(111);
 
-    let result = engine.call("StatementMap", &[]).expect("call succeeds");
-    assert_eq!(result, Value::Int(111));
-}
-
-#[test]
-fn assigns_to_proplist_properties() {
-    let mut engine = Engine::new();
-    load_script(
-        &mut engine,
+    assigns_to_proplist_properties:
         r#"
         #strict 3
         global func Mutate() {
@@ -351,10 +287,7 @@ fn assigns_to_proplist_properties() {
             return data.foo + data.nested.value + data.new_field;
         }
         "#,
-    );
-
-    let result = engine.call("Mutate", &[]).expect("call succeeds");
-    assert_eq!(result, Value::Int(51));
+        "Mutate", &[] => Value::Int(51);
 }
 
 #[test]
@@ -467,11 +400,8 @@ fn canonical_scenario_parity_harness() {
     assert_eq!(effect, Some(Value::Int(7)));
 }
 
-#[test]
-fn supports_access_modifiers_on_functions() {
-    let mut engine = Engine::new();
-    load_script(
-        &mut engine,
+run_cases! {
+    supports_access_modifiers_on_functions:
         r#"
         private func PrivateHelper() {
             return 10;
@@ -493,10 +423,7 @@ fn supports_access_modifiers_on_functions() {
             return PrivateHelper() + ProtectedHelper() + PublicHelper() + GlobalHelper();
         }
         "#,
-    );
-
-    let result = engine.call("CallAll", &[]).expect("call succeeds");
-    assert_eq!(result, Value::Int(100));
+        "CallAll", &[] => Value::Int(100);
 }
 
 #[test]

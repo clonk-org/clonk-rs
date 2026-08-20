@@ -1116,20 +1116,6 @@ class ExactReferenceTests(unittest.TestCase):
             )
         )
         self.assertTrue(
-            MODULE.reference_has_player(self.REFERENCE, "LoadPlayer-01")
-        )
-        self.assertFalse(
-            MODULE.reference_has_player(self.REFERENCE, "StalePlayer")
-        )
-        # C++ StdAdaptors.h:923-947 serializes bitfields with `|`, and
-        # C4PlayerInfo.cpp:327-330 retains Joined when adding Removed.
-        self.assertFalse(
-            MODULE.reference_has_player(self.REFERENCE, "RemovedPlayer")
-        )
-        self.assertFalse(
-            MODULE.reference_has_player(self.REFERENCE, "LoadClient-01")
-        )
-        self.assertTrue(
             MODULE.reference_has_activated_clients(
                 self.REFERENCE, {"LoadClient-01"}
             )

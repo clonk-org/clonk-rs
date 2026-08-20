@@ -133,12 +133,12 @@ impl ToolsPageModel {
     pub(crate) fn layout(&self, width: u32, height: u32) -> Vec<ToolsPageSlot> {
         let width = width as i32;
         let height = height as i32;
-        let content = IntRect {
-            x: PADDING,
-            y: PADDING,
-            w: (width - PADDING * 2).max(1),
-            h: (height - PADDING * 2).max(1),
-        };
+        let content = IntRect::new(
+            PADDING,
+            PADDING,
+            (width - PADDING * 2).max(1),
+            (height - PADDING * 2).max(1),
+        );
         let mode_width = MODE_COLUMN_WIDTH.min((content.w - WIDE_GAP - 1).max(1));
         let mut slots = Vec::with_capacity(TOOLS_PAGE_CONTROLS.len());
         let mut push = |control: ToolsControl, rect: IntRect| {
@@ -167,12 +167,12 @@ impl ToolsPageModel {
         {
             push(
                 control,
-                IntRect {
-                    x: content.x,
-                    y: content.y + index as i32 * (BUTTON_HEIGHT + NARROW_GAP),
-                    w: mode_width,
-                    h: BUTTON_HEIGHT,
-                },
+                IntRect::new(
+                    content.x,
+                    content.y + index as i32 * (BUTTON_HEIGHT + NARROW_GAP),
+                    mode_width,
+                    BUTTON_HEIGHT,
+                ),
             );
         }
 
@@ -191,12 +191,12 @@ impl ToolsPageModel {
         for (index, control) in tools.into_iter().enumerate() {
             push(
                 control,
-                IntRect {
-                    x: right_x + index as i32 * (tool_width + NARROW_GAP),
-                    y: content.y,
-                    w: tool_width,
-                    h: BUTTON_HEIGHT,
-                },
+                IntRect::new(
+                    right_x + index as i32 * (tool_width + NARROW_GAP),
+                    content.y,
+                    tool_width,
+                    BUTTON_HEIGHT,
+                ),
             );
         }
 
@@ -205,22 +205,17 @@ impl ToolsPageModel {
         let lower_height = (content.y + content.h - lower_y).max(1);
         push(
             ToolsControl::Preview,
-            IntRect {
-                x: right_x,
-                y: lower_y,
-                w: PREVIEW_SIZE.min(right_width),
-                h: PREVIEW_SIZE.min(lower_height),
-            },
+            IntRect::new(
+                right_x,
+                lower_y,
+                PREVIEW_SIZE.min(right_width),
+                PREVIEW_SIZE.min(lower_height),
+            ),
         );
         let grade_x = right_x + PREVIEW_SIZE + WIDE_GAP;
         push(
             ToolsControl::Grade,
-            IntRect {
-                x: grade_x,
-                y: lower_y,
-                w: GRADE_WIDTH,
-                h: lower_height,
-            },
+            IntRect::new(grade_x, lower_y, GRADE_WIDTH, lower_height),
         );
         let ift_x = grade_x + GRADE_WIDTH + WIDE_GAP;
         for (index, control) in [ToolsControl::Ift, ToolsControl::NoIft]
@@ -229,12 +224,12 @@ impl ToolsPageModel {
         {
             push(
                 control,
-                IntRect {
-                    x: ift_x,
-                    y: lower_y + index as i32 * (BUTTON_HEIGHT + NARROW_GAP),
-                    w: IFT_COLUMN_WIDTH,
-                    h: BUTTON_HEIGHT,
-                },
+                IntRect::new(
+                    ift_x,
+                    lower_y + index as i32 * (BUTTON_HEIGHT + NARROW_GAP),
+                    IFT_COLUMN_WIDTH,
+                    BUTTON_HEIGHT,
+                ),
             );
         }
 
@@ -244,21 +239,16 @@ impl ToolsPageModel {
         let list_height = ((lower_height - NARROW_GAP) / 2).max(1);
         push(
             ToolsControl::Materials,
-            IntRect {
-                x: list_x,
-                y: lower_y,
-                w: list_width,
-                h: list_height,
-            },
+            IntRect::new(list_x, lower_y, list_width, list_height),
         );
         push(
             ToolsControl::Textures,
-            IntRect {
-                x: list_x,
-                y: lower_y + list_height + NARROW_GAP,
-                w: list_width,
-                h: list_height,
-            },
+            IntRect::new(
+                list_x,
+                lower_y + list_height + NARROW_GAP,
+                list_width,
+                list_height,
+            ),
         );
         slots
     }
@@ -333,12 +323,12 @@ impl ToolsPageModel {
         let wanted = (rows as i32).max(1) * LIST_ROW_HEIGHT + 2;
         let top = anchor.rect.y;
         let available = (height as i32 - top).max(LIST_ROW_HEIGHT + 2);
-        Some(IntRect {
-            x: anchor.rect.x,
-            y: top,
-            w: anchor.rect.w,
-            h: wanted.min(available),
-        })
+        Some(IntRect::new(
+            anchor.rect.x,
+            top,
+            anchor.rect.w,
+            wanted.min(available),
+        ))
     }
 
     /// The row an open combo's list puts under a point, if any.
@@ -437,10 +427,7 @@ impl ToolsPageModel {
         draw_fitted_text(
             surface,
             font,
-            IntRect {
-                w: (slot.rect.w - marker).max(1),
-                ..slot.rect
-            },
+            slot.rect.with_width((slot.rect.w - marker).max(1)),
             value,
             if slot.enabled {
                 CONTROL_TEXT
@@ -550,10 +537,7 @@ impl ToolsPageModel {
         draw_fitted_text(
             surface,
             font,
-            IntRect {
-                h: rect.h / 2,
-                ..rect
-            },
+            rect.with_height(rect.h / 2),
             &self.material,
             CONTROL_TEXT,
             SMALL_FONT_SIZE,
@@ -562,11 +546,7 @@ impl ToolsPageModel {
         draw_fitted_text(
             surface,
             font,
-            IntRect {
-                y: rect.y + rect.h / 2,
-                h: rect.h / 2,
-                ..rect
-            },
+            rect.with_vertical(rect.y + rect.h / 2, rect.h / 2),
             &self.texture,
             CONTROL_TEXT,
             SMALL_FONT_SIZE,
@@ -587,12 +567,12 @@ impl ToolsPageModel {
             (GRADE_MAX - self.grade.clamp(GRADE_MIN, GRADE_MAX)) * travel / (GRADE_MAX - GRADE_MIN);
         fill(
             surface,
-            IntRect {
-                x: slot.rect.x + 2,
-                y: slot.rect.y + offset,
-                w: (slot.rect.w - 4).max(1),
-                h: BUTTON_HEIGHT,
-            },
+            IntRect::new(
+                slot.rect.x + 2,
+                slot.rect.y + offset,
+                (slot.rect.w - 4).max(1),
+                BUTTON_HEIGHT,
+            ),
             MID_EDGE,
         );
     }
@@ -627,12 +607,12 @@ impl ToolsPageModel {
             .take(rows)
             .enumerate()
         {
-            let rect = IntRect {
-                x: slot.rect.x + 1,
-                y: slot.rect.y + 1 + row as i32 * LIST_ROW_HEIGHT,
-                w: (slot.rect.w - 2).max(1),
-                h: LIST_ROW_HEIGHT,
-            };
+            let rect = IntRect::new(
+                slot.rect.x + 1,
+                slot.rect.y + 1 + row as i32 * LIST_ROW_HEIGHT,
+                (slot.rect.w - 2).max(1),
+                LIST_ROW_HEIGHT,
+            );
             let chosen = *name == selected;
             if chosen {
                 fill(surface, rect, SELECTED_BACKGROUND);
@@ -692,24 +672,24 @@ fn grade_at(rect: IntRect, y: i32) -> i32 {
 /// The property page: `C4PropertyDlg`'s read-only text box (`IDC_EDITOUTPUT`).
 pub(crate) fn render_property_page(surface: &mut Surface, font: &dyn TextFont, text: &str) {
     surface.fill(WINDOW_BACKGROUND);
-    let rect = IntRect {
-        x: PADDING,
-        y: PADDING,
-        w: (surface.width() as i32 - PADDING * 2).max(1),
-        h: (surface.height() as i32 - PADDING * 2).max(1),
-    };
+    let rect = IntRect::new(
+        PADDING,
+        PADDING,
+        (surface.width() as i32 - PADDING * 2).max(1),
+        (surface.height() as i32 - PADDING * 2).max(1),
+    );
     draw_sunken(surface, rect, CONTROL_BACKGROUND);
     let rows = ((rect.h - 2) / LIST_ROW_HEIGHT).max(0) as usize;
     for (row, line) in text.lines().take(rows).enumerate() {
         draw_fitted_text(
             surface,
             font,
-            IntRect {
-                x: rect.x + 1,
-                y: rect.y + 1 + row as i32 * LIST_ROW_HEIGHT,
-                w: (rect.w - 2).max(1),
-                h: LIST_ROW_HEIGHT,
-            },
+            IntRect::new(
+                rect.x + 1,
+                rect.y + 1 + row as i32 * LIST_ROW_HEIGHT,
+                (rect.w - 2).max(1),
+                LIST_ROW_HEIGHT,
+            ),
             line,
             CONTROL_TEXT,
             SMALL_FONT_SIZE,

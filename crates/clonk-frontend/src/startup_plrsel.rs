@@ -113,12 +113,12 @@ fn plrsel_layout_with_line_heights(
     let margin_x = if w < 500 { 2 } else { w / 50 };
     let margin_y = if h < 320 { 2 } else { h * 2 / 75 };
     let margin_top = h / 7;
-    let client = IntRect {
-        x: margin_x,
-        y: margin_top,
-        w: w - 2 * margin_x,
-        h: h - margin_top - margin_y,
-    };
+    let client = IntRect::new(
+        margin_x,
+        margin_top,
+        w - 2 * margin_x,
+        h - margin_top - margin_y,
+    );
 
     // Ctor math over the zero-based client (C4StartupPlrSelDlg.cpp:550-562).
     let button_height = 32; // C4GUI_ButtonHgt (C4Gui.h:119)
@@ -134,86 +134,81 @@ fn plrsel_layout_with_line_heights(
     let main_w = client.w;
     let main_h = client.h - button_area_h;
 
-    let plr_list_rel = IntRect {
-        x: main_w / 10,
-        y: main_h * 10 / 36,
-        w: main_w * 25 / 81,
-        h: main_h * 2 / 3,
-    };
-    let info_rel = IntRect {
-        x: main_w * 371 / 768,
-        y: main_h * 197 / 451,
-        w: main_w * 121 / 384,
-        h: main_h * 242 / 451,
-    };
+    let plr_list_rel = IntRect::new(
+        main_w / 10,
+        main_h * 10 / 36,
+        main_w * 25 / 81,
+        main_h * 2 / 3,
+    );
+    let info_rel = IntRect::new(
+        main_w * 371 / 768,
+        main_h * 197 / 451,
+        main_w * 121 / 384,
+        main_h * 242 / 451,
+    );
     let picture_w = (main_w * 121 / 384).min(200);
     let picture_h = picture_w * 3 / 4;
-    let picture_rel = IntRect {
-        x: main_w * 613 / 768 - picture_w,
-        y: main_h * 197 / 451 - picture_h,
-        w: picture_w,
-        h: picture_h,
-    };
+    let picture_rel = IntRect::new(
+        main_w * 613 / 768 - picture_w,
+        main_h * 197 / 451 - picture_h,
+        picture_w,
+        picture_h,
+    );
 
-    let at_screen = |r: IntRect| IntRect {
-        x: client.x + r.x,
-        y: client.y + r.y,
-        w: r.w,
-        h: r.h,
-    };
+    let at_screen = |r: IntRect| IntRect::new(client.x + r.x, client.y + r.y, r.w, r.h);
     let plr_list = at_screen(plr_list_rel);
     // ListBox client: 3px margins (C4GuiListBox.h:120-123).
-    let list_client = IntRect {
-        x: plr_list.x + 3,
-        y: plr_list.y + 3,
-        w: plr_list.w - 6,
-        h: plr_list.h - 6,
-    };
-    let list_viewport = IntRect {
-        x: list_client.x,
-        y: list_client.y,
-        w: list_client.w - SCROLLBAR_WIDTH,
-        h: list_client.h,
-    };
-    let list_scrollbar = IntRect {
-        x: list_viewport.x + list_viewport.w,
-        y: list_viewport.y,
-        w: SCROLLBAR_WIDTH,
-        h: list_viewport.h,
-    };
+    let list_client = IntRect::new(
+        plr_list.x + 3,
+        plr_list.y + 3,
+        plr_list.w - 6,
+        plr_list.h - 6,
+    );
+    let list_viewport = IntRect::new(
+        list_client.x,
+        list_client.y,
+        list_client.w - SCROLLBAR_WIDTH,
+        list_client.h,
+    );
+    let list_scrollbar = IntRect::new(
+        list_viewport.x + list_viewport.w,
+        list_viewport.y,
+        SCROLLBAR_WIDTH,
+        list_viewport.h,
+    );
     let info_window = at_screen(info_rel);
     // TextWindow margins T8 L10 R5 B8 (C4Gui.h:1334-1337); the scroll window
     // reserves the 16px scrollbar (C4GuiContainers.cpp:477-491).
-    let info_client = IntRect {
-        x: info_window.x + 10,
-        y: info_window.y + 8,
-        w: info_window.w - 10 - 5 - 16,
-        h: info_window.h - 8 - 8,
-    };
+    let info_client = IntRect::new(
+        info_window.x + 10,
+        info_window.y + 8,
+        info_window.w - 10 - 5 - 16,
+        info_window.h - 8 - 8,
+    );
 
     // GetGridCell(i,6,0,1,bw,32,centered) over rcBottomButtons
     // (C4Gui.cpp:1059-1080): sector w = clientWdt/6, centered shrink to bw.
     let cell_w = client.w / 6;
     let mut buttons = [IntRect::default(); 6];
     for (i, rect) in buttons.iter_mut().enumerate() {
-        *rect = IntRect {
-            x: client.x + cell_w * i as i32 + (cell_w - bottom_button_w) / 2,
-            y: client.y + bottom_buttons_y,
-            w: bottom_button_w,
-            h: button_height,
-        };
+        *rect = IntRect::new(
+            client.x + cell_w * i as i32 + (cell_w - bottom_button_w) / 2,
+            client.y + bottom_buttons_y,
+            bottom_button_w,
+            button_height,
+        );
     }
     // Crew mode reuses `bottom_button_w`; only the number of grid sectors
     // changes from six to four (UpdateBottomButtons, cpp:668-671).
     let crew_cell_w = client.w / 4;
     let mut crew_buttons = [IntRect::default(); 4];
     for (i, rect) in crew_buttons.iter_mut().enumerate() {
-        *rect = IntRect {
-            x: client.x + crew_cell_w * i as i32 + (crew_cell_w - bottom_button_w) / 2,
-            y: client.y + bottom_buttons_y,
-            w: bottom_button_w,
-            h: button_height,
-        };
+        *rect = IntRect::new(
+            client.x + crew_cell_w * i as i32 + (crew_cell_w - bottom_button_w) / 2,
+            client.y + bottom_buttons_y,
+            bottom_button_w,
+            button_height,
+        );
     }
 
     PlrSelLayout {
@@ -2762,23 +2757,23 @@ impl PlrSelScreen {
                     gamma,
                 );
                 if is_renaming {
-                    let item = IntRect {
-                        x: layout.list_viewport.x,
-                        y: layout.list_viewport.y + layout.item_pitch * i as i32 - scroll_y,
-                        w: layout.item_width,
-                        h: layout.item_height,
-                    };
+                    let item = IntRect::new(
+                        layout.list_viewport.x,
+                        layout.list_viewport.y + layout.item_pitch * i as i32 - scroll_y,
+                        layout.item_width,
+                        layout.item_height,
+                    );
                     let edit_x = item.x + (item.h + 2) * 2;
                     if let Some((_, edit)) = crew_rename.as_mut() {
                         edit.render_with_draw_focus(
                             surface,
                             &fonts.text,
-                            IntRect {
-                                x: edit_x,
-                                y: item.y + 2,
-                                w: (item.x + item.w - edit_x - 2).max(1),
-                                h: (item.h - 4).max(1),
-                            },
+                            IntRect::new(
+                                edit_x,
+                                item.y + 2,
+                                (item.x + item.w - edit_x - 2).max(1),
+                                (item.h - 4).max(1),
+                            ),
                             draw_focus,
                             gamma,
                         );
@@ -3040,12 +3035,12 @@ impl PlrSelScreen {
         scroll_y: i32,
         gamma: Option<&GammaRamp>,
     ) {
-        let item = IntRect {
-            x: layout.list_viewport.x,
-            y: layout.list_viewport.y + layout.item_pitch * index - scroll_y,
-            w: layout.item_width,
-            h: layout.item_height,
-        };
+        let item = IntRect::new(
+            layout.list_viewport.x,
+            layout.list_viewport.y + layout.item_pitch * index - scroll_y,
+            layout.item_width,
+            layout.item_height,
+        );
         // Checkbox: phase = fChecked + 2*!fEnabled of the 32x32 facet,
         // stretched to Hgt x Hgt (CheckBox::DrawElement,
         // C4GuiCheckBox.cpp:110-115).
@@ -3053,23 +3048,13 @@ impl PlrSelScreen {
         let cb = extract_region(&assets.checkbox, phase * 32, 0, 32, 32);
         crate::draw_image_bilinear(
             surface,
-            &gui_rect(IntRect {
-                x: item.x,
-                y: item.y,
-                w: item.h,
-                h: item.h,
-            }),
+            &gui_rect(IntRect::new(item.x, item.y, item.h, item.h)),
             &cb,
             gamma,
         );
         // Icon at x = iHeight + IconLabelSpacing (cpp:88), aspect-centered
         // (Picture::DrawElement, C4GuiLabels.cpp:348-378).
-        let icon_box = IntRect {
-            x: item.x + item.h + 2,
-            y: item.y,
-            w: item.h,
-            h: item.h,
-        };
+        let icon_box = IntRect::new(item.x + item.h + 2, item.y, item.h, item.h);
         match &player.big_icon {
             Some(icon) => {
                 let icon = engine_png_texture(icon); // C4Surface.cpp:972
@@ -3119,32 +3104,22 @@ impl PlrSelScreen {
         draw_name: bool,
         gamma: Option<&GammaRamp>,
     ) {
-        let item = IntRect {
-            x: layout.list_viewport.x,
-            y: layout.list_viewport.y + layout.item_pitch * index - scroll_y,
-            w: layout.item_width,
-            h: layout.item_height,
-        };
+        let item = IntRect::new(
+            layout.list_viewport.x,
+            layout.list_viewport.y + layout.item_pitch * index - scroll_y,
+            layout.item_width,
+            layout.item_height,
+        );
         let phase = u32::from(participating);
         let checkbox = extract_region(&assets.checkbox, phase * 32, 0, 32, 32);
         crate::draw_image_bilinear(
             surface,
-            &gui_rect(IntRect {
-                x: item.x,
-                y: item.y,
-                w: item.h,
-                h: item.h,
-            }),
+            &gui_rect(IntRect::new(item.x, item.y, item.h, item.h)),
             &checkbox,
             gamma,
         );
 
-        let icon_box = IntRect {
-            x: item.x + item.h + 2,
-            y: item.y,
-            w: item.h,
-            h: item.h,
-        };
+        let icon_box = IntRect::new(item.x + item.h + 2, item.y, item.h, item.h);
         if let Some(icon) = &crew.rank_icon {
             let icon = engine_png_texture(icon);
             let dest = aspect_fit(icon.width() as i32, icon.height() as i32, icon_box);
@@ -3450,24 +3425,8 @@ mod tests {
             ),
             (151, 260, 373, 367)
         );
-        assert_eq!(
-            l.list_viewport,
-            IntRect {
-                x: 151,
-                y: 260,
-                w: 357,
-                h: 367
-            }
-        );
-        assert_eq!(
-            l.list_scrollbar,
-            IntRect {
-                x: 508,
-                y: 260,
-                w: 16,
-                h: 367
-            }
-        );
+        assert_eq!(l.list_viewport, IntRect::new(151, 260, 357, 367));
+        assert_eq!(l.list_scrollbar, IntRect::new(508, 260, 16, 367));
         // Items: 357 wide (373-16 scrollbar), 26 high, 27px pitch.
         assert_eq!((l.item_width, l.item_height, l.item_pitch), (357, 26, 27));
 
@@ -4886,28 +4845,10 @@ mod tests {
     #[test]
     fn aspect_fit_centers_square_source_in_wide_box() {
         // 150x150 source in (806,196,200,150) → (831,196,150,150) (spec §6).
-        let out = aspect_fit(
-            150,
-            150,
-            IntRect {
-                x: 806,
-                y: 196,
-                w: 200,
-                h: 150,
-            },
-        );
+        let out = aspect_fit(150, 150, IntRect::new(806, 196, 200, 150));
         assert_eq!((out.x, out.y, out.w, out.h), (831, 196, 150, 150));
         // 64x64 into 26x26: ratios equal → unchanged.
-        let out = aspect_fit(
-            64,
-            64,
-            IntRect {
-                x: 179,
-                y: 260,
-                w: 26,
-                h: 26,
-            },
-        );
+        let out = aspect_fit(64, 64, IntRect::new(179, 260, 26, 26));
         assert_eq!((out.x, out.y, out.w, out.h), (179, 260, 26, 26));
     }
 

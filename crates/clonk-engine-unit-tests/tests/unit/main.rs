@@ -68,6 +68,61 @@ mod tests {
         Definition::from_script(id, name, source).expect("test definition compiles")
     }
 
+    fn join_player_config(name: impl Into<String>) -> JoinPlayerConfig {
+        JoinPlayerConfig {
+            name: name.into(),
+            player_info_id: 1,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        }
+    }
+
+    macro_rules! spawn_fixture {
+        ($engine:expr, $definition:expr $(, $setter:ident: $value:expr)* $(,)?) => {
+            ($engine).spawn_test_object(
+                SpawnConfig::new($definition)$(.$setter($value))*
+            )
+        };
+    }
+
+    macro_rules! unit_assert_eq {
+        ($actual:expr => $expected:expr, $($message:tt)+) => {
+            assert_eq!($actual, $expected, $($message)+)
+        };
+        ($actual:expr => $expected:expr $(,)?) => {
+            assert_eq!($actual, $expected)
+        };
+    }
+
+    macro_rules! unit_assert {
+        ($condition:expr, $($message:tt)+) => {
+            assert!($condition, $($message)+)
+        };
+        ($condition:expr $(,)?) => {
+            assert!($condition)
+        };
+    }
+
+    macro_rules! unit_assert_ne {
+        ($actual:expr => $unexpected:expr, $($message:tt)+) => {
+            assert_ne!($actual, $unexpected, $($message)+)
+        };
+        ($actual:expr => $unexpected:expr $(,)?) => {
+            assert_ne!($actual, $unexpected)
+        };
+    }
+
     trait TestValueExt<T> {
         fn test_value(self) -> T;
     }

@@ -317,37 +317,32 @@ impl NetworkChartDialog {
         let (x, y) = self
             .position
             .unwrap_or((preferred.x + 30, preferred.y + 30));
-        let bounds = IntRect {
+        let bounds = IntRect::new(
             x,
             y,
-            w: NETWORK_CHART_DIALOG_WIDTH,
-            h: NETWORK_CHART_DIALOG_HEIGHT,
-        };
+            NETWORK_CHART_DIALOG_WIDTH,
+            NETWORK_CHART_DIALOG_HEIGHT,
+        );
         let caption_height = resources.fonts.text.line_height.max(MIN_CAPTION_HEIGHT);
-        let caption = IntRect {
-            x: bounds.x,
-            y: bounds.y,
-            w: bounds.w,
-            h: caption_height,
-        };
-        let close_button = IntRect {
-            x: caption.x + caption.w - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_INSET,
-            y: caption.y + CLOSE_BUTTON_INSET,
-            w: CLOSE_BUTTON_SIZE,
-            h: CLOSE_BUTTON_SIZE,
-        };
-        let tabular = IntRect {
-            x: bounds.x + TABULAR_INSET,
-            y: bounds.y + caption_height + TABULAR_INSET,
-            w: bounds.w - 2 * TABULAR_INSET,
-            h: bounds.h - caption_height - 2 * TABULAR_INSET,
-        };
-        let chart = IntRect {
-            x: tabular.x + TABULAR_MARGIN,
-            y: tabular.y + TAB_STRIP_HEIGHT + TABULAR_MARGIN,
-            w: (tabular.w - 2 * TABULAR_MARGIN).max(1),
-            h: (tabular.h - TAB_STRIP_HEIGHT - 2 * TABULAR_MARGIN).max(1),
-        };
+        let caption = IntRect::new(bounds.x, bounds.y, bounds.w, caption_height);
+        let close_button = IntRect::new(
+            caption.x + caption.w - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_INSET,
+            caption.y + CLOSE_BUTTON_INSET,
+            CLOSE_BUTTON_SIZE,
+            CLOSE_BUTTON_SIZE,
+        );
+        let tabular = IntRect::new(
+            bounds.x + TABULAR_INSET,
+            bounds.y + caption_height + TABULAR_INSET,
+            bounds.w - 2 * TABULAR_INSET,
+            bounds.h - caption_height - 2 * TABULAR_INSET,
+        );
+        let chart = IntRect::new(
+            tabular.x + TABULAR_MARGIN,
+            tabular.y + TAB_STRIP_HEIGHT + TABULAR_MARGIN,
+            (tabular.w - 2 * TABULAR_MARGIN).max(1),
+            (tabular.h - TAB_STRIP_HEIGHT - 2 * TABULAR_MARGIN).max(1),
+        );
         let mut tab_x = tabular.x + TAB_INITIAL_OFFSET;
         let tabs = self
             .tabs
@@ -358,12 +353,12 @@ impl NetworkChartDialog {
                     resources.fonts.text.measure(&tab.caption, false).0 + TAB_CAPTION_PADDING;
                 let layout = NetworkChartTabLayout {
                     index,
-                    bounds: IntRect {
-                        x: tab_x,
-                        y: tabular.y,
-                        w: width.max(TAB_STRIP_HEIGHT),
-                        h: TAB_STRIP_HEIGHT,
-                    },
+                    bounds: IntRect::new(
+                        tab_x,
+                        tabular.y,
+                        width.max(TAB_STRIP_HEIGHT),
+                        TAB_STRIP_HEIGHT,
+                    ),
                 };
                 tab_x += layout.bounds.w + TAB_SPACING;
                 layout
@@ -515,11 +510,10 @@ impl NetworkChartDialog {
         );
         draw_3d_frame(
             surface,
-            IntRect {
-                y: layout.tabular.y + TAB_STRIP_HEIGHT,
-                h: layout.tabular.h - TAB_STRIP_HEIGHT,
-                ..layout.tabular
-            },
+            layout.tabular.with_vertical(
+                layout.tabular.y + TAB_STRIP_HEIGHT,
+                layout.tabular.h - TAB_STRIP_HEIGHT,
+            ),
             gamma,
         );
         for tab_layout in &layout.tabs {
@@ -988,12 +982,7 @@ mod tests {
             5,
             0x7f20_4060,
             None,
-            IntRect {
-                x: 1,
-                y: 1,
-                w: 10,
-                h: 6,
-            },
+            IntRect::new(1, 1, 10, 6),
         );
 
         let scene = surface

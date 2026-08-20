@@ -15,7 +15,7 @@ const PLAYER_INFO_SYNC_FLAGS: u16 = 0x7fcd;
 
 /// One complete `C4PlayerInfoList`, used for both `PlayerInfos` and
 /// `RestorePlayerInfos` in `C4GameParameters`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlayerInfoListSnapshot {
     pub last_player_id: i32,
     pub clients: Vec<ClientPlayerInfosSnapshot>,

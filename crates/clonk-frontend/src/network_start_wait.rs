@@ -321,59 +321,51 @@ impl NetworkStartWaitState {
         } else {
             SMALL_DIALOG_HEIGHT
         };
-        let bounds = IntRect {
-            x: (screen_width - width) / 2,
-            y: (screen_height - height) / 2,
-            w: width,
-            h: height,
-        };
+        let bounds = IntRect::new(
+            (screen_width - width) / 2,
+            (screen_height - height) / 2,
+            width,
+            height,
+        );
         let caption_height = fonts.text.line_height.max(MIN_CAPTION_HEIGHT);
-        let caption = IntRect {
-            h: caption_height,
-            ..bounds
-        };
-        let close_button = IntRect {
-            x: caption.x + caption.w - 20,
-            y: caption.y + 4,
-            w: 16,
-            h: 16,
-        };
-        let mut available = IntRect {
-            x: bounds.x,
-            y: bounds.y + caption_height,
-            w: bounds.w,
-            h: (bounds.h - caption_height).max(0),
-        };
+        let caption = bounds.with_height(caption_height);
+        let close_button = IntRect::new(caption.x + caption.w - 20, caption.y + 4, 16, 16);
+        let mut available = IntRect::new(
+            bounds.x,
+            bounds.y + caption_height,
+            bounds.w,
+            (bounds.h - caption_height).max(0),
+        );
 
-        let button_area = IntRect {
-            x: available.x + DIALOG_INDENT,
-            y: available.y + available.h - BUTTON_AREA_HEIGHT - DIALOG_INDENT,
-            w: available.w - 2 * DIALOG_INDENT,
-            h: BUTTON_AREA_HEIGHT,
-        };
+        let button_area = IntRect::new(
+            available.x + DIALOG_INDENT,
+            available.y + available.h - BUTTON_AREA_HEIGHT - DIALOG_INDENT,
+            available.w - 2 * DIALOG_INDENT,
+            BUTTON_AREA_HEIGHT,
+        );
         available.h = (available.h - BUTTON_AREA_HEIGHT - 2 * DIALOG_INDENT).max(0);
 
-        let waiting_label = IntRect {
-            x: available.x + DIALOG_INDENT,
-            y: available.y + DIALOG_INDENT,
-            w: available.w - 2 * DIALOG_INDENT,
-            h: WAIT_LABEL_HEIGHT,
-        };
+        let waiting_label = IntRect::new(
+            available.x + DIALOG_INDENT,
+            available.y + DIALOG_INDENT,
+            available.w - 2 * DIALOG_INDENT,
+            WAIT_LABEL_HEIGHT,
+        );
         available.y += WAIT_LABEL_HEIGHT + 2 * DIALOG_INDENT;
         available.h = (available.h - WAIT_LABEL_HEIGHT - 2 * DIALOG_INDENT).max(0);
 
-        let client_list = IntRect {
-            x: available.x + DIALOG_INDENT,
-            y: available.y + DIALOG_INDENT,
-            w: available.w - 2 * DIALOG_INDENT,
-            h: (available.h - 2 * DIALOG_INDENT).max(0),
-        };
-        let client_list_clip = IntRect {
-            x: client_list.x + LIST_MARGIN,
-            y: client_list.y + LIST_MARGIN,
-            w: (client_list.w - 2 * LIST_MARGIN).max(0),
-            h: (client_list.h - 2 * LIST_MARGIN).max(0),
-        };
+        let client_list = IntRect::new(
+            available.x + DIALOG_INDENT,
+            available.y + DIALOG_INDENT,
+            available.w - 2 * DIALOG_INDENT,
+            (available.h - 2 * DIALOG_INDENT).max(0),
+        );
+        let client_list_clip = IntRect::new(
+            client_list.x + LIST_MARGIN,
+            client_list.y + LIST_MARGIN,
+            (client_list.w - 2 * LIST_MARGIN).max(0),
+            (client_list.h - 2 * LIST_MARGIN).max(0),
+        );
 
         let icon_size = 2 * fonts.text.line_height;
         let row_height = icon_size + 2 * ROW_VERTICAL_INDENT;
@@ -388,36 +380,31 @@ impl NetworkStartWaitState {
             .iter()
             .enumerate()
             .map(|(index, client)| {
-                let row = IntRect {
-                    x: client_list_clip.x,
-                    y: client_list_clip.y + i32::try_from(index).unwrap_or(i32::MAX) * row_height
+                let row = IntRect::new(
+                    client_list_clip.x,
+                    client_list_clip.y + i32::try_from(index).unwrap_or(i32::MAX) * row_height
                         - client_scroll,
-                    w: client_list_clip.w,
-                    h: row_height,
-                };
-                let icon = IntRect {
-                    x: row.x,
-                    y: row.y + ROW_VERTICAL_INDENT,
-                    w: icon_size,
-                    h: icon_size,
-                };
+                    client_list_clip.w,
+                    row_height,
+                );
+                let icon = IntRect::new(row.x, row.y + ROW_VERTICAL_INDENT, icon_size, icon_size);
                 let kick_size = icon_size.max(16);
-                let kick_button = (client.client_id != 0).then_some(IntRect {
-                    x: row.x + row.w - kick_size - 2,
-                    y: row.y + 1,
-                    w: kick_size,
-                    h: kick_size,
-                });
-                let label = IntRect {
-                    x: icon.x + icon.w + ICON_LABEL_SPACING,
-                    y: row.y + ROW_VERTICAL_INDENT,
-                    w: (kick_button.map_or(row.x + row.w, |button| button.x)
+                let kick_button = (client.client_id != 0).then_some(IntRect::new(
+                    row.x + row.w - kick_size - 2,
+                    row.y + 1,
+                    kick_size,
+                    kick_size,
+                ));
+                let label = IntRect::new(
+                    icon.x + icon.w + ICON_LABEL_SPACING,
+                    row.y + ROW_VERTICAL_INDENT,
+                    (kick_button.map_or(row.x + row.w, |button| button.x)
                         - icon.x
                         - icon.w
                         - ICON_LABEL_SPACING)
                         .max(0),
-                    h: fonts.text.line_height,
-                };
+                    fonts.text.line_height,
+                );
                 NetworkStartWaitClientLayout {
                     client_id: client.client_id,
                     row,
@@ -431,16 +418,8 @@ impl NetworkStartWaitState {
         let button_group_width = 2 * BUTTON_WIDTH + BUTTON_GAP;
         let first_button_x = button_area.x + (button_area.w - button_group_width) / 2;
         let button_y = button_area.y + (button_area.h - BUTTON_HEIGHT) / 2;
-        let restart_button = IntRect {
-            x: first_button_x,
-            y: button_y,
-            w: BUTTON_WIDTH,
-            h: BUTTON_HEIGHT,
-        };
-        let cancel_button = IntRect {
-            x: first_button_x + BUTTON_WIDTH + BUTTON_GAP,
-            ..restart_button
-        };
+        let restart_button = IntRect::new(first_button_x, button_y, BUTTON_WIDTH, BUTTON_HEIGHT);
+        let cancel_button = restart_button.with_x(first_button_x + BUTTON_WIDTH + BUTTON_GAP);
 
         NetworkStartWaitLayout {
             bounds,

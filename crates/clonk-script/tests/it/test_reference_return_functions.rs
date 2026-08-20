@@ -3,98 +3,61 @@
 use clonk_script::{Engine, Value};
 
 // private func & FuncName()
-crate::support::compile_case!(
-    private_func_ref_no_params,
-    r#"private func & GetValue() { return(Local(0)); }"#
-);
+crate::support::compile_cases! {
+    private_func_ref_no_params: r#"private func & GetValue() { return(Local(0)); }"#;
 
 // public func & FuncName()
-crate::support::compile_case!(
-    public_func_ref_no_params,
-    r#"public func & GetData() { return(Var(0)); }"#
-);
+    public_func_ref_no_params: r#"public func & GetData() { return(Var(0)); }"#;
 
 // func & with parameters
-crate::support::compile_case!(
-    func_ref_with_params,
-    r#"func & GetSlot(int index) { return(Local(index)); }"#
-);
+    func_ref_with_params: r#"func & GetSlot(int index) { return(Local(index)); }"#;
 
 // Exact pattern from RACE line 47
-crate::support::compile_case!(
-    race_line_47_pattern,
-    r#"private func & PlayerDeaths(int iPlr) { return(Local(iPlr*2)); }"#
-);
+    race_line_47_pattern: r#"private func & PlayerDeaths(int iPlr) { return(Local(iPlr*2)); }"#;
 
 // Exact pattern from RACE line 48
-crate::support::compile_case!(
-    race_line_48_pattern,
-    r#"private func & TeamDeaths(int iTeam) { return(Local(iTeam*2+1)); }"#
-);
+    race_line_48_pattern: r#"private func & TeamDeaths(int iTeam) { return(Local(iTeam*2+1)); }"#;
 
 // Multiple reference return functions in same script
-crate::support::compile_case!(
-    multiple_ref_functions,
+    multiple_ref_functions:
     r#"
     private func & GetA() { return(Local(0)); }
     private func & GetB() { return(Local(1)); }
     public func & GetC() { return(Var(0)); }
-    "#,
-);
+    "#;
 
 // Reference return function used in assignment (lvalue)
-crate::support::compile_case!(
-    ref_func_used_as_lvalue,
+    ref_func_used_as_lvalue:
     r#"
     private func & GetSlot(int i) { return(Local(i)); }
     func Test() { GetSlot(0) = 42; }
-    "#,
-);
+    "#;
 
 // Reference return function with increment
-crate::support::compile_case!(
-    ref_func_with_increment,
+    ref_func_with_increment:
     r#"
     private func & Counter() { return(Local(0)); }
     func Test() { ++Counter(); }
-    "#,
-);
+    "#;
 
 // protected func & pattern
-crate::support::compile_case!(
-    protected_func_ref,
-    r#"protected func & GetInternal() { return(Local(5)); }"#
-);
+    protected_func_ref: r#"protected func & GetInternal() { return(Local(5)); }"#;
 
 // global func & pattern
-crate::support::compile_case!(
-    global_func_ref,
-    r#"global func & GetGlobal() { return(Var()); }"#
-);
+    global_func_ref: r#"global func & GetGlobal() { return(Var()); }"#;
 
 // func & without explicit access modifier (defaults to public)
-crate::support::compile_case!(
-    func_ref_no_access_modifier,
-    r#"func & DefaultAccess() { return(Local()); }"#
-);
+    func_ref_no_access_modifier: r#"func & DefaultAccess() { return(Local()); }"#;
 
 // func & with multiple parameters
-crate::support::compile_case!(
-    ref_func_multiple_params,
-    r#"private func & GetValue(int x, int y, object obj) { return(Local(x + y)); }"#
-);
+    ref_func_multiple_params: r#"private func & GetValue(int x, int y, object obj) { return(Local(x + y)); }"#;
 
 // Make sure regular functions still work
-crate::support::compile_case!(
-    effect_callback_without_ref_return,
-    r#"global func FxFireStart(effect, target) { return effect + target; }"#
-);
+    effect_callback_without_ref_return: r#"global func FxFireStart(effect, target) { return effect + target; }"#;
+}
 
-#[test]
-fn reference_return_mutates_local_slot() {
-    let mut engine = Engine::new();
-    engine
-        .load_script(
+run_cases! {
+    reference_return_mutates_local_slot:
             r#"
             func & Slot(int index) { return Local(index); }
             func Test() {
@@ -102,10 +65,7 @@ fn reference_return_mutates_local_slot() {
                 return Local(0);
             }
             "#,
-        )
-        .expect("script loads");
-
-    assert_eq!(engine.call("Test", &[]).unwrap(), Value::Int(42));
+        "Test", &[] => Value::Int(42);
 }
 
 #[test]

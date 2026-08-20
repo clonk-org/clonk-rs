@@ -255,19 +255,13 @@ fn safe_navigation_is_strict3_only_and_requires_a_navigation_operator() {
     }
 }
 
-#[test]
-fn eval_inherits_the_calling_functions_strict_level() {
-    let mut engine = Engine::new();
-    engine
-        .load_script(
+run_cases! {
+    eval_inherits_the_calling_functions_strict_level:
             r#"
             #strict 3
             func Probe() { return eval("{ key = 8 }?.key"); }
             "#,
-        )
-        .expect("script loads");
-
-    assert_eq!(engine.call("Probe", &[]).unwrap(), Value::Int(8));
+        "Probe", &[] => Value::Int(8);
 }
 
 #[test]

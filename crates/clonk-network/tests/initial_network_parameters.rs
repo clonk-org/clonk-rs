@@ -88,7 +88,7 @@ fn cpp_serializes_all_parameter_fields_in_compile_order() {
     parameters.auto_frame_skip = true;
     parameters.rules = vec![id_entry(*b"ABCD", 1), id_entry(*b"EFGH", 0)];
     parameters.goals = vec![id_entry(*b"GOAL", -2)];
-    parameters.league = LegacyCString::from_bytes(b"Cup".to_vec()).unwrap();
+    parameters.league = crate::c4(b"Cup");
     parameters.clients.clients.clear();
     let defaults = InitialNetworkScenarioDefaults {
         random_seed: 0,
@@ -141,7 +141,7 @@ fn cpp_serializes_sorted_clients_with_field_defaults_and_exact_escaping() {
             client_id: 2,
             activated: false,
             observer: true,
-            name: LegacyCString::from_bytes(b"Two".to_vec()).unwrap(),
+            name: crate::c4(b"Two"),
             nick: LegacyCString::default(),
             lobby_ready: true,
         },
@@ -157,8 +157,8 @@ fn cpp_serializes_sorted_clients_with_field_defaults_and_exact_escaping() {
             client_id: 0,
             activated: true,
             observer: false,
-            name: LegacyCString::from_bytes(b"Line\n\"\\\x011".to_vec()).unwrap(),
-            nick: LegacyCString::from_bytes(b"Zero".to_vec()).unwrap(),
+            name: crate::c4(b"Line\n\"\\\x011"),
+            nick: crate::c4(b"Zero"),
             lobby_ready: false,
         },
     ];
@@ -216,14 +216,14 @@ fn cpp_string_writer_preserves_non_utf8_and_utf8_bytes_as_octal() {
     non_utf8.control_rate = -1;
     non_utf8.auto_frame_skip = false;
     non_utf8.clients.clients.clear();
-    non_utf8.league = LegacyCString::from_bytes(vec![0xff, b'1']).unwrap();
+    non_utf8.league = crate::c4(vec![0xff, b'1']);
     assert_eq!(
         serialize_initial_network_parameters(&non_utf8, &defaults).unwrap(),
         b"[Parameters]\r\nLeague=\"\\377\\61\"\r\n"
     );
 
     let mut utf8 = non_utf8;
-    utf8.league = LegacyCString::from_bytes("é".as_bytes().to_vec()).unwrap();
+    utf8.league = crate::c4("é".as_bytes());
     assert_eq!(
         serialize_initial_network_parameters(&utf8, &defaults).unwrap(),
         b"[Parameters]\r\nLeague=\"\\303\\251\"\r\n"
@@ -266,8 +266,7 @@ fn cpp_string_writer_uses_all_named_escapes_and_unpadded_octal() {
     parameters.control_rate = -1;
     parameters.auto_frame_skip = false;
     parameters.clients.clients.clear();
-    parameters.league =
-        LegacyCString::from_bytes(b"\x07\x08\x0c\n\r\t\x0b\"\\\x7f9".to_vec()).unwrap();
+    parameters.league = crate::c4(b"\x07\x08\x0c\n\r\t\x0b\"\\\x7f9");
     let defaults = InitialNetworkScenarioDefaults {
         random_seed: 0,
         max_players: 8,
@@ -291,10 +290,10 @@ fn save_with_scenario_does_not_inspect_the_omitted_savegame_block() {
     // The non-null pScenario branch skips LeagueAddress, Title, resources,
     // player infos, and teams completely (src/C4GameParameters.cpp:573-585).
     let mut parameters = oracle_parameters();
-    parameters.league_address = LegacyCString::from_bytes(vec![0xff]).unwrap();
-    parameters.title = LegacyCString::from_bytes(vec![0xfe]).unwrap();
-    parameters.scenario.filename = LegacyCString::from_bytes(vec![0xfd]).unwrap();
-    parameters.game_resources[0].author = LegacyCString::from_bytes(vec![0xfc]).unwrap();
+    parameters.league_address = crate::c4(vec![0xff]);
+    parameters.title = crate::c4(vec![0xfe]);
+    parameters.scenario.filename = crate::c4(vec![0xfd]);
+    parameters.game_resources[0].author = crate::c4(vec![0xfc]);
     let defaults = InitialNetworkScenarioDefaults {
         random_seed: 0,
         max_players: 8,
@@ -368,28 +367,17 @@ fn cpp_elides_nontrivial_scenario_fair_crew_and_id_list_defaults() {
 }
 
 fn oracle_parameters() -> JoinGameParametersEnvelope {
-    let empty_players = PlayerInfoListSnapshot {
-        last_player_id: 0,
-        clients: Vec::new(),
-    };
-    let oracle_host = LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap();
+    let empty_players = PlayerInfoListSnapshot::default();
+    let oracle_host = crate::c4(b"OracleHost");
     JoinGameParametersEnvelope {
         random_seed: 424_242,
-        startup_player_count: 0,
         max_players: 8,
-        use_fair_crew: false,
-        fair_crew_forced: false,
-        fair_crew_strength: 0,
         allow_debug: true,
         is_network_game: true,
         control_rate: 2,
-        auto_frame_skip: true,
-        rules: Vec::new(),
-        goals: Vec::new(),
-        league: LegacyCString::default(),
-        // Save(pScenario) must ignore all fields in this block.
-        league_address: LegacyCString::from_bytes(b"ignored league address".to_vec()).unwrap(),
-        title: LegacyCString::from_bytes(b"ignored title".to_vec()).unwrap(),
+        auto_frame_skip: true, // Save(pScenario) must ignore all fields in this block.
+        league_address: crate::c4(b"ignored league address"),
+        title: crate::c4(b"ignored title"),
         scenario: NetworkResourceCore {
             resource_type: 1,
             id: 99,
@@ -412,9 +400,9 @@ fn oracle_parameters() -> JoinGameParametersEnvelope {
             team_distribution: 2,
             team_colors: 1,
             max_script_players: 3,
-            script_player_names: LegacyCString::from_bytes(b"ignored".to_vec()).unwrap(),
+            script_player_names: crate::c4(b"ignored"),
             random_team_count: 2,
-            teams: Vec::new(),
+            ..Default::default()
         },
         clients: JoinClientRegistrySnapshot {
             clients: vec![ClientCoreControlData {
@@ -427,6 +415,7 @@ fn oracle_parameters() -> JoinGameParametersEnvelope {
             }],
             local_client_id: Some(0),
         },
+        ..Default::default()
     }
 }
 

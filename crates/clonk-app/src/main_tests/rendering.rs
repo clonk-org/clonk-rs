@@ -1,6 +1,67 @@
 // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
+macro_rules! rendering_fixture {
+    (edge_scroll_app: $app:ident, $owner:ident, $focus:ident $(,)?) => {
+        let mut $app = new_running_sandbox_app();
+        let $owner = $app.local_owner;
+        let $focus = $app.engine.test_crew_cursor($owner);
+        $app.engine
+            .replace_player_viewports(
+                $owner,
+                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some($focus))],
+            )
+            .test_value();
+        $app.snapshot = $app.engine.snapshot();
+    };
+    (raw_control: $command:expr, $data:expr $(,)?) => {
+        ControlEvent::RawPlayerControl {
+            command: $command,
+            data: $data,
+        }
+    };
+    (definition_picture: $x:expr, $y:expr, $width:expr, $height:expr $(,)?) => {
+        clonk_engine::DefinitionPicture {
+            x: $x,
+            y: $y,
+            width: $width,
+            height: $height,
+        }
+    };
+    (sprite_image: $width:expr, $height:expr, $pixels:expr $(,)?) => {
+        clonk_engine::DefinitionSpriteImage {
+            width: $width,
+            height: $height,
+            pixels: $pixels,
+            color_mask: None,
+        }
+    };
+    (hud_player: $owner:expr, $crew:expr, $focus:expr $(,)?) => {
+        HudPlayerSnapshot {
+            owner: $owner,
+            crew: $crew,
+            focus: $focus,
+            eliminated: false,
+            wealth: 0,
+            score: 0,
+        }
+    };
+    (loader_group: $priority:expr, $registration_order:expr, $group:expr $(,)?) => {
+        LoaderGroupRegistration {
+            priority: $priority,
+            registration_order: $registration_order,
+            group: $group,
+        }
+    };
+    (set_scale: $percent:expr, $persist:expr $(,)?) => {
+        OptionsDisplayRequest::SetScale {
+            percent: $percent,
+            persist: $persist,
+        }
+    };
+}
+
 #[cfg(unix)]
 #[test]
 fn definition_graphics_route_reopens_a_projected_non_ascii_path() {
@@ -30,36 +91,24 @@ fn definition_graphics_route_reopens_a_projected_non_ascii_path() {
         0,
     )
     .test_value();
-    assert_eq!(registrations[0].group.root(), definition.as_path());
+    main_assert_eq!(registrations[0].group.root() => definition.as_path());
 }
 
 #[test]
 fn definition_path_directory_probe_applies_both_cpp_trailing_removals() {
     let separator = std::path::MAIN_SEPARATOR as u8;
-    assert_eq!(definition_path_directory_probe(&[separator]), None);
-    assert_eq!(
-        definition_path_directory_probe(&[separator, separator]),
-        None
-    );
-    assert_eq!(
-        definition_path_directory_probe(&[b'D', b'e', b'f', b's', separator]),
-        Some(b"Defs".to_vec())
-    );
+    main_assert_eq!(definition_path_directory_probe(&[separator]) => None);
+    main_assert_eq!(definition_path_directory_probe(&[separator, separator]) => None);
+    main_assert_eq!(definition_path_directory_probe(&[b'D', b'e', b'f', b's', separator]) => Some(b"Defs".to_vec()));
     let alternate = if separator == b'/' { b'\\' } else { b'/' };
-    assert_eq!(
-        definition_path_directory_probe(&[b'D', b'e', b'f', b's', alternate]),
-        Some(b"Defs".to_vec())
-    );
+    main_assert_eq!(definition_path_directory_probe(&[b'D', b'e', b'f', b's', alternate]) => Some(b"Defs".to_vec()));
 }
 
 #[test]
 fn hud_inventory_left_click_queues_exact_contents_only() {
     let (mut app, owner, _crew, _first, target, region_point) = inventory_region_fixture();
     let click_point = GuiPoint::new(region_point.x, region_point.y - 14.0);
-    assert_eq!(
-        app.ingame_viewport_region(owner, click_point),
-        Some(IngameViewportRegion::Inventory(target))
-    );
+    main_assert_eq!(app.ingame_viewport_region(owner, click_point) => Some(IngameViewportRegion::Inventory(target)));
     let behind = app
         .graphics
         .viewport_point_at(click_point)
@@ -88,8 +137,8 @@ fn hud_inventory_left_click_queues_exact_contents_only() {
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    assert_eq!(
-                app.ingame_mouse_select_target(owner, click_point),
+    main_assert_eq!(
+                app.ingame_mouse_select_target(owner, click_point) =>
                 Some(overlap),
                 "fixture must catch a leaked selection; overlap={:?}, projected={:?}, behind={behind:?}, region={click_point:?}, raw_pick={:?}",
                 app.snapshot.object(overlap),
@@ -107,31 +156,14 @@ fn hud_inventory_left_click_queues_exact_contents_only() {
     ));
     app.handle_ingame_mouse_button(ElementState::Pressed)
         .test_value();
-    assert_eq!(
-        network_commands.take_submitted_player_inputs(),
-        (Vec::new(), Vec::new(), Vec::new()),
-        "classic control queues nothing until button-up"
-    );
+    main_assert_eq!(network_commands.take_submitted_player_inputs() => (Vec::new(), Vec::new(), Vec::new()), "classic control queues nothing until button-up");
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
 
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
-    assert_eq!(
-        controls,
-        vec![(
-            owner,
-            ControlEvent::RawPlayerControl {
-                command: 9,
-                data: target.as_u64() as i32,
-            },
-            tick,
-        )]
-    );
-    assert!(commands.is_empty(), "HUD click must not queue MoveTo");
-    assert!(
-        selections.is_empty(),
-        "HUD click must not select world crew"
-    );
+    main_assert_eq!(controls => vec![(owner, rendering_fixture!(raw_control: 9, target.as_u64() as i32), tick,)]);
+    main_assert!(commands.is_empty(), "HUD click must not queue MoveTo");
+    main_assert!(selections.is_empty(), "HUD click must not select world crew");
 }
 
 #[test]
@@ -144,11 +176,8 @@ fn hud_inventory_autostop_queues_stored_press_and_release() {
         region_point.y,
     );
     let outside = GuiPoint::new(down.x - 3.0, down.y);
-    assert_eq!(
-        app.ingame_viewport_region(owner, down),
-        Some(IngameViewportRegion::Inventory(target))
-    );
-    assert_eq!(app.ingame_viewport_region(owner, outside), None);
+    main_assert_eq!(app.ingame_viewport_region(owner, down) => Some(IngameViewportRegion::Inventory(target)));
+    main_assert_eq!(app.ingame_viewport_region(owner, outside) => None);
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
@@ -158,45 +187,29 @@ fn hud_inventory_autostop_queues_stored_press_and_release() {
     app.handle_ingame_mouse_button(ElementState::Pressed)
         .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
-    assert_eq!(
-        controls,
-        vec![(
-            owner,
-            ControlEvent::RawPlayerControl {
-                command: 9,
-                data: target.as_u64() as i32,
-            },
-            tick,
-        )]
-    );
-    assert!(commands.is_empty());
-    assert!(selections.is_empty());
+    main_assert_eq!(controls => vec![(owner, rendering_fixture!(raw_control: 9, target.as_u64() as i32), tick,)]);
+    main_assert!(commands.is_empty());
+    main_assert!(selections.is_empty());
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(outside.x),
         f64::from(outside.y),
     ));
-    assert!(
-        app.mouse_state.is_some_and(|state| !state.motion.moved),
-        "three pixels must remain Drag_None"
-    );
+    main_assert!(app.mouse_state.is_some_and(|state| !state.motion.moved), "three pixels must remain Drag_None");
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
-    assert_eq!(
-        controls,
+    main_assert_eq!(
+        controls =>
         vec![(
             owner,
-            ControlEvent::RawPlayerControl {
-                command: 25,
-                data: target.as_u64() as i32,
-            },
+            rendering_fixture!(raw_control: 25, target.as_u64() as i32),
             tick,
         )],
         "COM_Contents+16 retains the down-time target number"
     );
-    assert!(commands.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(commands.is_empty());
+    main_assert!(selections.is_empty());
 }
 
 #[test]
@@ -211,36 +224,22 @@ fn definition_sprite_carries_the_raw_defcore_picture_rect() {
 
     let mut with_picture = test_definition("PIC2", "Pictured", "#strict\n");
     with_picture.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-8, -10, 16, 20)));
-    with_picture.set_picture(Some(clonk_engine::DefinitionPicture {
-        x: 192,
-        y: 100,
-        width: 32,
-        height: 40,
-    }));
-    with_picture.set_sprite_image(Some(clonk_engine::DefinitionSpriteImage {
-        width: 1,
-        height: 1,
-        pixels: Arc::from([0xff, 0, 0, 0xff]),
-        color_mask: None,
-    }));
+    with_picture.set_picture(Some(
+        rendering_fixture!(definition_picture: 192, 100, 32, 40),
+    ));
+    with_picture.set_sprite_image(Some(
+        rendering_fixture!(sprite_image: 1, 1, Arc::from([0xff, 0, 0, 0xff])),
+    ));
     app.engine.register_test_definition(with_picture);
 
     // C4DefCore::Load replaces a missing Picture with the shape-sized
     // top-left facet, ignoring the shape offsets (src/C4Def.cpp:222-224).
     let mut without_picture = test_definition("PIC0", "Unpictured", "#strict\n");
     without_picture.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-8, -10, 16, 20)));
-    without_picture.set_picture(Some(clonk_engine::DefinitionPicture {
-        x: 0,
-        y: 0,
-        width: 16,
-        height: 20,
-    }));
-    without_picture.set_sprite_image(Some(clonk_engine::DefinitionSpriteImage {
-        width: 1,
-        height: 1,
-        pixels: Arc::from([0xff, 0, 0, 0xff]),
-        color_mask: None,
-    }));
+    without_picture.set_picture(Some(rendering_fixture!(definition_picture: 0, 0, 16, 20)));
+    without_picture.set_sprite_image(Some(
+        rendering_fixture!(sprite_image: 1, 1, Arc::from([0xff, 0, 0, 0xff])),
+    ));
     app.engine.register_test_definition(without_picture);
 
     app.rebuild_definition_sprites();
@@ -251,14 +250,8 @@ fn definition_sprite_carries_the_raw_defcore_picture_rect() {
             .test_value()
             .picture
     };
-    assert_eq!(
-        picture_of("PIC2"),
-        Some(clonk_engine::DefinitionRect::new(192, 100, 32, 40)),
-    );
-    assert_eq!(
-        picture_of("PIC0"),
-        Some(clonk_engine::DefinitionRect::new(0, 0, 16, 20)),
-    );
+    main_assert_eq!(picture_of("PIC2") => Some(clonk_engine::DefinitionRect::new(192, 100, 32, 40)),);
+    main_assert_eq!(picture_of("PIC0") => Some(clonk_engine::DefinitionRect::new(0, 0, 16, 20)),);
 }
 
 #[test]
@@ -269,18 +262,10 @@ fn picture_only_magic_definition_keeps_a_zero_sized_world_face() {
     let mut app = new_running_sandbox_app();
     let mut spell = test_definition("MAG0", "Picture-only spell", "#strict\n");
     spell.set_category(clonk_engine::CATEGORY_MAGIC);
-    spell.set_picture(Some(clonk_engine::DefinitionPicture {
-        x: 0,
-        y: 0,
-        width: 64,
-        height: 64,
-    }));
-    spell.set_sprite_image(Some(clonk_engine::DefinitionSpriteImage {
-        width: 64,
-        height: 64,
-        pixels: Arc::from(vec![0xff; 64 * 64 * 4]),
-        color_mask: None,
-    }));
+    spell.set_picture(Some(rendering_fixture!(definition_picture: 0, 0, 64, 64)));
+    spell.set_sprite_image(Some(
+        rendering_fixture!(sprite_image: 64, 64, Arc::from(vec![0xff; 64 * 64 * 4])),
+    ));
     app.engine.register_test_definition(spell);
 
     app.rebuild_definition_sprites();
@@ -289,16 +274,8 @@ fn picture_only_magic_definition_keeps_a_zero_sized_world_face() {
         .graphics
         .object_sprite(&sprite_map_key("MAG0", None))
         .test_value();
-    assert_eq!(
-        sprite.picture,
-        Some(clonk_engine::DefinitionRect::new(0, 0, 64, 64)),
-        "the menu picture remains available",
-    );
-    assert_eq!(
-        sprite.shape,
-        Some(clonk_engine::DefinitionRect::default()),
-        "the picture must not become a large idle world face",
-    );
+    main_assert_eq!(sprite.picture => Some(clonk_engine::DefinitionRect::new(0, 0, 64, 64)), "the menu picture remains available",);
+    main_assert_eq!(sprite.shape => Some(clonk_engine::DefinitionRect::default()), "the picture must not become a large idle world face",);
 }
 
 #[test]
@@ -331,24 +308,15 @@ fn running_graphics_recreation_keeps_script_particle_catalog() {
     };
     app.engine.register_particle_resource(&flame).test_value();
     app.rebuild_definition_sprites();
-    assert!(
-        app.graphics.particle_sprite("Fire2").is_some(),
-        "precondition: the scenario definition rebuild installs Fire2"
-    );
+    main_assert!(app.graphics.particle_sprite("Fire2").is_some(), "precondition: the scenario definition rebuild installs Fire2");
 
     let label = app.scenario_label.clone();
     let ground = app.fallback_ground;
     app.configure_running_state(label, ground);
-    assert!(
-        app.graphics.particle_sprite("Fire2").is_some(),
-        "entering the running presentation must retain script particle graphics"
-    );
+    main_assert!(app.graphics.particle_sprite("Fire2").is_some(), "entering the running presentation must retain script particle graphics");
 
     app.resize(321, 201).test_value();
-    assert!(
-        app.graphics.particle_sprite("Fire2").is_some(),
-        "resizing the running presentation must retain script particle graphics"
-    );
+    main_assert!(app.graphics.particle_sprite("Fire2").is_some(), "resizing the running presentation must retain script particle graphics");
 }
 
 #[test]
@@ -373,7 +341,7 @@ fn viewport_buttons_use_only_the_exact_mouse_viewport() {
         .into_iter()
         .filter(|viewport| viewport.owner == owner)
         .collect::<Vec<_>>();
-    assert_eq!(viewports.len(), 2);
+    main_assert_eq!(viewports.len() => 2);
     let point = |viewport: ActiveViewportProjection| {
         let rect = clonk_frontend::hud::viewport_button_rect(
             viewport.rect,
@@ -381,17 +349,13 @@ fn viewport_buttons_use_only_the_exact_mouse_viewport() {
         );
         GuiPoint::new(rect.x as f32 + 1.0, rect.y as f32 + 1.0)
     };
-    assert_eq!(
-        app.ingame_viewport_region(owner, point(viewports[0])),
+    main_assert_eq!(
+        app.ingame_viewport_region(owner, point(viewports[0])) =>
         Some(IngameViewportRegion::ViewportButton(
             clonk_frontend::hud::ViewportButton::Help,
         ))
     );
-    assert_eq!(
-        app.ingame_viewport_region(owner, point(viewports[1])),
-        None,
-        "the same player's second viewport gets only the keyboard menu hint"
-    );
+    main_assert_eq!(app.ingame_viewport_region(owner, point(viewports[1])) => None, "the same player's second viewport gets only the keyboard menu hint");
 }
 
 #[test]
@@ -442,18 +406,11 @@ fn viewport_button_stack_is_wired_into_the_late_app_render() {
                 let index = (y as usize * width + x as usize) * 4;
                 if isolated[index + 3] == u8::MAX {
                     opaque_pixels += 1;
-                    assert_eq!(
-                        &rendered[index..index + 4],
-                        &isolated[index..index + 4],
-                        "late app render omitted or obscured {button:?} at ({x},{y})"
-                    );
+                    main_assert_eq!(&rendered[index..index + 4] => &isolated[index..index + 4], "late app render omitted or obscured {button:?} at ({x},{y})");
                 }
             }
         }
-        assert!(
-            opaque_pixels > 100,
-            "the isolated {button:?} control must contain a substantial opaque facet"
-        );
+        main_assert!(opaque_pixels > 100, "the isolated {button:?} control must contain a substantial opaque facet");
     }
 }
 
@@ -473,27 +430,13 @@ fn hud_command_bar_left_click_queues_exact_drawn_coms_only() {
         let tick = app.local_control_submission_tick();
         app.handle_ingame_mouse_button(ElementState::Pressed)
             .test_value();
-        assert_eq!(
-            network_commands.take_submitted_player_inputs(),
-            (Vec::new(), Vec::new(), Vec::new()),
-            "classic COM {command} waits for button-up"
-        );
+        main_assert_eq!(network_commands.take_submitted_player_inputs() => (Vec::new(), Vec::new(), Vec::new()), "classic COM {command} waits for button-up");
         app.handle_ingame_mouse_button(ElementState::Released)
             .test_value();
         let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
-        assert_eq!(
-            controls,
-            vec![(
-                owner,
-                ControlEvent::RawPlayerControl { command, data: 0 },
-                tick,
-            )]
-        );
-        assert!(commands.is_empty(), "COM {command} leaked a world command");
-        assert!(
-            selections.is_empty(),
-            "COM {command} leaked world selection"
-        );
+        main_assert_eq!(controls => vec![(owner, rendering_fixture!(raw_control: command, 0), tick,)]);
+        main_assert!(commands.is_empty(), "COM {command} leaked a world command");
+        main_assert!(selections.is_empty(), "COM {command} leaked world selection");
     }
 }
 
@@ -540,35 +483,28 @@ fn selection_drag_entering_hud_region_is_cancelled() {
         f64::from(crossed.x),
         f64::from(crossed.y),
     ));
-    assert!(app
-        .mouse_state
-        .is_some_and(|state| state.motion.moved && state.motion.selection_frame));
+    main_assert!(app.mouse_state.is_some_and(|state| state.motion.moved && state.motion.selection_frame));
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(region_point.x),
         f64::from(region_point.y),
     ));
-    assert!(app.ingame_selection_frame().is_none());
-    assert!(app.mouse_state.is_some_and(|state| {
-        !state.motion.selection_frame && state.motion.selection_cancelled_by_region
-    }));
+    main_assert!(app.ingame_selection_frame().is_none());
+    main_assert!(app.mouse_state.is_some_and(|state| {!state.motion.selection_frame && state.motion.selection_cancelled_by_region}));
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
-    assert_eq!(
-        controls,
+    main_assert_eq!(
+        controls =>
         vec![(
             owner,
-            ControlEvent::RawPlayerControl {
-                command: 0,
-                data: 0,
-            },
+            rendering_fixture!(raw_control: 0, 0),
             app.local_control_submission_tick(),
         )],
         "C++ sends the default copied DownRegion after cancellation"
     );
-    assert!(commands.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(commands.is_empty());
+    main_assert!(selections.is_empty());
 }
 
 #[test]
@@ -589,36 +525,36 @@ fn full_speed_runs_unpaced_skips_requested_renders_and_slow_restores_timer() {
         let outcome =
             advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
         let frame = first_frame + offset;
-        assert_eq!(outcome.executed_frames, 1);
-        assert_eq!(app.engine.frame(), frame);
-        assert_eq!(outcome.skip_redraw, frame.rem_euclid(3) != 0);
-        assert_eq!(accumulator, Duration::ZERO);
+        main_assert_eq!(outcome.executed_frames => 1);
+        main_assert_eq!(app.engine.frame() => frame);
+        main_assert_eq!(outcome.skip_redraw => frame.rem_euclid(3) != 0);
+        main_assert_eq!(accumulator => Duration::ZERO);
     }
 
     app.process_running_chat_text("/slow");
-    assert!(!app.full_speed);
-    assert_eq!(app.frame_skip, 1);
+    main_assert!(!app.full_speed);
+    main_assert_eq!(app.frame_skip => 1);
     let paced_frame = app.engine.frame();
     let waiting = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
-    assert_eq!(waiting.executed_frames, 0);
+    main_assert_eq!(waiting.executed_frames => 0);
     let tick_delay = Duration::from_millis(app.engine.game_tick_delay_ms());
     accumulator += tick_delay - Duration::from_millis(1);
-    assert_eq!(
+    main_assert_eq!(
         advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
             .expect("one millisecond below the normal tick still waits")
-            .executed_frames,
+            .executed_frames =>
         0
     );
     accumulator += Duration::from_millis(1);
     let paced = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
-    assert_eq!(paced.executed_frames, 1);
-    assert!(!paced.skip_redraw);
-    assert_eq!(app.engine.frame(), paced_frame + 1);
+    main_assert_eq!(paced.executed_frames => 1);
+    main_assert!(!paced.skip_redraw);
+    main_assert_eq!(app.engine.frame() => paced_frame + 1);
 
     app.process_running_chat_text("/fast 1");
     let fast_one = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
-    assert_eq!(fast_one.executed_frames, 1);
-    assert!(!fast_one.skip_redraw);
+    main_assert_eq!(fast_one.executed_frames => 1);
+    main_assert!(!fast_one.skip_redraw);
 }
 
 #[test]
@@ -627,10 +563,10 @@ fn automatic_frame_skip_uses_cpp_strict_slow_graphics_threshold() {
     let tick_delay = Duration::from_millis(28);
 
     frame_skip.finish_graphics_pass(true, tick_delay, tick_delay);
-    assert!(!frame_skip.begin_graphics_pass(true));
+    main_assert!(!frame_skip.begin_graphics_pass(true));
 
     frame_skip.finish_graphics_pass(true, tick_delay + Duration::from_millis(1), tick_delay);
-    assert!(frame_skip.begin_graphics_pass(true));
+    main_assert!(frame_skip.begin_graphics_pass(true));
 }
 
 #[test]
@@ -640,33 +576,25 @@ fn presentation_detail_steps_down_only_on_a_sustained_overrun() {
     // never cost the player fire particles.
     let budget = Duration::from_millis(28);
     let mut governor = PresentationDetailGovernor::default();
-    assert_eq!(governor.detail(), PresentationDetail::Full);
+    main_assert_eq!(governor.detail() => PresentationDetail::Full);
 
     for _ in 0..DETAIL_STEP_DOWN_PASSES - 1 {
         governor.record_graphics_pass(true, Duration::from_millis(40), budget);
-        assert_eq!(
-            governor.detail(),
-            PresentationDetail::Full,
-            "an overrun shorter than the streak must not degrade anything"
-        );
+        main_assert_eq!(governor.detail() => PresentationDetail::Full, "an overrun shorter than the streak must not degrade anything");
     }
     governor.record_graphics_pass(true, Duration::from_millis(40), budget);
-    assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+    main_assert_eq!(governor.detail() => PresentationDetail::NoFireParticles);
 
     // Still over budget after the first step: give up the gamma resolve
     // pass too, then stop — there is nothing cheaper left to trade.
     for _ in 0..DETAIL_STEP_DOWN_PASSES {
         governor.record_graphics_pass(true, Duration::from_millis(40), budget);
     }
-    assert_eq!(governor.detail(), PresentationDetail::NoGammaPass);
+    main_assert_eq!(governor.detail() => PresentationDetail::NoGammaPass);
     for _ in 0..DETAIL_STEP_DOWN_PASSES * 4 {
         governor.record_graphics_pass(true, Duration::from_millis(400), budget);
     }
-    assert_eq!(
-        governor.detail(),
-        PresentationDetail::NoGammaPass,
-        "the ladder has a bottom; it must not wrap or keep counting"
-    );
+    main_assert_eq!(governor.detail() => PresentationDetail::NoGammaPass, "the ladder has a bottom; it must not wrap or keep counting");
 }
 
 #[test]
@@ -685,11 +613,7 @@ fn presentation_detail_ignores_an_overrun_streak_broken_by_an_in_budget_pass() {
         governor.record_graphics_pass(true, Duration::from_millis(27), budget);
     }
 
-    assert_eq!(
-        governor.detail(),
-        PresentationDetail::Full,
-        "an in-budget pass must break the overrun streak, not merely fail to extend it"
-    );
+    main_assert_eq!(governor.detail() => PresentationDetail::Full, "an in-budget pass must break the overrun streak, not merely fail to extend it");
 }
 
 #[test]
@@ -703,18 +627,14 @@ fn presentation_detail_ignores_a_comfortable_streak_broken_by_a_deadband_pass() 
     for _ in 0..DETAIL_STEP_DOWN_PASSES {
         governor.record_graphics_pass(true, Duration::from_millis(40), budget);
     }
-    assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+    main_assert_eq!(governor.detail() => PresentationDetail::NoFireParticles);
 
     for _ in 0..DETAIL_STEP_UP_PASSES * 2 {
         governor.record_graphics_pass(true, Duration::from_millis(5), budget);
         governor.record_graphics_pass(true, Duration::from_millis(27), budget);
     }
 
-    assert_eq!(
-        governor.detail(),
-        PresentationDetail::NoFireParticles,
-        "a deadband pass must break the comfortable streak too"
-    );
+    main_assert_eq!(governor.detail() => PresentationDetail::NoFireParticles, "a deadband pass must break the comfortable streak too");
 }
 
 #[test]
@@ -724,29 +644,29 @@ fn presentation_detail_recovers_only_with_real_headroom() {
     for _ in 0..DETAIL_STEP_DOWN_PASSES {
         governor.record_graphics_pass(true, Duration::from_millis(40), budget);
     }
-    assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+    main_assert_eq!(governor.detail() => PresentationDetail::NoFireParticles);
 
     // Just inside budget is the deadband: recovering there would step back
     // up into the very cost that caused the overrun and oscillate.
     for _ in 0..DETAIL_STEP_UP_PASSES * 2 {
         governor.record_graphics_pass(true, Duration::from_millis(27), budget);
     }
-    assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+    main_assert_eq!(governor.detail() => PresentationDetail::NoFireParticles);
 
     // Comfortable headroom restores detail, one step at a time.
     for _ in 0..DETAIL_STEP_UP_PASSES {
         governor.record_graphics_pass(true, Duration::from_millis(5), budget);
     }
-    assert_eq!(governor.detail(), PresentationDetail::Full);
+    main_assert_eq!(governor.detail() => PresentationDetail::Full);
 
     // Disabling automatic degradation restores full detail immediately.
     let mut governor = PresentationDetailGovernor::default();
     for _ in 0..DETAIL_STEP_DOWN_PASSES * 2 {
         governor.record_graphics_pass(true, Duration::from_millis(40), budget);
     }
-    assert_ne!(governor.detail(), PresentationDetail::Full);
+    main_assert_ne!(governor.detail() => PresentationDetail::Full);
     governor.record_graphics_pass(false, Duration::from_millis(400), budget);
-    assert_eq!(governor.detail(), PresentationDetail::Full);
+    main_assert_eq!(governor.detail() => PresentationDetail::Full);
 }
 
 #[test]
@@ -760,25 +680,13 @@ fn framebuffer_backends_widen_to_gl_before_giving_up() {
     // board without a usable Vulkan driver produces no adapter and
     // `PixelsBuilder::build` then fails out of `main`.
     let attempts = framebuffer_backend_attempts(None);
-    assert_eq!(
-        attempts.first().copied(),
-        Some(Backends::PRIMARY),
-        "the desktop-clean set is still tried first"
-    );
-    assert!(
-        attempts
-            .last()
-            .is_some_and(|backends| backends.contains(Backends::GL)),
-        "a board with only GLES must still get an adapter attempt"
-    );
-    assert!(attempts.len() >= 2);
+    main_assert_eq!(attempts.first().copied() => Some(Backends::PRIMARY), "the desktop-clean set is still tried first");
+    main_assert!(attempts.last().is_some_and(|backends| backends.contains(Backends::GL)), "a board with only GLES must still get an adapter attempt");
+    main_assert!(attempts.len() >= 2);
 
     // An explicit WGPU_BACKEND is an instruction, not a hint: never widen
     // past what the operator asked for.
-    assert_eq!(
-        framebuffer_backend_attempts(Some(Backends::VULKAN)),
-        vec![Backends::VULKAN],
-    );
+    main_assert_eq!(framebuffer_backend_attempts(Some(Backends::VULKAN)) => vec![Backends::VULKAN],);
 }
 
 /// `docs/GRAPHICS_SUPPORT.md` lists software adapters (llvmpipe, lavapipe,
@@ -792,36 +700,16 @@ fn the_last_framebuffer_attempt_asks_for_a_software_adapter() {
 
     let attempts = framebuffer_attempts(None);
 
-    assert!(
-        attempts
-            .iter()
-            .take(attempts.len() - 1)
-            .all(|attempt| !attempt.fallback_adapter),
-        "hardware is tried first, on every backend set: {attempts:?}"
-    );
+    main_assert!(attempts.iter().take(attempts.len() - 1).all(|attempt| !attempt.fallback_adapter), "hardware is tried first, on every backend set: {attempts:?}");
     let last = attempts.last().expect("at least one attempt");
-    assert!(
-        last.fallback_adapter,
-        "the final attempt is the explicit software one: {attempts:?}"
-    );
-    assert!(
-        last.backends.contains(Backends::GL),
-        "and it keeps the widest backend set: {attempts:?}"
-    );
+    main_assert!(last.fallback_adapter, "the final attempt is the explicit software one: {attempts:?}");
+    main_assert!(last.backends.contains(Backends::GL), "and it keeps the widest backend set: {attempts:?}");
 
     // An explicit WGPU_BACKEND still names the backend; asking that backend
     // for its software adapter is not widening to another one.
     let explicit = framebuffer_attempts(Some(Backends::VULKAN));
-    assert!(
-        explicit
-            .iter()
-            .all(|attempt| attempt.backends == Backends::VULKAN),
-        "{explicit:?}"
-    );
-    assert!(
-        explicit.last().is_some_and(|attempt| attempt.fallback_adapter),
-        "{explicit:?}"
-    );
+    main_assert!(explicit.iter().all(|attempt| attempt.backends == Backends::VULKAN), "{explicit:?}");
+    main_assert!(explicit.last().is_some_and(|attempt| attempt.fallback_adapter), "{explicit:?}");
 }
 
 #[test]
@@ -841,8 +729,8 @@ fn a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent() {
     // FREEZE the unbudgeted behaviour first: a full backlog drains at once.
     let mut accumulator = MAX_ACCUMULATED_TIME;
     let drained = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
-    assert_eq!(
-        drained.executed_frames,
+    main_assert_eq!(
+        drained.executed_frames =>
         (MAX_ACCUMULATED_TIME.as_millis() / schedule.simulation_interval.as_millis()) as u32,
         "the whole backlog runs inside one pass when nothing bounds it"
     );
@@ -853,15 +741,9 @@ fn a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent() {
     let bounded =
         advance_simulation_pass_within(&mut app, &mut schedule, &mut accumulator, Duration::ZERO)
             .test_value();
-    assert_eq!(
-        bounded.executed_frames, 1,
-        "an exhausted budget yields after one frame, it does not stall"
-    );
-    assert_eq!(app.engine.frame(), before + 1);
-    assert!(
-        accumulator >= schedule.simulation_interval,
-        "the unspent backlog is retained for the next pass, not discarded"
-    );
+    main_assert_eq!(bounded.executed_frames => 1, "an exhausted budget yields after one frame, it does not stall");
+    main_assert_eq!(app.engine.frame() => before + 1);
+    main_assert!(accumulator >= schedule.simulation_interval, "the unspent backlog is retained for the next pass, not discarded");
 }
 
 #[test]
@@ -875,7 +757,7 @@ fn swallowed_script_error_keeps_a_presentable_landscape_snapshot() {
             "LandscapeSnapshotError.c",
             "#strict 3\nglobal func Step(state, frame, random) { return NoSuchFunctionAnywhere(); }",
         ).test_value();
-    assert!(app.snapshot.landscape.is_some());
+    main_assert!(app.snapshot.landscape.is_some());
     let mut schedule = frame_schedule_for_mode(
         app.mode,
         app.engine.game_tick_delay_ms(),
@@ -886,10 +768,7 @@ fn swallowed_script_error_keeps_a_presentable_landscape_snapshot() {
 
     advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
 
-    assert!(
-        app.snapshot.landscape.is_some(),
-        "the next redraw must not lose terrain after a nonfatal script error"
-    );
+    main_assert!(app.snapshot.landscape.is_some(), "the next redraw must not lose terrain after a nonfatal script error");
 }
 
 #[test]
@@ -904,34 +783,23 @@ fn render_floor_reserves_a_share_of_the_wall_clock_for_drawing() {
     let base = Instant::now();
 
     // With no measurement yet the burst may run a full simulation period.
-    assert_eq!(
-        floor.simulation_burst_budget(Duration::from_millis(28)),
+    main_assert_eq!(
+        floor.simulation_burst_budget(Duration::from_millis(28)) =>
         Duration::from_millis(28),
         "an unmeasured graphics pass must not shorten the first burst"
     );
 
     // A 3 ms draw is cheap: simulation may run 85/15 of it before yielding.
     floor.record_presentation(base, Duration::from_millis(3));
-    assert_eq!(
-        floor.simulation_burst_budget(Duration::from_millis(28)),
-        Duration::from_millis(28),
-        "the burst never drops below one simulation period"
-    );
+    main_assert_eq!(floor.simulation_burst_budget(Duration::from_millis(28)) => Duration::from_millis(28), "the burst never drops below one simulation period");
 
     // A 30 ms draw on a slow machine buys simulation 170 ms, not forever.
     floor.record_presentation(base, Duration::from_millis(30));
-    assert_eq!(
-        floor.simulation_burst_budget(Duration::from_millis(28)),
-        Duration::from_millis(170),
-    );
+    main_assert_eq!(floor.simulation_burst_budget(Duration::from_millis(28)) => Duration::from_millis(170),);
 
     // And the reservation is itself capped by the hard repaint floor.
     floor.record_presentation(base, Duration::from_millis(400));
-    assert_eq!(
-        floor.simulation_burst_budget(Duration::from_millis(28)),
-        MAX_TIME_BETWEEN_RENDERS,
-        "no burst may outrun the hard repaint floor"
-    );
+    main_assert_eq!(floor.simulation_burst_budget(Duration::from_millis(28)) => MAX_TIME_BETWEEN_RENDERS, "no burst may outrun the hard repaint floor");
 }
 
 #[test]
@@ -947,18 +815,18 @@ fn a_simulation_burst_yields_when_the_next_graphics_opportunity_is_due() {
     let now = Instant::now();
     let reserved = Duration::from_millis(187);
 
-    assert_eq!(
-        simulation_burst_budget_before(reserved, now, now + Duration::from_millis(28)),
+    main_assert_eq!(
+        simulation_burst_budget_before(reserved, now, now + Duration::from_millis(28)) =>
         Duration::from_millis(28),
         "a graphics opportunity coming due outranks the reservation"
     );
-    assert_eq!(
-        simulation_burst_budget_before(reserved, now, now + Duration::from_millis(400)),
+    main_assert_eq!(
+        simulation_burst_budget_before(reserved, now, now + Duration::from_millis(400)) =>
         reserved,
         "a deadline further out than the reservation leaves it alone"
     );
-    assert_eq!(
-        simulation_burst_budget_before(reserved, now, now - Duration::from_millis(5)),
+    main_assert_eq!(
+        simulation_burst_budget_before(reserved, now, now - Duration::from_millis(5)) =>
         Duration::ZERO,
         "an overdue opportunity yields after the one frame the pass always owes"
     );
@@ -973,19 +841,19 @@ fn render_floor_forces_a_repaint_at_two_hertz_however_deep_the_skip() {
     let base = Instant::now();
     floor.record_presentation(base, Duration::from_millis(5));
 
-    assert!(!floor.must_present(base + Duration::from_millis(499)));
-    assert!(floor.must_present(base + MAX_TIME_BETWEEN_RENDERS));
-    assert!(floor.must_present(base + Duration::from_secs(30)));
+    main_assert!(!floor.must_present(base + Duration::from_millis(499)));
+    main_assert!(floor.must_present(base + MAX_TIME_BETWEEN_RENDERS));
+    main_assert!(floor.must_present(base + Duration::from_secs(30)));
 
     // A repaint rearms it.
     floor.record_presentation(base + Duration::from_secs(30), Duration::from_millis(5));
-    assert!(!floor.must_present(base + Duration::from_secs(30)));
+    main_assert!(!floor.must_present(base + Duration::from_secs(30)));
 
     // Before the very first repaint the floor is armed from the first ask,
     // so a game that never draws still gets its first frame on time.
     let mut fresh = RenderFloor::default();
-    assert!(!fresh.must_present(base));
-    assert!(fresh.must_present(base + MAX_TIME_BETWEEN_RENDERS));
+    main_assert!(!fresh.must_present(base));
+    main_assert!(fresh.must_present(base + MAX_TIME_BETWEEN_RENDERS));
 }
 
 #[test]
@@ -997,29 +865,21 @@ fn presentation_stats_count_the_present_rate_the_game_tick_counter_cannot_see() 
     // the tick, so the same counter stays nominal straight through a
     // presentation stall. These counters are the half it cannot see.
     let mut stats = PresentationStats::default();
-    assert_eq!(stats.presentations_per_second(), 0);
+    main_assert_eq!(stats.presentations_per_second() => 0);
 
     for _ in 0..9 {
         stats.record_presentation(Duration::from_millis(33));
     }
-    assert_eq!(
-        stats.presentations_per_second(),
-        0,
-        "like cFPS, the readout only moves when the second closes"
-    );
+    main_assert_eq!(stats.presentations_per_second() => 0, "like cFPS, the readout only moves when the second closes");
 
     stats.sample_second();
-    assert_eq!(stats.presentations_per_second(), 9);
-    assert_eq!(stats.last_graphics(), Duration::from_millis(33));
+    main_assert_eq!(stats.presentations_per_second() => 9);
+    main_assert_eq!(stats.last_graphics() => Duration::from_millis(33));
 
     // And the next second starts from zero, exactly like cFPS.
     stats.sample_second();
-    assert_eq!(stats.presentations_per_second(), 0);
-    assert_eq!(
-        stats.last_graphics(),
-        Duration::from_millis(33),
-        "the last measured pass survives an idle second; only the rate resets"
-    );
+    main_assert_eq!(stats.presentations_per_second() => 0);
+    main_assert_eq!(stats.last_graphics() => Duration::from_millis(33), "the last measured pass survives an idle second; only the rate resets");
 }
 
 #[test]
@@ -1037,19 +897,15 @@ fn presentation_stats_summarize_what_the_graphics_pass_cost_that_second() {
     stats.record_automatic_graphics_skip();
     stats.sample_second();
 
-    assert_eq!(stats.presentations_per_second(), 10);
-    assert_eq!(stats.automatic_graphics_skips_per_second(), 2);
-    assert_eq!(
-        stats.graphics_p95(),
-        Duration::from_millis(90),
-        "nearest rank over ten samples is the slowest pass, not the median"
-    );
+    main_assert_eq!(stats.presentations_per_second() => 10);
+    main_assert_eq!(stats.automatic_graphics_skips_per_second() => 2);
+    main_assert_eq!(stats.graphics_p95() => Duration::from_millis(90), "nearest rank over ten samples is the slowest pass, not the median");
 
     // The window is the second, so the next one is not dragged by this one.
     stats.record_presentation(Duration::from_millis(4));
     stats.sample_second();
-    assert_eq!(stats.graphics_p95(), Duration::from_millis(4));
-    assert_eq!(stats.automatic_graphics_skips_per_second(), 0);
+    main_assert_eq!(stats.graphics_p95() => Duration::from_millis(4));
+    main_assert_eq!(stats.automatic_graphics_skips_per_second() => 0);
 }
 
 #[test]
@@ -1062,14 +918,10 @@ fn presentation_stats_bound_the_samples_one_second_may_retain() {
     for _ in 0..(PRESENTATION_STATS_MAX_SAMPLES * 4) {
         stats.record_presentation(Duration::from_millis(7));
     }
-    assert_eq!(
-        stats.retained_graphics_samples(),
-        PRESENTATION_STATS_MAX_SAMPLES,
-        "an undrained second must not grow without bound"
-    );
+    main_assert_eq!(stats.retained_graphics_samples() => PRESENTATION_STATS_MAX_SAMPLES, "an undrained second must not grow without bound");
     stats.sample_second();
-    assert_eq!(stats.graphics_p95(), Duration::from_millis(7));
-    assert_eq!(stats.retained_graphics_samples(), 0);
+    main_assert_eq!(stats.graphics_p95() => Duration::from_millis(7));
+    main_assert_eq!(stats.retained_graphics_samples() => 0);
 }
 
 #[test]
@@ -1088,11 +940,7 @@ fn the_diagnostics_overlay_reports_both_frame_rates_and_stays_off_by_default() {
     app.presentation_stats.sample_second();
 
     app.update_diagnostics_overlay();
-    assert_eq!(
-        app.graphics.diagnostics_overlay_text(),
-        None,
-        "Graphics.ShowStats is opt-in: unset means no overlay at all"
-    );
+    main_assert_eq!(app.graphics.diagnostics_overlay_text() => None, "Graphics.ShowStats is opt-in: unset means no overlay at all");
 
     app.display_flags.show_stats = true;
     app.update_diagnostics_overlay();
@@ -1101,19 +949,16 @@ fn the_diagnostics_overlay_reports_both_frame_rates_and_stays_off_by_default() {
         .diagnostics_overlay_text()
         .test_value()
         .to_string();
-    assert!(text.contains("Sim 36 FPS"), "{text}");
-    assert!(text.contains("Render 9 FPS"), "{text}");
-    assert!(text.contains("32.0 ms"), "{text}");
-    assert!(text.contains("skips 1"), "{text}");
-    assert!(
-        !text.contains("PreSend"),
-        "an offline round has no control horizon to report: {text}"
-    );
+    main_assert!(text.contains("Sim 36 FPS"), "{text}");
+    main_assert!(text.contains("Render 9 FPS"), "{text}");
+    main_assert!(text.contains("32.0 ms"), "{text}");
+    main_assert!(text.contains("skips 1"), "{text}");
+    main_assert!(!text.contains("PreSend"), "an offline round has no control horizon to report: {text}");
 
     // And turning it back off retires the draw site rather than freezing it.
     app.display_flags.show_stats = false;
     app.update_diagnostics_overlay();
-    assert_eq!(app.graphics.diagnostics_overlay_text(), None);
+    main_assert_eq!(app.graphics.diagnostics_overlay_text() => None);
 }
 
 #[test]
@@ -1136,16 +981,10 @@ fn the_diagnostics_overlay_reports_the_horizon_a_stalling_client_is_sized_from()
         .test_value()
         .to_string();
     let presend = app.network_control_clock.test_value().control_presend();
-    assert!(text.contains(&format!("PreSend {presend}")), "{text}");
-    assert!(text.contains("late 300 ms"), "{text}");
-    assert!(
-        text.contains("budget 300.0 ms"),
-        "the tail-aware envelope, not the ping-derived ACT: {text}"
-    );
-    assert!(
-        !text.contains("Ping"),
-        "a stub with no live route must not invent one: {text}"
-    );
+    main_assert!(text.contains(&format!("PreSend {presend}")), "{text}");
+    main_assert!(text.contains("late 300 ms"), "{text}");
+    main_assert!(text.contains("budget 300.0 ms"), "the tail-aware envelope, not the ping-derived ACT: {text}");
+    main_assert!(!text.contains("Ping"), "a stub with no live route must not invent one: {text}");
 }
 
 #[test]
@@ -1157,28 +996,25 @@ fn stats_toggle_is_default_unbound_and_a_custom_chord_flips_the_overlay() {
     let mut app = new_running_sandbox_app();
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    assert!(!app.display_flags.show_stats);
+    main_assert!(!app.display_flags.show_stats);
 
     let parsed = parse_runtime_key_config(b"[Keys]\nStatsToggle=F8\n").test_value();
     app.runtime_key_config_cache = OnceLock::new();
     app.runtime_key_config_cache.set(Ok(parsed)).test_value();
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    assert!(app.display_flags.show_stats);
+    main_assert!(app.display_flags.show_stats);
     app.update_diagnostics_overlay();
-    assert!(app.graphics.diagnostics_overlay_text().is_some());
-    assert!(
-        app.runtime_flash_message.is_none(),
-        "the toggle flashes no message, exactly like ToggleShowNetStatus"
-    );
+    main_assert!(app.graphics.diagnostics_overlay_text().is_some());
+    main_assert!(app.runtime_flash_message.is_none(), "the toggle flashes no message, exactly like ToggleShowNetStatus");
 
     app.test_key(VirtualKeyCode::F8, ElementState::Released);
-    assert!(app.display_flags.show_stats);
+    main_assert!(app.display_flags.show_stats);
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    assert!(!app.display_flags.show_stats);
+    main_assert!(!app.display_flags.show_stats);
     app.update_diagnostics_overlay();
-    assert!(app.graphics.diagnostics_overlay_text().is_none());
+    main_assert!(app.graphics.diagnostics_overlay_text().is_none());
 }
 
 #[test]
@@ -1196,20 +1032,14 @@ fn a_refused_presentation_rearms_the_repaint_floor() {
     let reservation = floor.simulation_burst_budget(Duration::from_millis(28));
 
     let overdue = base + MAX_TIME_BETWEEN_RENDERS;
-    assert!(floor.must_present(overdue));
+    main_assert!(floor.must_present(overdue));
     floor.note_refused_presentation(overdue);
-    assert!(
-        !floor.must_present(overdue + Duration::from_millis(499)),
-        "a refused presentation still consumed the opportunity"
-    );
-    assert!(floor.must_present(overdue + MAX_TIME_BETWEEN_RENDERS));
+    main_assert!(!floor.must_present(overdue + Duration::from_millis(499)), "a refused presentation still consumed the opportunity");
+    main_assert!(floor.must_present(overdue + MAX_TIME_BETWEEN_RENDERS));
 
     // The refusal cost no graphics time, so the simulation reservation that the
     // last real presentation implies is untouched.
-    assert_eq!(
-        floor.simulation_burst_budget(Duration::from_millis(28)),
-        reservation,
-    );
+    main_assert_eq!(floor.simulation_burst_budget(Duration::from_millis(28)) => reservation,);
 }
 
 #[test]
@@ -1220,18 +1050,15 @@ fn only_a_real_presentation_marks_the_window_as_having_drawn() {
     // never put a pixel on screen as drawn.
     let mut floor = RenderFloor::default();
     let base = Instant::now();
-    assert!(!floor.has_presented());
+    main_assert!(!floor.has_presented());
 
     floor.note_refused_presentation(base);
-    assert!(
-        !floor.has_presented(),
-        "a refused opportunity drew nothing, whatever it did to the floor"
-    );
+    main_assert!(!floor.has_presented(), "a refused opportunity drew nothing, whatever it did to the floor");
     let _ = floor.must_present(base);
-    assert!(!floor.has_presented(), "arming the floor is not drawing");
+    main_assert!(!floor.has_presented(), "arming the floor is not drawing");
 
     floor.record_presentation(base, Duration::from_millis(5));
-    assert!(floor.has_presented());
+    main_assert!(floor.has_presented());
 }
 
 #[test]
@@ -1239,18 +1066,16 @@ fn automatic_frame_skip_never_skips_two_consecutive_graphics_passes() {
     let mut frame_skip = AutomaticFrameSkip::default();
     frame_skip.finish_graphics_pass(true, Duration::from_millis(29), Duration::from_millis(28));
 
-    assert!(frame_skip.begin_graphics_pass(true));
-    assert!(!frame_skip.begin_graphics_pass(true));
+    main_assert!(frame_skip.begin_graphics_pass(true));
+    main_assert!(!frame_skip.begin_graphics_pass(true));
 }
 
 #[test]
 fn automatic_frame_skip_freezes_cpp_parameter_precedence() {
-    assert!(configured_auto_frame_skip(b""));
-    assert!(!configured_auto_frame_skip(
-        b"[Graphics]\nAutoFrameSkip=false\n"
-    ));
-    assert!(!frozen_auto_frame_skip(true, Some(false), None));
-    assert!(frozen_auto_frame_skip(false, Some(false), Some(true)));
+    main_assert!(configured_auto_frame_skip(b""));
+    main_assert!(!configured_auto_frame_skip(b"[Graphics]\nAutoFrameSkip=false\n"));
+    main_assert!(!frozen_auto_frame_skip(true, Some(false), None));
+    main_assert!(frozen_auto_frame_skip(false, Some(false), Some(true)));
 }
 
 #[test]
@@ -1259,16 +1084,10 @@ fn graphics_deadline_ignores_early_wakes_and_coalesces_missed_periods() {
     let interval = Duration::from_millis(14);
     let deadline = base + interval;
 
-    assert!(base + Duration::from_millis(10) < deadline);
-    assert_eq!(
-        advance_graphics_deadline(deadline, deadline, interval),
-        base + Duration::from_millis(28)
-    );
+    main_assert!(base + Duration::from_millis(10) < deadline);
+    main_assert_eq!(advance_graphics_deadline(deadline, deadline, interval) => base + Duration::from_millis(28));
     let late = base + Duration::from_millis(50);
-    assert_eq!(
-        advance_graphics_deadline(deadline, late, interval),
-        late + interval
-    );
+    main_assert_eq!(advance_graphics_deadline(deadline, late, interval) => late + interval);
 }
 
 #[test]
@@ -1288,15 +1107,8 @@ fn graphics_deadline_never_banks_more_than_one_period_ahead() {
     for pass in 0..10_000_u32 {
         let now = base + Duration::from_micros(u64::from(pass) * 4);
         deadline = advance_graphics_deadline(deadline, now, interval);
-        assert!(
-            deadline <= now + interval,
-            "pass {pass} banked {:?} of deadline debt",
-            deadline.saturating_duration_since(now + interval),
-        );
-        assert!(
-            deadline > now,
-            "pass {pass} left the deadline in the past, which would spin"
-        );
+        main_assert!(deadline <= now + interval, "pass {pass} banked {:?} of deadline debt", deadline.saturating_duration_since(now + interval),);
+        main_assert!(deadline > now, "pass {pass} left the deadline in the past, which would spin");
     }
 }
 
@@ -1304,7 +1116,7 @@ fn graphics_deadline_never_banks_more_than_one_period_ahead() {
 fn hud_game_time_reads_the_engine_snapshot() {
     let mut app = new_state_only_menu_app(320, 200);
     app.snapshot.game_time = 61;
-    assert_eq!(app.game_time_seconds(), 61);
+    main_assert_eq!(app.game_time_seconds() => 61);
 }
 
 fn make_packed_test_entry_unreadable(group: &mut [u8], entry_index: usize) {
@@ -1331,33 +1143,23 @@ fn configured_fullscreen_reaches_platform_startup_path() {
     ]);
     let paths = AppPaths::discover_with_config_file(Some(&config_file)).test_value();
     let windowed = DisplayOptions::load(Some(&paths));
-    assert_eq!(windowed.mode, DisplayMode::Window);
-    assert!(!defer_startup_fullscreen_until_resumed(windowed.mode));
-    assert!(!should_reconcile_deferred_fullscreen(windowed.mode, false));
-    assert!(
-        startup_window_attributes(&windowed, PhysicalSize::new(800, 600))
-            .fullscreen
-            .is_none()
-    );
+    main_assert_eq!(windowed.mode => DisplayMode::Window);
+    main_assert!(!defer_startup_fullscreen_until_resumed(windowed.mode));
+    main_assert!(!should_reconcile_deferred_fullscreen(windowed.mode, false));
+    main_assert!(startup_window_attributes(&windowed, PhysicalSize::new(800, 600)).fullscreen.is_none());
 
     fs::write(&config_file, "[Graphics]\nDisplayMode=Fullscreen\n").test_value();
     let display = DisplayOptions::load(Some(&paths));
-    assert_eq!(display.mode, DisplayMode::Fullscreen);
-    assert_eq!(
-        should_reconcile_deferred_fullscreen(display.mode, false),
-        cfg!(target_os = "macos")
-    );
-    assert!(!should_reconcile_deferred_fullscreen(display.mode, true));
+    main_assert_eq!(display.mode => DisplayMode::Fullscreen);
+    main_assert_eq!(should_reconcile_deferred_fullscreen(display.mode, false) => cfg!(target_os = "macos"));
+    main_assert!(!should_reconcile_deferred_fullscreen(display.mode, true));
 
     let attributes = startup_window_attributes(&display, PhysicalSize::new(800, 600));
 
     if defer_startup_fullscreen_until_resumed(display.mode) {
-        assert!(attributes.fullscreen.is_none());
+        main_assert!(attributes.fullscreen.is_none());
     } else {
-        assert!(matches!(
-            attributes.fullscreen.as_ref(),
-            Some(Fullscreen::Borderless(None))
-        ));
+        main_assert!(matches!(attributes.fullscreen.as_ref(), Some(Fullscreen::Borderless(None))));
     }
 }
 
@@ -1372,13 +1174,13 @@ fn positional_mix_ownerless_viewport_listens_at_its_live_center() {
     }];
     let viewports = [audio_viewport(0, OWNER_NONE, Vector2::new(0, 100))];
 
-    assert_eq!(
-        compute_positional_mix_values(Vector2::new(350, 100), &snapshot, &viewports),
+    main_assert_eq!(
+        compute_positional_mix_values(Vector2::new(350, 100), &snapshot, &viewports) =>
         (50, 0.7),
         "a NO_OWNER viewport has no player listener override",
     );
-    assert_eq!(
-        compute_positional_mix_values(Vector2::new(350, 100), &snapshot, &[]),
+    main_assert_eq!(
+        compute_positional_mix_values(Vector2::new(350, 100), &snapshot, &[]) =>
         (0, 0.0),
         "no active C4Viewport means no audibility or pan contribution",
     );
@@ -1407,17 +1209,14 @@ fn rendered_object_audibility_cache_retains_until_the_next_completed_render() {
     let retained = audio.rendered_object_audibility.clone();
 
     audio.update_channels(&snapshot, &viewports, true);
-    assert_eq!(
-        audio.rendered_object_audibility, retained,
-        "a sound tick without a completed render retains the prior draw cache",
-    );
+    main_assert_eq!(audio.rendered_object_audibility => retained, "a sound tick without a completed render retains the prior draw cache",);
 
     // C4Object::GetAudibility (C4Object.cpp:5622-5628) only recomputes
     // when Audible is -1, which C4GraphicsSystem::Execute's
     // ResetAudibility sets. Movement between the draw and the mix leaves
     // the drawn pair in place and observably apart from the origin mix.
     snapshot.objects[0].position.x += 1;
-    assert_eq!(
+    main_assert_eq!(
         compute_mix_values_for_with_rendered_audibility(
             100,
             Some(line.id),
@@ -1425,24 +1224,17 @@ fn rendered_object_audibility_cache_retains_until_the_next_completed_render() {
             &snapshot,
             &viewports,
             &audio.rendered_object_audibility,
-        ),
+        ) =>
         (0.5, 0.7),
         "movement without a new render keeps the retained draw audibility",
     );
-    assert_eq!(
-        compute_mix_values_for(100, Some(line.id), None, &snapshot, &viewports),
-        (0.0, 1.0),
-        "the live origin mix remains observably different",
-    );
+    main_assert_eq!(compute_mix_values_for(100, Some(line.id), None, &snapshot, &viewports) => (0.0, 1.0), "the live origin mix remains observably different",);
 
     audio.cache_rendered_object_audibility(&HashMap::new(), &snapshot, &viewports);
-    assert!(
-        audio.rendered_object_audibility.is_empty(),
-        "the next completed render replaces rather than extends the cache",
-    );
+    main_assert!(audio.rendered_object_audibility.is_empty(), "the next completed render replaces rather than extends the cache",);
     audio.cache_rendered_object_audibility(&calls, &snapshot, &viewports);
     audio.reset_sound_system_generation();
-    assert!(audio.rendered_object_audibility.is_empty());
+    main_assert!(audio.rendered_object_audibility.is_empty());
 }
 
 #[test]
@@ -1464,8 +1256,8 @@ fn rendered_audibility_reduction_clamps_each_parallax_pan_call() {
         ],
     )]);
 
-    assert_eq!(
-        reduce_rendered_object_audibility(&calls, &snapshot, &[], &HashMap::new())[&target.id].pan,
+    main_assert_eq!(
+        reduce_rendered_object_audibility(&calls, &snapshot, &[], &HashMap::new())[&target.id].pan =>
         98,
         "each integer contribution is clamped before the next one is added",
     );
@@ -1486,8 +1278,8 @@ fn inactive_parallax_cache_retains_pan_while_normal_objects_reset_it() {
         },
     )]);
     let no_calls = HashMap::new();
-    assert_eq!(
-        reduce_rendered_object_audibility(&no_calls, &snapshot, &[], &previous),
+    main_assert_eq!(
+        reduce_rendered_object_audibility(&no_calls, &snapshot, &[], &previous) =>
         previous,
         "inactive MODE_Object targets are outside the frame reset loop",
     );
@@ -1499,16 +1291,16 @@ fn inactive_parallax_cache_retains_pan_while_normal_objects_reset_it() {
             rendered_center: Vector2::ZERO,
         }],
     )]);
-    assert_eq!(
-        reduce_rendered_object_audibility(&calls, &snapshot, &[], &previous)[&target.id].pan,
+    main_assert_eq!(
+        reduce_rendered_object_audibility(&calls, &snapshot, &[], &previous)[&target.id].pan =>
         100,
         "the next inactive parallax contribution starts from retained pan",
     );
 
     let mut normal_snapshot = snapshot;
     normal_snapshot.objects[0].status = ObjectStatus::Normal;
-    assert_eq!(
-        reduce_rendered_object_audibility(&calls, &normal_snapshot, &[], &previous)[&target.id].pan,
+    main_assert_eq!(
+        reduce_rendered_object_audibility(&calls, &normal_snapshot, &[], &previous)[&target.id].pan =>
         20,
         "normal objects begin every completed frame with reset pan",
     );
@@ -1529,14 +1321,7 @@ fn object_bound_mix_uses_only_active_viewport_listener_and_pan() {
     let remote_listener = make_object(3, "RMTE", source.position);
     let mut snapshot = make_snapshot(
         vec![source.clone(), listener.clone(), remote_listener.clone()],
-        vec![HudPlayerSnapshot {
-            owner: 8,
-            crew: vec![remote_listener.id],
-            focus: Some(remote_listener.id),
-            eliminated: false,
-            wealth: 0,
-            score: 0,
-        }],
+        vec![rendering_fixture!(hud_player: 8, vec![remote_listener.id], Some(remote_listener.id))],
     );
     snapshot.players = vec![
         PlayerState {
@@ -1555,22 +1340,22 @@ fn object_bound_mix_uses_only_active_viewport_listener_and_pan() {
     let mut cursor_fallback = snapshot.clone();
     cursor_fallback.players[0].view_cursor = Some(listener.id);
     cursor_fallback.players[0].view_target = Some(remote_listener.id);
-    assert_eq!(
-        compute_positional_mix_values(source.position, &cursor_fallback, &viewports),
+    main_assert_eq!(
+        compute_positional_mix_values(source.position, &cursor_fallback, &viewports) =>
         (79, 0.7),
         "ViewCursor takes precedence over ViewTarget and Cursor",
     );
     cursor_fallback.players[0].view_cursor = None;
     cursor_fallback.players[0].view_target = None;
     cursor_fallback.players[0].cursor = Some(listener.id);
-    assert_eq!(
-        compute_positional_mix_values(source.position, &cursor_fallback, &viewports),
+    main_assert_eq!(
+        compute_positional_mix_values(source.position, &cursor_fallback, &viewports) =>
         (79, 0.7),
         "Cursor is used when ViewCursor and ViewTarget are null",
     );
     cursor_fallback.players[0].cursor = None;
-    assert_eq!(
-        compute_positional_mix_values(source.position, &cursor_fallback, &viewports),
+    main_assert_eq!(
+        compute_positional_mix_values(source.position, &cursor_fallback, &viewports) =>
         (50, 0.7),
         "the live viewport center is the final listener fallback",
     );
@@ -1588,17 +1373,17 @@ fn object_bound_mix_uses_only_active_viewport_listener_and_pan() {
         )
         .test_value();
     let key = SoundInstanceKey::new("Impact", Some(source.id));
-    assert_eq!(audio.active_channels[&key].detached_mix, Some((0.79, 0.7)));
-    assert!(audio.active_channels[&key].channel.is_some());
+    main_assert_eq!(audio.active_channels[&key].detached_mix => Some((0.79, 0.7)));
+    main_assert!(audio.active_channels[&key].channel.is_some());
 
     audio.update_channels(&snapshot, &[], true);
-    assert_eq!(audio.active_channels[&key].detached_mix, Some((0.0, 0.0)));
-    assert!(audio.active_channels[&key].channel.is_none());
+    main_assert_eq!(audio.active_channels[&key].detached_mix => Some((0.0, 0.0)));
+    main_assert!(audio.active_channels[&key].channel.is_none());
 
     let moved_viewports = [audio_viewport(0, 7, Vector2::new(100, 100))];
     audio.update_channels(&snapshot, &moved_viewports, true);
-    assert_eq!(audio.active_channels[&key].detached_mix, Some((0.79, 0.5)));
-    assert!(audio.active_channels[&key].channel.is_some());
+    main_assert_eq!(audio.active_channels[&key].detached_mix => Some((0.79, 0.5)));
+    main_assert!(audio.active_channels[&key].channel.is_some());
 
     audio.detach_object_sounds(source.id, source.position, &snapshot, &viewports);
     let info = audio
@@ -1606,17 +1391,10 @@ fn object_bound_mix_uses_only_active_viewport_listener_and_pan() {
         .values()
         .find(|info| info.sample_name == "impact.wav")
         .test_value();
-    assert_eq!(info.target, None);
-    assert_eq!(info.detached_mix, Some((0.79, 0.7)));
+    main_assert_eq!(info.target => None);
+    main_assert_eq!(info.detached_mix => Some((0.79, 0.7)));
     audio.update_channels(&snapshot, &[], true);
-    assert_eq!(
-        audio
-            .active_channels
-            .values()
-            .find(|info| info.sample_name == "impact.wav")
-            .and_then(|info| info.detached_mix),
-        Some((0.79, 0.7)),
-    );
+    main_assert_eq!(audio.active_channels.values().find(|info| info.sample_name == "impact.wav").and_then(|info| info.detached_mix) => Some((0.79, 0.7)),);
 }
 
 #[test]
@@ -1631,17 +1409,11 @@ fn global_portrait_frame_position_is_independent_of_text_alignment() {
     let aligned_frame =
         global_portrait_frame_rect(viewport, offset, positioned | FLAG_ALIGN_RIGHT, (121, 77));
 
-    assert_eq!(frame, aligned_frame);
-    assert_eq!(
-        message_horizontal_alignment(positioned | FLAG_ALIGN_RIGHT, true),
-        HorizontalAlignment::Right
-    );
-    assert_eq!(
-        message_horizontal_alignment(FLAG_RIGHT | FLAG_ALIGN_LEFT, true),
-        HorizontalAlignment::Left
-    );
-    assert_eq!(
-        message_horizontal_alignment(FLAG_RIGHT, true),
+    main_assert_eq!(frame => aligned_frame);
+    main_assert_eq!(message_horizontal_alignment(positioned | FLAG_ALIGN_RIGHT, true) => HorizontalAlignment::Right);
+    main_assert_eq!(message_horizontal_alignment(FLAG_RIGHT | FLAG_ALIGN_LEFT, true) => HorizontalAlignment::Left);
+    main_assert_eq!(
+        message_horizontal_alignment(FLAG_RIGHT, true) =>
         HorizontalAlignment::Left,
         "portrait frame position must not change the default text alignment"
     );
@@ -1680,7 +1452,7 @@ fn running_render_draws_supported_globals_and_ignores_remote_or_missing_targets(
     app.snapshot.hud.messages = vec![remote, missing_target, visible];
     let mut rendered = vec![0; 320 * 200 * 4];
     app.test_render(&mut rendered);
-    assert_ne!(rendered, baseline, "the visible global contributes pixels");
+    main_assert_ne!(rendered => baseline, "the visible global contributes pixels");
 }
 
 #[test]
@@ -1727,9 +1499,9 @@ fn same_owner_split_checks_target_in_second_exact_viewport() {
     app.test_render(&mut rendered);
 
     let projections = app.graphics.active_viewport_projections();
-    assert_eq!(projections.len(), 2);
-    assert_eq!([projections[0].index, projections[1].index], [0, 1]);
-    assert_eq!(projections[0].owner, projections[1].owner);
+    main_assert_eq!(projections.len() => 2);
+    main_assert_eq!([projections[0].index, projections[1].index] => [0, 1]);
+    main_assert_eq!(projections[0].owner => projections[1].owner);
     let target = app.snapshot.object(target_id).test_value();
     let shape_height = app
         .engine
@@ -1738,17 +1510,17 @@ fn same_owner_split_checks_target_in_second_exact_viewport() {
         .unwrap_or(0);
     let first = c4_message_target_position(target, Vector2::ZERO, shape_height, projections[0]);
     let second = c4_message_target_position(target, Vector2::ZERO, shape_height, projections[1]);
-    assert!(!projections[0].contains_logical_point(first));
-    assert!(projections[1].contains_logical_point(second));
+    main_assert!(!projections[0].contains_logical_point(first));
+    main_assert!(projections[1].contains_logical_point(second));
     let changed = rendered
         .chunks_exact(4)
         .zip(baseline.chunks_exact(4))
         .enumerate()
         .filter_map(|(index, (actual, before))| (actual != before).then_some(index))
         .collect::<Vec<_>>();
-    assert!(!changed.is_empty(), "the target message contributes pixels");
+    main_assert!(!changed.is_empty(), "the target message contributes pixels");
     let viewport = projections[1].rect;
-    assert!(changed.iter().all(|index| {
+    main_assert!(changed.iter().all(|index| {
         let x = (*index % 320) as i32;
         let y = (*index / 320) as i32;
         x >= viewport.x
@@ -1774,10 +1546,9 @@ fn live_temporary_physicals_feed_all_integer_hud_bar_ranges() {
                 &clonk_engine::ScriptControlData {
                     target_object,
                     strictness: clonk_engine::ScriptStrictness::Strict3,
-                    script: clonk_engine::LegacyCString::from_bytes(
+                    script: legacy_cstring(
                         format!("SetPhysical(\"{name}\", {value}, 2)").into_bytes(),
-                    )
-                    .test_value(),
+                    ),
                     by_client: 0,
                 },
                 ScriptControlPolicy::live(false),
@@ -1796,17 +1567,17 @@ fn live_temporary_physicals_feed_all_integer_hud_bar_ranges() {
         &app.bindings,
         &app.gamepad_bindings,
     );
-    assert_eq!(app.engine.object_snapshot(crew), Some(before_object));
-    assert_eq!(app.engine.object_physical(crew_index), before_physical);
+    main_assert_eq!(app.engine.object_snapshot(crew) => Some(before_object));
+    main_assert_eq!(app.engine.object_physical(crew_index) => before_physical);
 
     let crew = overlays
         .iter()
         .find(|player| player.owner == app.local_owner)
         .and_then(|player| player.crew.iter().find(|entry| entry.object_id == crew))
         .test_value();
-    assert_eq!((crew.energy, crew.energy_capacity), (1, 2));
-    assert_eq!((crew.magic_energy, crew.magic_capacity), (1_000, 2_000));
-    assert_eq!((crew.breath, crew.breath_capacity), (1, 2));
+    main_assert_eq!((crew.energy, crew.energy_capacity) => (1, 2));
+    main_assert_eq!((crew.magic_energy, crew.magic_capacity) => (1_000, 2_000));
+    main_assert_eq!((crew.breath, crew.breath_capacity) => (1, 2));
 
     let columns = [
         [220, 0, 0, 255],
@@ -1866,16 +1637,8 @@ fn live_temporary_physicals_feed_all_integer_hud_bar_ranges() {
         Color::opaque(0, 0, 220),
     ];
     for (slot, x) in [5_u32, 7, 9].into_iter().enumerate() {
-        assert_eq!(
-            surface.get_pixel(x, 107),
-            Some(empty[slot]),
-            "105px half bar keeps local row 52 empty"
-        );
-        assert_eq!(
-            surface.get_pixel(x, 108),
-            Some(filled[slot]),
-            "105px half bar begins filling at local row 53"
-        );
+        main_assert_eq!(surface.get_pixel(x, 107) => Some(empty[slot]), "105px half bar keeps local row 52 empty");
+        main_assert_eq!(surface.get_pixel(x, 108) => Some(filled[slot]), "105px half bar begins filling at local row 53");
     }
 }
 
@@ -1892,7 +1655,7 @@ fn player_overlay_projects_transient_hud_flags() {
     player.view_wealth = -1;
     player.view_value = -1;
 
-    assert!(!app.engine.scenario_value_gain_enabled());
+    main_assert!(!app.engine.scenario_value_gain_enabled());
     let overlays = collect_player_overlays(
         &mut app.engine,
         &app.snapshot,
@@ -1904,14 +1667,8 @@ fn player_overlay_projects_transient_hud_flags() {
         .iter()
         .find(|player| player.owner == owner)
         .test_value();
-    assert!(
-        overlay.view_wealth,
-        "nonzero ViewWealth uses C++ truthiness"
-    );
-    assert!(
-        !overlay.view_value,
-        "ViewValue stays hidden when Game.ValueGain is disabled"
-    );
+    main_assert!(overlay.view_wealth, "nonzero ViewWealth uses C++ truthiness");
+    main_assert!(!overlay.view_value, "ViewValue stays hidden when Game.ValueGain is disabled");
 
     set_test_scenario_value_gain(&mut app, -1);
     let player = app
@@ -1933,11 +1690,8 @@ fn player_overlay_projects_transient_hud_flags() {
         .iter()
         .find(|player| player.owner == owner)
         .test_value();
-    assert!(!overlay.view_wealth);
-    assert!(
-        overlay.view_value,
-        "nonzero ViewValue is visible when Game.ValueGain is enabled"
-    );
+    main_assert!(!overlay.view_wealth);
+    main_assert!(overlay.view_value, "nonzero ViewValue is visible when Game.ValueGain is enabled");
 }
 
 #[test]
@@ -1969,13 +1723,7 @@ fn viewport_overlay_collection_skips_unpresented_remote_players() {
         &app.gamepad_bindings,
         &owned_viewport,
     );
-    assert_eq!(
-        overlays
-            .iter()
-            .map(|overlay| overlay.owner)
-            .collect::<Vec<_>>(),
-        vec![local_owner]
-    );
+    main_assert_eq!(overlays.iter().map(|overlay| overlay.owner).collect::<Vec<_>>() => vec![local_owner]);
 
     // NO_OWNER is the native exception: C4Game::DrawCursors(NO_OWNER)
     // traverses every player, so their cursor-label data remains needed
@@ -1989,7 +1737,7 @@ fn viewport_overlay_collection_skips_unpresented_remote_players() {
         &app.gamepad_bindings,
         &observer_viewport,
     );
-    assert_eq!(overlays.len(), 2);
+    main_assert_eq!(overlays.len() => 2);
 }
 
 #[test]
@@ -2009,17 +1757,14 @@ fn speaking_overlay_maps_authenticated_player_to_selected_cursor() {
         .test_value()
         .ocf |= clonk_engine::ocf::CREW_MEMBER;
 
-    assert_eq!(
-        collect_speaking_overlay_objects(&app.snapshot, &[(7, player_id)]),
+    main_assert_eq!(
+        collect_speaking_overlay_objects(&app.snapshot, &[(7, player_id)]) =>
         vec![selected],
         "voice ownership maps to the real selected crew cursor, not ViewCursor",
     );
-    assert!(
-        collect_speaking_overlay_objects(&app.snapshot, &[(8, player_id)]).is_empty(),
-        "a client must not mark another client's player as speaking",
-    );
-    assert_eq!(
-        collect_speaking_overlay_objects(&app.snapshot, &[(7, player_id), (7, player_id)]),
+    main_assert!(collect_speaking_overlay_objects(&app.snapshot, &[(8, player_id)]).is_empty(), "a client must not mark another client's player as speaking",);
+    main_assert_eq!(
+        collect_speaking_overlay_objects(&app.snapshot, &[(7, player_id), (7, player_id)]) =>
         vec![selected],
         "repeated activity frames must not draw the same selected cursor twice",
     );
@@ -2031,7 +1776,7 @@ fn hud_graphics_loads_gamepad_startup_phases() {
     let graphics = GraphicsResource::open(paths.planet_dir().join("Graphics.c4g")).test_value();
     let hud = FrontendAssets::load_hud_graphics(&graphics);
     let gamepad = hud.gamepad.test_ref();
-    assert_eq!((gamepad.width(), gamepad.height()), (320, 36));
+    main_assert_eq!((gamepad.width(), gamepad.height()) => (320, 36));
 }
 
 #[test]
@@ -2040,11 +1785,7 @@ fn cursor_inventory_separates_and_draws_tflint_picture_rects() {
     // APS_Graphics is set, and Picture2Facet uses the own rect when Wdt is
     // nonzero (src/C4Object.cpp:3123-3129,6173-6213). T-Flint switches from
     // its DefCore picture (0,12,64,64) to (0,76,64,64) while active.
-    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value()
-        .to_path_buf();
+    let repository = test_repository_root().to_path_buf();
     let flint_group =
         Group::open(repository.join("content/Objects.c4d/Items.c4d/Weapons.c4d/TFlint.c4d"))
             .test_value();
@@ -2073,14 +1814,7 @@ fn cursor_inventory_separates_and_draws_tflint_picture_rects() {
 
     let snapshot = make_snapshot(
         vec![crew, idle, active.clone()],
-        vec![HudPlayerSnapshot {
-            owner: 0,
-            crew: vec![crew_id],
-            focus: Some(crew_id),
-            eliminated: false,
-            wealth: 0,
-            score: 0,
-        }],
+        vec![rendering_fixture!(hud_player: 0, vec![crew_id], Some(crew_id))],
     );
 
     let inventory = collect_crew_inventory(
@@ -2089,14 +1823,14 @@ fn cursor_inventory_separates_and_draws_tflint_picture_rects() {
         crew_id,
         clonk_frontend::AdvancedRendererConfig::DEFAULT,
     );
-    assert_eq!(inventory.len(), 2, "different PictureRects do not stack");
-    assert_eq!(inventory[0].object_id, idle_id);
-    assert_eq!(inventory[1].object_id, active_id);
+    main_assert_eq!(inventory.len() => 2, "different PictureRects do not stack");
+    main_assert_eq!(inventory[0].object_id => idle_id);
+    main_assert_eq!(inventory[1].object_id => active_id);
     let idle_picture = inventory[0].picture.test_ref();
     let active_picture = inventory[1].picture.test_ref();
-    assert_eq!((idle_picture.width(), idle_picture.height()), (64, 64));
-    assert_eq!((active_picture.width(), active_picture.height()), (64, 64));
-    assert_ne!(idle_picture.pixels(), active_picture.pixels());
+    main_assert_eq!((idle_picture.width(), idle_picture.height()) => (64, 64));
+    main_assert_eq!((active_picture.width(), active_picture.height()) => (64, 64));
+    main_assert_ne!(idle_picture.pixels() => active_picture.pixels());
 
     // C4ObjectMenu refills Sell/Get/Contents rows from the iterator's
     // representative object via Picture2Facet, not from the bare item ID
@@ -2128,7 +1862,7 @@ fn cursor_inventory_separates_and_draws_tflint_picture_rects() {
         0,
     )
     .test_value();
-    assert_eq!(menu_picture.pixels(), active_picture.pixels());
+    main_assert_eq!(menu_picture.pixels() => active_picture.pixels());
 
     // C4Object::Picture2Facet runs PrepareDrawing before drawing the
     // selected rect (src/C4Object.cpp:3138-3154); ColorMod therefore
@@ -2144,7 +1878,7 @@ fn cursor_inventory_separates_and_draws_tflint_picture_rects() {
     {
         let expected =
             Color::new(source[0], source[1], source[2], source[3]).modulate_clr(modulation);
-        assert_eq!(actual, &[expected.r, expected.g, expected.b, expected.a]);
+        main_assert_eq!(actual => &[expected.r, expected.g, expected.b, expected.a]);
     }
 }
 
@@ -2161,19 +1895,19 @@ fn direct_hud_inventory_alpha_uses_the_full_renderer_snapshot() {
         prepare_inventory_pixels(&mut pixels, modulation, mode, config);
         let mut owner = vec![80, 100, 120, 192];
         prepare_inventory_owner_pixels(&mut owner, modulation, mode, config);
-        assert_eq!(owner[3], pixels[3], "owner and base live passes agree");
+        main_assert_eq!(owner[3] => pixels[3], "owner and base live passes agree");
         pixels[3]
     };
 
-    assert_eq!(prepared_alpha(BlitMode::Normal, false, false), 128);
-    assert_eq!(prepared_alpha(BlitMode::Normal, false, true), 192);
-    assert_eq!(prepared_alpha(BlitMode::Normal, true, false), 128);
-    assert_eq!(prepared_alpha(BlitMode::Normal, true, true), 128);
-    assert_eq!(prepared_alpha(BlitMode::Mod2, false, false), 128);
-    assert_eq!(prepared_alpha(BlitMode::Mod2, false, true), 128);
-    assert_eq!(prepared_alpha(BlitMode::Mod2, true, false), 192);
-    assert_eq!(prepared_alpha(BlitMode::Mod2, true, true), 192);
-    assert_eq!(
+    main_assert_eq!(prepared_alpha(BlitMode::Normal, false, false) => 128);
+    main_assert_eq!(prepared_alpha(BlitMode::Normal, false, true) => 192);
+    main_assert_eq!(prepared_alpha(BlitMode::Normal, true, false) => 128);
+    main_assert_eq!(prepared_alpha(BlitMode::Normal, true, true) => 128);
+    main_assert_eq!(prepared_alpha(BlitMode::Mod2, false, false) => 128);
+    main_assert_eq!(prepared_alpha(BlitMode::Mod2, false, true) => 128);
+    main_assert_eq!(prepared_alpha(BlitMode::Mod2, true, false) => 192);
+    main_assert_eq!(prepared_alpha(BlitMode::Mod2, true, true) => 192);
+    main_assert_eq!(
         prepared_inventory_alpha(
             192,
             Color::new(255, 255, 255, 0),
@@ -2183,7 +1917,7 @@ fn direct_hud_inventory_alpha_uses_the_full_renderer_snapshot() {
                 no_alpha_add: true,
                 ..clonk_frontend::AdvancedRendererConfig::DEFAULT
             },
-        ),
+        ) =>
         192,
         "exact packed C4 white keeps GL_REPLACE alpha",
     );
@@ -2228,13 +1962,13 @@ fn script_text_spec_icons_use_the_exact_classic_facets() {
     ] {
         let image = resolve_script_font_image(&engine, spec, 0xff, resources)
             .unwrap_or_else(|| panic!("{spec} resolves"));
-        assert_eq!((image.width(), image.height()), (size, size), "{spec}");
-        assert_eq!(image.pixels()[0], phase, "{spec}");
+        main_assert_eq!((image.width(), image.height()) => (size, size), "{spec}");
+        main_assert_eq!(image.pixels()[0] => phase, "{spec}");
     }
 
     let settlement =
         resolve_script_font_image(&engine, "Ico:Settlement", 0xff, resources).test_value();
-    assert_eq!(settlement, score);
+    main_assert_eq!(settlement => score);
 }
 
 #[test]
@@ -2264,9 +1998,9 @@ fn running_render_draws_resolved_world_cursor() {
     let retained = app.window_mouse_position;
     app.window_active = false;
     app.handle_focus_lost().test_value();
-    assert!(app.ingame_pointer.is_none());
+    main_assert!(app.ingame_pointer.is_none());
     app.handle_focus_gained().test_value();
-    assert_eq!(app.window_mouse_position, retained);
+    main_assert_eq!(app.window_mouse_position => retained);
     app.ingame_mouse_caption.cursor = IngameMouseCursorKind::Grab;
     app.ingame_mouse_caption.caption = None;
     app.running_gui_mouse_owned = false;
@@ -2275,22 +2009,16 @@ fn running_render_draws_resolved_world_cursor() {
     app.test_render(&mut frame);
     let origin_x = (pointer.screen.x as i32 - 2) as u32;
     let origin_y = (pointer.screen.y as i32 - 2) as u32;
-    assert_eq!(
-        app.graphics.surface().get_pixel(origin_x, origin_y),
-        Some(Color::opaque(3, 43, 200))
-    );
+    main_assert_eq!(app.graphics.surface().get_pixel(origin_x, origin_y) => Some(Color::opaque(3, 43, 200)));
 
     app.external_irc_dialog_visible = true;
     app.running_world_mouse_owned = true;
     app.pointer_left().test_value();
-    assert!(
-        app.ingame_pointer.is_some(),
-        "fixture exercises the dialog-owned pointer-left early return"
-    );
+    main_assert!(app.ingame_pointer.is_some(), "fixture exercises the dialog-owned pointer-left early return");
     app.external_irc_dialog_visible = false;
     app.test_render(&mut frame);
-    assert_ne!(
-        app.graphics.surface().get_pixel(origin_x, origin_y),
+    main_assert_ne!(
+        app.graphics.surface().get_pixel(origin_x, origin_y) =>
         Some(Color::opaque(3, 43, 200)),
         "the retained world pointer must not draw outside the client area"
     );
@@ -2324,24 +2052,11 @@ fn passive_observer_renders_region_cursor() {
         f64::from(point.x),
         f64::from(point.y),
     ));
-    assert_eq!(
-        app.ingame_mouse_caption.cursor,
-        IngameMouseCursorKind::Region
-    );
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
 
     app.test_render(&mut frame);
-    assert_eq!(
-        app.ingame_mouse_caption.cursor,
-        IngameMouseCursorKind::Region
-    );
-    assert!(
-        app.graphics
-            .surface()
-            .pixels()
-            .chunks_exact(4)
-            .any(|pixel| pixel == [1, 40, 200, 255]),
-        "passive Region cell must reach the composed frame"
-    );
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
+    main_assert!(app.graphics.surface().pixels().chunks_exact(4).any(|pixel| pixel == [1, 40, 200, 255]), "passive Region cell must reach the composed frame");
 }
 
 #[test]
@@ -2382,14 +2097,7 @@ fn running_render_draws_throw_point_and_shift_add_marker() {
         ("landing Point", [27, 67, 200, 255]),
         ("Shift Add", [31, 71, 200, 255]),
     ] {
-        assert!(
-            app.graphics
-                .surface()
-                .pixels()
-                .chunks_exact(4)
-                .any(|pixel| pixel == color),
-            "{phase} cursor cell must reach the composed frame"
-        );
+        main_assert!(app.graphics.surface().pixels().chunks_exact(4).any(|pixel| pixel == color), "{phase} cursor cell must reach the composed frame");
     }
 }
 
@@ -2402,8 +2110,8 @@ fn every_global_gui_sheet_is_eagerly_required_and_malformed_fails_closed() {
             .assets
             .require_classic_global_gui_bootstrap_resources(&HashMap::new())
             .expect_err("every global sheet is unconditional");
-        assert_eq!(
-            error,
+        main_assert_eq!(
+            error =>
             ClassicParityBoundary::GlobalGuiBootstrapResources {
                 issues: vec![ClassicGuiBootstrapIssue::missing(stem)],
             },
@@ -2419,8 +2127,8 @@ fn every_global_gui_sheet_is_eagerly_required_and_malformed_fails_closed() {
             .assets
             .require_classic_global_gui_bootstrap_resources(&HashMap::new())
             .expect_err("malformed global sheet must fail");
-        assert_eq!(
-            error,
+        main_assert_eq!(
+            error =>
             ClassicParityBoundary::GlobalGuiBootstrapResources {
                 issues: vec![ClassicGuiBootstrapIssue::malformed(
                     stem,
@@ -2472,7 +2180,7 @@ fn global_gui_fonts_require_initialized_glyph_atlases() {
         let error = assets
             .require_classic_global_gui_bootstrap_resources(&HashMap::new())
             .expect_err("metric-valid empty font must fail");
-        assert!(matches!(
+        main_assert!(matches!(
             error,
             ClassicParityBoundary::GlobalGuiBootstrapResources { ref issues }
                 if issues.len() == 1
@@ -2527,8 +2235,7 @@ fn mid_round_graphics_group_arrival_rebinds_changed_sheets_only() {
             resource_type: clonk_network::HostResourceType::Definitions as u8,
             id,
             loadable: true,
-            filename: clonk_engine::LegacyCString::from_bytes(b"MidRound.c4d".to_vec())
-                .test_value(),
+            filename: legacy_cstring(b"MidRound.c4d"),
             ..Default::default()
         },
         path: path.to_path_buf(),
@@ -2561,23 +2268,9 @@ fn mid_round_graphics_group_arrival_rebinds_changed_sheets_only() {
 
     events.send(arrival(31, &pack_a)).test_value();
     app.test_network_events();
-    assert_eq!(
-        app.assets
-            .startup_dialog_images
-            .get("GUICaption.png")
-            .expect("overloaded caption")
-            .pixels()[..4],
-        [0x31, 0x11, 0x11, 0xff]
-    );
-    assert_eq!(
-        app.assets
-            .startup_dialog_images
-            .get("GUIScroll.png")
-            .expect("overloaded scroll")
-            .pixels()[..4],
-        [0x32, 0x22, 0x22, 0xff]
-    );
-    assert!(app.active_global_gui_failures.is_empty());
+    main_assert_eq!(app.assets.startup_dialog_images.get("GUICaption.png").expect("overloaded caption").pixels()[..4] => [0x31, 0x11, 0x11, 0xff]);
+    main_assert_eq!(app.assets.startup_dialog_images.get("GUIScroll.png").expect("overloaded scroll").pixels()[..4] => [0x32, 0x22, 0x22, 0xff]);
+    main_assert!(app.active_global_gui_failures.is_empty());
     let caption_ptr = sheet_ptr(&app, "GUICaption.png");
     let scroll_ptr = sheet_ptr(&app, "GUIScroll.png");
 
@@ -2585,25 +2278,18 @@ fn mid_round_graphics_group_arrival_rebinds_changed_sheets_only() {
     // unchanged winners keep their loaded surfaces (the group-id cache).
     events.send(arrival(32, &pack_b)).test_value();
     app.test_network_events();
-    assert_eq!(sheet_ptr(&app, "GUICaption.png"), caption_ptr);
-    assert_eq!(sheet_ptr(&app, "GUIScroll.png"), scroll_ptr);
-    assert_eq!(
-        app.assets
-            .startup_dialog_images
-            .get("GUIIcons.png")
-            .expect("overloaded icons")
-            .pixels()[..4],
-        [0x33, 0x33, 0x33, 0xff]
-    );
+    main_assert_eq!(sheet_ptr(&app, "GUICaption.png") => caption_ptr);
+    main_assert_eq!(sheet_ptr(&app, "GUIScroll.png") => scroll_ptr);
+    main_assert_eq!(app.assets.startup_dialog_images.get("GUIIcons.png").expect("overloaded icons").pixels()[..4] => [0x33, 0x33, 0x33, 0xff]);
     let icons_ptr = sheet_ptr(&app, "GUIIcons.png");
 
     // A re-arrival of an already registered root is the
     // idRegisteredMainGroupSetFiles skip: every winner stays loaded.
     events.send(arrival(33, &pack_a)).test_value();
     app.test_network_events();
-    assert_eq!(sheet_ptr(&app, "GUICaption.png"), caption_ptr);
-    assert_eq!(sheet_ptr(&app, "GUIScroll.png"), scroll_ptr);
-    assert_eq!(sheet_ptr(&app, "GUIIcons.png"), icons_ptr);
+    main_assert_eq!(sheet_ptr(&app, "GUICaption.png") => caption_ptr);
+    main_assert_eq!(sheet_ptr(&app, "GUIScroll.png") => scroll_ptr);
+    main_assert_eq!(sheet_ptr(&app, "GUIIcons.png") => icons_ptr);
 
     // A malformed winner in an arriving group fails typed before pixels.
     events.send(arrival(34, &pack_c)).test_value();
@@ -2623,9 +2309,9 @@ fn mid_round_graphics_group_arrival_rebinds_changed_sheets_only() {
                     )],
                 },
             );
-    assert_eq!(sheet_ptr(&app, "GUICaption.png"), caption_ptr);
-    assert_eq!(sheet_ptr(&app, "GUIScroll.png"), scroll_ptr);
-    assert_eq!(sheet_ptr(&app, "GUIIcons.png"), icons_ptr);
+    main_assert_eq!(sheet_ptr(&app, "GUICaption.png") => caption_ptr);
+    main_assert_eq!(sheet_ptr(&app, "GUIScroll.png") => scroll_ptr);
+    main_assert_eq!(sheet_ptr(&app, "GUIIcons.png") => icons_ptr);
 
     // A host rebuilds its set from the retained activation inputs
     // (OpenScenario chain + effective definition roots) and overloads
@@ -2645,15 +2331,7 @@ fn mid_round_graphics_group_arrival_rebinds_changed_sheets_only() {
     host_app.network = Some(host_manager);
     host_events.send(arrival(41, &pack_a)).test_value();
     host_app.test_network_events();
-    assert_eq!(
-        host_app
-            .assets
-            .startup_dialog_images
-            .get("GUICaption.png")
-            .expect("host overloaded caption")
-            .pixels()[..4],
-        [0x31, 0x11, 0x11, 0xff]
-    );
+    main_assert_eq!(host_app.assets.startup_dialog_images.get("GUICaption.png").expect("host overloaded caption").pixels()[..4] => [0x31, 0x11, 0x11, 0xff]);
 }
 
 #[test]
@@ -2664,7 +2342,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
     let check =
         |app: &GameApp, before: RuntimeGlobalUiSnapshot, error: EngineError, label: &str| {
             assert_engine_parity_boundary(error, boundary());
-            assert_eq!(runtime_global_ui_snapshot(app), before, "{label}");
+            main_assert_eq!(runtime_global_ui_snapshot(app) => before, "{label}");
         };
 
     let mut definition = new_classic_menu_app(640, 480);
@@ -2808,15 +2486,11 @@ fn startup_fade_modulates_retained_draws_and_text_like_cpp() {
             startup_fade_packed_modulation(opacity),
         );
         let (draw, text) = faded_batch(opacity);
-        assert_eq!(draw, expected, "retained draw at opacity {opacity}");
-        assert_eq!(text, expected, "semantic text at opacity {opacity}");
+        main_assert_eq!(draw => expected, "retained draw at opacity {opacity}");
+        main_assert_eq!(text => expected, "semantic text at opacity {opacity}");
     }
-    assert_ne!(faded_batch(outgoing), faded_batch(incoming));
-    assert_eq!(
-        faded_batch(u8::MAX),
-        (source, source),
-        "C4GUI disables modulation at the fully visible endpoint"
-    );
+    main_assert_ne!(faded_batch(outgoing) => faded_batch(incoming));
+    main_assert_eq!(faded_batch(u8::MAX) => (source, source), "C4GUI disables modulation at the fully visible endpoint");
 
     let mut app = new_real_menu_app(320, 200);
     app.startup_dialog_fade = None;
@@ -2827,10 +2501,7 @@ fn startup_fade_modulates_retained_draws_and_text_like_cpp() {
     let presentation = retained_test_presentation(&app);
     let frame = app.render_retained_gpu_frame(presentation).test_value();
     assert_retained_frame_has_commands("startup fade", &frame);
-    assert!(
-        frame.layers.len() >= 3,
-        "startup fade must retain underlay, outgoing, and incoming painter layers"
-    );
+    main_assert!(frame.layers.len() >= 3, "startup fade must retain underlay, outgoing, and incoming painter layers");
 }
 
 #[test]
@@ -2838,28 +2509,30 @@ fn pixels_handles_surface_recovery_and_app_handles_renderer_failures() {
     // The local Pixels patch bounds outdated/suboptimal retries, returns a
     // successful skipped outcome for timeout/occlusion, and surfaces Lost so
     // the app can rebuild Pixels. Other escaping errors remain fatal.
-    assert_eq!(
+    main_assert_eq!(
         retained_gpu_present_recovery(
-            &anyhow::Error::new(clonk_surface::SurfaceError::Validation).context("retained presentation")
-        ),
+            &anyhow::Error::new(clonk_surface::SurfaceError::Validation)
+                .context("retained presentation")
+        ) =>
         RetainedGpuPresentRecovery::Fatal
     );
     let masked_device_loss = retained_gpu_presentation_error(
-        anyhow::Error::new(clonk_surface::SurfaceError::Validation).context("retained presentation"),
+        anyhow::Error::new(clonk_surface::SurfaceError::Validation)
+            .context("retained presentation"),
         Err(gpu_renderer::GpuRendererError::DeviceRecreationRequired {
             reason: gpu_renderer::RetainedGpuRecreateReason::DeviceLost,
             detail: "Destroyed".to_owned(),
         }),
     );
-    assert_eq!(
-        retained_gpu_present_recovery(&masked_device_loss),
+    main_assert_eq!(
+        retained_gpu_present_recovery(&masked_device_loss) =>
         RetainedGpuPresentRecovery::RebuildDevice,
         "recorded renderer health must override the Pixels error that escaped first"
     );
     let surface_loss = anyhow::Error::new(clonk_surface::SurfaceError::SurfaceLost)
         .context("retained presentation surface was lost");
-    assert_eq!(
-        retained_gpu_present_recovery(&surface_loss),
+    main_assert_eq!(
+        retained_gpu_present_recovery(&surface_loss) =>
         RetainedGpuPresentRecovery::RebuildDevice,
         "a surface-only loss must rebuild Pixels even while renderer health is clean"
     );
@@ -2869,27 +2542,18 @@ fn pixels_handles_surface_recovery_and_app_handles_renderer_failures() {
             detail: "Parent device is lost".to_owned(),
         })
         .context("retained presentation");
-    assert_eq!(
-        retained_gpu_present_recovery(&observed_device_loss),
-        RetainedGpuPresentRecovery::RebuildDevice
-    );
+    main_assert_eq!(retained_gpu_present_recovery(&observed_device_loss) => RetainedGpuPresentRecovery::RebuildDevice);
     let queue_submit_loss =
         "Error in Queue::submit: Validation Error: Parent device is lost".to_owned();
     let detail = wgpu_device_loss_panic_detail(&queue_submit_loss).test_value();
-    assert_eq!(
-        retained_gpu_present_recovery(&retained_gpu_device_loss_error(detail)),
-        RetainedGpuPresentRecovery::RebuildDevice
-    );
+    main_assert_eq!(retained_gpu_present_recovery(&retained_gpu_device_loss_error(detail)) => RetainedGpuPresentRecovery::RebuildDevice);
     let unrelated_panic = "index out of bounds".to_owned();
-    assert_eq!(wgpu_device_loss_panic_detail(&unrelated_panic), None);
+    main_assert_eq!(wgpu_device_loss_panic_detail(&unrelated_panic) => None);
     let renderer_validation = anyhow::Error::new(gpu_renderer::GpuRendererError::DeviceFatal {
         reason: gpu_renderer::RetainedGpuFatalReason::Validation,
         detail: "invalid bind group".to_owned(),
     });
-    assert_eq!(
-        retained_gpu_present_recovery(&renderer_validation),
-        RetainedGpuPresentRecovery::Fatal
-    );
+    main_assert_eq!(retained_gpu_present_recovery(&renderer_validation) => RetainedGpuPresentRecovery::Fatal);
 
     let oversized_source =
         anyhow::Error::new(gpu_renderer::GpuRendererError::TextureDimensionExceeded {
@@ -2898,12 +2562,9 @@ fn pixels_handles_surface_recovery_and_app_handles_renderer_failures() {
             extent: [33_900, 1],
             max_texture_dimension_2d: 32_768,
         });
-    assert_eq!(
-        retained_gpu_present_recovery(&oversized_source),
-        RetainedGpuPresentRecovery::CpuFallback
-    );
-    assert!(should_attempt_retained_gpu_presentation(false));
-    assert!(!should_attempt_retained_gpu_presentation(true));
+    main_assert_eq!(retained_gpu_present_recovery(&oversized_source) => RetainedGpuPresentRecovery::CpuFallback);
+    main_assert!(should_attempt_retained_gpu_presentation(false));
+    main_assert!(!should_attempt_retained_gpu_presentation(true));
     let oversized_composition =
         anyhow::Error::new(gpu_renderer::GpuRendererError::TextureDimensionExceeded {
             kind: gpu_renderer::RetainedGpuTextureKind::Composition,
@@ -2911,10 +2572,7 @@ fn pixels_handles_surface_recovery_and_app_handles_renderer_failures() {
             extent: [33_900, 1],
             max_texture_dimension_2d: 32_768,
         });
-    assert_eq!(
-        retained_gpu_present_recovery(&oversized_composition),
-        RetainedGpuPresentRecovery::Fatal
-    );
+    main_assert_eq!(retained_gpu_present_recovery(&oversized_composition) => RetainedGpuPresentRecovery::Fatal);
 }
 
 struct FakeSystemFontProvider {
@@ -2964,12 +2622,7 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
     let root = tempdir();
     install_global_gui_and_loader_test_root(root.path());
     let user = root.path().join("user");
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(root.path())),
-        ("LC_CONTENT_DIR", None),
-        ("LC_USER_DATA_DIR", Some(user.as_path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = isolated_test_app_paths(root.path(), user.as_path());
     paths.ensure_user_dirs().test_value();
     let font_bytes: Arc<[u8]> = fs::read(root.path().join("planet/System.c4g/Endeavour.ttf"))
         .test_value()
@@ -2986,8 +2639,8 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
     )
     .test_value();
     let native = gui.native_source.test_value();
-    assert_eq!(native.bytes.as_ref(), font_bytes.as_ref());
-    assert_eq!(native.face_index, 0);
+    main_assert_eq!(native.bytes.as_ref() => font_bytes.as_ref());
+    main_assert_eq!(native.face_index => 0);
     resolve_classic_startup_font_bundle_for_request_with_system_fonts(
         &paths,
         "MOCK SYSTEM FACE",
@@ -2997,10 +2650,7 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
         &provider,
     )
     .test_value();
-    assert!(
-        provider.requests().iter().all(|(_, weight)| *weight == 400),
-        "the requested FontDef weight reaches system lookup"
-    );
+    main_assert!(provider.requests().iter().all(|(_, weight)| *weight == 400), "the requested FontDef weight reaches system lookup");
 
     provider.clear_requests();
     resolve_classic_font_bundle_for_request_with_system_fonts(
@@ -3012,7 +2662,7 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
         &provider,
     )
     .test_value();
-    assert!(provider.requests().is_empty());
+    main_assert!(provider.requests().is_empty());
 
     let explicit_file = tempfile::Builder::new()
         .prefix("lc-font-")
@@ -3025,10 +2675,7 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
         .file_name()
         .and_then(|name| name.to_str())
         .test_value();
-    assert!(
-        clonk_script::c4_string_bytes(explicit_face).len() <= 30,
-        "the explicit-file precedence fixture must fit C4MaxName"
-    );
+    main_assert!(clonk_script::c4_string_bytes(explicit_face).len() <= 30, "the explicit-file precedence fixture must fit C4MaxName");
     resolve_classic_font_bundle_for_request_with_system_fonts(
         &paths,
         explicit_face,
@@ -3038,7 +2685,7 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
         &provider,
     )
     .test_value();
-    assert!(provider.requests().is_empty());
+    main_assert!(provider.requests().is_empty());
 
     let missing = resolve_classic_font_bundle_for_request_with_system_fonts(
         &paths,
@@ -3050,7 +2697,7 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
     )
     .err()
     .test_value();
-    assert!(missing.to_string().contains("is unavailable"));
+    main_assert!(missing.to_string().contains("is unavailable"));
 
     let malformed = FakeSystemFontProvider::new("Malformed System Face", b"not a font".as_slice());
     let error = resolve_classic_font_bundle_for_request_with_system_fonts(
@@ -3063,9 +2710,7 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
     )
     .err()
     .test_value();
-    assert!(error
-        .to_string()
-        .contains("failed to initialize classic vector font"));
+    main_assert!(error.to_string().contains("failed to initialize classic vector font"));
 }
 
 #[test]
@@ -3074,12 +2719,7 @@ fn font_catalog_skips_bad_optional_candidates_and_falls_through_matching_faces()
     let root = tempdir();
     install_global_gui_and_loader_test_root(root.path());
     let user = root.path().join("user");
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(root.path())),
-        ("LC_CONTENT_DIR", None),
-        ("LC_USER_DATA_DIR", Some(user.as_path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = isolated_test_app_paths(root.path(), user.as_path());
     paths.ensure_user_dirs().test_value();
     let system_font = fs::read(root.path().join("planet/System.c4g/Endeavour.ttf")).test_value();
 
@@ -3108,7 +2748,7 @@ fn font_catalog_skips_bad_optional_candidates_and_falls_through_matching_faces()
         unreadable_vector,
     )
     .test_value();
-    assert!(unreadable_vector.read_file("Unreadable.ttf").is_err());
+    main_assert!(unreadable_vector.read_file("Unreadable.ttf").is_err());
 
     let mut unreadable_definitions =
         packed_test_group(&[("Fonts.txt", false, b"[Font]\nName=MustNotLoad\n")]);
@@ -3118,26 +2758,16 @@ fn font_catalog_skips_bad_optional_candidates_and_falls_through_matching_faces()
         unreadable_definitions,
     )
     .test_value();
-    assert!(unreadable_definitions.read_file("Fonts.txt").is_err());
+    main_assert!(unreadable_definitions.read_file("Fonts.txt").is_err());
 
     let corrupt_face = Group::from_raw_memory(
         PathBuf::from("corrupt-font-face.c4g"),
         packed_test_group(&[("FallbackFace.ttf", false, b"not a font")]),
     )
     .test_value();
-    assert_eq!(
-        corrupt_face
-            .read_file("FallbackFace.ttf")
-            .expect("corrupt face remains readable")
-            .as_slice(),
-        b"not a font"
-    );
+    main_assert_eq!(corrupt_face.read_file("FallbackFace.ttf").expect("corrupt face remains readable").as_slice() => b"not a font");
 
-    let registration = |registration_order, group| LoaderGroupRegistration {
-        priority: 100,
-        registration_order,
-        group,
-    };
+    let registration = |registration_order, group| rendering_fixture!(loader_group: 100, registration_order, group);
     let registrations = vec![
         registration(0, oldest),
         registration(1, newest_usable),
@@ -3156,14 +2786,7 @@ fn font_catalog_skips_bad_optional_candidates_and_falls_through_matching_faces()
         &provider,
     )
     .test_value();
-    assert_eq!(
-        bundle
-            .native_source
-            .expect("matching winning candidates retain a native source")
-            .bytes
-            .as_ref(),
-        newest_usable_font.as_slice()
-    );
+    main_assert_eq!(bundle.native_source.expect("matching winning candidates retain a native source").bytes.as_ref() => newest_usable_font.as_slice());
     resolve_classic_startup_font_bundle_for_request_with_system_fonts(
         &paths,
         "FallbackFace",
@@ -3173,10 +2796,7 @@ fn font_catalog_skips_bad_optional_candidates_and_falls_through_matching_faces()
         &provider,
     )
     .test_value();
-    assert!(
-        provider.requests().is_empty(),
-        "the system face is attempted only after every matching registered face"
-    );
+    main_assert!(provider.requests().is_empty(), "the system face is attempted only after every matching registered face");
 
     let bad_registrations = [
         registration(2, unreadable_vector),
@@ -3192,19 +2812,9 @@ fn font_catalog_skips_bad_optional_candidates_and_falls_through_matching_faces()
         &provider,
     )
     .test_value();
-    assert_eq!(
-        system_bundle
-            .native_source
-            .expect("system fallback supplies a native source")
-            .bytes
-            .as_ref(),
-        system_font.as_slice()
-    );
-    assert!(!provider.requests().is_empty());
-    assert!(provider
-        .requests()
-        .iter()
-        .all(|(family, weight)| family == "FallbackFace" && *weight == 400));
+    main_assert_eq!(system_bundle.native_source.expect("system fallback supplies a native source").bytes.as_ref() => system_font.as_slice());
+    main_assert!(!provider.requests().is_empty());
+    main_assert!(provider.requests().iter().all(|(family, weight)| family == "FallbackFace" && *weight == 400));
 }
 
 #[test]
@@ -3213,12 +2823,7 @@ fn general_font_size_sixteen_builds_the_cpp_derived_app_bundle() {
     let root = tempdir();
     install_global_gui_and_loader_test_root(root.path());
     let user = root.path().join("user");
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(root.path())),
-        ("LC_CONTENT_DIR", None),
-        ("LC_USER_DATA_DIR", Some(user.as_path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = isolated_test_app_paths(root.path(), user.as_path());
     paths.ensure_user_dirs().test_value();
     fs::write(
         paths.config_file(),
@@ -3227,13 +2832,13 @@ fn general_font_size_sixteen_builds_the_cpp_derived_app_bundle() {
     .test_value();
 
     let bundle = resolve_classic_font_bundle(&paths, None, &[], &[]).test_value();
-    assert_eq!(bundle.fonts.mini.line_height, 20); // 16*12/14 = 13px
-    assert_eq!(bundle.fonts.main_small.line_height, 22); // 16*13/14 = 14px
-    assert_eq!(bundle.fonts.text.line_height, 25); // 16px
-    assert_eq!(bundle.fonts.caption.line_height, 28); // 16*16/14 = 18px
-    assert_eq!(bundle.fonts.title.line_height, 39); // 16*22/14 = 25px
-    assert_eq!(bundle.tooltip.line_height, 25);
-    assert_eq!(bundle.tooltip.h_space, 0);
+    main_assert_eq!(bundle.fonts.mini.line_height => 20); // 16*12/14 = 13px
+    main_assert_eq!(bundle.fonts.main_small.line_height => 22); // 16*13/14 = 14px
+    main_assert_eq!(bundle.fonts.text.line_height => 25); // 16px
+    main_assert_eq!(bundle.fonts.caption.line_height => 28); // 16*16/14 = 18px
+    main_assert_eq!(bundle.fonts.title.line_height => 39); // 16*22/14 = 25px
+    main_assert_eq!(bundle.tooltip.line_height => 25);
+    main_assert_eq!(bundle.tooltip.h_space => 0);
     // The native atlas builder used to carry a hard-coded 22/16/14/13/12
     // role map, so the only safe answer at size 16 was to refuse rather
     // than impersonate a recipe it could not serve. It now carries the
@@ -3241,8 +2846,8 @@ fn general_font_size_sixteen_builds_the_cpp_derived_app_bundle() {
     // claim a role map that disagrees with the bundle it came from, which
     // is the invariant this test has always been about.
     let native = bundle.native_source.test_ref();
-    assert_eq!(
-        native.sizes,
+    main_assert_eq!(
+        native.sizes =>
         clonk_frontend::clonk_fonts::NativeFontSizes {
             title: 25,
             caption: 18,
@@ -3267,16 +2872,8 @@ fn graphics_group_double_reversal_makes_actual_parent_beat_later_origin() {
     }
     fs::create_dir(&fallback).test_value();
     let registrations = vec![
-        LoaderGroupRegistration {
-            priority: 101,
-            registration_order: 1,
-            group: Group::open(&actual).expect("actual group"),
-        },
-        LoaderGroupRegistration {
-            priority: 101,
-            registration_order: 2,
-            group: Group::open(&origin).expect("origin group"),
-        },
+        rendering_fixture!(loader_group: 101, 1, Group::open(&actual).expect("actual group")),
+        rendering_fixture!(loader_group: 101, 2, Group::open(&origin).expect("origin group")),
     ];
     let graphics = loader_graphics_registrations(&registrations).test_value();
     let image = load_named_graphics_image(
@@ -3285,7 +2882,7 @@ fn graphics_group_double_reversal_makes_actual_parent_beat_later_origin() {
         &Group::open(&fallback).test_value(),
     )
     .test_value();
-    assert_eq!(image.pixels(), [255, 0, 0, 255]);
+    main_assert_eq!(image.pixels() => [255, 0, 0, 255]);
 }
 
 #[test]
@@ -3301,45 +2898,33 @@ fn graphics_stem_resolver_matches_find_suitable_file_extension_bug() {
         [0, 0, 255, 255],
         image::ImageFormat::Bmp,
     );
-    let registrations = vec![LoaderGroupRegistration {
-        priority: 200,
-        registration_order: 0,
-        group: Group::open(&override_group).expect("override group"),
-    }];
+    let registrations = vec![
+        rendering_fixture!(loader_group: 200, 0, Group::open(&override_group).expect("override group")),
+    ];
     let base_group = Group::open(&base).test_value();
     let selected = select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
         .test_value();
-    assert!(!selected.from_registration);
-    assert_eq!(
-        selected.source.entry.relative_path,
-        PathBuf::from("GUIBigArrows.png")
-    );
-    assert_eq!(
+    main_assert!(!selected.from_registration);
+    main_assert_eq!(selected.source.entry.relative_path => PathBuf::from("GUIBigArrows.png"));
+    main_assert_eq!(
         decode_selected_loader(&selected.source)
             .expect("decode selected base png")
-            .pixels(),
+            .pixels() =>
         [255, 0, 0, 255],
         "FindSuitableFile never updates iPrio, so a base png replaces a scenario-priority bmp"
     );
 
     write_preview_png(&override_group.join("GUIBigArrows.png"), [0, 255, 0, 255]);
-    let registrations = vec![LoaderGroupRegistration {
-        priority: 200,
-        registration_order: 0,
-        group: Group::open(&override_group).expect("reopen override group"),
-    }];
+    let registrations = vec![rendering_fixture!(
+        loader_group:
+            200,
+            0,
+            Group::open(&override_group).expect("reopen override group"),
+    )];
     let selected = select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
         .test_value();
-    assert_eq!(
-        selected.source.entry.relative_path,
-        PathBuf::from("GUIBigArrows.png")
-    );
-    assert_eq!(
-        decode_selected_loader(&selected.source)
-            .expect("decode selected png")
-            .pixels(),
-        [0, 255, 0, 255]
-    );
+    main_assert_eq!(selected.source.entry.relative_path => PathBuf::from("GUIBigArrows.png"));
+    main_assert_eq!(decode_selected_loader(&selected.source).expect("decode selected png").pixels() => [0, 255, 0, 255]);
 }
 
 #[test]
@@ -3443,11 +3028,8 @@ fn game_graphics_refreshes_hud_cursor_and_palette_then_reverts_at_preinit() {
         13,
         [0, 200, 0, 255],
     );
-    let scenario_registrations = [LoaderGroupRegistration {
-        priority: 200,
-        registration_order: 0,
-        group: Group::open(&scenario_path).test_value(),
-    }];
+    let scenario_registrations =
+        [rendering_fixture!(loader_group: 200, 0, Group::open(&scenario_path).test_value())];
     let active = resolve_game_graphics_resources(
         &scenario_registrations,
         &base,
@@ -3455,58 +3037,36 @@ fn game_graphics_refreshes_hud_cursor_and_palette_then_reverts_at_preinit() {
         true,
     )
     .test_value();
-    assert_eq!(
+    main_assert_eq!(
         active
             .hud_graphics
             .rank
             .as_ref()
             .expect("scenario rank")
-            .pixels(),
+            .pixels() =>
         [4, 8, 12, 255],
         "indexed BMP pixels use the selected game palette, not the embedded BMP palette"
     );
-    assert_eq!(
-        active
-            .hud_graphics
-            .control
-            .as_ref()
-            .expect("scenario control")
-            .pixels(),
-        [80, 90, 100, 255]
-    );
-    assert_eq!(
+    main_assert_eq!(active.hud_graphics.control.as_ref().expect("scenario control").pixels() => [80, 90, 100, 255]);
+    main_assert_eq!(
         active
             .hud_graphics
             .gamepad
             .as_ref()
             .expect("scenario gamepad")
-            .pixels(),
+            .pixels() =>
         [140, 150, 160, 255],
         "the active group set reloads the startup gamepad facet"
     );
-    assert_eq!(active.palette.color(6), Color::opaque(12, 16, 20));
-    assert_eq!(
-        active
-            .options
-            .as_deref()
-            .expect("scenario options")
-            .pixels(),
-        [110, 120, 130, 255]
-    );
-    assert_eq!(
-        active
-            .liquid_animation
-            .as_deref()
-            .expect("scenario liquid animation")
-            .pixels(),
-        [170, 180, 190, 255]
-    );
-    assert_eq!(
+    main_assert_eq!(active.palette.color(6) => Color::opaque(12, 16, 20));
+    main_assert_eq!(active.options.as_deref().expect("scenario options").pixels() => [110, 120, 130, 255]);
+    main_assert_eq!(active.liquid_animation.as_deref().expect("scenario liquid animation").pixels() => [170, 180, 190, 255]);
+    main_assert_eq!(
         active
             .cursor_atlas
             .image_for_resolution(1280)
             .expect("cached large cursor")
-            .pixels()[..4],
+            .pixels()[..4] =>
         [10, 20, 30, 255],
         "a valid legacy Cursor suppresses sized overrides, then the cached pre-game size wins"
     );
@@ -3518,71 +3078,31 @@ fn game_graphics_refreshes_hud_cursor_and_palette_then_reverts_at_preinit() {
         [0, 200, 0, 255],
     );
     let sized = resolve_game_graphics_resources(
-        &[LoaderGroupRegistration {
-            priority: 200,
-            registration_order: 0,
-            group: Group::open(&sized_path).test_value(),
-        }],
+        &[rendering_fixture!(loader_group: 200, 0, Group::open(&sized_path).test_value())],
         &base,
         Some(Arc::clone(&startup.cursor_atlas)),
         true,
     )
     .test_value();
     let sized_large = sized.cursor_atlas.image_for_resolution(1280).test_value();
-    assert_eq!(sized_large.height(), 13);
-    assert_eq!(&sized_large.pixels()[..4], &[0, 200, 0, 255]);
-    assert_eq!(
-        (
-            35 * sized_large.height(),
-            36 * sized_large.height(),
-            38 * sized_large.height()
-        ),
-        (455, 468, 494)
-    );
+    main_assert_eq!(sized_large.height() => 13);
+    main_assert_eq!(&sized_large.pixels()[..4] => &[0, 200, 0, 255]);
+    main_assert_eq!((35 * sized_large.height(), 36 * sized_large.height(), 38 * sized_large.height()) => (455, 468, 494));
 
     let mut app = new_menu_app(64, 64);
     let startup_hud = app.assets.hud_graphics();
     let startup_palette = app.assets.game_palette();
     app.active_game_graphics = Some(active.clone());
     app.configure_running_state("Overridden".to_string(), 64);
-    assert_eq!(
-        app.graphics
-            .hud_graphics()
-            .rank
-            .as_ref()
-            .expect("active rank")
-            .pixels(),
-        [4, 8, 12, 255]
-    );
-    assert_eq!(
-        app.graphics.game_palette().color(6),
-        Color::opaque(12, 16, 20)
-    );
-    assert_eq!(
-        app.ensure_ingame_menu_gfx()
-            .options
-            .as_ref()
-            .expect("active options sheet")
-            .pixels(),
-        [110, 120, 130, 255]
-    );
+    main_assert_eq!(app.graphics.hud_graphics().rank.as_ref().expect("active rank").pixels() => [4, 8, 12, 255]);
+    main_assert_eq!(app.graphics.game_palette().color(6) => Color::opaque(12, 16, 20));
+    main_assert_eq!(app.ensure_ingame_menu_gfx().options.as_ref().expect("active options sheet").pixels() => [110, 120, 130, 255]);
     app.resize(80, 80).test_value();
-    assert_eq!(
-        app.graphics
-            .hud_graphics()
-            .control
-            .as_ref()
-            .expect("active control after resize")
-            .pixels(),
-        [80, 90, 100, 255]
-    );
+    main_assert_eq!(app.graphics.hud_graphics().control.as_ref().expect("active control after resize").pixels() => [80, 90, 100, 255]);
     app.return_to_menu();
-    assert!(app.active_game_graphics.is_none());
-    assert_eq!(app.graphics.hud_graphics().as_ref(), startup_hud.as_ref());
-    assert_eq!(
-        app.graphics.game_palette().as_ref(),
-        startup_palette.as_ref()
-    );
+    main_assert!(app.active_game_graphics.is_none());
+    main_assert_eq!(app.graphics.hud_graphics().as_ref() => startup_hud.as_ref());
+    main_assert_eq!(app.graphics.game_palette().as_ref() => startup_palette.as_ref());
 }
 
 #[test]
@@ -3599,24 +3119,12 @@ fn initial_extra_override_rebinds_canonical_and_malformed_winner_never_falls_bac
     );
     {
         let user = valid.path().join("user");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(valid.path())),
-            ("LC_CONTENT_DIR", None),
-            ("LC_USER_DATA_DIR", Some(user.as_path())),
-        ]);
-        let paths = test_app_paths();
+        let (_guard, paths) = isolated_test_app_paths(valid.path(), user.as_path());
         let assets = FrontendAssets::load(Some(&paths));
         assets
             .require_classic_global_gui_bootstrap_resources(&HashMap::new())
             .test_value();
-        assert_eq!(
-            assets
-                .startup_dialog_images
-                .get("GUIBigArrows.png")
-                .expect("canonical renderer key rebound")
-                .pixels(),
-            [0x12, 0x34, 0x56, 0xff]
-        );
+        main_assert_eq!(assets.startup_dialog_images.get("GUIBigArrows.png").expect("canonical renderer key rebound").pixels() => [0x12, 0x34, 0x56, 0xff]);
     }
 
     let malformed = tempdir();
@@ -3630,17 +3138,12 @@ fn initial_extra_override_rebinds_canonical_and_malformed_winner_never_falls_bac
     );
     {
         let user = malformed.path().join("user");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(malformed.path())),
-            ("LC_CONTENT_DIR", None),
-            ("LC_USER_DATA_DIR", Some(user.as_path())),
-        ]);
-        let paths = test_app_paths();
+        let (_guard, paths) = isolated_test_app_paths(malformed.path(), user.as_path());
         let assets = FrontendAssets::load(Some(&paths));
         let error = assets
             .require_classic_global_gui_bootstrap_resources(&HashMap::new())
             .expect_err("malformed winning png must not fall back to base PNG");
-        assert!(matches!(
+        main_assert!(matches!(
             error,
             ClassicParityBoundary::GlobalGuiBootstrapResources { ref issues }
                 if issues.len() == 1
@@ -3648,12 +3151,7 @@ fn initial_extra_override_rebinds_canonical_and_malformed_winner_never_falls_bac
                     && matches!(&issues[0].defect,
                         ClassicGuiBootstrapDefect::Malformed { .. })
         ));
-        assert!(
-            !assets
-                .startup_dialog_images
-                .contains_key("GUIBigArrows.png"),
-            "a malformed winning source must remove the lower base image"
-        );
+        main_assert!(!assets.startup_dialog_images.contains_key("GUIBigArrows.png"), "a malformed winning source must remove the lower base image");
     }
 }
 
@@ -3665,12 +3163,7 @@ fn real_app_constructor_and_system_font_sources_follow_global_order() {
     install_global_gui_test_root(missing.path(), Some("GUISpinBoxArrow.png"));
     {
         let user = missing.path().join("user");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(missing.path())),
-            ("LC_CONTENT_DIR", None),
-            ("LC_USER_DATA_DIR", Some(user.as_path())),
-        ]);
-        let paths = test_app_paths();
+        let (_guard, paths) = isolated_test_app_paths(missing.path(), user.as_path());
         let error = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
             .err()
             .test_value();
@@ -3685,21 +3178,16 @@ fn real_app_constructor_and_system_font_sources_follow_global_order() {
     fs::write(active_mapping.path().join("planet/System.c4g/Fonts.txt"), "[Font]\nName=Endeavour\nSize=14\nLogFont=Endeavour,12\nSmallFont=Endeavour,13\nFont=Endeavour,14\nCaptionFont=Endeavour,16\nTitleFont=Endeavour,22\n").test_value();
     {
         let user = active_mapping.path().join("user");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(active_mapping.path())),
-            ("LC_CONTENT_DIR", None),
-            ("LC_USER_DATA_DIR", Some(user.as_path())),
-        ]);
-        let paths = test_app_paths();
+        let (_guard, paths) = isolated_test_app_paths(active_mapping.path(), user.as_path());
         let assets = FrontendAssets::load(Some(&paths));
         assets
             .require_classic_global_gui_bootstrap_resources(&HashMap::new())
             .test_value();
         let fonts = assets.clonk_fonts.as_deref().test_value();
-        assert_eq!(fonts.mini.line_height, 18);
-        assert_eq!(fonts.text.line_height, 22);
-        assert_eq!(fonts.caption.line_height, 25);
-        assert_eq!(fonts.title.line_height, 34);
+        main_assert_eq!(fonts.mini.line_height => 18);
+        main_assert_eq!(fonts.text.line_height => 22);
+        main_assert_eq!(fonts.caption.line_height => 25);
+        main_assert_eq!(fonts.title.line_height => 34);
     }
 
     let ambiguous = tempdir();
@@ -3711,12 +3199,7 @@ fn real_app_constructor_and_system_font_sources_follow_global_order() {
     .test_value();
     {
         let user = ambiguous.path().join("user");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(ambiguous.path())),
-            ("LC_CONTENT_DIR", None),
-            ("LC_USER_DATA_DIR", Some(user.as_path())),
-        ]);
-        let paths = test_app_paths();
+        let (_guard, paths) = isolated_test_app_paths(ambiguous.path(), user.as_path());
         let assets = FrontendAssets::load(Some(&paths));
         assets
             .require_classic_global_gui_bootstrap_resources(&HashMap::new())
@@ -3730,16 +3213,8 @@ fn scale_fifty_options_close_and_rejected_test_preserve_raw_value() {
     use clonk_frontend::startup_options_dlg::OptionsDlgAction;
 
     let _lock = env_lock().lock();
-    let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_root)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(
         paths.config_file(),
@@ -3750,51 +3225,31 @@ fn scale_fifty_options_close_and_rejected_test_preserve_raw_value() {
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     app.open_options_menu();
     let graphics = app.startup_options_dialog.test_ref().graphics();
-    assert_eq!(graphics.applied_scale_percent, 50);
-    assert_eq!(graphics.proposed_scale_percent, 100);
+    main_assert_eq!(graphics.applied_scale_percent => 50);
+    main_assert_eq!(graphics.proposed_scale_percent => 100);
 
     let action = graphics.request_scale_test().test_value();
     app.process_options_dialog_actions(vec![OptionsDlgAction::Graphics(action)])
         .test_value();
-    assert_eq!(
-        app.pending_options_display_requests.pop_front(),
-        Some(OptionsDisplayRequest::SetScale {
-            percent: 100,
-            persist: false,
-        })
-    );
+    main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 100, false)));
     app.finish_message_dialog(MessageDialogResult::No)
         .test_value();
-    assert_eq!(
-        app.pending_options_display_requests.pop_front(),
-        Some(OptionsDisplayRequest::SetScale {
-            percent: 50,
-            persist: false,
-        })
-    );
+    main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 50, false)));
     let graphics = app.startup_options_dialog.test_ref().graphics();
-    assert_eq!(graphics.applied_scale_percent, 50);
-    assert_eq!(graphics.proposed_scale_percent, 100);
+    main_assert_eq!(graphics.applied_scale_percent => 50);
+    main_assert_eq!(graphics.proposed_scale_percent => 100);
 
     app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
         .test_value();
     let persisted = Config::load(paths.config_file()).test_value();
-    assert_eq!(persisted.get_in(Some("Graphics"), "Scale"), Some("50"));
+    main_assert_eq!(persisted.get_in(Some("Graphics"), "Scale") => Some("50"));
 }
 
 #[test]
 fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
     let _lock = env_lock().lock();
-    let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_root)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(
         paths.config_file(),
@@ -3808,116 +3263,38 @@ fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
     app.apply_options_font_selection(None, Some(16))
         .test_value();
 
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .program()
-            .font_size,
-        "16"
-    );
-    assert_eq!(
-        app.assets.clonk_fonts.as_ref().unwrap().text.line_height,
-        25
-    );
-    assert_eq!(
-        app.assets
-            .options_book_fonts
-            .as_ref()
-            .unwrap()
-            .book
-            .line_height,
-        25
-    );
-    assert_eq!(app.assets.book_fonts.as_ref().unwrap().text.line_height, 25);
-    assert_eq!(
-        app.assets
-            .plrsel_book_fonts
-            .as_ref()
-            .unwrap()
-            .text
-            .line_height,
-        25
-    );
+    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().program().font_size => "16");
+    main_assert_eq!(app.assets.clonk_fonts.as_ref().unwrap().text.line_height => 25);
+    main_assert_eq!(app.assets.options_book_fonts.as_ref().unwrap().book.line_height => 25);
+    main_assert_eq!(app.assets.book_fonts.as_ref().unwrap().text.line_height => 25);
+    main_assert_eq!(app.assets.plrsel_book_fonts.as_ref().unwrap().text.line_height => 25);
     let config = Config::load(paths.config_file()).test_value();
-    assert_eq!(
-        config.get_in(Some("General"), "FontName"),
-        Some("Endeavour")
-    );
-    assert_eq!(config.get_in(Some("General"), "FontSize"), Some("16"));
+    main_assert_eq!(config.get_in(Some("General"), "FontName") => Some("Endeavour"));
+    main_assert_eq!(config.get_in(Some("General"), "FontSize") => Some("16"));
 
     let before_failure = fs::read(paths.config_file()).test_value();
     app.apply_options_font_selection(Some("Definitely Missing Font".to_string()), None)
         .test_value();
     let error = app.message_dialogs.last().test_value();
-    assert_eq!(error.state.message(), "Error initializing fonts");
-    assert_eq!(
-        error.state.icon(),
-        clonk_frontend::message_dialog::MessageDialogIcon::ERROR
-    );
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .program()
-            .font_size,
-        "16"
-    );
-    assert_eq!(
-        app.assets.clonk_fonts.as_ref().unwrap().text.line_height,
-        25
-    );
-    assert_eq!(fs::read(paths.config_file()).unwrap(), before_failure);
+    main_assert_eq!(error.state.message() => "Error initializing fonts");
+    main_assert_eq!(error.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
+    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().program().font_size => "16");
+    main_assert_eq!(app.assets.clonk_fonts.as_ref().unwrap().text.line_height => 25);
+    main_assert_eq!(fs::read(paths.config_file()).unwrap() => before_failure);
 
     drop(app);
     let mut restarted =
         test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
     wait_for_menu(&mut restarted);
-    assert_eq!(
-        restarted
-            .assets
-            .clonk_fonts
-            .as_ref()
-            .unwrap()
-            .text
-            .line_height,
-        25
-    );
-    assert_eq!(
-        restarted
-            .assets
-            .options_book_fonts
-            .as_ref()
-            .unwrap()
-            .book
-            .line_height,
-        25
-    );
-    assert_eq!(
-        restarted
-            .assets
-            .book_fonts
-            .as_ref()
-            .unwrap()
-            .text
-            .line_height,
-        25
-    );
-    assert_eq!(
-        restarted
-            .assets
-            .plrsel_book_fonts
-            .as_ref()
-            .unwrap()
-            .text
-            .line_height,
-        25
-    );
+    main_assert_eq!(restarted.assets.clonk_fonts.as_ref().unwrap().text.line_height => 25);
+    main_assert_eq!(restarted.assets.options_book_fonts.as_ref().unwrap().book.line_height => 25);
+    main_assert_eq!(restarted.assets.book_fonts.as_ref().unwrap().text.line_height => 25);
+    main_assert_eq!(restarted.assets.plrsel_book_fonts.as_ref().unwrap().text.line_height => 25);
     restarted.open_player_selection_dialog();
     let player_layout = restarted.startup_player_dialog.test_ref().layout();
-    assert_eq!(player_layout.item_height, 29);
-    assert_eq!(
-        player_layout,
+    main_assert_eq!(player_layout.item_height => 29);
+    main_assert_eq!(
+        player_layout =>
         clonk_frontend::startup_plrsel::plrsel_layout_with_fonts(
             1280,
             720,
@@ -3926,64 +3303,24 @@ fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
         )
     );
     restarted.open_options_menu();
-    assert_eq!(
-        restarted
-            .startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .program()
-            .font_size,
-        "16"
-    );
+    main_assert_eq!(restarted.startup_options_dialog.as_ref().unwrap().program().font_size => "16");
 
     fs::remove_file(paths.config_file()).test_value();
     fs::create_dir(paths.config_file()).test_value();
     restarted
         .apply_options_font_selection(None, Some(18))
         .test_value();
-    assert_eq!(
-        restarted
-            .startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .program()
-            .font_size,
-        "16"
-    );
-    assert_eq!(
-        restarted
-            .assets
-            .clonk_fonts
-            .as_ref()
-            .unwrap()
-            .text
-            .line_height,
-        25
-    );
-    assert_eq!(
-        restarted
-            .message_dialogs
-            .last()
-            .expect("font persistence error")
-            .state
-            .message(),
-        "Error initializing fonts"
-    );
+    main_assert_eq!(restarted.startup_options_dialog.as_ref().unwrap().program().font_size => "16");
+    main_assert_eq!(restarted.assets.clonk_fonts.as_ref().unwrap().text.line_height => 25);
+    main_assert_eq!(restarted.message_dialogs.last().expect("font persistence error").state.message() => "Error initializing fonts");
 }
 
 #[test]
 fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
     let _lock = env_lock().lock();
-    let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
+    let install_root = test_repository_root();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_root)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install_root), user_data.path());
     paths.ensure_user_dirs().test_value();
     fs::write(
         paths.config_file(),
@@ -4012,46 +3349,18 @@ fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
     )
     .test_value();
 
-    assert_eq!(app.message_dialogs.len(), dialog_count);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .expect("reopened Options")
-            .program()
-            .font_face,
-        "Mock System Face"
-    );
+    main_assert_eq!(app.message_dialogs.len() => dialog_count);
+    main_assert_eq!(app.startup_options_dialog.as_ref().expect("reopened Options").program().font_face => "Mock System Face");
     let config = Config::load(paths.config_file()).test_value();
-    assert_eq!(
-        config.get_in(Some("General"), "FontName"),
-        Some("Mock System Face")
-    );
-    assert!(!Arc::ptr_eq(
-        app.assets.clonk_fonts.as_ref().unwrap(),
-        &prior_gui
-    ));
-    assert!(!Arc::ptr_eq(
-        app.assets.book_fonts.as_ref().unwrap(),
-        &prior_book
-    ));
-    assert!(!Arc::ptr_eq(
-        app.assets.options_book_fonts.as_ref().unwrap(),
-        &prior_options
-    ));
-    assert!(!Arc::ptr_eq(
-        app.assets.plrsel_book_fonts.as_ref().unwrap(),
-        &prior_player
-    ));
+    main_assert_eq!(config.get_in(Some("General"), "FontName") => Some("Mock System Face"));
+    main_assert!(!Arc::ptr_eq(app.assets.clonk_fonts.as_ref().unwrap(), &prior_gui));
+    main_assert!(!Arc::ptr_eq(app.assets.book_fonts.as_ref().unwrap(), &prior_book));
+    main_assert!(!Arc::ptr_eq(app.assets.options_book_fonts.as_ref().unwrap(), &prior_options));
+    main_assert!(!Arc::ptr_eq(app.assets.plrsel_book_fonts.as_ref().unwrap(), &prior_player));
     let native_source = app.assets.startup_native_font_source.test_ref();
-    assert_eq!(native_source.bytes.as_ref(), font_bytes.as_ref());
-    assert_eq!(native_source.face_index, 0);
-    assert_eq!(
-        app.native_startup_fonts
-            .as_ref()
-            .expect("system face builds at application scale")
-            .scale(),
-        2.0
-    );
+    main_assert_eq!(native_source.bytes.as_ref() => font_bytes.as_ref());
+    main_assert_eq!(native_source.face_index => 0);
+    main_assert_eq!(app.native_startup_fonts.as_ref().expect("system face builds at application scale").scale() => 2.0);
 
     let selected_gui = app.assets.clonk_fonts.clone().test_value();
     let before_failure = fs::read(paths.config_file()).test_value();
@@ -4061,20 +3370,10 @@ fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
         &provider,
     )
     .test_value();
-    assert_eq!(app.message_dialogs.len(), dialog_count + 1);
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .program()
-            .font_face,
-        "Mock System Face"
-    );
-    assert!(Arc::ptr_eq(
-        app.assets.clonk_fonts.as_ref().unwrap(),
-        &selected_gui
-    ));
-    assert_eq!(fs::read(paths.config_file()).unwrap(), before_failure);
+    main_assert_eq!(app.message_dialogs.len() => dialog_count + 1);
+    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().program().font_face => "Mock System Face");
+    main_assert!(Arc::ptr_eq(app.assets.clonk_fonts.as_ref().unwrap(), &selected_gui));
+    main_assert_eq!(fs::read(paths.config_file()).unwrap() => before_failure);
 }
 
 #[test]
@@ -4092,27 +3391,11 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
         .controller
         .set_input_text("225");
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    assert!(app.game_option_input_dialog.is_none());
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .graphics()
-            .proposed_scale_percent,
-        225
-    );
-    assert_eq!(
-        app.pending_options_display_requests.pop_front(),
-        Some(OptionsDisplayRequest::SetScale {
-            percent: 225,
-            persist: false,
-        })
-    );
-    assert!(app
-        .message_dialogs
-        .last()
-        .is_some_and(|dialog| dialog.state.message().contains("12 seconds")));
-    assert!(matches!(
+    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 225);
+    main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 225, false)));
+    main_assert!(app.message_dialogs.last().is_some_and(|dialog| dialog.state.message().contains("12 seconds")));
+    main_assert!(matches!(
         app.message_dialogs
             .last()
             .map(|dialog| &dialog.continuation),
@@ -4123,26 +3406,13 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
         })
     ));
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    assert_eq!(app.message_dialogs.len(), 1);
+    main_assert_eq!(app.message_dialogs.len() => 1);
     for _ in 0..12 {
         app.sec1_timer().test_value();
     }
-    assert!(app.message_dialogs.is_empty());
-    assert_eq!(
-        app.pending_options_display_requests.pop_front(),
-        Some(OptionsDisplayRequest::SetScale {
-            percent: 100,
-            persist: false,
-        })
-    );
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .graphics()
-            .proposed_scale_percent,
-        100
-    );
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 100, false)));
+    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 100);
 
     app.startup_options_dialog
         .as_mut()
@@ -4156,24 +3426,11 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
         },
     )])
     .test_value();
-    assert!(app.pending_options_display_requests.pop_front().is_some());
+    main_assert!(app.pending_options_display_requests.pop_front().is_some());
     app.finish_message_dialog(MessageDialogResult::Yes)
         .test_value();
-    assert_eq!(
-        app.pending_options_display_requests.pop_front(),
-        Some(OptionsDisplayRequest::SetScale {
-            percent: 175,
-            persist: true,
-        })
-    );
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .graphics()
-            .applied_scale_percent,
-        175
-    );
+    main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 175, true)));
+    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().graphics().applied_scale_percent => 175);
 
     app.startup_options_dialog
         .as_mut()
@@ -4187,16 +3444,10 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
         },
     )])
     .test_value();
-    assert!(app.pending_options_display_requests.pop_front().is_some());
+    main_assert!(app.pending_options_display_requests.pop_front().is_some());
     app.finish_message_dialog(MessageDialogResult::No)
         .test_value();
-    assert_eq!(
-        app.pending_options_display_requests.pop_front(),
-        Some(OptionsDisplayRequest::SetScale {
-            percent: 175,
-            persist: false,
-        })
-    );
+    main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 175, false)));
 }
 
 fn set_test_scenario_value_gain(app: &mut GameApp, value_gain: i32) {
@@ -4225,7 +3476,7 @@ fn set_test_scenario_value_gain(app: &mut GameApp, value_gain: i32) {
     *values = serde_json::from_value(encoded).test_value();
     app.engine.restore_state(&state).test_value();
     app.snapshot = app.engine.snapshot();
-    assert_eq!(app.engine.scenario_value_gain_enabled(), value_gain != 0);
+    main_assert_eq!(app.engine.scenario_value_gain_enabled() => value_gain != 0);
 }
 
 #[test]
@@ -4255,11 +3506,8 @@ fn msgboard_command_reaches_continuous_multiline_render() {
             })
         })
     };
-    assert!(band_changed(output_y));
-    assert!(
-        band_changed(output_y + line_height),
-        "/msgboard 3 must render more than one simultaneous message line"
-    );
+    main_assert!(band_changed(output_y));
+    main_assert!(band_changed(output_y + line_height), "/msgboard 3 must render more than one simultaneous message line");
 }
 
 #[test]
@@ -4304,32 +3552,22 @@ fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primar
     app.engine.set_local_players([primary, secondary]);
 
     app.local_controls = LocalControlRegistry::default();
-    let primary_control = app.local_controls.initialize(LocalControlInit {
-        owner: primary,
-        preferred_set: 0,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
-    let secondary_control = app.local_controls.initialize(LocalControlInit {
-        owner: secondary,
-        preferred_set: 1,
-        prefers_mouse: true,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
-    assert!(!primary_control.mouse);
-    assert!(secondary_control.mouse);
-    assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+    let primary_control = app
+        .local_controls
+        .initialize(test_local_control_init(primary, 0, false, false));
+    let secondary_control = app
+        .local_controls
+        .initialize(test_local_control_init(secondary, 1, true, false));
+    main_assert!(!primary_control.mouse);
+    main_assert!(secondary_control.mouse);
+    main_assert_eq!(app.local_controls.mouse_owner() => Some(secondary));
 
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     let primary_viewport = app.graphics.viewport_rect(primary).test_value();
     let secondary_viewport = app.graphics.viewport_rect(secondary).test_value();
-    assert_ne!(primary_viewport, secondary_viewport);
+    main_assert_ne!(primary_viewport => secondary_viewport);
 
     let (physical_point, _) = (primary_viewport.y
         ..primary_viewport.y + primary_viewport.height as i32)
@@ -4359,7 +3597,7 @@ fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primar
             GuiPoint::new(physical_point.x.ceil(), physical_point.y.ceil()),
         )
         .test_value();
-    assert!(
+    main_assert!(
         physical_point.x < secondary_viewport.x as f32
             || physical_point.x >= (secondary_viewport.x + secondary_viewport.width as i32) as f32
             || physical_point.y < secondary_viewport.y as f32
@@ -4376,11 +3614,7 @@ fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primar
         f64::from(physical_point.x),
         f64::from(physical_point.y),
     ));
-    assert_eq!(
-        app.ingame_pointer,
-        Some(expected_pointer),
-        "C4MouseControl projects through its assigned player's viewport"
-    );
+    main_assert_eq!(app.ingame_pointer => Some(expected_pointer), "C4MouseControl projects through its assigned player's viewport");
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
 
@@ -4389,23 +3623,17 @@ fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primar
         .test_object_snapshot(secondary_crew)
         .command_stack
         .command_views();
-    assert_eq!(secondary_commands.len(), 1);
-    assert_eq!(secondary_commands[0].name, "MoveTo");
-    assert_eq!(secondary_commands[0].target, None);
-    assert_eq!(
-        secondary_commands[0].tx,
-        Some(expected_pointer.world.x as i32)
-    );
-    assert_eq!(
-        secondary_commands[0].ty,
-        Some(expected_pointer.world.y as i32)
-    );
-    assert_eq!(
+    main_assert_eq!(secondary_commands.len() => 1);
+    main_assert_eq!(secondary_commands[0].name => "MoveTo");
+    main_assert_eq!(secondary_commands[0].target => None);
+    main_assert_eq!(secondary_commands[0].tx => Some(expected_pointer.world.x as i32));
+    main_assert_eq!(secondary_commands[0].ty => Some(expected_pointer.world.y as i32));
+    main_assert_eq!(
         app.engine
             .object_snapshot(primary_crew)
             .expect("primary crew after click")
             .command_stack
-            .command_views(),
+            .command_views() =>
         primary_commands,
         "the physically hovered primary player must receive no command"
     );
@@ -4435,11 +3663,8 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
     app.test_render(&mut frame);
     let rect = app.graphics.viewport_rect(owner).test_value();
     let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
-    assert!(app.ingame_viewport_region(owner, left).is_none());
-    assert!(app
-        .script_menu_pointer_target(left)
-        .expect("left edge target query")
-        .is_none());
+    main_assert!(app.ingame_viewport_region(owner, left).is_none());
+    main_assert!(app.script_menu_pointer_target(left).expect("left edge target query").is_none());
     let view_state = |app: &GameApp| {
         let snapshot = app.engine.snapshot();
         let player = snapshot
@@ -4453,15 +3678,9 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
 
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
     let left_edge = app.ingame_edge_scroll.test_value().edge;
-    assert_eq!(left_edge.delta, Vector2::new(-10, 0));
-    assert_eq!(left_edge.cursor, clonk_frontend::MouseCursorPhase::Left);
-    assert_eq!(
-        view_state(&app),
-        (
-            Vector2::new(before.x - 10, before.y),
-            clonk_engine::PLAYER_VIEW_MODE_SCROLLING,
-        )
-    );
+    main_assert_eq!(left_edge.delta => Vector2::new(-10, 0));
+    main_assert_eq!(left_edge.cursor => clonk_frontend::MouseCursorPhase::Left);
+    main_assert_eq!(view_state(&app) => (Vector2::new(before.x - 10, before.y), clonk_engine::PLAYER_VIEW_MODE_SCROLLING,));
     app.test_render(&mut frame);
     let projection = app
         .graphics
@@ -4470,8 +3689,8 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
         .find(|projection| projection.owner == owner)
         .test_value();
     let scrolled_center = view_state(&app).0;
-    assert_eq!(
-        (projection.target_x, projection.target_y),
+    main_assert_eq!(
+        (projection.target_x, projection.target_y) =>
         (
             scrolled_center.x - projection.logical_width / 2,
             scrolled_center.y - projection.logical_height / 2,
@@ -4481,11 +3700,7 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
 
     app.test_update();
     app.test_update();
-    assert_eq!(
-        view_state(&app).0,
-        Vector2::new(before.x - 30, before.y),
-        "no extra OS motion event is required for each ten-pixel step"
-    );
+    main_assert_eq!(view_state(&app).0 => Vector2::new(before.x - 30, before.y), "no extra OS motion event is required for each ten-pixel step");
 
     let interior = GuiPoint::new(
         (rect.x + rect.width as i32 / 2) as f32,
@@ -4495,36 +3710,23 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
         f64::from(interior.x),
         f64::from(interior.y),
     ));
-    assert!(app.ingame_edge_scroll.is_none());
+    main_assert!(app.ingame_edge_scroll.is_none());
     let stopped = view_state(&app).0;
     for _ in 0..6 {
         app.test_update();
     }
-    assert_eq!(view_state(&app).0, stopped);
-    assert_eq!(
-        view_state(&app).1,
-        clonk_engine::PLAYER_VIEW_MODE_SCROLLING,
-        "leaving the border stops pan but does not itself restore cursor mode"
-    );
+    main_assert_eq!(view_state(&app).0 => stopped);
+    main_assert_eq!(view_state(&app).1 => clonk_engine::PLAYER_VIEW_MODE_SCROLLING, "leaving the border stops pan but does not itself restore cursor mode");
 
     app.engine
         .player_in_com(owner, clonk_engine::COM_RIGHT, 0)
         .test_value();
-    assert_eq!(view_state(&app).1, clonk_engine::PLAYER_VIEW_MODE_CURSOR);
+    main_assert_eq!(view_state(&app).1 => clonk_engine::PLAYER_VIEW_MODE_CURSOR);
 }
 
 #[test]
 fn continuous_edge_execute_reprojects_world_pointer_before_scrolling_again() {
-    let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
-    let focus = app.engine.test_crew_cursor(owner);
-    app.engine
-        .replace_player_viewports(
-            owner,
-            vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
-        )
-        .test_value();
-    app.snapshot = app.engine.snapshot();
+    rendering_fixture!(edge_scroll_app: app, owner, focus);
     app.display_flags.show_commands = false;
     app.display_flags.scroll_smooth = 1;
     app.graphics.set_scroll_smooth(1);
@@ -4549,37 +3751,18 @@ fn continuous_edge_execute_reprojects_world_pointer_before_scrolling_again() {
         .graphics
         .viewport_output_point_for_index(scroll.viewport_index, scroll.screen)
         .test_value();
-    assert_ne!(
-        expected.world, stale.world,
-        "the rendered camera movement must change the fixed screen point's world coordinate"
-    );
-    assert_eq!(
-        app.ingame_pointer,
-        Some(stale),
-        "rendering alone does not synthesize C4MouseControl::Move"
-    );
+    main_assert_ne!(expected.world => stale.world, "the rendered camera movement must change the fixed screen point's world coordinate");
+    main_assert_eq!(app.ingame_pointer => Some(stale), "rendering alone does not synthesize C4MouseControl::Move");
 
     app.test_update();
 
-    assert_eq!(app.ingame_pointer, Some(expected));
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
-        Vector2::new(after_move.x + 10, after_move.y)
-    );
+    main_assert_eq!(app.ingame_pointer => Some(expected));
+    main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(after_move.x + 10, after_move.y));
 }
 
 #[test]
 fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
-    let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
-    let focus = app.engine.test_crew_cursor(owner);
-    app.engine
-        .replace_player_viewports(
-            owner,
-            vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
-        )
-        .test_value();
-    app.snapshot = app.engine.snapshot();
+    rendering_fixture!(edge_scroll_app: app, owner, focus);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     let rect = app.graphics.viewport_rect(owner).test_value();
@@ -4589,7 +3772,7 @@ fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
     );
 
     app.test_cursor(left);
-    assert!(app.ingame_edge_scroll.is_some());
+    main_assert!(app.ingame_edge_scroll.is_some());
     app.open_context_menu_at(
         vec![ContextMenuEntry::<AppContextMenuCommand>::new(
             "Remain open",
@@ -4597,10 +3780,7 @@ fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
         GuiPoint::new(20.0, 20.0),
     )
     .test_value();
-    assert!(
-        app.ingame_edge_scroll.is_some(),
-        "opening the popup alone does not synthesize a pointer move"
-    );
+    main_assert!(app.ingame_edge_scroll.is_some(), "opening the popup alone does not synthesize a pointer move");
     let row = app.context_menu.test_ref().layout().panels[0].rows[0].rect;
     let stopped = app.engine.player(owner).test_value().viewports()[0].center;
 
@@ -4608,33 +3788,20 @@ fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
         f64::from(row.x + 1),
         f64::from(row.y + 1),
     ));
-    assert!(app.context_menu.is_some());
-    assert!(app.ingame_pointer.is_none());
-    assert!(app.ingame_edge_scroll.is_none());
+    main_assert!(app.context_menu.is_some());
+    main_assert!(app.ingame_pointer.is_none());
+    main_assert!(app.ingame_edge_scroll.is_none());
 
     for _ in 0..6 {
         app.test_update();
     }
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
-        stopped,
-        "neither continuous Execute nor Tick5 may revive a GUI-consumed edge move"
-    );
-    assert!(app.ingame_edge_scroll.is_none());
+    main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => stopped, "neither continuous Execute nor Tick5 may revive a GUI-consumed edge move");
+    main_assert!(app.ingame_edge_scroll.is_none());
 }
 
 #[test]
 fn continuous_execute_rechecks_retained_viewport_x_after_resize_without_reclamping() {
-    let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
-    let focus = app.engine.test_crew_cursor(owner);
-    app.engine
-        .replace_player_viewports(
-            owner,
-            vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
-        )
-        .test_value();
-    app.snapshot = app.engine.snapshot();
+    rendering_fixture!(edge_scroll_app: app, owner, focus);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.display_flags.show_commands = false;
     app.test_render(&mut frame);
@@ -4645,64 +3812,31 @@ fn continuous_execute_rechecks_retained_viewport_x_after_resize_without_reclampi
     );
 
     app.test_cursor(right);
-    assert_eq!(
-        app.ingame_viewport_mouse
-            .expect("C4MouseControl VpX/VpY retained")
-            .position
-            .x,
-        original.width as i32 - 1
-    );
-    assert_eq!(
-        app.ingame_edge_scroll
-            .expect("original right edge remains armed")
-            .edge
-            .delta,
-        Vector2::new(10, 0)
-    );
+    main_assert_eq!(app.ingame_viewport_mouse.expect("C4MouseControl VpX/VpY retained").position.x => original.width as i32 - 1);
+    main_assert_eq!(app.ingame_edge_scroll.expect("original right edge remains armed").edge.delta => Vector2::new(10, 0));
     let stopped = app.engine.player(owner).test_value().viewports()[0].center;
 
     app.resize(480, 200).test_value();
     let mut wider_frame = vec![0_u8; 480 * 200 * 4];
     app.test_render(&mut wider_frame);
     let wider = app.graphics.viewport_rect(owner).test_value();
-    assert!(wider.width > original.width);
-    assert_eq!(
-        app.ingame_viewport_mouse
-            .expect("resize retains native VpX/VpY")
-            .position
-            .x,
-        original.width as i32 - 1
-    );
-    assert!(
-        original.width as i32 - 1 < wider.width as i32 - 1,
-        "the retained right edge is now an interior viewport coordinate"
-    );
-    assert!(
-        app.ingame_edge_scroll.is_some(),
-        "native Scrolling stays armed until the next Execute reevaluates VpX"
-    );
+    main_assert!(wider.width > original.width);
+    main_assert_eq!(app.ingame_viewport_mouse.expect("resize retains native VpX/VpY").position.x => original.width as i32 - 1);
+    main_assert!(original.width as i32 - 1 < wider.width as i32 - 1, "the retained right edge is now an interior viewport coordinate");
+    main_assert!(app.ingame_edge_scroll.is_some(), "native Scrolling stays armed until the next Execute reevaluates VpX");
 
     app.test_update();
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
+    main_assert_eq!(
+        app.engine.player(owner).unwrap().viewports()[0].center =>
         stopped,
         "Execute must test retained VpX against the new width, not clamp it back to the edge"
     );
-    assert!(app.ingame_edge_scroll.is_none());
+    main_assert!(app.ingame_edge_scroll.is_none());
 }
 
 #[test]
 fn height_only_resize_retains_right_edge_continuous_pan() {
-    let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
-    let focus = app.engine.test_crew_cursor(owner);
-    app.engine
-        .replace_player_viewports(
-            owner,
-            vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
-        )
-        .test_value();
-    app.snapshot = app.engine.snapshot();
+    rendering_fixture!(edge_scroll_app: app, owner, focus);
     app.display_flags.show_commands = false;
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
@@ -4722,25 +3856,16 @@ fn height_only_resize_retains_right_edge_continuous_pan() {
     let mut taller_frame = vec![0_u8; 320 * 240 * 4];
     app.test_render(&mut taller_frame);
     let taller = app.graphics.viewport_rect(owner).test_value();
-    assert_eq!(taller.width, original.width);
-    assert!(taller.height > original.height);
-    assert_eq!(
-        app.ingame_viewport_mouse
-            .expect("resize retains native VpX/VpY")
-            .position
-            .x,
-        taller.width as i32 - 1
-    );
+    main_assert_eq!(taller.width => original.width);
+    main_assert!(taller.height > original.height);
+    main_assert_eq!(app.ingame_viewport_mouse.expect("resize retains native VpX/VpY").position.x => taller.width as i32 - 1);
 
     app.test_update();
 
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
-        Vector2::new(after_move.x + 10, after_move.y)
-    );
+    main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(after_move.x + 10, after_move.y));
     let scroll = app.ingame_edge_scroll.test_value();
-    assert_eq!(scroll.edge.delta, Vector2::new(10, 0));
-    assert_eq!(scroll.edge.cursor, clonk_frontend::MouseCursorPhase::Right);
+    main_assert_eq!(scroll.edge.delta => Vector2::new(10, 0));
+    main_assert_eq!(scroll.edge.cursor => clonk_frontend::MouseCursorPhase::Right);
 }
 
 #[test]
@@ -4776,7 +3901,7 @@ fn tick5_starts_edge_pan_after_suppressing_viewport_region_disappears() {
         (rect.x + rect.width as i32 - 1) as f32,
         (rect.y + rect.height as i32 - 1) as f32,
     );
-    assert!(
+    main_assert!(
         matches!(
             app.ingame_viewport_region(owner, corner),
             Some(IngameViewportRegion::Command(_))
@@ -4785,51 +3910,33 @@ fn tick5_starts_edge_pan_after_suppressing_viewport_region_disappears() {
     );
 
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
-    assert!(app.ingame_edge_scroll.is_some());
+    main_assert!(app.ingame_edge_scroll.is_some());
     app.test_cursor(PhysicalPosition::new(
         f64::from(corner.x),
         f64::from(corner.y),
     ));
-    assert!(app.ingame_edge_scroll.is_none());
+    main_assert!(app.ingame_edge_scroll.is_none());
     let before_tick5 = app.engine.player(owner).test_value().viewports()[0].center;
 
     app.display_flags.show_commands = false;
-    assert!(app.ingame_viewport_region(owner, corner).is_none());
+    main_assert!(app.ingame_viewport_region(owner, corner).is_none());
     app.test_update();
-    assert_eq!(app.engine.frame() % 5, 0);
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
-        Vector2::new(before_tick5.x + 10, before_tick5.y + 10)
-    );
+    main_assert_eq!(app.engine.frame() % 5 => 0);
+    main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(before_tick5.x + 10, before_tick5.y + 10));
     let resumed = app.ingame_edge_scroll.test_value();
-    assert_eq!(resumed.edge.delta, Vector2::new(10, 10));
-    assert_eq!(
-        resumed.edge.cursor,
-        clonk_frontend::MouseCursorPhase::DownRight
-    );
+    main_assert_eq!(resumed.edge.delta => Vector2::new(10, 10));
+    main_assert_eq!(resumed.edge.cursor => clonk_frontend::MouseCursorPhase::DownRight);
 }
 
 #[test]
 fn mouse_viewport_corner_pans_both_axes_and_uses_diagonal_cursor() {
-    let mut app = new_running_sandbox_app();
-    let owner = app.local_owner;
-    let focus = app.engine.test_crew_cursor(owner);
-    app.engine
-        .replace_player_viewports(
-            owner,
-            vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
-        )
-        .test_value();
-    app.snapshot = app.engine.snapshot();
+    rendering_fixture!(edge_scroll_app: app, owner, focus);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     let rect = app.graphics.viewport_rect(owner).test_value();
     let corner = GuiPoint::new(rect.x as f32, rect.y as f32);
-    assert!(app.ingame_viewport_region(owner, corner).is_none());
-    assert!(app
-        .script_menu_pointer_target(corner)
-        .expect("corner target query")
-        .is_none());
+    main_assert!(app.ingame_viewport_region(owner, corner).is_none());
+    main_assert!(app.script_menu_pointer_target(corner).expect("corner target query").is_none());
     let before = app.engine.player(owner).test_value().viewports()[0].center;
 
     app.test_cursor(PhysicalPosition::new(
@@ -4837,13 +3944,10 @@ fn mouse_viewport_corner_pans_both_axes_and_uses_diagonal_cursor() {
         f64::from(corner.y),
     ));
 
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
-        Vector2::new(before.x - 10, before.y - 10)
-    );
+    main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(before.x - 10, before.y - 10));
     let corner_edge = app.ingame_edge_scroll.test_value().edge;
-    assert_eq!(corner_edge.delta, Vector2::new(-10, -10));
-    assert_eq!(corner_edge.cursor, clonk_frontend::MouseCursorPhase::UpLeft);
+    main_assert_eq!(corner_edge.delta => Vector2::new(-10, -10));
+    main_assert_eq!(corner_edge.cursor => clonk_frontend::MouseCursorPhase::UpLeft);
 }
 
 #[test]
@@ -4876,8 +3980,8 @@ fn fullscreen_mouse_edge_pan_uses_the_forty_pixel_overflow_bound() {
 
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
 
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
+    main_assert_eq!(
+        app.engine.player(owner).unwrap().viewports()[0].center =>
         Vector2::new(minimum_x, y),
         "the remaining five pixels clamp instead of applying all ten"
     );
@@ -4904,7 +4008,7 @@ fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
         )],
     );
     let before = app.graphics.active_viewport_projections()[0];
-    assert_eq!(before.owner, OWNER_NONE);
+    main_assert_eq!(before.owner => OWNER_NONE);
     let left = GuiPoint::new(
         before.rect.x as f32,
         (before.rect.y + before.rect.height as i32 / 2) as f32,
@@ -4913,27 +4017,21 @@ fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
 
     let after_move = app.graphics.active_viewport_projections()[0];
-    assert_eq!(after_move.content_origin_x, before.content_origin_x - 10.0);
-    assert_eq!(after_move.content_origin_y, before.content_origin_y);
-    assert_eq!(
-        app.ingame_edge_scroll
-            .expect("passive edge state remains live")
-            .edge
-            .cursor,
-        clonk_frontend::MouseCursorPhase::Left
-    );
-    assert_eq!(
+    main_assert_eq!(after_move.content_origin_x => before.content_origin_x - 10.0);
+    main_assert_eq!(after_move.content_origin_y => before.content_origin_y);
+    main_assert_eq!(app.ingame_edge_scroll.expect("passive edge state remains live").edge.cursor => clonk_frontend::MouseCursorPhase::Left);
+    main_assert_eq!(
         app.engine
             .player(app.local_owner)
             .expect("sandbox player remains")
-            .viewports(),
+            .viewports() =>
         engine_viewports.as_slice(),
         "ownerless ScrollView must not mutate an unrelated player"
     );
 
     app.test_update();
     let after_tick = app.graphics.active_viewport_projections()[0];
-    assert_eq!(after_tick.content_origin_x, before.content_origin_x - 20.0);
+    main_assert_eq!(after_tick.content_origin_x => before.content_origin_x - 20.0);
 }
 
 #[test]
@@ -4948,13 +4046,13 @@ fn zero_object_observer_uses_anchor_free_ownerless_viewport() {
     app.focus_snapshot = None;
 
     let inputs = collect_viewport_inputs(&app.snapshot).test_value();
-    assert_eq!(inputs.len(), 1);
-    assert_eq!(inputs[0].owner, OWNER_NONE);
-    assert!(inputs[0].focus.is_none());
+    main_assert_eq!(inputs.len() => 1);
+    main_assert_eq!(inputs[0].owner => OWNER_NONE);
+    main_assert!(inputs[0].focus.is_none());
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.render_running(&mut frame, false).test_value();
-    assert!(app.graphics.active_viewport_projections()[0].is_no_owner_viewport);
+    main_assert!(app.graphics.active_viewport_projections()[0].is_no_owner_viewport);
 }
 
 #[test]
@@ -4977,15 +4075,15 @@ fn focusless_scrolling_player_uses_anchor_free_owned_viewport() {
     app.focus_snapshot = None;
 
     let inputs = collect_viewport_inputs(&app.snapshot).test_value();
-    assert_eq!(inputs.len(), 1);
-    assert_eq!(inputs[0].owner, owner);
-    assert!(inputs[0].focus.is_none());
+    main_assert_eq!(inputs.len() => 1);
+    main_assert_eq!(inputs[0].owner => owner);
+    main_assert!(inputs[0].focus.is_none());
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.render_running(&mut frame, false).test_value();
     let projection = app.graphics.active_viewport_projections()[0];
-    assert_eq!(projection.owner, owner);
-    assert!(!projection.is_no_owner_viewport);
+    main_assert_eq!(projection.owner => owner);
+    main_assert!(!projection.is_no_owner_viewport);
 }
 
 #[test]
@@ -5022,28 +4120,25 @@ fn automatic_retirement_closes_viewport_and_releases_local_control() {
     app.engine.set_player_surrendered(player, true).test_value();
     for frame in 1..60 {
         app.test_update();
-        assert!(
-            app.engine.player(player).is_some(),
-            "player retired before frame {frame}"
-        );
-        assert!(app.ui_sound_log.is_empty());
+        main_assert!(app.engine.player(player).is_some(), "player retired before frame {frame}");
+        main_assert!(app.ui_sound_log.is_empty());
     }
     app.test_update();
 
-    assert!(app.engine.player(player).is_none());
-    assert_eq!(app.local_controls.assignment(player), None);
-    assert!(!app.snapshot.hud.local_players.contains(&player));
-    assert_eq!(
+    main_assert!(app.engine.player(player).is_none());
+    main_assert_eq!(app.local_controls.assignment(player) => None);
+    main_assert!(!app.snapshot.hud.local_players.contains(&player));
+    main_assert_eq!(
         app.ui_sound_log
             .iter()
             .filter(|sound| sound.as_str() == "CloseViewport")
-            .count(),
+            .count() =>
         1,
         "automatic retirement closes all matching viewports once"
     );
     let viewports = collect_viewport_inputs(&app.snapshot).test_value();
-    assert_eq!(viewports.len(), 1);
-    assert_eq!(viewports[0].owner, OWNER_NONE);
+    main_assert_eq!(viewports.len() => 1);
+    main_assert_eq!(viewports[0].owner => OWNER_NONE);
 }
 
 #[test]
@@ -5069,10 +4164,7 @@ fn construction_drag_keeps_hud_regions_blocking_the_world_site() {
             - clonk_frontend::hud::SYMBOL_BORDER
             - clonk_frontend::hud::SYMBOL_SIZE / 2) as f32,
     );
-    assert_eq!(
-        app.ingame_viewport_region(owner, hud_point),
-        Some(IngameViewportRegion::Inventory(carried))
-    );
+    main_assert_eq!(app.ingame_viewport_region(owner, hud_point) => Some(IngameViewportRegion::Inventory(carried)));
     let world = app
         .graphics
         .viewport_output_point_at(hud_point)
@@ -5081,20 +4173,10 @@ fn construction_drag_keeps_hud_regions_blocking_the_world_site() {
     let mut landscape = Landscape::flat(480, world.y);
     landscape.set_world_height(world.y.saturating_add(40));
     app.engine.set_landscape(landscape);
-    assert!(
-        app.engine.construction_site_valid("BLD1", world),
-        "terrain behind the HUD is otherwise a valid construction site"
-    );
+    main_assert!(app.engine.construction_site_valid("BLD1", world), "terrain behind the HUD is otherwise a valid construction site");
 
     begin_construction_drag(&mut app, menu_point, hud_point);
-    assert!(matches!(
-        app.construction_menu_drag.as_ref(),
-        Some(ConstructionMenuDrag::Active {
-            pointer: Some(_),
-            site_valid: false,
-            ..
-        })
-    ));
+    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Active {pointer: Some(_), site_valid: false,..})));
 }
 
 #[test]
@@ -5113,9 +4195,9 @@ fn construction_drop_uses_cached_last_phase_without_release_recheck() {
     app.test_left_button(ElementState::Released);
 
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
-    assert!(controls.is_empty());
-    assert_eq!(
-        commands,
+    main_assert!(controls.is_empty());
+    main_assert_eq!(
+        commands =>
         vec![(
             tick,
             PlayerCommandControlData {
@@ -5131,7 +4213,7 @@ fn construction_drop_uses_cached_last_phase_without_release_recheck() {
             },
         )]
     );
-    assert!(selections.is_empty());
+    main_assert!(selections.is_empty());
 }
 
 #[test]
@@ -5152,16 +4234,9 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
         f64::from(start.x),
         f64::from(start.y),
     ));
-    assert_eq!(
-        app.script_menu_pointer_target(start)
-            .expect("title hit-test resources"),
-        Some(EngineScriptMenuPointerTarget::Title)
-    );
+    main_assert_eq!(app.script_menu_pointer_target(start).expect("title hit-test resources") => Some(EngineScriptMenuPointerTarget::Title));
     app.test_left_button(ElementState::Pressed);
-    assert!(matches!(
-        app.menu_title_drag,
-        Some(MenuTitleDrag::Script { .. })
-    ));
+    main_assert!(matches!(app.menu_title_drag, Some(MenuTitleDrag::Script { .. })));
     let destination = GuiPoint::new(start.x - 400.0, start.y + 17.0);
     app.test_cursor(PhysicalPosition::new(
         f64::from(destination.x),
@@ -5171,35 +4246,24 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
         geometry.bounds.x.saturating_sub(400),
         geometry.bounds.y.saturating_add(17),
     );
-    assert_eq!(
+    main_assert_eq!(
         app.script_menu_presentations
             .get(&owner)
-            .and_then(|state| state.location),
+            .and_then(|state| state.location) =>
         Some(expected),
         "native title drag applies the exact pointer delta without a threshold or clamp"
     );
     app.test_left_button(ElementState::Released);
-    assert!(app.menu_title_drag.is_none());
+    main_assert!(app.menu_title_drag.is_none());
     let retained = app
         .script_menu_presentations
         .get(&owner)
         .and_then(|state| state.location);
     app.test_cursor(PhysicalPosition::new(10.0, 10.0));
-    assert_eq!(
-        app.script_menu_presentations
-            .get(&owner)
-            .and_then(|state| state.location),
-        retained
-    );
+    main_assert_eq!(app.script_menu_presentations.get(&owner).and_then(|state| state.location) => retained);
     app.resize(360, 220).test_value();
-    assert!(app.menu_title_drag.is_none());
-    assert_eq!(
-        app.script_menu_presentations
-            .get(&owner)
-            .and_then(|state| state.location),
-        None,
-        "viewport ResetLocation restores anchored placement"
-    );
+    main_assert!(app.menu_title_drag.is_none());
+    main_assert_eq!(app.script_menu_presentations.get(&owner).and_then(|state| state.location) => None, "viewport ResetLocation restores anchored placement");
 
     let mut player_app = new_classic_running_sandbox_app();
     let player = player_app.local_owner;
@@ -5264,10 +4328,10 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
             .bounds(area, &font, &gfx)
             .x
     };
-    assert_eq!(moved_x, bounds.x + 11);
+    main_assert_eq!(moved_x => bounds.x + 11);
     player_app.test_left_button(ElementState::Released);
     player_app.resize(360, 220).test_value();
-    assert!(player_app.menu_title_drag.is_none());
+    main_assert!(player_app.menu_title_drag.is_none());
 }
 
 #[test]
@@ -5281,14 +4345,8 @@ fn runtime_flash_renders_non_cp1252_utf8_through_font_regular() {
         .test_value();
     let mut unicode = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut unicode);
-    assert_ne!(unicode, baseline);
-    assert_eq!(
-        app.runtime_flash_message
-            .as_ref()
-            .expect("three UTF-8 byte draws remain")
-            .remaining_draws,
-        3
-    );
+    main_assert_ne!(unicode => baseline);
+    main_assert_eq!(app.runtime_flash_message.as_ref().expect("three UTF-8 byte draws remain").remaining_draws => 3);
 }
 
 #[test]
@@ -5300,10 +4358,7 @@ fn runtime_flash_counts_successful_draws_survives_resize_and_resets_with_game() 
         .test_value();
     let before_update = app.runtime_flash_message.clone();
     app.test_update();
-    assert_eq!(
-        app.runtime_flash_message, before_update,
-        "ticks do not age flash"
-    );
+    main_assert_eq!(app.runtime_flash_message => before_update, "ticks do not age flash");
     app.set_runtime_flash_message("", RuntimeHelpCharset::Windows1252)
         .test_value();
     let mut baseline = vec![0_u8; 320 * 200 * 4];
@@ -5313,34 +4368,28 @@ fn runtime_flash_counts_successful_draws_survives_resize_and_resets_with_game() 
 
     let mut first = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut first);
-    assert_ne!(first, baseline);
-    assert_eq!(
-        app.runtime_flash_message
-            .as_ref()
-            .expect("one pass remains")
-            .remaining_draws,
-        1
-    );
+    main_assert_ne!(first => baseline);
+    main_assert_eq!(app.runtime_flash_message.as_ref().expect("one pass remains").remaining_draws => 1);
     let mut final_visible = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut final_visible);
-    assert_eq!(final_visible, first);
-    assert!(app.runtime_flash_message.is_none());
+    main_assert_eq!(final_visible => first);
+    main_assert!(app.runtime_flash_message.is_none());
     let mut expired = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut expired);
-    assert_eq!(expired, baseline);
+    main_assert_eq!(expired => baseline);
 
     app.set_runtime_flash_message("AB", RuntimeHelpCharset::Windows1252)
         .test_value();
     let before_resize = app.runtime_flash_message.clone();
     app.resize(321, 200).test_value();
-    assert_eq!(app.runtime_flash_message, before_resize);
+    main_assert_eq!(app.runtime_flash_message => before_resize);
 
     app.configure_running_state("Next game".to_string(), DEFAULT_GROUND_HEIGHT);
-    assert!(app.runtime_flash_message.is_none());
+    main_assert!(app.runtime_flash_message.is_none());
     app.set_runtime_flash_message("AB", RuntimeHelpCharset::Windows1252)
         .test_value();
     app.return_to_menu();
-    assert!(app.runtime_flash_message.is_none());
+    main_assert!(app.runtime_flash_message.is_none());
 }
 
 #[test]
@@ -5348,10 +4397,7 @@ fn runtime_help_and_flash_resolve_fontregular_images() {
     let mut app = new_classic_running_sandbox_app();
     let resolved =
         resolve_font_images_in_texts(&app.engine, ["{{CLNK}}"], app.script_text_spec_resources());
-    assert!(
-        resolved.font_image("CLNK").is_some(),
-        "the live FontRegular provider resolves installed definitions"
-    );
+    main_assert!(resolved.font_image("CLNK").is_some(), "the live FontRegular provider resolves installed definitions");
     app.status_text.clear();
     app.snapshot.hud.messages.clear();
     hold_message_board_for_frame_comparison(&mut app);
@@ -5369,21 +4415,15 @@ fn runtime_help_and_flash_resolve_fontregular_images() {
     app.runtime_help_visible = false;
     let mut baseline = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut baseline);
-    assert_ne!(help, baseline, "resolved help image contributes pixels");
+    main_assert_ne!(help => baseline, "resolved help image contributes pixels");
 
     app.set_runtime_flash_message("<i>{{CLNK}}</i>", RuntimeHelpCharset::Windows1252)
         .test_value();
     let before = app.runtime_flash_message.test_ref().remaining_draws;
     let mut flash = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut flash);
-    assert_ne!(flash, baseline, "resolved flash image contributes pixels");
-    assert_eq!(
-        app.runtime_flash_message
-            .as_ref()
-            .expect("more image flash passes remain")
-            .remaining_draws,
-        before - 1,
-    );
+    main_assert_ne!(flash => baseline, "resolved flash image contributes pixels");
+    main_assert_eq!(app.runtime_flash_message.as_ref().expect("more image flash passes remain").remaining_draws => before - 1,);
 }
 
 #[test]
@@ -5395,14 +4435,14 @@ fn debug_keys_toggle_render_flags_and_exact_flashes() {
         RuntimeFlashProducerBoundary::ControlRate => "ControlRate",
         RuntimeFlashProducerBoundary::FairCrew => "FairCrew",
     });
-    assert_eq!(names.len(), 5);
-    assert_eq!(names.into_iter().collect::<HashSet<_>>().len(), 5);
+    main_assert_eq!(names.len() => 5);
+    main_assert_eq!(names.into_iter().collect::<HashSet<_>>().len() => 5);
 
     let mut app = new_running_sandbox_app();
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
-    assert!(app.engine.debug_mode());
-    assert_eq!(runtime_flash_text(&app), Some("Debug mode: on"));
+    main_assert!(app.engine.debug_mode());
+    main_assert_eq!(runtime_flash_text(&app) => Some("Debug mode: on"));
     app.bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F5);
     app.engine
@@ -5410,25 +4450,25 @@ fn debug_keys_toggle_render_flags_and_exact_flashes() {
         .control
         .pressed_coms = 1 << clonk_engine::COM_LEFT;
     app.test_key(VirtualKeyCode::F5, ElementState::Released);
-    assert_ne!(
+    main_assert_ne!(
         app.engine
             .player(app.local_owner)
             .expect("local player")
             .control
             .pressed_coms
-            & (1 << clonk_engine::COM_LEFT),
+            & (1 << clonk_engine::COM_LEFT) =>
         0,
         "debug callback Up must not leak into modifier-blind player control"
     );
 
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
     let flags = app.graphics.debug_draw_flags();
-    assert!(flags.show_vertices && flags.show_entrance);
-    assert_eq!(runtime_flash_text(&app), Some("Entrance+Vertices: on"));
+    main_assert!(flags.show_vertices && flags.show_entrance);
+    main_assert_eq!(runtime_flash_text(&app) => Some("Entrance+Vertices: on"));
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
     let flags = app.graphics.debug_draw_flags();
-    assert!(!flags.show_vertices && !flags.show_entrance);
-    assert_eq!(runtime_flash_text(&app), Some("Entrance+Vertices: off"));
+    main_assert!(!flags.show_vertices && !flags.show_entrance);
+    main_assert_eq!(runtime_flash_text(&app) => Some("Entrance+Vertices: off"));
 
     for (expected, action, command, pathfinder) in [
         ("Actions", true, false, false),
@@ -5438,32 +4478,26 @@ fn debug_keys_toggle_render_flags_and_exact_flashes() {
     ] {
         app.test_key(VirtualKeyCode::F7, ElementState::Pressed);
         let flags = app.graphics.debug_draw_flags();
-        assert_eq!(
-            (flags.show_action, flags.show_command, flags.show_pathfinder),
-            (action, command, pathfinder)
-        );
-        assert_eq!(runtime_flash_text(&app), Some(expected));
+        main_assert_eq!((flags.show_action, flags.show_command, flags.show_pathfinder) => (action, command, pathfinder));
+        main_assert_eq!(runtime_flash_text(&app) => Some(expected));
     }
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    assert!(app.graphics.debug_draw_flags().show_solid_mask);
-    assert_eq!(runtime_flash_text(&app), Some("SolidMasks: on"));
+    main_assert!(app.graphics.debug_draw_flags().show_solid_mask);
+    main_assert_eq!(runtime_flash_text(&app) => Some("SolidMasks: on"));
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    assert!(!app.graphics.debug_draw_flags().show_solid_mask);
-    assert_eq!(runtime_flash_text(&app), Some("SolidMasks: off"));
+    main_assert!(!app.graphics.debug_draw_flags().show_solid_mask);
+    main_assert_eq!(runtime_flash_text(&app) => Some("SolidMasks: off"));
 
     let mut flags = app.graphics.debug_draw_flags();
     flags.show_net_status = true;
     app.graphics.set_debug_draw_flags(flags);
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
-    assert!(!app.engine.debug_mode());
-    assert_eq!(
-        app.graphics.debug_draw_flags(),
-        clonk_frontend::DebugDrawFlags::default()
-    );
-    assert_eq!(runtime_flash_text(&app), Some("Debug mode: off"));
-    assert_eq!(app.mode, AppMode::Running);
-    assert!(!app.exit_requested);
+    main_assert!(!app.engine.debug_mode());
+    main_assert_eq!(app.graphics.debug_draw_flags() => clonk_frontend::DebugDrawFlags::default());
+    main_assert_eq!(runtime_flash_text(&app) => Some("Debug mode: off"));
+    main_assert_eq!(app.mode => AppMode::Running);
+    main_assert!(!app.exit_requested);
 }
 
 #[test]
@@ -5473,67 +4507,46 @@ fn runtime_f1_language_parser_preserves_cpp_boundaries_and_font_safety() {
         "malformed fixture",
     )
     .test_value();
-    assert!(!malformed.contains_key("IDS_CON_HELP"));
-    assert_eq!(
-        malformed.get("IDS_CTL_MUSIC").map(String::as_str),
-        Some("Mu\r\nsic")
-    );
-    assert_eq!(
-        malformed.get("IDS_CTL_SOUND").map(String::as_str),
-        Some("a=b")
-    );
+    main_assert!(!malformed.contains_key("IDS_CON_HELP"));
+    main_assert_eq!(malformed.get("IDS_CTL_MUSIC").map(String::as_str) => Some("Mu\r\nsic"));
+    main_assert_eq!(malformed.get("IDS_CTL_SOUND").map(String::as_str) => Some("a=b"));
 
     let cp1252 = parse_runtime_help_language_table(
         b"IDS_LANG_CHARSET=\r\nIDS_CON_HELP=\x80\r\n",
         "CP1252 fixture",
     )
     .test_value();
-    assert_eq!(cp1252.get("IDS_CON_HELP").map(String::as_str), Some("€"));
+    main_assert_eq!(cp1252.get("IDS_CON_HELP").map(String::as_str) => Some("€"));
 
     let raw = parse_runtime_language_bytes_table(
         b"IDS_LANG_CHARSET=RUSSIAN\r\nIDS_DESC_DATEREC=\xcf\xf0\xe8\xe2\xe5\xf2\\n%s\r\n",
         "raw CP1251 fixture",
     )
     .test_value();
-    assert_eq!(
-        raw.entries.get("IDS_LANG_CHARSET").map(Vec::as_slice),
-        Some(b"RUSSIAN".as_slice())
-    );
-    assert_eq!(
-        raw.entries.get("IDS_DESC_DATEREC").map(Vec::as_slice),
-        Some(b"\xcf\xf0\xe8\xe2\xe5\xf2\r\n%s".as_slice())
-    );
+    main_assert_eq!(raw.entries.get("IDS_LANG_CHARSET").map(Vec::as_slice) => Some(b"RUSSIAN".as_slice()));
+    main_assert_eq!(raw.entries.get("IDS_DESC_DATEREC").map(Vec::as_slice) => Some(b"\xcf\xf0\xe8\xe2\xe5\xf2\r\n%s".as_slice()));
 
     let utf8 = parse_runtime_help_language_table(
         "IDS_LANG_CHARSET=UTF-8\nIDS_CON_HELP=Hilfe ä\n".as_bytes(),
         "UTF-8 fixture",
     )
     .test_value();
-    assert_eq!(
-        utf8.get("IDS_CON_HELP").map(String::as_str),
-        Some("Hilfe ä")
-    );
+    main_assert_eq!(utf8.get("IDS_CON_HELP").map(String::as_str) => Some("Hilfe ä"));
 
     for supported in ["<i>Help</i>", "{{CLNK}}"] {
         let mut table = HashMap::new();
         table.insert("IDS_CON_HELP".to_string(), supported.to_string());
         let columns = build_runtime_help_columns(&table).test_value();
-        assert!(
-            columns.left.contains(supported),
-            "help column must preserve {supported:?}"
-        );
+        main_assert!(columns.left.contains(supported), "help column must preserve {supported:?}");
     }
     let mut unicode = HashMap::new();
     unicode.insert("IDS_CON_HELP".to_string(), "Помощь".to_string());
-    assert!(
-        build_runtime_help_columns(&unicode).is_ok(),
-        "UTF-8 FontRegular dynamically supports non-CP1252 scalars"
-    );
+    main_assert!(build_runtime_help_columns(&unicode).is_ok(), "UTF-8 FontRegular dynamically supports non-CP1252 scalars");
     let mut oversized = HashMap::new();
     oversized.insert("IDS_CON_HELP".to_string(), "x".repeat(2501));
     let error = build_runtime_help_columns(&oversized)
         .expect_err("oversized C++ TextOut line must fail closed");
-    assert!(error.to_string().contains("2500-byte TextOut buffer"));
+    main_assert!(error.to_string().contains("2500-byte TextOut buffer"));
 }
 
 #[test]
@@ -5542,25 +4555,15 @@ fn graphics_smoke_level_loads_legacy_default_and_configured_value() {
     let install = tempdir();
     let user_data = tempdir();
     fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
 
-    assert_eq!(
-        load_graphics_smoke_level(Some(&paths)),
-        clonk_engine::DEFAULT_SMOKE_LEVEL
-    );
+    main_assert_eq!(load_graphics_smoke_level(Some(&paths)) => clonk_engine::DEFAULT_SMOKE_LEVEL);
     fs::write(paths.config_file(), "[Graphics]\nSmokeLevel=73\n").test_value();
-    assert_eq!(load_graphics_smoke_level(Some(&paths)), 73);
+    main_assert_eq!(load_graphics_smoke_level(Some(&paths)) => 73);
 
     fs::write(paths.config_file(), "[Graphics]\nSmokeLevel=invalid\n").test_value();
-    assert_eq!(
-        load_graphics_smoke_level(Some(&paths)),
-        clonk_engine::DEFAULT_SMOKE_LEVEL
-    );
+    main_assert_eq!(load_graphics_smoke_level(Some(&paths)) => clonk_engine::DEFAULT_SMOKE_LEVEL);
 }
 
 #[test]
@@ -5569,28 +4572,24 @@ fn liquid_animation_requires_both_legacy_graphics_switches() {
     let install = tempdir();
     let user_data = tempdir();
     fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install.path()), user_data.path());
     paths.ensure_user_dirs().test_value();
 
-    assert!(!load_graphics_color_animation(Some(&paths)));
+    main_assert!(!load_graphics_color_animation(Some(&paths)));
     for config in [
         "[Graphics]\nColorAnimation=1\n",
         "[Graphics]\nShader=1\n",
         "[Graphics]\nColorAnimation=1\nShader=invalid\n",
     ] {
         fs::write(paths.config_file(), config).test_value();
-        assert!(!load_graphics_color_animation(Some(&paths)));
+        main_assert!(!load_graphics_color_animation(Some(&paths)));
     }
     fs::write(
         paths.config_file(),
         "[Graphics]\nColorAnimation=1\nShader=1\n",
     )
     .test_value();
-    assert!(load_graphics_color_animation(Some(&paths)));
+    main_assert!(load_graphics_color_animation(Some(&paths)));
 }
 
 #[test]
@@ -5604,25 +4603,25 @@ fn runtime_f1_help_toggles_on_each_down_renders_and_release_falls_through() {
         let mut before_pixels = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut before_pixels);
         app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-        assert!(app.runtime_help_visible);
+        main_assert!(app.runtime_help_visible);
         app.test_key(VirtualKeyCode::F1, ElementState::Released);
-        assert!(app.runtime_help_visible);
+        main_assert!(app.runtime_help_visible);
 
         let mut after_pixels = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut after_pixels);
-        assert_ne!(after_pixels, before_pixels);
+        main_assert_ne!(after_pixels => before_pixels);
 
         // Repeated key-down events execute ToggleShowHelp each time.
         app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-        assert!(!app.runtime_help_visible);
+        main_assert!(!app.runtime_help_visible);
         let mut hidden_again = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut hidden_again);
-        assert_eq!(hidden_again, before_pixels);
+        main_assert_eq!(hidden_again => before_pixels);
 
         app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-        assert!(app.runtime_help_visible);
+        main_assert!(app.runtime_help_visible);
         app.configure_running_state("Next game".to_string(), DEFAULT_GROUND_HEIGHT);
-        assert!(!app.runtime_help_visible);
+        main_assert!(!app.runtime_help_visible);
     }
 }
 
@@ -5635,17 +4634,14 @@ fn ownerless_escape_opens_fullscreen_abort_confirmation() {
     app.local_controls = LocalControlRegistry::default();
     app.snapshot = app.engine.snapshot();
     app.refresh_non_authoritative_physical_viewports();
-    assert!(app.primary_physical_viewport_is_no_owner());
+    main_assert!(app.primary_physical_viewport_is_no_owner());
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
-        dialog.continuation,
-        MessageDialogContinuation::AbortGame { .. }
-    )));
-    assert!(app.ingame_menu.is_none());
-    assert!(!app.ingame_menu_belongs_to(app.local_owner));
-    assert!(matches!(app.mode, AppMode::Running));
-    assert!(!app.take_exit_request());
+    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
+    main_assert!(app.ingame_menu.is_none());
+    main_assert!(!app.ingame_menu_belongs_to(app.local_owner));
+    main_assert!(matches!(app.mode, AppMode::Running));
+    main_assert!(!app.take_exit_request());
 }
 
 #[test]
@@ -5669,8 +4665,8 @@ fn material_render_info_preserves_cpp_color_alpha_and_overlay_fields() {
     .test_value();
     let definition = library.get("Earth").test_value();
 
-    assert_eq!(
-        material_render_info(definition),
+    main_assert_eq!(
+        material_render_info(definition) =>
         clonk_frontend::MaterialRenderInfo::new(
             [11, 12, 13, 14, 0, 0, 0, 0, 0],
             [21, 22, 23, 24, 0, 0],
@@ -5695,12 +4691,8 @@ fn material_render_info_preserves_signed_placement_and_defaults_only_zero() {
         .test_value();
         let definition = library.get("Earth").test_value();
 
-        assert_eq!(material_render_placement(definition), expected);
-        assert_eq!(
-            material_render_info(definition),
-            clonk_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 50)
-                .with_placement(expected),
-        );
+        main_assert_eq!(material_render_placement(definition) => expected);
+        main_assert_eq!(material_render_info(definition) => clonk_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 50).with_placement(expected),);
     }
 }
 
@@ -5714,8 +4706,8 @@ fn material_render_info_defaults_pxs_size_to_facet_width() {
     .test_value();
     let definition = library.get("Lava").test_value();
 
-    assert_eq!(
-        material_render_info(definition),
+    main_assert_eq!(
+        material_render_info(definition) =>
         clonk_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 0)
             .with_placement(5)
             .with_pxs_graphics(Some("Lava".to_string()), [0, 0, 32, 32, -16, -16], 32),
@@ -5731,17 +4723,13 @@ fn hazard_tutorial_inherits_parent_material_metadata_and_textures() {
     // C4Game.cpp:899-965).
     let _env_lock = crate::tests::env_lock().lock();
     reset_cached_app_paths();
-    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value()
-        .to_path_buf();
+    let repository = test_repository_root().to_path_buf();
     let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(repository.as_path()))]);
     let tutorial = repository.join("content/Hazard.c4f/Tutorial.c4s");
 
     let render_info = load_material_render_info(&tutorial, None);
-    assert_eq!(
-        render_info.get("rain"),
+    main_assert_eq!(
+        render_info.get("rain") =>
         Some(
             &clonk_frontend::MaterialRenderInfo::new(
                 [7, 35, 140, 7, 35, 140, 7, 35, 140],
@@ -5753,8 +4741,8 @@ fn hazard_tutorial_inherits_parent_material_metadata_and_textures() {
             .with_placement(10)
         ),
     );
-    assert_eq!(
-        render_info.get("ashes"),
+    main_assert_eq!(
+        render_info.get("ashes") =>
         Some(
             &clonk_frontend::MaterialRenderInfo::new(
                 [90, 78, 40, 82, 80, 78, 100, 96, 90],
@@ -5768,10 +4756,7 @@ fn hazard_tutorial_inherits_parent_material_metadata_and_textures() {
         ),
         "the parent default PXSGfxSize=32 must beat global Ashes size 6",
     );
-    assert!(
-        load_scenario_material_textures(&tutorial, None).contains_key("industrial1"),
-        "parent-group texture must load through Group::open_child"
-    );
+    main_assert!(load_scenario_material_textures(&tutorial, None).contains_key("industrial1"), "parent-group texture must load through Group::open_child");
 
     let paths = cached_app_paths().test_value();
     let scenario = Scenario::load_from_path_with_languages(
@@ -5787,7 +4772,7 @@ fn hazard_tutorial_inherits_parent_material_metadata_and_textures() {
         .id_of("Rain")
         .and_then(|id| engine.materials().get_by_id(id))
         .test_value();
-    assert_eq!(rain.density(), 25);
+    main_assert_eq!(rain.density() => 25);
 
     reset_cached_app_paths();
 }
@@ -5801,7 +4786,7 @@ fn presentation_texture_long_name_collisions_keep_the_latest_surface() {
     write_preview_png(&second_path, [40, 50, 60, 255]);
 
     let prefix = "ColliderPrefixX";
-    assert_eq!(clonk_script::c4_string_bytes(prefix).len(), 15);
+    main_assert_eq!(clonk_script::c4_string_bytes(prefix).len() => 15);
     let mut source = clonk_resources::MutableGroup::new("Material.c4g");
     source
         .add_file("Broken.png", b"not a PNG".to_vec())
@@ -5836,8 +4821,8 @@ fn presentation_texture_long_name_collisions_keep_the_latest_surface() {
     let mut textures = HashMap::new();
     let mut inventory = Vec::new();
     absorb_material_texture_group(&group, &mut textures, &mut inventory);
-    assert_eq!(
-        inventory,
+    main_assert_eq!(
+        inventory =>
         vec![
             "Broken".to_string(),
             prefix.to_string(),
@@ -5850,29 +4835,26 @@ fn presentation_texture_long_name_collisions_keep_the_latest_surface() {
         .get("broken")
         .and_then(MaterialTextureSurface::surface32_image)
         .test_value();
-    assert_eq!(
-        (broken.width(), broken.height(), broken.pixels()),
-        (0, 0, &[][..])
-    );
-    assert_eq!(
+    main_assert_eq!((broken.width(), broken.height(), broken.pixels()) => (0, 0, &[][..]));
+    main_assert_eq!(
         textures
             .get(&clonk_resources::material::c4_name_key(prefix))
             .expect("colliding PNG surface")
             .surface32_image()
             .expect("latest collider is a Surface32 PNG")
-            .pixels(),
+            .pixels() =>
         &[40, 50, 60, 255],
         "the later fixed-name collision shadows the earlier surface"
     );
-    assert_eq!(
+    main_assert_eq!(
         textures
             .get("indexedonly")
             .expect("indexed BMP surface")
-            .indexed_pixels(),
+            .indexed_pixels() =>
         Some((1, 1, [2].as_slice())),
         "Surface8 admission applies AllowColor(0, 2, true)"
     );
-    assert!(!inventory.iter().any(|name| name == "Mislabeled"));
+    main_assert!(!inventory.iter().any(|name| name == "Mislabeled"));
 }
 
 #[test]
@@ -5881,10 +4863,7 @@ fn material_render_bytes_keep_the_cpp_uint32_low_byte() {
     // compiler reads them with strtoul (C4Material.h:79-81;
     // StdCompiler.cpp:651-654). Palette/texture composition then narrows
     // to uint8, so out-of-range values wrap instead of clamping.
-    assert_eq!(
-        material_value_array::<4>(Some(vec![255, 256, -1, 511])),
-        [255, 0, 255, 255],
-    );
+    main_assert_eq!(material_value_array::<4>(Some(vec![255, 256, -1, 511])) => [255, 0, 255, 255],);
 }
 
 #[test]
@@ -5893,13 +4872,13 @@ fn set_plr_show_command_request_force_enables_display_once() {
     app.display_flags.show_commands = false;
     app.show_commands_requests.request_enable();
     app.apply_show_commands_enable_request();
-    assert!(app.display_flags.show_commands);
+    main_assert!(app.display_flags.show_commands);
 
     // The native call writes true once; a later user toggle remains off
     // until another SetPlrShowCommand call.
     app.display_flags.show_commands = false;
     app.apply_show_commands_enable_request();
-    assert!(!app.display_flags.show_commands);
+    main_assert!(!app.display_flags.show_commands);
 }
 
 /// `Config.General.ScrollSmooth` defaults to 4 (C4Config.cpp:381-388) and
@@ -5912,25 +4891,21 @@ fn configured_scroll_smooth_drives_runtime_camera_divisor() {
         let root = tempdir();
         let user_data = tempdir();
         fs::create_dir_all(root.path().join("planet/System.c4g")).test_value();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(root.path())),
-            ("LC_USER_DATA_DIR", Some(user_data.path())),
-        ]);
-        let paths = test_app_paths();
+        let (_guard, paths) = guarded_test_app_paths(Some(root.path()), user_data.path());
         paths.ensure_user_dirs().test_value();
         fs::write(paths.config_file(), body).test_value();
         load_display_flags(Some(&paths)).scroll_smooth
     };
 
     // The C++ default survives an absent key and an unparsable value.
-    assert_eq!(load("[General]\nName=Tester\n"), 4);
-    assert_eq!(load("[General]\nScrollSmooth=not a number\n"), 4);
+    main_assert_eq!(load("[General]\nName=Tester\n") => 4);
+    main_assert_eq!(load("[General]\nScrollSmooth=not a number\n") => 4);
     // A configured value is loaded raw, including out-of-range input: C++
     // stores it unclamped and clamps only where it divides.
-    assert_eq!(load("[General]\nScrollSmooth=1\n"), 1);
-    assert_eq!(load("[General]\nScrollSmooth=25\n"), 25);
-    assert_eq!(load("[General]\nScrollSmooth=0\n"), 0);
-    assert_eq!(load("[General]\nScrollSmooth=9999\n"), 9999);
+    main_assert_eq!(load("[General]\nScrollSmooth=1\n") => 1);
+    main_assert_eq!(load("[General]\nScrollSmooth=25\n") => 25);
+    main_assert_eq!(load("[General]\nScrollSmooth=0\n") => 0);
+    main_assert_eq!(load("[General]\nScrollSmooth=9999\n") => 9999);
 
     // The loaded scalar reaches the camera through the render path, and the
     // divisor clamps at use.
@@ -5939,16 +4914,8 @@ fn configured_scroll_smooth_drives_runtime_camera_divisor() {
     for (configured, effective) in [(1, 1), (4, 4), (25, 25), (0, 1), (9_999, 50)] {
         app.display_flags.scroll_smooth = configured;
         app.test_render(&mut frame);
-        assert_eq!(
-            app.graphics.scroll_smooth(),
-            configured,
-            "the raw configured value reaches the graphics model"
-        );
-        assert_eq!(
-            app.graphics.scroll_smooth().clamp(1, 50),
-            effective,
-            "the effective divisor clamps to 1..=50 like AdjustPosition"
-        );
+        main_assert_eq!(app.graphics.scroll_smooth() => configured, "the raw configured value reaches the graphics model");
+        main_assert_eq!(app.graphics.scroll_smooth().clamp(1, 50) => effective, "the effective divisor clamps to 1..=50 like AdjustPosition");
     }
 }
 
@@ -5968,22 +4935,16 @@ fn a_below_floor_adapter_is_reported_as_such_not_as_a_missing_one() {
         REQUIRED_BUFFER_USAGES,
         (2048, 480),
     );
-    assert!(!report.is_supported());
+    main_assert!(!report.is_supported());
     let below_floor = anyhow::Error::new(clonk_surface::SurfaceError::BelowGraphicsFloor(report))
         .context("failed to create pixel framebuffer")
         .context("no GPU adapter on any backend");
-    assert_eq!(
-        crate::main_audio::software_choice_for_gpu_failure(&below_floor),
-        PresentationChoice::Software(SoftwareReason::BelowFloor),
-    );
+    main_assert_eq!(crate::main_audio::software_choice_for_gpu_failure(&below_floor) => PresentationChoice::Software(SoftwareReason::BelowFloor),);
 
     // An adapter that never answered carries no report at all.
     let no_adapter = anyhow::anyhow!("no GPU backends were attempted")
         .context("failed to create pixel framebuffer");
-    assert_eq!(
-        crate::main_audio::software_choice_for_gpu_failure(&no_adapter),
-        PresentationChoice::Software(SoftwareReason::NoAdapter),
-    );
+    main_assert_eq!(crate::main_audio::software_choice_for_gpu_failure(&no_adapter) => PresentationChoice::Software(SoftwareReason::NoAdapter),);
 }
 
 /// The third of clonk-org/clonk-rs#299's three startup-diagnostic cases: not
@@ -6003,20 +4964,11 @@ fn a_machine_with_neither_presentation_path_is_told_it_was_both() {
 
     let message = crate::main_audio::both_presentations_failed_context(&gpu_error);
 
-    assert!(
-        message.contains("software presentation could not start either"),
-        "the software half must survive: {message}"
-    );
-    assert!(
-        message.contains("no GPU adapter on any backend"),
-        "the GPU half must survive: {message}"
-    );
+    main_assert!(message.contains("software presentation could not start either"), "the software half must survive: {message}");
+    main_assert!(message.contains("no GPU adapter on any backend"), "the GPU half must survive: {message}");
     // `{:#}` renders the whole chain; the outer context alone names nothing an
     // operator can act on.
-    assert!(
-        message.contains("no GPU backends were attempted"),
-        "the GPU cause must survive, not just its outermost context: {message}"
-    );
+    main_assert!(message.contains("no GPU backends were attempted"), "the GPU cause must survive, not just its outermost context: {message}");
 }
 
 #[test]
@@ -6049,14 +5001,8 @@ fn the_presentation_path_never_reaches_the_simulation() {
     // cross-path comparison below could pass by comparing two runs that are
     // both wrong, or fail for a reason that has nothing to do with
     // presentation.
-    assert_eq!(
-        gpu, gpu_again,
-        "the sandbox fixture must be deterministic before it can prove anything"
-    );
+    main_assert_eq!(gpu => gpu_again, "the sandbox fixture must be deterministic before it can prove anything");
 
     let software = advance(false);
-    assert_eq!(
-        gpu, software,
-        "presentation path changed the simulation: snapshot, RNG or frame diverged"
-    );
+    main_assert_eq!(gpu => software, "presentation path changed the simulation: snapshot, RNG or frame diverged");
 }

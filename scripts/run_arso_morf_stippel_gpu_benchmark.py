@@ -1139,19 +1139,6 @@ def validate_native_presentation_cadence(report):
         )
 
 
-def require_single_result(lines, expected):
-    results = [
-        line.strip()
-        for line in lines
-        if line.startswith(f"{PRESENTATION_PREFIX} result=")
-    ]
-    if results != [expected]:
-        raise BenchmarkFailure(
-            "native presentation budget did not report pass "
-            f"(observed {results or ['no result']})"
-        )
-
-
 def single_budget_result(lines):
     matches = [
         line.strip()

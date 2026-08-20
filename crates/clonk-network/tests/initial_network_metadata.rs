@@ -187,7 +187,7 @@ fn id_entry(id: [u8; 4], count: i32) -> JoinDataIdListEntry {
 }
 
 fn legacy(bytes: &[u8]) -> LegacyCString {
-    LegacyCString::from_bytes(bytes.to_vec()).unwrap()
+    crate::c4(bytes)
 }
 
 fn helper_team_metadata() -> InitialNetworkTeamMetadata {
@@ -240,17 +240,14 @@ fn base_parameters() -> JoinGameParametersEnvelope {
         restore_player_infos: players,
         teams: JoinTeamListSnapshot {
             active: 1,
-            custom: 0,
             allow_hostility_change: 1,
-            allow_team_switch: 0,
             auto_generate_teams: 1,
             last_team_id: 1,
-            team_distribution: 0,
             team_colors: 1,
             max_script_players: 2,
             script_player_names: legacy(b"old"),
             random_team_count: 3,
-            teams: Vec::new(),
+            ..Default::default()
         },
         clients: JoinClientRegistrySnapshot {
             clients: Vec::new(),

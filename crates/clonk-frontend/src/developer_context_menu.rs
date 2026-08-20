@@ -211,12 +211,7 @@ impl ViewportContextMenu {
             .iter()
             .enumerate()
             .scan(y, |top, (index, entry)| {
-                let rect = IntRect {
-                    x,
-                    y: *top,
-                    w: menu_width,
-                    h: entry_height(entry),
-                };
+                let rect = IntRect::new(x, *top, menu_width, entry_height(entry));
                 *top += rect.h;
                 Some(ViewportContextEntryLayout { index, rect })
             })
@@ -266,12 +261,12 @@ impl ViewportContextMenu {
         };
         draw_raised(
             surface,
-            IntRect {
-                x: first.rect.x,
-                y: first.rect.y,
-                w: first.rect.w,
-                h: last.rect.y + last.rect.h - first.rect.y,
-            },
+            IntRect::new(
+                first.rect.x,
+                first.rect.y,
+                first.rect.w,
+                last.rect.y + last.rect.h - first.rect.y,
+            ),
             WINDOW_BACKGROUND,
         );
         for row in &rows {
@@ -281,12 +276,12 @@ impl ViewportContextMenu {
             match entry {
                 ViewportContextEntry::Separator => fill(
                     surface,
-                    IntRect {
-                        x: row.rect.x + 4,
-                        y: row.rect.y + row.rect.h / 2,
-                        w: row.rect.w - 8,
-                        h: 1,
-                    },
+                    IntRect::new(
+                        row.rect.x + 4,
+                        row.rect.y + row.rect.h / 2,
+                        row.rect.w - 8,
+                        1,
+                    ),
                     MID_EDGE,
                 ),
                 ViewportContextEntry::Item { label, enabled, .. } => {

@@ -1,62 +1,40 @@
 // Test for increment/decrement on various lvalue types
 
 // ++EffectVar(0, pTarget, iEffect)
-crate::support::compile_case!(
-    effectvar_three_args_pre_increment,
-    r#"func Test() { var pTarget, iEffect; ++EffectVar(0, pTarget, iEffect); }"#
-);
+crate::support::compile_cases! {
+    effectvar_three_args_pre_increment: r#"func Test() { var pTarget, iEffect; ++EffectVar(0, pTarget, iEffect); }"#;
 
 // --EffectVar(0, pTarget, iEffect)
-crate::support::compile_case!(
-    effectvar_three_args_pre_decrement,
-    r#"func Test() { var pTarget, iEffect; --EffectVar(0, pTarget, iEffect); }"#
-);
+    effectvar_three_args_pre_decrement: r#"func Test() { var pTarget, iEffect; --EffectVar(0, pTarget, iEffect); }"#;
 
 // EffectVar(0, pTarget, iEffect)++
-crate::support::compile_case!(
-    effectvar_three_args_post_increment,
-    r#"func Test() { var pTarget, iEffect; EffectVar(0, pTarget, iEffect)++; }"#
-);
+    effectvar_three_args_post_increment: r#"func Test() { var pTarget, iEffect; EffectVar(0, pTarget, iEffect)++; }"#;
 
 // EffectVar(0, pTarget, iEffect)--
-crate::support::compile_case!(
-    effectvar_three_args_post_decrement,
-    r#"func Test() { var pTarget, iEffect; EffectVar(0, pTarget, iEffect)--; }"#
-);
+    effectvar_three_args_post_decrement: r#"func Test() { var pTarget, iEffect; EffectVar(0, pTarget, iEffect)--; }"#;
 
 // ++LocalN("key", obj)
-crate::support::compile_case!(
-    localn_two_args_pre_increment,
-    r#"func Test() { var obj; ++LocalN("count", obj); }"#
-);
+    localn_two_args_pre_increment: r#"func Test() { var obj; ++LocalN("count", obj); }"#;
 
 // LocalN("key", obj)--
-crate::support::compile_case!(
-    localn_two_args_post_decrement,
-    r#"func Test() { var obj; LocalN("active", obj)--; }"#
-);
+    localn_two_args_post_decrement: r#"func Test() { var obj; LocalN("active", obj)--; }"#;
 
 // ++LocalN("key")
-crate::support::compile_case!(
-    localn_one_arg_pre_increment,
-    r#"func Test() { ++LocalN("counter"); }"#
-);
+    localn_one_arg_pre_increment: r#"func Test() { ++LocalN("counter"); }"#;
 
 // --Var()
-crate::support::compile_case!(var_zero_args_pre_decrement, r#"func Test() { --Var(); }"#);
+    var_zero_args_pre_decrement: r#"func Test() { --Var(); }"#;
 
 // Var()++
-crate::support::compile_case!(var_zero_args_post_increment, r#"func Test() { Var()++; }"#);
+    var_zero_args_post_increment: r#"func Test() { Var()++; }"#;
+}
 
-#[test]
-fn increment_resolves_side_effectful_var_lvalue_once() {
+run_cases! {
+    increment_resolves_side_effectful_var_lvalue_once:
     // C++ compiles the operand to one C4Value reference and AB_Inc1 mutates
     // that reference in place (C4AulExec.cpp:450-454). ComboMenu::CheckSpells
     // relies on this exact nested expression when counting one MGUP candidate:
     // `++Var(Var(13+iCount++*2) = key)`.
-    let mut engine = clonk_script::Engine::new();
-    engine
-        .load_script(
             r#"
                 #strict
                 func Test()
@@ -66,28 +44,18 @@ fn increment_resolves_side_effectful_var_lvalue_once() {
                     return [iCount, Var(4), Var(13), Var(15)];
                 }
             "#,
-        )
-        .expect("nested Var lvalue compiles");
-
-    assert_eq!(
-        engine.call("Test", &[]).expect("nested increment executes"),
+        "Test", &[] =>
         clonk_script::Value::Array(vec![
             clonk_script::Value::Int(1),
             clonk_script::Value::Int(1),
             clonk_script::Value::Int(4),
             clonk_script::Value::Nil,
-        ])
-    );
-}
+        ]);
 
-#[test]
-fn increment_resolves_side_effectful_effectvar_lvalue_once() {
+    increment_resolves_side_effectful_effectvar_lvalue_once:
     // EffectVar is also a reference-returning C++ engine function. Its slot
     // address is evaluated before AB_Inc1 and cannot be recomputed for the
     // write (C4AulExec.cpp:450-454; C4Script.cpp:5569-5594).
-    let mut engine = clonk_script::Engine::new();
-    engine
-        .load_script(
             r#"
                 #strict
                 func Test()
@@ -97,18 +65,11 @@ fn increment_resolves_side_effectful_effectvar_lvalue_once() {
                     return [i, result];
                 }
             "#,
-        )
-        .expect("side-effectful EffectVar lvalue compiles");
-
-    assert_eq!(
-        engine
-            .call("Test", &[])
-            .expect("nested EffectVar increment executes"),
+        "Test", &[] =>
         clonk_script::Value::Array(vec![
             clonk_script::Value::Int(1),
             clonk_script::Value::Int(1),
-        ])
-    );
+        ]);
 }
 
 #[test]
@@ -164,37 +125,21 @@ fn indexed_effectvar_array_assignment_writes_through_the_returned_reference() {
 }
 
 // ++Local()
-crate::support::compile_case!(
-    local_zero_args_pre_increment,
-    r#"func Test() { ++Local(); }"#
-);
+crate::support::compile_cases! {
+    local_zero_args_pre_increment: r#"func Test() { ++Local(); }"#;
 
 // ++Local(0, obj)
-crate::support::compile_case!(
-    local_two_args_pre_increment,
-    r#"func Test() { var obj; ++Local(0, obj); }"#
-);
+    local_two_args_pre_increment: r#"func Test() { var obj; ++Local(0, obj); }"#;
 
 // Var(0, obj)--
-crate::support::compile_case!(
-    var_two_args_post_decrement,
-    r#"func Test() { var obj; Var(0, obj)--; }"#
-);
+    var_two_args_post_decrement: r#"func Test() { var obj; Var(0, obj)--; }"#;
 
 // Exact pattern from WARP line 147
-crate::support::compile_case!(
-    warp_line_147_exact_pattern,
-    r#"func Test() { var pTarget, iEffect, pObj; EffectVar(++EffectVar(0, pTarget, iEffect), pTarget, iEffect) = pObj; }"#
-);
+    warp_line_147_exact_pattern: r#"func Test() { var pTarget, iEffect, pObj; EffectVar(++EffectVar(0, pTarget, iEffect), pTarget, iEffect) = pObj; }"#;
 
 // Pattern from Skyrace.c4s: --Var() in if condition
-crate::support::compile_case!(
-    skyrace_var_decrement_pattern,
-    r#"func Test() { if (!--Var()) return("Done"); }"#
-);
+    skyrace_var_decrement_pattern: r#"func Test() { if (!--Var()) return("Done"); }"#;
 
 // Pattern: if((--EffectVar(0, pTarget, iEffectNumber))<=0)
-crate::support::compile_case!(
-    nested_increment_in_condition,
-    r#"func Test() { var pTarget, iEffectNumber; if((--EffectVar(0, pTarget, iEffectNumber))<=0) return(-1); }"#
-);
+    nested_increment_in_condition: r#"func Test() { var pTarget, iEffectNumber; if((--EffectVar(0, pTarget, iEffectNumber))<=0) return(-1); }"#;
+}

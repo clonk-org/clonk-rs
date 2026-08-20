@@ -13,11 +13,11 @@
 
         let encoded = serde_json::to_string(&record).test_value();
         let decoded: ShapeAttachRecord = serde_json::from_str(&encoded).test_value();
-        assert_eq!(decoded, record);
+        unit_assert_eq!(decoded => record);
 
         let legacy: ShapeAttachRecord =
             serde_json::from_str(r#"{"mat_valid":true,"x":12,"y":34,"vtx":2}"#).test_value();
-        assert!(!legacy.mat_vehicle);
+        unit_assert!(!legacy.mat_vehicle);
     }
 
     #[test]
@@ -37,13 +37,12 @@
         let mut engine = Engine::with_seed(1);
         engine.set_materials(materials);
 
-        let mut definition = test_definition("WALK", "Walker", "");
-        definition.configure_actions(
-            Some("Walk".to_string()),
-            HashMap::from([(
-                "Walk".to_string(),
-                ActionSpec::default().with_procedure("WALK"),
-            )]),
+        let mut definition = action_definition(
+            "WALK",
+            "Walker",
+            "",
+            Some("Walk"),
+            [("Walk", ActionSpec::default().with_procedure("WALK"))],
         );
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
         engine.register_test_definition(definition);
@@ -58,18 +57,8 @@
         let mut landscape = Landscape::new(5, vec![5; 5]).test_value();
         landscape.set_pixel_grid(grid);
         engine.set_landscape(landscape);
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.border_material_at(2, 3)),
-            Some(vehicle)
-        );
-        assert_eq!(
-            engine
-                .landscape()
-                .map(|landscape| landscape.density_at(2, 3, engine.materials())),
-            Some(100)
-        );
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.border_material_at(2, 3)) => Some(vehicle));
+        unit_assert_eq!(engine.landscape().map(|landscape| landscape.density_at(2, 3, engine.materials())) => Some(100));
 
         let walker = engine.spawn_test_object(
             test_spawn_at("WALK", 2, 2)
@@ -80,7 +69,7 @@
         let index = engine.test_object_index(walker);
         engine.tick_without_snapshot().test_value();
 
-        assert!(
+        unit_assert!(
             engine.objects[index].state.shape_attach.mat_valid,
             "attachment missing: pos={:?} vel={:?} mobile={} action={:?} t_attach={} vertices={:?}",
             engine.objects[index].state.position,
@@ -90,7 +79,7 @@
             engine.objects[index].state.t_attach,
             engine.objects[index].state.vertices
         );
-        assert!(engine.objects[index].state.shape_attach.mat_vehicle);
+        unit_assert!(engine.objects[index].state.shape_attach.mat_vehicle);
     }
 
     #[test]
@@ -98,8 +87,8 @@
         // C4Action::CompileFunc persists Action.Dir verbatim
         // (C4Action.cpp:45-54); save/snapshot JSON must do the same.
         let direction: Direction = serde_json::from_str("13").test_value();
-        assert_eq!(direction.to_script_value(), 13);
-        assert_eq!(serde_json::to_string(&direction).test_value(), "13");
+        unit_assert_eq!(direction.to_script_value() => 13);
+        unit_assert_eq!(serde_json::to_string(&direction).test_value() => "13");
     }
 
     #[test]
@@ -107,8 +96,8 @@
         // C4Action::CompileFunc persists Action.ComDir verbatim
         // (C4Action.cpp:45-54); save/snapshot JSON must do the same.
         let direction: CommandDirection = serde_json::from_str("200").test_value();
-        assert_eq!(direction.to_script_value(), 200);
-        assert_eq!(serde_json::to_string(&direction).test_value(), "200");
+        unit_assert_eq!(direction.to_script_value() => 200);
+        unit_assert_eq!(serde_json::to_string(&direction).test_value() => "200");
     }
 
     #[test]
@@ -116,7 +105,7 @@
         // C4Action::ComDir is a plain int32 assignment, including through
         // script-produced state updates (C4Script.cpp:792-796).
         let direction = value_to_command_direction("TEST", "Step", Value::Int(200)).test_value();
-        assert_eq!(direction.to_script_value(), 200);
+        unit_assert_eq!(direction.to_script_value() => 200);
     }
 
     #[test]
@@ -126,8 +115,8 @@
         // not accelerate or decelerate the object.
         let mut velocity = FixedVec2::new(itofix(2), itofix(3));
         apply_walk_physical_movement(&mut velocity, CommandDirection::from_raw(200), itofix(10));
-        assert_eq!(velocity, FixedVec2::new(itofix(2), itofix(3)));
-        assert_eq!(CommandDirection::from_raw(200).axis_components(), (0, 0));
+        unit_assert_eq!(velocity => FixedVec2::new(itofix(2), itofix(3)));
+        unit_assert_eq!(CommandDirection::from_raw(200).axis_components() => (0, 0));
     }
 
     #[test]
@@ -136,7 +125,7 @@
         // before adding an attachment side (C4Object.cpp:4852-4853).
         let direction = Direction::from_script_value(8);
         let attach = procedure_t_attach(ActionProcedure::Scale, false, direction, 0, 0);
-        assert_eq!(attach & (CNAT_LEFT | CNAT_RIGHT), 0);
+        unit_assert_eq!(attach & (CNAT_LEFT | CNAT_RIGHT) => 0);
     }
     use clonk_engine::math::C4Fixed;
     use clonk_engine::rng::LcgRng;
@@ -226,15 +215,12 @@
             .get(&earth)
             .copied()
             .unwrap_or_default();
-        assert!(removed > 0, "expected blast to remove material");
+        unit_assert!(removed > 0, "expected blast to remove material");
 
         let snapshot = engine.snapshot();
-        assert!(
-            !snapshot.particles.is_empty(),
-            "expected blast to emit particles"
-        );
-        assert_eq!(snapshot.particles[0].definition_id, "material/pxs/earth");
-        assert_eq!(snapshot.particles[0].parameter_b, earth.index() as i32);
+        unit_assert!(!snapshot.particles.is_empty(), "expected blast to emit particles");
+        unit_assert_eq!(snapshot.particles[0].definition_id => "material/pxs/earth");
+        unit_assert_eq!(snapshot.particles[0].parameter_b => earth.index() as i32);
     }
 
     #[test]
@@ -262,21 +248,14 @@
         let result = engine
             .blast_circle(Vector2::new(8, 40), 4, None)
             .test_value();
-        assert!(
-            result.removed_by_material.is_empty(),
-            "BlastFree=0 removes nothing"
-        );
+        unit_assert!(result.removed_by_material.is_empty(), "BlastFree=0 removes nothing");
         let pre_count = result
             .pixel_count_by_material
             .get(&rock)
             .copied()
             .unwrap_or_default();
-        assert_eq!(pre_count, 25, "solid half circle of r=4");
-        assert_eq!(
-            engine.pxs_system.count() as i32,
-            pre_count / 2,
-            "PXS.Cast(mat, BlastMatCount/Blast2PXSRatio) (C4Landscape.cpp:1075-1078)"
-        );
+        unit_assert_eq!(pre_count => 25, "solid half circle of r=4");
+        unit_assert_eq!(engine.pxs_system.count() as i32 => pre_count / 2, "PXS.Cast(mat, BlastMatCount/Blast2PXSRatio) (C4Landscape.cpp:1075-1078)");
     }
 
     #[test]
@@ -319,8 +298,8 @@
             .blast_circle(Vector2::new(3, 3), 2, None)
             .test_value();
 
-        assert_eq!(result.pixel_count_by_material.get(&earth), Some(&10));
-        assert_eq!(result.removed_by_material.get(&earth), Some(&10));
+        unit_assert_eq!(result.pixel_count_by_material.get(&earth) => Some(&10));
+        unit_assert_eq!(result.removed_by_material.get(&earth) => Some(&10));
         let landscape = engine.landscape().test_value();
         for (x, y) in [
             (3, 1),
@@ -333,19 +312,11 @@
             (3, 4),
             (3, 5),
         ] {
-            assert_eq!(
-                landscape.material_at(x, y),
-                None,
-                "BlastFree must clear in-circle pixel ({x}, {y})"
-            );
+            unit_assert_eq!(landscape.material_at(x, y) => None, "BlastFree must clear in-circle pixel ({x}, {y})");
         }
-        assert_eq!(
-            landscape.grid_byte_at(3, 3),
-            Some(20 | 0x80),
-            "ClearPix must retain the tunnel-background IFT byte"
-        );
-        assert_eq!(landscape.material_at(3, 0), Some(earth));
-        assert_eq!(landscape.material_at(3, 6), Some(earth));
+        unit_assert_eq!(landscape.grid_byte_at(3, 3) => Some(20 | 0x80), "ClearPix must retain the tunnel-background IFT byte");
+        unit_assert_eq!(landscape.material_at(3, 0) => Some(earth));
+        unit_assert_eq!(landscape.material_at(3, 6) => Some(earth));
     }
 
     #[test]
@@ -375,18 +346,8 @@
         engine
             .blast_circle(Vector2::new(1, 1), 0, None)
             .test_value();
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.material_at(1, 1)),
-            None
-        );
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.material_at(1, 0)),
-            engine.materials().id_of("Earth")
-        );
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.material_at(1, 1)) => None);
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.material_at(1, 0)) => engine.materials().id_of("Earth"));
     }
 
     #[test]
@@ -424,18 +385,8 @@
             .blast_circle(Vector2::new(1, 1), 0, None)
             .test_value();
 
-        assert_eq!(
-            engine
-                .landscape()
-                .and_then(|landscape| landscape.grid_byte_at(1, 1)),
-            Some(1),
-            "unresolved BlastShiftTo byte 0 performs no landscape write"
-        );
-        assert_eq!(
-            (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()),
-            rng_before,
-            "unresolved BlastShiftTo byte 0 performs no Random draw"
-        );
+        unit_assert_eq!(engine.landscape().and_then(|landscape| landscape.grid_byte_at(1, 1)) => Some(1), "unresolved BlastShiftTo byte 0 performs no landscape write");
+        unit_assert_eq!((engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()) => rng_before, "unresolved BlastShiftTo byte 0 performs no Random draw");
     }
 
     fn free_rect_test_engine(
@@ -489,11 +440,7 @@
             engine
                 .call_scenario_script_function("Probe", Vec::new())
                 .test_value();
-            assert_eq!(
-                engine.debug_landscape_plane().test_value().2,
-                expected,
-                "FreeRect density selector {density}"
-            );
+            unit_assert_eq!(engine.debug_landscape_plane().test_value().2 => expected, "FreeRect density selector {density}");
         }
     }
 
@@ -510,7 +457,7 @@
         engine
             .call_scenario_script_function("Probe", Vec::new())
             .test_value();
-        assert_eq!(engine.debug_landscape_plane().test_value().2, vec![0; 6]);
+        unit_assert_eq!(engine.debug_landscape_plane().test_value().2 => vec![0; 6]);
     }
 
     #[test]
@@ -533,21 +480,15 @@
                 saw_zero_first_draw = true;
             }
         }
-        assert!(saw_zero_first_draw, "fixture covers the one-draw row arm");
-        assert!(
-            saw_nonzero_first_draw,
-            "fixture covers the two-draw row arm"
-        );
+        unit_assert!(saw_zero_first_draw, "fixture covers the one-draw row arm");
+        unit_assert!(saw_nonzero_first_draw, "fixture covers the two-draw row arm");
 
         engine
             .call_scenario_script_function("Probe", Vec::new())
             .test_value();
 
-        assert_eq!(engine.debug_landscape_plane().test_value().2, vec![1; 20]);
-        assert_eq!(
-            engine.rng, expected_rng,
-            "every row consumes one Rnd3 and a second exactly when the first is nonzero"
-        );
+        unit_assert_eq!(engine.debug_landscape_plane().test_value().2 => vec![1; 20]);
+        unit_assert_eq!(engine.rng => expected_rng, "every row consumes one Rnd3 and a second exactly when the first is nonzero");
     }
 
     #[test]
@@ -560,16 +501,12 @@
             "if (GBackSolid(0, 0)) FreeRect(0, 0, 1, 1, C4M_Solid); \
              if (!GBackSolid(0, 0)) FreeRect(1, 0, 1, 1, C4M_Solid);",
         );
-        assert_eq!(engine.debug_landscape_density(0, 0), Some(50));
+        unit_assert_eq!(engine.debug_landscape_density(0, 0) => Some(50));
 
         engine
             .call_scenario_script_function("Probe", Vec::new())
             .test_value();
-        assert_eq!(
-            engine.debug_landscape_plane().test_value().2,
-            vec![0, 0],
-            "the second clear proves GBackSolid saw the first synchronous clear"
-        );
+        unit_assert_eq!(engine.debug_landscape_plane().test_value().2 => vec![0, 0], "the second clear proves GBackSolid saw the first synchronous clear");
     }
 
     #[test]
@@ -628,30 +565,24 @@
                 expected_shifts += 1;
             }
         }
-        assert!(
-            expected_shifts > 0,
-            "seed fixture exercises captured writes"
-        );
+        unit_assert!(expected_shifts > 0, "seed fixture exercises captured writes");
         let expected_tail = expected_rng.random(1000);
 
         let probe_index = engine.test_object_index(probe);
-        assert_eq!(
-            engine.call_test_object_function(probe_index, "Probe", Vec::new()),
+        unit_assert_eq!(
+            engine.call_test_object_function(probe_index, "Probe", Vec::new()) =>
             Value::Int(expected_tail),
             "the callback tail observes BlastFree's synchronous RNG position"
         );
-        assert_eq!(
-            engine.rng, expected_rng,
-            "the authoritative replay consumes no duplicate blast draws"
-        );
-        assert_eq!(
+        unit_assert_eq!(engine.rng => expected_rng, "the authoritative replay consumes no duplicate blast draws");
+        unit_assert_eq!(
             engine
                 .debug_landscape_plane()
                 .test_value()
                 .2
                 .iter()
                 .filter(|byte| **byte == 2)
-                .count(),
+                .count() =>
             expected_shifts,
             "the fold applies each captured BlastShiftTo choice once"
         );
@@ -692,28 +623,14 @@
         let probe = engine.spawn_test_object(SpawnConfig::new("SPRB"));
         let probe_index = engine.test_object_index(probe);
 
-        assert_eq!(
-            engine.call_test_object_function(probe_index, "Probe", Vec::new()),
-            Value::Nil
-        );
-        assert_eq!(
-            engine.pxs_system.count(),
-            9,
-            "the nine pixels in the C++ r=2 scan become PXS exactly once"
-        );
-        assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
+        unit_assert_eq!(engine.call_test_object_function(probe_index, "Probe", Vec::new()) => Value::Nil);
+        unit_assert_eq!(engine.pxs_system.count() => 9, "the nine pixels in the C++ r=2 scan become PXS exactly once");
+        unit_assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
     }
 
     #[test]
     fn shake_free_preview_stops_reporting_a_newly_orphaned_pixel_as_solid() {
-        let materials = test_materials(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            DigFree=1
-        "#,
-        );
+        let materials = test_materials(EARTH_DIG_FREE_MATERIAL_SOURCE);
         let mut engine = Engine::with_seed(23);
         engine.set_materials(materials);
 
@@ -741,8 +658,8 @@
         engine.register_test_definition(probe);
         let probe = engine.spawn_test_object(SpawnConfig::new("SPRB"));
 
-        assert_eq!(
-            engine.call_test_object_function(engine.test_object_index(probe), "Probe", Vec::new()),
+        unit_assert_eq!(
+            engine.call_test_object_function(engine.test_object_index(probe), "Probe", Vec::new()) =>
             Value::Bool(false),
             "later script in the same callback observes the orphan as non-solid"
         );
@@ -789,31 +706,25 @@
         let digger = engine.spawn_test_object(SpawnConfig::new("DGRR"));
         let digger_index = engine.test_object_index(digger);
 
-        assert_eq!(
-            engine.call_test_object_function(digger_index, "Dig", vec![Value::Int(0)]),
-            Value::Nil
-        );
-        assert_eq!(
+        unit_assert_eq!(engine.call_test_object_function(digger_index, "Dig", vec![Value::Int(0)]) => Value::Nil);
+        unit_assert_eq!(
             engine
                 .objects
                 .iter()
                 .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
-                .count(),
+                .count() =>
             0,
             "two pixels are credited once and remain below the ratio-three threshold"
         );
 
         let digger_index = engine.test_object_index(digger);
-        assert_eq!(
-            engine.call_test_object_function(digger_index, "Dig", vec![Value::Int(2)]),
-            Value::Nil
-        );
-        assert_eq!(
+        unit_assert_eq!(engine.call_test_object_function(digger_index, "Dig", vec![Value::Int(2)]) => Value::Nil);
+        unit_assert_eq!(
             engine
                 .objects
                 .iter()
                 .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
-                .count(),
+                .count() =>
             1,
             "the second two-pixel credit crosses the threshold once"
         );
@@ -885,8 +796,8 @@
         let expected_tail = expected_rng.random(1_000);
 
         let probe_index = engine.test_object_index(probe);
-        assert_eq!(
-            engine.call_test_object_function(probe_index, "Probe", Vec::new()),
+        unit_assert_eq!(
+            engine.call_test_object_function(probe_index, "Probe", Vec::new()) =>
             Value::Array(vec![
                 Value::Bool(true),
                 Value::Int(expected_construction),
@@ -895,46 +806,16 @@
             ]),
             "Blast2Object is findable after Construction and before the caller resumes"
         );
-        assert_eq!(
-            engine.rng, expected_rng,
-            "every blast draw runs exactly once"
-        );
-        assert_eq!(engine.pxs_system.count(), 1);
-        assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
-        assert_eq!(
-            engine
-                .objects
-                .iter()
-                .filter(|object| object.definition_id == "DEBR" && !object.destroyed)
-                .count(),
-            1
-        );
-        assert_eq!(
-            engine.debug_landscape_plane().test_value().2,
-            vec![0],
-            "the captured terrain write folds once"
-        );
+        unit_assert_eq!(engine.rng => expected_rng, "every blast draw runs exactly once");
+        unit_assert_eq!(engine.pxs_system.count() => 1);
+        unit_assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
+        unit_assert_eq!(engine.objects.iter().filter(|object| object.definition_id == "DEBR" && !object.destroyed).count() => 1);
+        unit_assert_eq!(engine.debug_landscape_plane().test_value().2 => vec![0], "the captured terrain write folds once");
     }
 
     #[test]
     fn dig_free_recomputes_creator_geometry_between_material_lifecycles() {
-        let materials = test_materials(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=80
-            DigFree=1
-            Dig2Object=GEMA
-            Dig2ObjectRatio=1
-
-            [Material Rock]
-            Name=Rock
-            Density=100
-            DigFree=1
-            Dig2Object=GEMB
-            Dig2ObjectRatio=1
-        "#,
-        );
+        let materials = test_materials(EARTH_ROCK_DIG_OBJECT_MATERIAL_SOURCE);
         let mut engine = Engine::with_seed(43);
         engine.set_materials(materials);
         let grid = landscape::PixelGrid::new(
@@ -998,15 +879,15 @@
         let expected_tail = expected_rng.random(1_000);
 
         let digger_index = engine.test_object_index(digger);
-        assert_eq!(
-            engine.call_test_object_function(digger_index, "Probe", Vec::new()),
+        unit_assert_eq!(
+            engine.call_test_object_function(digger_index, "Probe", Vec::new()) =>
             Value::Array(vec![
                 Value::Int(expected_first_construction),
                 Value::Int(expected_second_construction),
                 Value::Int(expected_tail),
             ])
         );
-        assert_eq!(engine.rng, expected_rng, "dig lifecycle draws run once");
+        unit_assert_eq!(engine.rng => expected_rng, "dig lifecycle draws run once");
         let first = engine
             .objects
             .iter()
@@ -1017,16 +898,8 @@
             .iter()
             .find(|object| object.definition_id == "GEMB")
             .test_value();
-        assert_eq!(
-            first.state.position,
-            Vector2::ZERO,
-            "initial NewObject growth preserves the raw y=0 shape bottom"
-        );
-        assert_eq!(
-            second.state.position,
-            Vector2::new(10, 30),
-            "the second cast observes the first Construction's move and shape write"
-        );
+        unit_assert_eq!(first.state.position => Vector2::ZERO, "initial NewObject growth preserves the raw y=0 shape bottom");
+        unit_assert_eq!(second.state.position => Vector2::new(10, 30), "the second cast observes the first Construction's move and shape write");
     }
 
     #[test]
@@ -1078,12 +951,12 @@
 
         engine.frame = 4;
         engine.tick_without_snapshot().test_value();
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .objects
                 .iter()
                 .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
-                .count(),
+                .count() =>
             1,
             "two callbacks in one effect batch accumulate 2 + 2 before conversion"
         );
@@ -1140,25 +1013,25 @@
         gem.set_c4_callback_convention(true);
         engine.register_test_definition(gem);
 
-        engine.spawn_test_object(SpawnConfig::new("DINI").with_loaded(true));
+        spawn_fixture!(engine, "DINI", with_loaded: true);
         let digger = engine.spawn_test_object(SpawnConfig::new("DINI"));
-        assert!(engine.find_object_index(digger).is_some());
+        unit_assert!(engine.find_object_index(digger).is_some());
         let gem = engine
             .objects
             .iter()
             .find(|object| object.definition_id == "GEM_" && !object.destroyed)
             .test_value();
-        assert_eq!(
-            gem.state.local_vars.get("creator_found"),
+        unit_assert_eq!(
+            gem.state.local_vars.get("creator_found") =>
             Some(&Value::Bool(true)),
             "a nested Dig2Object Construction sees its pending creator in the C++ master list"
         );
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .objects
                 .iter()
                 .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
-                .count(),
+                .count() =>
             1,
             "Initialize inherits Construction's pre-insertion material credit"
         );
@@ -1209,14 +1082,8 @@
         engine.objects[index].state.position = Vector2::new(10, 10);
         engine.objects[index].fixed_position = FixedVec2::from_ints(10, 10);
         engine.update_solid_mask(index);
-        assert_eq!(
-            engine.debug_solid_mask_buffer(id.as_u64()).test_value(),
-            vec![1, 1 | 0x80]
-        );
-        assert_eq!(
-            engine.debug_landscape_plane().test_value().2[10 * 20 + 10..10 * 20 + 12],
-            [2, 2]
-        );
+        unit_assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()).test_value() => vec![1, 1 | 0x80]);
+        unit_assert_eq!(engine.debug_landscape_plane().test_value().2[10 * 20 + 10..10 * 20 + 12] => [2, 2]);
         (engine, id, vehicle)
     }
 
@@ -1233,8 +1100,8 @@
         let probe_index = engine.test_object_index(mask);
         let result = engine.call_test_object_function(probe_index, "Probe", Vec::new());
 
-        assert_eq!(
-            result,
+        unit_assert_eq!(
+            result =>
             Value::Array(vec![
                 Value::Bool(true),
                 Value::Bool(true),
@@ -1243,30 +1110,18 @@
             ]),
             "same-call reads see FinishChange's repaired Vehicle mask"
         );
-        assert_eq!(engine.rng, expected_rng, "one source-row Rnd3 arm");
-        assert_eq!(engine.pxs_system.count(), 0);
+        unit_assert_eq!(engine.rng => expected_rng, "one source-row Rnd3 arm");
+        unit_assert_eq!(engine.pxs_system.count() => 0);
 
         let index = engine.test_object_index(mask);
-        assert_eq!(
-            engine.debug_landscape_plane().test_value().2[10 * 20 + 10..10 * 20 + 12],
-            [2, 2],
-            "the authoritative fold also re-puts Vehicle"
-        );
-        assert_eq!(
-            engine.debug_solid_mask_buffer(mask.as_u64()).test_value(),
-            vec![0, 0x80],
-            "Repair saves the cleared sky/IFT background"
-        );
+        unit_assert_eq!(engine.debug_landscape_plane().test_value().2[10 * 20 + 10..10 * 20 + 12] => [2, 2], "the authoritative fold also re-puts Vehicle");
+        unit_assert_eq!(engine.debug_solid_mask_buffer(mask.as_u64()).test_value() => vec![0, 0x80], "Repair saves the cleared sky/IFT background");
 
         engine.remove_solid_mask(index);
         engine.objects[index].state.position = Vector2::new(15, 15);
         engine.objects[index].fixed_position = FixedVec2::from_ints(15, 15);
         engine.update_solid_mask(index);
-        assert_eq!(
-            engine.debug_landscape_plane().test_value().2[10 * 20 + 10..10 * 20 + 12],
-            [0, 0x80],
-            "moving the owner uncovers the cleared background"
-        );
+        unit_assert_eq!(engine.debug_landscape_plane().test_value().2[10 * 20 + 10..10 * 20 + 12] => [0, 0x80], "moving the owner uncovers the cleared background");
     }
 
     #[test]
@@ -1282,8 +1137,8 @@
         let probe_index = engine.test_object_index(mask);
         let result = engine.call_test_object_function(probe_index, "Probe", Vec::new());
 
-        assert_eq!(
-            result,
+        unit_assert_eq!(
+            result =>
             Value::Array(vec![
                 Value::Bool(false),
                 Value::Bool(false),
@@ -1292,24 +1147,13 @@
             ]),
             "ClearRectDensity reads and clears the raw Vehicle bytes"
         );
-        assert_eq!(engine.rng, expected_rng, "one source-row Rnd3 arm");
+        unit_assert_eq!(engine.rng => expected_rng, "one source-row Rnd3 arm");
 
         let index = engine.test_object_index(mask);
-        assert_eq!(
-            engine.debug_landscape_plane().test_value().2[10 * 20 + 10..10 * 20 + 12],
-            [0, 0]
-        );
-        assert_eq!(
-            engine.debug_solid_mask_buffer(mask.as_u64()).test_value(),
-            vec![1, 1 | 0x80],
-            "density clear has no PrepareChange/Repair bracket"
-        );
+        unit_assert_eq!(engine.debug_landscape_plane().test_value().2[10 * 20 + 10..10 * 20 + 12] => [0, 0]);
+        unit_assert_eq!(engine.debug_solid_mask_buffer(mask.as_u64()).test_value() => vec![1, 1 | 0x80], "density clear has no PrepareChange/Repair bracket");
         engine.remove_solid_mask(index);
-        assert_eq!(
-            engine.debug_landscape_plane().test_value().2[10 * 20 + 10..10 * 20 + 12],
-            [0, 0],
-            "raw-cleared mask pixels are not restored later"
-        );
+        unit_assert_eq!(engine.debug_landscape_plane().test_value().2[10 * 20 + 10..10 * 20 + 12] => [0, 0], "raw-cleared mask pixels are not restored later");
     }
 
     #[test]
@@ -1353,14 +1197,10 @@
             .call_scenario_script_function("Probe", Vec::new())
             .test_value();
         let landscape = engine.landscape().test_value();
-        assert_eq!(
-            landscape.surface(),
-            [8, 8, 5, 5],
-            "both clear arms ignore Material.DigFree while density filtering survives"
-        );
-        assert_eq!(landscape.liquid_material_at(3, 2), None);
-        assert_eq!(landscape.liquid_material_at(3, 3), None);
-        assert_eq!(landscape.liquid_material_at(3, 4), Some(water));
+        unit_assert_eq!(landscape.surface() => [8, 8, 5, 5], "both clear arms ignore Material.DigFree while density filtering survives");
+        unit_assert_eq!(landscape.liquid_material_at(3, 2) => None);
+        unit_assert_eq!(landscape.liquid_material_at(3, 3) => None);
+        unit_assert_eq!(landscape.liquid_material_at(3, 4) => Some(water));
     }
 
     #[test]
@@ -1380,8 +1220,7 @@
         let mut part = test_definition("PART", "FreeRect RNG part", "");
         part.set_rotateable(1);
 
-        let mut engine = Engine::with_seed(2);
-        engine.register_test_definition(source);
+        let mut engine = definition_engine(2, source);
         engine.register_test_definition(part);
         engine.set_landscape(Landscape::flat(1, 1));
         let source = engine.spawn_test_object(SpawnConfig::new("FRNG"));
@@ -1394,30 +1233,20 @@
         let expected_ydir = expected_rng.rnd3();
         let expected_xdir = expected_rng.rnd3();
         let expected_rotation = expected_rng.random(360);
-        assert_eq!(
-            (expected_rdir, expected_ydir, expected_xdir),
-            (0, 1, -1),
-            "seed fixture distinguishes synchronous from deferred ordering"
-        );
+        unit_assert_eq!((expected_rdir, expected_ydir, expected_xdir) => (0, 1, -1), "seed fixture distinguishes synchronous from deferred ordering");
 
         let source_index = engine.test_object_index(source);
-        assert_eq!(
-            engine.call_test_object_function(source_index, "Probe", Vec::new()),
-            Value::Bool(true)
-        );
+        unit_assert_eq!(engine.call_test_object_function(source_index, "Probe", Vec::new()) => Value::Bool(true));
         let piece = engine
             .objects
             .iter()
             .find(|object| object.definition_id == "PART")
             .test_value();
-        assert_eq!(
-            piece.fixed_velocity,
-            FixedVec2::from_ints(expected_xdir, expected_ydir)
-        );
-        assert_eq!(piece.rotation_velocity, itofix(expected_rdir));
-        assert_eq!(piece.state.rotation, expected_rotation);
-        assert_eq!(engine.rng.rnd3_ptr(), 5, "FreeRect draws are not replayed");
-        assert_eq!(engine.rng, expected_rng);
+        unit_assert_eq!(piece.fixed_velocity => FixedVec2::from_ints(expected_xdir, expected_ydir));
+        unit_assert_eq!(piece.rotation_velocity => itofix(expected_rdir));
+        unit_assert_eq!(piece.state.rotation => expected_rotation);
+        unit_assert_eq!(engine.rng.rnd3_ptr() => 5, "FreeRect draws are not replayed");
+        unit_assert_eq!(engine.rng => expected_rng);
     }
 
     #[test]
@@ -1469,8 +1298,8 @@
             .blast_circle(Vector2::new(8, 40), 4, Some(controller))
             .test_value();
         // Pre-blast counts: dust x∈4..=8 → 17, ruby x∈9..=11 → 8.
-        assert_eq!(result.pixel_count_by_material.get(&dust), Some(&17));
-        assert_eq!(result.pixel_count_by_material.get(&ruby), Some(&8));
+        unit_assert_eq!(result.pixel_count_by_material.get(&dust) => Some(&17));
+        unit_assert_eq!(result.pixel_count_by_material.get(&ruby) => Some(&8));
 
         // Dust (index 0): no Blast2Object → PXS.Cast(dust, 17/5 = 3, …, 60)
         // draws Random(61) twice per particle (C4PXS.cpp:309-322).
@@ -1490,23 +1319,23 @@
         // …then PXS.Cast(ruby, 8/5 = 1, …).
         mirror.random(61);
         mirror.random(61);
-        assert_eq!(engine.rng, mirror, "synced draw stream matches C++");
+        unit_assert_eq!(engine.rng => mirror, "synced draw stream matches C++");
 
         let gems: Vec<&Object> = engine
             .objects
             .iter()
             .filter(|object| object.definition_id == "GEM0")
             .collect();
-        assert_eq!(gems.len(), 2);
+        unit_assert_eq!(gems.len() => 2);
         for (object, (r1, r2, r3, r4)) in gems.iter().zip(expected_objects) {
-            assert_eq!(object.state.rotation, r1.rem_euclid(360));
-            assert_eq!(object.fixed_velocity.x, math::fixed10(r2 - 30), "xdir");
-            assert_eq!(object.fixed_velocity.y, math::fixed10(r3 - 40), "ydir");
-            assert_eq!(object.rotation_velocity, math::itofix(r4 + 1), "rdir");
-            assert_eq!(object.state.owner, OWNER_NONE, "CreateObject NO_OWNER");
-            assert_eq!(object.state.controller, controller, "iByPlayer");
+            unit_assert_eq!(object.state.rotation => r1.rem_euclid(360));
+            unit_assert_eq!(object.fixed_velocity.x => math::fixed10(r2 - 30), "xdir");
+            unit_assert_eq!(object.fixed_velocity.y => math::fixed10(r3 - 40), "ydir");
+            unit_assert_eq!(object.rotation_velocity => math::itofix(r4 + 1), "rdir");
+            unit_assert_eq!(object.state.owner => OWNER_NONE, "CreateObject NO_OWNER");
+            unit_assert_eq!(object.state.controller => controller, "iByPlayer");
         }
-        assert_eq!(engine.pxs_system.count(), 4, "3 dust + 1 ruby particles");
+        unit_assert_eq!(engine.pxs_system.count() => 4, "3 dust + 1 ruby particles");
     }
 
     #[test]
@@ -1538,7 +1367,7 @@
         let result = engine
             .blast_circle(Vector2::new(8, 40), 4, None)
             .test_value();
-        assert_eq!(result.pixel_count_by_material.get(&emerald), Some(&25));
+        unit_assert_eq!(result.pixel_count_by_material.get(&emerald) => Some(&25));
         // 25/4 = 6 objects worth of draws, definition never loaded…
         for _ in 0..6 {
             mirror.random(3);
@@ -1551,9 +1380,9 @@
             mirror.random(61);
             mirror.random(61);
         }
-        assert_eq!(engine.rng, mirror, "unknown-def draws are consumed");
-        assert!(engine.objects.is_empty(), "C4Id2Def null spawns no objects");
-        assert_eq!(engine.pxs_system.count(), 5);
+        unit_assert_eq!(engine.rng => mirror, "unknown-def draws are consumed");
+        unit_assert!(engine.objects.is_empty(), "C4Id2Def null spawns no objects");
+        unit_assert_eq!(engine.pxs_system.count() => 5);
     }
 
     #[test]
@@ -1600,16 +1429,8 @@
         engine.set_landscape(landscape);
 
         let landscape = engine.landscape().test_value();
-        assert_eq!(
-            landscape.material_at(0, 0),
-            Some(water),
-            "Pix2Mat resolves liquid pixels to the engine material id"
-        );
-        assert_eq!(
-            landscape.material_at(1, 1),
-            Some(earth),
-            "Pix2Mat resolves solid pixels to the engine material id"
-        );
+        unit_assert_eq!(landscape.material_at(0, 0) => Some(water), "Pix2Mat resolves liquid pixels to the engine material id");
+        unit_assert_eq!(landscape.material_at(1, 1) => Some(earth), "Pix2Mat resolves solid pixels to the engine material id");
     }
 
     #[test]
@@ -1637,12 +1458,8 @@
         engine.set_materials(materials);
         engine.set_landscape(Landscape::flat_with_material(10, 5, Some(earth)));
         let landscape = engine.landscape().test_value();
-        assert_eq!(
-            landscape.border_material_at(-1, 3),
-            Some(vehicle),
-            "closed side reads the Vehicle material"
-        );
-        assert_eq!(landscape.border_material_at(4, -1), None, "top open");
+        unit_assert_eq!(landscape.border_material_at(-1, 3) => Some(vehicle), "closed side reads the Vehicle material");
+        unit_assert_eq!(landscape.border_material_at(4, -1) => None, "top open");
     }
 
     #[test]
@@ -1679,54 +1496,31 @@
             .get(&rock)
             .copied()
             .unwrap_or_default();
-        assert!(pre_count > 0, "expected in-circle rock pixels");
+        unit_assert!(pre_count > 0, "expected in-circle rock pixels");
 
         let ratio = 2;
         let expected_spawns = pre_count / ratio;
-        assert!(
-            expected_spawns > 0,
-            "expected blast to spawn objects for the counted material"
-        );
+        unit_assert!(expected_spawns > 0, "expected blast to spawn objects for the counted material");
         let after_snapshot = engine.snapshot();
         let new_objects: Vec<_> = after_snapshot
             .objects
             .iter()
             .filter(|object| !existing_ids.contains(&object.id))
             .collect();
-        assert_eq!(
-            new_objects.len() as i32,
-            expected_spawns,
-            "blast should spawn one object per {:?} counted pixels",
-            ratio
-        );
+        unit_assert_eq!(new_objects.len() as i32 => expected_spawns, "blast should spawn one object per {:?} counted pixels", ratio);
 
         for object in new_objects {
-            assert_eq!(
-                object.definition_id, "GEM0",
-                "blast should spawn configured definition"
-            );
+            unit_assert_eq!(object.definition_id => "GEM0", "blast should spawn configured definition");
             // FIXED10(Random(61)-30) / FIXED10(Random(61)-40)
             // (C4Game.cpp:1730-1731): ±3.0 / -4.0..+2.0 as integers.
-            assert!(
-                (-3..=3).contains(&object.velocity.x),
-                "expected horizontal velocity to follow the FIXED10 range"
-            );
-            assert!(
-                (-4..=2).contains(&object.velocity.y),
-                "expected vertical velocity to follow the FIXED10 range"
-            );
-            assert!(
-                (0..360).contains(&object.rotation),
-                "expected rotation to be normalised"
-            );
+            unit_assert!((-3..=3).contains(&object.velocity.x), "expected horizontal velocity to follow the FIXED10 range");
+            unit_assert!((-4..=2).contains(&object.velocity.y), "expected vertical velocity to follow the FIXED10 range");
+            unit_assert!((0..360).contains(&object.rotation), "expected rotation to be normalised");
             // CreateObject(id, nullptr, NO_OWNER, …, iByPlayer)
             // (C4Game.cpp:1733): the blast controller is the CONTROLLER,
             // not the owner.
-            assert_eq!(object.owner, OWNER_NONE, "owner is NO_OWNER");
-            assert_eq!(
-                object.controller, controller,
-                "controller carries the blasting player"
-            );
+            unit_assert_eq!(object.owner => OWNER_NONE, "owner is NO_OWNER");
+            unit_assert_eq!(object.controller => controller, "controller carries the blasting player");
         }
     }
 
@@ -1754,13 +1548,7 @@
         }]);
 
         let snapshot = engine.snapshot();
-        assert!(
-            snapshot
-                .particles
-                .iter()
-                .any(|particle| particle.definition_id == "material/pxs/earth"),
-            "blast operation should emit earth particles"
-        );
+        unit_assert!(snapshot.particles.iter().any(|particle| particle.definition_id == "material/pxs/earth"), "blast operation should emit earth particles");
     }
 
     #[test]
@@ -1782,17 +1570,14 @@
         let mut engine = Engine::with_seed(1);
         engine.set_materials(materials);
         engine.set_landscape(landscape);
-        assert!(engine.debug_landscape_is_liquid(5, 11));
+        unit_assert!(engine.debug_landscape_is_liquid(5, 11));
 
         engine.apply_landscape_operations(vec![LandscapeOperation::ExtractLiquid {
             position: Vector2::new(5, 11),
         }]);
 
-        assert!(!engine.debug_landscape_is_liquid(5, 10));
-        assert!(
-            engine.debug_landscape_is_liquid(5, 11),
-            "ExtractMaterial's FindMatTop clears the surface, not the probed interior pixel"
-        );
+        unit_assert!(!engine.debug_landscape_is_liquid(5, 10));
+        unit_assert!(engine.debug_landscape_is_liquid(5, 11), "ExtractMaterial's FindMatTop clears the surface, not the probed interior pixel");
     }
 
     fn hit_victim_definition(mut definition: Definition, energy: i32) -> Definition {
@@ -1848,22 +1633,11 @@
         // reduced: max(250/3, 1) = 83, energy change = -(83/5) = -16% =
         // -16000 raw (DoEnergy fExact=false, C4Object.cpp:1347).
         let victim_idx = engine.test_object_index(victim);
-        assert_eq!(
-            engine.objects[victim_idx].state.energy,
-            energy_before - 16_000,
-            "hit energy applied"
-        );
+        unit_assert_eq!(engine.objects[victim_idx].state.energy => energy_before - 16_000, "hit energy applied");
         // fling: xdir = itofix(5)*50/100 = itofix(2.5), ydir = 0; no
         // Tumble/Jump actions on the def → raw velocity (C4Object.cpp:1612-1625)
-        assert_eq!(
-            engine.objects[victim_idx].fixed_velocity.x,
-            math::C4Fixed::from_raw(math::itofix(5).val() * 50 / 100),
-            "flung horizontally"
-        );
-        assert_eq!(
-            engine.objects[victim_idx].fixed_velocity.y,
-            math::C4Fixed::ZERO
-        );
+        unit_assert_eq!(engine.objects[victim_idx].fixed_velocity.x => math::C4Fixed::from_raw(math::itofix(5).val() * 50 / 100), "flung horizontally");
+        unit_assert_eq!(engine.objects[victim_idx].fixed_velocity.y => math::C4Fixed::ZERO);
     }
 
     #[test]
@@ -1875,18 +1649,18 @@
         // successful SetAction unconditionally snaps fix_x/fix_y to x/y
         // (C4Object.cpp:4142-4169).
         let mut victim_def = hit_victim_definition(simple_definition("Clonk"), 100_000);
-        victim_def.configure_actions(
-            Some("Jump".to_string()),
-            HashMap::from([(
-                "Jump".to_string(),
+        set_test_actions(
+            &mut victim_def,
+            Some("Jump"),
+            [(
+                "Jump",
                 ActionSpec::default()
                     .with_procedure("FLIGHT")
                     .with_directions(2),
-            )]),
+            )],
         );
 
-        let mut engine = Engine::with_seed(40);
-        engine.register_test_definition(victim_def);
+        let mut engine = definition_engine(40, victim_def);
         engine.register_test_definition(hit_object_definition("Rock"));
         let position = Vector2::new(50, 50);
         let mut jump = ActionState::new("Jump");
@@ -1902,26 +1676,13 @@
         let _rock = engine.spawn_test_object(hit_object_spawn("Rock", 5));
 
         let victim_idx = engine.test_object_index(victim);
-        assert_ne!(
-            engine.objects[victim_idx].fixed_position,
-            FixedVec2::from_ints(position.x, position.y),
-            "fixture starts with sub-pixel drift"
-        );
+        unit_assert_ne!(engine.objects[victim_idx].fixed_position => FixedVec2::from_ints(position.x, position.y), "fixture starts with sub-pixel drift");
         engine.cross_check(3).test_value();
 
         let victim_idx = engine.test_object_index(victim);
-        assert_eq!(engine.objects[victim_idx].state.action.phase, 0);
-        assert_eq!(
-            engine.objects[victim_idx].fixed_velocity,
-            FixedVec2::new(
-                C4Fixed::from_raw(itofix(5).val() * 50 / 100),
-                C4Fixed::ZERO,
-            )
-        );
-        assert_eq!(
-            engine.objects[victim_idx].fixed_position,
-            FixedVec2::from_ints(position.x, position.y)
-        );
+        unit_assert_eq!(engine.objects[victim_idx].state.action.phase => 0);
+        unit_assert_eq!(engine.objects[victim_idx].fixed_velocity => FixedVec2::new(C4Fixed::from_raw(itofix(5).val() * 50 / 100), C4Fixed::ZERO,));
+        unit_assert_eq!(engine.objects[victim_idx].fixed_position => FixedVec2::from_ints(position.x, position.y));
     }
 
     #[test]
@@ -1929,8 +1690,10 @@
         // EngObjHit is the one DoEnergy cause that updates the kill trace
         // even when integer division reduces iChange to zero. CrossCheck
         // attributes that hit to the hitting object's Controller, not Owner.
-        let mut engine = Engine::with_seed(41);
-        engine.register_test_definition(hit_victim_definition(simple_definition("Clonk"), 100_000));
+        let mut engine = definition_engine(
+            41,
+            hit_victim_definition(simple_definition("Clonk"), 100_000),
+        );
         engine.register_test_definition(hit_object_definition("Rock"));
 
         let victim = engine.spawn_test_object(
@@ -1946,14 +1709,8 @@
         engine.cross_check(1).test_value();
 
         let victim_idx = engine.test_object_index(victim);
-        assert_eq!(
-            engine.objects[victim_idx].state.energy, 100_000,
-            "equal velocities produce an exact zero-percent hit change"
-        );
-        assert_eq!(
-            engine.objects[victim_idx].last_energy_loss_cause, 9,
-            "a zero-change EngObjHit still records the hitter's controller, not its owner"
-        );
+        unit_assert_eq!(engine.objects[victim_idx].state.energy => 100_000, "equal velocities produce an exact zero-percent hit change");
+        unit_assert_eq!(engine.objects[victim_idx].last_energy_loss_cause => 9, "a zero-change EngObjHit still records the hitter's controller, not its owner");
     }
 
     #[test]
@@ -1976,22 +1733,23 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
         let mut victim_def = test_definition("CLNK", "Clonk", victim_script);
         victim_def.set_c4_callback_convention(true);
         let mut victim_def = hit_victim_definition(victim_def, 100_000);
-        victim_def.configure_actions(
-            Some("Walk".to_string()),
-            HashMap::from([
+        set_test_actions(
+            &mut victim_def,
+            Some("Walk"),
+            [
                 (
-                    "Walk".to_string(),
+                    "Walk",
                     ActionSpec::default()
                         .with_procedure("WALK")
                         .with_directions(2),
                 ),
                 (
-                    "Tumble".to_string(),
+                    "Tumble",
                     ActionSpec::default()
                         .with_procedure("FLIGHT")
                         .with_directions(2),
                 ),
-            ]),
+            ],
         );
         let mut engine = Engine::with_seed(42);
         engine.register_test_player(PlayerConfig::new(11, "redirected striker"));
@@ -2013,18 +1771,11 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
 
         let victim_idx = engine.test_object_index(victim);
         let rock_idx = engine.test_object_index(rock);
-        assert_eq!(engine.objects[victim_idx].state.controller, OWNER_NONE);
-        assert_eq!(engine.objects[rock_idx].state.controller, 11);
-        assert_eq!(
-            engine.objects[victim_idx].last_energy_loss_cause, 11,
-            "Fling re-attributes the living victim from the striker's live Controller"
-        );
-        assert_eq!(engine.objects[victim_idx].state.action.name, "Tumble");
-        assert_eq!(
-            engine.objects[victim_idx].state.direction,
-            Direction::Right,
-            "negative fling x uses C++ SetDir(true) == DIR_Right"
-        );
+        unit_assert_eq!(engine.objects[victim_idx].state.controller => OWNER_NONE);
+        unit_assert_eq!(engine.objects[rock_idx].state.controller => 11);
+        unit_assert_eq!(engine.objects[victim_idx].last_energy_loss_cause => 11, "Fling re-attributes the living victim from the striker's live Controller");
+        unit_assert_eq!(engine.objects[victim_idx].state.action.name => "Tumble");
+        unit_assert_eq!(engine.objects[victim_idx].state.direction => Direction::Right, "negative fling x uses C++ SetDir(true) == DIR_Right");
     }
 
     #[test]
@@ -2033,32 +1784,23 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
             test_definition("FLCK", "Fling-locked actor", "#strict\n"),
             100_000,
         );
-        definition.configure_actions(
-            Some("Walk".to_string()),
-            HashMap::from([
+        set_test_actions(
+            &mut definition,
+            Some("Walk"),
+            [
+                ("Walk", ActionSpec::default().with_procedure("WALK")),
                 (
-                    "Walk".to_string(),
-                    ActionSpec::default().with_procedure("WALK"),
-                ),
-                (
-                    "Dead".to_string(),
+                    "Dead",
                     ActionSpec::default()
                         .with_procedure("FLIGHT")
                         .with_no_other_action(true),
                 ),
-                (
-                    "Tumble".to_string(),
-                    ActionSpec::default().with_procedure("FLIGHT"),
-                ),
-                (
-                    "Jump".to_string(),
-                    ActionSpec::default().with_procedure("FLIGHT"),
-                ),
-            ]),
+                ("Tumble", ActionSpec::default().with_procedure("FLIGHT")),
+                ("Jump", ActionSpec::default().with_procedure("FLIGHT")),
+            ],
         );
 
-        let mut engine = Engine::with_seed(43);
-        engine.register_test_definition(definition);
+        let mut engine = definition_engine(43, definition);
         engine.register_test_definition(hit_object_definition("FLRK"));
         let object = engine.spawn_test_object(
             hit_victim_spawn("FLCK", 100_000)
@@ -2074,18 +1816,14 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
 
         engine.cross_check(3).test_value();
 
-        let index = engine.test_object_index(object);
-        let object = &engine.objects[index];
-        assert_eq!(object.state.energy, 84_000, "the hit reached Fling");
-        assert_eq!(object.state.action.name, "Dead");
-        assert_eq!(object.state.direction, Direction::Right);
-        assert_eq!(
-            object.fixed_velocity,
-            FixedVec2::new(C4Fixed::from_raw(itofix(5).val() * 50 / 100), C4Fixed::ZERO,)
-        );
-        assert!(object.state.mobile);
-        assert_eq!(object.state.t_attach, CNAT_LEFT);
-        assert_eq!(object.frame_t_attach, CNAT_LEFT);
+        let object = test_object(&engine, object);
+        unit_assert_eq!(object.state.energy => 84_000, "the hit reached Fling");
+        unit_assert_eq!(object.state.action.name => "Dead");
+        unit_assert_eq!(object.state.direction => Direction::Right);
+        unit_assert_eq!(object.fixed_velocity => FixedVec2::new(C4Fixed::from_raw(itofix(5).val() * 50 / 100), C4Fixed::ZERO,));
+        unit_assert!(object.state.mobile);
+        unit_assert_eq!(object.state.t_attach => CNAT_LEFT);
+        unit_assert_eq!(object.frame_t_attach => CNAT_LEFT);
     }
 
     #[test]
@@ -2116,25 +1854,14 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
 
         engine.cross_check(1).test_value();
 
-        let victim_idx = engine.test_object_index(victim);
-        let victim = &engine.objects[victim_idx];
-        assert!(!victim.state.alive, "the hit is lethal before Fling");
-        assert_eq!(
-            victim.last_energy_loss_cause, 2,
-            "DoEnergy attributes the lethal hit to the striker's Controller"
-        );
-        assert_eq!(
-            victim.state.local_vars.get("death_killer"),
-            Some(&Value::Int(2)),
-            "GetKiller exposes the Controller during the Death callback"
-        );
-        assert_eq!(
-            victim.state.controller, 2,
-            "non-alive uncontained Fling takes the striker's Controller"
-        );
-        assert!(victim.state.mobile, "the raw fallback mobilizes");
-        assert_eq!(victim.state.t_attach, CNAT_LEFT);
-        assert_eq!(victim.frame_t_attach, CNAT_LEFT);
+        let victim = test_object(&engine, victim);
+        unit_assert!(!victim.state.alive, "the hit is lethal before Fling");
+        unit_assert_eq!(victim.last_energy_loss_cause => 2, "DoEnergy attributes the lethal hit to the striker's Controller");
+        unit_assert_eq!(victim.state.local_vars.get("death_killer") => Some(&Value::Int(2)), "GetKiller exposes the Controller during the Death callback");
+        unit_assert_eq!(victim.state.controller => 2, "non-alive uncontained Fling takes the striker's Controller");
+        unit_assert!(victim.state.mobile, "the raw fallback mobilizes");
+        unit_assert_eq!(victim.state.t_attach => CNAT_LEFT);
+        unit_assert_eq!(victim.frame_t_attach => CNAT_LEFT);
     }
 
     #[test]
@@ -2157,10 +1884,14 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
             energy: 5_000,
             ..PhysicalInfo::default()
         });
-        let mut specs = HashMap::new();
-        specs.insert("Idle".to_string(), ActionSpec::default());
-        specs.insert("Dead".to_string(), ActionSpec::default());
-        clonk_def.configure_actions(Some("Idle".to_string()), specs);
+        set_test_actions(
+            &mut clonk_def,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Dead", ActionSpec::default()),
+            ],
+        );
         engine.register_test_definition(clonk_def);
         register_simple_definitions(&mut engine, &["Gem"]);
 
@@ -2175,30 +1906,23 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
         engine
             .change_object_energy(idx, -3, C4FX_CALL_ENG_SCRIPT, 7)
             .test_value();
-        assert!(engine.objects[idx].state.alive, "energy 2000 raw left");
+        unit_assert!(engine.objects[idx].state.alive, "energy 2000 raw left");
         engine
             .change_object_energy(idx, -2, C4FX_CALL_ENG_SCRIPT, 7)
             .test_value();
         let idx = engine.test_object_index(clonk);
-        assert!(!engine.objects[idx].state.alive, "dead at zero energy");
-        assert_eq!(engine.objects[idx].state.action.name, "Dead");
-        assert!(
-            engine.objects[idx].state.contents.is_empty(),
-            "contents lost"
-        );
+        unit_assert!(!engine.objects[idx].state.alive, "dead at zero energy");
+        unit_assert_eq!(engine.objects[idx].state.action.name => "Dead");
+        unit_assert!(engine.objects[idx].state.contents.is_empty(), "contents lost");
         let gem_idx = engine.test_object_index(gem);
-        assert_eq!(engine.objects[gem_idx].state.container, None, "gem ejected");
-        assert_eq!(
-            engine.objects[gem_idx].state.position,
-            Vector2::new(50, 50),
-            "ejected at the dying object's position"
-        );
+        unit_assert_eq!(engine.objects[gem_idx].state.container => None, "gem ejected");
+        unit_assert_eq!(engine.objects[gem_idx].state.position => Vector2::new(50, 50), "ejected at the dying object's position");
 
         // Death is not re-assigned (already dead, C4Object.cpp:1141)
         engine
             .change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 9)
             .test_value();
-        assert_eq!(engine.objects[idx].last_energy_loss_cause, 9);
+        unit_assert_eq!(engine.objects[idx].last_energy_loss_cause => 9);
     }
 
     #[test]
@@ -2211,13 +1935,15 @@ func Death()
     return 1;
 }
 "#;
-        let mut corpse_definition = test_definition("DCOR", "Death corpse", script);
-        corpse_definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
-                ("Dead".to_string(), ActionSpec::default()),
-            ]),
+        let corpse_definition = action_definition(
+            "DCOR",
+            "Death corpse",
+            script,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Dead", ActionSpec::default()),
+            ],
         );
 
         let mut engine = Engine::with_seed(91);
@@ -2225,15 +1951,7 @@ func Death()
         engine.register_test_definition(corpse_definition);
         register_simple_definitions(&mut engine, &["DITM"]);
 
-        let corpse = engine.spawn_test_object(
-            SpawnConfig::new("DCOR")
-                .with_owner(0)
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(50, 50))
-                .with_fixed_velocity(FixedVec2::new(itofix(7), itofix(-3)))
-                .with_plr_view_range(333)
-                .with_alive(true),
-        );
+        let corpse = spawn_fixture!(engine, "DCOR", with_owner: 0, with_category: CATEGORY_OBJECT, with_position: Vector2::new(50, 50), with_fixed_velocity: FixedVec2::new(itofix(7), itofix(-3)), with_plr_view_range: 333, with_alive: true);
         let item = engine.spawn_test_object(
             SpawnConfig::new("DITM")
                 .with_loaded(true)
@@ -2255,77 +1973,47 @@ func Death()
         let item_idx = engine.test_object_index(item);
         let item_position = engine.objects[item_idx].state.position;
         let item_fixed_position = engine.objects[item_idx].fixed_position;
-        assert_ne!(
-            item_fixed_position,
-            FixedVec2::from_ints(item_position.x, item_position.y)
-        );
-        assert_ne!(engine.objects[item_idx].fixed_velocity, FixedVec2::ZERO);
-        assert_ne!(engine.objects[item_idx].fixed_rotation, math::C4Fixed::ZERO);
-        assert_ne!(
-            engine.objects[item_idx].rotation_velocity,
-            math::C4Fixed::ZERO
-        );
+        unit_assert_ne!(item_fixed_position => FixedVec2::from_ints(item_position.x, item_position.y));
+        unit_assert_ne!(engine.objects[item_idx].fixed_velocity => FixedVec2::ZERO);
+        unit_assert_ne!(engine.objects[item_idx].fixed_rotation => math::C4Fixed::ZERO);
+        unit_assert_ne!(engine.objects[item_idx].rotation_velocity => math::C4Fixed::ZERO);
 
         let corpse_idx = engine.test_object_index(corpse);
         engine.assign_death(corpse_idx, false).test_value();
 
-        let item_idx = engine.test_object_index(item);
-        let item_state = &engine.objects[item_idx];
-        assert_eq!(item_state.state.container, None);
-        assert_eq!(item_state.state.position, item_position);
-        assert_eq!(
-            item_state.fixed_position,
+        let item_state = test_object(&engine, item);
+        unit_assert_eq!(item_state.state.container => None);
+        unit_assert_eq!(item_state.state.position => item_position);
+        unit_assert_eq!(
+            item_state.fixed_position =>
             FixedVec2::from_ints(item_position.x, item_position.y),
             "Exit(x, y) snaps a loaded item's subpixel position to its integer coordinates"
         );
-        assert_eq!(item_state.state.rotation, 0);
-        assert_eq!(item_state.fixed_rotation, math::C4Fixed::ZERO);
-        assert_eq!(item_state.fixed_velocity, FixedVec2::ZERO);
-        assert_eq!(item_state.state.velocity, Vector2::ZERO);
-        assert_eq!(item_state.rotation_velocity, math::C4Fixed::ZERO);
-        assert!(item_state.state.mobile);
-        assert!(!item_state.state.in_liquid);
+        unit_assert_eq!(item_state.state.rotation => 0);
+        unit_assert_eq!(item_state.fixed_rotation => math::C4Fixed::ZERO);
+        unit_assert_eq!(item_state.fixed_velocity => FixedVec2::ZERO);
+        unit_assert_eq!(item_state.state.velocity => Vector2::ZERO);
+        unit_assert_eq!(item_state.rotation_velocity => math::C4Fixed::ZERO);
+        unit_assert!(item_state.state.mobile);
+        unit_assert!(!item_state.state.in_liquid);
 
         let corpse_state = engine.test_object_snapshot(corpse);
-        assert_eq!(corpse_state.plr_view_range, 0);
-        assert_eq!(
-            corpse_state.local_vars.get("death_view_range"),
-            Some(&Value::Int(0)),
-            "nonliving range is cleared before Death"
-        );
+        unit_assert_eq!(corpse_state.plr_view_range => 0);
+        unit_assert_eq!(corpse_state.local_vars.get("death_view_range") => Some(&Value::Int(0)), "nonliving range is cleared before Death");
 
-        let living = engine.spawn_test_object(
-            SpawnConfig::new("DCOR")
-                .with_owner(0)
-                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-                .with_plr_view_range(333)
-                .with_alive(true),
-        );
+        let living = spawn_fixture!(engine, "DCOR", with_owner: 0, with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_plr_view_range: 333, with_alive: true);
         let living_idx = engine.test_object_index(living);
         engine.assign_death(living_idx, false).test_value();
         let living_state = engine.test_object_snapshot(living);
-        assert_eq!(living_state.plr_view_range, 333);
-        assert_eq!(
-            living_state.local_vars.get("death_view_range"),
-            Some(&Value::Int(333)),
-            "owned living FoW objects retain their range for dead-view decay"
-        );
+        unit_assert_eq!(living_state.plr_view_range => 333);
+        unit_assert_eq!(living_state.local_vars.get("death_view_range") => Some(&Value::Int(333)), "owned living FoW objects retain their range for dead-view decay");
 
-        let ownerless = engine.spawn_test_object(
-            SpawnConfig::new("DCOR")
-                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-                .with_plr_view_range(333)
-                .with_alive(true),
-        );
+        let ownerless = spawn_fixture!(engine, "DCOR", with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_plr_view_range: 333, with_alive: true);
         let ownerless_idx = engine.test_object_index(ownerless);
         engine.assign_death(ownerless_idx, false).test_value();
         let ownerless_state = engine.test_object_snapshot(ownerless);
-        assert_eq!(ownerless_state.plr_view_range, 0);
-        assert_eq!(
-            ownerless_state.local_vars.get("death_view_range"),
-            Some(&Value::Int(0)),
-            "a living object without a valid owner has no death-view exemption"
-        );
+        unit_assert_eq!(ownerless_state.plr_view_range => 0);
+        unit_assert_eq!(ownerless_state.local_vars.get("death_view_range") => Some(&Value::Int(0)), "a living object without a valid owner has no death-view exemption");
     }
 
     #[test]
@@ -2337,12 +2025,13 @@ func Death()
         fn corpse_definition() -> Definition {
             let mut definition = test_definition("FOWC", "FoW corpse", "#strict 2\n");
             definition.set_crew_member(true);
-            definition.configure_actions(
-                Some("Idle".to_string()),
-                HashMap::from([
-                    ("Idle".to_string(), ActionSpec::default()),
-                    ("Dead".to_string(), ActionSpec::default()),
-                ]),
+            set_test_actions(
+                &mut definition,
+                Some("Idle"),
+                [
+                    ("Idle", ActionSpec::default()),
+                    ("Dead", ActionSpec::default()),
+                ],
             );
             definition
         }
@@ -2351,31 +2040,17 @@ func Death()
         engine.register_test_player(PlayerConfig::new(0, "Owner"));
         engine.register_test_definition(corpse_definition());
         engine.frame = 1; // avoid unrelated Tick35 elimination work
-        let corpse = engine.spawn_test_object(
-            SpawnConfig::new("FOWC")
-                .with_owner(0)
-                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-                .with_crew_member(true)
-                .with_plr_view_range(500)
-                .with_alive(true),
-        );
+        let corpse = spawn_fixture!(engine, "FOWC", with_owner: 0, with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_crew_member: true, with_plr_view_range: 500, with_alive: true);
         let corpse_index = engine.test_object_index(corpse);
         engine.assign_death(corpse_index, false).test_value();
-        assert_eq!(engine.test_object_snapshot(corpse).plr_view_range, 500);
+        unit_assert_eq!(engine.test_object_snapshot(corpse).plr_view_range => 500);
 
         engine.tick_player_systems().test_value();
-        assert_eq!(engine.test_object_snapshot(corpse).plr_view_range, 490);
+        unit_assert_eq!(engine.test_object_snapshot(corpse).plr_view_range => 490);
 
         let encoded = engine.capture_state().to_json_string().test_value();
         let decoded = EngineState::from_json_str(&encoded).test_value();
-        assert_eq!(
-            decoded
-                .objects
-                .iter()
-                .find(|object| object.snapshot.id == corpse)
-                .map(|object| object.snapshot.plr_view_range),
-            Some(490)
-        );
+        unit_assert_eq!(decoded.objects.iter().find(|object| object.snapshot.id == corpse).map(|object| object.snapshot.plr_view_range) => Some(490));
 
         let mut restored = Engine::with_seed(93);
         restored.register_test_definition(corpse_definition());
@@ -2383,15 +2058,11 @@ func Death()
         for _ in 0..48 {
             restored.tick_player_systems().test_value();
         }
-        assert_eq!(restored.test_object_snapshot(corpse).plr_view_range, 10);
+        unit_assert_eq!(restored.test_object_snapshot(corpse).plr_view_range => 10);
         restored.tick_player_systems().test_value();
-        assert_eq!(restored.test_object_snapshot(corpse).plr_view_range, 0);
+        unit_assert_eq!(restored.test_object_snapshot(corpse).plr_view_range => 0);
         restored.tick_player_systems().test_value();
-        assert_eq!(
-            restored.test_object_snapshot(corpse).plr_view_range,
-            0,
-            "removal from FoWViewObjs stops further decay"
-        );
+        unit_assert_eq!(restored.test_object_snapshot(corpse).plr_view_range => 0, "removal from FoWViewObjs stops further decay");
     }
 
     #[test]
@@ -2425,52 +2096,34 @@ func Departure(object old_container)
     return old_container->Mark(marker + 1);
 }
 "#;
-        let mut corpse_definition = test_definition("DORD", "Death order", corpse_script);
-        corpse_definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
-                ("Dead".to_string(), ActionSpec::default()),
-            ]),
+        let corpse_definition = action_definition(
+            "DORD",
+            "Death order",
+            corpse_script,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Dead", ActionSpec::default()),
+            ],
         );
         let item_definition = test_definition("OITM", "Ordered item", item_script);
 
-        let mut engine = Engine::with_seed(92);
-        engine.register_test_definition(corpse_definition);
+        let mut engine = definition_engine(92, corpse_definition);
         engine.register_test_definition(item_definition);
-        let corpse = engine.spawn_test_object(SpawnConfig::new("DORD").with_alive(true));
-        let marker_three = engine.spawn_test_object(
-            SpawnConfig::new("OITM")
-                .with_container(corpse)
-                .with_local_vars(HashMap::from([("marker".to_string(), Value::Int(3))])),
-        );
-        let marker_one = engine.spawn_test_object(
-            SpawnConfig::new("OITM")
-                .with_container(corpse)
-                .with_local_vars(HashMap::from([("marker".to_string(), Value::Int(1))])),
-        );
+        let corpse = spawn_fixture!(engine, "DORD", with_alive: true);
+        let marker_three = spawn_fixture!(engine, "OITM", with_container: corpse, with_local_vars: HashMap::from([("marker".to_string(), Value::Int(3))]));
+        let marker_one = spawn_fixture!(engine, "OITM", with_container: corpse, with_local_vars: HashMap::from([("marker".to_string(), Value::Int(1))]));
         let corpse_idx = engine.test_object_index(corpse);
-        assert_eq!(
-            engine.objects[corpse_idx].state.contents,
-            vec![marker_one, marker_three],
-            "same-definition stContents insertion puts the newest item first"
-        );
+        unit_assert_eq!(engine.objects[corpse_idx].state.contents => vec![marker_one, marker_three], "same-definition stContents insertion puts the newest item first");
 
         engine.assign_death(corpse_idx, false).test_value();
 
         let corpse_state = engine.test_object_snapshot(corpse);
-        assert!(corpse_state.contents.is_empty());
-        assert_eq!(
-            corpse_state.local_vars.get("trace"),
-            Some(&Value::Int(1_278_345))
-        );
-        assert_eq!(
-            corpse_state.local_vars.get("remaining"),
-            Some(&Value::Int(210)),
-            "each Ejection observes callback-added contents in the live list"
-        );
+        unit_assert!(corpse_state.contents.is_empty());
+        unit_assert_eq!(corpse_state.local_vars.get("trace") => Some(&Value::Int(1_278_345)));
+        unit_assert_eq!(corpse_state.local_vars.get("remaining") => Some(&Value::Int(210)), "each Ejection observes callback-added contents in the live list");
         for item in [marker_one, marker_three] {
-            assert_eq!(engine.test_object_snapshot(item).container, None);
+            unit_assert_eq!(engine.test_object_snapshot(item).container => None);
         }
     }
 
@@ -2489,16 +2142,16 @@ func Ejection(object item)
         let mut crew_definition = test_definition("DCRW", "Death crew", crew_script);
         crew_definition.set_crew_member(true);
         crew_definition.set_category(CATEGORY_OBJECT | CATEGORY_LIVING);
-        crew_definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
-                ("Dead".to_string(), ActionSpec::default()),
-            ]),
+        set_test_actions(
+            &mut crew_definition,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Dead", ActionSpec::default()),
+            ],
         );
 
-        let mut engine = Engine::with_seed(93);
-        engine.register_test_definition(crew_definition);
+        let mut engine = definition_engine(93, crew_definition);
         register_simple_definitions(&mut engine, &["CITM"]);
         let mut start = PlayerStart::default();
         start.ready_crew = vec![("DCRW".to_string(), 1)];
@@ -2517,50 +2170,36 @@ func Ejection(object item)
             .test_value();
         let crew = engine.player(0).test_value().crew()[0];
         let original_link = engine.capture_state().crew_info_links[&crew];
-        let replacement = engine.spawn_test_object(
-            SpawnConfig::new("DCRW")
-                .with_owner(0)
-                .with_crew_member(false)
-                .with_alive(true),
-        );
+        let replacement = spawn_fixture!(engine, "DCRW", with_owner: 0, with_crew_member: false, with_alive: true);
         let crew_idx = engine.test_object_index(crew);
         engine.call_test_object_function(
             crew_idx,
             "SetReplacement",
             vec![Value::Object(replacement.as_u64())],
         );
-        engine.spawn_test_object(SpawnConfig::new("CITM").with_container(crew));
+        spawn_fixture!(engine, "CITM", with_container: crew);
         engine.game_time = 23;
 
         engine.assign_death(crew_idx, false).test_value();
 
         let corpse = engine.test_object_snapshot(crew);
-        assert_eq!(corpse.local_vars.get("count_seen"), Some(&Value::Int(5)));
-        assert_eq!(
-            corpse.local_vars.get("replacement_joined"),
-            Some(&Value::Bool(true))
-        );
+        unit_assert_eq!(corpse.local_vars.get("count_seen") => Some(&Value::Int(5)));
+        unit_assert_eq!(corpse.local_vars.get("replacement_joined") => Some(&Value::Bool(true)));
         let state = engine.capture_state();
-        assert_eq!(state.crew_info_links[&crew], original_link);
-        assert_eq!(state.crew_object_infos[&crew].death_count, 5);
+        unit_assert_eq!(state.crew_info_links[&crew] => original_link);
+        unit_assert_eq!(state.crew_object_infos[&crew].death_count => 5);
         let replacement_link = state.crew_info_links[&replacement];
-        assert_ne!(
-            replacement_link, original_link,
-            "HasDied is already set, so Ejection cannot recycle the dead info"
-        );
-        assert_eq!(state.crew_info_rosters[&0].len(), 2);
+        unit_assert_ne!(replacement_link => original_link, "HasDied is already set, so Ejection cannot recycle the dead info");
+        unit_assert_eq!(state.crew_info_rosters[&0].len() => 2);
         let dead_info = &state.crew_info_rosters[&0][original_link.roster_index];
-        assert!(dead_info.has_died);
-        assert_eq!(dead_info.death_count, 5);
-        assert!(!dead_info.in_action);
-        assert_eq!(dead_info.total_playing_time, 40);
+        unit_assert!(dead_info.has_died);
+        unit_assert_eq!(dead_info.death_count => 5);
+        unit_assert!(!dead_info.in_action);
+        unit_assert_eq!(dead_info.total_playing_time => 40);
         let encoded = state.to_json_string().test_value();
         let decoded = EngineState::from_json_str(&encoded).test_value();
-        assert_eq!(
-            decoded.crew_info_rosters[&0][original_link.roster_index].death_count,
-            5
-        );
-        assert_eq!(decoded.crew_object_infos[&crew].death_count, 5);
+        unit_assert_eq!(decoded.crew_info_rosters[&0][original_link.roster_index].death_count => 5);
+        unit_assert_eq!(decoded.crew_object_infos[&crew].death_count => 5);
     }
 
     #[test]
@@ -2582,12 +2221,13 @@ func Recruit() { return MakeCrewMember(this(), 0); }
         let mut definition = test_definition("DCRW", "Death crew", script);
         definition.set_crew_member(true);
         definition.set_category(CATEGORY_OBJECT | CATEGORY_LIVING);
-        definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
-                ("Dead".to_string(), ActionSpec::default()),
-            ]),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Dead", ActionSpec::default()),
+            ],
         );
 
         let crew_info = |name: &str| player_file::CrewInfo {
@@ -2595,8 +2235,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
             name: name.to_string(),
             ..Default::default()
         };
-        let mut engine = Engine::with_seed(155);
-        engine.register_test_definition(definition);
+        let mut engine = definition_engine(155, definition);
         let mut start = PlayerStart::default();
         start.ready_crew = vec![("DCRW".to_string(), 2)];
         engine.set_player_starts(vec![start]);
@@ -2609,38 +2248,32 @@ func Recruit() { return MakeCrewMember(this(), 0); }
         engine.register_test_player(PlayerConfig::new(1, "Foreign roster"));
 
         let crew = engine.player(0).test_value().crew().to_vec();
-        assert_eq!(crew.len(), 2);
+        unit_assert_eq!(crew.len() => 2);
         let corpse = crew[0];
         let survivor = crew[1];
         let corpse_link = engine.capture_state().crew_info_links[&corpse];
         engine.set_crew_cursor(0, Some(corpse)).test_value();
         let corpse_index = engine.test_object_index(corpse);
-        assert_eq!(
-            engine.call_test_object_function(corpse_index, "Share", Vec::new()),
-            Value::Int(1)
-        );
+        unit_assert_eq!(engine.call_test_object_function(corpse_index, "Share", Vec::new()) => Value::Int(1));
         engine.set_crew_cursor(1, Some(corpse)).test_value();
         engine.game_time = 17;
 
         engine.assign_death(corpse_index, false).test_value();
 
         let corpse_state = engine.test_object_snapshot(corpse);
-        assert!(!corpse_state.alive);
-        assert!(
-            corpse_state.crew_member,
-            "the compatibility union bit stays set for a foreign Crew link"
-        );
-        assert_eq!(engine.player(0).test_value().crew(), &[survivor]);
-        assert_eq!(engine.crew_cursor(0), Some(survivor));
-        assert_eq!(engine.player(1).test_value().crew(), &[corpse]);
-        assert_eq!(engine.crew_cursor(1), Some(corpse));
+        unit_assert!(!corpse_state.alive);
+        unit_assert!(corpse_state.crew_member, "the compatibility union bit stays set for a foreign Crew link");
+        unit_assert_eq!(engine.player(0).test_value().crew() => &[survivor]);
+        unit_assert_eq!(engine.crew_cursor(0) => Some(survivor));
+        unit_assert_eq!(engine.player(1).test_value().crew() => &[corpse]);
+        unit_assert_eq!(engine.crew_cursor(1) => Some(corpse));
         let survivor_index = engine.test_object_index(survivor);
-        assert_eq!(
+        unit_assert_eq!(
             engine.call_test_object_function(
                 survivor_index,
                 "Probe",
                 vec![Value::Object(corpse.as_u64())],
-            ),
+            ) =>
             Value::Array(vec![
                 Value::Int(1),
                 Value::Bool(true),
@@ -2651,20 +2284,16 @@ func Recruit() { return MakeCrewMember(this(), 0); }
 
         for _ in 0..3 {
             engine.tick_without_snapshot().test_value();
-            assert_eq!(
-                engine.player(0).test_value().crew(),
-                &[survivor],
-                "the corpse must not re-enter during player execution"
-            );
-            assert_eq!(engine.player(1).test_value().crew(), &[corpse]);
-            assert_eq!(engine.crew_cursor(1), Some(corpse));
+            unit_assert_eq!(engine.player(0).test_value().crew() => &[survivor], "the corpse must not re-enter during player execution");
+            unit_assert_eq!(engine.player(1).test_value().crew() => &[corpse]);
+            unit_assert_eq!(engine.crew_cursor(1) => Some(corpse));
         }
-        assert_eq!(
+        unit_assert_eq!(
             engine.call_test_object_function(
                 survivor_index,
                 "Probe",
                 vec![Value::Object(corpse.as_u64())],
-            ),
+            ) =>
             Value::Array(vec![
                 Value::Int(1),
                 Value::Bool(true),
@@ -2675,52 +2304,24 @@ func Recruit() { return MakeCrewMember(this(), 0); }
         );
         for command in [COM_CURSOR_RIGHT, COM_CURSOR_LEFT] {
             engine.player_direct_com(0, command, 0).test_value();
-            assert_eq!(engine.crew_cursor(0), Some(survivor));
+            unit_assert_eq!(engine.crew_cursor(0) => Some(survivor));
         }
 
         let state = engine.capture_state();
-        assert_eq!(
-            state
-                .players
-                .iter()
-                .find(|player| player.id == 0)
-                .test_value()
-                .crew,
-            vec![survivor]
-        );
-        assert_eq!(
-            state
-                .players
-                .iter()
-                .find(|player| player.id == 1)
-                .test_value()
-                .crew,
-            vec![corpse]
-        );
+        unit_assert_eq!(state.players.iter().find(|player| player.id == 0).test_value().crew => vec![survivor]);
+        unit_assert_eq!(state.players.iter().find(|player| player.id == 1).test_value().crew => vec![corpse]);
         let dead_info = &state.crew_info_rosters[&0][corpse_link.roster_index];
-        assert!(dead_info.has_died);
-        assert_eq!(dead_info.death_count, 1);
-        assert!(!dead_info.in_action);
-        assert_eq!(dead_info.total_playing_time, 17);
+        unit_assert!(dead_info.has_died);
+        unit_assert_eq!(dead_info.death_count => 1);
+        unit_assert!(!dead_info.in_action);
+        unit_assert_eq!(dead_info.total_playing_time => 17);
 
-        let replacement = engine.spawn_test_object(
-            SpawnConfig::new("DCRW")
-                .with_owner(0)
-                .with_alive(true)
-                .with_crew_member(false)
-                .with_action(ActionState::new("Idle")),
-        );
+        let replacement = spawn_fixture!(engine, "DCRW", with_owner: 0, with_alive: true, with_crew_member: false, with_action: ActionState::new("Idle"));
         let replacement_index = engine.test_object_index(replacement);
-        assert_eq!(
-            engine.call_test_object_function(replacement_index, "Recruit", Vec::new()),
-            Value::Bool(true)
-        );
+        unit_assert_eq!(engine.call_test_object_function(replacement_index, "Recruit", Vec::new()) => Value::Bool(true));
         let replacement_link = engine.capture_state().crew_info_links[&replacement];
-        assert_ne!(
-            replacement_link, corpse_link,
-            "GetIdle must never recycle an info whose HasDied flag is set"
-        );
-        assert!(!engine.player(0).test_value().crew().contains(&corpse));
+        unit_assert_ne!(replacement_link => corpse_link, "GetIdle must never recycle an info whose HasDied flag is set");
+        unit_assert!(!engine.player(0).test_value().crew().contains(&corpse));
     }
 
     #[test]
@@ -2736,42 +2337,31 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let mut definition = test_definition("DCOF", "Death OCF", script);
         definition.set_category(CATEGORY_LIVING | CATEGORY_OBJECT);
         definition.set_c4_callback_convention(true);
-        definition.configure_actions(
+        set_test_actions(
+            &mut definition,
             None,
-            HashMap::from([
-                (
-                    "Walk".to_string(),
-                    ActionSpec::default().with_abort_call("WalkAbort"),
-                ),
-                (
-                    "Dead".to_string(),
-                    ActionSpec::default().with_start_call("DeadStart"),
-                ),
-            ]),
+            [
+                ("Walk", ActionSpec::default().with_abort_call("WalkAbort")),
+                ("Dead", ActionSpec::default().with_start_call("DeadStart")),
+            ],
         );
 
-        let mut engine = Engine::with_seed(91);
-        engine.register_test_definition(definition);
-        let id = engine.spawn_test_object(
+        let (mut engine, id) = definition_fixture(
+            91,
+            definition,
             SpawnConfig::new("DCOF")
                 .with_category(CATEGORY_LIVING | CATEGORY_OBJECT)
                 .with_alive(true)
                 .with_action(ActionState::new("Walk")),
         );
         let idx = engine.test_object_index(id);
-        assert_ne!(engine.objects[idx].state.ocf & ocf::ALIVE, 0);
+        unit_assert_ne!(engine.objects[idx].state.ocf & ocf::ALIVE => 0);
 
         engine.assign_death(idx, false).test_value();
 
         let object = engine.test_object_snapshot(id);
-        assert_eq!(
-            object.local_vars.get("start_ocf_alive"),
-            Some(&Value::Int(0))
-        );
-        assert_eq!(
-            object.local_vars.get("abort_ocf_alive"),
-            Some(&Value::Int(0))
-        );
+        unit_assert_eq!(object.local_vars.get("start_ocf_alive") => Some(&Value::Int(0)));
+        unit_assert_eq!(object.local_vars.get("abort_ocf_alive") => Some(&Value::Int(0)));
     }
 
     #[test]
@@ -2792,17 +2382,11 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             .spawn_test_object(test_spawn_at("SCST", 75, 25).with_status(ObjectStatus::Inactive));
 
         let packet = engine.sync_check(0);
-        assert_eq!((packet.object_count, packet.sector_shape_sum), (1, 1));
+        unit_assert_eq!((packet.object_count, packet.sector_shape_sum) => (1, 1));
         let sectors = engine.sectors.as_ref().test_value();
-        assert!(!sectors
-            .object_ids(SectorKey::Inside { x: 1, y: 0 })
-            .contains(&inactive));
-        assert!(!sectors
-            .shape_ids(SectorKey::Inside { x: 1, y: 0 })
-            .contains(&inactive));
-        assert!(engine
-            .at_object(Vector2::new(75, 25), ocf::GRAB, None)
-            .is_none());
+        unit_assert!(!sectors.object_ids(SectorKey::Inside { x: 1, y: 0 }).contains(&inactive));
+        unit_assert!(!sectors.shape_ids(SectorKey::Inside { x: 1, y: 0 }).contains(&inactive));
+        unit_assert!(engine.at_object(Vector2::new(75, 25), ocf::GRAB, None).is_none());
 
         engine
             .apply_object_update(
@@ -2811,14 +2395,8 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             )
             .test_value();
         let packet = engine.sync_check(0);
-        assert_eq!(
-            (packet.object_count, packet.sector_shape_sum),
-            (0, 0),
-            "Status-zero removal tombstones stop contributing immediately"
-        );
-        assert!(engine
-            .at_object(Vector2::new(25, 25), ocf::GRAB, None)
-            .is_none());
+        unit_assert_eq!((packet.object_count, packet.sector_shape_sum) => (0, 0), "Status-zero removal tombstones stop contributing immediately");
+        unit_assert!(engine.at_object(Vector2::new(25, 25), ocf::GRAB, None).is_none());
     }
 
     #[test]
@@ -2836,10 +2414,10 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let outside = engine.spawn_test_object(test_spawn_at("SCOT", 150, 25));
 
         let packet = engine.sync_check(0);
-        assert_eq!(packet.object_count, 1);
-        assert_eq!(packet.sector_shape_sum, 0);
+        unit_assert_eq!(packet.object_count => 1);
+        unit_assert_eq!(packet.sector_shape_sum => 0);
         let sectors = engine.sectors.as_ref().test_value();
-        assert!(sectors.shape_ids(SectorKey::Outside).contains(&outside));
+        unit_assert!(sectors.shape_ids(SectorKey::Outside).contains(&outside));
     }
 
     #[test]
@@ -2856,13 +2434,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let mut crew_def = simple_definition("Clonk");
         crew_def.set_crew_member(true);
         engine.register_test_definition(crew_def);
-        let crew = engine.spawn_test_object(
-            SpawnConfig::new("Clonk")
-                .with_owner(1)
-                .with_crew_member(true)
-                .with_alive(true)
-                .with_position(Vector2::new(10, 10)),
-        );
+        let crew = spawn_fixture!(engine, "Clonk", with_owner: 1, with_crew_member: true, with_alive: true, with_position: Vector2::new(10, 10));
         // give the crew sub-pixel x so the centipixel precision is visible
         let idx = engine.test_object_index(crew);
         engine.objects[idx].fixed_position.x =
@@ -2870,21 +2442,14 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
 
         engine.tick_without_snapshot().test_value(); // builds crew lists
         let packet = engine.sync_check(0);
-        assert_eq!(packet.random3, engine.rng.rnd3_ptr());
-        assert_eq!(packet.random_count, engine.rng.count);
-        assert_eq!(
-            packet.crew_positions_sum,
-            math::fixtoi_prec(engine.objects[idx].fixed_position.x, 100),
-            "centipixel crew sum over the player's crew list"
-        );
-        assert_eq!(packet.object_count, 1);
-        assert_eq!(
-            packet.object_enumeration_index, 1,
-            "ObjectEnumerationIndex is the last assigned object number"
-        );
+        unit_assert_eq!(packet.random3 => engine.rng.rnd3_ptr());
+        unit_assert_eq!(packet.random_count => engine.rng.count);
+        unit_assert_eq!(packet.crew_positions_sum => math::fixtoi_prec(engine.objects[idx].fixed_position.x, 100), "centipixel crew sum over the player's crew list");
+        unit_assert_eq!(packet.object_count => 1);
+        unit_assert_eq!(packet.object_enumeration_index => 1, "ObjectEnumerationIndex is the last assigned object number");
         let initial_network_data = InitialNetworkGameData::from_engine(&engine).test_value();
-        assert_eq!(
-            packet.object_enumeration_index, initial_network_data.object_enumeration_index,
+        unit_assert_eq!(
+            packet.object_enumeration_index => initial_network_data.object_enumeration_index,
             "sync-check and Game.txt report the same C++ allocator high-water mark"
         );
 
@@ -2892,46 +2457,34 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let mut gated = Engine::with_seed(81);
         gated.control_rate = 2;
         tick_test_engine(&mut gated, 4);
-        assert_eq!(gated.control_tick, 2, "frames 2 and 4 advance the tick");
+        unit_assert_eq!(gated.control_tick => 2, "frames 2 and 4 advance the tick");
 
         // SyncRate: the digest is queued on frame % 100 == 0 and pruned
         // after 50 frames.
         let mut machine = Engine::with_seed(82);
         machine.sync_rate = 10;
         tick_test_engine(&mut machine, 10);
-        assert!(machine.get_sync_check(10).is_some(), "queued on frame 10");
+        unit_assert!(machine.get_sync_check(10).is_some(), "queued on frame 10");
         // strict cutoff (C4GameControl.cpp:519: frame < FrameCounter - 50):
         // check 10 survives the frame-60 prune and drops at the frame-70 one.
         tick_test_engine(&mut machine, 50);
-        assert!(
-            machine.get_sync_check(10).is_some(),
-            "10 >= 60 - 50 keeps it at frame 60"
-        );
+        unit_assert!(machine.get_sync_check(10).is_some(), "10 >= 60 - 50 keeps it at frame 60");
         tick_test_engine(&mut machine, 10);
-        assert!(
-            machine.get_sync_check(10).is_none(),
-            "pruned once frame - 50 exceeds it"
-        );
-        assert!(machine.get_sync_check(60).is_some());
+        unit_assert!(machine.get_sync_check(10).is_none(), "pruned once frame - 50 exceeds it");
+        unit_assert!(machine.get_sync_check(60).is_some());
 
         // Remote comparison (C4ControlSyncCheck::Execute, C4Control.cpp:469+):
         // matching digest → ok; tampered digest → synchronization loss.
         let local = machine.get_sync_check(60).cloned().test_value();
-        assert!(machine.register_remote_sync_check(local.clone()));
+        unit_assert!(machine.register_remote_sync_check(local.clone()));
         let mut shifted_tick = local.clone();
         shifted_tick.control_tick += 1;
-        assert!(
-            !machine.register_remote_sync_check(shifted_tick.clone()),
-            "live control compares ControlTick"
-        );
+        unit_assert!(!machine.register_remote_sync_check(shifted_tick.clone()), "live control compares ControlTick");
         machine.set_replay_control(true);
-        assert!(
-            machine.register_remote_sync_check(shifted_tick),
-            "replay control exempts only ControlTick"
-        );
+        unit_assert!(machine.register_remote_sync_check(shifted_tick), "replay control exempts only ControlTick");
         let mut tampered = local;
         tampered.random_count += 1;
-        assert!(!machine.register_remote_sync_check(tampered));
+        unit_assert!(!machine.register_remote_sync_check(tampered));
     }
 
     #[test]
@@ -2945,18 +2498,18 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let timing = NetworkControlTiming::new(9, 2).test_value();
         engine.initialize_network_control_timing(timing);
 
-        assert_eq!(engine.sync_check(0).control_tick, 9);
+        unit_assert_eq!(engine.sync_check(0).control_tick => 9);
         engine.tick_without_snapshot().test_value();
-        assert_eq!(engine.frame(), 1);
-        assert_eq!(engine.sync_check(0).control_tick, 9);
+        unit_assert_eq!(engine.frame() => 1);
+        unit_assert_eq!(engine.sync_check(0).control_tick => 9);
         engine.tick_without_snapshot().test_value();
-        assert_eq!(engine.frame(), 2);
-        assert_eq!(engine.sync_check(0).control_tick, 10);
+        unit_assert_eq!(engine.frame() => 2);
+        unit_assert_eq!(engine.sync_check(0).control_tick => 10);
         engine.tick_without_snapshot().test_value();
-        assert_eq!(engine.sync_check(0).control_tick, 10);
+        unit_assert_eq!(engine.sync_check(0).control_tick => 10);
         engine.tick_without_snapshot().test_value();
-        assert_eq!(engine.frame(), 4);
-        assert_eq!(engine.sync_check(0).control_tick, 11);
+        unit_assert_eq!(engine.frame() => 4);
+        unit_assert_eq!(engine.sync_check(0).control_tick => 11);
     }
 
     #[test]
@@ -2966,10 +2519,10 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         // C4MaxControlRate is 20 (C4Constants.h:43). JoinData is copied
         // directly (C4Network2.cpp:1607), so malformed peers must be rejected
         // rather than silently normalized to a different synchronized rate.
-        assert!(NetworkControlTiming::new(9, 1).is_ok());
-        assert!(NetworkControlTiming::new(9, 20).is_ok());
-        assert!(NetworkControlTiming::new(9, 0).is_err());
-        assert!(NetworkControlTiming::new(9, 21).is_err());
+        unit_assert!(NetworkControlTiming::new(9, 1).is_ok());
+        unit_assert!(NetworkControlTiming::new(9, 20).is_ok());
+        unit_assert!(NetworkControlTiming::new(9, 0).is_err());
+        unit_assert!(NetworkControlTiming::new(9, 21).is_err());
     }
 
     #[test]
@@ -2992,27 +2545,13 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
 
         // With no landscape GBackWdt/GBackHgt are zero, so this valid PXS
         // deactivates in C4PXS::Execute's out-of-bounds check.
-        assert!(engine.pxs_system.create(
-            sand,
-            math::C4Fixed::ZERO,
-            math::C4Fixed::ZERO,
-            math::C4Fixed::ZERO,
-            math::C4Fixed::ZERO,
-        ));
+        unit_assert!(engine.pxs_system.create(sand, math::C4Fixed::ZERO, math::C4Fixed::ZERO, math::C4Fixed::ZERO, math::C4Fixed::ZERO,));
         engine.tick_pxs();
-        assert_eq!(engine.pxs_system.iter().count(), 0, "pixel deactivated");
-        assert_eq!(
-            engine.sync_check(0).pxs_count,
-            1,
-            "Count records the executed slot even though it died"
-        );
+        unit_assert_eq!(engine.pxs_system.iter().count() => 0, "pixel deactivated");
+        unit_assert_eq!(engine.sync_check(0).pxs_count => 1, "Count records the executed slot even though it died");
 
         engine.tick_pxs();
-        assert_eq!(
-            engine.sync_check(0).pxs_count,
-            0,
-            "the next Execute resets Count before scanning an empty system"
-        );
+        unit_assert_eq!(engine.sync_check(0).pxs_count => 0, "the next Execute resets Count before scanning an empty system");
     }
 
     #[test]
@@ -3030,17 +2569,14 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let gem = engine.spawn_test_object(test_spawn_at("Gem", 30, 30).with_container(hut));
 
         let idx = engine.test_object_index(hut);
-        assert!(engine.incinerate_object(idx, 1, false, None).test_value());
+        unit_assert!(engine.incinerate_object(idx, 1, false, None).test_value());
         let idx = engine.test_object_index(hut);
-        assert_eq!(
-            engine.objects[idx].definition_id, "Ruin",
-            "BurnTurnTo changed the definition"
-        );
-        assert!(engine.objects[idx].state.on_fire);
-        assert!(engine.objects[idx].state.contents.is_empty());
+        unit_assert_eq!(engine.objects[idx].definition_id => "Ruin", "BurnTurnTo changed the definition");
+        unit_assert!(engine.objects[idx].state.on_fire);
+        unit_assert!(engine.objects[idx].state.contents.is_empty());
         let gem_idx = engine.test_object_index(gem);
-        assert_eq!(engine.objects[gem_idx].state.container, None, "ejected");
-        assert_eq!(engine.objects[gem_idx].state.position, Vector2::new(30, 30));
+        unit_assert_eq!(engine.objects[gem_idx].state.container => None, "ejected");
+        unit_assert_eq!(engine.objects[gem_idx].state.position => Vector2::new(30, 30));
 
         // NoBurnDecay keeps the contents (C4Effect.cpp:588).
         let mut keeper_def = simple_definition("Chest");
@@ -3049,11 +2585,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let chest = engine.spawn_test_object(test_spawn_at("Chest", 50, 30));
         let coin = engine.spawn_test_object(test_spawn_at("Gem", 50, 30).with_container(chest));
         let chest_idx = engine.test_object_index(chest);
-        assert!(engine
-            .incinerate_object(chest_idx, 1, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(chest_idx, 1, false, None).test_value());
         let chest_idx = engine.test_object_index(chest);
-        assert_eq!(engine.objects[chest_idx].state.contents, vec![coin]);
+        unit_assert_eq!(engine.objects[chest_idx].state.contents => vec![coin]);
     }
 
     enum TestAttacherMode {
@@ -3085,12 +2619,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             TestAttacherMode::RemoveOnAbort => Some(("remove_on_abort", Value::Bool(true))),
         };
         local_vars.extend(extra.map(|(name, value)| (name.to_string(), value)));
-        engine.spawn_test_object(
-            SpawnConfig::new("ATCH")
-                .with_action(action)
-                .with_local_vars(local_vars)
-                .with_loaded(true),
-        )
+        spawn_fixture!(engine, "ATCH", with_action: action, with_local_vars: local_vars, with_loaded: true)
     }
 
     fn spawn_plain_attacher(engine: &mut Engine, target: ObjectId, marker: i32) -> ObjectId {
@@ -3209,37 +2738,26 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             "#,
             );
             attached_definition.set_c4_callback_convention(true);
-            attached_definition.configure_actions(
-                Some("Idle".to_string()),
-                HashMap::from([
-                    ("Idle".to_string(), ActionSpec::default()),
+            set_test_actions(
+                &mut attached_definition,
+                Some("Idle"),
+                [
+                    ("Idle", ActionSpec::default()),
                     (
-                        "Attach".to_string(),
+                        "Attach",
                         ActionSpec::default()
                             .with_procedure("ATTACH")
                             .with_abort_call("AttachAbort"),
                     ),
-                ]),
+                ],
             );
             engine.register_test_definition(attached_definition);
             register_simple_definitions(&mut engine, &["ANCR"]);
 
-            let actor = engine.spawn_test_object(
-                SpawnConfig::new("ACTR")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_controller(7),
-            );
+            let actor =
+                spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT, with_controller: 7);
             let burner = engine.spawn_test_object(test_spawn_at("BURN", 30, 30));
-            let content = engine.spawn_test_object(
-                SpawnConfig::new("ITEM")
-                    .with_container(burner)
-                    .with_controller(2)
-                    .with_rotation(73)
-                    .with_rotation_velocity(itofix(20))
-                    .with_in_liquid(true)
-                    .with_mobile(false)
-                    .with_loaded(true),
-            );
+            let content = spawn_fixture!(engine, "ITEM", with_container: burner, with_controller: 2, with_rotation: 73, with_rotation_velocity: itofix(20), with_in_liquid: true, with_mobile: false, with_loaded: true);
             let anchor = engine.spawn_test_object(SpawnConfig::new("ANCR"));
 
             let attached = spawn_test_attacher(
@@ -3264,120 +2782,57 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             engine.objects[content_idx].fixed_velocity = FixedVec2::new(itofix(11), itofix(-7));
             engine.objects[content_idx].state.velocity = Vector2::new(11, -7);
             engine.objects[content_idx].fixed_rotation = itofix(73);
-            assert_ne!(engine.objects[content_idx].fixed_velocity, FixedVec2::ZERO);
-            assert_ne!(engine.objects[content_idx].fixed_rotation, C4Fixed::ZERO);
+            unit_assert_ne!(engine.objects[content_idx].fixed_velocity => FixedVec2::ZERO);
+            unit_assert_ne!(engine.objects[content_idx].fixed_rotation => C4Fixed::ZERO);
             let attached_idx = engine.test_object_index(attached);
             engine.call_test_object_function(attached_idx, "ResetDetachOrder", Vec::new());
 
             let (script_result, native_result) =
                 ignite_test_object(&mut engine, actor, burner, via_script);
-            assert_eq!(script_result, Value::Bool(true), "{path} ignition succeeds");
-            assert!(native_result, "{path} ignition succeeds");
+            unit_assert_eq!(script_result => Value::Bool(true), "{path} ignition succeeds");
+            unit_assert!(native_result, "{path} ignition succeeds");
 
             let burner_idx = engine.test_object_index(burner);
-            assert!(engine.objects[burner_idx].state.contents.is_empty());
-            assert_eq!(
-                engine.objects[burner_idx]
-                    .state
-                    .local_vars
-                    .get("ejection_count"),
-                Some(&Value::Int(1)),
-                "{path} uses the Ejection seam"
-            );
-            assert_eq!(
-                engine.objects[burner_idx]
-                    .state
-                    .local_vars
-                    .get("ejection_controller"),
-                Some(&Value::Int(7)),
-                "{path} updates Controller before Ejection"
-            );
+            unit_assert!(engine.objects[burner_idx].state.contents.is_empty());
+            unit_assert_eq!(engine.objects[burner_idx].state.local_vars.get("ejection_count") => Some(&Value::Int(1)), "{path} uses the Ejection seam");
+            unit_assert_eq!(engine.objects[burner_idx].state.local_vars.get("ejection_controller") => Some(&Value::Int(7)), "{path} updates Controller before Ejection");
 
             let content_idx = engine.test_object_index(content);
             let content_state = &engine.objects[content_idx].state;
-            assert_eq!(content_state.container, None, "{path} content exits");
-            assert_eq!(
-                content_state.controller, 7,
-                "{path} content receives the fire cause"
-            );
-            assert_eq!(
-                content_state.local_vars.get("departure_count"),
-                Some(&Value::Int(1)),
-                "{path} runs Departure"
-            );
-            assert_eq!(
-                content_state.local_vars.get("departure_controller"),
-                Some(&Value::Int(7)),
-                "{path} updates Controller before Exit callbacks"
-            );
-            assert_eq!(
-                content_state.local_vars.get("departure_container"),
-                Some(&object_reference_value(burner))
-            );
-            assert_eq!(content_state.rotation, 0, "{path} uses real Exit");
-            assert_eq!(
-                engine.objects[content_idx].fixed_velocity,
-                FixedVec2::ZERO,
-                "{path} Exit clears xdir and ydir"
-            );
-            assert_eq!(content_state.velocity, Vector2::ZERO);
-            assert_eq!(engine.objects[content_idx].fixed_rotation, C4Fixed::ZERO);
-            assert_eq!(
-                engine.objects[content_idx].rotation_velocity,
-                C4Fixed::ZERO,
-                "{path} Exit clears rotational velocity"
-            );
-            assert!(content_state.mobile, "{path} Exit mobilizes content");
-            assert!(!content_state.in_liquid, "{path} Exit clears InLiquid");
+            unit_assert_eq!(content_state.container => None, "{path} content exits");
+            unit_assert_eq!(content_state.controller => 7, "{path} content receives the fire cause");
+            unit_assert_eq!(content_state.local_vars.get("departure_count") => Some(&Value::Int(1)), "{path} runs Departure");
+            unit_assert_eq!(content_state.local_vars.get("departure_controller") => Some(&Value::Int(7)), "{path} updates Controller before Exit callbacks");
+            unit_assert_eq!(content_state.local_vars.get("departure_container") => Some(&object_reference_value(burner)));
+            unit_assert_eq!(content_state.rotation => 0, "{path} uses real Exit");
+            unit_assert_eq!(engine.objects[content_idx].fixed_velocity => FixedVec2::ZERO, "{path} Exit clears xdir and ydir");
+            unit_assert_eq!(content_state.velocity => Vector2::ZERO);
+            unit_assert_eq!(engine.objects[content_idx].fixed_rotation => C4Fixed::ZERO);
+            unit_assert_eq!(engine.objects[content_idx].rotation_velocity => C4Fixed::ZERO, "{path} Exit clears rotational velocity");
+            unit_assert!(content_state.mobile, "{path} Exit mobilizes content");
+            unit_assert!(!content_state.in_liquid, "{path} Exit clears InLiquid");
 
             for (candidate, label) in [(attached, "Target"), (target2_attached, "Target2")] {
                 let candidate_idx = engine.test_object_index(candidate);
                 let candidate_state = &engine.objects[candidate_idx].state;
-                assert_eq!(
-                    candidate_state.action.name, "Idle",
-                    "{path} detaches every DFA_ATTACH {label} match"
-                );
-                assert_eq!(
-                    candidate_state.local_vars.get("abort_count"),
-                    Some(&Value::Int(1)),
-                    "{path} dispatches every Attach AbortCall"
-                );
-                assert_eq!(
-                    candidate_state.local_vars.get("abort_saw_idle"),
-                    Some(&Value::Bool(true)),
-                    "the idle action is live before AbortCall"
-                );
-                assert_eq!(
-                    candidate_state.local_vars.get("set_action_shadow_calls"),
-                    Some(&Value::Int(0)),
-                    "native detach bypasses a script SetAction shadow"
-                );
+                unit_assert_eq!(candidate_state.action.name => "Idle", "{path} detaches every DFA_ATTACH {label} match");
+                unit_assert_eq!(candidate_state.local_vars.get("abort_count") => Some(&Value::Int(1)), "{path} dispatches every Attach AbortCall");
+                unit_assert_eq!(candidate_state.local_vars.get("abort_saw_idle") => Some(&Value::Bool(true)), "the idle action is live before AbortCall");
+                unit_assert_eq!(candidate_state.local_vars.get("set_action_shadow_calls") => Some(&Value::Int(0)), "native detach bypasses a script SetAction shadow");
             }
             let attached_idx = engine.test_object_index(attached);
-            assert_eq!(
-                engine.call_test_object_function(attached_idx, "GetDetachOrder", Vec::new()),
+            unit_assert_eq!(
+                engine.call_test_object_function(attached_idx, "GetDetachOrder", Vec::new()) =>
                 Value::Int(21),
                 "{path} follows forward main-list order: newer Target2 peer before Target peer"
             );
-            assert_eq!(
-                engine.objects[attached_idx].state.action.target,
-                Some(burner),
-                "SetAction(ActIdle) preserves an unsupplied primary target"
-            );
+            unit_assert_eq!(engine.objects[attached_idx].state.action.target => Some(burner), "SetAction(ActIdle) preserves an unsupplied primary target");
             let target2_idx = engine.test_object_index(target2_attached);
-            assert_eq!(
-                engine.objects[target2_idx].state.action.target2,
-                Some(burner),
-                "FindObject action-target filtering includes Target2"
-            );
+            unit_assert_eq!(engine.objects[target2_idx].state.action.target2 => Some(burner), "FindObject action-target filtering includes Target2");
 
             let unrelated_idx = engine.test_object_index(unrelated);
-            assert_eq!(engine.objects[unrelated_idx].state.action.name, "Attach");
-            assert_eq!(
-                engine.objects[unrelated_idx].state.action.target,
-                Some(anchor),
-                "{path} only detaches objects targeting the burner"
-            );
+            unit_assert_eq!(engine.objects[unrelated_idx].state.action.name => "Attach");
+            unit_assert_eq!(engine.objects[unrelated_idx].state.action.target => Some(anchor), "{path} only detaches objects targeting the burner");
 
             let mut incomplete_definition = simple_definition("INCO");
             incomplete_definition.set_incomplete_activity(true);
@@ -3396,20 +2851,14 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
 
                 let (script_result, native_result) =
                     ignite_test_object(&mut engine, actor, gated_burner, via_script);
-                assert_eq!(script_result, Value::Bool(true));
-                assert!(native_result);
+                unit_assert_eq!(script_result => Value::Bool(true));
+                unit_assert!(native_result);
 
                 let attacher_idx = engine.test_object_index(gated_attacher);
                 let state = &engine.objects[attacher_idx].state;
-                assert_eq!(
-                    state.action.name, "Attach",
-                    "{path} {label} keeps targeting attachers attached"
-                );
-                assert_eq!(state.action.target, Some(gated_burner));
-                assert!(state
-                    .local_vars
-                    .get("abort_count")
-                    .is_none_or(|value| matches!(value, Value::Nil | Value::Int(0))));
+                unit_assert_eq!(state.action.name => "Attach", "{path} {label} keeps targeting attachers attached");
+                unit_assert_eq!(state.action.target => Some(gated_burner));
+                unit_assert!(state.local_vars.get("abort_count").is_none_or(|value| matches!(value, Value::Nil | Value::Int(0))));
             }
 
             // C++ performs one fresh FindObject(..., previous) walk per
@@ -3428,49 +2877,20 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
 
             let (script_result, native_result) =
                 ignite_test_object(&mut engine, actor, live_cursor_burner, via_script);
-            assert_eq!(script_result, Value::Bool(true));
-            assert!(native_result);
+            unit_assert_eq!(script_result => Value::Bool(true));
+            unit_assert!(native_result);
 
             let cursor_idx = engine.test_object_index(cursor_attacher);
-            assert_eq!(
-                engine.objects[cursor_idx].state.status,
-                ObjectStatus::Inactive,
-                "{path} Abort removes the FindObject cursor from the main list"
-            );
-            assert_eq!(engine.objects[cursor_idx].state.action.name, "Idle");
-            assert_eq!(
-                engine.objects[cursor_idx]
-                    .state
-                    .local_vars
-                    .get("abort_count"),
-                Some(&Value::Int(1))
-            );
-            assert_eq!(
-                engine.objects[cursor_idx]
-                    .state
-                    .local_vars
-                    .get("abort_saw_idle"),
-                Some(&Value::Bool(true))
-            );
+            unit_assert_eq!(engine.objects[cursor_idx].state.status => ObjectStatus::Inactive, "{path} Abort removes the FindObject cursor from the main list");
+            unit_assert_eq!(engine.objects[cursor_idx].state.action.name => "Idle");
+            unit_assert_eq!(engine.objects[cursor_idx].state.local_vars.get("abort_count") => Some(&Value::Int(1)));
+            unit_assert_eq!(engine.objects[cursor_idx].state.local_vars.get("abort_saw_idle") => Some(&Value::Bool(true)));
             let tail_idx = engine.test_object_index(tail_attacher);
-            assert_eq!(engine.objects[tail_idx].state.status, ObjectStatus::Normal);
-            assert_eq!(
-                engine.objects[tail_idx].state.action.name, "Attach",
-                "{path} stops when the previous FindObject cursor disappears"
-            );
-            assert_eq!(
-                engine.objects[tail_idx].state.action.target,
-                Some(live_cursor_burner)
-            );
-            assert!(engine.objects[tail_idx]
-                .state
-                .local_vars
-                .get("abort_count")
-                .is_none_or(|value| matches!(value, Value::Nil | Value::Int(0))));
-            assert_eq!(
-                engine.call_test_object_function(attached_idx, "GetDetachOrder", Vec::new()),
-                Value::Int(8)
-            );
+            unit_assert_eq!(engine.objects[tail_idx].state.status => ObjectStatus::Normal);
+            unit_assert_eq!(engine.objects[tail_idx].state.action.name => "Attach", "{path} stops when the previous FindObject cursor disappears");
+            unit_assert_eq!(engine.objects[tail_idx].state.action.target => Some(live_cursor_burner));
+            unit_assert!(engine.objects[tail_idx].state.local_vars.get("abort_count").is_none_or(|value| matches!(value, Value::Nil | Value::Int(0))));
+            unit_assert_eq!(engine.call_test_object_function(attached_idx, "GetDetachOrder", Vec::new()) => Value::Int(8));
 
             // AssignRemoval leaves its Status=Deleted link in Game.Objects
             // until DeleteObjects. Unlike an inactive cursor, that link is
@@ -3487,23 +2907,13 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
 
             let (script_result, native_result) =
                 ignite_test_object(&mut engine, actor, deleted_cursor_burner, via_script);
-            assert_eq!(script_result, Value::Bool(true));
-            assert!(native_result);
+            unit_assert_eq!(script_result => Value::Bool(true));
+            unit_assert!(native_result);
 
             let after_deleted_idx = engine.test_object_index(after_deleted);
-            assert_eq!(engine.objects[after_deleted_idx].state.action.name, "Idle");
-            assert_eq!(
-                engine.objects[after_deleted_idx]
-                    .state
-                    .local_vars
-                    .get("abort_count"),
-                Some(&Value::Int(1))
-            );
-            assert_eq!(
-                engine.call_test_object_function(attached_idx, "GetDetachOrder", Vec::new()),
-                Value::Int(69),
-                "{path} continues past a deleted cursor link"
-            );
+            unit_assert_eq!(engine.objects[after_deleted_idx].state.action.name => "Idle");
+            unit_assert_eq!(engine.objects[after_deleted_idx].state.local_vars.get("abort_count") => Some(&Value::Int(1)));
+            unit_assert_eq!(engine.call_test_object_function(attached_idx, "GetDetachOrder", Vec::new()) => Value::Int(69), "{path} continues past a deleted cursor link");
         }
     }
 
@@ -3576,68 +2986,34 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             content_definition.set_c4_callback_convention(true);
             engine.register_test_definition(content_definition);
 
-            let actor = engine.spawn_test_object(
-                SpawnConfig::new("ACTR")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_controller(7),
-            );
+            let actor =
+                spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT, with_controller: 7);
             let parent = engine.spawn_test_object(test_spawn_at("PRNT", 80, 40).with_controller(5));
             let burner =
                 engine.spawn_test_object(test_spawn_at("BURN", 10, 10).with_container(parent));
-            let content = engine.spawn_test_object(
-                SpawnConfig::new("ITEM")
-                    .with_container(burner)
-                    .with_controller(2),
-            );
+            let content =
+                spawn_fixture!(engine, "ITEM", with_container: burner, with_controller: 2);
 
             let (script_result, native_result) =
                 ignite_test_object(&mut engine, actor, burner, via_script);
-            assert_eq!(script_result, Value::Bool(true));
-            assert!(native_result);
+            unit_assert_eq!(script_result => Value::Bool(true));
+            unit_assert!(native_result);
 
             let content_idx = engine.test_object_index(content);
             let content_state = &engine.objects[content_idx].state;
-            assert_eq!(
-                content_state.container,
-                Some(parent),
-                "{path} enters parent"
-            );
-            assert_eq!(
-                content_state.position,
-                Vector2::new(80, 40),
-                "{path} copies parent motion"
-            );
-            assert_eq!(
-                content_state.local_vars.get("callback_order"),
+            unit_assert_eq!(content_state.container => Some(parent), "{path} enters parent");
+            unit_assert_eq!(content_state.position => Vector2::new(80, 40), "{path} copies parent motion");
+            unit_assert_eq!(
+                content_state.local_vars.get("callback_order") =>
                 Some(&Value::Int(51234)),
                 "{path} runs RejectEntrance -> Ejection -> Departure -> Collection2 -> Entrance"
             );
-            assert_eq!(
-                content_state.local_vars.get("reject_container"),
-                Some(&object_reference_value(parent))
-            );
-            assert_eq!(
-                content_state.local_vars.get("reject_controller"),
-                Some(&Value::Int(7)),
-                "the fire cause is assigned before RejectEntrance"
-            );
-            assert_eq!(
-                content_state.local_vars.get("departure_controller"),
-                Some(&Value::Int(7)),
-                "the fire cause is assigned before Enter starts"
-            );
-            assert_eq!(
-                content_state.local_vars.get("departure_container"),
-                Some(&object_reference_value(burner))
-            );
-            assert_eq!(
-                content_state.local_vars.get("entrance_container"),
-                Some(&object_reference_value(parent))
-            );
-            assert_eq!(
-                content_state.controller, 5,
-                "nonliving Enter finally adopts the parent controller"
-            );
+            unit_assert_eq!(content_state.local_vars.get("reject_container") => Some(&object_reference_value(parent)));
+            unit_assert_eq!(content_state.local_vars.get("reject_controller") => Some(&Value::Int(7)), "the fire cause is assigned before RejectEntrance");
+            unit_assert_eq!(content_state.local_vars.get("departure_controller") => Some(&Value::Int(7)), "the fire cause is assigned before Enter starts");
+            unit_assert_eq!(content_state.local_vars.get("departure_container") => Some(&object_reference_value(burner)));
+            unit_assert_eq!(content_state.local_vars.get("entrance_container") => Some(&object_reference_value(parent)));
+            unit_assert_eq!(content_state.controller => 5, "nonliving Enter finally adopts the parent controller");
         }
     }
 
@@ -3686,15 +3062,13 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                 burner_definition.set_c4_callback_convention(true);
                 burner_definition.set_category(CATEGORY_OBJECT);
                 burner_definition.set_burn_turn_to(Some("ASH1".to_string()));
-                burner_definition.configure_actions(
-                    Some("Idle".to_string()),
-                    HashMap::from([
-                        ("Idle".to_string(), ActionSpec::default()),
-                        (
-                            "Work".to_string(),
-                            ActionSpec::default().with_abort_call("OldAbort"),
-                        ),
-                    ]),
+                set_test_actions(
+                    &mut burner_definition,
+                    Some("Idle"),
+                    [
+                        ("Idle", ActionSpec::default()),
+                        ("Work", ActionSpec::default().with_abort_call("OldAbort")),
+                    ],
                 );
                 engine.register_test_definition(burner_definition);
 
@@ -3732,71 +3106,35 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                 content_definition.set_category(CATEGORY_VEHICLE);
                 engine.register_test_definition(content_definition);
 
-                let actor = engine.spawn_test_object(
-                    SpawnConfig::new("ACTR")
-                        .with_category(CATEGORY_OBJECT)
-                        .with_controller(7),
-                );
+                let actor = spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT, with_controller: 7);
                 let parent_position = Vector2::new(80, 40);
                 let parent_velocity = FixedVec2::new(
                     C4Fixed::from_raw(itofix(3).val() + 321),
                     C4Fixed::from_raw(itofix(-4).val() - 654),
                 );
-                let parent = engine.spawn_test_object(
-                    SpawnConfig::new("PRNT")
-                        .with_position(parent_position)
-                        .with_fixed_position(FixedVec2::new(
-                            C4Fixed::from_raw(itofix(80).val() + 123),
-                            C4Fixed::from_raw(itofix(40).val() + 456),
-                        ))
-                        .with_fixed_velocity(parent_velocity)
-                        .with_rotation_velocity(C4Fixed::from_raw(777))
-                        .with_controller(5)
-                        .with_local_vars(HashMap::from([
-                            ("ejection_count".to_string(), Value::Int(0)),
-                            ("collection_count".to_string(), Value::Int(0)),
-                        ])),
-                );
-                let peer_a = engine.spawn_test_object(
-                    SpawnConfig::new("PEER")
-                        .with_category(CATEGORY_VEHICLE)
-                        .with_container(parent),
-                );
-                let peer_b = engine.spawn_test_object(
-                    SpawnConfig::new("PEER")
-                        .with_category(CATEGORY_VEHICLE)
-                        .with_container(parent),
-                );
-                let burner = engine.spawn_test_object(
-                    SpawnConfig::new("BURN")
-                        .with_category(CATEGORY_VEHICLE)
-                        .with_container(parent)
-                        .with_action(ActionState::new("Work"))
-                        .with_local_vars(HashMap::from([
-                            ("abort_count".to_string(), Value::Int(0)),
-                            ("departure_count".to_string(), Value::Int(0)),
-                            ("reject_count".to_string(), Value::Int(0)),
-                            ("entrance_count".to_string(), Value::Int(0)),
-                            ("ejection_count".to_string(), Value::Int(0)),
-                        ])),
-                );
-                let content = engine.spawn_test_object(
-                    SpawnConfig::new("ITEM")
-                        .with_category(CATEGORY_VEHICLE)
-                        .with_container(burner)
-                        .with_controller(2)
-                        .with_local_vars(HashMap::from([
-                            ("departure_count".to_string(), Value::Int(0)),
-                            ("entrance_count".to_string(), Value::Int(0)),
-                        ])),
-                );
+                let parent = spawn_fixture!(engine, "PRNT", with_position: parent_position, with_fixed_position: FixedVec2::new(
+                    C4Fixed::from_raw(itofix(80).val() + 123),
+                    C4Fixed::from_raw(itofix(40).val() + 456),
+                ), with_fixed_velocity: parent_velocity, with_rotation_velocity: C4Fixed::from_raw(777), with_controller: 5, with_local_vars: HashMap::from([
+                    ("ejection_count".to_string(), Value::Int(0)),
+                    ("collection_count".to_string(), Value::Int(0)),
+                ]));
+                let peer_a = spawn_fixture!(engine, "PEER", with_category: CATEGORY_VEHICLE, with_container: parent);
+                let peer_b = spawn_fixture!(engine, "PEER", with_category: CATEGORY_VEHICLE, with_container: parent);
+                let burner = spawn_fixture!(engine, "BURN", with_category: CATEGORY_VEHICLE, with_container: parent, with_action: ActionState::new("Work"), with_local_vars: HashMap::from([
+                    ("abort_count".to_string(), Value::Int(0)),
+                    ("departure_count".to_string(), Value::Int(0)),
+                    ("reject_count".to_string(), Value::Int(0)),
+                    ("entrance_count".to_string(), Value::Int(0)),
+                    ("ejection_count".to_string(), Value::Int(0)),
+                ]));
+                let content = spawn_fixture!(engine, "ITEM", with_category: CATEGORY_VEHICLE, with_container: burner, with_controller: 2, with_local_vars: HashMap::from([
+                    ("departure_count".to_string(), Value::Int(0)),
+                    ("entrance_count".to_string(), Value::Int(0)),
+                ]));
 
                 let parent_idx = engine.test_object_index(parent);
-                assert_eq!(
-                    engine.objects[parent_idx].state.contents,
-                    vec![burner, peer_b, peer_a],
-                    "{label}: fixture starts with the burner at the sorted front"
-                );
+                unit_assert_eq!(engine.objects[parent_idx].state.contents => vec![burner, peer_b, peer_a], "{label}: fixture starts with the burner at the sorted front");
                 let burner_idx = engine.test_object_index(burner);
                 {
                     let burner = &mut engine.objects[burner_idx];
@@ -3811,25 +3149,14 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
 
                 let (script_result, native_result) =
                     ignite_test_object(&mut engine, actor, burner, via_script);
-                assert_eq!(
-                    script_result,
-                    Value::Bool(true),
-                    "{label}: ignition succeeds"
-                );
-                assert!(native_result, "{label}: ignition succeeds");
+                unit_assert_eq!(script_result => Value::Bool(true), "{label}: ignition succeeds");
+                unit_assert!(native_result, "{label}: ignition succeeds");
 
-                let burner_idx = engine.test_object_index(burner);
-                let burner_state = &engine.objects[burner_idx];
-                assert_eq!(burner_state.definition_id, "ASH1", "{label}: BurnTurnTo");
-                assert_eq!(
-                    burner_state.state.category, CATEGORY_VEHICLE,
-                    "{label}: ChangeDef preserves the object's category"
-                );
-                assert!(burner_state.state.on_fire, "{label}: fire starts");
-                assert!(
-                    burner_state.state.contents.is_empty(),
-                    "{label}: content leaves"
-                );
+                let burner_state = test_object(&engine, burner);
+                unit_assert_eq!(burner_state.definition_id => "ASH1", "{label}: BurnTurnTo");
+                unit_assert_eq!(burner_state.state.category => CATEGORY_VEHICLE, "{label}: ChangeDef preserves the object's category");
+                unit_assert!(burner_state.state.on_fire, "{label}: fire starts");
+                unit_assert!(burner_state.state.contents.is_empty(), "{label}: content leaves");
                 for (name, expected, message) in [
                     ("abort_count", 1, "old-action AbortCall runs exactly once"),
                     ("departure_count", 0, "silent Exit suppresses Departure"),
@@ -3841,95 +3168,59 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                         "only the later content Exit calls Ejection",
                     ),
                 ] {
-                    assert_eq!(
-                        burner_state.state.local_vars.get(name),
-                        Some(&Value::Int(expected)),
-                        "{label}: {message}"
-                    );
+                    unit_assert_eq!(burner_state.state.local_vars.get(name) => Some(&Value::Int(expected)), "{label}: {message}");
                 }
-                assert_eq!(
-                    burner_state.state.rotation, 0,
+                unit_assert_eq!(
+                    burner_state.state.rotation => 0,
                     "{label}: silent Exit clears r"
                 );
-                assert_eq!(burner_state.fixed_rotation, C4Fixed::ZERO);
-                assert_eq!(
-                    burner_state.rotation_velocity,
-                    C4Fixed::ZERO,
-                    "{label}: CopyMotion does not replace the cleared rdir"
-                );
-                assert!(burner_state.state.mobile, "{label}: silent Exit mobilizes");
-                assert!(
-                    !burner_state.state.in_liquid,
-                    "{label}: silent Exit clears InLiquid"
-                );
+                unit_assert_eq!(burner_state.fixed_rotation => C4Fixed::ZERO);
+                unit_assert_eq!(burner_state.rotation_velocity => C4Fixed::ZERO, "{label}: CopyMotion does not replace the cleared rdir");
+                unit_assert!(burner_state.state.mobile, "{label}: silent Exit mobilizes");
+                unit_assert!(!burner_state.state.in_liquid, "{label}: silent Exit clears InLiquid");
 
                 let parent_idx = engine.test_object_index(parent);
                 let parent_state = &engine.objects[parent_idx].state;
-                assert_eq!(
-                    parent_state.local_vars.get("ejection_count"),
-                    Some(&Value::Int(0)),
-                    "{label}: silent ChangeDef exit does not call parent Ejection"
-                );
-                assert_eq!(
-                    parent_state.local_vars.get("collection_count"),
+                unit_assert_eq!(parent_state.local_vars.get("ejection_count") => Some(&Value::Int(0)), "{label}: silent ChangeDef exit does not call parent Ejection");
+                unit_assert_eq!(
+                    parent_state.local_vars.get("collection_count") =>
                     Some(&Value::Int(i32::from(!reject_reentry))),
                     "{label}: only an accepted content transfer calls Collection2"
                 );
 
-                let content_idx = engine.test_object_index(content);
-                let content_object = &engine.objects[content_idx];
+                let content_object = test_object(&engine, content);
                 let content_state = &content_object.state;
-                assert_eq!(
-                    content_state.local_vars.get("departure_count"),
-                    Some(&Value::Int(1)),
-                    "{label}: fire ejection runs Departure once"
-                );
-                assert_eq!(
-                    content_state.local_vars.get("entrance_count"),
+                unit_assert_eq!(content_state.local_vars.get("departure_count") => Some(&Value::Int(1)), "{label}: fire ejection runs Departure once");
+                unit_assert_eq!(
+                    content_state.local_vars.get("entrance_count") =>
                     Some(&Value::Int(i32::from(!reject_reentry))),
                     "{label}: content Entrance follows only an accepted parent transfer"
                 );
 
                 if reject_reentry {
-                    assert_eq!(
-                        burner_state.state.container, None,
-                        "{label}: veto leaves outside"
-                    );
-                    assert_eq!(burner_state.state.position, Vector2::ZERO);
-                    assert_eq!(burner_state.fixed_position, FixedVec2::ZERO);
-                    assert_eq!(burner_state.fixed_velocity, FixedVec2::ZERO);
-                    assert_eq!(parent_state.contents, vec![peer_b, peer_a]);
-                    assert_eq!(
-                        content_state.container, None,
-                        "{label}: content exits to world"
-                    );
-                    assert_eq!(content_state.position, parent_position);
-                    assert_eq!(content_object.fixed_velocity, FixedVec2::ZERO);
-                    assert_eq!(
-                        content_state.controller, 7,
-                        "{label}: fire cause is retained"
-                    );
+                    unit_assert_eq!(burner_state.state.container => None, "{label}: veto leaves outside");
+                    unit_assert_eq!(burner_state.state.position => Vector2::ZERO);
+                    unit_assert_eq!(burner_state.fixed_position => FixedVec2::ZERO);
+                    unit_assert_eq!(burner_state.fixed_velocity => FixedVec2::ZERO);
+                    unit_assert_eq!(parent_state.contents => vec![peer_b, peer_a]);
+                    unit_assert_eq!(content_state.container => None, "{label}: content exits to world");
+                    unit_assert_eq!(content_state.position => parent_position);
+                    unit_assert_eq!(content_object.fixed_velocity => FixedVec2::ZERO);
+                    unit_assert_eq!(content_state.controller => 7, "{label}: fire cause is retained");
                 } else {
-                    assert_eq!(burner_state.state.container, Some(parent));
-                    assert_eq!(burner_state.state.position, parent_position);
-                    assert_eq!(
-                        burner_state.fixed_position,
+                    unit_assert_eq!(burner_state.state.container => Some(parent));
+                    unit_assert_eq!(burner_state.state.position => parent_position);
+                    unit_assert_eq!(
+                        burner_state.fixed_position =>
                         FixedVec2::from_ints(parent_position.x, parent_position.y),
                         "{label}: CopyMotion snaps fix_x/fix_y to integer parent position"
                     );
-                    assert_eq!(burner_state.fixed_velocity, parent_velocity);
-                    assert_eq!(
-                        parent_state.contents,
-                        vec![content, peer_b, peer_a, burner],
-                        "{label}: content sorts first and Unsorted burner remains at tail"
-                    );
-                    assert_eq!(content_state.container, Some(parent));
-                    assert_eq!(content_state.position, parent_position);
-                    assert_eq!(content_object.fixed_velocity, parent_velocity);
-                    assert_eq!(
-                        content_state.controller, 5,
-                        "{label}: parent adopts content"
-                    );
+                    unit_assert_eq!(burner_state.fixed_velocity => parent_velocity);
+                    unit_assert_eq!(parent_state.contents => vec![content, peer_b, peer_a, burner], "{label}: content sorts first and Unsorted burner remains at tail");
+                    unit_assert_eq!(content_state.container => Some(parent));
+                    unit_assert_eq!(content_state.position => parent_position);
+                    unit_assert_eq!(content_object.fixed_velocity => parent_velocity);
+                    unit_assert_eq!(content_state.controller => 5, "{label}: parent adopts content");
                 }
             }
         }
@@ -3969,16 +3260,16 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
 
         let mut mirror = engine.rng.clone();
         let expected_phase = mirror.random(15);
-        assert!(engine.incinerate_object(idx, 1, false, None).test_value());
-        assert!(engine.objects[idx].state.on_fire);
-        assert_eq!(engine.objects[idx].state.fire_phase, expected_phase);
-        assert_eq!(engine.objects[idx].state.fire_caused_by, 1);
-        assert_eq!(engine.rng, mirror, "one FirePhase draw");
+        unit_assert!(engine.incinerate_object(idx, 1, false, None).test_value());
+        unit_assert!(engine.objects[idx].state.on_fire);
+        unit_assert_eq!(engine.objects[idx].state.fire_phase => expected_phase);
+        unit_assert_eq!(engine.objects[idx].state.fire_caused_by => 1);
+        unit_assert_eq!(engine.rng => mirror, "one FirePhase draw");
 
         // already burning → false, no draw (C4Object.cpp:1233)
-        assert!(!engine.incinerate_object(idx, 2, false, None).test_value());
-        assert_eq!(engine.rng, mirror);
-        assert_eq!(engine.objects[idx].state.fire_caused_by, 1);
+        unit_assert!(!engine.incinerate_object(idx, 2, false, None).test_value());
+        unit_assert_eq!(engine.rng => mirror);
+        unit_assert_eq!(engine.objects[idx].state.fire_caused_by => 1);
 
         // dead living → false (C4Object.cpp:1235)
         let mut dead_def = simple_definition("Corpse");
@@ -3987,10 +3278,8 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         engine.register_test_definition(dead_def);
         let corpse = engine.spawn_test_object(test_spawn_at("Corpse", 20, 10).with_alive(false));
         let corpse_idx = engine.test_object_index(corpse);
-        assert!(!engine
-            .incinerate_object(corpse_idx, 1, false, None)
-            .test_value());
-        assert!(!engine.objects[corpse_idx].state.on_fire);
+        unit_assert!(!engine.incinerate_object(corpse_idx, 1, false, None).test_value());
+        unit_assert!(!engine.objects[corpse_idx].state.on_fire);
 
         // Submerged in extinguisher material: the constructor still hands
         // back the allocated number (so Incinerate succeeds), while the
@@ -4002,11 +3291,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let soaked = engine.spawn_test_object(test_spawn_at("Tree", 30, 8));
         let soaked_idx = engine.test_object_index(soaked);
         let mirror = engine.rng.clone();
-        assert!(engine
-            .incinerate_object(soaked_idx, 1, false, None)
-            .test_value());
-        assert!(!engine.objects[soaked_idx].state.on_fire);
-        assert_eq!(engine.rng, mirror, "no draw when extinguished at start");
+        unit_assert!(engine.incinerate_object(soaked_idx, 1, false, None).test_value());
+        unit_assert!(!engine.objects[soaked_idx].state.on_fire);
+        unit_assert_eq!(engine.rng => mirror, "no draw when extinguished at start");
     }
 
     #[test]
@@ -4022,18 +3309,18 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         register_simple_definitions(&mut engine, &["Bush"]);
         let bush = engine.spawn_test_object(test_spawn_at("Bush", 10, 10));
         let idx = engine.test_object_index(bush);
-        assert!(engine.incinerate_object(idx, 3, true, None).test_value());
+        unit_assert!(engine.incinerate_object(idx, 3, true, None).test_value());
         let fire = {
             let effects = &engine.objects[idx].state.effects;
-            assert_eq!(effects.len(), 1, "exactly one Fire effect entry");
+            unit_assert_eq!(effects.len() => 1, "exactly one Fire effect entry");
             effects[0].clone()
         };
-        assert_eq!(fire.name, "Fire", "C4Fx_Fire");
-        assert_eq!(fire.priority, 100, "C4Fx_FirePriority");
-        assert_eq!(fire.interval, 1, "C4Fx_FireTimer");
-        assert!(fire.number > 0, "allocated per-object number");
-        assert_eq!(
-            fire.vars(),
+        unit_assert_eq!(fire.name => "Fire", "C4Fx_Fire");
+        unit_assert_eq!(fire.priority => 100, "C4Fx_FirePriority");
+        unit_assert_eq!(fire.interval => 1, "C4Fx_FireTimer");
+        unit_assert!(fire.number > 0, "allocated per-object number");
+        unit_assert_eq!(
+            fire.vars() =>
             &[
                 // default StaticBack category → C4Fx_FireMode_LivingVeg
                 EffectVarValue::Int(2),
@@ -4051,16 +3338,10 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         engine.register_test_definition(cart_def);
         let cart = engine.spawn_test_object(test_spawn_at("Cart", 20, 10));
         let cart_idx = engine.test_object_index(cart);
-        assert!(engine
-            .incinerate_object(cart_idx, 1, false, Some(bush))
-            .test_value());
+        unit_assert!(engine.incinerate_object(cart_idx, 1, false, Some(bush)).test_value());
         let cart_fire = engine.objects[cart_idx].state.effects[0].clone();
-        assert_eq!(cart_fire.vars()[0], EffectVarValue::Int(1), "StructVeh");
-        assert_eq!(
-            cart_fire.vars()[3],
-            EffectVarValue::Object(bush.as_u64()),
-            "incinerating object stored"
-        );
+        unit_assert_eq!(cart_fire.vars()[0] => EffectVarValue::Int(1), "StructVeh");
+        unit_assert_eq!(cart_fire.vars()[3] => EffectVarValue::Object(bush.as_u64()), "incinerating object stored");
 
         // a ~FireMode script answer is read through C4Value::getInt
         // (C4Effect.cpp:611). A raw Bool retains its full Data.Int payload;
@@ -4076,19 +3357,13 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         engine.register_test_definition(hot_def);
         let torch = engine.spawn_test_object(test_spawn_at("Torch", 30, 10));
         let torch_idx = engine.test_object_index(torch);
-        assert!(engine
-            .incinerate_object(torch_idx, 1, false, None)
-            .test_value());
-        assert_eq!(
-            engine.objects[torch_idx].state.effects[0].vars()[0],
-            EffectVarValue::Int(3),
-            "out-of-range raw-Bool FireMode callback answer"
-        );
+        unit_assert!(engine.incinerate_object(torch_idx, 1, false, None).test_value());
+        unit_assert_eq!(engine.objects[torch_idx].state.effects[0].vars()[0] => EffectVarValue::Int(3), "out-of-range raw-Bool FireMode callback answer");
 
         // refused incinerations leave no entry: a repeat is denied by the
         // already-burning check (C4Object.cpp:1259) …
-        assert!(!engine.incinerate_object(idx, 5, false, None).test_value());
-        assert_eq!(engine.objects[idx].state.effects.len(), 1, "no duplicate");
+        unit_assert!(!engine.incinerate_object(idx, 5, false, None).test_value());
+        unit_assert_eq!(engine.objects[idx].state.effects.len() => 1, "no duplicate");
     }
 
     #[test]
@@ -4104,21 +3379,13 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         register_simple_definitions(&mut engine, &["Hut"]);
         let hut = engine.spawn_test_object(test_spawn_at("Hut", 10, 10));
         let idx = engine.test_object_index(hut);
-        assert!(engine.incinerate_object(idx, 1, false, None).test_value());
+        unit_assert!(engine.incinerate_object(idx, 1, false, None).test_value());
         let con_before = engine.objects[idx].state.construction;
         let phase_before = engine.objects[idx].state.fire_phase;
         engine.tick_without_snapshot().test_value();
         let idx = engine.test_object_index(hut);
-        assert_eq!(
-            engine.objects[idx].state.construction,
-            con_before - 100,
-            "DoCon(-100) exactly once per frame (C4Object.cpp:779-781)"
-        );
-        assert_eq!(
-            engine.objects[idx].state.fire_phase,
-            (phase_before + 1) % 15,
-            "FirePhase advances once (C4Object.cpp:770)"
-        );
+        unit_assert_eq!(engine.objects[idx].state.construction => con_before - 100, "DoCon(-100) exactly once per frame (C4Object.cpp:779-781)");
+        unit_assert_eq!(engine.objects[idx].state.fire_phase => (phase_before + 1) % 15, "FirePhase advances once (C4Object.cpp:770)");
         let fire = engine.objects[idx]
             .state
             .effects
@@ -4126,14 +3393,10 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             .find(|effect| effect.name == "Fire")
             .cloned()
             .test_value();
-        assert_eq!(fire.timer, 1, "iTime elapsed once");
+        unit_assert_eq!(fire.timer => 1, "iTime elapsed once");
         engine.tick_without_snapshot().test_value();
         let idx = engine.test_object_index(hut);
-        assert_eq!(
-            engine.objects[idx].state.construction,
-            con_before - 200,
-            "second frame burns exactly once more"
-        );
+        unit_assert_eq!(engine.objects[idx].state.construction => con_before - 200, "second frame burns exactly once more");
     }
 
     #[test]
@@ -4154,27 +3417,22 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             count: 2,
         }]);
 
-        let mut engine = Engine::with_seed(29);
-        engine.register_test_definition(definition);
+        let mut engine = definition_engine(29, definition);
         let id = engine
             .spawn_test_object(test_spawn_at("BurningStructure", 3, 8).with_construction(FULL_CON));
         let idx = engine.test_object_index(id);
-        assert_eq!(engine.objects[idx].state.position.y, 4);
-        assert!(engine.incinerate_object(idx, 1, false, None).test_value());
+        unit_assert_eq!(engine.objects[idx].state.position.y => 4);
+        unit_assert!(engine.incinerate_object(idx, 1, false, None).test_value());
 
         engine.tick_without_snapshot().test_value();
 
         let object = engine.test_object_snapshot(id);
-        assert_eq!(object.construction, FULL_CON - 100);
-        assert_eq!(object.position.y, 5, "DoCon preserves shape bottom");
-        assert_eq!(object.vertices[0].y, 3, "UpdateFace jolts vertices");
-        assert_eq!(object.components.get("WOOD"), Some(1));
+        unit_assert_eq!(object.construction => FULL_CON - 100);
+        unit_assert_eq!(object.position.y => 5, "DoCon preserves shape bottom");
+        unit_assert_eq!(object.vertices[0].y => 3, "UpdateFace jolts vertices");
+        unit_assert_eq!(object.components.get("WOOD") => Some(1));
         let idx = engine.test_object_index(id);
-        assert_eq!(
-            engine.objects[idx].fixed_position.y,
-            itofix(4),
-            "SetAction resynchronizes before UpdatePos preserves fixed y"
-        );
+        unit_assert_eq!(engine.objects[idx].fixed_position.y => itofix(4), "SetAction resynchronizes before UpdatePos preserves fixed y");
     }
 
     #[test]
@@ -4213,7 +3471,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             engine.register_test_definition(hut_definition);
             let hut = engine.spawn_test_object(test_spawn_at("Hut", 10, 10));
             let idx = engine.test_object_index(hut);
-            assert!(engine.incinerate_object(idx, 1, false, None).test_value());
+            unit_assert!(engine.incinerate_object(idx, 1, false, None).test_value());
 
             // Flood the spot after ignition, then run to the next Tick5.
             let mut landscape = Landscape::flat_with_material(40, 30, None);
@@ -4230,9 +3488,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                 "native"
             };
             let idx = engine.test_object_index(hut);
-            assert!(!engine.objects[idx].state.on_fire, "{path}: extinguished");
+            unit_assert!(!engine.objects[idx].state.on_fire, "{path}: extinguished");
             if inherited_timer {
-                assert!(
+                unit_assert!(
                     engine.objects[idx]
                         .state
                         .effects
@@ -4243,14 +3501,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                 engine.tick_without_snapshot().test_value();
             }
             let idx = engine.test_object_index(hut);
-            assert!(
-                !engine.objects[idx]
-                    .state
-                    .effects
-                    .iter()
-                    .any(|effect| effect.name == "Fire"),
-                "{path}: the fire effect was killed by the extinguish",
-            );
+            unit_assert!(!engine.objects[idx].state.effects.iter().any(|effect| effect.name == "Fire"), "{path}: the fire effect was killed by the extinguish",);
         }
 
         run(false);
@@ -4288,15 +3539,13 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             energy: 100_000,
             ..PhysicalInfo::default()
         });
-        definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
-                (
-                    "Work".to_string(),
-                    ActionSpec::default().with_abort_call("WorkAbort"),
-                ),
-            ]),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Work", ActionSpec::default().with_abort_call("WorkAbort")),
+            ],
         );
         definition
     }
@@ -4324,14 +3573,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             .test_value();
         let mut burning = Vec::new();
         for definition in ["NativeBaseFire", "InheritedBaseFire"] {
-            let id = engine.spawn_test_object(
-                SpawnConfig::new(definition)
-                    .with_category(CATEGORY_LIVING)
-                    .with_container(base)
-                    .with_energy(100_000),
-            );
+            let id = spawn_fixture!(engine, definition, with_category: CATEGORY_LIVING, with_container: base, with_energy: 100_000);
             let idx = engine.test_object_index(id);
-            assert!(engine.incinerate_object(idx, 7, false, None).test_value());
+            unit_assert!(engine.incinerate_object(idx, 7, false, None).test_value());
             burning.push((id, definition));
         }
 
@@ -4344,8 +3588,8 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         }
         for (id, path) in &burning {
             let object = engine.test_object_snapshot(*id);
-            assert!(object.on_fire, "{path} respects a disabled base bit");
-            assert_eq!(object.container, Some(base));
+            unit_assert!(object.on_fire, "{path} respects a disabled base bit");
+            unit_assert_eq!(object.container => Some(base));
             engine
                 .apply_object_update(
                     *id,
@@ -4373,53 +3617,19 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
 
         engine.set_base_extinguish_enabled(true);
         engine.tick_without_snapshot().test_value();
-        assert_eq!(engine.frame(), 10);
+        unit_assert_eq!(engine.frame() => 10);
 
         for (id, path) in burning {
             let object = engine.test_object_snapshot(id);
-            assert!(
-                !object.on_fire,
-                "{path} extinguishes in its valid base; effects={:?}",
-                object.effects
-            );
-            assert!(
-                !object
-                    .effects
-                    .iter()
-                    .any(|effect| effect.name == "Fire" && effect.priority != 0),
-                "{path} kills the numbered Fire effect"
-            );
+            unit_assert!(!object.on_fire, "{path} extinguishes in its valid base; effects={:?}", object.effects);
+            unit_assert!(!object.effects.iter().any(|effect| effect.name == "Fire" && effect.priority != 0), "{path} kills the numbered Fire effect");
             let (construction, damage, energy, fire_phase) = before[&id];
-            assert_eq!(
-                object.construction,
-                construction - 100,
-                "{path} still runs decay after the base extinguish"
-            );
-            assert_eq!(
-                object.damage,
-                damage + 2,
-                "{path} still runs Tick10 damage after the base extinguish"
-            );
-            assert_eq!(
-                object.energy,
-                energy - 1_000,
-                "{path} still runs Tick5 energy after the base extinguish"
-            );
-            assert_eq!(
-                object.fire_phase,
-                (fire_phase + 1) % MAX_FIRE_PHASE,
-                "{path} retains the phase advance that precedes extinguish"
-            );
-            assert_eq!(
-                object.local_vars.get("abort_saw_fire"),
-                Some(&Value::Bool(false)),
-                "{path} extinguishes before DoCon's action callback"
-            );
-            assert_eq!(
-                object.local_vars.get("damage_saw_fire"),
-                Some(&Value::Bool(false)),
-                "{path} extinguishes before Tick10 damage"
-            );
+            unit_assert_eq!(object.construction => construction - 100, "{path} still runs decay after the base extinguish");
+            unit_assert_eq!(object.damage => damage + 2, "{path} still runs Tick10 damage after the base extinguish");
+            unit_assert_eq!(object.energy => energy - 1_000, "{path} still runs Tick5 energy after the base extinguish");
+            unit_assert_eq!(object.fire_phase => (fire_phase + 1) % MAX_FIRE_PHASE, "{path} retains the phase advance that precedes extinguish");
+            unit_assert_eq!(object.local_vars.get("abort_saw_fire") => Some(&Value::Bool(false)), "{path} extinguishes before DoCon's action callback");
+            unit_assert_eq!(object.local_vars.get("damage_saw_fire") => Some(&Value::Bool(false)), "{path} extinguishes before Tick10 damage");
         }
     }
 
@@ -4431,51 +3641,29 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         // C4Object::Extinguish(0) (C4Object.cpp:1269-1301) — killing the
         // "Fire" effect and clearing OnFire through the engine-internal
         // FnFxFireStop (C4Effect.cpp:787).
-        let mut engine = Engine::with_seed(37);
-        engine.register_test_definition(
-            test_definition("ACTR", "Actor", "#strict\nfunc Ignite(pVictim) { return Incinerate(pVictim); }\nfunc Quench(pVictim) { return Extinguish(pVictim); }\n"),
-        );
+        let mut engine = definition_engine(37, test_definition("ACTR", "Actor", "#strict\nfunc Ignite(pVictim) { return Incinerate(pVictim); }\nfunc Quench(pVictim) { return Extinguish(pVictim); }\n"),);
         register_simple_definitions(&mut engine, &["Hut"]);
-        let actor =
-            engine.spawn_test_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT));
+        let actor = spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT);
         let hut = engine.spawn_test_object(SpawnConfig::new("Hut"));
         let actor_idx = engine.test_object_index(actor);
         engine.objects[actor_idx].state.controller = 5;
         let hut_value = Value::Object(hut.as_u64());
 
         let result = engine.call_test_object_function(actor_idx, "Ignite", vec![hut_value.clone()]);
-        assert_eq!(result, Value::Bool(true), "Incinerate reports success");
+        unit_assert_eq!(result => Value::Bool(true), "Incinerate reports success");
         let hut_idx = engine.test_object_index(hut);
-        assert!(engine.objects[hut_idx].state.on_fire);
-        assert_eq!(
-            engine.objects[hut_idx].state.fire_caused_by, 5,
-            "caused by the caller's controller"
-        );
-        assert!(engine.objects[hut_idx]
-            .state
-            .effects
-            .iter()
-            .any(|effect| effect.name == "Fire"));
+        unit_assert!(engine.objects[hut_idx].state.on_fire);
+        unit_assert_eq!(engine.objects[hut_idx].state.fire_caused_by => 5, "caused by the caller's controller");
+        unit_assert!(engine.objects[hut_idx].state.effects.iter().any(|effect| effect.name == "Fire"));
 
         let result = engine.call_test_object_function(actor_idx, "Quench", vec![hut_value]);
-        assert_eq!(result, Value::Bool(true), "Extinguish reports success");
+        unit_assert_eq!(result => Value::Bool(true), "Extinguish reports success");
         let hut_idx = engine.test_object_index(hut);
-        assert!(!engine.objects[hut_idx].state.on_fire, "flag cleared");
-        assert!(
-            engine.objects[hut_idx]
-                .state
-                .effects
-                .iter()
-                .any(|effect| effect.name == "Fire" && effect.priority == 0),
-            "the killed Fire node stays linked dead"
-        );
+        unit_assert!(!engine.objects[hut_idx].state.on_fire, "flag cleared");
+        unit_assert!(engine.objects[hut_idx].state.effects.iter().any(|effect| effect.name == "Fire" && effect.priority == 0), "the killed Fire node stays linked dead");
         engine.tick_without_snapshot().test_value();
         let hut_idx = engine.test_object_index(hut);
-        assert!(!engine.objects[hut_idx]
-            .state
-            .effects
-            .iter()
-            .any(|effect| effect.name == "Fire"));
+        unit_assert!(!engine.objects[hut_idx].state.effects.iter().any(|effect| effect.name == "Fire"));
     }
 
     #[test]
@@ -4484,38 +3672,29 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         // FnFxFireStop clears OnFire (C4Effect.cpp:787); with fDoNoCalls
         // the Stop is skipped and the flag survives (FnRemoveEffect,
         // C4Script.cpp:5493-5507).
-        let mut engine = Engine::with_seed(41);
-        engine.register_test_definition(test_definition(
-            "ACTR",
-            "Actor",
-            "#strict\nfunc Douse(pVictim) { return RemoveEffect(\"Fire\", pVictim); }\n",
-        ));
+        let mut engine = definition_engine(
+            41,
+            test_definition(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc Douse(pVictim) { return RemoveEffect(\"Fire\", pVictim); }\n",
+            ),
+        );
         register_simple_definitions(&mut engine, &["Hut"]);
-        let actor =
-            engine.spawn_test_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT));
+        let actor = spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT);
         let hut = engine.spawn_test_object(SpawnConfig::new("Hut"));
         let actor_idx = engine.test_object_index(actor);
         let hut_idx = engine.test_object_index(hut);
-        assert!(engine
-            .incinerate_object(hut_idx, 1, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(hut_idx, 1, false, None).test_value());
         let result =
             engine.call_test_object_function(actor_idx, "Douse", vec![Value::Object(hut.as_u64())]);
-        assert_eq!(result, Value::Bool(true));
+        unit_assert_eq!(result => Value::Bool(true));
         let hut_idx = engine.test_object_index(hut);
-        assert!(!engine.objects[hut_idx].state.on_fire, "OnFire cleared");
-        assert!(engine.objects[hut_idx]
-            .state
-            .effects
-            .iter()
-            .any(|effect| effect.name == "Fire" && effect.priority == 0));
+        unit_assert!(!engine.objects[hut_idx].state.on_fire, "OnFire cleared");
+        unit_assert!(engine.objects[hut_idx].state.effects.iter().any(|effect| effect.name == "Fire" && effect.priority == 0));
         engine.tick_without_snapshot().test_value();
         let hut_idx = engine.test_object_index(hut);
-        assert!(!engine.objects[hut_idx]
-            .state
-            .effects
-            .iter()
-            .any(|effect| effect.name == "Fire"));
+        unit_assert!(!engine.objects[hut_idx].state.effects.iter().any(|effect| effect.name == "Fire"));
     }
 
     #[test]
@@ -4534,34 +3713,16 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let shed = engine.spawn_test_object(SpawnConfig::new("SHED"));
         let barn_idx = engine.test_object_index(barn);
         let shed_idx = engine.test_object_index(shed);
-        assert!(engine
-            .incinerate_object(barn_idx, 1, false, None)
-            .test_value());
-        assert!(engine
-            .incinerate_object(shed_idx, 1, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(barn_idx, 1, false, None).test_value());
+        unit_assert!(engine.incinerate_object(shed_idx, 1, false, None).test_value());
         let barn_con = engine.objects[barn_idx].state.construction;
         let shed_con = engine.objects[shed_idx].state.construction;
         engine.tick_without_snapshot().test_value();
         let barn_idx = engine.test_object_index(barn);
         let shed_idx = engine.test_object_index(shed);
-        assert_eq!(
-            engine.objects[barn_idx].state.construction,
-            barn_con - 100,
-            "inherited() chains to the engine FnFxFireTimer burn"
-        );
-        assert_eq!(
-            engine.objects[shed_idx].state.construction, shed_con,
-            "an overload that swallows the call replaces the engine burn"
-        );
-        assert!(
-            engine.objects[shed_idx]
-                .state
-                .effects
-                .iter()
-                .any(|effect| effect.name == "Fire"),
-            "FX_OK keeps the effect alive"
-        );
+        unit_assert_eq!(engine.objects[barn_idx].state.construction => barn_con - 100, "inherited() chains to the engine FnFxFireTimer burn");
+        unit_assert_eq!(engine.objects[shed_idx].state.construction => shed_con, "an overload that swallows the call replaces the engine burn");
+        unit_assert!(engine.objects[shed_idx].state.effects.iter().any(|effect| effect.name == "Fire"), "FX_OK keeps the effect alive");
     }
 
     fn register_test_particle(engine: &mut Engine, name: &str, failure: &str) {
@@ -4607,8 +3768,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         }
         definition.set_c4_callback_convention(c4_callback_convention);
         engine.register_test_definition(definition);
-        let object =
-            engine.spawn_test_object(SpawnConfig::new(id).with_category(CATEGORY_STRUCTURE));
+        let object = spawn_fixture!(engine, id, with_category: CATEGORY_STRUCTURE);
         (engine, object)
     }
 
@@ -4626,22 +3786,13 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         barn.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         barn.set_fire_properties(0, true, true);
         engine.register_test_definition(barn);
-        let object = engine.spawn_test_object(
-            SpawnConfig::new("BARN")
-                .with_category(CATEGORY_STRUCTURE)
-                .with_position(Vector2::new(200, 300)),
-        );
+        let object = spawn_fixture!(engine, "BARN", with_category: CATEGORY_STRUCTURE, with_position: Vector2::new(200, 300));
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
 
         for execution in 1..4 {
             engine.tick_without_snapshot().test_value();
-            assert!(
-                engine.particle_system().particles().is_empty(),
-                "execution {execution} is inside the iTime % 4 gate",
-            );
+            unit_assert!(engine.particle_system().particles().is_empty(), "execution {execution} is inside the iTime % 4 gate",);
         }
         engine.tick_without_snapshot().test_value();
 
@@ -4651,11 +3802,8 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             .iter()
             .map(|particle| particle.def_name.as_str())
             .collect();
-        assert_eq!(
-            names,
-            vec!["Fire", "Fire", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2"],
-        );
-        assert!(
+        unit_assert_eq!(names => vec!["Fire", "Fire", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2"],);
+        unit_assert!(
             engine
                 .particle_system()
                 .particles()
@@ -4679,9 +3827,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         // (C4Effect.cpp:859-865), whose `a` is that level.
         let (mut engine, object) = smoke_fixture(70, "SMK1", "Smoky hut", "", 16, None, false);
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
 
         let mut smoking_frames = Vec::new();
         for _ in 0..15 {
@@ -4692,23 +3838,13 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             }
         }
 
-        assert!(
-            !smoking_frames.is_empty(),
-            "a burning object with a SmokeRate smokes",
-        );
+        unit_assert!(!smoking_frames.is_empty(), "a burning object with a SmokeRate smokes",);
         let period = 5;
         let phase = smoking_frames[0] % period;
         for frame in &smoking_frames {
-            assert_eq!(
-                frame % period,
-                phase,
-                "smoke lands on one residue class of the SmokeRate period: {smoking_frames:?}",
-            );
+            unit_assert_eq!(frame % period => phase, "smoke lands on one residue class of the SmokeRate period: {smoking_frames:?}",);
         }
-        assert!(
-            smoking_frames.len() >= 2,
-            "the cadence repeats within 15 frames: {smoking_frames:?}",
-        );
+        unit_assert!(smoking_frames.len() >= 2, "the cadence repeats within 15 frames: {smoking_frames:?}",);
         let level = engine
             .particle_system()
             .particles()
@@ -4716,7 +3852,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             .find(|particle| particle.def_name == "Smoke")
             .map(|particle| particle.a)
             .test_value();
-        assert_eq!(level.to_bits(), 10.0f32.to_bits(), "2 * Shape.Wdt / 3");
+        unit_assert_eq!(level.to_bits() => 10.0f32.to_bits(), "2 * Shape.Wdt / 3");
     }
 
     #[test]
@@ -4726,11 +3862,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let (mut engine, object) =
             smoke_fixture(71, "SMK0", "Smokeless hut", "", 16, Some(0), false);
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
         tick_test_engine(&mut engine, 15);
-        assert!(engine.particle_system().particles().is_empty());
+        unit_assert!(engine.particle_system().particles().is_empty());
     }
 
     #[test]
@@ -4748,9 +3882,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let (mut engine, object) =
             smoke_fixture(72, "SMK2", "Overloaded hut", script, 16, None, true);
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
 
         // Sample per tick: a global-layer particle's survival is its own
         // (well covered) story, and what this test is about is how often the
@@ -4774,19 +3906,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                 }
             }
         }
-        assert!(
-            puffs > 0,
-            "the inherited chain keeps the ExecFire smoke arm"
-        );
-        assert_eq!(
-            level.map(f32::to_bits),
-            Some(10.0f32.to_bits()),
-            "2 * Shape.Wdt / 3, same level as the native path",
-        );
-        assert!(
-            layer_ok,
-            "Smoke() passes no target, so it uses the global list",
-        );
+        unit_assert!(puffs > 0, "the inherited chain keeps the ExecFire smoke arm");
+        unit_assert_eq!(level.map(f32::to_bits) => Some(10.0f32.to_bits()), "2 * Shape.Wdt / 3, same level as the native path",);
+        unit_assert!(layer_ok, "Smoke() passes no target, so it uses the global list",);
 
         // The two feeders are mutually exclusive per fire effect
         // (engine/tick.rs's `native_fire` branch), so the overload must
@@ -4802,10 +3924,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                 native_puffs += 1;
             }
         }
-        assert_eq!(
-            puffs, native_puffs,
-            "the inherited chain smokes exactly once per execution",
-        );
+        unit_assert_eq!(puffs => native_puffs, "the inherited chain smokes exactly once per execution",);
 
         // Non-vacuity: an overload that swallows the call instead of chaining
         // produces no smoke at all, so the assertions above are answering for
@@ -4814,14 +3933,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
              global func FxFireTimer(pObj, iNumber, iTime) { return -1; }\n";
         let (mut silent, quiet) = smoke_fixture(77, "SMK4", "Swallowed", swallow, 16, None, true);
         let index = silent.test_object_index(quiet);
-        assert!(silent
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(silent.incinerate_object(index, OWNER_NONE, false, None).test_value());
         tick_test_engine(&mut silent, 15);
-        assert!(
-            silent.particle_system().particles().is_empty(),
-            "a swallowing overload replaces the engine arm entirely",
-        );
+        unit_assert!(silent.particle_system().particles().is_empty(), "a swallowing overload replaces the engine arm entirely",);
     }
 
     #[test]
@@ -4842,29 +3956,16 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         torch.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         torch.set_fire_properties(0, true, true);
         engine.register_test_definition(torch);
-        let object =
-            engine.spawn_test_object(SpawnConfig::new("TRC2").with_category(CATEGORY_STRUCTURE));
+        let object = spawn_fixture!(engine, "TRC2", with_category: CATEGORY_STRUCTURE);
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
         tick_test_engine(&mut engine, 8);
-        assert!(
-            engine.particle_system().particles().is_empty(),
-            "the automatic emitter is silenced",
-        );
+        unit_assert!(engine.particle_system().particles().is_empty(), "the automatic emitter is silenced",);
 
         let index = engine.test_object_index(object);
         engine.call_test_object_function(index, "Flare", Vec::new());
         engine.tick_without_snapshot().test_value();
-        assert!(
-            engine
-                .particle_system()
-                .particles()
-                .iter()
-                .any(|particle| particle.def_name == "Fire2"),
-            "script-created Fire2 is unaffected by the switch",
-        );
+        unit_assert!(engine.particle_system().particles().iter().any(|particle| particle.def_name == "Fire2"), "script-created Fire2 is unaffected by the switch",);
     }
 
     /// An engine with only the `Smoke` particle def registered, plus a
@@ -4880,9 +3981,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             false,
         );
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
         (engine, object)
     }
 
@@ -4902,25 +4001,12 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                     smoking_frames.push(engine.frame());
                 }
             }
-            assert!(
-                !smoking_frames.is_empty(),
-                "width {width} still smokes on the floored period",
-            );
+            unit_assert!(!smoking_frames.is_empty(), "width {width} still smokes on the floored period",);
             let phase = smoking_frames[0] % 3;
             for frame in &smoking_frames {
-                assert_eq!(frame % 3, phase, "width {width}: {smoking_frames:?}");
+                unit_assert_eq!(frame % 3 => phase, "width {width}: {smoking_frames:?}");
             }
-            assert_eq!(
-                engine
-                    .particle_system()
-                    .particles()
-                    .first()
-                    .test_value()
-                    .a
-                    .to_bits(),
-                (level as f32).to_bits(),
-                "width {width}: 2 * Shape.Wdt / 3",
-            );
+            unit_assert_eq!(engine.particle_system().particles().first().test_value().a.to_bits() => (level as f32).to_bits(), "width {width}: 2 * Shape.Wdt / 3",);
         }
     }
 
@@ -4950,12 +4036,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let at_threshold = sample(90, itofix(2));
         // One raw unit past it is.
         let past_threshold = sample(91, C4Fixed::from_raw(itofix(2).val() + 1));
-        assert_eq!(past_threshold, 6, "a fast object smokes on every execution",);
-        assert!(
-            at_threshold < past_threshold,
-            "the comparison is strict: {at_threshold} at the threshold vs \
-             {past_threshold} past it",
-        );
+        unit_assert_eq!(past_threshold => 6, "a fast object smokes on every execution",);
+        unit_assert!(at_threshold < past_threshold, "the comparison is strict: {at_threshold} at the threshold vs \
+             {past_threshold} past it",);
     }
 
     #[test]
@@ -4976,16 +4059,9 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         // `IsFireParticleLoaded` is consulted (C4Effect.cpp:658 then :660-661),
         // so an installation with no Fire/Fire2 defs still smokes.
         let (mut engine, _) = burning_smoker(92, 16, 100);
-        assert!(!engine.particle_system().is_fire_particle_loaded());
+        unit_assert!(!engine.particle_system().is_fire_particle_loaded());
         tick_test_engine(&mut engine, 12);
-        assert!(
-            engine
-                .particle_system()
-                .particles()
-                .iter()
-                .any(|particle| particle.def_name == "Smoke"),
-            "smoke does not depend on the fire particle defs",
-        );
+        unit_assert!(engine.particle_system().particles().iter().any(|particle| particle.def_name == "Smoke"), "smoke does not depend on the fire particle defs",);
     }
 
     #[test]
@@ -5010,16 +4086,14 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                 true,
             );
             let index = engine.test_object_index(object);
-            assert!(engine
-                .incinerate_object(index, OWNER_NONE, false, None)
-                .test_value());
+            unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
             (engine, object)
         };
 
         // SmokeRate=0 opts the overload out exactly as it does the native path.
         let (mut silent, _) = build(75, 0);
         tick_test_engine(&mut silent, 15);
-        assert!(silent.particle_system().particles().is_empty());
+        unit_assert!(silent.particle_system().particles().is_empty());
 
         // Past itofix(2) the cadence is bypassed and it smokes every tick.
         let (mut fast, object) = build(76, 100);
@@ -5032,11 +4106,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             ));
             fast.tick_without_snapshot().test_value();
         }
-        assert_eq!(
-            fast.particle_system().particles().len(),
-            5,
-            "the overload's fast-mover escape fires on every execution",
-        );
+        unit_assert_eq!(fast.particle_system().particles().len() => 5, "the overload's fast-mover escape fires on every execution",);
     }
 
     /// A definition-less engine wired with the stock `Fire`/`Fire2` particle
@@ -5060,25 +4130,15 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         arrow.set_shape_rect(Some(DefinitionRect::new(-4, -4, 8, 8)));
         arrow.set_fire_properties(0, true, true);
         engine.register_test_definition(arrow);
-        let object = engine.spawn_test_object(
-            SpawnConfig::new("ARRW")
-                .with_category(CATEGORY_OBJECT)
-                .with_position(Vector2::new(10, 10)),
-        );
+        let object = spawn_fixture!(engine, "ARRW", with_category: CATEGORY_OBJECT, with_position: Vector2::new(10, 10));
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
 
         engine.tick_without_snapshot().test_value();
         // iCount = int(sqrt(64) / 4) = 2, so the double set is 4.
-        assert_eq!(engine.particle_system().particles().len(), 4);
+        unit_assert_eq!(engine.particle_system().particles().len() => 4);
         engine.tick_without_snapshot().test_value();
-        assert_eq!(
-            engine.particle_system().particles().len(),
-            8,
-            "the second execution emits again without waiting for iTime % 4",
-        );
+        unit_assert_eq!(engine.particle_system().particles().len() => 8, "the second execution emits again without waiting for iTime % 4",);
     }
 
     #[test]
@@ -5095,25 +4155,16 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         engine.register_test_definition(chest);
 
         let container = engine.spawn_test_object(SpawnConfig::new("CHST"));
-        let torch =
-            engine.spawn_test_object(SpawnConfig::new("TRCH").with_category(CATEGORY_OBJECT));
+        let torch = spawn_fixture!(engine, "TRCH", with_category: CATEGORY_OBJECT);
         let torch_index = engine.test_object_index(torch);
         engine.objects[torch_index].state.container = Some(container);
-        assert!(engine
-            .incinerate_object(torch_index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(torch_index, OWNER_NONE, false, None).test_value());
 
         let fire_phase = engine.objects[torch_index].state.fire_phase;
         engine.tick_without_snapshot().test_value();
         let torch_index = engine.test_object_index(torch);
-        assert!(
-            engine.particle_system().particles().is_empty(),
-            "a contained object draws no fire particles",
-        );
-        assert_ne!(
-            engine.objects[torch_index].state.fire_phase, fire_phase,
-            "ExecFire still ran; only the emitter returned early",
-        );
+        unit_assert!(engine.particle_system().particles().is_empty(), "a contained object draws no fire particles",);
+        unit_assert_ne!(engine.objects[torch_index].state.fire_phase => fire_phase, "ExecFire still ran; only the emitter returned early",);
     }
 
     #[test]
@@ -5128,20 +4179,14 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         barn.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         barn.set_fire_properties(0, true, true);
         engine.register_test_definition(barn);
-        let object =
-            engine.spawn_test_object(SpawnConfig::new("BARN").with_category(CATEGORY_STRUCTURE));
+        let object = spawn_fixture!(engine, "BARN", with_category: CATEGORY_STRUCTURE);
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
 
         tick_test_engine(&mut engine, 8);
         let index = engine.test_object_index(object);
-        assert!(engine.particle_system().particles().is_empty());
-        assert!(
-            engine.objects[index].state.on_fire,
-            "the object is still burning; only its particles are suppressed",
-        );
+        unit_assert!(engine.particle_system().particles().is_empty());
+        unit_assert!(engine.objects[index].state.on_fire, "the object is still burning; only its particles are suppressed",);
     }
 
     #[test]
@@ -5155,14 +4200,11 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         barn.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         barn.set_fire_properties(0, true, true);
         engine.register_test_definition(barn);
-        let object =
-            engine.spawn_test_object(SpawnConfig::new("BARN").with_category(CATEGORY_STRUCTURE));
+        let object = spawn_fixture!(engine, "BARN", with_category: CATEGORY_STRUCTURE);
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
-        assert_eq!(
-            engine.objects[index].state.effects[0].vars.first(),
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
+        unit_assert_eq!(
+            engine.objects[index].state.effects[0].vars.first() =>
             Some(&EffectVarValue::Int(C4FX_FIRE_MODE_STRUCT_VEH)),
             "a C4D_Structure defaults to struct/vehicle mode",
         );
@@ -5170,11 +4212,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         engine.objects[index].state.effects[0]
             .set_var(0, EffectVarValue::Int(C4FX_FIRE_MODE_OBJECT));
         engine.tick_without_snapshot().test_value();
-        assert_eq!(
-            engine.particle_system().particles().len(),
-            8,
-            "object mode emits on the first execution, inside iTime % 4",
-        );
+        unit_assert_eq!(engine.particle_system().particles().len() => 8, "object mode emits on the first execution, inside iTime % 4",);
     }
 
     #[test]
@@ -5201,22 +4239,13 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         hut.set_fire_properties(0, true, true);
         hut.set_c4_callback_convention(true);
         engine.register_test_definition(hut);
-        let object = engine.spawn_test_object(
-            SpawnConfig::new("HUT1")
-                .with_category(CATEGORY_STRUCTURE)
-                .with_position(Vector2::new(120, 90)),
-        );
+        let object = spawn_fixture!(engine, "HUT1", with_category: CATEGORY_STRUCTURE, with_position: Vector2::new(120, 90));
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
 
         for _ in 0..3 {
             engine.tick_without_snapshot().test_value();
-            assert!(
-                engine.particle_system().particles().is_empty(),
-                "inside the iTime % 4 gate",
-            );
+            unit_assert!(engine.particle_system().particles().is_empty(), "inside the iTime % 4 gate",);
         }
         engine.tick_without_snapshot().test_value();
         let names: Vec<&str> = engine
@@ -5225,11 +4254,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             .iter()
             .map(|particle| particle.def_name.as_str())
             .collect();
-        assert_eq!(
-            names,
-            vec!["Fire", "Fire", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2"],
-            "the inherited chain reaches the same double set",
-        );
+        unit_assert_eq!(names => vec!["Fire", "Fire", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2"], "the inherited chain reaches the same double set",);
     }
 
     #[test]
@@ -5245,19 +4270,16 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         barn.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         barn.set_fire_properties(0, true, true);
         engine.register_test_definition(barn);
-        let object =
-            engine.spawn_test_object(SpawnConfig::new("BRN2").with_category(CATEGORY_STRUCTURE));
+        let object = spawn_fixture!(engine, "BRN2", with_category: CATEGORY_STRUCTURE);
 
         // Burn the first two frames so effect time trails the frame by two.
         tick_test_engine(&mut engine, 2);
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
 
         for execution in 1..4 {
             engine.tick_without_snapshot().test_value();
-            assert!(
+            unit_assert!(
                 engine.particle_system().particles().is_empty(),
                 "execution {execution} is inside the gate even though the game \
                  frame passed a multiple of four",
@@ -5265,11 +4287,8 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         }
         engine.tick_without_snapshot().test_value();
         let index = engine.test_object_index(object);
-        assert_eq!(
-            engine.objects[index].state.effects[0].timer, 4,
-            "the effect's own clock reached four on its fourth execution",
-        );
-        assert!(!engine.particle_system().particles().is_empty());
+        unit_assert_eq!(engine.objects[index].state.effects[0].timer => 4, "the effect's own clock reached four on its fourth execution",);
+        unit_assert!(!engine.particle_system().particles().is_empty());
     }
 
     #[test]
@@ -5284,43 +4303,27 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         hut.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         hut.set_fire_properties(0, true, true);
         engine.register_test_definition(hut);
-        let object =
-            engine.spawn_test_object(SpawnConfig::new("HUT2").with_category(CATEGORY_STRUCTURE));
+        let object = spawn_fixture!(engine, "HUT2", with_category: CATEGORY_STRUCTURE);
         let index = engine.test_object_index(object);
-        assert!(engine
-            .incinerate_object(index, OWNER_NONE, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(index, OWNER_NONE, false, None).test_value());
         tick_test_engine(&mut engine, 4);
-        assert!(!engine.particle_system().particles().is_empty());
+        unit_assert!(!engine.particle_system().particles().is_empty());
         let live_before: i32 = ["Fire", "Fire2"]
             .iter()
             .filter_map(|name| engine.particle_system().get_def(name))
             .map(|definition| definition.count)
             .sum();
-        assert!(
-            live_before > 0,
-            "the defs are counting their live particles"
-        );
+        unit_assert!(live_before > 0, "the defs are counting their live particles");
 
         // AssignRemoval; the tick's retain sweep is what runs C4Object::Clear.
         let index = engine.test_object_index(object);
         engine.objects[index].destroyed = true;
         engine.tick_without_snapshot().test_value();
-        assert!(
-            engine.find_object_index(object).is_none(),
-            "the hut is gone"
-        );
+        unit_assert!(engine.find_object_index(object).is_none(), "the hut is gone");
 
-        assert!(
-            engine.particle_system().particles().is_empty(),
-            "the removed object's attached particles are released",
-        );
+        unit_assert!(engine.particle_system().particles().is_empty(), "the removed object's attached particles are released",);
         for name in ["Fire", "Fire2"] {
-            assert_eq!(
-                engine.particle_system().get_def(name).test_value().count,
-                0,
-                "{name} gets its MaxCount budget back",
-            );
+            unit_assert_eq!(engine.particle_system().get_def(name).test_value().count => 0, "{name} gets its MaxCount budget back",);
         }
     }
 
@@ -5373,34 +4376,22 @@ func FxFireTimer(pObj, iNumber, iTime)
         engine.register_test_definition(native_definition);
         engine.register_test_definition(inherited_definition);
 
-        let invalid_native = engine.spawn_test_object(
-            SpawnConfig::new("NTMR")
-                .with_category(CATEGORY_OBJECT)
-                .with_controller(5),
-        );
-        let invalid_inherited = engine.spawn_test_object(
-            SpawnConfig::new("ITMR")
-                .with_category(CATEGORY_OBJECT)
-                .with_controller(5),
-        );
-        let valid_native = engine.spawn_test_object(
-            SpawnConfig::new("NTMR")
-                .with_category(CATEGORY_OBJECT)
-                .with_controller(5),
-        );
-        let valid_inherited = engine.spawn_test_object(
-            SpawnConfig::new("ITMR")
-                .with_category(CATEGORY_OBJECT)
-                .with_controller(5),
-        );
+        let invalid_native =
+            spawn_fixture!(engine, "NTMR", with_category: CATEGORY_OBJECT, with_controller: 5);
+        let invalid_inherited =
+            spawn_fixture!(engine, "ITMR", with_category: CATEGORY_OBJECT, with_controller: 5);
+        let valid_native =
+            spawn_fixture!(engine, "NTMR", with_category: CATEGORY_OBJECT, with_controller: 5);
+        let valid_inherited =
+            spawn_fixture!(engine, "ITMR", with_category: CATEGORY_OBJECT, with_controller: 5);
 
         for id in [invalid_native, invalid_inherited] {
             let idx = engine.test_object_index(id);
-            assert!(engine.incinerate_object(idx, 99, false, None).test_value());
+            unit_assert!(engine.incinerate_object(idx, 99, false, None).test_value());
         }
         for id in [valid_native, valid_inherited] {
             let idx = engine.test_object_index(id);
-            assert!(engine.incinerate_object(idx, 7, false, None).test_value());
+            unit_assert!(engine.incinerate_object(idx, 7, false, None).test_value());
         }
 
         while engine.frame < 10 {
@@ -5409,39 +4400,21 @@ func FxFireTimer(pObj, iNumber, iTime)
 
         for (id, path) in [(invalid_native, "native"), (invalid_inherited, "inherited")] {
             let idx = engine.test_object_index(id);
-            assert_eq!(
-                engine.objects[idx].state.local_vars.get("damage_cause"),
-                Some(&Value::Int(OWNER_NONE)),
-                "{path} Tick10 damage receives NO_OWNER"
-            );
-            assert_eq!(
-                engine.objects[idx].last_energy_loss_cause, OWNER_NONE,
-                "{path} Tick5 energy attribution receives NO_OWNER"
-            );
+            unit_assert_eq!(engine.objects[idx].state.local_vars.get("damage_cause") => Some(&Value::Int(OWNER_NONE)), "{path} Tick10 damage receives NO_OWNER");
+            unit_assert_eq!(engine.objects[idx].last_energy_loss_cause => OWNER_NONE, "{path} Tick5 energy attribution receives NO_OWNER");
             let fire = engine.objects[idx]
                 .state
                 .effects
                 .iter()
                 .find(|effect| effect.name == "Fire")
                 .test_value();
-            assert_eq!(
-                fire.vars()[1],
-                EffectVarValue::Int(99),
-                "validation is per timer call and does not rewrite the stored cause"
-            );
+            unit_assert_eq!(fire.vars()[1] => EffectVarValue::Int(99), "validation is per timer call and does not rewrite the stored cause");
         }
 
         for (id, path) in [(valid_native, "native"), (valid_inherited, "inherited")] {
             let idx = engine.test_object_index(id);
-            assert_eq!(
-                engine.objects[idx].state.local_vars.get("damage_cause"),
-                Some(&Value::Int(7)),
-                "{path} preserves a valid fire cause for damage"
-            );
-            assert_eq!(
-                engine.objects[idx].last_energy_loss_cause, 7,
-                "{path} preserves a valid fire cause for energy"
-            );
+            unit_assert_eq!(engine.objects[idx].state.local_vars.get("damage_cause") => Some(&Value::Int(7)), "{path} preserves a valid fire cause for damage");
+            unit_assert_eq!(engine.objects[idx].last_energy_loss_cause => 7, "{path} preserves a valid fire cause for energy");
         }
     }
 
@@ -5454,13 +4427,9 @@ func FxFireTimer(pObj, iNumber, iTime)
         // (C4Effect.cpp:609-634) — and AddEffect returns the number. A
         // denied start (extinguishing material) marks the effect dead but
         // still returns its allocated number (C4Effect.cpp:128-136).
-        let mut engine = Engine::with_seed(47);
-        engine.register_test_definition(
-            test_definition("ACTR", "Actor", "#strict\nfunc Torch(pVictim) { return AddEffect(\"Fire\", pVictim, 100, 1, 0, 0, 7, false); }\n"),
-        );
+        let mut engine = definition_engine(47, test_definition("ACTR", "Actor", "#strict\nfunc Torch(pVictim) { return AddEffect(\"Fire\", pVictim, 100, 1, 0, 0, 7, false); }\n"),);
         register_simple_definitions(&mut engine, &["Hut"]);
-        let actor =
-            engine.spawn_test_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT));
+        let actor = spawn_fixture!(engine, "ACTR", with_category: CATEGORY_OBJECT);
         let hut = engine.spawn_test_object(SpawnConfig::new("Hut"));
         let actor_idx = engine.test_object_index(actor);
         let mut mirror = engine.rng.clone();
@@ -5468,10 +4437,10 @@ func FxFireTimer(pObj, iNumber, iTime)
         let result =
             engine.call_test_object_function(actor_idx, "Torch", vec![Value::Object(hut.as_u64())]);
         let hut_idx = engine.test_object_index(hut);
-        assert!(engine.objects[hut_idx].state.on_fire, "ignited");
-        assert_eq!(engine.objects[hut_idx].state.fire_phase, expected_phase);
-        assert_eq!(engine.objects[hut_idx].state.fire_caused_by, 7);
-        assert_eq!(engine.rng, mirror, "one FirePhase draw");
+        unit_assert!(engine.objects[hut_idx].state.on_fire, "ignited");
+        unit_assert_eq!(engine.objects[hut_idx].state.fire_phase => expected_phase);
+        unit_assert_eq!(engine.objects[hut_idx].state.fire_caused_by => 7);
+        unit_assert_eq!(engine.rng => mirror, "one FirePhase draw");
         let fire = engine.objects[hut_idx]
             .state
             .effects
@@ -5479,20 +4448,8 @@ func FxFireTimer(pObj, iNumber, iTime)
             .find(|effect| effect.name == "Fire")
             .cloned()
             .test_value();
-        assert_eq!(
-            result,
-            Value::Int(fire.number),
-            "AddEffect hands back the number"
-        );
-        assert_eq!(
-            fire.vars(),
-            &[
-                EffectVarValue::Int(2),
-                EffectVarValue::Int(7),
-                EffectVarValue::Bool(false),
-                EffectVarValue::Nil,
-            ]
-        );
+        unit_assert_eq!(result => Value::Int(fire.number), "AddEffect hands back the number");
+        unit_assert_eq!(fire.vars() => &[EffectVarValue::Int(2), EffectVarValue::Int(7), EffectVarValue::Bool(false), EffectVarValue::Nil,]);
     }
 
     #[test]
@@ -5502,36 +4459,25 @@ func FxFireTimer(pObj, iNumber, iTime)
         // C4Effect.cpp:97-116). A passing check then invokes the engine
         // FnFxFireStart before the constructor and AddEffect return
         // (C4Effect.cpp:118-136).
-        let mut engine = Engine::with_seed(53);
-        engine.register_test_definition(
-            test_definition("BARN", "Barn", "#strict\nfunc FxShieldEffect(szNew, pObj, iNumber) { return 0; }\nfunc Kindle() { AddEffect(\"Shield\", this(), 200, 0); return AddEffect(\"Fire\", this(), 100, 1, 0, 0, 9); }\n"),
-        );
-        let barn = engine.spawn_test_object(SpawnConfig::new("BARN"));
+        let (mut engine, barn) = definition_fixture(53, test_definition("BARN", "Barn", "#strict\nfunc FxShieldEffect(szNew, pObj, iNumber) { return 0; }\nfunc Kindle() { AddEffect(\"Shield\", this(), 200, 0); return AddEffect(\"Fire\", this(), 100, 1, 0, 0, 9); }\n"), SpawnConfig::new("BARN"));
         let barn_idx = engine.test_object_index(barn);
         let _ = engine.call_test_object_function(barn_idx, "Kindle", Vec::new());
         let barn_idx = engine.test_object_index(barn);
-        assert!(
-            engine.objects[barn_idx].state.on_fire,
-            "the checked add runs the engine start before AddEffect returns"
-        );
+        unit_assert!(engine.objects[barn_idx].state.on_fire, "the checked add runs the engine start before AddEffect returns");
         let con_before = engine.objects[barn_idx].state.construction;
         engine.tick_without_snapshot().test_value();
         let barn_idx = engine.test_object_index(barn);
-        assert!(engine.objects[barn_idx].state.on_fire, "ignited");
-        assert_eq!(engine.objects[barn_idx].state.fire_caused_by, 9);
-        assert_eq!(
-            engine.objects[barn_idx].state.construction,
-            con_before - 100,
-            "the first execution starts AND burns"
-        );
+        unit_assert!(engine.objects[barn_idx].state.on_fire, "ignited");
+        unit_assert_eq!(engine.objects[barn_idx].state.fire_caused_by => 9);
+        unit_assert_eq!(engine.objects[barn_idx].state.construction => con_before - 100, "the first execution starts AND burns");
         let fire = engine.objects[barn_idx]
             .state
             .effects
             .iter()
             .find(|effect| effect.name == "Fire")
             .test_value();
-        assert_eq!(fire.vars()[0], EffectVarValue::Int(2), "mode written");
-        assert_eq!(fire.vars()[1], EffectVarValue::Int(9), "cause remapped");
+        unit_assert_eq!(fire.vars()[0] => EffectVarValue::Int(2), "mode written");
+        unit_assert_eq!(fire.vars()[1] => EffectVarValue::Int(9), "cause remapped");
     }
 
     #[test]
@@ -5561,18 +4507,15 @@ func Incineration(iCause) { return 1; }
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
 
-        let mut engine = Engine::with_seed(73);
-        engine.register_test_definition(definition);
-        let direct = engine.spawn_test_object(
+        let (mut engine, direct) = definition_fixture(
+            73,
+            definition,
             SpawnConfig::new("FIRE_DENY")
                 .with_category(CATEGORY_OBJECT)
                 .with_controller(9),
         );
-        let scripted = engine.spawn_test_object(
-            SpawnConfig::new("FIRE_DENY")
-                .with_category(CATEGORY_OBJECT)
-                .with_controller(9),
-        );
+        let scripted =
+            spawn_fixture!(engine, "FIRE_DENY", with_category: CATEGORY_OBJECT, with_controller: 9);
 
         let mut shield_numbers = HashMap::new();
         for id in [direct, scripted] {
@@ -5581,7 +4524,7 @@ func Incineration(iCause) { return 1; }
             let Value::Int(number) = result else {
                 panic!("Shield AddEffect returned {result:?}");
             };
-            assert!(number > 0);
+            unit_assert!(number > 0);
             shield_numbers.insert(id, number);
         }
         call_log.lock().unwrap().clear();
@@ -5595,54 +4538,30 @@ func Incineration(iCause) { return 1; }
         });
 
         let direct_idx = engine.test_object_index(direct);
-        assert!(!engine
-            .incinerate_object(direct_idx, 9, false, None)
-            .test_value());
+        unit_assert!(!engine.incinerate_object(direct_idx, 9, false, None).test_value());
         let scripted_idx = engine.test_object_index(scripted);
-        assert_eq!(
-            engine.call_test_object_function(scripted_idx, "Ignite", Vec::new()),
-            Value::Bool(false)
-        );
+        unit_assert_eq!(engine.call_test_object_function(scripted_idx, "Ignite", Vec::new()) => Value::Bool(false));
 
-        assert_eq!(engine.rng, rng_before, "denied fire consumes no RNG");
+        unit_assert_eq!(engine.rng => rng_before, "denied fire consumes no RNG");
         for (slot, id) in [direct, scripted].into_iter().enumerate() {
-            let idx = engine.test_object_index(id);
-            let object = &engine.objects[idx];
-            assert!(!object.state.on_fire);
-            assert_eq!(
-                (object.state.fire_phase, object.state.fire_caused_by),
-                fire_before[slot]
-            );
+            let object = test_object(&engine, id);
+            unit_assert!(!object.state.on_fire);
+            unit_assert_eq!((object.state.fire_phase, object.state.fire_caused_by) => fire_before[slot]);
             let shield = object
                 .state
                 .effects
                 .iter()
                 .find(|effect| effect.name == "Shield" && effect.priority != 0)
                 .test_value();
-            assert_eq!(shield.priority, 200);
-            assert_eq!(
-                shield.number, shield_numbers[&id],
-                "the denying effect is unchanged"
-            );
-            assert!(object
-                .state
-                .effects
-                .iter()
-                .any(|effect| effect.name == "Fire" && effect.priority == 0));
+            unit_assert_eq!(shield.priority => 200);
+            unit_assert_eq!(shield.number => shield_numbers[&id], "the denying effect is unchanged");
+            unit_assert!(object.state.effects.iter().any(|effect| effect.name == "Fire" && effect.priority == 0));
         }
 
         engine.tick_without_snapshot().test_value();
         for id in [direct, scripted] {
             let idx = engine.test_object_index(id);
-            assert_eq!(
-                engine.objects[idx]
-                    .state
-                    .effects
-                    .iter()
-                    .map(|effect| effect.name.as_str())
-                    .collect::<Vec<_>>(),
-                vec!["Shield"]
-            );
+            unit_assert_eq!(engine.objects[idx].state.effects.iter().map(|effect| effect.name.as_str()).collect::<Vec<_>>() => vec!["Shield"]);
         }
 
         let calls: Vec<_> = call_log
@@ -5652,11 +4571,11 @@ func Incineration(iCause) { return 1; }
             .filter(|(name, _)| name.starts_with("Fx") || name == "Incineration")
             .cloned()
             .collect();
-        assert_eq!(calls.len(), 2);
+        unit_assert_eq!(calls.len() => 2);
         for ((name, args), id) in calls.iter().zip([direct, scripted]) {
-            assert_eq!(name, "FxShieldEffect");
-            assert_eq!(
-                args,
+            unit_assert_eq!(name => "FxShieldEffect");
+            unit_assert_eq!(
+                args =>
                 &vec![
                     Value::String("Fire".to_string().into()),
                     Value::Object(id.as_u64()),
@@ -5697,13 +4616,9 @@ func Incineration(iCause) { return 1; }
         definition.set_debugger_hooks(hooks);
         engine.register_test_definition(definition);
 
-        let ids: [ObjectId; 3] = std::array::from_fn(|_| {
-            engine.spawn_test_object(
-                SpawnConfig::new("FIRE_START")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_controller(7),
-            )
-        });
+        let ids: [ObjectId; 3] = std::array::from_fn(
+            |_| spawn_fixture!(engine, "FIRE_START", with_category: CATEGORY_OBJECT, with_controller: 7),
+        );
         let rng_before = engine.rng.clone();
         let fire_before = ids.map(|id| {
             let idx = engine.test_object_index(id);
@@ -5715,42 +4630,23 @@ func Incineration(iCause) { return 1; }
 
         let source = ids[1];
         let direct_idx = engine.test_object_index(ids[0]);
-        assert!(engine
-            .incinerate_object(direct_idx, 7, true, Some(source))
-            .test_value());
+        unit_assert!(engine.incinerate_object(direct_idx, 7, true, Some(source)).test_value());
         let script_idx = engine.test_object_index(ids[1]);
-        assert_eq!(
-            engine.call_test_object_function(script_idx, "ViaIncinerate", Vec::new()),
-            Value::Bool(true)
-        );
+        unit_assert_eq!(engine.call_test_object_function(script_idx, "ViaIncinerate", Vec::new()) => Value::Bool(true));
         let add_idx = engine.test_object_index(ids[2]);
-        assert_eq!(
-            engine.call_test_object_function(
-                add_idx,
-                "ViaAddEffect",
-                vec![Value::Object(source.as_u64())],
-            ),
-            Value::Int(1)
-        );
+        unit_assert_eq!(engine.call_test_object_function(add_idx, "ViaAddEffect", vec![Value::Object(source.as_u64())],) => Value::Int(1));
 
-        assert_eq!(
-            engine.rng, rng_before,
-            "the script override consumes no RNG"
-        );
+        unit_assert_eq!(engine.rng => rng_before, "the script override consumes no RNG");
         for (slot, id) in ids.into_iter().enumerate() {
-            let idx = engine.test_object_index(id);
-            let object = &engine.objects[idx];
-            assert!(!object.state.on_fire, "the native start was replaced");
-            assert_eq!(
-                (object.state.fire_phase, object.state.fire_caused_by),
-                fire_before[slot]
-            );
-            assert_eq!(object.state.effects.len(), 1);
+            let object = test_object(&engine, id);
+            unit_assert!(!object.state.on_fire, "the native start was replaced");
+            unit_assert_eq!((object.state.fire_phase, object.state.fire_caused_by) => fire_before[slot]);
+            unit_assert_eq!(object.state.effects.len() => 1);
             let fire = &object.state.effects[0];
-            assert_eq!(fire.name, "Fire");
-            assert_eq!(fire.number, 1);
-            assert_eq!(fire.priority, 100);
-            assert_eq!(fire.interval, 1);
+            unit_assert_eq!(fire.name => "Fire");
+            unit_assert_eq!(fire.number => 1);
+            unit_assert_eq!(fire.priority => 100);
+            unit_assert_eq!(fire.interval => 1);
         }
 
         let calls: Vec<_> = call_log
@@ -5762,7 +4658,7 @@ func Incineration(iCause) { return 1; }
             })
             .cloned()
             .collect();
-        assert_eq!(calls.len(), 3);
+        unit_assert_eq!(calls.len() => 3);
         let expected_args = [
             vec![
                 Value::Object(ids[0].as_u64()),
@@ -5793,21 +4689,15 @@ func Incineration(iCause) { return 1; }
             ],
         ];
         for ((name, args), expected) in calls.iter().zip(expected_args) {
-            assert_eq!(name, "FxFireStart");
-            assert_eq!(args, &expected);
+            unit_assert_eq!(name => "FxFireStart");
+            unit_assert_eq!(args => &expected);
         }
     }
 
     #[test]
     fn foreign_incinerate_bypasses_add_effect_script_shadows() {
         let mut engine = Engine::with_seed(83);
-        assert_eq!(
-            engine.install_global_scripts(&[(
-                "System.c4g/AddEffect.c".to_string(),
-                "global func AddEffect() { return 0; }\n".to_string(),
-            )]),
-            1
-        );
+        unit_assert_eq!(engine.install_global_scripts(&[("System.c4g/AddEffect.c".to_string(), "global func AddEffect() { return 0; }\n".to_string(),)]) => 1);
 
         let mut igniter = test_definition(
             "IGNITER",
@@ -5825,34 +4715,21 @@ func Incineration(iCause) { return 1; }
         engine.register_test_definition(local_shadow);
         register_simple_definitions(&mut engine, &["PLAIN_TARGET"]);
 
-        let actor = engine.spawn_test_object(
-            SpawnConfig::new("IGNITER")
-                .with_category(CATEGORY_OBJECT)
-                .with_controller(7),
-        );
-        let local_target = engine
-            .spawn_test_object(SpawnConfig::new("LOCAL_SHADOW").with_category(CATEGORY_OBJECT));
-        let global_target = engine
-            .spawn_test_object(SpawnConfig::new("PLAIN_TARGET").with_category(CATEGORY_OBJECT));
+        let actor =
+            spawn_fixture!(engine, "IGNITER", with_category: CATEGORY_OBJECT, with_controller: 7);
+        let local_target = spawn_fixture!(engine, "LOCAL_SHADOW", with_category: CATEGORY_OBJECT);
+        let global_target = spawn_fixture!(engine, "PLAIN_TARGET", with_category: CATEGORY_OBJECT);
         let actor_idx = engine.test_object_index(actor);
 
         for target in [local_target, global_target] {
-            assert_eq!(
-                engine.call_test_object_function(
-                    actor_idx,
-                    "Ignite",
-                    vec![Value::Object(target.as_u64())],
-                ),
-                Value::Bool(true)
-            );
-            let target_idx = engine.test_object_index(target);
-            let object = &engine.objects[target_idx];
-            assert!(object.state.on_fire);
-            assert_eq!(object.state.fire_caused_by, 7);
-            assert_eq!(object.state.effects.len(), 1);
-            assert_eq!(object.state.effects[0].name, "Fire");
-            assert_eq!(object.state.effects[0].priority, 100);
-            assert_eq!(object.state.effects[0].interval, 1);
+            unit_assert_eq!(engine.call_test_object_function(actor_idx, "Ignite", vec![Value::Object(target.as_u64())],) => Value::Bool(true));
+            let object = test_object(&engine, target);
+            unit_assert!(object.state.on_fire);
+            unit_assert_eq!(object.state.fire_caused_by => 7);
+            unit_assert_eq!(object.state.effects.len() => 1);
+            unit_assert_eq!(object.state.effects[0].name => "Fire");
+            unit_assert_eq!(object.state.effects[0].priority => 100);
+            unit_assert_eq!(object.state.effects[0].interval => 1);
         }
     }
 
@@ -5881,41 +4758,27 @@ func Incineration(iCause) { return 1; }
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
 
-        let mut engine = Engine::with_seed(89);
-        engine.register_test_definition(definition);
-        let target = engine.spawn_test_object(
+        let (mut engine, target) = definition_fixture(
+            89,
+            definition,
             SpawnConfig::new("BROKEN_CHECK")
                 .with_category(CATEGORY_OBJECT)
                 .with_controller(7),
         );
         let idx = engine.test_object_index(target);
-        assert!(matches!(
-            engine.call_test_object_function(idx, "InstallBroken", Vec::new()),
-            Value::Int(number) if number > 0
-        ));
+        unit_assert!(matches!(engine.call_test_object_function(idx, "InstallBroken", Vec::new()), Value::Int(number) if number > 0));
         call_log.lock().unwrap().clear();
 
         let mut mirror = engine.rng.clone();
         let expected_phase = mirror.random(15);
-        assert!(engine.incinerate_object(idx, 7, false, None).test_value());
-        assert_eq!(engine.rng, mirror);
+        unit_assert!(engine.incinerate_object(idx, 7, false, None).test_value());
+        unit_assert_eq!(engine.rng => mirror);
         let object = &engine.objects[idx];
-        assert!(object.state.on_fire);
-        assert_eq!(object.state.fire_phase, expected_phase);
-        assert_eq!(object.state.fire_caused_by, 7);
-        assert_eq!(
-            object
-                .state
-                .effects
-                .iter()
-                .map(|effect| effect.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Fire", "Broken"]
-        );
-        assert_eq!(
-            call_log.lock().unwrap().as_slice(),
-            ["FxBrokenEffect", "Incineration"]
-        );
+        unit_assert!(object.state.on_fire);
+        unit_assert_eq!(object.state.fire_phase => expected_phase);
+        unit_assert_eq!(object.state.fire_caused_by => 7);
+        unit_assert_eq!(object.state.effects.iter().map(|effect| effect.name.as_str()).collect::<Vec<_>>() => vec!["Fire", "Broken"]);
+        unit_assert_eq!(call_log.lock().unwrap().as_slice() => ["FxBrokenEffect", "Incineration"]);
     }
 
     #[test]
@@ -5957,8 +4820,8 @@ func Incineration(iCause) { return 1; }
             .iter()
             .filter(|object| object.definition_id == "FXU1")
             .collect();
-        assert_eq!(bubbles.len(), 1, "one bubble from the submerged spot");
-        assert_eq!(bubbles[0].state.position, Vector2::new(10, 8));
+        unit_assert_eq!(bubbles.len() => 1, "one bubble from the submerged spot");
+        unit_assert_eq!(bubbles[0].state.position => Vector2::new(10, 8));
         // open air → no bubbles from nowhere (C4Effect.cpp:850)
         let _ = engine.call_test_object_function(
             actor_idx,
@@ -5970,7 +4833,7 @@ func Incineration(iCause) { return 1; }
             .iter()
             .filter(|object| object.definition_id == "FXU1")
             .count();
-        assert_eq!(count, 1, "no bubble in open air");
+        unit_assert_eq!(count => 1, "no bubble in open air");
     }
 
     #[test]
@@ -6026,24 +4889,24 @@ func Incineration(iCause) { return 1; }
         // Local non-record play uses Config.Graphics.SmokeLevel, whose
         // default is 200 rather than the synchronized fixed limit 150.
         let (mut local_default, actor) = fixture(None, false, false, 199);
-        assert_eq!(call_and_count(&mut local_default, actor), 200);
-        assert_eq!(call_and_count(&mut local_default, actor), 200);
+        unit_assert_eq!(call_and_count(&mut local_default, actor) => 200);
+        unit_assert_eq!(call_and_count(&mut local_default, actor) => 200);
 
         // A custom local setting is consumed directly, including values
         // below the sync limit.
         let (mut local_custom, actor) = fixture(Some(3), false, false, 2);
-        assert_eq!(call_and_count(&mut local_custom, actor), 3);
-        assert_eq!(call_and_count(&mut local_custom, actor), 3);
+        unit_assert_eq!(call_and_count(&mut local_custom, actor) => 3);
+        unit_assert_eq!(call_and_count(&mut local_custom, actor) => 3);
 
         // Network and active-recording sync modes both force 150 regardless
         // of the process-local graphics setting.
         let (mut network, actor) = fixture(Some(3), true, false, 149);
-        assert_eq!(call_and_count(&mut network, actor), 150);
-        assert_eq!(call_and_count(&mut network, actor), 150);
+        unit_assert_eq!(call_and_count(&mut network, actor) => 150);
+        unit_assert_eq!(call_and_count(&mut network, actor) => 150);
 
         let (mut recording, actor) = fixture(Some(3), false, true, 149);
-        assert_eq!(call_and_count(&mut recording, actor), 150);
-        assert_eq!(call_and_count(&mut recording, actor), 150);
+        unit_assert_eq!(call_and_count(&mut recording, actor) => 150);
+        unit_assert_eq!(call_and_count(&mut recording, actor) => 150);
     }
 
     #[test]
@@ -6070,19 +4933,12 @@ func Incineration(iCause) { return 1; }
         register_simple_definitions(&mut engine, &["Tree"]);
         let tree = engine.spawn_test_object(test_spawn_at("Tree", 10, 8));
         let idx = engine.test_object_index(tree);
-        assert!(engine.incinerate_object(idx, 1, false, None).test_value());
-        assert!(!engine.objects[idx].state.on_fire);
-        assert!(
-            engine.objects[idx]
-                .state
-                .effects
-                .iter()
-                .any(|effect| effect.name == "Fire" && effect.priority == 0),
-            "the Start-denied node stays linked dead"
-        );
+        unit_assert!(engine.incinerate_object(idx, 1, false, None).test_value());
+        unit_assert!(!engine.objects[idx].state.on_fire);
+        unit_assert!(engine.objects[idx].state.effects.iter().any(|effect| effect.name == "Fire" && effect.priority == 0), "the Start-denied node stays linked dead");
         engine.tick_without_snapshot().test_value();
         let idx = engine.test_object_index(tree);
-        assert!(engine.objects[idx].state.effects.is_empty());
+        unit_assert!(engine.objects[idx].state.effects.is_empty());
     }
 
     #[test]
@@ -6115,7 +4971,7 @@ func Incineration(iCause) { return 1; }
         // in open air: the Tick5 background-material block never fires
         let hut = engine.spawn_test_object(test_spawn_at("Hut", 10, 10).with_energy(50_000));
         let idx = engine.test_object_index(hut);
-        assert!(engine.incinerate_object(idx, 1, false, None).test_value());
+        unit_assert!(engine.incinerate_object(idx, 1, false, None).test_value());
         let phase_after_start = engine.objects[idx].state.fire_phase;
         let con_before = engine.objects[idx].state.construction;
         let mirror = engine.rng.clone();
@@ -6123,40 +4979,32 @@ func Incineration(iCause) { return 1; }
         let fire_number = engine.objects[idx].state.effects[0].number;
         // frame 1: neither Tick5 nor Tick10 — only phase + decay
         engine.exec_object_fire(idx, 1, fire_number);
-        assert_eq!(
-            engine.objects[idx].state.fire_phase,
-            (phase_after_start + 1) % 15
-        );
-        assert_eq!(engine.objects[idx].state.construction, con_before - 100);
-        assert_eq!(engine.objects[idx].state.energy, 50_000);
-        assert_eq!(engine.objects[idx].state.damage, 0);
-        assert_eq!(engine.rng, mirror, "no draws in open air off-tick");
+        unit_assert_eq!(engine.objects[idx].state.fire_phase => (phase_after_start + 1) % 15);
+        unit_assert_eq!(engine.objects[idx].state.construction => con_before - 100);
+        unit_assert_eq!(engine.objects[idx].state.energy => 50_000);
+        unit_assert_eq!(engine.objects[idx].state.damage => 0);
+        unit_assert_eq!(engine.rng => mirror, "no draws in open air off-tick");
 
         // frame 5: Tick5 → energy -1 (air: no background draw)
         engine.exec_object_fire(idx, 5, fire_number);
-        assert_eq!(engine.objects[idx].state.energy, 49_000);
+        unit_assert_eq!(engine.objects[idx].state.energy => 49_000);
         // frame 10: Tick10 + Tick5 → damage +2, energy -1
         engine.exec_object_fire(idx, 10, fire_number);
-        assert_eq!(engine.objects[idx].state.damage, 2);
-        assert_eq!(engine.objects[idx].state.energy, 48_000);
-        assert_eq!(engine.rng, mirror, "still no draws in open air");
+        unit_assert_eq!(engine.objects[idx].state.damage => 2);
+        unit_assert_eq!(engine.objects[idx].state.energy => 48_000);
+        unit_assert_eq!(engine.rng => mirror, "still no draws in open air");
 
         // Buried in earth (below the flat surface at y = 30): Tick5 draws
         // Random(3) for landscape inflammation (C4Object.cpp:797-805).
         let buried = engine.spawn_test_object(test_spawn_at("Hut", 20, 35).with_energy(50));
         let buried_idx = engine.test_object_index(buried);
-        assert!(engine
-            .incinerate_object(buried_idx, 1, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(buried_idx, 1, false, None).test_value());
         let buried_fire = engine.objects[buried_idx].state.effects[0].number;
         let mut mirror = engine.rng.clone();
         engine.exec_object_fire(buried_idx, 15, buried_fire);
         mirror.random(3);
-        assert_eq!(engine.rng, mirror, "Tick5 inflame draw over material");
-        assert!(
-            engine.objects[buried_idx].state.on_fire,
-            "earth does not extinguish"
-        );
+        unit_assert_eq!(engine.rng => mirror, "Tick5 inflame draw over material");
+        unit_assert!(engine.objects[buried_idx].state.on_fire, "earth does not extinguish");
     }
 
     #[test]
@@ -6197,24 +5045,22 @@ func Incineration(iCause) { return 1; }
         // keeps the tree center at (41,20), on top of the shapeless torch.
         let tree = engine.spawn_test_object(test_spawn_at("Tree", 41, 28).with_layer(other_layer));
         let torch_idx = engine.test_object_index(torch);
-        assert!(engine
-            .incinerate_object(torch_idx, 7, false, None)
-            .test_value());
+        unit_assert!(engine.incinerate_object(torch_idx, 7, false, None).test_value());
 
         // Not a Tick35 frame: nothing happens, no draws.
         let mirror = engine.rng.clone();
         engine.cross_check(34).test_value();
         let tree_idx = engine.test_object_index(tree);
-        assert!(!engine.objects[tree_idx].state.on_fire);
-        assert_eq!(engine.rng, mirror);
+        unit_assert!(!engine.objects[tree_idx].state.on_fire);
+        unit_assert_eq!(engine.rng => mirror);
 
         // A different pLayer is rejected by AtObject before the contact
         // chance, so even a Tick35 pass consumes no draw.
         let mirror = engine.rng.clone();
         engine.cross_check(35).test_value();
         let tree_idx = engine.test_object_index(tree);
-        assert!(!engine.objects[tree_idx].state.on_fire);
-        assert_eq!(engine.rng, mirror, "cross-layer contact draws nothing");
+        unit_assert!(!engine.objects[tree_idx].state.on_fire);
+        unit_assert_eq!(engine.rng => mirror, "cross-layer contact draws nothing");
 
         engine
             .apply_object_update(tree, ObjectUpdate::new().with_layer(source_layer))
@@ -6227,9 +5073,9 @@ func Incineration(iCause) { return 1; }
         mirror.random(15);
         engine.cross_check(35).test_value();
         let tree_idx = engine.test_object_index(tree);
-        assert!(engine.objects[tree_idx].state.on_fire, "tree caught fire");
-        assert_eq!(engine.objects[tree_idx].state.fire_caused_by, 7);
-        assert_eq!(engine.rng, mirror, "contact draw then FirePhase draw");
+        unit_assert!(engine.objects[tree_idx].state.on_fire, "tree caught fire");
+        unit_assert_eq!(engine.objects[tree_idx].state.fire_caused_by => 7);
+        unit_assert_eq!(engine.rng => mirror, "contact draw then FirePhase draw");
     }
 
     const PLAIN_FIGHTER_SCRIPT: &str = r#"
@@ -6241,12 +5087,13 @@ func Incineration(iCause) { return 1; }
         definition.set_crew_member(true);
         definition.set_category(CATEGORY_LIVING);
         definition.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
-        definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), ActionSpec::default()),
-                ("Fight".to_string(), ActionSpec::default()),
-            ]),
+        set_test_actions(
+            &mut definition,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Fight", ActionSpec::default()),
+            ],
         );
         definition
     }
@@ -6260,8 +5107,8 @@ func Incineration(iCause) { return 1; }
     }
 
     fn fight_engine(seed: u64, knight_a_script: &str, hostile: bool) -> Engine {
-        let mut engine = Engine::with_seed(seed);
-        engine.register_test_definition(fight_ready_definition("KnightA", knight_a_script));
+        let mut engine =
+            definition_engine(seed, fight_ready_definition("KnightA", knight_a_script));
         engine.register_test_definition(fight_ready_definition("KnightB", PLAIN_FIGHTER_SCRIPT));
         engine.register_test_player(PlayerConfig::new(1, "P1"));
         engine.register_test_player(PlayerConfig::new(2, "P2"));
@@ -6295,13 +5142,13 @@ func Incineration(iCause) { return 1; }
         // Frame 4 is not a Tick5 frame: nothing happens.
         engine.cross_check(4).test_value();
         let idx_a = engine.test_object_index(knight_a);
-        assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
+        unit_assert_ne!(engine.objects[idx_a].state.action.name => "Fight");
 
         engine.cross_check(5).test_value();
         let idx_a = engine.test_object_index(knight_a);
         let idx_b = engine.test_object_index(knight_b);
-        assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
-        assert_ne!(engine.objects[idx_b].state.action.name, "Fight");
+        unit_assert_ne!(engine.objects[idx_a].state.action.name => "Fight");
+        unit_assert_ne!(engine.objects[idx_b].state.action.name => "Fight");
 
         engine
             .apply_object_update(knight_b, ObjectUpdate::new().with_layer(layer_a))
@@ -6309,10 +5156,10 @@ func Incineration(iCause) { return 1; }
         engine.cross_check(5).test_value();
         let idx_a = engine.test_object_index(knight_a);
         let idx_b = engine.test_object_index(knight_b);
-        assert_eq!(engine.objects[idx_a].state.action.name, "Fight");
-        assert_eq!(engine.objects[idx_b].state.action.name, "Fight");
-        assert_eq!(engine.objects[idx_a].state.action.target, Some(knight_b));
-        assert_eq!(engine.objects[idx_b].state.action.target, Some(knight_a));
+        unit_assert_eq!(engine.objects[idx_a].state.action.name => "Fight");
+        unit_assert_eq!(engine.objects[idx_b].state.action.name => "Fight");
+        unit_assert_eq!(engine.objects[idx_a].state.action.target => Some(knight_b));
+        unit_assert_eq!(engine.objects[idx_b].state.action.target => Some(knight_a));
 
         // Friendly players never fight (C4PlayerList::Hostile,
         // C4PlayerList.cpp:82-92).
@@ -6321,7 +5168,7 @@ func Incineration(iCause) { return 1; }
         let _knight_b = engine.spawn_test_object(fighter_spawn("KnightB", 2, Vector2::new(52, 50)));
         engine.cross_check(5).test_value();
         let idx_a = engine.test_object_index(knight_a);
-        assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
+        unit_assert_ne!(engine.objects[idx_a].state.action.name => "Fight");
 
         // A truthy RejectFight callback on either side vetoes the fight.
         let mut engine = fight_engine(
@@ -6335,7 +5182,7 @@ func Incineration(iCause) { return 1; }
         let _knight_b = engine.spawn_test_object(fighter_spawn("KnightB", 2, Vector2::new(52, 50)));
         engine.cross_check(5).test_value();
         let idx_a = engine.test_object_index(knight_a);
-        assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
+        unit_assert_ne!(engine.objects[idx_a].state.action.name => "Fight");
     }
 
     #[test]
@@ -6360,16 +5207,16 @@ func Incineration(iCause) { return 1; }
         // Tick5 frame: pass 1 skips contained objects.
         engine.cross_check(5).test_value();
         let idx_a = engine.test_object_index(knight_a);
-        assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
+        unit_assert_ne!(engine.objects[idx_a].state.action.name => "Fight");
 
         // Tick10 frame: contained fight engages both ways.
         engine.cross_check(10).test_value();
         let idx_a = engine.test_object_index(knight_a);
         let idx_b = engine.test_object_index(knight_b);
-        assert_eq!(engine.objects[idx_a].state.action.name, "Fight");
-        assert_eq!(engine.objects[idx_b].state.action.name, "Fight");
-        assert_eq!(engine.objects[idx_a].state.action.target, Some(knight_b));
-        assert_eq!(engine.objects[idx_b].state.action.target, Some(knight_a));
+        unit_assert_eq!(engine.objects[idx_a].state.action.name => "Fight");
+        unit_assert_eq!(engine.objects[idx_b].state.action.name => "Fight");
+        unit_assert_eq!(engine.objects[idx_a].state.action.target => Some(knight_b));
+        unit_assert_eq!(engine.objects[idx_b].state.action.target => Some(knight_a));
     }
 
     #[test]
@@ -6380,10 +5227,14 @@ func Incineration(iCause) { return 1; }
         // content, rather than continuing on to C.
         let mut fighter = test_definition("Knight", "Knight", "#strict 2\n");
         fighter.set_category(CATEGORY_LIVING);
-        let mut specs = HashMap::new();
-        specs.insert("Idle".to_string(), ActionSpec::default());
-        specs.insert("Fight".to_string(), ActionSpec::default());
-        fighter.configure_actions(Some("Idle".to_string()), specs);
+        set_test_actions(
+            &mut fighter,
+            Some("Idle"),
+            [
+                ("Idle", ActionSpec::default()),
+                ("Fight", ActionSpec::default()),
+            ],
+        );
 
         let mut engine = Engine::new();
         engine.register_test_definition(fighter);
@@ -6393,49 +5244,34 @@ func Incineration(iCause) { return 1; }
         engine.set_hostility(1, 2, true).test_value();
 
         let hut = engine.spawn_test_object(SpawnConfig::new("Hut"));
-        let knight_a = engine.spawn_test_object(
-            SpawnConfig::new("Knight")
-                .with_owner(1)
-                .with_alive(true)
-                .with_container(hut),
-        );
+        let knight_a =
+            spawn_fixture!(engine, "Knight", with_owner: 1, with_alive: true, with_container: hut);
         // Enter C before B so same-definition stContents insertion leaves
         // [B, C, A]. stMain has the same B/C/A forward order, making A the
         // last outer object and its own final target directly observable.
-        let knight_c = engine.spawn_test_object(
-            SpawnConfig::new("Knight")
-                .with_owner(2)
-                .with_alive(true)
-                .with_container(hut),
-        );
-        let knight_b = engine.spawn_test_object(
-            SpawnConfig::new("Knight")
-                .with_owner(2)
-                .with_alive(true)
-                .with_container(hut),
-        );
-        assert_eq!(
-            engine.test_object_snapshot(hut).contents,
-            vec![knight_b, knight_c, knight_a]
-        );
+        let knight_c =
+            spawn_fixture!(engine, "Knight", with_owner: 2, with_alive: true, with_container: hut);
+        let knight_b =
+            spawn_fixture!(engine, "Knight", with_owner: 2, with_alive: true, with_container: hut);
+        unit_assert_eq!(engine.test_object_snapshot(hut).contents => vec![knight_b, knight_c, knight_a]);
         let fighters = engine
             .debug_exec_order()
             .into_iter()
             .rev()
             .filter(|id| [knight_a, knight_b, knight_c].contains(id))
             .collect::<Vec<_>>();
-        assert_eq!(fighters, vec![knight_b, knight_c, knight_a]);
+        unit_assert_eq!(fighters => vec![knight_b, knight_c, knight_a]);
 
         engine.cross_check(10).test_value();
 
         let action_target = |object_id| {
             let index = engine.test_object_index(object_id);
-            assert_eq!(engine.objects[index].state.action.name, "Fight");
+            unit_assert_eq!(engine.objects[index].state.action.name => "Fight");
             engine.objects[index].state.action.target
         };
-        assert_eq!(action_target(knight_a), Some(knight_b));
-        assert_eq!(action_target(knight_b), Some(knight_a));
-        assert_eq!(action_target(knight_c), Some(knight_a));
+        unit_assert_eq!(action_target(knight_a) => Some(knight_b));
+        unit_assert_eq!(action_target(knight_b) => Some(knight_a));
+        unit_assert_eq!(action_target(knight_c) => Some(knight_a));
     }
 
     #[test]
@@ -6459,15 +5295,8 @@ func Incineration(iCause) { return 1; }
 
         engine.cross_check(1).test_value();
         let victim_idx = engine.test_object_index(victim);
-        assert_eq!(
-            engine.objects[victim_idx].state.energy, 100,
-            "QueryCatchBlow rejected the blow"
-        );
-        assert_eq!(
-            engine.objects[victim_idx].fixed_velocity.x,
-            math::C4Fixed::ZERO,
-            "no fling on rejected blow"
-        );
+        unit_assert_eq!(engine.objects[victim_idx].state.energy => 100, "QueryCatchBlow rejected the blow");
+        unit_assert_eq!(engine.objects[victim_idx].fixed_velocity.x => math::C4Fixed::ZERO, "no fling on rejected blow");
     }
 
     #[test]
@@ -6488,20 +5317,8 @@ func Incineration(iCause) { return 1; }
 
             engine.register_test_definition(hit_object_definition("Rock"));
 
-            let victim = engine.spawn_test_object(
-                SpawnConfig::new("Victim")
-                    .with_loaded(true)
-                    .with_alive(true)
-                    .with_energy(100_000)
-                    .with_construction(construction)
-                    .with_position(Vector2::new(50, 50)),
-            );
-            let _rock = engine.spawn_test_object(
-                SpawnConfig::new("Rock")
-                    .with_loaded(true)
-                    .with_position(Vector2::new(50, 42))
-                    .with_velocity(Vector2::new(5, 0)),
-            );
+            let victim = spawn_fixture!(engine, "Victim", with_loaded: true, with_alive: true, with_energy: 100_000, with_construction: construction, with_position: Vector2::new(50, 50));
+            let _rock = spawn_fixture!(engine, "Rock", with_loaded: true, with_position: Vector2::new(50, 42), with_velocity: Vector2::new(5, 0));
 
             let victim_idx = engine.test_object_index(victim);
             let expected_shape = if construction == FULL_CON {
@@ -6509,16 +5326,11 @@ func Incineration(iCause) { return 1; }
             } else {
                 DefinitionRect::new(-10, -5, 20, 10)
             };
-            assert_eq!(
-                engine.objects[victim_idx].current_shape_rect(),
-                Some(expected_shape),
-                "the test must distinguish the live and definition shapes"
-            );
+            unit_assert_eq!(engine.objects[victim_idx].current_shape_rect() => Some(expected_shape), "the test must distinguish the live and definition shapes");
 
             engine.cross_check(1).test_value();
 
-            let victim_idx = engine.test_object_index(victim);
-            let victim = &engine.objects[victim_idx];
+            let victim = test_object(&engine, victim);
             (
                 victim.state.local_vars.get("query_calls").cloned(),
                 victim.state.energy,
@@ -6526,19 +5338,12 @@ func Incineration(iCause) { return 1; }
         }
 
         let (partial_calls, partial_energy) = run_case(FULL_CON / 2);
-        assert_eq!(
-            partial_calls, None,
-            "the rock is outside the Con=50 live Shape"
-        );
-        assert_eq!(partial_energy, 100_000);
+        unit_assert_eq!(partial_calls => None, "the rock is outside the Con=50 live Shape");
+        unit_assert_eq!(partial_energy => 100_000);
 
         let (full_calls, full_energy) = run_case(FULL_CON);
-        assert_eq!(
-            full_calls,
-            Some(Value::Int(1)),
-            "the unchanged full-Con Shape still receives the hit"
-        );
-        assert!(full_energy < 100_000);
+        unit_assert_eq!(full_calls => Some(Value::Int(1)), "the unchanged full-Con Shape still receives the hit");
+        unit_assert!(full_energy < 100_000);
     }
 
     #[test]
@@ -6561,41 +5366,23 @@ func Incineration(iCause) { return 1; }
         // y=60 grows to center y=50; keep the shapeless item at that center.
         let collector_position = Vector2::new(50, 60);
         let item_position = Vector2::new(50, 50);
-        let static_collector = engine.spawn_test_object(
-            SpawnConfig::new("Collector")
-                .with_category(CATEGORY_STATIC_BACK)
-                .with_position(collector_position),
-        );
-        let living_collector = engine.spawn_test_object(
-            SpawnConfig::new("Collector")
-                .with_category(CATEGORY_LIVING)
-                .with_alive(true)
-                .with_position(collector_position),
-        );
-        let item = engine.spawn_test_object(SpawnConfig::new("Item").with_position(item_position));
+        let static_collector = spawn_fixture!(engine, "Collector", with_category: CATEGORY_STATIC_BACK, with_position: collector_position);
+        let living_collector = spawn_fixture!(engine, "Collector", with_category: CATEGORY_LIVING, with_alive: true, with_position: collector_position);
+        let item = spawn_fixture!(engine, "Item", with_position: item_position);
 
-        assert_eq!(
-            engine.debug_exec_order(),
-            vec![static_collector, living_collector, item]
-        );
+        unit_assert_eq!(engine.debug_exec_order() => vec![static_collector, living_collector, item]);
 
         for collector in [static_collector, living_collector] {
             let index = engine.test_object_index(collector);
-            assert_ne!(engine.object_ocf_at_index(index) & ocf::COLLECTION, 0);
+            unit_assert_ne!(engine.object_ocf_at_index(index) & ocf::COLLECTION => 0);
         }
         let item_index = engine.test_object_index(item);
-        assert_ne!(engine.object_ocf_at_index(item_index) & ocf::CARRYABLE, 0);
+        unit_assert_ne!(engine.object_ocf_at_index(item_index) & ocf::CARRYABLE => 0);
 
         engine.cross_check(3).test_value();
 
-        assert_eq!(
-            engine.test_object_snapshot(item).container,
-            Some(living_collector)
-        );
-        assert!(engine
-            .test_object_snapshot(static_collector)
-            .contents
-            .is_empty());
+        unit_assert_eq!(engine.test_object_snapshot(item).container => Some(living_collector));
+        unit_assert!(engine.test_object_snapshot(static_collector).contents.is_empty());
     }
 
     #[test]
@@ -6633,31 +5420,17 @@ func CatchBlow(level, by)
         // shapeless rock is placed directly at that center.
         let victim_spawn_position = Vector2::new(50, 55);
         let rock_position = Vector2::new(50, 50);
-        let victim_a = engine.spawn_test_object(
-            SpawnConfig::new("Victim")
-                .with_alive(true)
-                .with_energy(100_000)
-                .with_position(victim_spawn_position),
-        );
-        let victim_b = engine.spawn_test_object(
-            SpawnConfig::new("Victim")
-                .with_alive(true)
-                .with_energy(100_000)
-                .with_position(victim_spawn_position),
-        );
-        let rock = engine.spawn_test_object(
-            SpawnConfig::new("Rock")
-                .with_position(rock_position)
-                .with_velocity(Vector2::new(5, 0)),
-        );
+        let victim_a = spawn_fixture!(engine, "Victim", with_alive: true, with_energy: 100_000, with_position: victim_spawn_position);
+        let victim_b = spawn_fixture!(engine, "Victim", with_alive: true, with_energy: 100_000, with_position: victim_spawn_position);
+        let rock = spawn_fixture!(engine, "Rock", with_position: rock_position, with_velocity: Vector2::new(5, 0));
 
-        assert_eq!(engine.debug_exec_order(), vec![victim_a, victim_b, rock]);
+        unit_assert_eq!(engine.debug_exec_order() => vec![victim_a, victim_b, rock]);
         for victim in [victim_a, victim_b] {
             let index = engine.test_object_index(victim);
-            assert_ne!(engine.object_ocf_at_index(index) & ocf::ALIVE, 0);
+            unit_assert_ne!(engine.object_ocf_at_index(index) & ocf::ALIVE => 0);
         }
         let rock_index = engine.test_object_index(rock);
-        assert_ne!(engine.object_ocf_at_index(rock_index) & ocf::HIT_SPEED2, 0);
+        unit_assert_ne!(engine.object_ocf_at_index(rock_index) & ocf::HIT_SPEED2 => 0);
 
         engine.cross_check(1).test_value();
 
@@ -6669,13 +5442,7 @@ func CatchBlow(level, by)
                 locals.get("catch_order").cloned(),
             )
         };
-        assert_eq!(
-            callback_orders(victim_b),
-            (Some(Value::Int(40)), Some(Value::Int(41)))
-        );
-        assert_eq!(
-            callback_orders(victim_a),
-            (Some(Value::Int(42)), Some(Value::Int(43)))
-        );
-        assert_eq!(engine.physics().gravity, 44);
+        unit_assert_eq!(callback_orders(victim_b) => (Some(Value::Int(40)), Some(Value::Int(41))));
+        unit_assert_eq!(callback_orders(victim_a) => (Some(Value::Int(42)), Some(Value::Int(43))));
+        unit_assert_eq!(engine.physics().gravity => 44);
     }

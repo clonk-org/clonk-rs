@@ -727,12 +727,7 @@ pub fn compose_classic_lobby_player_fallback_icon(
     let player = blacken_transparent_pixels(player);
     let colored = crate::hud::colorize_by_owner(&player, owner_color);
     let extent = i32::try_from(CLASSIC_ROSTER_ICON_EXTENT).expect("40 fits i32");
-    let bounds = IntRect {
-        x: 0,
-        y: 0,
-        w: extent,
-        h: extent,
-    };
+    let bounds = IntRect::new(0, 0, extent, extent);
     let fitted = aspect_fit_roster_raster(colored.width(), colored.height(), bounds);
     let mut surface = Surface::new(
         CLASSIC_ROSTER_ICON_EXTENT,
@@ -1210,12 +1205,12 @@ impl Aligner {
     }
 
     fn get_from_top(&mut self, height: i32) -> IntRect {
-        let rect = IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: self.area.w - 2 * self.margin_x,
-            h: height,
-        };
+        let rect = IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.margin_y,
+            self.area.w - 2 * self.margin_x,
+            height,
+        );
         let used = height + 2 * self.margin_y;
         self.area.y += used;
         self.area.h -= used;
@@ -1223,23 +1218,23 @@ impl Aligner {
     }
 
     fn get_from_bottom(&mut self, height: i32) -> IntRect {
-        let rect = IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.area.h - height - self.margin_y,
-            w: self.area.w - 2 * self.margin_x,
-            h: height,
-        };
+        let rect = IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.area.h - height - self.margin_y,
+            self.area.w - 2 * self.margin_x,
+            height,
+        );
         self.area.h -= height + 2 * self.margin_y;
         rect
     }
 
     fn get_from_left(&mut self, width: i32) -> IntRect {
-        let rect = IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: width,
-            h: self.area.h - 2 * self.margin_y,
-        };
+        let rect = IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.margin_y,
+            width,
+            self.area.h - 2 * self.margin_y,
+        );
         let used = width + 2 * self.margin_x;
         self.area.x += used;
         self.area.w -= used;
@@ -1247,23 +1242,23 @@ impl Aligner {
     }
 
     fn get_from_right(&mut self, width: i32) -> IntRect {
-        let rect = IntRect {
-            x: self.area.x + self.area.w - width - self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: width,
-            h: self.area.h - 2 * self.margin_y,
-        };
+        let rect = IntRect::new(
+            self.area.x + self.area.w - width - self.margin_x,
+            self.area.y + self.margin_y,
+            width,
+            self.area.h - 2 * self.margin_y,
+        );
         self.area.w -= width + 2 * self.margin_x;
         rect
     }
 
     const fn all(self) -> IntRect {
-        IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: self.area.w - 2 * self.margin_x,
-            h: self.area.h - 2 * self.margin_y,
-        }
+        IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.margin_y,
+            self.area.w - 2 * self.margin_x,
+            self.area.h - 2 * self.margin_y,
+        )
     }
 
     const fn inner_width(self) -> i32 {
@@ -1275,12 +1270,12 @@ impl Aligner {
     }
 
     const fn centered(self, width: i32, height: i32) -> IntRect {
-        IntRect {
-            x: self.area.x + self.area.w / 2 - width / 2,
-            y: self.area.y + self.area.h / 2 - height / 2,
-            w: width,
-            h: height,
-        }
+        IntRect::new(
+            self.area.x + self.area.w / 2 - width / 2,
+            self.area.y + self.area.h / 2 - height / 2,
+            width,
+            height,
+        )
     }
 
     fn expand_top(&mut self, height: i32) {
@@ -1290,11 +1285,7 @@ impl Aligner {
 }
 
 fn offset(rect: IntRect, x: i32, y: i32) -> IntRect {
-    IntRect {
-        x: rect.x + x,
-        y: rect.y + y,
-        ..rect
-    }
+    rect.with_position(rect.x + x, rect.y + y)
 }
 
 /// Constructor-exact geometry for the initial Players/Clients lobby sheet.
@@ -1318,12 +1309,12 @@ pub fn game_lobby_layout(
         screen_height * 2 / 75
     };
     let margin_top = 50 + margin_y;
-    let client = IntRect {
-        x: margin_x,
-        y: margin_top,
-        w: screen_width - 2 * margin_x,
-        h: screen_height - margin_top - margin_y,
-    };
+    let client = IntRect::new(
+        margin_x,
+        margin_top,
+        screen_width - 2 * margin_x,
+        screen_height - margin_top - margin_y,
+    );
     let absolute = |rect| offset(rect, client.x, client.y);
 
     let normal_width = client.w > 500;
@@ -1339,16 +1330,7 @@ pub fn game_lobby_layout(
         (2, 2, 1, 1)
     };
 
-    let mut main = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: client.w,
-            h: client.h,
-        },
-        0,
-        0,
-    );
+    let mut main = Aligner::new(IntRect::new(0, 0, client.w, client.h), 0, 0);
     let _status_offset = main.get_from_bottom(indent_y2);
     let bottom_rect = main.get_from_bottom(BUTTON_HEIGHT + indent_y1 * 2);
     let mut bottom = Aligner::new(bottom_rect, indent_x1, indent_y1);
@@ -1370,22 +1352,19 @@ pub fn game_lobby_layout(
     let right_caption = absolute(right.get_from_top(text_line_height.max(CAPTION_HEIGHT as i32)));
     right.expand_top(indent_y4 * 2 + 1);
     let right_tab = absolute(right.all());
-    let roster = IntRect {
-        x: right_tab.x + TAB_SHEET_MARGIN,
-        y: right_tab.y + TAB_SHEET_MARGIN,
-        w: right_tab.w - 2 * TAB_SHEET_MARGIN,
-        h: right_tab.h - 2 * TAB_SHEET_MARGIN,
-    };
-    let roster_client = IntRect {
-        w: roster.w - SCROLLBAR_EXTENT,
-        ..roster
-    };
-    let roster_scrollbar = IntRect {
-        x: roster_client.x + roster_client.w,
-        y: roster.y,
-        w: SCROLLBAR_EXTENT,
-        h: roster.h,
-    };
+    let roster = IntRect::new(
+        right_tab.x + TAB_SHEET_MARGIN,
+        right_tab.y + TAB_SHEET_MARGIN,
+        right_tab.w - 2 * TAB_SHEET_MARGIN,
+        right_tab.h - 2 * TAB_SHEET_MARGIN,
+    );
+    let roster_client = roster.with_width(roster.w - SCROLLBAR_EXTENT);
+    let roster_scrollbar = IntRect::new(
+        roster_client.x + roster_client.w,
+        roster.y,
+        SCROLLBAR_EXTENT,
+        roster.h,
+    );
 
     let mut center = Aligner::new(main.all(), indent_x2, indent_y3);
     let edit_height = (text_line_height + 3).max(CAPTION_HEIGHT as i32);
@@ -1394,30 +1373,30 @@ pub fn game_lobby_layout(
     let chat_label = absolute(chat.get_from_left(40));
     let chat_edit = absolute(chat.all());
     let chat_log = absolute(center.all());
-    let chat_log_client = IntRect {
-        x: chat_log.x + 10,
-        y: chat_log.y + 8,
-        w: chat_log.w - 10 - 5 - SCROLLBAR_EXTENT,
-        h: chat_log.h - 16,
-    };
-    let chat_log_scrollbar = IntRect {
-        x: chat_log.x + chat_log.w - 5 - SCROLLBAR_EXTENT,
-        y: chat_log.y + 8,
-        w: SCROLLBAR_EXTENT,
-        h: chat_log.h - 16,
-    };
+    let chat_log_client = IntRect::new(
+        chat_log.x + 10,
+        chat_log.y + 8,
+        chat_log.w - 10 - 5 - SCROLLBAR_EXTENT,
+        chat_log.h - 16,
+    );
+    let chat_log_scrollbar = IntRect::new(
+        chat_log.x + chat_log.w - 5 - SCROLLBAR_EXTENT,
+        chat_log.y + 8,
+        SCROLLBAR_EXTENT,
+        chat_log.h - 16,
+    );
 
     let count = 4 + usize::from(has_teams) + usize::from(has_external_chat);
     let mut next_index = count as i32;
     let mut tab_buttons = Vec::with_capacity(count);
     let mut add_tab = |control, sheet, icon, selected| {
         next_index -= 1;
-        let rect = IntRect {
-            x: right_caption.x + right_caption.w - (TAB_ICON_EXTENT + 4) * (next_index + 1),
-            y: right_caption.y + 4,
-            w: TAB_ICON_EXTENT,
-            h: TAB_ICON_EXTENT,
-        };
+        let rect = IntRect::new(
+            right_caption.x + right_caption.w - (TAB_ICON_EXTENT + 4) * (next_index + 1),
+            right_caption.y + 4,
+            TAB_ICON_EXTENT,
+            TAB_ICON_EXTENT,
+        );
         tab_buttons.push(LobbyTabButtonLayout {
             control,
             sheet,
@@ -1486,10 +1465,7 @@ pub fn game_lobby_layout(
         exit_button,
         run_button,
         ready_checkbox,
-        ready_square: IntRect {
-            w: ready_checkbox.h,
-            ..ready_checkbox
-        },
+        ready_square: ready_checkbox.with_width(ready_checkbox.h),
         preload_button: None,
         game_option_strip,
         tab_buttons,
@@ -2506,29 +2482,29 @@ impl GameLobby {
             layout.roster_scrollbar.h = (layout.roster_scrollbar.h - 2 * LIST_BOX_MARGIN).max(0);
         } else if self.active_sheet == LobbySheet::Scenario {
             let bounds = layout.roster;
-            layout.roster_client = IntRect {
-                x: bounds.x + SCENARIO_TEXT_LEFT_MARGIN,
-                y: bounds.y + SCENARIO_TEXT_VERTICAL_MARGIN,
-                w: (bounds.w
+            layout.roster_client = IntRect::new(
+                bounds.x + SCENARIO_TEXT_LEFT_MARGIN,
+                bounds.y + SCENARIO_TEXT_VERTICAL_MARGIN,
+                (bounds.w
                     - SCENARIO_TEXT_LEFT_MARGIN
                     - SCENARIO_TEXT_RIGHT_MARGIN
                     - SCROLLBAR_EXTENT)
                     .max(0),
-                h: (bounds.h - 2 * SCENARIO_TEXT_VERTICAL_MARGIN).max(0),
-            };
-            layout.roster_scrollbar = IntRect {
-                x: bounds.x + bounds.w - SCENARIO_TEXT_RIGHT_MARGIN - SCROLLBAR_EXTENT,
-                y: bounds.y + SCENARIO_TEXT_VERTICAL_MARGIN,
-                w: SCROLLBAR_EXTENT,
-                h: (bounds.h - 2 * SCENARIO_TEXT_VERTICAL_MARGIN).max(0),
-            };
+                (bounds.h - 2 * SCENARIO_TEXT_VERTICAL_MARGIN).max(0),
+            );
+            layout.roster_scrollbar = IntRect::new(
+                bounds.x + bounds.w - SCENARIO_TEXT_RIGHT_MARGIN - SCROLLBAR_EXTENT,
+                bounds.y + SCENARIO_TEXT_VERTICAL_MARGIN,
+                SCROLLBAR_EXTENT,
+                (bounds.h - 2 * SCENARIO_TEXT_VERTICAL_MARGIN).max(0),
+            );
         } else if self.active_sheet == LobbySheet::Resources && self.preload_button_present {
-            let button = IntRect {
-                x: layout.roster.x,
-                y: layout.roster.y + (layout.roster.h - BUTTON_HEIGHT).max(0),
-                w: layout.roster.w,
-                h: BUTTON_HEIGHT.min(layout.roster.h),
-            };
+            let button = IntRect::new(
+                layout.roster.x,
+                layout.roster.y + (layout.roster.h - BUTTON_HEIGHT).max(0),
+                layout.roster.w,
+                BUTTON_HEIGHT.min(layout.roster.h),
+            );
             layout.roster.h = (layout.roster.h - BUTTON_HEIGHT).max(0);
             layout.roster_client.h = (layout.roster_client.h - BUTTON_HEIGHT).max(0);
             layout.roster_scrollbar.h = (layout.roster_scrollbar.h - BUTTON_HEIGHT).max(0);
@@ -2633,29 +2609,24 @@ impl GameLobby {
                 let y = i32::try_from(index)
                     .unwrap_or(i32::MAX)
                     .saturating_mul(row_height);
-                let rect = IntRect {
-                    x: layout.roster_client.x,
-                    y: layout.roster_client.y + y - self.resource_scroll,
-                    w: layout.roster_client.w,
-                    h: row_height,
-                };
+                let rect = IntRect::new(
+                    layout.roster_client.x,
+                    layout.roster_client.y + y - self.resource_scroll,
+                    layout.roster_client.w,
+                    row_height,
+                );
                 LobbyRosterRowLayout {
                     index,
                     rect,
-                    icon: IntRect {
-                        x: rect.x,
-                        y: rect.y + 2,
-                        w: icon_size,
-                        h: icon_size,
-                    },
+                    icon: IntRect::new(rect.x, rect.y + 2, icon_size, icon_size),
                     add_player: None,
                     team: None,
-                    save: row.save_possible.then_some(IntRect {
-                        x: rect.x + rect.w - 18,
-                        y: rect.y + 1,
-                        w: 16,
-                        h: 16,
-                    }),
+                    save: row.save_possible.then_some(IntRect::new(
+                        rect.x + rect.w - 18,
+                        rect.y + 1,
+                        16,
+                        16,
+                    )),
                     option_value: None,
                     rank: None,
                     collapsed: false,
@@ -2708,30 +2679,25 @@ impl GameLobby {
                 let y = i32::try_from(index)
                     .unwrap_or(i32::MAX)
                     .saturating_mul(row_pitch);
-                let rect = IntRect {
-                    x: layout.roster_client.x,
-                    y: layout.roster_client.y + y - self.option_scroll,
-                    w: layout.roster_client.w,
-                    h: row_height,
-                };
+                let rect = IntRect::new(
+                    layout.roster_client.x,
+                    layout.roster_client.y + y - self.option_scroll,
+                    layout.roster_client.w,
+                    row_height,
+                );
                 LobbyRosterRowLayout {
                     index,
                     rect,
-                    icon: IntRect {
-                        x: rect.x,
-                        y: rect.y,
-                        w: 0,
-                        h: 0,
-                    },
+                    icon: IntRect::new(rect.x, rect.y, 0, 0),
                     add_player: None,
                     team: None,
                     save: None,
-                    option_value: Some(IntRect {
-                        x: rect.x + 6,
-                        y: rect.y + caption_height + 3,
-                        w: (rect.w - 7).max(0),
-                        h: combo_height,
-                    }),
+                    option_value: Some(IntRect::new(
+                        rect.x + 6,
+                        rect.y + caption_height + 3,
+                        (rect.w - 7).max(0),
+                        combo_height,
+                    )),
                     rank: None,
                     collapsed: false,
                 }
@@ -2920,53 +2886,48 @@ impl GameLobby {
                 LobbyRosterRow::Client(_) | LobbyRosterRow::Header(_) => text_line_height,
             };
             let indent = row.indent();
-            let rect = IntRect {
-                x: layout.roster_client.x + indent,
-                y: layout.roster_client.y + y - self.roster_scroll,
-                w: layout.roster_client.w - indent,
-                h: height,
-            };
-            let icon = IntRect {
-                x: rect.x,
-                y: rect.y,
-                w: height,
-                h: height,
-            };
+            let rect = IntRect::new(
+                layout.roster_client.x + indent,
+                layout.roster_client.y + y - self.roster_scroll,
+                layout.roster_client.w - indent,
+                height,
+            );
+            let icon = IntRect::new(rect.x, rect.y, height, height);
             let add_player = match row {
-                LobbyRosterRow::Client(client) if client.local => Some(IntRect {
-                    x: rect.x + rect.w - height - 2,
-                    y: rect.y,
-                    w: height,
-                    h: height,
-                }),
+                LobbyRosterRow::Client(client) if client.local => Some(IntRect::new(
+                    rect.x + rect.w - height - 2,
+                    rect.y,
+                    height,
+                    height,
+                )),
                 LobbyRosterRow::Header(header)
                     if header.kind == LobbyRosterHeader::ScriptPlayers && header.can_add_player =>
                 {
-                    Some(IntRect {
-                        x: rect.x + rect.w - height - 2,
-                        y: rect.y,
-                        w: height,
-                        h: height,
-                    })
+                    Some(IntRect::new(
+                        rect.x + rect.w - height - 2,
+                        rect.y,
+                        height,
+                        height,
+                    ))
                 }
                 _ => None,
             };
             let (team, rank) = match row {
                 LobbyRosterRow::Player(_) if !collapsed => {
                     let team_y = rect.y + height - (text_line_height + 4) - ICON_LABEL_SPACING;
-                    let mut team_rect = IntRect {
-                        x: rect.x + height + 2 * ICON_LABEL_SPACING + 2,
-                        y: team_y,
-                        w: rect.w - height - 4 * ICON_LABEL_SPACING,
-                        h: text_line_height + 4,
-                    };
+                    let mut team_rect = IntRect::new(
+                        rect.x + height + 2 * ICON_LABEL_SPACING + 2,
+                        team_y,
+                        rect.w - height - 4 * ICON_LABEL_SPACING,
+                        text_line_height + 4,
+                    );
                     let rank = self.league_mode.then(|| {
-                        let rank_rect = IntRect {
-                            x: team_rect.x + team_rect.w - team_rect.h,
-                            y: team_rect.y,
-                            w: team_rect.h,
-                            h: team_rect.h,
-                        };
+                        let rank_rect = IntRect::new(
+                            team_rect.x + team_rect.w - team_rect.h,
+                            team_rect.y,
+                            team_rect.h,
+                            team_rect.h,
+                        );
                         team_rect.w -= rank_rect.w;
                         rank_rect
                     });
@@ -5027,12 +4988,12 @@ impl GameLobby {
             };
             let text = format!("{ping} ms");
             let (width, height) = font.measure(&text, true);
-            let ping_rect = IntRect {
-                x: row_layout.rect.x + row_layout.rect.w - width,
-                y: row_layout.rect.y,
-                w: width,
-                h: height,
-            };
+            let ping_rect = IntRect::new(
+                row_layout.rect.x + row_layout.rect.w - width,
+                row_layout.rect.y,
+                width,
+                height,
+            );
             if contains(ping_rect, pointer) {
                 return Some(LobbyTooltip {
                     pointer,
@@ -5637,12 +5598,12 @@ impl GameLobby {
                         CONTEXT_HEIGHT,
                         CONTEXT_HEIGHT,
                     ),
-                    IntRect {
-                        x: arrow_x,
-                        y: combo.y + (combo.h - CONTEXT_HEIGHT as i32) / 2,
-                        w: CONTEXT_HEIGHT as i32,
-                        h: CONTEXT_HEIGHT as i32,
-                    },
+                    IntRect::new(
+                        arrow_x,
+                        combo.y + (combo.h - CONTEXT_HEIGHT as i32) / 2,
+                        CONTEXT_HEIGHT as i32,
+                        CONTEXT_HEIGHT as i32,
+                    ),
                     layout.roster_client,
                     gamma,
                 );
@@ -5658,12 +5619,7 @@ impl GameLobby {
                 gamma,
                 intersection(
                     layout.roster_client,
-                    IntRect {
-                        x: combo.x,
-                        y: combo.y,
-                        w: (arrow_x - combo.x).max(0),
-                        h: combo.h,
-                    },
+                    IntRect::new(combo.x, combo.y, (arrow_x - combo.x).max(0), combo.h),
                 ),
             );
             if active
@@ -5805,11 +5761,7 @@ impl GameLobby {
                     surface,
                     resources.context,
                     (u32::from(combo_open) * 16, 0, 16, 16),
-                    IntRect {
-                        w: 16,
-                        h: 16,
-                        ..team_rect
-                    },
+                    team_rect.with_size(16, 16),
                     layout.roster_client,
                     gamma,
                 );
@@ -5982,12 +5934,12 @@ impl GameLobby {
             && (self.focus == LobbyControl::Ready
                 || self.resources_loaded && self.hovered == HitTarget::Ready)
         {
-            let marker = IntRect {
-                x: layout.ready_square.x + layout.ready_square.w / 4,
-                y: layout.ready_square.y + layout.ready_square.h / 4,
-                w: layout.ready_square.w / 2,
-                h: layout.ready_square.h / 2,
-            };
+            let marker = IntRect::new(
+                layout.ready_square.x + layout.ready_square.w / 4,
+                layout.ready_square.y + layout.ready_square.h / 4,
+                layout.ready_square.w / 2,
+                layout.ready_square.h / 2,
+            );
             draw_highlight(surface, marker, &resources.button_highlight, gamma);
         }
     }
@@ -6050,12 +6002,7 @@ fn draw_edit(
             font.line_height - 2,
         )
     };
-    let clip = IntRect {
-        x: client.x - 2,
-        y: client.y,
-        w: client.w + 4,
-        h: client.h + 1,
-    };
+    let clip = IntRect::new(client.x - 2, client.y, client.w + 4, client.h + 1);
     if let Some((anchor, caret)) = view.selection {
         let (start, end) = if anchor <= caret {
             (anchor, caret)
@@ -6338,21 +6285,15 @@ fn joined_player_overlay_layout(
     if crew_height >= source_height {
         return None;
     }
-    let overlay_bounds = IntRect {
-        x: 0,
-        y: i32::try_from(crew_height).ok()?,
-        w: i32::try_from(size_max / 2).ok()?,
-        h: i32::try_from(source_height - crew_height).ok()?,
-    };
-    let colored_source = aspect_fit_roster_raster(crew.width(), crew.height(), overlay_bounds);
-    let shadow_source = aspect_fit_roster_raster(
-        crew.width(),
-        crew.height(),
-        IntRect {
-            x: 2,
-            ..overlay_bounds
-        },
+    let overlay_bounds = IntRect::new(
+        0,
+        i32::try_from(crew_height).ok()?,
+        i32::try_from(size_max / 2).ok()?,
+        i32::try_from(source_height - crew_height).ok()?,
     );
+    let colored_source = aspect_fit_roster_raster(crew.width(), crew.height(), overlay_bounds);
+    let shadow_source =
+        aspect_fit_roster_raster(crew.width(), crew.height(), overlay_bounds.with_x(2));
 
     let map = |source: IntRect| {
         let map_axis = |start: i32, extent: i32, source_start: i32, source_extent: u32| {
@@ -6366,12 +6307,7 @@ fn joined_player_overlay_layout(
         let top = map_axis(fitted.y, fitted.h, source.y, source_height);
         let right = map_axis(fitted.x, fitted.w, source.x + source.w, source_width);
         let bottom = map_axis(fitted.y, fitted.h, source.y + source.h, source_height);
-        IntRect {
-            x: left,
-            y: top,
-            w: right - left,
-            h: bottom - top,
-        }
+        IntRect::new(left, top, right - left, bottom - top)
     };
 
     Some(JoinedPlayerOverlayLayout {
@@ -6541,12 +6477,12 @@ fn draw_source_clipped(
 }
 
 fn edit_client(rect: IntRect) -> IntRect {
-    IntRect {
-        x: rect.x + 4,
-        y: rect.y + 2,
-        w: (rect.w - 8).max(0),
-        h: (rect.h - 4).max(0),
-    }
+    IntRect::new(
+        rect.x + 4,
+        rect.y + 2,
+        (rect.w - 8).max(0),
+        (rect.h - 4).max(0),
+    )
 }
 
 fn center(rect: IntRect) -> GuiPoint {
@@ -6597,12 +6533,7 @@ fn intersection(a: IntRect, b: IntRect) -> IntRect {
     let y = a.y.max(b.y);
     let right = (a.x + a.w).min(b.x + b.w);
     let bottom = (a.y + a.h).min(b.y + b.h);
-    IntRect {
-        x,
-        y,
-        w: (right - x).max(0),
-        h: (bottom - y).max(0),
-    }
+    IntRect::new(x, y, (right - x).max(0), (bottom - y).max(0))
 }
 
 fn gui_rect(rect: IntRect) -> GuiRect {
@@ -6674,65 +6605,14 @@ mod tests {
 
     #[test]
     fn roster_raster_aspect_fit_matches_c4facet_integer_math() {
-        let wide = aspect_fit_roster_raster(
-            60,
-            30,
-            IntRect {
-                x: 4,
-                y: 8,
-                w: 20,
-                h: 20,
-            },
-        );
-        assert_eq!(
-            wide,
-            IntRect {
-                x: 4,
-                y: 13,
-                w: 20,
-                h: 10
-            }
-        );
+        let wide = aspect_fit_roster_raster(60, 30, IntRect::new(4, 8, 20, 20));
+        assert_eq!(wide, IntRect::new(4, 13, 20, 10));
 
-        let tall = aspect_fit_roster_raster(
-            30,
-            60,
-            IntRect {
-                x: 4,
-                y: 8,
-                w: 20,
-                h: 20,
-            },
-        );
-        assert_eq!(
-            tall,
-            IntRect {
-                x: 9,
-                y: 8,
-                w: 10,
-                h: 20
-            }
-        );
+        let tall = aspect_fit_roster_raster(30, 60, IntRect::new(4, 8, 20, 20));
+        assert_eq!(tall, IntRect::new(9, 8, 10, 20));
 
-        let square = aspect_fit_roster_raster(
-            64,
-            64,
-            IntRect {
-                x: 4,
-                y: 8,
-                w: 20,
-                h: 20,
-            },
-        );
-        assert_eq!(
-            square,
-            IntRect {
-                x: 4,
-                y: 8,
-                w: 20,
-                h: 20
-            }
-        );
+        let square = aspect_fit_roster_raster(64, 64, IntRect::new(4, 8, 20, 20));
+        assert_eq!(square, IntRect::new(4, 8, 20, 20));
     }
 
     #[test]
@@ -6751,30 +6631,15 @@ mod tests {
         assert_eq!(pixel(5, 30), [0, 0, 0, 0]);
 
         let crew = ImageData::new(1, 1, vec![0, 0, 255, 255]);
-        let bounds = IntRect {
-            x: 0,
-            y: 0,
-            w: 40,
-            h: 40,
-        };
+        let bounds = IntRect::new(0, 0, 40, 40);
         let layout =
             joined_player_overlay_layout(&LobbyRosterIcon::Raster(icon), &crew, bounds, bounds)
                 .expect("40x40 fallback accepts a joined-player overlay");
         assert_eq!(
             layout,
             JoinedPlayerOverlayLayout {
-                shadow: IntRect {
-                    x: 2,
-                    y: 20,
-                    w: 20,
-                    h: 20,
-                },
-                colored: IntRect {
-                    x: 0,
-                    y: 20,
-                    w: 20,
-                    h: 20,
-                },
+                shadow: IntRect::new(2, 20, 20, 20),
+                colored: IntRect::new(0, 20, 20, 20),
                 clip: bounds,
             }
         );
@@ -6784,35 +6649,15 @@ mod tests {
     fn joined_player_overlay_matches_cpp_lower_half_shadow_aspect_and_clip() {
         let crew = ImageData::new(2, 1, vec![0, 0, 255, 255, 0, 0, 255, 255]);
         let icon = LobbyRosterIcon::Standard(7);
-        let bounds = IntRect {
-            x: 4,
-            y: 3,
-            w: 40,
-            h: 40,
-        };
-        let clip = IntRect {
-            x: 4,
-            y: 3,
-            w: 22,
-            h: 34,
-        };
+        let bounds = IntRect::new(4, 3, 40, 40);
+        let clip = IntRect::new(4, 3, 22, 34);
         let layout = joined_player_overlay_layout(&icon, &crew, bounds, clip)
             .expect("non-empty crew overlay");
         assert_eq!(
             layout,
             JoinedPlayerOverlayLayout {
-                shadow: IntRect {
-                    x: 6,
-                    y: 28,
-                    w: 20,
-                    h: 10,
-                },
-                colored: IntRect {
-                    x: 4,
-                    y: 28,
-                    w: 20,
-                    h: 10,
-                },
+                shadow: IntRect::new(6, 28, 20, 10),
+                colored: IntRect::new(4, 28, 20, 10),
                 clip,
             }
         );
@@ -6857,12 +6702,7 @@ mod tests {
             COLOR_WHITE,
             TextAlign::Left,
             None,
-            IntRect {
-                x: 2,
-                y: 4,
-                w: 10,
-                h: 10,
-            },
+            IntRect::new(2, 4, 10, 10),
             false,
         );
 
@@ -6944,148 +6784,28 @@ mod tests {
     #[test]
     fn normal_host_layout_matches_constructor_math() {
         let layout = game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, false, false);
-        assert_eq!(
-            layout.client,
-            IntRect {
-                x: 25,
-                y: 69,
-                w: 1230,
-                h: 632
-            }
-        );
+        assert_eq!(layout.client, IntRect::new(25, 69, 1230, 632));
         assert_eq!(layout.title_anchor, (640, 8));
-        assert_eq!(
-            layout.chat_log,
-            IntRect {
-                x: 45,
-                y: 77,
-                w: 780,
-                h: 491
-            }
-        );
-        assert_eq!(
-            layout.chat_label,
-            IntRect {
-                x: 45,
-                y: 584,
-                w: 40,
-                h: 25
-            }
-        );
-        assert_eq!(
-            layout.chat_edit,
-            IntRect {
-                x: 85,
-                y: 584,
-                w: 740,
-                h: 25
-            }
-        );
-        assert_eq!(
-            layout.right_caption,
-            IntRect {
-                x: 850,
-                y: 77,
-                w: 400,
-                h: 23
-            }
-        );
-        assert_eq!(
-            layout.right_tab,
-            IntRect {
-                x: 850,
-                y: 99,
-                w: 400,
-                h: 510
-            }
-        );
-        assert_eq!(
-            layout.roster,
-            IntRect {
-                x: 854,
-                y: 103,
-                w: 392,
-                h: 502
-            }
-        );
-        assert_eq!(
-            layout.exit_button,
-            IntRect {
-                x: 35,
-                y: 633,
-                w: 100,
-                h: 32
-            }
-        );
-        assert_eq!(
-            layout.run_button,
-            Some(IntRect {
-                x: 1145,
-                y: 633,
-                w: 100,
-                h: 32
-            })
-        );
-        assert_eq!(
-            layout.ready_checkbox,
-            IntRect {
-                x: 1015,
-                y: 633,
-                w: 110,
-                h: 32
-            }
-        );
-        assert_eq!(
-            layout.game_option_strip,
-            IntRect {
-                x: 155,
-                y: 617,
-                w: 840,
-                h: 64
-            }
-        );
-        assert_eq!(
-            layout.tab_buttons[0].rect,
-            IntRect {
-                x: 1170,
-                y: 81,
-                w: 16,
-                h: 16
-            }
-        );
-        assert_eq!(
-            layout.tab_buttons[3].rect,
-            IntRect {
-                x: 1230,
-                y: 81,
-                w: 16,
-                h: 16
-            }
-        );
+        assert_eq!(layout.chat_log, IntRect::new(45, 77, 780, 491));
+        assert_eq!(layout.chat_label, IntRect::new(45, 584, 40, 25));
+        assert_eq!(layout.chat_edit, IntRect::new(85, 584, 740, 25));
+        assert_eq!(layout.right_caption, IntRect::new(850, 77, 400, 23));
+        assert_eq!(layout.right_tab, IntRect::new(850, 99, 400, 510));
+        assert_eq!(layout.roster, IntRect::new(854, 103, 392, 502));
+        assert_eq!(layout.exit_button, IntRect::new(35, 633, 100, 32));
+        assert_eq!(layout.run_button, Some(IntRect::new(1145, 633, 100, 32)));
+        assert_eq!(layout.ready_checkbox, IntRect::new(1015, 633, 110, 32));
+        assert_eq!(layout.game_option_strip, IntRect::new(155, 617, 840, 64));
+        assert_eq!(layout.tab_buttons[0].rect, IntRect::new(1170, 81, 16, 16));
+        assert_eq!(layout.tab_buttons[3].rect, IntRect::new(1230, 81, 16, 16));
     }
 
     #[test]
     fn client_variant_recenters_options_without_go_button() {
         let layout = game_lobby_layout(1280, 720, 34, 22, LobbyRole::Client, false, false);
         assert_eq!(layout.run_button, None);
-        assert_eq!(
-            layout.ready_checkbox,
-            IntRect {
-                x: 1135,
-                y: 633,
-                w: 110,
-                h: 32
-            }
-        );
-        assert_eq!(
-            layout.game_option_strip,
-            IntRect {
-                x: 185,
-                y: 617,
-                w: 930,
-                h: 64
-            }
-        );
+        assert_eq!(layout.ready_checkbox, IntRect::new(1135, 633, 110, 32));
+        assert_eq!(layout.game_option_strip, IntRect::new(185, 617, 930, 64));
     }
 
     #[test]
@@ -9045,22 +8765,12 @@ mod tests {
         assert_eq!(roster.rows[0].rect.h, 54);
         assert_eq!(
             roster.rows[0].team,
-            Some(IntRect {
-                x: 917,
-                y: 129,
-                w: 285,
-                h: 26,
-            }),
+            Some(IntRect::new(917, 129, 285, 26)),
             "team 0 keeps the exact blank-combo geometry"
         );
         assert_eq!(
             roster.rows[0].rank,
-            Some(IntRect {
-                x: 1202,
-                y: 129,
-                w: 26,
-                h: 26,
-            }),
+            Some(IntRect::new(1202, 129, 26, 26)),
             "league reserves rank width even without a rank symbol"
         );
 

@@ -1,20 +1,56 @@
 // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
+macro_rules! startup_fixture {
+    (loader_registrations: $scenario:expr, $scenario_group:expr, $head:expr, $paths:expr $(,)?) => {
+        classic_loader_registrations(
+            &$scenario,
+            &$scenario_group,
+            &$head,
+            &loader_fixture_definition_load(),
+            &$paths,
+        )
+        .test_value()
+    };
+    (player_selection_name_activated_color_dw_score_rounds_rounds_won_rounds_lost_total_playing_time: $name:expr, $activated:expr, $color_dw:expr, $score:expr, $rounds:expr, $rounds_won:expr, $rounds_lost:expr, $total_playing_time:expr $(,)?) => {
+        clonk_frontend::startup_plrsel::PlrSelPlayer {
+            name: $name,
+            activated: $activated,
+            big_icon: None,
+            portrait: None,
+            color_dw: $color_dw,
+            score: $score,
+            rounds: $rounds,
+            rounds_won: $rounds_won,
+            rounds_lost: $rounds_lost,
+            total_playing_time: $total_playing_time,
+            comment: String::new(),
+        }
+    };
+    (startup_player: $path:expr, $file_name:expr, $player_file:expr, $render_model:expr $(,)?) => {
+        StartupPlayerFile {
+            path: $path,
+            file_name: $file_name,
+            player_file: $player_file,
+            render_model: $render_model,
+        }
+    };
+    (loader_group: $priority:expr, $registration_order:expr, $group:expr $(,)?) => {
+        LoaderGroupRegistration {
+            priority: $priority,
+            registration_order: $registration_order,
+            group: $group,
+        }
+    };
+}
+
 #[test]
 fn two_line_product_logo_keeps_classic_startup_footprint() {
     let (_, logo_y, logo_width, logo_height) = startup_main_logo_geometry(800, 600, 972, 440);
-    assert_eq!(
-        (logo_width, logo_height),
-        (282, 128),
-        "the two-line logo keeps the classic 960x320 logo's 0.4x height",
-    );
+    main_assert_eq!((logo_width, logo_height) => (282, 128), "the two-line logo keeps the classic 960x320 logo's 0.4x height",);
 
     let first_button = clonk_frontend::main_menu_layout(800, 600).buttons[0];
-    assert!(
-        logo_y + logo_height < first_button.y,
-        "the startup logo must end above the first main-menu button",
-    );
+    main_assert!(logo_y + logo_height < first_button.y, "the startup logo must end above the first main-menu button",);
 }
 
 #[test]
@@ -45,8 +81,8 @@ fn hud_graphics_receive_canonical_transparent_pixels_from_the_shared_loader() {
         ("Menu.png", hud.menu.as_ref()),
         ("Energy.png", hud.energy.as_ref()),
     ] {
-        assert_eq!(
-            image.unwrap_or_else(|| panic!("{name} loaded")).pixels(),
+        main_assert_eq!(
+            image.unwrap_or_else(|| panic!("{name} loaded")).pixels() =>
             &[0, 0, 0, 0, 200, 100, 50, 1],
             "{name} reaches HudGraphics with only exact alpha-zero RGB cleared"
         );
@@ -74,12 +110,9 @@ fn positional_mix_uses_player_listener_for_volume_and_viewport_for_pan() {
 
     // Volume listens at ViewCursor (150px away), while pan uses the
     // physical viewport center (350px away): 79% and +0.70.
-    assert_eq!(
-        compute_positional_mix_values(Vector2::new(1150, 1000), &snapshot, &viewports),
-        (79, 0.7),
-    );
-    assert_eq!(
-        compute_positional_mix_values(Vector2::new(1700, 1000), &snapshot, &viewports),
+    main_assert_eq!(compute_positional_mix_values(Vector2::new(1150, 1000), &snapshot, &viewports) => (79, 0.7),);
+    main_assert_eq!(
+        compute_positional_mix_values(Vector2::new(1700, 1000), &snapshot, &viewports) =>
         (0, 1.0),
         "an event at the audibility radius is silent and fully right-panned",
     );
@@ -129,7 +162,7 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
 
     let mut initial = audio.music_resolver.global.filenames();
     initial.sort();
-    assert_eq!(initial, ["Old Base.ogg", "Old Match.mp3", "Removed.mod"]);
+    main_assert_eq!(initial => ["Old Base.ogg", "Old Match.mp3", "Removed.mod"]);
     audio.configure_scenario(Some(&local_scenario));
     let stale_recent = Arc::clone(
         &audio
@@ -157,54 +190,40 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     )
     .test_value();
 
-    assert!(
-        audio.music_resolver.global.resolve("New Base").is_none(),
-        "external edits remain invisible until the next PreInit"
-    );
+    main_assert!(audio.music_resolver.global.resolve("New Base").is_none(), "external edits remain invisible until the next PreInit");
     audio.reset_music_system_generation(Some(&paths));
 
     let mut reloaded = audio.music_resolver.active_filenames();
     reloaded.sort();
-    assert_eq!(reloaded, ["Frontend.ogg", "New Base.ogg", "New Match.ogg"]);
-    assert_eq!(
-        audio
-            .music_resolver
-            .resolve("New Base")
-            .expect("reloaded Music.c4g addition")
-            .load_audio()
-            .expect("read reloaded global track"),
-        b"new base"
-    );
-    assert_eq!(
+    main_assert_eq!(reloaded => ["Frontend.ogg", "New Base.ogg", "New Match.ogg"]);
+    main_assert_eq!(audio.music_resolver.resolve("New Base").expect("reloaded Music.c4g addition").load_audio().expect("read reloaded global track") => b"new base");
+    main_assert_eq!(
         audio
             .music_resolver
             .resolve("New Match")
             .expect("changed wildcard match")
             .load_audio()
-            .expect("read changed wildcard track"),
+            .expect("read changed wildcard track") =>
         b"new wildcard"
     );
     for removed in ["Old Base", "Removed", "Old Match", "Local Theme"] {
-        assert!(
-            audio.music_resolver.resolve(removed).is_none(),
-            "{removed} must not leak into the reconstructed catalog"
-        );
+        main_assert!(audio.music_resolver.resolve(removed).is_none(), "{removed} must not leak into the reconstructed catalog");
     }
-    assert!(!audio.music_resolver.scenario_has_local_sources);
-    assert!(audio.music_resolver.scenario_root.is_none());
-    assert!(audio.music_resolver.playlist.is_none());
+    main_assert!(!audio.music_resolver.scenario_has_local_sources);
+    main_assert!(audio.music_resolver.scenario_root.is_none());
+    main_assert!(audio.music_resolver.playlist.is_none());
     let control = lock_unpoisoned(&audio.music_control);
-    assert!(control.most_recently_played.is_none());
-    assert!(control.scenario_level.is_none());
+    main_assert!(control.most_recently_played.is_none());
+    main_assert!(control.scenario_level.is_none());
     drop(control);
 
     audio.prepare_frontend_music();
-    assert_eq!(audio.music_resolver.playlist.as_deref(), Some("Frontend.*"));
-    assert_eq!(
+    main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
+    main_assert_eq!(
         audio
             .music_resolver
             .first_default()
-            .map(|asset| asset.file_name_bytes.as_slice()),
+            .map(|asset| asset.file_name_bytes.as_slice()) =>
         Some(b"Frontend.ogg".as_slice()),
         "the ensuing frontend selection must use the rediscovered catalog"
     );
@@ -232,13 +251,10 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     let audio = app.audio.test_ref();
     let mut final_catalog = audio.music_resolver.active_filenames();
     final_catalog.sort();
-    assert_eq!(
-        final_catalog,
-        ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]
-    );
-    assert_eq!(audio.music_resolver.playlist.as_deref(), Some("Frontend.*"));
-    assert!(!app.resume_frontend_music_after_fade);
-    assert!(app.frontend_music_attempted_for_entry);
+    main_assert_eq!(final_catalog => ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]);
+    main_assert_eq!(audio.music_resolver.playlist.as_deref() => Some("Frontend.*"));
+    main_assert!(!app.resume_frontend_music_after_fade);
+    main_assert!(app.frontend_music_attempted_for_entry);
     let expected_frontend = audio
         .music_resolver
         .first_default()
@@ -246,13 +262,10 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
         .identity
         .clone();
     let controlled = audio.controlled_music_loads.test_ref();
-    assert_eq!(controlled.requests.len(), 1);
+    main_assert_eq!(controlled.requests.len() => 1);
     let request = controlled.requests.front().test_value();
-    assert!(!request.looped);
-    assert!(request
-        .identity
-        .as_ref()
-        .is_some_and(|identity| Arc::ptr_eq(identity, &expected_frontend)));
+    main_assert!(!request.looped);
+    main_assert!(request.identity.as_ref().is_some_and(|identity| Arc::ptr_eq(identity, &expected_frontend)));
 
     let pre_console_generation = lock_unpoisoned(&audio.music_control).generation;
     fs::remove_file(global.join("Final Base.ogg")).test_value();
@@ -267,28 +280,22 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
         .test_value();
 
     let audio = app.audio.test_ref();
-    assert_eq!(
-        lock_unpoisoned(&audio.music_control).generation,
-        pre_console_generation
-    );
+    main_assert_eq!(lock_unpoisoned(&audio.music_control).generation => pre_console_generation);
     let mut retained_catalog = audio.music_resolver.active_filenames();
     retained_catalog.sort();
-    assert_eq!(
-        retained_catalog,
-        ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]
-    );
-    assert!(audio.music_resolver.resolve("Console Only").is_none());
-    assert_eq!(
+    main_assert_eq!(retained_catalog => ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]);
+    main_assert!(audio.music_resolver.resolve("Console Only").is_none());
+    main_assert_eq!(
         audio
             .controlled_music_loads
             .as_ref()
             .expect("controlled music loading")
             .requests
-            .len(),
+            .len() =>
         1,
         "console failure must not run C4Startup::DoStartup again"
     );
-    assert!(app.resume_frontend_music_after_fade);
+    main_assert!(app.resume_frontend_music_after_fade);
 
     app.console_mode = false;
     app.classic_command_line.scenario = Some(dir.path().join("Explicit.c4s"));
@@ -298,30 +305,16 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     app.finish_startup_network_restart(StartupNetworkPurpose::Join)
         .test_value();
     let audio = app.audio.test_ref();
-    assert_eq!(
-        lock_unpoisoned(&audio.music_control).generation,
-        pre_console_generation
-    );
-    assert!(audio.music_resolver.resolve("Console Only").is_none());
-    assert_eq!(
-        audio
-            .controlled_music_loads
-            .as_ref()
-            .expect("controlled music loading")
-            .requests
-            .len(),
-        1
-    );
+    main_assert_eq!(lock_unpoisoned(&audio.music_control).generation => pre_console_generation);
+    main_assert!(audio.music_resolver.resolve("Console Only").is_none());
+    main_assert_eq!(audio.controlled_music_loads.as_ref().expect("controlled music loading").requests.len() => 1);
 
     app.classic_command_line.scenario = None;
     app.classic_command_line.record_stream = Some(PathBuf::from("record.example:11114"));
-    assert!(!app.failed_open_game_returns_to_startup());
+    main_assert!(!app.failed_open_game_returns_to_startup());
     app.classic_command_line.record_stream = Some(PathBuf::new());
     app.classic_command_line.direct_join = Some(String::new());
-    assert!(
-        app.failed_open_game_returns_to_startup(),
-        "native suppresses startup only for nonempty command-line buffers"
-    );
+    main_assert!(app.failed_open_game_returns_to_startup(), "native suppresses startup only for nonempty command-line buffers");
 
     // User-aborting the pre-game lobby also makes OpenGame return false.
     // Its ordinary startup lineage must run the same QuitGame -> PreInit
@@ -332,15 +325,15 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     app.process_classic_lobby_actions(vec![ClassicLobbyAction::ExitRequested])
         .test_value();
     let audio = app.audio.test_ref();
-    assert!(lock_unpoisoned(&audio.music_control).generation > pre_lobby_generation);
-    assert!(audio.music_resolver.resolve("Console Only").is_some());
-    assert_eq!(
+    main_assert!(lock_unpoisoned(&audio.music_control).generation > pre_lobby_generation);
+    main_assert!(audio.music_resolver.resolve("Console Only").is_some());
+    main_assert_eq!(
         audio
             .controlled_music_loads
             .as_ref()
             .expect("controlled music loading")
             .requests
-            .len(),
+            .len() =>
         2,
         "lobby abort requests frontend music exactly once after rediscovery"
     );
@@ -363,12 +356,12 @@ fn about_chrome_uses_runtime_resource_strings() {
             .insert(key.to_string(), value.to_string());
     }
     app.open_about_dialog();
-    assert_eq!(
+    main_assert_eq!(
         app.startup_about_dialog
             .as_ref()
             .expect("about dialog")
             .labels()
-            .buttons,
+            .buttons =>
         [
             "Zurueck".to_string(),
             "Nach &Updates suchen".to_string(),
@@ -382,25 +375,16 @@ fn about_chrome_uses_runtime_resource_strings() {
         about.title_anchor.0 as f32,
         about.title_anchor.1 as f32 + 1.0,
     );
-    assert_eq!(
-        app.about_tooltip_target_at(at_anchor),
-        Some(StartupTooltip::text("&Programminfo"))
-    );
+    main_assert_eq!(app.about_tooltip_target_at(at_anchor) => Some(StartupTooltip::text("&Programminfo")));
 
     // The relocated mnemonic activates, and the old English one does not.
     app.keyboard_modifiers = ModifiersState::ALT;
     app.test_key(VirtualKeyCode::KeyU, ElementState::Pressed);
-    assert_eq!(app.message_dialogs.len(), 1);
+    main_assert_eq!(app.message_dialogs.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
     app.test_key(VirtualKeyCode::KeyL, ElementState::Pressed);
-    assert_eq!(
-        app.startup_about_dialog
-            .as_ref()
-            .expect("about dialog")
-            .current_page(),
-        clonk_frontend::startup_about_dlg::AboutPage::Licenses
-    );
+    main_assert_eq!(app.startup_about_dialog.as_ref().expect("about dialog").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
 }
 
 /// `C4StartupOptionsDlg`'s constructor resolves every caption, label, button
@@ -466,44 +450,31 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     let labels = app.startup_options_dialog.test_ref().labels().clone();
 
     // The caption drops its mnemonic marker like every FullscreenDialog title.
-    assert_eq!(labels.title, "Einstellungen");
+    main_assert_eq!(labels.title => "Einstellungen");
     // The third sheet reads the port-only `IDS_DLG_AUDIO`, not the C++
     // `IDS_DLG_SOUND` the ingame menu still uses for its own "Sound" entry:
     // the port hosts the voice-chat group there too (clonk-org/clonk-rs#452).
-    assert_eq!(
-        labels.sheets,
-        ["Programm", "Grafik", "Klang", "Tastatur", "Gamepad", "Netzwerk"].map(str::to_string)
-    );
-    assert_eq!(labels.back, "Zurueck");
-    assert_eq!(labels.language, "Sprache");
-    assert_eq!(labels.reset_config, "Konfiguration zuruecksetzen");
-    assert_eq!(labels.port_reference, "Referenzport");
-    assert_eq!(labels.active, "Aktiv");
-    assert_eq!(labels.chat_name, "Chatname:");
+    main_assert_eq!(labels.sheets => ["Programm", "Grafik", "Klang", "Tastatur", "Gamepad", "Netzwerk"].map(str::to_string));
+    main_assert_eq!(labels.back => "Zurueck");
+    main_assert_eq!(labels.language => "Sprache");
+    main_assert_eq!(labels.reset_config => "Konfiguration zuruecksetzen");
+    main_assert_eq!(labels.port_reference => "Referenzport");
+    main_assert_eq!(labels.active => "Aktiv");
+    main_assert_eq!(labels.chat_name => "Chatname:");
     // The fair-crew child captions and network port group titles are resolved
     // at construction (`C4StartupOptionsDlg.cpp:768-773,996-999`), not only
     // when a control is activated.
-    assert_eq!(labels.fair_crew_weak, "Schwach");
-    assert_eq!(labels.fair_crew_strong, "Stark");
-    assert_eq!(labels.port_tcp, "TCP-Anschluss");
-    assert_eq!(labels.port_udp, "UDP-Anschluss");
-    assert_eq!(
-        labels.fair_crew_strength,
-        "Staerke der \"Fairen Mannschaft\""
-    );
+    main_assert_eq!(labels.fair_crew_weak => "Schwach");
+    main_assert_eq!(labels.fair_crew_strong => "Stark");
+    main_assert_eq!(labels.port_tcp => "TCP-Anschluss");
+    main_assert_eq!(labels.port_udp => "UDP-Anschluss");
+    main_assert_eq!(labels.fair_crew_strength => "Staerke der \"Fairen Mannschaft\"");
 
     // A key absent from the table falls back to the shipped US text, which is
     // what C4ResStrTable itself yields.
     app.startup_tooltip_resources.remove("IDS_CTL_LANGUAGE");
     app.open_options_menu();
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .expect("options dialog")
-            .labels()
-            .language,
-        "Language"
-    );
+    main_assert_eq!(app.startup_options_dialog.as_ref().expect("options dialog").labels().language => "Language");
 
     // KeySelDialog uses the same localized action name as the control button
     // (`C4StartupOptionsDlg.cpp:160-177`).
@@ -528,11 +499,8 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     ])
     .test_value();
     let capture = app.message_dialogs.last().test_value();
-    assert_eq!(
-        capture.state.message(),
-        "Taste fuer \"Graben\" auf Tastaturblock 3 druecken."
-    );
-    assert_eq!(capture.state.caption(), "Taste zuweisen");
+    main_assert_eq!(capture.state.message() => "Taste fuer \"Graben\" auf Tastaturblock 3 druecken.");
+    main_assert_eq!(capture.state.caption() => "Taste zuweisen");
 
     // The nested key-capture and resolution-confirm dialogs are resources too,
     // including their positional `%s`/`%d`/`%u` arguments.
@@ -548,20 +516,10 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     }
     app.begin_options_scale_test(100, 150).test_value();
     let confirm = app.message_dialogs.last().test_value();
-    assert_eq!(confirm.state.caption(), "Aufloesung wechseln");
-    assert_eq!(
-        confirm.state.message(),
-        "Neue Aufloesung. Gefaellt sie?|Wird in 12 Sekunden zurueckgesetzt..."
-    );
+    main_assert_eq!(confirm.state.caption() => "Aufloesung wechseln");
+    main_assert_eq!(confirm.state.message() => "Neue Aufloesung. Gefaellt sie?|Wird in 12 Sekunden zurueckgesetzt...");
     app.tick_options_scale_test_prompt();
-    assert_eq!(
-        app.message_dialogs
-            .last()
-            .expect("confirmation")
-            .state
-            .message(),
-        "Neue Aufloesung. Gefaellt sie?|Wird in 11 Sekunden zurueckgesetzt..."
-    );
+    main_assert_eq!(app.message_dialogs.last().expect("confirmation").state.message() => "Neue Aufloesung. Gefaellt sie?|Wird in 11 Sekunden zurueckgesetzt...");
 
     // Layout measures the resolved text, so a longer label widens its column.
     let fonts = app.assets.clonk_fonts.as_deref().test_value();
@@ -582,13 +540,13 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     let widened = clonk_frontend::startup_options_dlg::options_dlg_layout_with_labels(
         640, 480, fonts, book, &wide,
     );
-    assert!(
+    main_assert!(
         widened.language_combo.x > narrow.language_combo.x,
         "a longer resolved label must push its combo right: {} vs {}",
         widened.language_combo.x,
         narrow.language_combo.x
     );
-    assert!(
+    main_assert!(
         widened.weak_label.w > narrow.weak_label.w
             && widened.strong_label.w > narrow.strong_label.w,
         "fair-crew labels must measure resolved child captions: weak {} vs {}, strong {} vs {}",
@@ -624,17 +582,11 @@ fn startup_fullscreen_title_tooltips_follow_active_language_amp_rules() {
     network.resize(640, 480);
     app.startup_network_dialog = Some(network);
     let net_layout = clonk_frontend::startup_netdlg::net_dlg_layout(640, 480, &net_metrics);
-    assert_eq!(
-        app.network_game_tooltip_target_at(at_anchor(net_layout.title_anchor)),
-        Some(StartupTooltip::text("&Netzwerkstart"))
-    );
+    main_assert_eq!(app.network_game_tooltip_target_at(at_anchor(net_layout.title_anchor)) => Some(StartupTooltip::text("&Netzwerkstart")));
 
     app.open_about_dialog();
     let about = clonk_frontend::startup_about_dlg::about_layout(640, 480);
-    assert_eq!(
-        app.about_tooltip_target_at(at_anchor(about.title_anchor)),
-        Some(StartupTooltip::text("&Programminfo"))
-    );
+    main_assert_eq!(app.about_tooltip_target_at(at_anchor(about.title_anchor)) => Some(StartupTooltip::text("&Programminfo")));
 
     app.open_options_menu();
     let options_book = app.assets.options_book_fonts.as_deref().test_value();
@@ -644,35 +596,23 @@ fn startup_fullscreen_title_tooltips_follow_active_language_amp_rules() {
         fonts.as_ref(),
         options_book,
     );
-    assert_eq!(
-        app.options_tooltip_target_at(at_anchor(options.title_center)),
-        Some(StartupTooltip::text("Einstellungen"))
-    );
+    main_assert_eq!(app.options_tooltip_target_at(at_anchor(options.title_center)) => Some(StartupTooltip::text("Einstellungen")));
 
     app.open_player_selection_dialog();
     let player_layout = clonk_frontend::startup_plrsel::plrsel_layout(640, 480);
-    assert_eq!(
-        app.player_selection_tooltip_target_at(at_anchor(player_layout.title_anchor)),
-        Some(StartupTooltip::text("Spielerauswahl"))
-    );
+    main_assert_eq!(app.player_selection_tooltip_target_at(at_anchor(player_layout.title_anchor)) => Some(StartupTooltip::text("Spielerauswahl")));
     let player_dialog = app.startup_player_dialog.test_mut();
     player_dialog.set_player_count(1);
-    assert!(player_dialog.enter_crew_mode(0, "Ada", vec![true]));
-    assert_eq!(
-        app.player_selection_tooltip_target_at(at_anchor(player_layout.title_anchor)),
-        Some(StartupTooltip::text("Mannschaft: Ada"))
-    );
+    main_assert!(player_dialog.enter_crew_mode(0, "Ada", vec![true]));
+    main_assert_eq!(app.player_selection_tooltip_target_at(at_anchor(player_layout.title_anchor)) => Some(StartupTooltip::text("Mannschaft: Ada")));
     app.startup_tooltip
         .note_pointer_move(GuiPoint::new(10.0, 10.0));
     app.leave_startup_crew_mode();
-    assert_eq!(app.startup_tooltip.pointer_position(), None);
+    main_assert_eq!(app.startup_tooltip.pointer_position() => None);
 
     app.open_scenario_browser();
     let scenario = clonk_frontend::startup_scensel::scen_sel_layout(640, 480, fonts.as_ref());
-    assert_eq!(
-        app.scenario_browser_tooltip_target_at(at_anchor(scenario.title_anchor)),
-        Some(StartupTooltip::text("Lokales Spiel"))
-    );
+    main_assert_eq!(app.scenario_browser_tooltip_target_at(at_anchor(scenario.title_anchor)) => Some(StartupTooltip::text("Lokales Spiel")));
 }
 
 #[test]
@@ -706,15 +646,15 @@ fn startup_irc_snapshot_projects_legacy_bytes_without_utf8_reinterpretation() {
 
     let projected = project_startup_irc_snapshot("irc.example.test", snapshot);
     let presented = "\u{00c3}\u{00a9}";
-    assert_eq!(projected.nick, presented);
-    assert_eq!(projected.channels[0].name, format!("#{presented}"));
-    assert_eq!(projected.channels[0].topic, presented);
-    assert_eq!(projected.channels[0].users[0].prefix, "@");
-    assert_eq!(projected.channels[0].users[0].name, presented);
-    assert_eq!(projected.messages[0].source, presented);
-    assert_eq!(projected.messages[0].target, format!("#{presented}"));
-    assert_eq!(projected.messages[0].text, presented);
-    assert!(projected.messages[0].is_channel);
+    main_assert_eq!(projected.nick => presented);
+    main_assert_eq!(projected.channels[0].name => format!("#{presented}"));
+    main_assert_eq!(projected.channels[0].topic => presented);
+    main_assert_eq!(projected.channels[0].users[0].prefix => "@");
+    main_assert_eq!(projected.channels[0].users[0].name => presented);
+    main_assert_eq!(projected.messages[0].source => presented);
+    main_assert_eq!(projected.messages[0].target => format!("#{presented}"));
+    main_assert_eq!(projected.messages[0].text => presented);
+    main_assert!(projected.messages[0].is_channel);
     for text in [
         &projected.nick,
         &projected.channels[0].topic,
@@ -722,7 +662,7 @@ fn startup_irc_snapshot_projects_legacy_bytes_without_utf8_reinterpretation() {
         &projected.messages[0].source,
         &projected.messages[0].text,
     ] {
-        assert_eq!(encode_startup_irc_text(text), Some(raw.clone()));
+        main_assert_eq!(encode_startup_irc_text(text) => Some(raw.clone()));
     }
 }
 
@@ -751,43 +691,25 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
     app.request_startup_irc_connection(cancelled.clone())
         .test_value();
     let warning = app.message_dialogs.last_mut().test_value();
-    assert_eq!(warning.state.caption(), "Chat - Disclaimer");
-    assert!(warning.state.message().contains("irc.cancelled.test"));
-    assert_eq!(warning.state.buttons(), MessageDialogButtons::OK_CANCEL);
-    assert_eq!(warning.state.icon(), MessageDialogIcon::NOTIFY);
-    assert_eq!(
-        warning.state.focused_button(),
-        Some(MessageDialogButton::Ok)
-    );
-    assert!(matches!(
-        &warning.continuation,
-        MessageDialogContinuation::StartupIrcConnectWarning { login }
-            if login == &cancelled
-    ));
-    assert_eq!(warning.state.handle_hotkey('d'), None);
+    main_assert_eq!(warning.state.caption() => "Chat - Disclaimer");
+    main_assert!(warning.state.message().contains("irc.cancelled.test"));
+    main_assert_eq!(warning.state.buttons() => MessageDialogButtons::OK_CANCEL);
+    main_assert_eq!(warning.state.icon() => MessageDialogIcon::NOTIFY);
+    main_assert_eq!(warning.state.focused_button() => Some(MessageDialogButton::Ok));
+    main_assert!(matches!(&warning.continuation, MessageDialogContinuation::StartupIrcConnectWarning { login } if login == &cancelled));
+    main_assert_eq!(warning.state.handle_hotkey('d') => None);
     app.persist_top_message_dialog_checkbox_changes();
     app.finish_message_dialog(MessageDialogResult::Cancel)
         .test_value();
-    assert!(app.startup_irc_client.is_none());
+    main_assert!(app.startup_irc_client.is_none());
 
     let persisted = Config::load(paths.config_file()).test_value();
-    assert_eq!(persisted.get_in(Some("IRC"), "Nick"), Some("SavedNick"));
-    assert_eq!(
-        persisted.get_in(Some("IRC"), "RealName"),
-        Some("Saved Name")
-    );
-    assert_eq!(persisted.get_in(Some("IRC"), "Channel"), Some("#saved"));
-    assert_eq!(persisted.get_in(Some("IRC"), "Password"), None);
-    assert_eq!(
-        persisted.get_in(Some("IRC"), "Server2"),
-        Some("irc.configured.test"),
-        "Connect persists form fields without replacing configured Server2"
-    );
-    assert_eq!(
-        persisted.get_in(Some("Startup"), "HideMsgIRCDangerous"),
-        Some("1"),
-        "the don't-show choice persists even when the connection is cancelled"
-    );
+    main_assert_eq!(persisted.get_in(Some("IRC"), "Nick") => Some("SavedNick"));
+    main_assert_eq!(persisted.get_in(Some("IRC"), "RealName") => Some("Saved Name"));
+    main_assert_eq!(persisted.get_in(Some("IRC"), "Channel") => Some("#saved"));
+    main_assert_eq!(persisted.get_in(Some("IRC"), "Password") => None);
+    main_assert_eq!(persisted.get_in(Some("IRC"), "Server2") => Some("irc.configured.test"), "Connect persists form fields without replacing configured Server2");
+    main_assert_eq!(persisted.get_in(Some("Startup"), "HideMsgIRCDangerous") => Some("1"), "the don't-show choice persists even when the connection is cancelled");
 
     persist_config_value(&paths, "Startup", "HideMsgIRCDangerous", "0").test_value();
     let (address, server) = spawn_loopback_irc_server();
@@ -799,14 +721,11 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
         channel: "#accepted".into(),
     };
     app.request_startup_irc_connection(accepted).test_value();
-    assert!(app.startup_irc_client.is_none());
+    main_assert!(app.startup_irc_client.is_none());
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
     let client = app.startup_irc_client.test_ref();
-    assert!(matches!(
-        client.recv_event_timeout(Duration::from_secs(2)),
-        Ok(clonk_network::IrcClientEvent::Connected)
-    ));
+    main_assert!(matches!(client.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
     drop(app);
     server.test_join();
     reset_cached_app_paths();
@@ -832,10 +751,7 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
         Duration::from_secs(2),
     )
     .test_value();
-    assert!(matches!(
-        handle.recv_event_timeout(Duration::from_secs(2)),
-        Ok(clonk_network::IrcClientEvent::Connected)
-    ));
+    main_assert!(matches!(handle.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
 
     let mut app = new_real_classic_menu_app(640, 480);
     app.startup_irc_server = address.to_string();
@@ -843,23 +759,14 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
     app.open_network_game_dialog();
     let browser_status = app.status_text.clone();
     activate_startup_network_chat(&mut app);
-    assert!(app.network.is_none());
-    assert_eq!(app.status_text, browser_status);
-    assert_eq!(
-        app.startup_network_dialog.as_ref().unwrap().mode(),
-        clonk_frontend::startup_netdlg::NetDlgMode::Chat
-    );
-    assert_eq!(
-        app.startup_network_dialog
-            .as_ref()
-            .unwrap()
-            .chat_connection_state(),
-        clonk_frontend::startup_netdlg::NetDlgChatConnectionState::Connected
-    );
+    main_assert!(app.network.is_none());
+    main_assert_eq!(app.status_text => browser_status);
+    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().mode() => clonk_frontend::startup_netdlg::NetDlgMode::Chat);
+    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().chat_connection_state() => clonk_frontend::startup_netdlg::NetDlgChatConnectionState::Connected);
 
     let mut frame = vec![0xa5; 640 * 480 * 4];
     app.test_render(&mut frame);
-    assert!(frame.iter().any(|byte| *byte != 0xa5));
+    main_assert!(frame.iter().any(|byte| *byte != 0xa5));
 
     let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics {
         caption_back_extent: 51,
@@ -876,20 +783,17 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
     app.test_cursor(point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert_eq!(
-        app.startup_network_dialog.as_ref().unwrap().mode(),
-        clonk_frontend::startup_netdlg::NetDlgMode::GameList
-    );
+    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().mode() => clonk_frontend::startup_netdlg::NetDlgMode::GameList);
 
     app.show_main_menu();
     app.open_network_game_dialog();
     activate_startup_network_chat(&mut app);
-    assert!(app.startup_irc_client.is_some());
-    assert_eq!(
+    main_assert!(app.startup_irc_client.is_some());
+    main_assert_eq!(
         app.startup_network_dialog
             .as_ref()
             .unwrap()
-            .chat_connection_state(),
+            .chat_connection_state() =>
         clonk_frontend::startup_netdlg::NetDlgChatConnectionState::Connected,
         "the process-global IRC client survives startup-screen replacement"
     );
@@ -971,17 +875,11 @@ fn startup_irc_command_projection_covers_the_frontend_command_language() {
         ),
     ];
     for (frontend, backend) in cases {
-        assert_eq!(project_startup_irc_command(frontend), Some(backend));
+        main_assert_eq!(project_startup_irc_command(frontend) => Some(backend));
     }
-    assert_eq!(
-        project_startup_irc_command(Frontend::OpenQuery {
-            nick: "Clonker".into(),
-        }),
-        None,
-        "query tabs are a frontend-only operation"
-    );
-    assert_eq!(
-        project_startup_irc_command(Frontend::Raw("snowman \u{2603}".into())),
+    main_assert_eq!(project_startup_irc_command(Frontend::OpenQuery {nick: "Clonker".into(),}) => None, "query tabs are a frontend-only operation");
+    main_assert_eq!(
+        project_startup_irc_command(Frontend::Raw("snowman \u{2603}".into())) =>
         None,
         "unrepresentable presentation text must not reach the byte transport"
     );
@@ -1008,21 +906,15 @@ fn missing_startup_models_precede_status_and_leave_pixels_untouched() {
         let mut frame = vec![0x7c; 320 * 200 * 4];
 
         let error = app.render(&mut frame).expect_err("missing startup model");
-        assert_eq!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(&expected)
-        );
-        assert!(frame.iter().all(|byte| *byte == 0x7c));
+        main_assert_eq!(error.downcast_ref::<ClassicParityBoundary>() => Some(&expected));
+        main_assert!(frame.iter().all(|byte| *byte == 0x7c));
 
         let mut native = vec![0x48; 640 * 400 * 4];
         let error = app
             .render_native_main_menu_text(&mut native, 640, 400)
             .expect_err("native pass must reject missing model");
-        assert_eq!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(&expected)
-        );
-        assert!(native.iter().all(|byte| *byte == 0x48));
+        main_assert_eq!(error.downcast_ref::<ClassicParityBoundary>() => Some(&expected));
+        main_assert!(native.iter().all(|byte| *byte == 0x48));
     }
 }
 
@@ -1051,24 +943,12 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     app.check_for_updates_with(false, &transport).test_value();
 
     let prompt = update_result_dialog(&app);
-    assert_eq!(
-        prompt.state.message(),
-        "An update to version 99.0.0 is available. \
-             Do you want to download and install this update?"
-    );
-    assert_eq!(prompt.state.caption(), "Check for Updates");
-    assert_eq!(
-        prompt.state.buttons(),
-        clonk_frontend::message_dialog::MessageDialogButtons::YES_NO
-    );
-    assert_eq!(
-        prompt.state.icon(),
-        clonk_frontend::message_dialog::MessageDialogIcon::Extended(14)
-    );
-    assert!(matches!(
-        prompt.continuation,
-        MessageDialogContinuation::UpdatePrompt { .. }
-    ));
+    main_assert_eq!(prompt.state.message() => "An update to version 99.0.0 is available. \
+             Do you want to download and install this update?");
+    main_assert_eq!(prompt.state.caption() => "Check for Updates");
+    main_assert_eq!(prompt.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_NO);
+    main_assert_eq!(prompt.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Extended(14));
+    main_assert!(matches!(prompt.continuation, MessageDialogContinuation::UpdatePrompt { .. }));
 
     // Declining is silent, exactly as C++'s ShowMessageModal returning
     // false is (`C4UpdateDlg.cpp:385-394`).
@@ -1079,7 +959,7 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     declined
         .finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
-    assert!(declined.message_dialogs.is_empty());
+    main_assert!(declined.message_dialogs.is_empty());
 
     // Accepting starts the cancellable component download. The test build
     // parks its network worker, so this pins the hand-off without touching
@@ -1087,28 +967,22 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .test_value();
     let download = update_result_dialog(&app);
-    assert_eq!(download.state.message(), "Downloading update 99.0.0...");
-    assert_eq!(download.state.caption(), "Check for Updates");
-    assert_eq!(download.state.progress(), Some(0));
-    assert_eq!(
-        download.state.buttons(),
-        clonk_frontend::message_dialog::MessageDialogButtons::CANCEL
-    );
-    assert!(app.update_download.is_some());
+    main_assert_eq!(download.state.message() => "Downloading update 99.0.0...");
+    main_assert_eq!(download.state.caption() => "Check for Updates");
+    main_assert_eq!(download.state.progress() => Some(0));
+    main_assert_eq!(download.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::CANCEL);
+    main_assert!(app.update_download.is_some());
 
     app.check_for_updates_at(false, 1_000).test_value();
-    assert!(app.update_check.is_none());
-    assert_eq!(
-        update_result_dialog(&app).state.message(),
-        "Update still in progress. Please wait."
-    );
+    main_assert!(app.update_check.is_none());
+    main_assert_eq!(update_result_dialog(&app).state.message() => "Update still in progress. Please wait.");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
-    assert!(app.update_download.is_none());
-    assert!(app.message_dialogs.is_empty());
+    main_assert!(app.update_download.is_none());
+    main_assert!(app.message_dialogs.is_empty());
 }
 
 #[test]
@@ -1126,27 +1000,15 @@ fn only_a_manual_check_reports_that_there_is_no_update() {
     manual
         .check_for_updates_with(false, &transport)
         .test_value();
-    assert_eq!(
-        update_result_dialog(&manual).state.message(),
-        format!(
-            "Clonk Rust {} is the latest version.",
-            clonk_core::version::PORT_VERSION
-        )
-    );
-    assert_eq!(
-        update_result_dialog(&manual).state.caption(),
-        "Check for Updates"
-    );
-    assert_eq!(
-        update_result_dialog(&manual).state.buttons(),
-        clonk_frontend::message_dialog::MessageDialogButtons::OK
-    );
+    main_assert_eq!(update_result_dialog(&manual).state.message() => format!("Clonk Rust {} is the latest version.", clonk_core::version::PORT_VERSION));
+    main_assert_eq!(update_result_dialog(&manual).state.caption() => "Check for Updates");
+    main_assert_eq!(update_result_dialog(&manual).state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::OK);
 
     let mut automatic = new_classic_menu_app(640, 480);
     automatic
         .check_for_updates_with(true, &transport)
         .test_value();
-    assert!(automatic.message_dialogs.is_empty());
+    main_assert!(automatic.message_dialogs.is_empty());
 }
 
 #[test]
@@ -1160,19 +1022,12 @@ fn a_failed_check_reports_the_transport_error_after_the_localized_prefix() {
         .test_value();
 
     let failure = update_result_dialog(&app);
-    assert!(
-        failure.state.message().starts_with("Update failed.: "),
-        "{}",
-        failure.state.message()
-    );
-    assert!(failure.state.message().contains("503"));
+    main_assert!(failure.state.message().starts_with("Update failed.: "), "{}", failure.state.message());
+    main_assert!(failure.state.message().contains("503"));
     // Never "Error" in a title bar: the caption names the command, and the
     // failure itself is the body.
-    assert_eq!(failure.state.caption(), "Check for Updates");
-    assert_eq!(
-        failure.state.icon(),
-        clonk_frontend::message_dialog::MessageDialogIcon::Extended(14)
-    );
+    main_assert_eq!(failure.state.caption() => "Check for Updates");
+    main_assert_eq!(failure.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Extended(14));
 }
 
 #[test]
@@ -1194,8 +1049,8 @@ fn a_release_built_against_another_engine_asks_for_a_manual_install() {
     )
     .test_value();
 
-    assert_eq!(
-        update_result_dialog(&app).state.message(),
+    main_assert_eq!(
+        update_result_dialog(&app).state.message() =>
         "Version 99.0.0 cannot be installed from within the game. \
              Please install it manually."
     );
@@ -1212,12 +1067,9 @@ fn an_incoming_update_package_is_refused_instead_of_executed() {
         .test_value();
 
     let refusal = update_result_dialog(&app);
-    assert_eq!(refusal.state.caption(), "Update");
-    assert_eq!(refusal.state.message(), "Update failed.");
-    assert!(
-        app.update_check.is_none(),
-        "nothing is fetched for a package"
-    );
+    main_assert_eq!(refusal.state.caption() => "Update");
+    main_assert_eq!(refusal.state.message() => "Update failed.");
+    main_assert!(app.update_check.is_none(), "nothing is fetched for a package");
 }
 
 #[test]
@@ -1247,47 +1099,38 @@ fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
 
     app.check_for_updates_at(true, 1000 + 60 * 60 * 24 - 1)
         .test_value();
-    assert!(app.update_check.is_none(), "an automatic check is daily");
-    assert!(app.message_dialogs.is_empty());
+    main_assert!(app.update_check.is_none(), "an automatic check is daily");
+    main_assert!(app.message_dialogs.is_empty());
 
     app.check_for_updates_at(false, 1000 + 60 * 60 * 24 - 1)
         .test_value();
-    assert!(app.update_check.is_some());
-    assert_eq!(
+    main_assert!(app.update_check.is_some());
+    main_assert_eq!(
         Config::load(paths.config_file())
             .expect("reload config")
             .get_in(Some("Network"), "LastUpdateTime")
-            .map(str::to_string),
+            .map(str::to_string) =>
         Some((1000 + 60 * 60 * 24 - 1).to_string()),
         "the attempt is stored before the result is known"
     );
     let saved = Config::load(paths.config_file()).test_value();
-    assert_eq!(
-        saved.get_in(Some("Graphics"), "ShowCrewNames"),
-        Some("false")
-    );
-    assert_eq!(
-        saved.get_in(Some("Graphics"), "ShowCrewCNames"),
-        Some("false")
-    );
-    assert_eq!(saved.get_in(Some("Graphics"), "ShowClock"), Some("true"));
-    assert_eq!(saved.get_in(Some("General"), "FPS"), Some("true"));
-    assert_eq!(saved.get_in(Some("Graphics"), "UpperBoard"), Some("Small"));
-    assert_eq!(app.deferred_config.len(), 0);
+    main_assert_eq!(saved.get_in(Some("Graphics"), "ShowCrewNames") => Some("false"));
+    main_assert_eq!(saved.get_in(Some("Graphics"), "ShowCrewCNames") => Some("false"));
+    main_assert_eq!(saved.get_in(Some("Graphics"), "ShowClock") => Some("true"));
+    main_assert_eq!(saved.get_in(Some("General"), "FPS") => Some("true"));
+    main_assert_eq!(saved.get_in(Some("Graphics"), "UpperBoard") => Some("Small"));
+    main_assert_eq!(app.deferred_config.len() => 0);
 
     // A second request while one is in flight says so rather than starting
     // another; C++ cannot reach this because its check blocks.
     app.check_for_updates_at(false, 1000 + 60 * 60 * 24)
         .test_value();
-    assert_eq!(
-        update_result_dialog(&app).state.message(),
-        "Update still in progress. Please wait."
-    );
+    main_assert_eq!(update_result_dialog(&app).state.message() => "Update still in progress. Please wait.");
 
     app.abort_update_check();
     app.check_for_updates_at(true, 1000 + 2 * 60 * 60 * 24)
         .test_value();
-    assert!(app.update_check.is_some());
+    main_assert!(app.update_check.is_some());
 }
 
 #[test]
@@ -1302,34 +1145,21 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
         clonk_frontend::startup_about_dlg::AboutDlgAction::CheckForUpdates,
     ])
     .test_value();
-    assert_eq!(app.startup_view, StartupView::About);
-    assert!(app.startup_about_dialog.is_some());
-    assert!(app.update_check.is_some(), "the check must be in flight");
+    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert!(app.startup_about_dialog.is_some());
+    main_assert!(app.update_check.is_some(), "the check must be in flight");
     let wait = app.message_dialogs.last().test_value();
-    assert_eq!(wait.state.caption(), "Check for Updates");
-    assert_eq!(wait.state.message(), "Checking for updates...");
-    assert_eq!(
-        wait.state.icon(),
-        clonk_frontend::message_dialog::MessageDialogIcon::Extended(14)
-    );
-    assert_eq!(
-        wait.state.buttons(),
-        clonk_frontend::message_dialog::MessageDialogButtons::CANCEL
-    );
-    assert_eq!(
-        wait.state
-            .button_label(clonk_frontend::message_dialog::MessageDialogButton::Cancel),
-        "Abort"
-    );
+    main_assert_eq!(wait.state.caption() => "Check for Updates");
+    main_assert_eq!(wait.state.message() => "Checking for updates...");
+    main_assert_eq!(wait.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Extended(14));
+    main_assert_eq!(wait.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::CANCEL);
+    main_assert_eq!(wait.state.button_label(clonk_frontend::message_dialog::MessageDialogButton::Cancel) => "Abort");
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
-    assert!(app.message_dialogs.is_empty());
-    assert!(
-        app.update_check.is_none(),
-        "closing the wait dialog abandons the check"
-    );
-    assert_eq!(app.startup_view, StartupView::About);
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.update_check.is_none(), "closing the wait dialog abandons the check");
+    main_assert_eq!(app.startup_view => StartupView::About);
 
     for key in [VirtualKeyCode::Enter, VirtualKeyCode::Space] {
         let mut app = new_classic_menu_app(640, 480);
@@ -1339,14 +1169,14 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
             app.test_key(VirtualKeyCode::Tab, ElementState::Released);
         }
         app.test_key(key, ElementState::Pressed);
-        assert!(app.message_dialogs.is_empty());
+        main_assert!(app.message_dialogs.is_empty());
         app.test_key(key, ElementState::Released);
-        assert_eq!(app.message_dialogs.len(), 1);
-        assert_eq!(app.startup_view, StartupView::About);
+        main_assert_eq!(app.message_dialogs.len() => 1);
+        main_assert_eq!(app.startup_view => StartupView::About);
         app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
             .test_value();
-        assert!(app.message_dialogs.is_empty());
-        assert_eq!(app.startup_view, StartupView::About);
+        main_assert!(app.message_dialogs.is_empty());
+        main_assert_eq!(app.startup_view => StartupView::About);
     }
 }
 
@@ -1363,13 +1193,7 @@ fn about_shift_tab_reverses_buttons_and_license_tabs() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Space, ElementState::Released);
-    assert_eq!(
-        app.startup_about_dialog
-            .as_ref()
-            .expect("About dialog")
-            .current_page(),
-        AboutPage::Licenses
-    );
+    main_assert_eq!(app.startup_about_dialog.as_ref().expect("About dialog").current_page() => AboutPage::Licenses);
 
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
@@ -1380,7 +1204,7 @@ fn about_shift_tab_reverses_buttons_and_license_tabs() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    assert_eq!(app.message_dialogs.len(), 1);
+    main_assert_eq!(app.message_dialogs.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
 
@@ -1390,14 +1214,8 @@ fn about_shift_tab_reverses_buttons_and_license_tabs() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    assert_eq!(
-        app.startup_about_dialog
-            .as_ref()
-            .expect("About dialog")
-            .current_page(),
-        AboutPage::Credits
-    );
-    assert_eq!(app.startup_view, StartupView::About);
+    main_assert_eq!(app.startup_about_dialog.as_ref().expect("About dialog").current_page() => AboutPage::Credits);
+    main_assert_eq!(app.startup_view => StartupView::About);
 }
 
 #[test]
@@ -1409,7 +1227,7 @@ fn unsupported_startup_actions_fail_before_status_or_domain_mutation() {
         clonk_frontend::startup_plrsel::PlrSelAction::NewPlayer,
     ])
     .test_value();
-    assert!(app.startup_player_properties_dialog.is_some());
+    main_assert!(app.startup_player_properties_dialog.is_some());
     app.startup_player_properties_dialog = None;
 }
 
@@ -1427,7 +1245,7 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
         .test_value()
         .handle_key_down(KeyCode::Down);
     app.process_player_dialog_actions(actions).test_value();
-    assert_eq!(app.ui_sound_log, ["Command"]);
+    main_assert_eq!(app.ui_sound_log => ["Command"]);
 
     let back = clonk_frontend::startup_plrsel::plrsel_layout(640, 480).buttons[0];
     let back = GuiPoint::new((back.x + back.w / 2) as f32, (back.y + back.h / 2) as f32);
@@ -1437,7 +1255,7 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
         .test_value()
         .handle_pointer_down(back);
     app.process_player_dialog_actions(actions).test_value();
-    assert_eq!(app.ui_sound_log, ["Command", "ArrowHit"]);
+    main_assert_eq!(app.ui_sound_log => ["Command", "ArrowHit"]);
 
     let actions = app
         .startup_player_dialog
@@ -1445,7 +1263,7 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
         .test_value()
         .handle_pointer_up(back);
     app.process_player_dialog_actions(actions).test_value();
-    assert_eq!(app.ui_sound_log, ["Command", "ArrowHit", "Click"]);
+    main_assert_eq!(app.ui_sound_log => ["Command", "ArrowHit", "Click"]);
 }
 
 #[test]
@@ -1469,26 +1287,25 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
         )).test_value();
     }
     let player_file = PlayerFile::load_from_path(&player_path).test_value();
-    let player_model = clonk_frontend::startup_plrsel::PlrSelPlayer {
-        name: "Ada".to_string(),
-        activated: false,
-        big_icon: None,
-        portrait: None,
-        color_dw: 255,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        comment: String::new(),
-    };
+    let player_model = startup_fixture!(
+        player_selection_name_activated_color_dw_score_rounds_rounds_won_rounds_lost_total_playing_time:
+            "Ada".to_string(),
+            false,
+            255,
+            0,
+            0,
+            0,
+            0,
+            0,
+    );
     let mut app = new_classic_menu_app(640, 480);
-    app.startup_player_files.push(StartupPlayerFile {
-        path: player_path.clone(),
-        file_name: "Ada.c4p".to_string(),
-        player_file,
-        render_model: player_model.clone(),
-    });
+    app.startup_player_files.push(startup_fixture!(
+        startup_player:
+            player_path.clone(),
+            "Ada.c4p".to_string(),
+            player_file,
+            player_model.clone(),
+    ));
     app.startup_player_models.push(player_model);
     app.open_player_selection_dialog();
 
@@ -1497,17 +1314,11 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     ])
     .test_value();
     let controller = app.startup_player_dialog.test_ref();
-    assert!(controller.is_crew_mode());
-    assert_eq!(controller.dialog_title(), "Crew: Ada");
-    assert_eq!(controller.selected_index(), Some(0));
-    assert_eq!(
-        app.startup_crew_models
-            .iter()
-            .map(|crew| crew.name.as_str())
-            .collect::<Vec<_>>(),
-        ["High", "Low"]
-    );
-    assert!(app.message_dialogs.is_empty());
+    main_assert!(controller.is_crew_mode());
+    main_assert_eq!(controller.dialog_title() => "Crew: Ada");
+    main_assert_eq!(controller.selected_index() => Some(0));
+    main_assert_eq!(app.startup_crew_models.iter().map(|crew| crew.name.as_str()).collect::<Vec<_>>() => ["High", "Low"]);
+    main_assert!(app.message_dialogs.is_empty());
 
     let selected_crew_file = app.startup_crew_files[0].file_name.clone();
     app.process_player_dialog_actions(vec![
@@ -1523,20 +1334,13 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
                 .map_err(|error| GroupError::InvalidGroup(error.to_string()))
         })
         .test_value();
-    assert_eq!(persisted.participation, 0);
+    main_assert_eq!(persisted.participation => 0);
 
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::SetCrewDeathMessage(0),
     ])
     .test_value();
-    assert_eq!(
-        app.game_option_input_dialog
-            .as_ref()
-            .expect("crew death-message input")
-            .controller
-            .max_text(),
-        75
-    );
+    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("crew death-message input").controller.max_text() => 75);
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
         "Farewell".to_string(),
     )])
@@ -1547,7 +1351,7 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
                 .map_err(|error| GroupError::InvalidGroup(error.to_string()))
         })
         .test_value();
-    assert_eq!(persisted.death_message, "Farewell");
+    main_assert_eq!(persisted.death_message => "Farewell");
 
     let layout = clonk_frontend::startup_plrsel::plrsel_layout(640, 480);
     app.startup_player_dialog
@@ -1556,19 +1360,8 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
             (layout.list_client.x + layout.item_height * 2) as f32,
             (layout.list_client.y + layout.item_height / 2) as f32,
         )));
-    assert!(app
-        .open_startup_player_context_menu(false)
-        .expect("open crew context menu"));
-    assert_eq!(
-        app.context_menu
-            .as_ref()
-            .expect("crew context menu")
-            .layout()
-            .panels[0]
-            .rows
-            .len(),
-        3
-    );
+    main_assert!(app.open_startup_player_context_menu(false).expect("open crew context menu"));
+    main_assert_eq!(app.context_menu.as_ref().expect("crew context menu").layout().panels[0].rows.len() => 3);
     app.close_context_menu_silently();
 
     app.process_player_dialog_actions(vec![
@@ -1576,8 +1369,8 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     ])
     .test_value();
     let controller = app.startup_player_dialog.test_ref();
-    assert!(!controller.is_crew_mode());
-    assert_eq!(controller.selected_index(), Some(0));
+    main_assert!(!controller.is_crew_mode());
+    main_assert_eq!(controller.selected_index() => Some(0));
 
     fs::remove_dir_all(player_path.join("Low.c4i")).test_value();
     fs::remove_dir_all(player_path.join("High.c4i")).test_value();
@@ -1586,18 +1379,12 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     ])
     .test_value();
     let controller = app.startup_player_dialog.test_ref();
-    assert!(!controller.is_crew_mode());
-    assert_eq!(controller.selected_index(), Some(0));
-    assert_eq!(app.message_dialogs.len(), 1);
-    assert_eq!(app.message_dialogs[0].state.caption(), "Crew: Ada");
-    assert_eq!(
-        app.message_dialogs[0].state.message(),
-        "Ada does not have a crew yet!"
-    );
-    assert_eq!(
-        app.message_dialogs[0].state.icon(),
-        clonk_frontend::message_dialog::MessageDialogIcon::PLAYER
-    );
+    main_assert!(!controller.is_crew_mode());
+    main_assert_eq!(controller.selected_index() => Some(0));
+    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.message_dialogs[0].state.caption() => "Crew: Ada");
+    main_assert_eq!(app.message_dialogs[0].state.message() => "Ada does not have a crew yet!");
+    main_assert_eq!(app.message_dialogs[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::PLAYER);
 }
 
 #[test]
@@ -1622,44 +1409,32 @@ fn startup_player_resize_matches_cpp_copyfrom_sfc_max_size() {
     // This offscreen helper intentionally has no display configuration:
     // application scale and PointFiltering cannot affect Blit8 sampling.
     let resized = resize_startup_player_image(&source, 2);
-    assert_eq!((resized.width(), resized.height()), (2, 1));
-    assert_eq!(
-        resized.pixels(),
-        &[0, 0, 0, 255, 128, 0, 0, 255],
-        "offscreen Blit8 samples source-pixel left edges"
-    );
+    main_assert_eq!((resized.width(), resized.height()) => (2, 1));
+    main_assert_eq!(resized.pixels() => &[0, 0, 0, 255, 128, 0, 0, 255], "offscreen Blit8 samples source-pixel left edges");
 
     let aspect = ImageData::new(5, 3, vec![255; 5 * 3 * 4]);
-    assert_eq!(
+    main_assert_eq!(
         {
             let resized = resize_startup_player_image(&aspect, 4);
             (resized.width(), resized.height())
-        },
+        } =>
         (4, 2),
         "the minor axis uses truncating integer aspect math"
     );
     let no_scale = ImageData::new(2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
-    assert_eq!(resize_startup_player_image(&no_scale, 2), no_scale);
+    main_assert_eq!(resize_startup_player_image(&no_scale, 2) => no_scale);
 
     let loaded = startup_player_image_from_rgba(2, 1, vec![90, 80, 70, 0, 10, 20, 30, 255]);
-    assert_eq!(
-        loaded.pixels(),
-        &[0, 0, 0, 0, 10, 20, 30, 255],
-        "C4Surface load blackens hidden RGB"
-    );
+    main_assert_eq!(loaded.pixels() => &[0, 0, 0, 0, 10, 20, 30, 255], "C4Surface load blackens hidden RGB");
     let owner_source = ImageData::new(2, 1, vec![0, 0, 255, 255, 200, 30, 30, 255]);
     let icon = startup_player_big_icon(&owner_source, 0x00ff_ffff).test_value();
-    assert_eq!(
-        icon.pixels(),
-        &[254, 254, 254, 255, 200, 30, 30, 255],
-        "software ModulateClr divides owner RGB by 256"
-    );
+    main_assert_eq!(icon.pixels() => &[254, 254, 254, 255, 200, 30, 30, 255], "software ModulateClr divides owner RGB by 256");
 
     let extreme = ImageData::new(1, 151, vec![255; 151 * 4]);
     let collapsed = resize_startup_player_image(&extreme, 150);
-    assert_eq!((collapsed.width(), collapsed.height()), (0, 0));
-    assert!(collapsed.pixels().is_empty());
-    assert_eq!(materialize_startup_player_image(&extreme, 150), None);
+    main_assert_eq!((collapsed.width(), collapsed.height()) => (0, 0));
+    main_assert!(collapsed.pixels().is_empty());
+    main_assert_eq!(materialize_startup_player_image(&extreme, 150) => None);
 }
 
 #[test]
@@ -1680,17 +1455,13 @@ fn startup_player_existence_scan_stops_after_the_first_visible_file() {
         b"not a directory",
     )
     .test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_root.path())),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install_root.path()), user_data.path());
     persist_config_value(&paths, "General", "PlayerPath", "Players").test_value();
 
-    assert!(startup_player_file_exists(&paths).expect("short-circuit existence scan"));
+    main_assert!(startup_player_file_exists(&paths).expect("short-circuit existence scan"));
 
     fs::remove_file(install_root.path().join("Players/Visible.C4P")).test_value();
-    assert!(startup_player_file_exists(&paths).is_err());
+    main_assert!(startup_player_file_exists(&paths).is_err());
 
     fs::remove_dir(install_root.path().join("Players")).test_value();
     fs::write(install_root.path().join("Players"), b"not a directory").test_value();
@@ -1701,26 +1472,18 @@ fn startup_player_existence_scan_stops_after_the_first_visible_file() {
         b"later filename-only player marker",
     )
     .test_value();
-    assert!(startup_player_file_exists(&paths).expect("continue after an earlier scan error"));
+    main_assert!(startup_player_file_exists(&paths).expect("continue after an earlier scan error"));
 
     fs::remove_file(install_root.path().join("build/Players/Later.c4p")).test_value();
-    assert!(startup_player_file_exists(&paths).is_err());
+    main_assert!(startup_player_file_exists(&paths).is_err());
     reset_cached_app_paths();
 }
 
 #[test]
 fn main_menu_without_visible_player_forces_creation_and_overwrites_participants() {
     let _lock = env_lock().lock();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     let player_root = user_data.path().join("Players");
     fs::create_dir_all(player_root.join(".Private.c4p")).test_value();
     fs::create_dir_all(player_root.join("Nested/Deep.c4p")).test_value();
@@ -1734,49 +1497,32 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     let mut app = GameApp::new(
         640,
         480,
-        AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        },
+        disabled_audio_options(),
         Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Player".to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with("Player".to_string(), false),
     )
     .test_value();
     wait_for_menu_preserving_first_player_dialog(&mut app);
-    assert_eq!(app.startup_view, StartupView::MainMenu);
-    assert!(matches!(
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert!(matches!(
         app.startup_player_properties_dialog
             .as_ref()
             .map(|pending| pending.controller.mode()),
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::New)
     ));
-    assert!(app
-        .startup_player_properties_dialog
-        .as_ref()
-        .is_some_and(|pending| matches!(
-            &pending.origin,
-            StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
-        )));
+    main_assert!(app.startup_player_properties_dialog.as_ref().is_some_and(|pending| matches!(&pending.origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer)));
 
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
     ]);
-    assert!(app.startup_player_properties_dialog.is_none());
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    main_assert!(app.startup_player_properties_dialog.is_none());
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
     app.handle_main_menu_activation(MainMenuItem::PlayerSelection)
         .test_value();
-    assert_eq!(app.startup_view, StartupView::PlayerSelection);
+    main_assert_eq!(app.startup_view => StartupView::PlayerSelection);
     app.process_player_dialog_actions(vec![clonk_frontend::startup_plrsel::PlrSelAction::Back])
         .test_value();
-    assert!(app.startup_player_properties_dialog.is_some());
+    main_assert!(app.startup_player_properties_dialog.is_some());
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
     ]);
@@ -1784,19 +1530,10 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     let broken = player_root.join("Broken.C4P");
     fs::write(&broken, b"not a player group").test_value();
     app.show_main_menu();
-    assert!(
-        app.startup_player_properties_dialog.is_none(),
-        "the native scan matches names without opening player groups"
-    );
+    main_assert!(app.startup_player_properties_dialog.is_none(), "the native scan matches names without opening player groups");
     fs::remove_file(&broken).test_value();
     app.show_main_menu();
-    assert!(app
-        .startup_player_properties_dialog
-        .as_ref()
-        .is_some_and(|pending| matches!(
-            &pending.origin,
-            StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
-        )));
+    main_assert!(app.startup_player_properties_dialog.as_ref().is_some_and(|pending| matches!(&pending.origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer)));
 
     let raced = player_root.join("Racer.c4p");
     fs::create_dir_all(&raced).test_value();
@@ -1817,16 +1554,16 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
     let created = player_root.join("First.c4p");
-    assert!(created.is_file());
-    assert!(app.startup_player_properties_dialog.is_none());
-    assert_eq!(app.startup_player_files.len(), 2);
-    assert!(app.startup_player_files.iter().any(|player| {
+    main_assert!(created.is_file());
+    main_assert!(app.startup_player_properties_dialog.is_none());
+    main_assert_eq!(app.startup_player_files.len() => 2);
+    main_assert!(app.startup_player_files.iter().any(|player| {
         player
             .file_name
             .eq_ignore_ascii_case(created.to_string_lossy().as_ref())
             && player.render_model.activated
     }));
-    assert!(
+    main_assert!(
         app.startup_player_files.iter().any(|player| {
             player
                 .file_name
@@ -1838,42 +1575,36 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     // The label reads the in-memory value, so a config file written behind the
     // modal cannot change it — `C4StartupMainDlg::UpdateParticipants` reads
     // `Config.General.Participants` directly (C4StartupMainDlg.cpp:174-200).
-    assert_eq!(app.main_menu_state.participants_label, "Players: First");
+    main_assert_eq!(app.main_menu_state.participants_label => "Players: First");
     // `C4StartupPlrSelDlg` never saves (no `Config.Save()` in that file), so the
     // new participant reaches the file at the next save surface — and still
     // overwrites the raced value when it does.
     app.flush_deferred_config();
-    assert_eq!(
+    main_assert_eq!(
         Config::load(paths.config_file())
             .expect("reload config")
-            .get_in(Some("General"), "Participants"),
+            .get_in(Some("General"), "Participants") =>
         Some(created.to_string_lossy().as_ref()),
         "forced creation overwrites stale participants with the new file"
     );
 
     app.show_main_menu();
-    assert!(
-        app.startup_player_properties_dialog.is_none(),
-        "a visible player prevents another forced dialog"
-    );
+    main_assert!(app.startup_player_properties_dialog.is_none(), "a visible player prevents another forced dialog");
     app.handle_main_menu_activation(MainMenuItem::PlayerSelection)
         .test_value();
     fs::remove_dir_all(&raced).test_value();
     app.delete_startup_player_and_refresh(&created).test_value();
     app.process_player_dialog_actions(vec![clonk_frontend::startup_plrsel::PlrSelAction::Back])
         .test_value();
-    assert_eq!(app.startup_view, StartupView::MainMenu);
-    assert!(
-        app.startup_player_properties_dialog.is_some(),
-        "every main-menu show rechecks the physical player directory"
-    );
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert!(app.startup_player_properties_dialog.is_some(), "every main-menu show rechecks the physical player directory");
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
     ]);
-    assert!(app.startup_player_properties_dialog.is_none());
+    main_assert!(app.startup_player_properties_dialog.is_none());
     app.handle_main_menu_activation(MainMenuItem::Options)
         .test_value();
-    assert_eq!(app.startup_view, StartupView::Options);
+    main_assert_eq!(app.startup_view => StartupView::Options);
     reset_cached_app_paths();
 }
 
@@ -1905,20 +1636,17 @@ fn assert_player_properties_validation_modal(
     };
 
     let modal = app.message_dialogs.last().test_value();
-    assert_eq!(modal.state.message(), expected_message);
-    assert_eq!(modal.state.caption(), "");
-    assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
-    assert_eq!(modal.state.icon(), MessageDialogIcon::ERROR);
-    assert_eq!(modal.state.size(), MessageDialogSize::Regular);
-    assert!(matches!(
-        modal.continuation,
-        MessageDialogContinuation::None
-    ));
+    main_assert_eq!(modal.state.message() => expected_message);
+    main_assert_eq!(modal.state.caption() => "");
+    main_assert_eq!(modal.state.buttons() => MessageDialogButtons::OK);
+    main_assert_eq!(modal.state.icon() => MessageDialogIcon::ERROR);
+    main_assert_eq!(modal.state.size() => MessageDialogSize::Regular);
+    main_assert!(matches!(modal.continuation, MessageDialogContinuation::None));
     let form = app.startup_player_properties_dialog.test_ref();
-    assert_eq!(form.controller.player(), expected_player);
-    assert_eq!(form.controller.comment(), expected_comment);
-    assert_eq!(form.controller.validation_error(), None);
-    assert!(app.status_text.is_empty());
+    main_assert_eq!(form.controller.player() => expected_player);
+    main_assert_eq!(form.controller.comment() => expected_comment);
+    main_assert_eq!(form.controller.validation_error() => None);
+    main_assert!(app.status_text.is_empty());
 }
 
 #[test]
@@ -1940,10 +1668,10 @@ fn startup_player_properties_empty_name_shows_modal_message_dialog() {
     );
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
-    assert!(app.message_dialogs.is_empty());
+    main_assert!(app.message_dialogs.is_empty());
     let form = app.startup_player_properties_dialog.as_ref().test_value();
-    assert_eq!(form.controller.player(), &expected_player);
-    assert_eq!(form.controller.comment(), expected_comment);
+    main_assert_eq!(form.controller.player() => &expected_player);
+    main_assert_eq!(form.controller.comment() => expected_comment);
 }
 
 #[test]
@@ -1966,14 +1694,14 @@ fn startup_player_properties_duplicate_name_shows_modal_message_dialog() {
         &expected_player,
         &expected_comment,
     );
-    assert!(occupied.is_dir());
-    assert!(app.startup_player_files.is_empty());
+    main_assert!(occupied.is_dir());
+    main_assert!(app.startup_player_files.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
-    assert!(app.message_dialogs.is_empty());
+    main_assert!(app.message_dialogs.is_empty());
     let form = app.startup_player_properties_dialog.as_ref().test_value();
-    assert_eq!(form.controller.player(), &expected_player);
-    assert_eq!(form.controller.comment(), expected_comment);
+    main_assert_eq!(form.controller.player() => &expected_player);
+    main_assert_eq!(form.controller.comment() => expected_comment);
 }
 
 #[test]
@@ -1992,7 +1720,7 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
     fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n").test_value();
     persist_config_value(&paths, "General", "Participants", old.to_string_lossy()).test_value();
     app.refresh_startup_player_list();
-    assert_eq!(app.startup_player_files.len(), 1);
+    main_assert_eq!(app.startup_player_files.len() => 1);
 
     app.open_existing_startup_player_properties(0);
     app.startup_player_properties_dialog
@@ -2007,41 +1735,25 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
 
-    assert!(!old.exists());
-    assert!(!player_root.join("Renamed.c4p").exists());
-    assert!(
-        app.startup_player_properties_dialog.is_none(),
-        "the properties form closes before the screen-owned error dialog"
-    );
-    assert!(app.startup_player_files.is_empty());
-    assert!(app.status_text.is_empty());
-    assert_eq!(
-        Config::load(paths.config_file())
-            .expect("reload reconciled config")
-            .get_in(Some("General"), "Participants"),
-        Some("")
-    );
+    main_assert!(!old.exists());
+    main_assert!(!player_root.join("Renamed.c4p").exists());
+    main_assert!(app.startup_player_properties_dialog.is_none(), "the properties form closes before the screen-owned error dialog");
+    main_assert!(app.startup_player_files.is_empty());
+    main_assert!(app.status_text.is_empty());
+    main_assert_eq!(Config::load(paths.config_file()).expect("reload reconciled config").get_in(Some("General"), "Participants") => Some(""));
 
     let modal = app.message_dialogs.last().test_value();
-    assert_eq!(modal.state.caption(), "Error");
-    assert!(!modal.state.message().is_empty());
-    assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
-    assert_eq!(modal.state.icon(), MessageDialogIcon::ERROR);
-    assert_eq!(modal.state.size(), MessageDialogSize::Regular);
-    assert!(matches!(
-        modal.continuation,
-        MessageDialogContinuation::None
-    ));
+    main_assert_eq!(modal.state.caption() => "Error");
+    main_assert!(!modal.state.message().is_empty());
+    main_assert_eq!(modal.state.buttons() => MessageDialogButtons::OK);
+    main_assert_eq!(modal.state.icon() => MessageDialogIcon::ERROR);
+    main_assert_eq!(modal.state.size() => MessageDialogSize::Regular);
+    main_assert!(matches!(modal.continuation, MessageDialogContinuation::None));
 
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    assert!(app.message_dialogs.is_empty());
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.selected_index()),
-        None
-    );
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert_eq!(app.startup_player_dialog.as_ref().and_then(|dialog| dialog.selected_index()) => None);
 }
 
 #[test]
@@ -2066,27 +1778,21 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
 
-    assert!(
-        app.startup_player_properties_dialog.is_none(),
-        "the creation form closes before the screen-owned error dialog"
-    );
-    assert!(app.startup_player_files.is_empty());
-    assert!(app.status_text.is_empty());
+    main_assert!(app.startup_player_properties_dialog.is_none(), "the creation form closes before the screen-owned error dialog");
+    main_assert!(app.startup_player_files.is_empty());
+    main_assert!(app.status_text.is_empty());
 
     let modal = app.message_dialogs.last().test_value();
-    assert_eq!(modal.state.caption(), "Error");
-    assert!(!modal.state.message().is_empty());
-    assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
-    assert_eq!(modal.state.icon(), MessageDialogIcon::ERROR);
-    assert_eq!(modal.state.size(), MessageDialogSize::Regular);
-    assert!(matches!(
-        modal.continuation,
-        MessageDialogContinuation::None
-    ));
+    main_assert_eq!(modal.state.caption() => "Error");
+    main_assert!(!modal.state.message().is_empty());
+    main_assert_eq!(modal.state.buttons() => MessageDialogButtons::OK);
+    main_assert_eq!(modal.state.icon() => MessageDialogIcon::ERROR);
+    main_assert_eq!(modal.state.size() => MessageDialogSize::Regular);
+    main_assert!(matches!(modal.continuation, MessageDialogContinuation::None));
 
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    assert!(app.message_dialogs.is_empty());
+    main_assert!(app.message_dialogs.is_empty());
 }
 
 #[test]
@@ -2100,13 +1806,7 @@ fn about_routes_wheel_to_credits_and_license_textwindows() {
         f64::from(scripting.y + 9),
     ));
     credits.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    assert_eq!(
-        credits
-            .startup_about_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.credit_scroll_offset(2)),
-        Some(28)
-    );
+    main_assert_eq!(credits.startup_about_dialog.as_ref().and_then(|dialog| dialog.credit_scroll_offset(2)) => Some(28));
 
     let mut licenses = new_classic_menu_app(320, 240);
     enter_about_licenses(&mut licenses);
@@ -2117,10 +1817,7 @@ fn about_routes_wheel_to_credits_and_license_textwindows() {
         f64::from(text.y + 10),
     ));
     licenses.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    assert!(licenses
-        .startup_about_dialog
-        .as_ref()
-        .is_some_and(|dialog| dialog.license_scroll_offset() > 0));
+    main_assert!(licenses.startup_about_dialog.as_ref().is_some_and(|dialog| dialog.license_scroll_offset() > 0));
 }
 
 #[test]
@@ -2140,25 +1837,24 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F5, ElementState::Released);
 
-    let shortcut_model = clonk_frontend::startup_plrsel::PlrSelPlayer {
-        name: "Shortcut Player".to_string(),
-        activated: false,
-        big_icon: None,
-        portrait: None,
-        color_dw: 0xff,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        comment: String::new(),
-    };
-    app.startup_player_files.push(StartupPlayerFile {
-        path: PathBuf::from("Shortcut Player.c4p"),
-        file_name: "Shortcut Player.c4p".to_string(),
-        player_file: PlayerFile::default(),
-        render_model: shortcut_model.clone(),
-    });
+    let shortcut_model = startup_fixture!(
+        player_selection_name_activated_color_dw_score_rounds_rounds_won_rounds_lost_total_playing_time:
+            "Shortcut Player".to_string(),
+            false,
+            0xff,
+            0,
+            0,
+            0,
+            0,
+            0,
+    );
+    app.startup_player_files.push(startup_fixture!(
+        startup_player:
+            PathBuf::from("Shortcut Player.c4p"),
+            "Shortcut Player.c4p".to_string(),
+            PlayerFile::default(),
+            shortcut_model.clone(),
+    ));
     app.startup_player_models.push(shortcut_model);
     app.open_player_selection_dialog();
     for (modifiers, key) in [
@@ -2170,11 +1866,11 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
         app.test_key(key, ElementState::Pressed);
         app.test_key(key, ElementState::Released);
     }
-    assert!(app.message_dialogs.is_empty());
-    assert!(app.status_text.is_empty());
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.status_text.is_empty());
     app.keyboard_modifiers = ModifiersState::SUPER;
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    assert!(matches!(
+    main_assert!(matches!(
         app.startup_player_properties_dialog
             .as_ref()
             .map(|pending| pending.controller.mode()),
@@ -2221,8 +1917,8 @@ fn startup_bootstrap_issues_are_typed_and_aggregated_in_cpp_init_order() {
     let error = assets
         .require_classic_startup_bootstrap_resources()
         .expect_err("incomplete bootstrap must fail as one aggregate");
-    assert_eq!(
-        error,
+    main_assert_eq!(
+        error =>
         ClassicParityBoundary::StartupBootstrapResources {
             issues: vec![
                 ClassicStartupBootstrapIssue::missing("StartupScenSelBG.png"),
@@ -2274,7 +1970,7 @@ fn startup_bootstrap_precedes_recursive_startup_children() {
                 "StartupPlrCtrlType.png",
             )],
         );
-        assert!(frame.iter().all(|byte| *byte == 0xc7));
+        main_assert!(frame.iter().all(|byte| *byte == 0xc7));
         Arc::get_mut(&mut app.assets)
             .test_value()
             .startup_dialog_images
@@ -2317,16 +2013,13 @@ fn startup_status_boundary_precedes_supported_view_pixels() {
                 view: boundary_view,
                 status: boundary_status,
             }) => {
-                assert_eq!(*boundary_view, view);
-                assert_eq!(boundary_status, &status);
+                main_assert_eq!(*boundary_view => view);
+                main_assert_eq!(boundary_status => &status);
             }
             other => panic!("unexpected startup status boundary: {other:?}"),
         }
-        assert_eq!(app.status_text, status, "diagnostic state is retained");
-        assert!(
-            frame.iter().all(|byte| *byte == 0x5a),
-            "{view:?} must fail before copying newly rendered pixels"
-        );
+        main_assert_eq!(app.status_text => status, "diagnostic state is retained");
+        main_assert!(frame.iter().all(|byte| *byte == 0x5a), "{view:?} must fail before copying newly rendered pixels");
     }
 }
 
@@ -2345,8 +2038,8 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
     teams.allow_team_switch = false;
     app.engine.set_team_configuration(teams);
     let conditions = app.main_menu_conditions();
-    assert!(!conditions.team_switch_allowed);
-    assert!(
+    main_assert!(!conditions.team_switch_allowed);
+    main_assert!(
         !IngameMenuState::main_menu(&conditions, &IngameMenuLabels::default())
             .expect("main menu")
             .items()
@@ -2356,7 +2049,7 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
 
     teams.allow_team_switch = true;
     app.engine.set_team_configuration(teams);
-    assert!(app.main_menu_conditions().team_switch_allowed);
+    main_assert!(app.main_menu_conditions().team_switch_allowed);
 
     app.engine
         .set_player_status(owner, PlayerStatus::TeamSelection)
@@ -2364,11 +2057,8 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
     app.apply_ingame_menu_action(MenuAction::ActivateTeamSelection)
         .test_value();
     let initial = app.ingame_menu.get(owner).test_value();
-    assert_eq!(initial.close_action(), Some(&MenuAction::ActivateMain));
-    assert!(initial
-        .items()
-        .iter()
-        .all(|item| matches!(&item.action, MenuAction::SelectTeam(_))));
+    main_assert_eq!(initial.close_action() => Some(&MenuAction::ActivateMain));
+    main_assert!(initial.items().iter().all(|item| matches!(&item.action, MenuAction::SelectTeam(_))));
     app.ingame_menu.clear();
     app.engine
         .set_player_status(owner, PlayerStatus::Active)
@@ -2377,14 +2067,8 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
     app.apply_ingame_menu_action(MenuAction::ActivateTeamSelection)
         .test_value();
     let menu = app.ingame_menu.get_mut(owner).test_value();
-    assert_eq!(menu.close_action(), Some(&MenuAction::ActivateMain));
-    assert_eq!(
-        menu.items()
-            .iter()
-            .map(|item| item.action.clone())
-            .collect::<Vec<_>>(),
-        [MenuAction::SwitchTeam(1), MenuAction::SwitchTeam(2)]
-    );
+    main_assert_eq!(menu.close_action() => Some(&MenuAction::ActivateMain));
+    main_assert_eq!(menu.items().iter().map(|item| item.action.clone()).collect::<Vec<_>>() => [MenuAction::SwitchTeam(1), MenuAction::SwitchTeam(2)]);
     menu.set_selection(1);
     let outcome = menu
         .handle_command(ControlCommand::MenuEnter, CommandKind::Press)
@@ -2394,9 +2078,9 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
         .test_value();
 
     let player = app.engine.test_player(owner);
-    assert_eq!(player.status(), PlayerStatus::Active);
-    assert_eq!(player.team(), Some(2));
-    assert!(app.ingame_menu.get(owner).is_none());
+    main_assert_eq!(player.status() => PlayerStatus::Active);
+    main_assert_eq!(player.team() => Some(2));
+    main_assert!(app.ingame_menu.get(owner).is_none());
 }
 
 #[test]
@@ -2407,18 +2091,15 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
     let main =
         IngameMenuState::main_menu(&app.main_menu_conditions(), &IngameMenuLabels::default())
             .test_value();
-    assert!(!main
-        .items()
-        .iter()
-        .any(|item| item.action == MenuAction::Abort));
+    main_assert!(!main.items().iter().any(|item| item.action == MenuAction::Abort));
     let display =
         IngameMenuState::display_menu(&app.display_flags, 0, &IngameMenuLabels::default());
-    assert_eq!(
+    main_assert_eq!(
         display
             .items()
             .iter()
             .map(|item| item.caption.as_str())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         [
             "Player names",
             "Clonk names",
@@ -2432,16 +2113,8 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
     let main =
         IngameMenuState::main_menu(&app.main_menu_conditions(), &IngameMenuLabels::default())
             .test_value();
-    assert!(main
-        .items()
-        .iter()
-        .any(|item| item.action == MenuAction::Abort));
-    assert_eq!(
-        IngameMenuState::display_menu(&app.display_flags, 0, &IngameMenuLabels::default())
-            .items()
-            .len(),
-        9
-    );
+    main_assert!(main.items().iter().any(|item| item.action == MenuAction::Abort));
+    main_assert_eq!(IngameMenuState::display_menu(&app.display_flags, 0, &IngameMenuLabels::default()).items().len() => 9);
 }
 
 #[test]
@@ -2468,20 +2141,14 @@ fn crew_name_label_respects_display_flags() {
         app.crew_name_overlays(&[ViewportInput::new(viewer, focus.position, 1.0, focus)])
     };
 
-    assert_eq!(
-        labels(&app)
-            .iter()
-            .map(|label| label.text.as_str())
-            .collect::<Vec<_>>(),
-        ["Remote Clonk (Remote Player)"]
-    );
+    main_assert_eq!(labels(&app).iter().map(|label| label.text.as_str()).collect::<Vec<_>>() => ["Remote Clonk (Remote Player)"]);
     app.display_flags.player_names = false;
-    assert_eq!(labels(&app)[0].text, "Remote Clonk");
+    main_assert_eq!(labels(&app)[0].text => "Remote Clonk");
     app.display_flags.player_names = true;
     app.display_flags.clonk_names = false;
-    assert_eq!(labels(&app)[0].text, "Remote Player");
+    main_assert_eq!(labels(&app)[0].text => "Remote Player");
     app.display_flags.player_names = false;
-    assert!(labels(&app).is_empty());
+    main_assert!(labels(&app).is_empty());
 }
 
 fn loader_origin_fixture_scenario(
@@ -2536,12 +2203,9 @@ fn extra_definition_names_follow_definition_path_and_local_folder_vector_order()
         &scenario,
     )
     .test_value();
-    assert_eq!(
-        names,
-        ["Objects.c4d", "Objects.c4d", "Outer.c4f", "Inner.c4f"]
-    );
-    assert_eq!(
-        extra_definition_filename(r"Packs\Windows.c4d"),
+    main_assert_eq!(names => ["Objects.c4d", "Objects.c4d", "Outer.c4f", "Inner.c4f"]);
+    main_assert_eq!(
+        extra_definition_filename(r"Packs\Windows.c4d") =>
         Some(if cfg!(windows) {
             "Windows.c4d"
         } else {
@@ -2560,18 +2224,12 @@ fn loader_origin_registers_existing_parent_when_final_scenario_is_missing() {
     let (scenario, scenario_group, head) =
         loader_origin_fixture_scenario(&scenario_path, "Parent.c4f/Missing.c4s");
 
-    let registrations = classic_loader_registrations(
-        &scenario,
-        &scenario_group,
-        &head,
-        &loader_fixture_definition_load(),
-        &paths,
-    )
-    .test_value();
-    assert_eq!(registrations.len(), 2);
-    assert_eq!(registrations[0].priority, 200);
-    assert_eq!(registrations[1].priority, 100);
-    assert_eq!(registrations[1].group.root(), origin_parent.as_path());
+    let registrations =
+        startup_fixture!(loader_registrations: scenario, scenario_group, head, paths);
+    main_assert_eq!(registrations.len() => 2);
+    main_assert_eq!(registrations[0].priority => 200);
+    main_assert_eq!(registrations[1].priority => 100);
+    main_assert_eq!(registrations[1].group.root() => origin_parent.as_path());
 }
 
 /// clonk-org/clonk-rs#186. C++ has one `ExePath`, so an `Origin` is read back
@@ -2589,15 +2247,9 @@ fn loader_origin_relative_to_the_install_root_registers_the_same_parent() {
     let (scenario, scenario_group, head) =
         loader_origin_fixture_scenario(&scenario_path, "content/Parent.c4f/Original.c4s");
 
-    let registrations = classic_loader_registrations(
-        &scenario,
-        &scenario_group,
-        &head,
-        &loader_fixture_definition_load(),
-        &paths,
-    )
-    .test_value();
-    assert!(
+    let registrations =
+        startup_fixture!(loader_registrations: scenario, scenario_group, head, paths);
+    main_assert!(
         registrations
             .iter()
             .any(|registration| registration.group.root() == origin_parent.as_path()),
@@ -2611,18 +2263,12 @@ fn loader_origin_explicit_empty_value_is_a_valid_no_op() {
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let scenario_path = content.join("Actual.c4s");
     let (scenario, scenario_group, head) = loader_origin_fixture_scenario(&scenario_path, "");
-    assert_eq!(head.origin(), Some("empty"));
+    main_assert_eq!(head.origin() => Some("empty"));
 
-    let registrations = classic_loader_registrations(
-        &scenario,
-        &scenario_group,
-        &head,
-        &loader_fixture_definition_load(),
-        &paths,
-    )
-    .test_value();
-    assert_eq!(registrations.len(), 1);
-    assert_eq!(registrations[0].group.root(), scenario_path.as_path());
+    let registrations =
+        startup_fixture!(loader_registrations: scenario, scenario_group, head, paths);
+    main_assert_eq!(registrations.len() => 1);
+    main_assert_eq!(registrations[0].group.root() => scenario_path.as_path());
 }
 
 #[test]
@@ -2634,20 +2280,14 @@ fn loader_origin_identical_existing_scenario_does_not_duplicate_parent() {
     let (scenario, scenario_group, head) =
         loader_origin_fixture_scenario(&scenario_path, "Parent.c4f/Actual.c4s");
 
-    let registrations = classic_loader_registrations(
-        &scenario,
-        &scenario_group,
-        &head,
-        &loader_fixture_definition_load(),
-        &paths,
-    )
-    .test_value();
-    assert_eq!(registrations.len(), 2);
-    assert_eq!(
+    let registrations =
+        startup_fixture!(loader_registrations: scenario, scenario_group, head, paths);
+    main_assert_eq!(registrations.len() => 2);
+    main_assert_eq!(
         registrations
             .iter()
             .filter(|registration| registration.group.root() == parent.as_path())
-            .count(),
+            .count() =>
         1,
         "ItemIdentical suppresses the duplicate Origin parent"
     );
@@ -2665,23 +2305,14 @@ fn loader_origin_opens_packed_parent_chain_outer_to_inner() {
     let (scenario, scenario_group, head) =
         loader_origin_fixture_scenario(&scenario_path, "Outer.c4f/inner.c4f/Missing.c4s");
 
-    let registrations = classic_loader_registrations(
-        &scenario,
-        &scenario_group,
-        &head,
-        &loader_fixture_definition_load(),
-        &paths,
-    )
-    .test_value();
-    assert_eq!(registrations.len(), 3);
-    assert_eq!(registrations[1].group.root(), outer_path.as_path());
-    assert_eq!(registrations[1].priority, 100);
+    let registrations =
+        startup_fixture!(loader_registrations: scenario, scenario_group, head, paths);
+    main_assert_eq!(registrations.len() => 3);
+    main_assert_eq!(registrations[1].group.root() => outer_path.as_path());
+    main_assert_eq!(registrations[1].priority => 100);
     // Packed C4Group traversal propagates the selected entry's stored spelling.
-    assert_eq!(
-        registrations[2].group.root(),
-        outer_path.join("INNER.C4F").as_path()
-    );
-    assert_eq!(registrations[2].priority, 101);
+    main_assert_eq!(registrations[2].group.root() => outer_path.join("INNER.C4F").as_path());
+    main_assert_eq!(registrations[2].priority => 101);
 }
 
 /// `C4GroupSet::RegisterParentFolders` registers each parent as it opens it
@@ -2708,8 +2339,8 @@ fn unresolvable_packed_loader_origin_keeps_the_parents_already_registered() {
     let mut registration_order = 0;
 
     register_loader_origin_parents(&origin, &mut registrations, &mut registration_order);
-    assert_eq!(registrations.len(), 1, "outer registration happens first");
-    assert_eq!(registrations[0].group.root(), outer_path.as_path());
+    main_assert_eq!(registrations.len() => 1, "outer registration happens first");
+    main_assert_eq!(registrations[0].group.root() => outer_path.as_path());
 }
 
 /// `C4Game::OpenScenario` discards the `RegisterParentFolders` result
@@ -2723,16 +2354,10 @@ fn loader_origin_naming_an_absent_parent_still_registers_the_scenario() {
     let (scenario, scenario_group, head) =
         loader_origin_fixture_scenario(&scenario_path, "Gone.c4f/Original.c4s");
 
-    let registrations = classic_loader_registrations(
-        &scenario,
-        &scenario_group,
-        &head,
-        &loader_fixture_definition_load(),
-        &paths,
-    )
-    .test_value();
-    assert_eq!(registrations.len(), 1);
-    assert_eq!(registrations[0].group.root(), scenario_path.as_path());
+    let registrations =
+        startup_fixture!(loader_registrations: scenario, scenario_group, head, paths);
+    main_assert_eq!(registrations.len() => 1);
+    main_assert_eq!(registrations[0].group.root() => scenario_path.as_path());
 }
 
 #[test]
@@ -2753,15 +2378,15 @@ fn selected_loader_title_cross_loads_from_origin_and_local_candidate_wins() {
     fs::write(packed_title.join("TitleUS.txt"), "US:Pack title\n").test_value();
 
     let packed = load_classic_scenario_loader_head(&scenario_group, &paths).test_value();
-    assert_eq!(packed.scenario_title(), "Pack title");
+    main_assert_eq!(packed.scenario_title() => "Pack title");
     let mut staged = FrontendScenario::fallback();
     staged.title = "Catalog fallback".to_string();
     retain_selected_scenario_title(&mut staged, Some(packed.scenario_title()));
-    assert_eq!(staged.title, "Pack title");
+    main_assert_eq!(staged.title => "Pack title");
 
     fs::write(scenario_path.join("TitleUS.txt"), "US:Local title\n").test_value();
     let local = load_classic_scenario_loader_head(&scenario_group, &paths).test_value();
-    assert_eq!(local.scenario_title(), "Local title");
+    main_assert_eq!(local.scenario_title() => "Local title");
 }
 
 #[test]
@@ -2786,7 +2411,7 @@ fn frontend_discovery_cross_loads_pack_title_and_local_candidate_wins() {
         .iter()
         .find(|entry| entry.identifier.ends_with("Actual.c4s"))
         .test_value();
-    assert_eq!(packed.title, "Pack catalog title");
+    main_assert_eq!(packed.title => "Pack catalog title");
 
     fs::write(
         scenario_path.join("TitleUS.txt"),
@@ -2798,7 +2423,7 @@ fn frontend_discovery_cross_loads_pack_title_and_local_candidate_wins() {
         .iter()
         .find(|entry| entry.identifier.ends_with("Actual.c4s"))
         .test_value();
-    assert_eq!(local.title, "Local catalog title");
+    main_assert_eq!(local.title => "Local catalog title");
 }
 
 #[test]
@@ -2822,7 +2447,7 @@ fn loader_title_uses_configured_language_ex_without_ui_fallbacks() {
     let scenario_group = Group::open(&scenario_path).test_value();
 
     let head = load_classic_scenario_loader_head(&scenario_group, &paths).test_value();
-    assert_eq!(head.scenario_title(), "Head fallback");
+    main_assert_eq!(head.scenario_title() => "Head fallback");
 }
 
 #[test]
@@ -2851,13 +2476,13 @@ fn frontend_and_loader_titles_share_fresh_primary_language_sequence() {
         .test_value()
         .title;
 
-    assert_eq!(
+    main_assert_eq!(
         (
             startup_language_sequence(Some(&paths)),
             classic_loader_language_sequence(&paths).expect("loader language sequence"),
             frontend_title,
             loader_title,
-        ),
+        ) =>
         (
             vec!["DE".to_string()],
             vec!["DE".to_string()],
@@ -2897,13 +2522,13 @@ fn frontend_and_loader_titles_share_persisted_language_ex_sequence() {
         .test_value()
         .title;
 
-    assert_eq!(
+    main_assert_eq!(
         (
             startup_language_sequence(Some(&paths)),
             classic_loader_language_sequence(&paths).expect("loader language sequence"),
             frontend_title,
             loader_title,
-        ),
+        ) =>
         (
             vec!["DE".to_string(), "US".to_string()],
             vec!["DE".to_string(), "US".to_string()],
@@ -2920,10 +2545,7 @@ fn loader_language_ex_keeps_raw_two_byte_segments_and_duplicates() {
     fs::create_dir_all(paths.config_dir()).test_value();
     fs::write(paths.config_file(), "LanguageEx=DE, DE,DE\n").test_value();
 
-    assert_eq!(
-        classic_loader_language_sequence(&paths).expect("raw LanguageEx sequence"),
-        vec!["DE".to_string(), " D".to_string(), "DE".to_string()]
-    );
+    main_assert_eq!(classic_loader_language_sequence(&paths).expect("raw LanguageEx sequence") => vec!["DE".to_string(), " D".to_string(), "DE".to_string()]);
 }
 
 #[test]
@@ -2934,15 +2556,15 @@ fn loader_config_strings_fail_beyond_cpp_byte_capacity() {
         config.set(key, oversized.clone());
         let error = classic_loader_bounded_config_value(&config, key)
             .expect_err("over-capacity loader string must fail closed");
-        assert!(error.to_string().contains(key));
-        assert!(error.to_string().contains("1024-byte"));
+        main_assert!(error.to_string().contains(key));
+        main_assert!(error.to_string().contains("1024-byte"));
     }
 
     let mut config = Config::new();
     config.set("LanguageEx", "US\0,DE");
     let error = classic_loader_bounded_config_value(&config, "LanguageEx")
         .expect_err("embedded NUL must not expose a suffix C++ truncates");
-    assert!(error.to_string().contains("embedded NUL"));
+    main_assert!(error.to_string().contains("embedded NUL"));
 }
 
 #[test]
@@ -2954,7 +2576,7 @@ fn raw_loader_config_nul_is_rejected_before_field_parsing() {
 
     let error = load_classic_loader_config(&paths)
         .expect_err("raw config suffix hidden from C++ must not be parsed");
-    assert!(error.to_string().contains("embedded NUL"));
+    main_assert!(error.to_string().contains("embedded NUL"));
 }
 
 #[test]
@@ -3019,9 +2641,9 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
     }
 
     let startup = startup_loader_registrations(&paths).test_value();
-    assert_eq!(startup.len(), 1);
-    assert_eq!(startup[0].priority, 2);
-    assert_eq!(startup[0].group.root(), extra_path.as_path());
+    main_assert_eq!(startup.len() => 1);
+    main_assert_eq!(startup[0].priority => 2);
+    main_assert_eq!(startup[0].group.root() => extra_path.as_path());
 
     let scenario_path = content.join("Actual.c4s");
     let (scenario, scenario_group, head) = loader_origin_fixture_scenario(&scenario_path, "");
@@ -3038,11 +2660,11 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
     let registrations =
         classic_loader_registrations(&scenario, &scenario_group, &head, &definitions, &paths)
             .test_value();
-    assert_eq!(
+    main_assert_eq!(
         registrations
             .iter()
             .map(|registration| (registration.priority, registration.group.root()))
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         [
             (200, scenario_path.as_path()),
             (2, extra_path.as_path()),
@@ -3050,16 +2672,14 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
             (3, second.as_path()),
         ]
     );
-    assert!(registrations
-        .iter()
-        .all(|registration| registration.group.root() != unused.as_path()));
+    main_assert!(registrations.iter().all(|registration| registration.group.root() != unused.as_path()));
 
     let loader_tier = highest_loader_tier(&registrations).test_value();
-    assert_eq!(
+    main_assert_eq!(
         loader_tier
             .iter()
             .map(|group| group.root())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         [second.as_path(), objects.as_path()],
         "priority-3 children pool later-first and exclude the priority-2 Extra root"
     );
@@ -3068,28 +2688,28 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
     let base_graphics = paths.planet_dir().join("Graphics.c4g");
     fs::create_dir(&base_graphics).test_value();
     let base = Group::open(&base_graphics).test_value();
-    assert_eq!(
+    main_assert_eq!(
         load_named_graphics_image("ChildWins", &graphics, &base)
             .expect("activated child graphic")
-            .pixels(),
+            .pixels() =>
         [0x44, 0x55, 0x66, 0xff],
         "the activated child sits above the Extra root"
     );
-    assert_eq!(
+    main_assert_eq!(
         load_named_graphics_image("ScenarioWins", &graphics, &base)
             .expect("scenario graphic")
-            .pixels(),
+            .pixels() =>
         [0xdd, 0xee, 0xff, 0xff],
         "scenario graphics remain above activated Extra children"
     );
-    assert_eq!(
+    main_assert_eq!(
         load_named_graphics_image("ChildTie", &graphics, &base)
             .expect("equal-priority Extra child graphic")
-            .pixels(),
+            .pixels() =>
         [0x12, 0x34, 0x56, 0xff],
         "RegisterMainGroups reverses the child tie a second time"
     );
-    assert!(select_named_graphics_image_source("UnusedWins", &graphics, &base).is_err());
+    main_assert!(select_named_graphics_image_source("UnusedWins", &graphics, &base).is_err());
 
     let first_definition_root = content.join("Objects.c4d");
     let second_definition_root = content.join("Second.c4d");
@@ -3103,11 +2723,11 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
     let resolved_graphics = resolver
         .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_roots)
         .test_value();
-    assert_eq!(
+    main_assert_eq!(
         resolved_graphics
             .iter()
             .map(|group| group.root())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         [
             scenario_graphics.as_path(),
             objects_graphics.as_path(),
@@ -3120,11 +2740,11 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
     let materials = resolver
         .resolve_material_groups(&scenario_group)
         .test_value();
-    assert_eq!(
+    main_assert_eq!(
         materials
             .iter()
             .map(|group| group.root())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         [extra_materials.as_path(), global_materials.as_path()],
         "Extra child materials register after C4GameParameters snapshots the material chain"
     );
@@ -3175,10 +2795,7 @@ fn classic_loader_setup_accepts_an_activated_cosmetic_extra_child() {
         &assets,
     )
     .test_value();
-    assert_eq!(
-        setup.screen.selection().selected_filename(),
-        "LoaderExtra.png"
-    );
+    main_assert_eq!(setup.screen.selection().selected_filename() => "LoaderExtra.png");
 }
 
 #[test]
@@ -3189,9 +2806,9 @@ fn distinct_global_extra_hits_take_ambiguity_boundary() {
     fs::create_dir(content.join("Extra.c4g")).test_value();
 
     let error = startup_loader_registrations(&paths).err().test_value();
-    assert!(error.to_string().contains("mapping is ambiguous"));
-    assert!(error.to_string().contains("planet"));
-    assert!(error.to_string().contains("content"));
+    main_assert!(error.to_string().contains("mapping is ambiguous"));
+    main_assert!(error.to_string().contains("planet"));
+    main_assert!(error.to_string().contains("content"));
 }
 
 #[test]
@@ -3206,12 +2823,8 @@ fn content_only_extra_cannot_enter_mapped_global_loader_set() {
     );
 
     let error = startup_loader_registrations(&paths).err().test_value();
-    assert!(error
-        .to_string()
-        .contains("outside the mapped global-data namespace"));
-    assert!(error
-        .to_string()
-        .contains(&extra_path.display().to_string()));
+    main_assert!(error.to_string().contains("outside the mapped global-data namespace"));
+    main_assert!(error.to_string().contains(&extra_path.display().to_string()));
 }
 
 #[test]
@@ -3225,18 +2838,18 @@ fn invalid_present_loader_graphics_booleans_take_typed_boundary() {
         config.save(paths.config_file()).test_value();
         let error = validate_classic_loader_graphics_config(&paths)
             .expect_err("invalid-present legacy boolean must not default silently");
-        assert!(error.to_string().contains(key));
-        assert!(error.to_string().contains("expected 1, 0, true, or false"));
+        main_assert!(error.to_string().contains(key));
+        main_assert!(error.to_string().contains("expected 1, 0, true, or false"));
     }
 }
 
 #[test]
 fn classic_loader_scale_numbers_require_full_decimal_i32() {
-    assert_eq!(parse_classic_loader_i32(" 2147483647 "), Some(i32::MAX));
-    assert_eq!(parse_classic_loader_i32("-1"), Some(-1));
-    assert_eq!(parse_classic_loader_i32("0x808080"), None);
-    assert_eq!(parse_classic_loader_i32("2147483648"), None);
-    assert_eq!(parse_classic_loader_i32("123tail"), None);
+    main_assert_eq!(parse_classic_loader_i32(" 2147483647 ") => Some(i32::MAX));
+    main_assert_eq!(parse_classic_loader_i32("-1") => Some(-1));
+    main_assert_eq!(parse_classic_loader_i32("0x808080") => None);
+    main_assert_eq!(parse_classic_loader_i32("2147483648") => None);
+    main_assert_eq!(parse_classic_loader_i32("123tail") => None);
 }
 
 #[test]
@@ -3247,7 +2860,7 @@ fn assetless_loading_mode_fails_instead_of_drawing_generic_loader() {
     let error = app
         .render(&mut frame)
         .expect_err("generic loader approximation must not render");
-    assert!(matches!(
+    main_assert!(matches!(
         error.downcast_ref::<ClassicParityBoundary>(),
         Some(ClassicParityBoundary::LoaderScreen { context, detail })
             if *context == "startup loading"
@@ -3267,12 +2880,7 @@ fn abandoning_the_network_lobby_reinitializes_the_startup_loader_screen() {
     let install = tempdir();
     install_global_gui_and_loader_test_root(install.path());
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_CONTENT_DIR", None),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = isolated_test_app_paths(install.path(), user_data.path());
     paths.ensure_user_dirs().test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let installed = app
@@ -3285,14 +2893,14 @@ fn abandoning_the_network_lobby_reinitializes_the_startup_loader_screen() {
     app.replace_startup_view(StartupView::NetworkLobby);
     app.show_main_menu();
 
-    assert_eq!(
+    main_assert_eq!(
         app.loader_screen
             .as_ref()
-            .map(|loader| loader.selection().selected_filename().to_string()),
+            .map(|loader| loader.selection().selected_filename().to_string()) =>
         Some(installed),
         "returning to the startup menu re-enters PreInit, which reinstalls the loader"
     );
-    assert!(app.loader_error.is_none());
+    main_assert!(app.loader_error.is_none());
 
     // The join that follows draws behind that retained loader instead of
     // taking the loader boundary and killing the process.
@@ -3309,10 +2917,7 @@ fn abandoning_the_network_lobby_reinitializes_the_startup_loader_screen() {
 fn startup_main_uses_classic_loader_wildcard_when_goldmine_is_absent() {
     let install = tempdir();
     install_global_gui_test_root(install.path(), None);
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
+    let repository = test_repository_root();
     // The pack ships a loader, just not the requested one.
     for name in [
         "LoaderWatercave1.png",
@@ -3327,45 +2932,24 @@ fn startup_main_uses_classic_loader_wildcard_when_goldmine_is_absent() {
         .unwrap_or_else(|error| panic!("copy fixture {name}: {error}"));
     }
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_CONTENT_DIR", None),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = isolated_test_app_paths(install.path(), user_data.path());
     paths.ensure_user_dirs().test_value();
     let app = new_menu_app_with_paths(640, 480, &paths);
 
-    assert!(
-        app.assets.menu_background.is_some(),
-        "the wildcard fallback must supply the startup background"
-    );
-    assert!(
-        app.assets.require_classic_startup_main_resources().is_ok(),
-        "preflight must not demand the named loader once a wildcard match exists"
-    );
-    assert_eq!(
-        app.loader_screen
-            .as_ref()
-            .map(|loader| loader.selection().selected_filename().to_string()),
-        Some("LoaderWatercave1.png".to_string())
-    );
+    main_assert!(app.assets.menu_background.is_some(), "the wildcard fallback must supply the startup background");
+    main_assert!(app.assets.require_classic_startup_main_resources().is_ok(), "preflight must not demand the named loader once a wildcard match exists");
+    main_assert_eq!(app.loader_screen.as_ref().map(|loader| loader.selection().selected_filename().to_string()) => Some("LoaderWatercave1.png".to_string()));
 
     // A pack with no eligible loader at all still fails the preflight, so
     // the boundary is the absent wildcard rather than the absent name.
     drop(_guard);
     let bare = tempdir();
     install_global_gui_test_root(bare.path(), None);
-    let _bare_guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(bare.path())),
-        ("LC_CONTENT_DIR", None),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let bare_paths = test_app_paths();
+    let (_bare_guard, bare_paths) = isolated_test_app_paths(bare.path(), user_data.path());
     bare_paths.ensure_user_dirs().test_value();
     let bare_assets = FrontendAssets::load(Some(&bare_paths));
-    assert!(bare_assets.menu_background.is_none());
-    assert!(matches!(
+    main_assert!(bare_assets.menu_background.is_none());
+    main_assert!(matches!(
         bare_assets.require_classic_startup_main_resources(),
         Err(ClassicParityBoundary::StartupMainResources { missing })
             if missing.contains(&"LoaderGoldmine1.png")
@@ -3380,15 +2964,10 @@ fn failed_startup_network_restart_reinitializes_the_startup_loader_screen() {
     let install = tempdir();
     install_global_gui_and_loader_test_root(install.path());
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_CONTENT_DIR", None),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = isolated_test_app_paths(install.path(), user_data.path());
     paths.ensure_user_dirs().test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
-    assert!(app.loader_screen.is_some());
+    main_assert!(app.loader_screen.is_some());
 
     app.startup_restart_diagnostics.mark_quit_with_error();
     app.startup_restart_diagnostics
@@ -3396,14 +2975,14 @@ fn failed_startup_network_restart_reinitializes_the_startup_loader_screen() {
     app.finish_startup_network_restart(StartupNetworkPurpose::Join)
         .test_value();
 
-    assert_eq!(
+    main_assert_eq!(
         app.loader_screen
             .as_ref()
-            .map(|loader| loader.selection().selected_filename().to_string()),
+            .map(|loader| loader.selection().selected_filename().to_string()) =>
         Some("LoaderGoldmine1.png".to_string()),
         "PreInit reinstalls the startup background loader for the next game"
     );
-    assert!(app.loader_error.is_none());
+    main_assert!(app.loader_error.is_none());
 }
 
 #[test]
@@ -3415,29 +2994,24 @@ fn failed_local_scenario_load_reinitializes_the_startup_loader_screen() {
     let install = tempdir();
     install_global_gui_and_loader_test_root(install.path());
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_CONTENT_DIR", None),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = isolated_test_app_paths(install.path(), user_data.path());
     paths.ensure_user_dirs().test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
-    assert!(app.loader_screen.is_some());
+    main_assert!(app.loader_screen.is_some());
     app.mode = AppMode::Loading;
 
     app.finish_scenario_loading_failure("controlled local load failure".to_string(), false)
         .test_value();
 
-    assert_eq!(app.mode, AppMode::Menu);
-    assert_eq!(
+    main_assert_eq!(app.mode => AppMode::Menu);
+    main_assert_eq!(
         app.loader_screen
             .as_ref()
-            .map(|loader| loader.selection().selected_filename().to_string()),
+            .map(|loader| loader.selection().selected_filename().to_string()) =>
         Some("LoaderGoldmine1.png".to_string()),
         "PreInit reinstalls the startup background loader for the next game"
     );
-    assert!(app.loader_error.is_none());
+    main_assert!(app.loader_error.is_none());
 }
 
 #[test]
@@ -3456,10 +3030,7 @@ fn a_command_line_scenario_that_fails_to_load_ends_the_process() {
     app.finish_scenario_loading_failure("controlled command-line load failure".to_string(), false)
         .test_value();
 
-    assert!(
-        app.take_exit_request(),
-        "there is no startup generation to return to"
-    );
+    main_assert!(app.take_exit_request(), "there is no startup generation to return to");
 
     // A console `/open` failure is the other branch: `/open` sets
     // `UseStartupDialog` back (C4Application.cpp:598-612), so the engine
@@ -3474,22 +3045,19 @@ fn a_command_line_scenario_that_fails_to_load_ends_the_process() {
         .finish_scenario_loading_failure("controlled /open load failure".to_string(), false)
         .test_value();
 
-    assert_eq!(opened.mode, AppMode::Menu);
-    assert!(
-        !opened.take_exit_request(),
-        "a console-opened failure waits for the next command instead"
-    );
+    main_assert_eq!(opened.mode => AppMode::Menu);
+    main_assert!(!opened.take_exit_request(), "a console-opened failure waits for the next command instead");
 }
 
 #[test]
 fn pathless_startup_skips_boot_worker_without_bypassing_loader_failure() {
     let mut app = test_game_app(320, 200, AudioOptions::default(), None).test_value();
     install_classic_test_assets(&mut app);
-    assert!(app.boot_loading.is_none(), "pathless app skips boot worker");
+    main_assert!(app.boot_loading.is_none(), "pathless app skips boot worker");
     app.test_update();
-    assert_eq!(app.mode, AppMode::Loading);
+    main_assert_eq!(app.mode => AppMode::Loading);
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    assert!(app.render(&mut frame).is_err());
+    main_assert!(app.render(&mut frame).is_err());
 }
 
 #[test]
@@ -3508,14 +3076,11 @@ fn loader_selector_repeats_explicit_extension_passes_and_cpp_wildcards() {
         }
     })
     .test_value();
-    assert_eq!(selected.entry.relative_path, PathBuf::from("LoaderOne.png"));
-    assert_eq!(ranges, [1, 2, 3, 7]);
-    assert!(classic_wildcard_match(b"*.*", b"extensionless"));
-    assert_eq!(
-        loader_patterns("LoaderTrailing.").expect("patterns").png,
-        "LoaderTrailing..png"
-    );
-    assert!(loader_patterns("Loader\0Hidden").is_err());
+    main_assert_eq!(selected.entry.relative_path => PathBuf::from("LoaderOne.png"));
+    main_assert_eq!(ranges => [1, 2, 3, 7]);
+    main_assert!(classic_wildcard_match(b"*.*", b"extensionless"));
+    main_assert_eq!(loader_patterns("LoaderTrailing.").expect("patterns").png => "LoaderTrailing..png");
+    main_assert!(loader_patterns("Loader\0Hidden").is_err());
 }
 
 #[test]
@@ -3531,7 +3096,7 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
         use std::os::unix::ffi::OsStrExt;
 
         let opaque_path = PathBuf::from(OsStr::from_bytes(b"Opaque\xfe.bin"));
-        assert!(opaque_path.to_str().is_none());
+        main_assert!(opaque_path.to_str().is_none());
         let entry = |relative_path: PathBuf, name_bytes: &[u8]| GroupEntry {
             relative_path,
             name_bytes: name_bytes.to_vec(),
@@ -3547,10 +3112,10 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
             entry(PathBuf::from("LoaderGood.png"), b"LoaderGood.png"),
             entry(PathBuf::from("Player.png"), b"Player.png"),
         ];
-        assert!(loader_entries_have_content(&raw_entries));
+        main_assert!(loader_entries_have_content(&raw_entries));
         let graphic =
             find_classic_named_entry_from_entries(raw_entries, b"player.PNG").test_value();
-        assert_eq!(graphic.name_bytes, b"Player.png");
+        main_assert_eq!(graphic.name_bytes => b"Player.png");
 
         #[cfg(not(target_os = "macos"))]
         {
@@ -3565,8 +3130,7 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
             fs::write(raw_directory.join("Player.png"), &image_bytes).test_value();
             let directory_group = Group::open(&raw_directory).test_value();
 
-            assert!(loader_group_has_content(&directory_group)
-                .expect("opaque sibling does not abort loader classification"));
+            main_assert!(loader_group_has_content(&directory_group).expect("opaque sibling does not abort loader classification"));
             let selected = select_loader_source(
                 std::slice::from_ref(&directory_group),
                 &directory_group,
@@ -3574,11 +3138,11 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
                 |_| 0,
             )
             .test_value();
-            assert_eq!(selected.filename_bytes(), b"LoaderGood.png");
+            main_assert_eq!(selected.filename_bytes() => b"LoaderGood.png");
             let graphic = find_classic_named_entry(&directory_group, "player.PNG")
                 .expect("opaque sibling does not abort named graphics lookup")
                 .test_value();
-            assert_eq!(graphic.name_bytes, b"Player.png");
+            main_assert_eq!(graphic.name_bytes => b"Player.png");
         }
     }
 
@@ -3601,21 +3165,16 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
     )
     .test_value();
 
-    assert!(loader_group_has_content(&group).expect("classify loader group"));
+    main_assert!(loader_group_has_content(&group).expect("classify loader group"));
     let selected = select_loader_source(std::slice::from_ref(&group), &group, "LoaderGood", |_| 0)
         .test_value();
-    assert_eq!(selected.filename_bytes(), b"LoaderGood.png");
-    assert_eq!(
-        decode_selected_loader(&selected)
-            .expect("decode selected ASCII loader")
-            .pixels(),
-        [11, 22, 33, 255]
-    );
+    main_assert_eq!(selected.filename_bytes() => b"LoaderGood.png");
+    main_assert_eq!(decode_selected_loader(&selected).expect("decode selected ASCII loader").pixels() => [11, 22, 33, 255]);
 
     let graphic = find_classic_named_entry(&group, "player.PNG")
         .expect("enumerate named graphics")
         .test_value();
-    assert_eq!(graphic.name_bytes, b"Player.png");
+    main_assert_eq!(graphic.name_bytes => b"Player.png");
 
     let opaque_specification = clonk_script::c4_string_from_bytes(b"Loader\xff.png");
     let selected = select_loader_source(
@@ -3625,13 +3184,8 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
         |_| 0,
     )
     .test_value();
-    assert_eq!(selected.filename_bytes(), b"Loader\xff.png");
-    assert_eq!(
-        decode_selected_loader(&selected)
-            .expect("selected opaque loader is read by exact entry identity")
-            .pixels(),
-        [11, 22, 33, 255]
-    );
+    main_assert_eq!(selected.filename_bytes() => b"Loader\xff.png");
+    main_assert_eq!(decode_selected_loader(&selected).expect("selected opaque loader is read by exact entry identity").pixels() => [11, 22, 33, 255]);
 }
 
 #[test]
@@ -3645,26 +3199,14 @@ fn loader_tier_keeps_later_equal_priority_registration_first() {
         fs::write(path.join("LoaderTier.png"), b"candidate").test_value();
     }
     let registrations = vec![
-        LoaderGroupRegistration {
-            priority: 100,
-            registration_order: 0,
-            group: Group::open(&lower).expect("lower group"),
-        },
-        LoaderGroupRegistration {
-            priority: 101,
-            registration_order: 1,
-            group: Group::open(&actual).expect("actual group"),
-        },
-        LoaderGroupRegistration {
-            priority: 101,
-            registration_order: 2,
-            group: Group::open(&origin).expect("origin group"),
-        },
+        startup_fixture!(loader_group: 100, 0, Group::open(&lower).expect("lower group")),
+        startup_fixture!(loader_group: 101, 1, Group::open(&actual).expect("actual group")),
+        startup_fixture!(loader_group: 101, 2, Group::open(&origin).expect("origin group")),
     ];
     let tier = highest_loader_tier(&registrations).test_value();
-    assert_eq!(tier.len(), 2);
-    assert_eq!(tier[0].root(), origin.as_path());
-    assert_eq!(tier[1].root(), actual.as_path());
+    main_assert_eq!(tier.len() => 2);
+    main_assert_eq!(tier[0].root() => origin.as_path());
+    main_assert_eq!(tier[1].root() => actual.as_path());
 }
 
 #[test]
@@ -3674,7 +3216,7 @@ fn loader_selector_includes_child_group_names_then_decode_fails() {
     let group = Group::open(directory.path()).test_value();
     let selected = select_loader_source(std::slice::from_ref(&group), &group, "LoaderChild", |_| 0)
         .test_value();
-    assert!(decode_selected_loader(&selected).is_err());
+    main_assert!(decode_selected_loader(&selected).is_err());
 }
 
 #[test]
@@ -3688,14 +3230,8 @@ fn loader_decoder_uses_selected_filename_extension_instead_of_magic() {
     let selected =
         select_loader_source(std::slice::from_ref(&group), &group, "LoaderRenamed", |_| 0)
             .test_value();
-    assert_eq!(
-        selected.entry.relative_path,
-        PathBuf::from("LoaderRenamed.jpg")
-    );
-    assert!(
-        decode_selected_loader(&selected).is_err(),
-        "C4Surface dispatches to JPEG for a .jpg entry and rejects PNG bytes"
-    );
+    main_assert_eq!(selected.entry.relative_path => PathBuf::from("LoaderRenamed.jpg"));
+    main_assert!(decode_selected_loader(&selected).is_err(), "C4Surface dispatches to JPEG for a .jpg entry and rejects PNG bytes");
 }
 
 #[test]
@@ -3711,26 +3247,13 @@ fn selected_loader_decoder_uses_the_same_transparent_pixel_invariant() {
         .test_value();
     let selected = SelectedLoaderSource { group, entry };
 
-    assert_eq!(
-        decode_selected_loader(&selected)
-            .expect("decode loader")
-            .pixels(),
-        &[0, 0, 0, 0, 68, 85, 102, 1]
-    );
+    main_assert_eq!(decode_selected_loader(&selected).expect("decode loader").pixels() => &[0, 0, 0, 0, 68, 85, 102, 1]);
 }
 
 #[test]
 fn startup_loader_render_uses_configured_user_gamma() {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     paths.ensure_user_dirs().test_value();
     let mut config = Config::new();
     config.set_in(Some("Graphics"), "Gamma1", "0");
@@ -3738,22 +3261,17 @@ fn startup_loader_render_uses_configured_user_gamma() {
     config.set_in(Some("Graphics"), "Gamma3", "13158600");
     config.save(paths.config_file()).test_value();
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
-    assert_eq!(
-        app.loader_gamma,
-        Some(clonk_graphics::GammaRamp::from_control_points([
-            0, 0x646464, 0xc8c8c8,
-        ]))
-    );
+    main_assert_eq!(app.loader_gamma => Some(clonk_graphics::GammaRamp::from_control_points([0, 0x646464, 0xc8c8c8,])));
     let mut corrected = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut corrected);
     app.loader_gamma = Some(clonk_graphics::GammaRamp::standard());
     let mut standard = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut standard);
-    assert_ne!(corrected, standard);
+    main_assert_ne!(corrected => standard);
 
     config.set_in(Some("Graphics"), "DisableGamma", "true");
     config.save(paths.config_file()).test_value();
-    assert_eq!(load_classic_loader_gamma(Some(&paths)), None);
+    main_assert_eq!(load_classic_loader_gamma(Some(&paths)) => None);
     app.loader_gamma = None;
     let current_renderer_config = app.graphics.advanced_renderer_config();
     app.graphics
@@ -3763,24 +3281,13 @@ fn startup_loader_render_uses_configured_user_gamma() {
         });
     let mut disabled = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut disabled);
-    assert!(disabled
-        .chunks_exact(4)
-        .zip(standard.chunks_exact(4))
-        .any(|(raw, corrected)| raw[..3].contains(&0) && raw != corrected));
+    main_assert!(disabled.chunks_exact(4).zip(standard.chunks_exact(4)).any(|(raw, corrected)| raw[..3].contains(&0) && raw != corrected));
 }
 
 #[test]
 fn app_loader_keeps_progress_monotonic_and_retains_phase_status() {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
     let resources = app.loader_screen.test_ref().resources().clone();
     let (sender, receiver) = mpsc::channel();
@@ -3797,9 +3304,9 @@ fn app_loader_keeps_progress_monotonic_and_retains_phase_status() {
     reporter.send(ScenarioLoadingEvent::RefreshResources);
     app.poll_loading().test_value();
     let state = app.loader_screen.test_ref().state();
-    assert_eq!(state.progress(), 42);
-    assert_eq!(state.process(), None);
-    assert!(matches!(
+    main_assert_eq!(state.progress() => 42);
+    main_assert_eq!(state.process() => None);
+    main_assert!(matches!(
         state.log(),
         clonk_frontend::loader_screen::LoaderLog::Visible(lines)
             if lines.last().map(String::as_str)
@@ -3815,38 +3322,22 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
     let mut app = GameApp::new(
         320,
         200,
-        AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        },
+        disabled_audio_options(),
         Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Loader parity".to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with("Loader parity".to_string(), false),
     )
     .test_value();
     wait_for_menu(&mut app);
     let scenario =
         resolve_next_mission_scenario(&app.scenario_catalog, "Tutorial.c4f/Tutorial01.c4s")
             .test_value();
-    assert!(scenario
-        .path
-        .as_ref()
-        .expect("scenario path")
-        .join("Scenario.txt")
-        .is_file());
+    main_assert!(scenario.path.as_ref().expect("scenario path").join("Scenario.txt").is_file());
 
     app.start_scenario(scenario).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
     let state = app.loader_screen.test_ref().state();
-    assert_eq!(state.progress(), 100);
+    main_assert_eq!(state.progress() => 100);
     let clonk_frontend::loader_screen::LoaderLog::Visible(lines) = state.log() else {
         panic!("worker phase status must make the live loader log visible");
     };
@@ -3865,7 +3356,7 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
             .position(|line| line == expected)
             .unwrap_or_else(|| panic!("missing cumulative loader status `{expected}`: {lines:?}"));
         if let Some(previous) = previous {
-            assert!(index > previous, "loader status order regressed: {lines:?}");
+            main_assert!(index > previous, "loader status order regressed: {lines:?}");
         }
         previous = Some(index);
     }
@@ -3893,7 +3384,7 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
         .collect();
     let mut controller = PlrSelController::new(app.startup_player_models.len());
     controller.resize(640, 480);
-    assert_eq!(controller.list_max_scroll(), 300);
+    main_assert_eq!(controller.list_max_scroll() => 300);
     app.startup_view = StartupView::PlayerSelection;
     app.startup_player_dialog = Some(controller);
 
@@ -3903,21 +3394,9 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
         f64::from(layout.list_viewport.y + 4),
     ));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .expect("player dialog")
-            .list_scroll_offset(),
-        60
-    );
+    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").list_scroll_offset() => 60);
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .expect("player dialog")
-            .list_scroll_offset(),
-        0
-    );
+    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").list_scroll_offset() => 0);
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_scrollbar.x + 8),
@@ -3929,17 +3408,11 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
     let first = app.startup_player_dialog.test_ref().list_scroll_offset();
     app.test_render(&mut frame);
     let second = app.startup_player_dialog.test_ref().list_scroll_offset();
-    assert_eq!((first, second), (1, 3));
+    main_assert_eq!((first, second) => (1, 3));
 
     app.test_left_button(ElementState::Released);
     app.test_render(&mut frame);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .expect("player dialog")
-            .list_scroll_offset(),
-        second
-    );
+    main_assert_eq!(app.startup_player_dialog.as_ref().expect("player dialog").list_scroll_offset() => second);
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_scrollbar.x + 8),
@@ -3952,27 +3425,20 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
     );
     app.test_cursor(first_row_name);
     app.test_left_button(ElementState::Released);
-    assert!(
-        app.plrsel_last_click.is_none(),
-        "scrollbar release must not seed row double-click bookkeeping"
-    );
+    main_assert!(app.plrsel_last_click.is_none(), "scrollbar release must not seed row double-click bookkeeping");
 
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert_eq!(
-        app.plrsel_last_click.map(|(index, _)| index),
-        Some(0),
-        "the first genuine row click must remain a single click"
-    );
-    assert!(app.startup_player_properties_dialog.is_none());
+    main_assert_eq!(app.plrsel_last_click.map(|(index, _)| index) => Some(0), "the first genuine row click must remain a single click");
+    main_assert!(app.startup_player_properties_dialog.is_none());
 }
 
 #[test]
 fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
-    assert_eq!(
+    main_assert_eq!(
         (1..=STARTUP_DIALOG_FADE_STEPS)
             .map(|step| startup_dialog_fade_opacity(step * 10))
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![26, 51, 77, 102, 128, 153, 179, 204, 230, 255]
     );
 
@@ -3987,44 +3453,41 @@ fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
     ] {
         let mut actual = incoming;
         blend_startup_dialog_frames(&underlay, Some(&outgoing), &mut actual, percent);
-        assert_eq!(actual, expected, "independent source-over at {percent}%");
+        main_assert_eq!(actual => expected, "independent source-over at {percent}%");
     }
     let mut incoming_only = incoming;
     blend_startup_dialog_frames(&underlay, None, &mut incoming_only, 10);
-    assert_eq!(incoming_only, [30, 40, 50, 60]);
+    main_assert_eq!(incoming_only => [30, 40, 50, 60]);
 
     let mut app = new_real_classic_menu_app(320, 200);
     let mut main = vec![0_u8; 320 * 200 * 4];
-    assert!(app.render(&mut main).expect("present stable Main dialog"));
+    main_assert!(app.render(&mut main).expect("present stable Main dialog"));
 
     app.handle_main_menu_activation(MainMenuItem::About)
         .test_value();
     let fade = app.startup_dialog_fade.test_ref();
-    assert_eq!(fade.outgoing, Some(StartupDialog::MainMenu));
-    assert_eq!(fade.incoming, StartupDialog::About);
-    assert_eq!(fade.step, 0);
+    main_assert_eq!(fade.outgoing => Some(StartupDialog::MainMenu));
+    main_assert_eq!(fade.incoming => StartupDialog::About);
+    main_assert_eq!(fade.step => 0);
     let fade_underlay = fade.underlay.clone();
     let fade_outgoing = fade.outgoing_frame.clone().test_value();
     app.test_update();
-    assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step, 0);
+    main_assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step => 0);
 
     let mut presented = Vec::new();
     for expected_step in 1..=STARTUP_DIALOG_FADE_STEPS {
         let mut frame = vec![0xa5; 320 * 200 * 4];
-        assert!(app.render(&mut frame).expect("present fade frame"));
+        main_assert!(app.render(&mut frame).expect("present fade frame"));
         if expected_step < STARTUP_DIALOG_FADE_STEPS {
-            assert_eq!(
-                app.startup_dialog_fade.as_ref().map(|fade| fade.step),
-                Some(expected_step)
-            );
+            main_assert_eq!(app.startup_dialog_fade.as_ref().map(|fade| fade.step) => Some(expected_step));
         } else {
-            assert!(app.startup_dialog_fade.is_none());
+            main_assert!(app.startup_dialog_fade.is_none());
         }
         presented.push(frame);
     }
 
     let about = presented.last().test_value().clone();
-    assert_ne!(main, about);
+    main_assert_ne!(main => about);
     for (index, actual) in presented.iter().take(9).enumerate() {
         let mut expected = about.clone();
         blend_startup_dialog_frames(
@@ -4033,16 +3496,16 @@ fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
             &mut expected,
             (index as u8 + 1) * 10,
         );
-        assert_eq!(actual, &expected, "fade presentation {}", index + 1);
+        main_assert_eq!(actual => &expected, "fade presentation {}", index + 1);
     }
-    assert_eq!(presented[9], about, "frame ten is fully incoming");
+    main_assert_eq!(presented[9] => about, "frame ten is fully incoming");
 
     let mut settled = vec![0_u8; 320 * 200 * 4];
-    assert!(app.render(&mut settled).expect("present settled About"));
-    assert_eq!(settled, about);
+    main_assert!(app.render(&mut settled).expect("present settled About"));
+    main_assert_eq!(settled => about);
     let mut again = vec![0_u8; 320 * 200 * 4];
-    assert!(app.render(&mut again).expect("re-present settled About"));
-    assert_eq!(again, about);
+    main_assert!(app.render(&mut again).expect("re-present settled About"));
+    main_assert_eq!(again => about);
 }
 
 #[test]
@@ -4055,54 +3518,45 @@ fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    app.test_gamepad_events([GamepadEvent::Action {
-        slot: GamepadSlot::new(0),
-        action: GamepadActionType::Cancel,
-        state: ElementState::Pressed,
-    }]);
-    assert_eq!(app.startup_view, StartupView::About);
-    assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step, 0);
+    app.test_gamepad_events([gamepad_action_event(
+        GamepadSlot::new(0),
+        GamepadActionType::Cancel,
+        ElementState::Pressed,
+    )]);
+    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step => 0);
 
     for expected_step in 1..=9 {
         app.test_render(&mut frame);
-        assert_eq!(
-            app.startup_dialog_fade.as_ref().unwrap().step,
-            expected_step
-        );
+        main_assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step => expected_step);
     }
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert_eq!(app.startup_view, StartupView::About);
+    main_assert_eq!(app.startup_view => StartupView::About);
 
     app.test_render(&mut frame);
-    assert!(app.startup_dialog_fade.is_none());
+    main_assert!(app.startup_dialog_fade.is_none());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
     let reverse = app.startup_dialog_fade.test_ref();
-    assert_eq!(reverse.outgoing, Some(StartupDialog::About));
-    assert_eq!(reverse.incoming, StartupDialog::MainMenu);
-    assert_eq!(reverse.step, 0);
+    main_assert_eq!(reverse.outgoing => Some(StartupDialog::About));
+    main_assert_eq!(reverse.incoming => StartupDialog::MainMenu);
+    main_assert_eq!(reverse.step => 0);
 
     let mut ninth = None;
     for expected_step in 1..=9 {
         app.test_render(&mut frame);
-        assert_eq!(
-            app.startup_dialog_fade.as_ref().unwrap().step,
-            expected_step
-        );
+        main_assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step => expected_step);
         if expected_step == 9 {
             ninth = Some(frame.clone());
         }
     }
     app.test_render(&mut frame);
-    assert!(app.startup_dialog_fade.is_none());
+    main_assert!(app.startup_dialog_fade.is_none());
     let frame_ten = frame.clone();
     let mut settled = vec![0_u8; frame.len()];
     app.test_render(&mut settled);
-    assert_eq!(
-        frame_ten, settled,
-        "frame ten must already draw active focus"
-    );
-    assert_ne!(ninth.expect("ninth frame"), frame_ten);
+    main_assert_eq!(frame_ten => settled, "frame ten must already draw active focus");
+    main_assert_ne!(ninth.expect("ninth frame") => frame_ten);
 
     app.handle_main_menu_activation(MainMenuItem::Options)
         .test_value();
@@ -4114,13 +3568,13 @@ fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
     ])
     .test_value();
     let back = app.startup_dialog_fade.test_ref();
-    assert_eq!(back.outgoing, Some(StartupDialog::Options));
-    assert_eq!(back.incoming, StartupDialog::MainMenu);
-    assert_eq!(back.step, 0);
+    main_assert_eq!(back.outgoing => Some(StartupDialog::Options));
+    main_assert_eq!(back.incoming => StartupDialog::MainMenu);
+    main_assert_eq!(back.step => 0);
     for _ in 0..STARTUP_DIALOG_FADE_STEPS {
         app.test_render(&mut frame);
     }
-    assert!(app.startup_dialog_fade.is_none());
+    main_assert!(app.startup_dialog_fade.is_none());
 }
 
 #[test]
@@ -4128,21 +3582,18 @@ fn startup_dialog_fade_in_without_outgoing_suppresses_input_for_ten_frames() {
     let mut app = new_real_classic_menu_app(320, 200);
     app.begin_startup_dialog_fade_in();
     let fade = app.startup_dialog_fade.test_ref();
-    assert_eq!(fade.outgoing, None);
-    assert_eq!(fade.incoming, StartupDialog::MainMenu);
+    main_assert_eq!(fade.outgoing => None);
+    main_assert_eq!(fade.incoming => StartupDialog::MainMenu);
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(!app.take_exit_request());
+    main_assert!(!app.take_exit_request());
     let mut frame = vec![0_u8; 320 * 200 * 4];
     for expected_step in 1..STARTUP_DIALOG_FADE_STEPS {
         app.test_render(&mut frame);
-        assert_eq!(
-            app.startup_dialog_fade.as_ref().unwrap().step,
-            expected_step
-        );
+        main_assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step => expected_step);
     }
     app.test_render(&mut frame);
-    assert!(app.startup_dialog_fade.is_none());
+    main_assert!(app.startup_dialog_fade.is_none());
 
     let mut modal_app = new_real_classic_menu_app(320, 200);
     modal_app.open_new_startup_player_properties_from(
@@ -4154,11 +3605,8 @@ fn startup_dialog_fade_in_without_outgoing_suppresses_input_for_ten_frames() {
     }
     let frame_ten = frame.clone();
     modal_app.test_render(&mut frame);
-    assert_eq!(
-        frame_ten, frame,
-        "first-player modal remains visible after fade"
-    );
-    assert!(modal_app.startup_player_properties_dialog.is_some());
+    main_assert_eq!(frame_ten => frame, "first-player modal remains visible after fade");
+    main_assert!(modal_app.startup_player_properties_dialog.is_some());
 }
 
 #[test]
@@ -4169,10 +3617,10 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
     let mut app = new_real_classic_menu_app(1152, 644);
     app.mode = AppMode::Loading;
     app.resize(1152, 723).test_value();
-    assert_eq!(app.mode, AppMode::Loading);
+    main_assert_eq!(app.mode => AppMode::Loading);
     app.mode = AppMode::Menu;
     app.show_main_menu();
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
 
     app.graphics.set_runtime_sprite_filtering(3.0, false);
     app.configure_native_startup_fonts(3.0, false);
@@ -4191,8 +3639,8 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
         .iter()
         .find(|command| command.text.ends_with("</c>tart Game"))
         .test_value();
-    assert_eq!(
-        (start.role, start.align, start.x, start.y),
+    main_assert_eq!(
+        (start.role, start.align, start.x, start.y) =>
         (
             clonk_graphics::clonk_font::ClonkFontRole::GuiTitle,
             clonk_graphics::clonk_font::TextAlign::Center,
@@ -4206,13 +3654,13 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
         .iter()
         .find(|command| command.text == app.main_menu_state.participants_label)
         .test_value();
-    assert_eq!(
+    main_assert_eq!(
         (
             participants.role,
             participants.align,
             participants.x,
             participants.y
-        ),
+        ) =>
         (
             clonk_graphics::clonk_font::ClonkFontRole::GuiTitle,
             clonk_graphics::clonk_font::TextAlign::Right,
@@ -4225,13 +3673,13 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
         .iter()
         .find(|command| command.text.starts_with("Clonk Rust is a fan project"))
         .test_value();
-    assert_eq!(
+    main_assert_eq!(
         (
             fanproject.role,
             fanproject.align,
             fanproject.x,
             fanproject.y
-        ),
+        ) =>
         (
             clonk_graphics::clonk_font::ClonkFontRole::GuiMini,
             clonk_graphics::clonk_font::TextAlign::Right,
@@ -4244,15 +3692,9 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
     // producing the one-row top crop seen in the reference capture.
     let projection =
         clonk_graphics::ClipperProjection::new(3.0, (1152, 723), 2168, Rect::new(0, 0, 1152, 723));
-    assert_eq!(projection.physical_clip(), Rect::new(0, -1, 3456, 2169));
-    assert_eq!(
-        projection.logical_to_physical(participants.x.into(), participants.y.into()),
-        (3303.0, 1919.0)
-    );
-    assert_eq!(
-        projection.logical_to_physical(fanproject.x.into(), fanproject.y.into()),
-        (3387.0, 2084.0)
-    );
+    main_assert_eq!(projection.physical_clip() => Rect::new(0, -1, 3456, 2169));
+    main_assert_eq!(projection.logical_to_physical(participants.x.into(), participants.y.into()) => (3303.0, 1919.0));
+    main_assert_eq!(projection.logical_to_physical(fanproject.x.into(), fanproject.y.into()) => (3387.0, 2084.0));
 }
 
 #[test]
@@ -4298,14 +3740,12 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     app.engine.set_local_players([primary, secondary]);
     app.local_controls = LocalControlRegistry::default();
     for (owner, preferred_set, prefers_mouse) in [(primary, 0, true), (secondary, 1, false)] {
-        app.local_controls.initialize(LocalControlInit {
+        app.local_controls.initialize(test_local_control_init(
             owner,
             preferred_set,
             prefers_mouse,
-            gamepads_enabled: true,
-            replay: false,
-            disable_mouse: false,
-        });
+            false,
+        ));
     }
     app.snapshot = app.engine.snapshot();
     app.open_ingame_menu_for_player(primary).test_value();
@@ -4366,18 +3806,18 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     // visible row instead of relying on the removed selection-pinning.
     let primary_item = item_point(&app, primary, "Goals");
     let secondary_item = item_point(&app, secondary, "Goals");
-    assert_eq!(app.local_controls.mouse_owner(), Some(primary));
+    main_assert_eq!(app.local_controls.mouse_owner() => Some(primary));
 
     app.test_cursor(secondary_item);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert_eq!(
-        app.ingame_menu.get(primary).map(IngameMenuState::page),
+    main_assert_eq!(
+        app.ingame_menu.get(primary).map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Main),
         "the unassigned viewport point must not clamp into the primary menu"
     );
-    assert_eq!(
-        app.ingame_menu.get(secondary).map(IngameMenuState::page),
+    main_assert_eq!(
+        app.ingame_menu.get(secondary).map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Main),
         "the unassigned viewport must not receive the click"
     );
@@ -4385,28 +3825,23 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     app.test_cursor(primary_item);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert_eq!(
-        app.ingame_menu.get(primary).map(IngameMenuState::page),
-        Some(ingame_menu::MenuPage::Goals)
-    );
-    assert_eq!(
-        app.ingame_menu.get(secondary).map(IngameMenuState::page),
+    main_assert_eq!(app.ingame_menu.get(primary).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Goals));
+    main_assert_eq!(
+        app.ingame_menu.get(secondary).map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Main),
         "the primary action must not cross-route to the secondary menu"
     );
 
     app.local_controls = LocalControlRegistry::default();
     for (owner, preferred_set, prefers_mouse) in [(secondary, 1, true), (primary, 0, false)] {
-        app.local_controls.initialize(LocalControlInit {
+        app.local_controls.initialize(test_local_control_init(
             owner,
             preferred_set,
             prefers_mouse,
-            gamepads_enabled: true,
-            replay: false,
-            disable_mouse: false,
-        });
+            false,
+        ));
     }
-    assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+    main_assert_eq!(app.local_controls.mouse_owner() => Some(secondary));
     let secondary_close = {
         let area = app.graphics.viewport_rect(secondary).test_value();
         let fallback = app.assets.font_arc();
@@ -4432,13 +3867,13 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
             (close.y + close.height as i32 / 2) as f32,
         )
     };
-    assert_eq!(
-        app.ingame_menu_pointer_target(secondary_close),
+    main_assert_eq!(
+        app.ingame_menu_pointer_target(secondary_close) =>
         Some((secondary, IngameMenuPointerTarget::Close)),
         "the assigned secondary mouse owner's close button must hit-test"
     );
     let secondary_target = app.ingame_menu_pointer_target(gui_point_from_position(secondary_item));
-    assert!(
+    main_assert!(
             matches!(secondary_target, Some((owner, IngameMenuPointerTarget::Item(_))) if owner == secondary),
             "assigned secondary menu item must hit-test: target={secondary_target:?}, viewport={:?}, point={secondary_item:?}",
             app.graphics.viewport_rect(secondary),
@@ -4446,12 +3881,9 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     app.test_cursor(secondary_item);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert_eq!(
-        app.ingame_menu.get(secondary).map(IngameMenuState::page),
-        Some(ingame_menu::MenuPage::Goals)
-    );
-    assert_eq!(
-        app.ingame_menu.get(primary).map(IngameMenuState::page),
+    main_assert_eq!(app.ingame_menu.get(secondary).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Goals));
+    main_assert_eq!(
+        app.ingame_menu.get(primary).map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Goals),
         "the secondary action must not cross-route to the primary menu"
     );
@@ -4468,36 +3900,35 @@ fn activate_new_player_reoffers_an_eliminated_startup_file() {
     ));
     let player_file = PlayerFile::load_from_path(player_path).test_value();
     let mut app = new_running_sandbox_app();
-    app.startup_player_files.push(StartupPlayerFile {
-        path: player_path.to_path_buf(),
-        file_name: "embedded_player.c4p".to_string(),
-        player_file: player_file.clone(),
-        render_model: clonk_frontend::startup_plrsel::PlrSelPlayer {
-            name: player_file.name.clone(),
-            activated: true,
-            big_icon: None,
-            portrait: None,
-            color_dw: player_file.normalized_preferred_color(),
-            score: player_file.score,
-            rounds: player_file.rounds,
-            rounds_won: player_file.rounds_won,
-            rounds_lost: player_file.rounds_lost,
-            total_playing_time: player_file.total_playing_time,
-            comment: String::new(),
-        },
-    });
+    app.startup_player_files.push(startup_fixture!(
+    startup_player:
+        player_path.to_path_buf(),
+        "embedded_player.c4p".to_string(),
+        player_file.clone(),
+        startup_fixture!(
+            player_selection_name_activated_color_dw_score_rounds_rounds_won_rounds_lost_total_playing_time:
+                player_file.name.clone(),
+                true,
+                player_file.normalized_preferred_color(),
+                player_file.score,
+                player_file.rounds,
+                player_file.rounds_won,
+                player_file.rounds_lost,
+                player_file.total_playing_time,
+        ),
+));
 
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
         .test_value();
 
-    assert_eq!(
+    main_assert_eq!(
         app.ingame_menu
             .as_ref()
             .expect("new-player menu opens")
             .items()
             .iter()
             .map(|item| item.action.clone())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         [MenuAction::JoinPlayer(
             player_path.to_string_lossy().into_owned()
         )]
@@ -4560,22 +3991,22 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
         .test_value();
 
     let menu = app.ingame_menu.get(app.local_owner).test_value();
-    assert_eq!(
+    main_assert_eq!(
         menu.items()
             .iter()
             .map(|item| item.caption.as_str())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         [
             "Join player: Zulu",
             "Join player: Active",
             "Join player: Alpha",
         ]
     );
-    assert_eq!(
+    main_assert_eq!(
         menu.items()
             .iter()
             .map(|item| item.action.clone())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         [
             MenuAction::JoinPlayer(zulu.to_string_lossy().into_owned()),
             MenuAction::JoinPlayer(active.to_string_lossy().into_owned()),
@@ -4592,10 +4023,7 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
     app.ingame_menu.clear();
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
         .test_value();
-    assert!(
-        app.ingame_menu.is_none(),
-        "a full game keeps the submenu closed"
-    );
+    main_assert!(app.ingame_menu.is_none(), "a full game keeps the submenu closed");
 }
 
 #[test]
@@ -4631,40 +4059,21 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
         app.flush_deferred_config();
         Config::load(paths.config_file()).test_value()
     };
-    assert_eq!(
-        after_startup_music.get_in(Some("Sound"), "MenuMusic"),
-        Some("false")
-    );
-    assert_eq!(
-        after_startup_music.get_in(Some("Sound"), "MenuSound"),
-        Some("true"),
-        "bare F3 must not rewrite FESamples"
-    );
+    main_assert_eq!(after_startup_music.get_in(Some("Sound"), "MenuMusic") => Some("false"));
+    main_assert_eq!(after_startup_music.get_in(Some("Sound"), "MenuSound") => Some("true"), "bare F3 must not rewrite FESamples");
 
     press_frontend_f3(&mut app, ModifiersState::CONTROL, "startup Ctrl+F3");
     let after_startup_sound = {
         app.flush_deferred_config();
         Config::load(paths.config_file()).test_value()
     };
-    assert_eq!(
-        after_startup_sound.get_in(Some("Sound"), "MenuSound"),
-        Some("false")
-    );
-    assert_eq!(
-        after_startup_sound.get_in(Some("Sound"), "Music"),
-        Some("true")
-    );
-    assert_eq!(
-        after_startup_sound.get_in(Some("Sound"), "Sound"),
-        Some("true")
-    );
-    assert_eq!(
-        after_startup_sound.get_in(Some("Sound"), "VendorExtension"),
-        Some("keep-me")
-    );
+    main_assert_eq!(after_startup_sound.get_in(Some("Sound"), "MenuSound") => Some("false"));
+    main_assert_eq!(after_startup_sound.get_in(Some("Sound"), "Music") => Some("true"));
+    main_assert_eq!(after_startup_sound.get_in(Some("Sound"), "Sound") => Some("true"));
+    main_assert_eq!(after_startup_sound.get_in(Some("Sound"), "VendorExtension") => Some("keep-me"));
     let startup_reload = AudioOptions::load(Some(&paths));
-    assert!(!startup_reload.menu_music_enabled);
-    assert!(!startup_reload.menu_sound_enabled);
+    main_assert!(!startup_reload.menu_music_enabled);
+    main_assert!(!startup_reload.menu_sound_enabled);
 
     app.mode = AppMode::Loading;
     press_frontend_f3(&mut app, ModifiersState::empty(), "loading F3");
@@ -4673,23 +4082,14 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
         app.flush_deferred_config();
         Config::load(paths.config_file()).test_value()
     };
-    assert_eq!(
-        after_loading.get_in(Some("Sound"), "MenuMusic"),
-        Some("true")
-    );
-    assert_eq!(
-        after_loading.get_in(Some("Sound"), "MenuSound"),
-        Some("true")
-    );
-    assert_eq!(after_loading.get_in(Some("Sound"), "Music"), Some("true"));
-    assert_eq!(after_loading.get_in(Some("Sound"), "Sound"), Some("true"));
-    assert_eq!(
-        after_loading.get_in(Some("Sound"), "VendorExtension"),
-        Some("keep-me")
-    );
+    main_assert_eq!(after_loading.get_in(Some("Sound"), "MenuMusic") => Some("true"));
+    main_assert_eq!(after_loading.get_in(Some("Sound"), "MenuSound") => Some("true"));
+    main_assert_eq!(after_loading.get_in(Some("Sound"), "Music") => Some("true"));
+    main_assert_eq!(after_loading.get_in(Some("Sound"), "Sound") => Some("true"));
+    main_assert_eq!(after_loading.get_in(Some("Sound"), "VendorExtension") => Some("keep-me"));
     let loading_reload = AudioOptions::load(Some(&paths));
-    assert!(loading_reload.menu_music_enabled);
-    assert!(loading_reload.menu_sound_enabled);
+    main_assert!(loading_reload.menu_music_enabled);
+    main_assert!(loading_reload.menu_sound_enabled);
 }
 
 #[test]
@@ -4711,14 +4111,14 @@ fn frontend_audio_toggle_write_failure_keeps_live_state() {
     app.test_key(VirtualKeyCode::F3, ElementState::Released);
 
     let audio = app.audio.test_ref();
-    assert_eq!(audio.options.menu_music_enabled, !music_before);
-    assert_eq!(audio.options.menu_sound_enabled, !sound_before);
+    main_assert_eq!(audio.options.menu_music_enabled => !music_before);
+    main_assert_eq!(audio.options.menu_sound_enabled => !sound_before);
 }
 
 #[test]
 fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
     let exercise = |app: &mut GameApp, label: &str| {
-        assert!(!matches!(app.mode, AppMode::Running), "{label}");
+        main_assert!(!matches!(app.mode, AppMode::Running), "{label}");
         let options_was_active = app.startup_options_dialog_is_active();
         let before_visual_music = app
             .startup_options_dialog
@@ -4729,22 +4129,14 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
             .unwrap_or_else(|error| panic!("clear modifiers for {label}: {error}"));
         app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("frontend F3 over {label}: {error}"));
-        assert_eq!(
-            app.audio
-                .as_ref()
-                .expect("test audio")
-                .options
-                .menu_music_enabled,
-            !before_music,
-            "{label}"
-        );
+        main_assert_eq!(app.audio.as_ref().expect("test audio").options.menu_music_enabled => !before_music, "{label}");
         if let Some(before_visual_music) = before_visual_music {
-            assert_eq!(
+            main_assert_eq!(
                 app.startup_options_dialog
                     .as_ref()
                     .expect("retained options dialog")
                     .sound()
-                    .frontend_music,
+                    .frontend_music =>
                 if options_was_active {
                     !before_music
                 } else {
@@ -4753,7 +4145,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
                 "bare F3 synchronizes only the active Options dialog: {label}"
             );
         }
-        assert!(app.runtime_flash_message.is_none(), "{label}");
+        main_assert!(app.runtime_flash_message.is_none(), "{label}");
         app.handle_key(VirtualKeyCode::F3, ElementState::Released)
             .unwrap_or_else(|error| panic!("frontend F3 release over {label}: {error}"));
 
@@ -4766,27 +4158,19 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
             .unwrap_or_else(|error| panic!("set Ctrl for {label}: {error}"));
         app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("frontend Ctrl+F3 over {label}: {error}"));
-        assert_eq!(
-            app.audio
-                .as_ref()
-                .expect("test audio")
-                .options
-                .menu_sound_enabled,
-            !before_sound,
-            "{label}"
-        );
+        main_assert_eq!(app.audio.as_ref().expect("test audio").options.menu_sound_enabled => !before_sound, "{label}");
         if let Some(before_visual_sound) = before_visual_sound {
-            assert_eq!(
+            main_assert_eq!(
                 app.startup_options_dialog
                     .as_ref()
                     .expect("retained options dialog")
                     .sound()
-                    .frontend_sound_effects,
+                    .frontend_sound_effects =>
                 before_visual_sound,
                 "Ctrl+F3 deliberately leaves the classic checkbox stale: {label}"
             );
         }
-        assert!(app.runtime_flash_message.is_none(), "{label}");
+        main_assert!(app.runtime_flash_message.is_none(), "{label}");
     };
 
     for view in StartupView::ALL {
@@ -4827,14 +4211,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         } else {
             enter_unported_startup_subscreen(&mut options, ClassicStartupSubscreen::Options(sheet));
         }
-        assert_eq!(
-            options
-                .startup_options_dialog
-                .as_ref()
-                .expect("retained Options model")
-                .active_sheet(),
-            sheet
-        );
+        main_assert_eq!(options.startup_options_dialog.as_ref().expect("retained Options model").active_sheet() => sheet);
         exercise(&mut options, &format!("retained Options {sheet:?} sheet"));
     }
 
@@ -4855,7 +4232,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         )
         .test_value();
     exercise(&mut nested, "modal above retained Options Sound sheet");
-    assert_eq!(nested.message_dialogs.len(), 1);
+    main_assert_eq!(nested.message_dialogs.len() => 1);
 
     let mut context = new_running_sandbox_app();
     context.return_to_menu();
@@ -4872,7 +4249,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         )
         .test_value();
     exercise(&mut context, "context above retained Options Sound sheet");
-    assert!(context.context_menu.is_some());
+    main_assert!(context.context_menu.is_some());
 
     let mut loading = new_running_sandbox_app();
     loading.return_to_menu();
@@ -4890,17 +4267,11 @@ fn escape_in_submenu_returns_to_main_menu() {
     app.open_ingame_menu().test_value();
     app.apply_ingame_menu_action(MenuAction::ActivateOptions)
         .test_value();
-    assert_eq!(
-        app.ingame_menu.as_ref().map(|menu| menu.page()),
-        Some(ingame_menu::MenuPage::Options)
-    );
+    main_assert_eq!(app.ingame_menu.as_ref().map(|menu| menu.page()) => Some(ingame_menu::MenuPage::Options));
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert_eq!(
-        app.ingame_menu.as_ref().map(|menu| menu.page()),
-        Some(ingame_menu::MenuPage::Main)
-    );
+    main_assert_eq!(app.ingame_menu.as_ref().map(|menu| menu.page()) => Some(ingame_menu::MenuPage::Main));
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menu.is_none());
 }
 
 #[test]
@@ -4931,21 +4302,14 @@ fn load_frontend_scenarios_orders_folders_by_index() {
     let user_dir = install_dir.path().join("user-data");
     fs::create_dir_all(&user_dir).test_value();
 
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_dir.path())),
-        ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
-    ]);
+    let _guard = test_env_guard(install_dir.path(), user_dir.as_path());
 
     let scenarios = load_frontend_scenarios();
     let identifiers: Vec<_> = scenarios
         .iter()
         .map(|entry| entry.identifier.as_str())
         .collect();
-    assert_eq!(
-        identifiers,
-        vec!["Missions.c4f", "Arcade.c4f"],
-        "folders should follow legacy indices"
-    );
+    main_assert_eq!(identifiers => vec!["Missions.c4f", "Arcade.c4f"], "folders should follow legacy indices");
 
     reset_cached_app_paths();
 }
@@ -4972,9 +4336,9 @@ fn alphabetical_sorting_gates_only_folder_index_and_difficulty() {
     let gamma = titled_entry("Gamma");
     let mut difficulty_entries = vec![alpha, beta, gamma];
     sort_frontend_entries(&mut difficulty_entries, false);
-    assert_eq!(titles(&difficulty_entries), vec!["Beta", "Alpha", "Gamma"]);
+    main_assert_eq!(titles(&difficulty_entries) => vec!["Beta", "Alpha", "Gamma"]);
     sort_frontend_entries(&mut difficulty_entries, true);
-    assert_eq!(titles(&difficulty_entries), vec!["Alpha", "Beta", "Gamma"]);
+    main_assert_eq!(titles(&difficulty_entries) => vec!["Alpha", "Beta", "Gamma"]);
 
     let mut alpha = titled_entry("Alpha");
     alpha.kind = ScenarioKind::Folder;
@@ -4986,9 +4350,9 @@ fn alphabetical_sorting_gates_only_folder_index_and_difficulty() {
     gamma.kind = ScenarioKind::Folder;
     let mut folder_entries = vec![alpha, beta, gamma];
     sort_frontend_entries(&mut folder_entries, false);
-    assert_eq!(titles(&folder_entries), vec!["Beta", "Alpha", "Gamma"]);
+    main_assert_eq!(titles(&folder_entries) => vec!["Beta", "Alpha", "Gamma"]);
     sort_frontend_entries(&mut folder_entries, true);
-    assert_eq!(titles(&folder_entries), vec!["Alpha", "Beta", "Gamma"]);
+    main_assert_eq!(titles(&folder_entries) => vec!["Alpha", "Beta", "Gamma"]);
 
     let mut alpha = titled_entry("Alpha");
     alpha.icon_index = Some(11);
@@ -4996,14 +4360,14 @@ fn alphabetical_sorting_gates_only_folder_index_and_difficulty() {
     beta.icon_index = Some(2);
     let mut icon_entries = vec![alpha, beta];
     sort_frontend_entries(&mut icon_entries, true);
-    assert_eq!(titles(&icon_entries), vec!["Beta", "Alpha"]);
+    main_assert_eq!(titles(&icon_entries) => vec!["Beta", "Alpha"]);
 
     let alpha = titled_entry("Alpha");
     let mut zulu = titled_entry("Zulu");
     zulu.kind = ScenarioKind::Folder;
     let mut kind_entries = vec![alpha, zulu];
     sort_frontend_entries(&mut kind_entries, true);
-    assert_eq!(titles(&kind_entries), vec!["Zulu", "Alpha"]);
+    main_assert_eq!(titles(&kind_entries) => vec!["Zulu", "Alpha"]);
 }
 
 #[test]
@@ -5036,11 +4400,7 @@ fn loader_reads_startup_alphabetical_sorting_recursively() {
 
     let user_dir = install_dir.path().join("user-data");
     fs::create_dir_all(&user_dir).test_value();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_dir.path())),
-        ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(Some(install_dir.path()), user_dir.as_path());
     paths.ensure_user_dirs().test_value();
 
     let child_titles = |entries: &[FrontendScenario]| {
@@ -5053,11 +4413,11 @@ fn loader_reads_startup_alphabetical_sorting_recursively() {
 
     fs::write(paths.config_file(), "[Startup]\nAlphabeticalSorting=1\n").test_value();
     let alphabetical = load_frontend_scenarios_from_paths(&paths);
-    assert_eq!(child_titles(&alphabetical), vec!["Alpha", "Beta"]);
+    main_assert_eq!(child_titles(&alphabetical) => vec!["Alpha", "Beta"]);
 
     fs::write(paths.config_file(), "[Startup]\nAlphabeticalSorting=0\n").test_value();
     let legacy = load_frontend_scenarios_from_paths(&paths);
-    assert_eq!(child_titles(&legacy), vec!["Beta", "Alpha"]);
+    main_assert_eq!(child_titles(&legacy) => vec!["Beta", "Alpha"]);
 
     reset_cached_app_paths();
 }
@@ -5096,25 +4456,18 @@ fn load_frontend_scenarios_orders_by_icon_index() {
     let user_dir = install_dir.path().join("user-data");
     fs::create_dir_all(&user_dir).test_value();
 
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_dir.path())),
-        ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
-    ]);
+    let _guard = test_env_guard(install_dir.path(), user_dir.as_path());
 
     let scenarios = load_frontend_scenarios();
-    assert_eq!(scenarios.len(), 1, "expected single folder entry");
+    main_assert_eq!(scenarios.len() => 1, "expected single folder entry");
     let folder = &scenarios[0];
-    assert_eq!(folder.identifier, "Missions.c4f");
+    main_assert_eq!(folder.identifier => "Missions.c4f");
     let titles: Vec<_> = folder
         .children
         .iter()
         .map(|child| child.title.as_str())
         .collect();
-    assert_eq!(
-        titles,
-        vec!["Bravo", "Alpha"],
-        "icon indices should order scenarios before title fallback"
-    );
+    main_assert_eq!(titles => vec!["Bravo", "Alpha"], "icon indices should order scenarios before title fallback");
 
     reset_cached_app_paths();
 }
@@ -5160,22 +4513,19 @@ fn load_frontend_scenarios_preserves_legacy_ordering() {
     )
     .test_value();
 
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_dir.path())),
-        ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
-    ]);
+    let _guard = test_env_guard(install_dir.path(), user_dir.as_path());
 
     let scenarios = load_frontend_scenarios();
-    assert_eq!(scenarios.len(), 1, "expected merged folder");
+    main_assert_eq!(scenarios.len() => 1, "expected merged folder");
     let folder = &scenarios[0];
-    assert_eq!(folder.identifier, "Worlds.c4f");
+    main_assert_eq!(folder.identifier => "Worlds.c4f");
     let identifiers: Vec<_> = folder
         .children
         .iter()
         .map(|child| child.identifier.as_str())
         .collect();
-    assert_eq!(
-        identifiers,
+    main_assert_eq!(
+        identifiers =>
         vec![
             "Worlds.c4f/Bravo.c4s",
             "Worlds.c4f/Charlie.c4s",
@@ -5183,18 +4533,8 @@ fn load_frontend_scenarios_preserves_legacy_ordering() {
         ],
         "merged children should follow legacy ordering rules"
     );
-    assert_eq!(
-        folder.children[2].title, "Alpha Override",
-        "user override title should be retained"
-    );
-    assert!(
-        folder.children[2]
-            .path
-            .as_ref()
-            .map(|path| path.starts_with(&user_dir))
-            .unwrap_or(false),
-        "user override should keep user path"
-    );
+    main_assert_eq!(folder.children[2].title => "Alpha Override", "user override title should be retained");
+    main_assert!(folder.children[2].path.as_ref().map(|path| path.starts_with(&user_dir)).unwrap_or(false), "user override should keep user path");
 
     reset_cached_app_paths();
 }
@@ -5219,19 +4559,12 @@ fn load_frontend_scenarios_sets_human_readable_location() {
     )
     .test_value();
 
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install_dir.path())),
-        ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
-    ]);
+    let _guard = test_env_guard(install_dir.path(), user_dir.as_path());
 
     let scenarios = load_frontend_scenarios();
-    assert_eq!(scenarios.len(), 1, "expected single scenario entry");
+    main_assert_eq!(scenarios.len() => 1, "expected single scenario entry");
     let scenario = &scenarios[0];
-    assert_eq!(
-        scenario.location_label().as_deref(),
-        Some("Scenarios / Alpha.c4s"),
-        "location label should mirror catalog path"
-    );
+    main_assert_eq!(scenario.location_label().as_deref() => Some("Scenarios / Alpha.c4s"), "location label should mirror catalog path");
 
     reset_cached_app_paths();
 }
@@ -5248,19 +4581,19 @@ fn classic_startup_argument_selects_initial_cpp_view() {
         (app.startup_view, app.scenario_selector_mode)
     };
 
-    assert_eq!(view("main").0, StartupView::MainMenu);
-    assert_eq!(view("scen").0, StartupView::ScenarioBrowser);
-    assert_eq!(view("net").0, StartupView::NetworkGame);
-    assert_eq!(view("options").0, StartupView::Options);
-    assert_eq!(view("plrsel").0, StartupView::PlayerSelection);
-    assert_eq!(view("about").0, StartupView::About);
+    main_assert_eq!(view("main").0 => StartupView::MainMenu);
+    main_assert_eq!(view("scen").0 => StartupView::ScenarioBrowser);
+    main_assert_eq!(view("net").0 => StartupView::NetworkGame);
+    main_assert_eq!(view("options").0 => StartupView::Options);
+    main_assert_eq!(view("plrsel").0 => StartupView::PlayerSelection);
+    main_assert_eq!(view("about").0 => StartupView::About);
 
     // `netscen` is the scenario selector in network-host mode: same view as
     // `scen`, different selector mode, and neither is the `net` browser.
     let (netscen_view, netscen_mode) = view("netscen");
-    assert_eq!(netscen_view, StartupView::ScenarioBrowser);
-    assert_eq!(netscen_mode, ScenarioSelectorMode::NetworkHost);
-    assert_ne!(netscen_mode, view("scen").1);
+    main_assert_eq!(netscen_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(netscen_mode => ScenarioSelectorMode::NetworkHost);
+    main_assert_ne!(netscen_mode => view("scen").1);
 
     // Every name is case-insensitive, exactly like SEqualNoCase.
     for (lower, upper) in [
@@ -5272,7 +4605,7 @@ fn classic_startup_argument_selects_initial_cpp_view() {
         ("plrsel", "PlrSel"),
         ("about", "ABOUT"),
     ] {
-        assert_eq!(view(lower), view(upper), "{lower} must be case-insensitive");
+        main_assert_eq!(view(lower) => view(upper), "{lower} must be case-insensitive");
     }
 
     // An unknown name leaves the remembered/default view untouched and opens
@@ -5281,10 +4614,10 @@ fn classic_startup_argument_selects_initial_cpp_view() {
     app.open_about_dialog();
     let remembered = app.startup_view;
     app.apply_classic_startup_screen("nonsense");
-    assert_eq!(app.startup_view, remembered);
-    assert!(app.message_dialogs.is_empty());
+    main_assert_eq!(app.startup_view => remembered);
+    main_assert!(app.message_dialogs.is_empty());
     app.apply_classic_startup_screen("");
-    assert_eq!(app.startup_view, remembered);
+    main_assert_eq!(app.startup_view => remembered);
 }
 
 /// `C4StartupMainDlg` binds bare F6 to `SwitchToEditor`
@@ -5299,23 +4632,18 @@ fn startup_f6_launches_editor_when_available() {
     let install = tempdir();
     let user_data = tempdir();
     install_global_gui_and_loader_test_root(install.path());
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(install.path())),
-        ("LC_CONTENT_DIR", None),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = isolated_test_app_paths(install.path(), user_data.path());
     paths.ensure_user_dirs().test_value();
 
     // Without Editor.exe the shortcut is inert on every platform: startup
     // stays open and nothing is queued.
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.show_main_menu();
-    assert_eq!(app.classic_editor_executable(), None);
+    main_assert_eq!(app.classic_editor_executable() => None);
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
-    assert_eq!(app.startup_view, StartupView::MainMenu);
-    assert!(app.pending_editor_launch.is_none());
-    assert!(!app.exit_requested);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert!(app.pending_editor_launch.is_none());
+    main_assert!(!app.exit_requested);
 
     // With Editor.exe beside the engine, Windows queues the deferred launch
     // and exits; other platforms still consume the key with no effect.
@@ -5323,31 +4651,31 @@ fn startup_f6_launches_editor_when_available() {
     fs::write(&editor, b"stub").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.show_main_menu();
-    assert_eq!(app.classic_editor_executable(), Some(editor.clone()));
+    main_assert_eq!(app.classic_editor_executable() => Some(editor.clone()));
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
     if cfg!(windows) {
-        assert_eq!(app.pending_editor_launch, Some(editor));
-        assert!(app.exit_requested, "SwitchToEditor exits startup");
+        main_assert_eq!(app.pending_editor_launch => Some(editor));
+        main_assert!(app.exit_requested, "SwitchToEditor exits startup");
     } else {
-        assert!(app.pending_editor_launch.is_none());
-        assert!(!app.exit_requested);
+        main_assert!(app.pending_editor_launch.is_none());
+        main_assert!(!app.exit_requested);
     }
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
 
     // A modified F6 is not the classic binding and must not reach it.
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.show_main_menu();
     app.keyboard_modifiers = ModifiersState::CONTROL;
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
-    assert!(app.pending_editor_launch.is_none());
-    assert!(!app.exit_requested);
+    main_assert!(app.pending_editor_launch.is_none());
+    main_assert!(!app.exit_requested);
 
     // The binding belongs to the main dialog only.
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.open_about_dialog();
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
-    assert!(app.pending_editor_launch.is_none());
-    assert_eq!(app.startup_view, StartupView::About);
+    main_assert!(app.pending_editor_launch.is_none());
+    main_assert_eq!(app.startup_view => StartupView::About);
 }
 
 #[test]
@@ -5361,23 +4689,14 @@ fn a_dedicated_server_keeps_the_fullscreen_startup_lineage_rule() {
     for headless in [false, true] {
         let mut app = new_state_only_menu_app(320, 200);
         app.headless = headless;
-        assert!(
-            app.failed_open_game_returns_to_startup(),
-            "an empty command line keeps a startup generation to return to"
-        );
+        main_assert!(app.failed_open_game_returns_to_startup(), "an empty command line keeps a startup generation to return to");
 
         app.classic_command_line.scenario = Some(PathBuf::from("Broken.c4s"));
-        assert!(
-            !app.failed_open_game_returns_to_startup(),
-            "an explicit command-line scenario suppresses the startup dialog"
-        );
+        main_assert!(!app.failed_open_game_returns_to_startup(), "an explicit command-line scenario suppresses the startup dialog");
 
         app.classic_command_line.scenario = None;
         app.classic_command_line.record_stream = Some(PathBuf::from("Broken.c4r"));
-        assert!(
-            !app.failed_open_game_returns_to_startup(),
-            "a command-line record stream suppresses the startup dialog"
-        );
+        main_assert!(!app.failed_open_game_returns_to_startup(), "a command-line record stream suppresses the startup dialog");
     }
 }
 
@@ -5395,15 +4714,12 @@ fn a_dedicated_server_quits_when_its_command_line_record_stream_fails() {
     app.classic_record_stream_activation_pending = true;
     app.mode = AppMode::Loading;
 
-    assert!(!app.startup_dialog_in_use());
+    main_assert!(!app.startup_dialog_in_use());
     app.finish_scenario_loading_failure("controlled headless load failure".to_string(), false)
         .test_value();
 
-    assert_eq!(app.mode, AppMode::Menu);
-    assert!(
-        app.take_exit_request(),
-        "a dedicated server with no startup generation to return to quits"
-    );
+    main_assert_eq!(app.mode => AppMode::Menu);
+    main_assert!(app.take_exit_request(), "a dedicated server with no startup generation to return to quits");
 }
 
 #[test]
@@ -5426,19 +4742,16 @@ fn a_ticked_dont_show_again_box_suppresses_its_warning_before_any_save() {
     .test_value();
     let mut app = new_state_only_menu_app(320, 200);
     app.app_paths = Some(paths.clone());
-    assert!(!app.startup_message_hidden("HideMsgStartDedicated"));
+    main_assert!(!app.startup_message_hidden("HideMsgStartDedicated"));
 
     app.deferred_config
         .set("Startup", "HideMsgStartDedicated", "1");
 
-    assert!(
-        app.startup_message_hidden("HideMsgStartDedicated"),
-        "the tick suppresses the warning without waiting for a save"
-    );
-    assert_eq!(
+    main_assert!(app.startup_message_hidden("HideMsgStartDedicated"), "the tick suppresses the warning without waiting for a save");
+    main_assert_eq!(
         Config::load(paths.config_file())
             .test_value()
-            .get_in(Some("Startup"), "HideMsgStartDedicated"),
+            .get_in(Some("Startup"), "HideMsgStartDedicated") =>
         Some("0"),
         "and the file still holds what the session started from"
     );
@@ -5470,10 +4783,7 @@ fn a_dedicated_server_writes_its_runtime_config_on_a_clean_quit() {
     app.finish_console_shutdown();
 
     let saved = Config::load(paths.config_file()).test_value();
-    assert_eq!(saved.get_in(Some("Network"), "ControlRate"), Some("7"));
-    assert_eq!(
-        saved.get_in(Some("Network"), "Comment"),
-        Some("Weekend server")
-    );
+    main_assert_eq!(saved.get_in(Some("Network"), "ControlRate") => Some("7"));
+    main_assert_eq!(saved.get_in(Some("Network"), "Comment") => Some("Weekend server"));
     reset_cached_app_paths();
 }

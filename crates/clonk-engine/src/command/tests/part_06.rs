@@ -1,5 +1,5 @@
-// Contiguous slice 6 of 7 of the `command/tests` battery, spliced by
-// `include!` from the parent module so every test id is unchanged.
+    // Contiguous slice 6 of 7 of the `command/tests` battery, spliced by
+    // `include!` from the parent module so every test id is unchanged.
 
     #[test]
     fn build_queues_energy_for_structures_needing_power() {
@@ -9,21 +9,16 @@
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.physical.can_construct = 1;
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.construction = FULL_CON;
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        let target = command_object!(target_id.as_u64(); construction = FULL_CON;
+            line_connect = LINE_CONNECT_POWER_INPUT);
 
         let objects = command_objects([builder.clone(), target]);
 
-        let ctx = CommandRuntimeContext {
-            structures_need_energy: true,
-            ..command_ctx(&builder, &objects, 0)
-        };
+        let ctx =
+            command_context!(command_ctx(&builder, &objects, 0); structures_need_energy: true);
 
-        let mut state = BuildState::from_request(
-            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-        )
-        .expect("build state");
+        let mut state = BuildState::from_request(&request!(Build, with_target: Some(target_id)))
+            .expect("build state");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -42,20 +37,14 @@
         let builder_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.crew_member = true;
+        let mut builder = command_object!(builder_id.as_u64(); crew_member = true);
         builder.ocf |= ocf::CREW_MEMBER;
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.construction = FULL_CON;
+        let target = command_object!(target_id.as_u64(); construction = FULL_CON);
         let objects = command_objects([builder.clone(), target]);
         let ctx = command_ctx(&builder, &objects, 0);
         let mut stack = CommandStack::new();
         stack
-            .push_front(
-                CommandRequest::new(CommandId::Build)
-                    .with_target(Some(target_id))
-                    .with_mode(CommandMode::Base),
-            )
+            .push_front(request!(Build, with_target: Some(target_id), with_mode: CommandMode::Base))
             .expect("build command queued");
 
         let result = stack.execute_front(&ctx).expect("build executed");
@@ -82,17 +71,15 @@
     fn deferred_physical_waits_for_native_command_gates() {
         let actor_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.physical_deferred = true;
-        actor.action_name = "Walk".into();
-        actor.action_procedure = ActionProcedure::Walk;
+        let actor = command_object!(actor_id.as_u64(); physical_deferred = true;
+            action_name = "Walk".into(); action_procedure = ActionProcedure::Walk);
         let target = snapshot_with_id(target_id.as_u64());
 
         let objects = command_objects([actor.clone()]);
         let ctx = command_ctx(&actor, &objects, 0);
         let mut missing_build = CommandStack::new();
         missing_build
-            .push_front(CommandRequest::new(CommandId::Build).with_target(Some(target_id)))
+            .push_front(request!(Build, with_target: Some(target_id)))
             .expect("Build queues");
         let result = missing_build
             .execute_front(&ctx)
@@ -107,11 +94,7 @@
         let ctx = command_ctx(&actor, &objects, 0);
         let mut expired_build = CommandStack::new();
         expired_build
-            .push_front(
-                CommandRequest::new(CommandId::Build)
-                    .with_target(Some(target_id))
-                    .with_update_interval(1),
-            )
+            .push_front(request!(Build, with_target: Some(target_id), with_update_interval: 1))
             .expect("expiring Build queues");
         let result = expired_build
             .execute_front(&ctx)
@@ -121,7 +104,7 @@
 
         let mut untargeted_throw = CommandStack::new();
         untargeted_throw
-            .push_front(CommandRequest::new(CommandId::Throw))
+            .push_front(request!(Throw))
             .expect("Throw queues");
         let result = untargeted_throw
             .execute_front(&ctx)
@@ -136,17 +119,15 @@
     fn build_resumes_detached_with_second_physical_read() {
         let actor_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.physical_deferred = true;
+        let mut actor = command_object!(actor_id.as_u64(); physical_deferred = true);
         actor.physical.can_construct = 0;
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.construction = FULL_CON;
+        let target = command_object!(target_id.as_u64(); construction = FULL_CON);
         let objects = command_objects([actor.clone(), target]);
         let ctx = command_ctx(&actor, &objects, 0);
 
         let mut stack = CommandStack::new();
         stack
-            .push_front(CommandRequest::new(CommandId::Build).with_target(Some(target_id)))
+            .push_front(request!(Build, with_target: Some(target_id)))
             .expect("Build queues");
         let suspended = stack.execute_front(&ctx).expect("Build suspends");
         let (reads, command_instance_id) = match suspended.events.as_slice() {
@@ -189,20 +170,15 @@
 
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.physical.can_construct = 1;
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.construction = FULL_CON;
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
-        let mut other = snapshot_with_id(other_id.as_u64());
-        other.commands = vec![command_view(CommandId::Energy, Some(target_id))];
+        let target = command_object!(target_id.as_u64(); construction = FULL_CON;
+            line_connect = LINE_CONNECT_POWER_INPUT);
+        let other = command_object!(other_id.as_u64();
+            commands = vec![command_view(CommandId::Energy, Some(target_id))]);
         let objects = command_objects([builder.clone(), target, other]);
-        let ctx = CommandRuntimeContext {
-            structures_need_energy: true,
-            ..command_ctx(&builder, &objects, 0)
-        };
-        let mut state = BuildState::from_request(
-            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-        )
-        .expect("build state");
+        let ctx =
+            command_context!(command_ctx(&builder, &objects, 0); structures_need_energy: true);
+        let mut state = BuildState::from_request(&request!(Build, with_target: Some(target_id)))
+            .expect("build state");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -214,19 +190,16 @@
         let builder_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
         let run = |position: Vector2, procedure: ActionProcedure| {
-            let mut builder = snapshot_with_id(builder_id.as_u64());
-            builder.position = position;
+            let mut builder = command_object!(builder_id.as_u64(); position = position);
             builder.physical.can_construct = 1;
             builder.action_procedure = procedure;
-            let mut target = snapshot_with_id(target_id.as_u64());
-            target.position = Vector2::new(100, 100);
-            target.shape = DefinitionRect::new(120, 90, 20, 20);
+            let target = command_object!(target_id.as_u64(); position = Vector2::new(100, 100);
+                shape = DefinitionRect::new(120, 90, 20, 20));
             let objects = command_objects([builder.clone(), target]);
             let ctx = command_ctx(&builder, &objects, 0);
-            let mut state = BuildState::from_request(
-                &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-            )
-            .expect("build state");
+            let mut state =
+                BuildState::from_request(&request!(Build, with_target: Some(target_id)))
+                    .expect("build state");
             state.step(&ctx)
         };
 
@@ -268,10 +241,8 @@
         let target = snapshot_with_id(target_id.as_u64());
         let objects = command_objects([builder.clone(), target]);
         let ctx = command_ctx(&builder, &objects, 0);
-        let mut state = BuildState::from_request(
-            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-        )
-        .expect("build state");
+        let mut state = BuildState::from_request(&request!(Build, with_target: Some(target_id)))
+            .expect("build state");
 
         let result = state.step(&ctx);
         let request = pushed_request(&result.operations, CommandId::UnGrab);
@@ -287,22 +258,16 @@
     fn build_dig_stops_then_resumes_same_execute() {
         let builder_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.position = Vector2::new(125, 100);
+        let mut builder = command_object!(builder_id.as_u64(); position = Vector2::new(125, 100));
         builder.physical.can_construct = 1;
         builder.action_procedure = ActionProcedure::Dig;
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 100);
-        target.shape = DefinitionRect::new(120, 90, 20, 20);
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(100, 100);
+            shape = DefinitionRect::new(120, 90, 20, 20));
         let mut objects = command_objects([builder.clone(), target.clone()]);
         let ctx = command_ctx(&builder, &objects, 0);
         let mut stack = CommandStack::new();
         stack
-            .push_front(
-                CommandRequest::new(CommandId::Build)
-                    .with_target(Some(target_id))
-                    .with_mode(CommandMode::Base),
-            )
+            .push_front(request!(Build, with_target: Some(target_id), with_mode: CommandMode::Base))
             .expect("build command queued");
 
         let stopped = stack.execute_front(&ctx).expect("dig build executed");
@@ -353,20 +318,18 @@
         let builder_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
         for category in [CATEGORY_STRUCTURE, CATEGORY_STATIC_BACK] {
-            let mut builder = snapshot_with_id(builder_id.as_u64());
-            builder.position = Vector2::new(125, 100);
+            let mut builder =
+                command_object!(builder_id.as_u64(); position = Vector2::new(125, 100));
             builder.physical.can_construct = 1;
             builder.category = category;
             builder.action_procedure = ActionProcedure::Walk;
-            let mut target = snapshot_with_id(target_id.as_u64());
-            target.position = Vector2::new(100, 100);
-            target.shape = DefinitionRect::new(120, 90, 20, 20);
+            let target = command_object!(target_id.as_u64(); position = Vector2::new(100, 100);
+                shape = DefinitionRect::new(120, 90, 20, 20));
             let objects = command_objects([builder.clone(), target]);
             let ctx = command_ctx(&builder, &objects, 0);
-            let mut state = BuildState::from_request(
-                &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-            )
-            .expect("build state");
+            let mut state =
+                BuildState::from_request(&request!(Build, with_target: Some(target_id)))
+                    .expect("build state");
             let result = state.step(&ctx);
             assert_eq!(result.status, CommandStatus::Failed, "category={category}");
             assert!(result.events.is_empty());
@@ -376,14 +339,11 @@
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.physical.can_construct = 1;
         builder.category = CATEGORY_STRUCTURE;
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.container = Some(builder_id);
+        let target = command_object!(target_id.as_u64(); container = Some(builder_id));
         let objects = command_objects([builder.clone(), target]);
         let ctx = command_ctx(&builder, &objects, 0);
-        let mut state = BuildState::from_request(
-            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-        )
-        .expect("build state");
+        let mut state = BuildState::from_request(&request!(Build, with_target: Some(target_id)))
+            .expect("build state");
         let result = state.step(&ctx);
         assert!(matches!(
             result.events.as_slice(),
@@ -404,24 +364,18 @@
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.physical.can_construct = 1;
         builder.commands = vec![command_view(CommandId::Build, Some(target_id))];
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.construction = FULL_CON;
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
-        let mut other = snapshot_with_id(other_id.as_u64());
-        other.commands = vec![command_view(CommandId::Build, Some(target_id))];
+        let target = command_object!(target_id.as_u64(); construction = FULL_CON;
+            line_connect = LINE_CONNECT_POWER_INPUT);
+        let mut other = command_object!(other_id.as_u64();
+            commands = vec![command_view(CommandId::Build, Some(target_id))]);
         other.contents.push(kit_id);
-        let mut kit = snapshot_with_id(kit_id.as_u64());
-        kit.definition_id = LINEKIT_DEFINITION.into();
-        kit.container = Some(other_id);
+        let kit = command_object!(kit_id.as_u64(); definition_id = LINEKIT_DEFINITION.into();
+            container = Some(other_id));
         let mut objects = command_objects([builder.clone(), target, other, kit]);
-        let ctx = CommandRuntimeContext {
-            structures_need_energy: true,
-            ..command_ctx(&builder, &objects, 0)
-        };
-        let mut state = BuildState::from_request(
-            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-        )
-        .expect("build state");
+        let ctx =
+            command_context!(command_ctx(&builder, &objects, 0); structures_need_energy: true);
+        let mut state = BuildState::from_request(&request!(Build, with_target: Some(target_id)))
+            .expect("build state");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -429,19 +383,14 @@
 
         let current_kit_id = ObjectId::new(41);
         builder.contents.push(current_kit_id);
-        let mut current_kit = snapshot_with_id(current_kit_id.as_u64());
-        current_kit.definition_id = LINEKIT_DEFINITION.into();
-        current_kit.container = Some(builder_id);
+        let current_kit = command_object!(current_kit_id.as_u64();
+            definition_id = LINEKIT_DEFINITION.into(); container = Some(builder_id));
         objects.insert(builder_id, builder.clone());
         objects.insert(current_kit_id, current_kit);
-        let ctx = CommandRuntimeContext {
-            structures_need_energy: true,
-            ..command_ctx(&builder, &objects, 1)
-        };
-        let mut state = BuildState::from_request(
-            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-        )
-        .expect("build state");
+        let ctx =
+            command_context!(command_ctx(&builder, &objects, 1); structures_need_energy: true);
+        let mut state = BuildState::from_request(&request!(Build, with_target: Some(target_id)))
+            .expect("build state");
 
         let result = state.step(&ctx);
         let energy = pushed_request(&result.operations, CommandId::Energy);
@@ -457,21 +406,17 @@
         let target_id = ObjectId::new(20);
         let supply_id = ObjectId::new(30);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 1;
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 0);
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
-        let mut supply = snapshot_with_id(supply_id.as_u64());
-        supply.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        let builder = command_object!(builder_id.as_u64(); owner = 1);
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(100, 0);
+            line_connect = LINE_CONNECT_POWER_INPUT);
+        let mut supply = command_object!(supply_id.as_u64();
+            line_connect = crate::LINE_CONNECT_POWER_OUTPUT);
         supply.ocf |= ocf::POWER_SUPPLY;
 
         let objects = command_objects([target, supply]);
-        let ctx = CommandRuntimeContext {
-            structures_need_energy: true,
-            ..command_ctx(&builder, &objects, 0)
-        };
-        let parent_request = CommandRequest::new(CommandId::Energy).with_target(Some(target_id));
+        let ctx =
+            command_context!(command_ctx(&builder, &objects, 0); structures_need_energy: true);
+        let parent_request = request!(Energy, with_target: Some(target_id));
         let mut state = EnergyState::from_request(&parent_request).expect("energy state");
 
         let result = state.step(&ctx);
@@ -486,10 +431,8 @@
         let target = snapshot_with_id(target_id.as_u64());
         let objects = command_objects([target]);
         let ctx = command_ctx(&builder, &objects, 0);
-        let mut state = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
-        )
-        .expect("energy state");
+        let mut state = EnergyState::from_request(&request!(Energy, with_target: Some(target_id)))
+            .expect("energy state");
 
         let result = state.step(&ctx);
 
@@ -506,29 +449,22 @@
         let linekit_id = ObjectId::new(40);
         let line_id = ObjectId::new(50);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 1;
+        let mut builder = command_object!(builder_id.as_u64(); owner = 1);
         builder.contents.push(linekit_id);
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
-        target.need_energy = false;
+        let target = command_object!(target_id.as_u64(); line_connect = LINE_CONNECT_POWER_INPUT;
+            need_energy = false);
         let mut supply = snapshot_with_id(supply_id.as_u64());
         supply.ocf |= ocf::POWER_SUPPLY;
         supply.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
-        let mut linekit = snapshot_with_id(linekit_id.as_u64());
-        linekit.definition_id = LINEKIT_DEFINITION.into();
-        linekit.container = Some(builder_id);
-        let mut line = snapshot_with_id(line_id.as_u64());
-        line.definition_id = POWERLINE_DEFINITION.into();
-        line.action_name = CONNECT_ACTION.into();
-        line.action_target = Some(supply_id);
-        line.action_target2 = Some(target_id);
+        let linekit = command_object!(linekit_id.as_u64(); definition_id = LINEKIT_DEFINITION.into();
+            container = Some(builder_id));
+        let line = command_object!(line_id.as_u64(); definition_id = POWERLINE_DEFINITION.into();
+            action_name = CONNECT_ACTION.into(); action_target = Some(supply_id);
+            action_target2 = Some(target_id));
 
         let mut objects = command_objects([target.clone(), supply, linekit, line]);
-        let mut state = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
-        )
-        .expect("energy state");
+        let mut state = EnergyState::from_request(&request!(Energy, with_target: Some(target_id)))
+            .expect("energy state");
         let result = {
             let mut ctx = command_ctx(&builder, &objects, 0);
             ctx.structures_need_energy = true;
@@ -545,10 +481,9 @@
             .get_mut(&target_id)
             .expect("target present")
             .need_energy = true;
-        let mut needs_energy_state = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
-        )
-        .expect("energy state");
+        let mut needs_energy_state =
+            EnergyState::from_request(&request!(Energy, with_target: Some(target_id)))
+                .expect("energy state");
         let continued = {
             let mut ctx = command_ctx(&builder, &objects, 1);
             ctx.structures_need_energy = true;
@@ -568,22 +503,17 @@
         let target_id = ObjectId::new(20);
         let closest_id = ObjectId::new(30);
         let farther_id = ObjectId::new(40);
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
-        let mut closest = snapshot_with_id(closest_id.as_u64());
-        closest.position = Vector2::new(10, 0);
+        let target = command_object!(target_id.as_u64(); line_connect = LINE_CONNECT_POWER_INPUT);
+        let mut closest = command_object!(closest_id.as_u64(); position = Vector2::new(10, 0));
         closest.ocf |= ocf::POWER_SUPPLY;
-        let mut farther = snapshot_with_id(farther_id.as_u64());
-        farther.position = Vector2::new(20, 0);
+        let mut farther = command_object!(farther_id.as_u64(); position = Vector2::new(20, 0));
         farther.ocf |= ocf::POWER_SUPPLY;
         farther.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
         let objects = command_objects([target, closest, farther]);
         let mut ctx = command_ctx(&builder, &objects, 0);
         ctx.structures_need_energy = true;
-        let mut state = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
-        )
-        .expect("energy state");
+        let mut state = EnergyState::from_request(&request!(Energy, with_target: Some(target_id)))
+            .expect("energy state");
 
         let result = state.step(&ctx);
 
@@ -598,18 +528,14 @@
         let builder = snapshot_with_id(10);
         let target_id = ObjectId::new(20);
         let supply_id = ObjectId::new(30);
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
-        let mut supply = snapshot_with_id(supply_id.as_u64());
-        supply.position = Vector2::new(650, 1);
-        supply.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        let target = command_object!(target_id.as_u64(); line_connect = LINE_CONNECT_POWER_INPUT);
+        let supply = command_object!(supply_id.as_u64(); position = Vector2::new(650, 1);
+            line_connect = crate::LINE_CONNECT_POWER_OUTPUT);
         let objects = command_objects([target, supply]);
         let mut ctx = command_ctx(&builder, &objects, 0);
         ctx.structures_need_energy = true;
         let mut state = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy)
-                .with_target(Some(target_id))
-                .with_target2(Some(supply_id)),
+            &request!(Energy, with_target: Some(target_id), with_target2: Some(supply_id)),
         )
         .expect("energy state");
 
@@ -637,30 +563,21 @@
         let ignored_far_endpoint_id = ObjectId::new(61);
         let other_kit_far_endpoint_id = ObjectId::new(62);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 1;
-        builder.command_direction = CommandDirection::Right;
-        builder.contents = vec![plain_kit_id, attached_kit_id, later_kit_id];
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
-        let mut selected_supply = snapshot_with_id(selected_supply_id.as_u64());
-        selected_supply.position = Vector2::new(100, 0);
-        selected_supply.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
-        let mut plain_kit = snapshot_with_id(plain_kit_id.as_u64());
-        plain_kit.definition_id = LINEKIT_DEFINITION.into();
-        plain_kit.container = Some(builder_id);
-        let mut attached_kit = snapshot_with_id(attached_kit_id.as_u64());
-        attached_kit.definition_id = LINEKIT_DEFINITION.into();
-        attached_kit.container = Some(builder_id);
-        let mut later_kit = snapshot_with_id(later_kit_id.as_u64());
-        later_kit.definition_id = LINEKIT_DEFINITION.into();
-        later_kit.container = Some(builder_id);
-        let mut line = snapshot_with_id(line_id.as_u64());
-        line.master_list_order = 2;
-        line.definition_id = POWERLINE_DEFINITION.into();
-        line.action_name = CONNECT_ACTION.into();
-        line.action_target = Some(far_endpoint_id);
-        line.action_target2 = Some(attached_kit_id);
+        let builder = command_object!(builder_id.as_u64(); owner = 1;
+            command_direction = CommandDirection::Right;
+            contents = vec![plain_kit_id, attached_kit_id, later_kit_id]);
+        let target = command_object!(target_id.as_u64(); line_connect = LINE_CONNECT_POWER_INPUT);
+        let selected_supply = command_object!(selected_supply_id.as_u64();
+            position = Vector2::new(100, 0); line_connect = crate::LINE_CONNECT_POWER_OUTPUT);
+        let plain_kit = command_object!(plain_kit_id.as_u64();
+            definition_id = LINEKIT_DEFINITION.into(); container = Some(builder_id));
+        let attached_kit = command_object!(attached_kit_id.as_u64();
+            definition_id = LINEKIT_DEFINITION.into(); container = Some(builder_id));
+        let later_kit = command_object!(later_kit_id.as_u64();
+            definition_id = LINEKIT_DEFINITION.into(); container = Some(builder_id));
+        let line = command_object!(line_id.as_u64(); master_list_order = 2;
+            definition_id = POWERLINE_DEFINITION.into(); action_name = CONNECT_ACTION.into();
+            action_target = Some(far_endpoint_id); action_target2 = Some(attached_kit_id));
         let mut later_same_kit_line = line.clone();
         later_same_kit_line.id = later_same_kit_line_id;
         later_same_kit_line.master_list_order = 3;
@@ -671,10 +588,8 @@
         earlier_other_kit_line.master_list_order = 1;
         earlier_other_kit_line.action_target = Some(later_kit_id);
         earlier_other_kit_line.action_target2 = Some(other_kit_far_endpoint_id);
-        let mut far_endpoint = snapshot_with_id(far_endpoint_id.as_u64());
-        far_endpoint.position = Vector2::new(100, 0);
-        far_endpoint.shape = DefinitionRect::new(92, -10, 16, 20);
-        far_endpoint.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        let far_endpoint = command_object!(far_endpoint_id.as_u64(); position = Vector2::new(100, 0);
+            shape = DefinitionRect::new(92, -10, 16, 20); line_connect = crate::LINE_CONNECT_POWER_OUTPUT);
         let ignored_far_endpoint = snapshot_with_id(ignored_far_endpoint_id.as_u64());
         let other_kit_far_endpoint = snapshot_with_id(other_kit_far_endpoint_id.as_u64());
         let mut objects = command_objects([
@@ -693,9 +608,7 @@
         let mut ctx = command_ctx(&builder, &objects, 0);
         ctx.structures_need_energy = true;
         let mut state = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy)
-                .with_target(Some(target_id))
-                .with_target2(Some(selected_supply_id)),
+            &request!(Energy, with_target: Some(target_id), with_target2: Some(selected_supply_id)),
         )
         .expect("energy state");
 
@@ -736,9 +649,7 @@
         let mut moving_builder = builder.clone();
         moving_builder.position = Vector2::new(100, 0);
         let mut moving_state = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy)
-                .with_target(Some(target_id))
-                .with_target2(Some(selected_supply_id)),
+            &request!(Energy, with_target: Some(target_id), with_target2: Some(selected_supply_id)),
         )
         .expect("energy state");
         let moving = {
@@ -777,17 +688,12 @@
         );
 
         let malformed_line_id = ObjectId::new(53);
-        let mut malformed_line = snapshot_with_id(malformed_line_id.as_u64());
-        malformed_line.master_list_order = 0;
-        malformed_line.definition_id = POWERLINE_DEFINITION.into();
-        malformed_line.action_name = CONNECT_ACTION.into();
-        malformed_line.action_target = Some(plain_kit_id);
-        malformed_line.action_target2 = None;
+        let malformed_line = command_object!(malformed_line_id.as_u64(); master_list_order = 0;
+            definition_id = POWERLINE_DEFINITION.into(); action_name = CONNECT_ACTION.into();
+            action_target = Some(plain_kit_id); action_target2 = None);
         objects.insert(malformed_line_id, malformed_line);
         let mut malformed_state = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy)
-                .with_target(Some(target_id))
-                .with_target2(Some(selected_supply_id)),
+            &request!(Energy, with_target: Some(target_id), with_target2: Some(selected_supply_id)),
         )
         .expect("energy state");
         let malformed = {
@@ -830,34 +736,25 @@
         let supply_id = ObjectId::new(30);
         let linekit_id = ObjectId::new(40);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 1;
+        let mut builder = command_object!(builder_id.as_u64(); owner = 1);
         builder.contents.push(linekit_id);
         builder.command_direction = CommandDirection::Right;
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 0);
-        target.shape = DefinitionRect::new(92, -10, 16, 20);
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(100, 0);
+            shape = DefinitionRect::new(92, -10, 16, 20); line_connect = LINE_CONNECT_POWER_INPUT);
 
-        let mut supply = snapshot_with_id(supply_id.as_u64());
-        supply.definition_id = "POWR".into();
-        supply.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        let mut supply = command_object!(supply_id.as_u64(); definition_id = "POWR".into();
+            line_connect = crate::LINE_CONNECT_POWER_OUTPUT);
         supply.ocf |= ocf::POWER_SUPPLY;
 
-        let mut linekit = snapshot_with_id(linekit_id.as_u64());
-        linekit.definition_id = LINEKIT_DEFINITION.into();
-        linekit.container = Some(builder_id);
+        let linekit = command_object!(linekit_id.as_u64(); definition_id = LINEKIT_DEFINITION.into();
+            container = Some(builder_id));
 
         let objects = command_objects([target, supply, linekit]);
-        let ctx = CommandRuntimeContext {
-            structures_need_energy: true,
-            ..command_ctx(&builder, &objects, 0)
-        };
-        let mut state = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
-        )
-        .expect("energy state");
+        let ctx =
+            command_context!(command_ctx(&builder, &objects, 0); structures_need_energy: true);
+        let mut state = EnergyState::from_request(&request!(Energy, with_target: Some(target_id)))
+            .expect("energy state");
 
         let result = state.step(&ctx);
 
@@ -876,20 +773,14 @@
         )));
 
         let line_id = ObjectId::new(50);
-        let mut line = snapshot_with_id(line_id.as_u64());
-        line.definition_id = POWERLINE_DEFINITION.into();
-        line.owner = 1;
-        line.action_name = CONNECT_ACTION.into();
-        line.action_target = Some(supply_id);
-        line.action_target2 = Some(linekit_id);
+        let line = command_object!(line_id.as_u64(); definition_id = POWERLINE_DEFINITION.into();
+            owner = 1; action_name = CONNECT_ACTION.into(); action_target = Some(supply_id);
+            action_target2 = Some(linekit_id));
         let mut connected_objects = objects.clone();
         connected_objects.insert(line_id, line);
         let mut at_target_builder = builder.clone();
         at_target_builder.position = Vector2::new(100, 0);
-        let connected_ctx = CommandRuntimeContext {
-            structures_need_energy: true,
-            ..command_ctx(&at_target_builder, &connected_objects, 1)
-        };
+        let connected_ctx = command_context!(command_ctx(&at_target_builder, &connected_objects, 1); structures_need_energy: true);
         let connected = state.step(&connected_ctx);
         assert_eq!(connected.status, CommandStatus::Completed);
         assert_eq!(
@@ -906,16 +797,13 @@
         let lower_id_later = ObjectId::new(3);
         let higher_id_earlier = ObjectId::new(99);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.owner = 7;
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::ZERO;
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        let actor = command_object!(actor_id.as_u64(); owner = 7);
+        let target = command_object!(target_id.as_u64(); position = Vector2::ZERO;
+            line_connect = LINE_CONNECT_POWER_INPUT);
 
         let supply = |id: ObjectId, x: i32, master_list_order: usize| {
-            let mut snapshot = snapshot_with_id(id.as_u64());
-            snapshot.master_list_order = master_list_order;
-            snapshot.position = Vector2::new(x, 0);
+            let mut snapshot = command_object!(id.as_u64(); master_list_order = master_list_order;
+                position = Vector2::new(x, 0));
             snapshot.ocf |= ocf::POWER_SUPPLY;
             snapshot.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
             snapshot
@@ -927,14 +815,11 @@
             supply(higher_id_earlier, -10, 1),
         ]);
         let choose = |objects: &CommandObjectSnapshots| {
-            let ctx = CommandRuntimeContext {
-                structures_need_energy: true,
-                ..command_ctx(&actor, objects, 0)
-            };
-            let mut state = EnergyState::from_request(
-                &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
-            )
-            .expect("energy state");
+            let ctx =
+                command_context!(command_ctx(&actor, objects, 0); structures_need_energy: true);
+            let mut state =
+                EnergyState::from_request(&request!(Energy, with_target: Some(target_id)))
+                    .expect("energy state");
             state.resolve_source(&ctx, target_id)
         };
 
@@ -962,20 +847,15 @@
         let older_selected_line_id = ObjectId::new(90);
         let later_other_line_id = ObjectId::new(99);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.owner = 7;
+        let actor = command_object!(actor_id.as_u64(); owner = 7);
         let target = snapshot_with_id(target_id.as_u64());
         let source = snapshot_with_id(source_id.as_u64());
         let selected_kit = snapshot_with_id(selected_kit_id.as_u64());
         let other_kit = snapshot_with_id(other_kit_id.as_u64());
         let line = |id: ObjectId, kit: ObjectId, master_list_order: usize| {
-            let mut snapshot = snapshot_with_id(id.as_u64());
-            snapshot.master_list_order = master_list_order;
-            snapshot.definition_id = POWERLINE_DEFINITION.into();
-            snapshot.owner = actor.owner;
-            snapshot.action_target = Some(source_id);
-            snapshot.action_target2 = Some(kit);
-            snapshot
+            command_object!(id.as_u64(); master_list_order = master_list_order;
+                definition_id = POWERLINE_DEFINITION.into(); owner = actor.owner;
+                action_target = Some(source_id); action_target2 = Some(kit))
         };
 
         let objects = command_objects([
@@ -988,14 +868,9 @@
             line(older_selected_line_id, selected_kit_id, 4),
             line(later_other_line_id, other_kit_id, 10),
         ]);
-        let ctx = CommandRuntimeContext {
-            structures_need_energy: true,
-            ..command_ctx(&actor, &objects, 0)
-        };
-        let state = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
-        )
-        .expect("energy state");
+        let ctx = command_context!(command_ctx(&actor, &objects, 0); structures_need_energy: true);
+        let state = EnergyState::from_request(&request!(Energy, with_target: Some(target_id)))
+            .expect("energy state");
 
         assert_eq!(
             state.spawned_line(&ctx, &source, selected_kit_id),
@@ -1008,17 +883,13 @@
         let builder_id = ObjectId::new(1);
         let item_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
+        let mut builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false);
         builder.contents.push(item_id);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.collectible = true;
-        item.construction = FULL_CON;
-        item.container = Some(builder_id);
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into();
+            ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true; construction = FULL_CON;
+            container = Some(builder_id));
 
         let objects = command_objects([builder, item]);
 
@@ -1026,7 +897,7 @@
         let ctx = command_ctx(builder_snapshot, &objects, 0);
 
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -1040,16 +911,12 @@
         let builder_id = ObjectId::new(10);
         let item_id = ObjectId::new(20);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
+        let builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.position = Vector2::new(100, 0);
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.collectible = true;
-        item.construction = FULL_CON;
+        let mut item = command_object!(item_id.as_u64(); definition_id = "WOOD".into();
+            position = Vector2::new(100, 0); ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true;
+            construction = FULL_CON);
         // Construction components are nonliving. C4Command::Acquire filters
         // by OCF_Available/full construction/fire, never OCF_Alive
         // (C4Command.cpp:2105-2132).
@@ -1061,7 +928,7 @@
         let ctx = command_ctx(builder_snapshot, &objects, 0);
 
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -1103,10 +970,7 @@
             "zero ranges default (C4Command.cpp:1668-1669)"
         );
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire)
-                .with_data(CommandData::Text("WOOD".into()))
-                .with_tx(Some(-50))
-                .with_ty(Some(-50)),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into()), with_tx: Some(-50), with_ty: Some(-50)),
         )
         .expect("state created");
         assert_eq!(
@@ -1136,18 +1000,12 @@
         let later_tie_id = ObjectId::new(3);
         let earlier_tie_id = ObjectId::new(99);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.collectible = false;
+        let builder = command_object!(builder_id.as_u64(); collectible = false);
 
         let item = |id: ObjectId, position: Vector2, master_list_order: usize| {
-            let mut snapshot = snapshot_with_id(id.as_u64());
-            snapshot.definition_id = "WOOD".into();
-            snapshot.position = position;
-            snapshot.master_list_order = master_list_order;
-            snapshot.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-            snapshot.collectible = true;
-            snapshot.construction = FULL_CON;
-            snapshot
+            command_object!(id.as_u64(); definition_id = "WOOD".into();
+                position = position; master_list_order = master_list_order;
+                ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true; construction = FULL_CON)
         };
         // Manhattan prefers (0,6): 6 < 7. C++ squared distance prefers the
         // 3-4-5 candidate: 25 < 36.
@@ -1157,7 +1015,7 @@
 
         let mut objects = command_objects([later_tie, manhattan_favorite, builder.clone()]);
         let state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("acquire state");
         let choose = |objects: &CommandObjectSnapshots| {
@@ -1191,16 +1049,11 @@
         let drain_connected_id = ObjectId::new(4);
         let available_id = ObjectId::new(5);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.collectible = false;
+        let builder = command_object!(builder_id.as_u64(); collectible = false);
         let item = |id: ObjectId, x: i32| {
-            let mut snapshot = snapshot_with_id(id.as_u64());
-            snapshot.definition_id = "WOOD".into();
-            snapshot.position = Vector2::new(x, 0);
-            snapshot.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-            snapshot.collectible = true;
-            snapshot.construction = FULL_CON;
-            snapshot
+            command_object!(id.as_u64(); definition_id = "WOOD".into();
+                position = Vector2::new(x, 0); ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true;
+                construction = FULL_CON)
         };
         let mut burning = item(burning_id, 1);
         burning.on_fire = true;
@@ -1208,24 +1061,16 @@
         let drain_connected = item(drain_connected_id, 3);
         let available = item(available_id, 4);
 
-        let mut source_pipe = snapshot_with_id(10);
-        source_pipe.definition_id = SOURCE_PIPE_DEFINITION.into();
-        source_pipe.action_name = CONNECT_ACTION.into();
-        source_pipe.action_target = Some(source_connected_id);
-        let mut drain_pipe = snapshot_with_id(11);
-        drain_pipe.definition_id = DRAIN_PIPE_DEFINITION.into();
-        drain_pipe.action_name = CONNECT_ACTION.into();
-        drain_pipe.action_target2 = Some(drain_connected_id);
+        let source_pipe = command_object!(10; definition_id = SOURCE_PIPE_DEFINITION.into();
+            action_name = CONNECT_ACTION.into(); action_target = Some(source_connected_id));
+        let drain_pipe = command_object!(11; definition_id = DRAIN_PIPE_DEFINITION.into();
+            action_name = CONNECT_ACTION.into(); action_target2 = Some(drain_connected_id));
         // Exact action and target matching matter: neither decoy may hide
         // the otherwise valid fallback candidate.
-        let mut wrong_action = snapshot_with_id(12);
-        wrong_action.definition_id = SOURCE_PIPE_DEFINITION.into();
-        wrong_action.action_name = "Idle".into();
-        wrong_action.action_target = Some(available_id);
-        let mut wrong_target = snapshot_with_id(13);
-        wrong_target.definition_id = DRAIN_PIPE_DEFINITION.into();
-        wrong_target.action_name = CONNECT_ACTION.into();
-        wrong_target.action_target = Some(builder_id);
+        let wrong_action = command_object!(12; definition_id = SOURCE_PIPE_DEFINITION.into();
+            action_name = "Idle".into(); action_target = Some(available_id));
+        let wrong_target = command_object!(13; definition_id = DRAIN_PIPE_DEFINITION.into();
+            action_name = CONNECT_ACTION.into(); action_target = Some(builder_id));
 
         let mut objects = CommandObjectSnapshots::default();
         for snapshot in [
@@ -1243,7 +1088,7 @@
         objects.insert(builder_id, builder.clone());
         let ctx = command_ctx(&builder, &objects, 0);
         let state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("acquire state");
 
@@ -1255,24 +1100,17 @@
         let builder_id = ObjectId::new(1);
         let far_id = ObjectId::new(2);
         let near_id = ObjectId::new(3);
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.collectible = false;
+        let builder = command_object!(builder_id.as_u64(); collectible = false);
         let make_item = |id: ObjectId, x: i32| {
-            let mut snapshot = snapshot_with_id(id.as_u64());
-            snapshot.definition_id = "WOOD".into();
-            snapshot.position = Vector2::new(x, 0);
-            snapshot.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-            snapshot.collectible = true;
-            snapshot.construction = FULL_CON;
-            snapshot
+            command_object!(id.as_u64(); definition_id = "WOOD".into();
+                position = Vector2::new(x, 0); ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true;
+                construction = FULL_CON)
         };
 
         let initial_objects = command_objects([builder.clone(), make_item(far_id, 20)]);
         let initial_ctx = command_ctx(&builder, &initial_objects, 0);
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire)
-                .with_data(CommandData::Text("WOOD".into()))
-                .with_update_interval(50),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into()), with_update_interval: 50),
         )
         .expect("acquire state");
         let _ = state.step(&initial_ctx);
@@ -1307,20 +1145,14 @@
         let container_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
-        builder.container = Some(container_id);
+        let builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false; container = Some(container_id));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(0, 0);
+        let container = command_object!(container_id.as_u64(); position = Vector2::new(0, 0));
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.construction = FULL_CON;
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.collectible = true;
-        item.container = Some(container_id);
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into();
+            construction = FULL_CON; ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true;
+            container = Some(container_id));
 
         let objects = command_objects([builder, container, item]);
 
@@ -1328,7 +1160,7 @@
         let ctx = command_ctx(builder_snapshot, &objects, 42);
 
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -1362,22 +1194,15 @@
         let container_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
-        builder.position = Vector2::new(0, 0);
+        let builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false; position = Vector2::new(0, 0));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(4, 0);
-        container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+        let container = command_object!(container_id.as_u64(); position = Vector2::new(4, 0);
+            ocf = ocf::AVAILABLE | ocf::ENTRANCE);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.construction = FULL_CON;
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.collectible = true;
-        item.container = Some(container_id);
-        item.position = container.position;
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into();
+            construction = FULL_CON; ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true;
+            container = Some(container_id); position = container.position);
 
         let objects = command_objects([builder, container, item]);
 
@@ -1385,7 +1210,7 @@
         let ctx = command_ctx(builder_snapshot, &objects, 100);
 
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -1410,16 +1235,15 @@
     fn acquire_requests_buy_when_no_candidate() {
         let builder_id = ObjectId::new(10);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
+        let builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false);
 
         let objects = command_objects([builder.clone()]);
 
         let ctx = command_ctx(&builder, &objects, 0);
 
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -1449,14 +1273,13 @@
     fn acquire_retries_buy_after_cooldown() {
         let builder_id = ObjectId::new(11);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
+        let builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false);
 
         let objects = command_objects([builder.clone()]);
 
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -1511,28 +1334,20 @@
         let target_container_id = ObjectId::new(3);
         let item_id = ObjectId::new(4);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
-        builder.container = Some(current_container_id);
+        let mut builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false; container = Some(current_container_id));
 
-        let mut current_container = snapshot_with_id(current_container_id.as_u64());
-        current_container.position = Vector2::new(5, 5);
-        current_container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+        let current_container = command_object!(current_container_id.as_u64();
+            position = Vector2::new(5, 5); ocf = ocf::AVAILABLE | ocf::ENTRANCE);
 
         builder.position = current_container.position;
 
-        let mut target_container = snapshot_with_id(target_container_id.as_u64());
-        target_container.position = Vector2::new(20, 0);
-        target_container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+        let target_container = command_object!(target_container_id.as_u64();
+            position = Vector2::new(20, 0); ocf = ocf::AVAILABLE | ocf::ENTRANCE);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.construction = FULL_CON;
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.collectible = true;
-        item.container = Some(target_container_id);
-        item.position = target_container.position;
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into();
+            construction = FULL_CON; ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true;
+            container = Some(target_container_id); position = target_container.position);
 
         let objects = command_objects([builder, current_container, target_container, item]);
 
@@ -1544,9 +1359,7 @@
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::Acquire)
-                    .with_data(CommandData::Text("WOOD".into()))
-                    .with_mode(CommandMode::Base),
+                request!(Acquire, with_data: CommandData::Text("WOOD".into()), with_mode: CommandMode::Base),
             )
             .expect("command queued");
 
@@ -1564,14 +1377,11 @@
         let mut frame = ctx.frame + 1;
         let initial_len = stack.len();
         loop {
-            let step_ctx = CommandRuntimeContext {
-                position: ctx.position,
-                structures_need_energy: ctx.structures_need_energy,
-                base_buy_enabled: ctx.base_buy_enabled,
-                base_sell_enabled: ctx.base_sell_enabled,
-                transfer_zones: ctx.transfer_zones,
-                ..command_ctx_at_frame(ctx.object, ctx.objects, ctx.players, ctx.definitions, frame)
-            };
+            let step_ctx = command_context!(command_ctx_at_frame(ctx.object, ctx.objects, ctx.players, ctx.definitions, frame); position: ctx.position,
+            structures_need_energy: ctx.structures_need_energy,
+            base_buy_enabled: ctx.base_buy_enabled,
+            base_sell_enabled: ctx.base_sell_enabled,
+            transfer_zones: ctx.transfer_zones);
             let step_result = stack.step(&step_ctx).expect("acquire evaluation");
             assert_eq!(step_result.status, CommandStatus::Running);
             if stack.len() > initial_len {
@@ -1599,23 +1409,17 @@
         let current_container_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
-        builder.container = Some(current_container_id);
+        let mut builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false; container = Some(current_container_id));
 
-        let mut current_container = snapshot_with_id(current_container_id.as_u64());
-        current_container.position = Vector2::new(5, 5);
-        current_container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+        let current_container = command_object!(current_container_id.as_u64();
+            position = Vector2::new(5, 5); ocf = ocf::AVAILABLE | ocf::ENTRANCE);
 
         builder.position = current_container.position;
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.construction = FULL_CON;
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.collectible = true;
-        item.position = Vector2::new(30, 0);
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into();
+            construction = FULL_CON; ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true;
+            position = Vector2::new(30, 0));
 
         let objects = command_objects([builder, current_container, item]);
 
@@ -1626,9 +1430,7 @@
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(
-                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
-            )
+            .push_back(request!(Acquire, with_data: CommandData::Text("WOOD".into())))
             .expect("command queued");
 
         let evaluation = stack.step(&ctx).expect("Acquire evaluates");
@@ -1645,14 +1447,11 @@
         let mut frame = ctx.frame + 1;
         let initial_len = stack.len();
         loop {
-            let step_ctx = CommandRuntimeContext {
-                position: ctx.position,
-                structures_need_energy: ctx.structures_need_energy,
-                base_buy_enabled: ctx.base_buy_enabled,
-                base_sell_enabled: ctx.base_sell_enabled,
-                transfer_zones: ctx.transfer_zones,
-                ..command_ctx_at_frame(ctx.object, ctx.objects, ctx.players, ctx.definitions, frame)
-            };
+            let step_ctx = command_context!(command_ctx_at_frame(ctx.object, ctx.objects, ctx.players, ctx.definitions, frame); position: ctx.position,
+            structures_need_energy: ctx.structures_need_energy,
+            base_buy_enabled: ctx.base_buy_enabled,
+            base_sell_enabled: ctx.base_sell_enabled,
+            transfer_zones: ctx.transfer_zones);
             let step_result = stack.step(&step_ctx).expect("acquire evaluation");
             assert_eq!(step_result.status, CommandStatus::Running);
             if stack.len() > initial_len {
@@ -1680,22 +1479,15 @@
         let container_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
-        builder.position = Vector2::new(0, 0);
+        let builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false; position = Vector2::new(0, 0));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(6, 0);
-        container.ocf = ocf::AVAILABLE | ocf::GRAB;
+        let container = command_object!(container_id.as_u64(); position = Vector2::new(6, 0);
+            ocf = ocf::AVAILABLE | ocf::GRAB);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.construction = FULL_CON;
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.collectible = true;
-        item.container = Some(container_id);
-        item.position = container.position;
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into();
+            construction = FULL_CON; ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true;
+            container = Some(container_id); position = container.position);
 
         let objects = command_objects([builder.clone(), container.clone(), item]);
 
@@ -1705,9 +1497,7 @@
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(
-                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
-            )
+            .push_back(request!(Acquire, with_data: CommandData::Text("WOOD".into())))
             .expect("command queued");
 
         let evaluation = stack.step(&ctx).expect("Acquire evaluates");
@@ -1724,14 +1514,11 @@
         let initial_len = stack.len();
         let mut frame = ctx.frame + 1;
         loop {
-            let step_ctx = CommandRuntimeContext {
-                position: ctx.position,
-                structures_need_energy: ctx.structures_need_energy,
-                base_buy_enabled: ctx.base_buy_enabled,
-                base_sell_enabled: ctx.base_sell_enabled,
-                transfer_zones: ctx.transfer_zones,
-                ..command_ctx_at_frame(ctx.object, ctx.objects, ctx.players, ctx.definitions, frame)
-            };
+            let step_ctx = command_context!(command_ctx_at_frame(ctx.object, ctx.objects, ctx.players, ctx.definitions, frame); position: ctx.position,
+            structures_need_energy: ctx.structures_need_energy,
+            base_buy_enabled: ctx.base_buy_enabled,
+            base_sell_enabled: ctx.base_sell_enabled,
+            transfer_zones: ctx.transfer_zones);
             let step_result = stack.step(&step_ctx).expect("acquire evaluation");
             assert_eq!(step_result.status, CommandStatus::Running);
             // `CommandStack::step` applies the command's operations to the stack
@@ -1768,16 +1555,15 @@
     #[test]
     fn acquire_script_handled_skips_default_logic() {
         let builder_id = ObjectId::new(5);
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
+        let builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false);
 
         let objects = command_objects([builder.clone()]);
 
         let ctx = command_ctx(&builder, &objects, 0);
 
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -1796,16 +1582,15 @@
     #[test]
     fn acquire_script_complete_finishes_command() {
         let builder_id = ObjectId::new(6);
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
+        let builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false);
 
         let objects = command_objects([builder.clone()]);
 
         let ctx = command_ctx(&builder, &objects, 0);
 
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -1818,16 +1603,15 @@
     #[test]
     fn acquire_script_failed_marks_command_failed() {
         let builder_id = ObjectId::new(7);
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
+        let builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false);
 
         let objects = command_objects([builder.clone()]);
 
         let ctx = command_ctx(&builder, &objects, 0);
 
         let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            &request!(Acquire, with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 

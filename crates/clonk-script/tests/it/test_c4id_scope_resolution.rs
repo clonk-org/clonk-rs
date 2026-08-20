@@ -112,14 +112,7 @@ fn c4id_shaped_names_are_quarantined_without_panicking_or_dropping_later_code() 
     }
 }
 
-#[test]
-fn adjacent_c4id_shaped_function_names_and_c4id_values_remain_valid() {
-    let mut engine = Engine::new();
-    engine
-        .load_script("func TEST() { return FLNT; }")
-        .expect("the delimiter-sensitive identifier form loads");
-    assert_eq!(
-        engine.call("TEST", &[]).expect("TEST executes"),
-        Value::C4Id("FLNT".to_string())
-    );
+run_cases! {
+    adjacent_c4id_shaped_function_names_and_c4id_values_remain_valid:
+        "func TEST() { return FLNT; }", "TEST", &[] => Value::C4Id("FLNT".to_string());
 }

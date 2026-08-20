@@ -21,7 +21,7 @@ pub const SCROLLBAR_EXTENT: i32 = 16;
 /// Builds a bar rectangle from plain coordinates, so callers holding a
 /// different rectangle type need not depend on `IntRect`'s shape.
 pub fn bar_rect(x: i32, y: i32, w: i32, h: i32) -> IntRect {
-    IntRect { x, y, w, h }
+    IntRect::new(x, y, w, h)
 }
 
 /// Which part of the bar a pointer landed on (`C4GuiContainers.cpp:477-623`).
@@ -63,12 +63,12 @@ pub fn pin_offset(height: i32, scroll: i32, max_scroll: i32) -> i32 {
 /// The pin's rectangle within `bar`.
 pub fn pin_rect(bar: IntRect, scroll: i32, max_scroll: i32) -> IntRect {
     let arrow = arrow_extent(bar.h);
-    IntRect {
-        x: bar.x,
-        y: bar.y + arrow + pin_offset(bar.h, scroll, max_scroll),
-        w: bar.w,
-        h: arrow,
-    }
+    IntRect::new(
+        bar.x,
+        bar.y + arrow + pin_offset(bar.h, scroll, max_scroll),
+        bar.w,
+        arrow,
+    )
 }
 
 /// Which region `point` falls in. `None` when the bar is absent — C++ only
@@ -224,12 +224,7 @@ pub fn draw_classic_scrollbar_held(
 mod tests {
     use super::*;
 
-    const BAR: IntRect = IntRect {
-        x: 100,
-        y: 40,
-        w: SCROLLBAR_EXTENT,
-        h: 160,
-    };
+    const BAR: IntRect = IntRect::new(100, 40, SCROLLBAR_EXTENT, 160);
 
     // C4GuiContainers.cpp:309-470,477-623 — the arrow buttons, the pageable
     // track, and the proportional pin, including their boundaries.
@@ -296,7 +291,7 @@ mod tests {
 
         // A bar too short for two full arrows splits evenly and never produces
         // a negative travel.
-        let short = IntRect { h: 10, ..BAR };
+        let short = BAR.with_height(10);
         assert_eq!(pin_travel(short.h), 0);
         assert_eq!(pin_offset(short.h, 5, 40), 0);
         assert_eq!(scroll_from_pointer(short, short.y + 5, 40), 0);

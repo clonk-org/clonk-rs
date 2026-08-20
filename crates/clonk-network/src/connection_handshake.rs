@@ -1881,57 +1881,29 @@ mod tests {
     }
 
     fn join_data() -> JoinDataEnvelope {
-        let empty_players = PlayerInfoListSnapshot {
-            last_player_id: 0,
-            clients: Vec::new(),
-        };
+        let empty_players = PlayerInfoListSnapshot::default();
         JoinDataEnvelope {
             client_id: 3,
             start_control_tick: 17,
-            status: NetworkStatus {
-                state: NETWORK_STATE_LOBBY,
-                control_mode: 1,
-                target_tick: -1,
-            },
+            status: NetworkStatus::new(NETWORK_STATE_LOBBY, 1, -1),
             dynamic: NetworkResourceCore::default(),
             parameters: JoinGameParametersEnvelope {
-                random_seed: 0,
-                startup_player_count: 0,
                 max_players: 8,
-                use_fair_crew: false,
-                fair_crew_forced: false,
-                fair_crew_strength: 0,
                 allow_debug: true,
                 is_network_game: true,
                 control_rate: 1,
-                auto_frame_skip: false,
-                rules: Vec::new(),
-                goals: Vec::new(),
-                league: LegacyCString::default(),
                 league_address: LegacyCString::default(),
                 title: wire_string(b"No title"),
-                scenario: NetworkResourceCore::default(),
-                game_resources: Vec::new(),
                 player_infos: empty_players.clone(),
                 restore_player_infos: empty_players,
                 teams: JoinTeamListSnapshot {
                     active: 1,
-                    custom: 0,
                     allow_hostility_change: 1,
-                    allow_team_switch: 0,
                     auto_generate_teams: 1,
-                    last_team_id: 0,
-                    team_distribution: 0,
-                    team_colors: 0,
-                    max_script_players: 0,
-                    script_player_names: LegacyCString::default(),
-                    random_team_count: 0,
-                    teams: Vec::new(),
+                    ..Default::default()
                 },
-                clients: JoinClientRegistrySnapshot {
-                    clients: Vec::new(),
-                    local_client_id: None,
-                },
+                clients: JoinClientRegistrySnapshot::default(),
+                ..Default::default()
             },
         }
     }
@@ -2874,18 +2846,18 @@ mod tests {
         host.send_message(ControlMessage::ConnectionReply(accepted(b"join accepted")))
             .await
             .unwrap();
-        host.send_message(ControlMessage::Status(NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: -1,
-        }))
+        host.send_message(ControlMessage::Status(NetworkStatus::new(
+            NETWORK_STATE_LOBBY,
+            1,
+            -1,
+        )))
         .await
         .unwrap();
-        host.send_message(ControlMessage::StatusAck(NetworkStatus {
-            state: NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: -1,
-        }))
+        host.send_message(ControlMessage::StatusAck(NetworkStatus::new(
+            NETWORK_STATE_LOBBY,
+            1,
+            -1,
+        )))
         .await
         .unwrap();
         host.send_message(ControlMessage::ActivationRequest { tick: 17 })
@@ -2912,11 +2884,9 @@ mod tests {
         host.send_message(ControlMessage::ExecSync { control_tick: 17 })
             .await
             .unwrap();
-        host.send_message(ControlMessage::PlayerInfoUpdate(PlayerInfoUpdateRequest {
-            client_id: 0,
-            flags: 0,
-            players: Vec::new(),
-        }))
+        host.send_message(ControlMessage::PlayerInfoUpdate(
+            PlayerInfoUpdateRequest::new(0, 0, Vec::new()),
+        ))
         .await
         .unwrap();
         host.send_message(ControlMessage::Address(AddressPacket {

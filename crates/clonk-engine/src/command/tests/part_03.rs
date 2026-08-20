@@ -1,19 +1,14 @@
-// Contiguous slice 3 of 7 of the `command/tests` battery, spliced by
-// `include!` from the parent module so every test id is unchanged.
+    // Contiguous slice 3 of 7 of the `command/tests` battery, spliced by
+    // `include!` from the parent module so every test id is unchanged.
 
     #[test]
     fn detached_throw_failure_updates_its_detached_outer_base() {
         let actor_id = ObjectId::new(622);
-        let mut walking = snapshot_with_id(actor_id.as_u64());
-        walking.action_procedure = ActionProcedure::Walk;
+        let walking = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Walk);
         let objects = command_objects([walking]);
         let ctx = command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 1);
         let mut stack = CommandStack::new();
-        let request = || {
-            CommandRequest::new(CommandId::Throw)
-                .with_tx(Some(100))
-                .with_ty(Some(20))
-        };
+        let request = || request!(Throw, with_tx: Some(100), with_ty: Some(20));
         stack
             .push_front(request().with_mode(CommandMode::Base))
             .expect("outer Throw queues");
@@ -62,20 +57,14 @@
     #[test]
     fn detached_throw_failure_uses_nonprelude_and_next_unfinished_bases() {
         let actor_id = ObjectId::new(623);
-        let mut walking = snapshot_with_id(actor_id.as_u64());
-        walking.action_procedure = ActionProcedure::Walk;
+        let walking = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Walk);
         let objects = command_objects([walking]);
         let ctx = command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 1);
-        let inner_request = || {
-            CommandRequest::new(CommandId::Throw)
-                .with_tx(Some(100))
-                .with_ty(Some(20))
-                .with_mode(CommandMode::SilentSub)
-        };
+        let inner_request = || request!(Throw, with_tx: Some(100), with_ty: Some(20), with_mode: CommandMode::SilentSub);
 
         let mut cleared = CommandStack::new();
         cleared
-            .push_front(CommandRequest::new(CommandId::Drop))
+            .push_front(request!(Drop))
             .expect("outer Drop queues");
         let CommandState::Drop(outer) = &mut cleared.entries.front_mut().unwrap().state else {
             panic!("outer command should be Drop");
@@ -106,13 +95,9 @@
             .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
 
         let mut skipped = CommandStack::new();
-        skipped
-            .push_front(CommandRequest::new(CommandId::Wait))
-            .expect("base2 queues");
+        skipped.push_front(request!(Wait)).expect("base2 queues");
         let base2_id = skipped.entries.front().unwrap().instance_id;
-        skipped
-            .push_front(CommandRequest::new(CommandId::Wait))
-            .expect("base1 queues");
+        skipped.push_front(request!(Wait)).expect("base1 queues");
         let base1_id = skipped.entries.front().unwrap().instance_id;
         skipped
             .push_front(inner_request())
@@ -158,17 +143,14 @@
             [(CommandMode::Base, true), (CommandMode::SilentBase, false)]
         {
             let mut stack = CommandStack::new();
-            stack
-                .push_front(CommandRequest::new(CommandId::Wait))
-                .expect("base queues");
+            stack.push_front(request!(Wait)).expect("base queues");
             let base_chain = stack
                 .entries
                 .iter()
                 .map(DetachedCommandBase::from)
                 .collect::<Vec<_>>();
-            let failed =
-                ActiveCommand::from_request(CommandRequest::new(CommandId::Throw).with_mode(mode))
-                    .expect("failed command constructs");
+            let failed = ActiveCommand::from_request(request!(Throw, with_mode: mode))
+                .expect("failed command constructs");
             assert_eq!(
                 stack
                     .record_detached_failure(&failed, &base_chain)
@@ -183,11 +165,9 @@
     fn detached_drop_keeps_raw_removed_target_and_queues_get() {
         let actor_id = ObjectId::new(620);
         let item_id = ObjectId::new(621);
-        let mut digging = snapshot_with_id(actor_id.as_u64());
-        digging.action_procedure = ActionProcedure::Dig;
-        digging.contents = vec![item_id];
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let digging = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Dig;
+            contents = vec![item_id]);
+        let mut item = command_object!(item_id.as_u64(); container = Some(actor_id));
         let initial_objects = command_objects([digging.clone(), item.clone()]);
         let initial_ctx = command_ctx(
             initial_objects.get(&actor_id).expect("actor present"),
@@ -196,7 +176,7 @@
         );
         let mut stack = CommandStack::new();
         stack
-            .push_front(CommandRequest::new(CommandId::Drop).with_target(Some(item_id)))
+            .push_front(request!(Drop, with_target: Some(item_id)))
             .expect("Drop queues");
         let command_instance_id = stack.entries.front().unwrap().instance_id;
         let initial = stack.execute_front(&initial_ctx).expect("Drop starts");
@@ -235,19 +215,13 @@
         // actor/item shapes (C4Command.cpp:1015-1033).
         let actor_id = ObjectId::new(632);
         let item_id = ObjectId::new(633);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(10, 10);
-        actor.command_direction = CommandDirection::Right;
-        actor.contents = vec![item_id];
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(10, 10);
+            command_direction = CommandDirection::Right; contents = vec![item_id]);
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id));
         let objects = command_objects([actor, item]);
         let ctx = command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0);
-        let mut state = DropState::from_request(
-            &CommandRequest::new(CommandId::Drop)
-                .with_tx(Some(11))
-                .with_ty(Some(10)),
-        );
+        let mut state =
+            DropState::from_request(&request!(Drop, with_tx: Some(11), with_ty: Some(10)));
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -271,23 +245,17 @@
         let item_id = ObjectId::new(635);
         let container_id = ObjectId::new(636);
         let pushed_id = ObjectId::new(637);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(10, 10);
-        actor.container = Some(container_id);
-        actor.action_procedure = ActionProcedure::Push;
-        actor.action_target = Some(pushed_id);
-        actor.contents = vec![item_id];
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(10, 10);
+            container = Some(container_id); action_procedure = ActionProcedure::Push;
+            action_target = Some(pushed_id); contents = vec![item_id]);
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id));
         let mut objects = command_objects([
             actor,
             item,
             snapshot_with_id(container_id.as_u64()),
             snapshot_with_id(pushed_id.as_u64()),
         ]);
-        let request = CommandRequest::new(CommandId::Drop)
-            .with_tx(Some(11))
-            .with_ty(Some(10));
+        let request = request!(Drop, with_tx: Some(11), with_ty: Some(10));
         let mut state = DropState::from_request(&request);
         let ctx = command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0);
 
@@ -325,18 +293,13 @@
     fn targeted_drop_uses_cpp_five_pixel_default_range() {
         let actor_id = ObjectId::new(638);
         let item_id = ObjectId::new(639);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(10, 10);
-        actor.contents = vec![item_id];
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(10, 10);
+            contents = vec![item_id]);
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id));
         let objects = command_objects([actor, item]);
         let ctx = command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0);
-        let mut state = DropState::from_request(
-            &CommandRequest::new(CommandId::Drop)
-                .with_tx(Some(16))
-                .with_ty(Some(10)),
-        );
+        let mut state =
+            DropState::from_request(&request!(Drop, with_tx: Some(16), with_ty: Some(10)));
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -355,13 +318,10 @@
         let actor_id = ObjectId::new(644);
         let item_id = ObjectId::new(645);
         let actor = snapshot_with_id(actor_id.as_u64());
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.position = Vector2::new(20, 10);
+        let item = command_object!(item_id.as_u64(); position = Vector2::new(20, 10));
         let objects = command_objects([actor, item]);
         let ctx = command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0);
-        let mut state = DropState::from_request(
-            &CommandRequest::new(CommandId::Drop).with_target(Some(item_id)),
-        );
+        let mut state = DropState::from_request(&request!(Drop, with_target: Some(item_id)));
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -382,23 +342,18 @@
         let actor_id = ObjectId::new(640);
         let item_id = ObjectId::new(641);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(0, 0);
-        actor.contents = vec![item_id];
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(0, 0);
+            contents = vec![item_id]);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id));
 
         let objects = command_objects([actor.clone(), item]);
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor_snapshot, &objects, 0);
 
-        let mut state = DropState::from_request(
-            &CommandRequest::new(CommandId::Drop)
-                .with_tx(Some(120))
-                .with_ty(Some(0)),
-        );
+        let mut state =
+            DropState::from_request(&request!(Drop, with_tx: Some(120), with_ty: Some(0)));
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -428,15 +383,12 @@
         let item_id = ObjectId::new(651);
         let container_id = ObjectId::new(652);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(container_id);
-        actor.contents = vec![item_id];
+        let actor = command_object!(actor_id.as_u64(); container = Some(container_id);
+            contents = vec![item_id]);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(0, 0);
+        let container = command_object!(container_id.as_u64(); position = Vector2::new(0, 0));
 
         let objects = command_objects([actor.clone(), item, container]);
 
@@ -447,11 +399,7 @@
         // later contained Put branch.
         let mut stack = CommandStack::new();
         stack
-            .push_front(
-                CommandRequest::new(CommandId::Drop)
-                    .with_tx(Some(0))
-                    .with_ty(Some(0)),
-            )
+            .push_front(request!(Drop, with_tx: Some(0), with_ty: Some(0)))
             .expect("Drop queues");
         let command_instance_id = stack.entries.front().expect("Drop remains").instance_id;
         let result = stack.execute_front(&ctx).expect("Drop executes");
@@ -475,23 +423,19 @@
         let item_id = ObjectId::new(661);
         let pushed_id = ObjectId::new(662);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.action_procedure = ActionProcedure::Push;
-        actor.action_target = Some(pushed_id);
-        actor.contents = vec![item_id];
+        let actor = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Push;
+            action_target = Some(pushed_id); contents = vec![item_id]);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        let item = command_object!(item_id.as_u64(); container = Some(actor_id));
 
-        let mut pushed = snapshot_with_id(pushed_id.as_u64());
-        pushed.position = Vector2::new(0, 0);
+        let pushed = command_object!(pushed_id.as_u64(); position = Vector2::new(0, 0));
 
         let objects = command_objects([actor.clone(), item, pushed]);
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor_snapshot, &objects, 0);
 
-        let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
+        let mut state = DropState::from_request(&request!(Drop));
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
@@ -518,21 +462,15 @@
     #[test]
     fn dig_requests_ungrab_when_pushing() {
         let actor_id = ObjectId::new(60);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.action_procedure = ActionProcedure::Push;
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Push;
+            command_direction = CommandDirection::Right);
 
         let objects = command_objects([actor.clone()]);
 
-        let request = CommandRequest::new(CommandId::Dig)
-            .with_tx(Some(15))
-            .with_ty(Some(25));
+        let request = request!(Dig, with_tx: Some(15), with_ty: Some(25));
         let mut state = DigState::from_request(&request).expect("state created");
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0); position: actor.position);
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -548,20 +486,14 @@
     #[test]
     fn dig_requests_exit_when_contained() {
         let actor_id = ObjectId::new(61);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.container = Some(ObjectId::new(99));
+        let actor = command_object!(actor_id.as_u64(); container = Some(ObjectId::new(99)));
 
         let objects = command_objects([actor.clone()]);
 
-        let request = CommandRequest::new(CommandId::Dig)
-            .with_tx(Some(0))
-            .with_ty(Some(0));
+        let request = request!(Dig, with_tx: Some(0), with_ty: Some(0));
         let mut state = DigState::from_request(&request).expect("state created");
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0); position: actor.position);
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -577,23 +509,16 @@
     #[test]
     fn dig_requests_live_object_com_dig_when_walking() {
         let actor_id = ObjectId::new(62);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.action_procedure = ActionProcedure::Walk;
-        actor.command_direction = CommandDirection::Stop;
+        let mut actor = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Walk;
+            command_direction = CommandDirection::Stop);
         actor.physical.can_dig = 1;
 
         let objects = command_objects([actor.clone()]);
 
-        let request = CommandRequest::new(CommandId::Dig)
-            .with_tx(Some(actor.position.x))
-            .with_ty(Some(actor.position.y + 20))
-            .with_data(CommandData::Integer(1));
+        let request = request!(Dig, with_tx: Some(actor.position.x), with_ty: Some(actor.position.y + 20), with_data: CommandData::Integer(1));
         let mut state = DigState::from_request(&request).expect("state created");
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0); position: actor.position);
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -613,21 +538,16 @@
     #[test]
     fn dig_completes_when_within_move_range() {
         let actor_id = ObjectId::new(63);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.action_procedure = ActionProcedure::Dig;
-        actor.command_direction = CommandDirection::Left;
+        let actor = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Dig;
+            command_direction = CommandDirection::Left);
 
         let objects = command_objects([actor.clone()]);
 
-        let request = CommandRequest::new(CommandId::Dig)
-            .with_tx(Some(actor.position.x))
-            .with_ty(Some(actor.position.y));
+        let request =
+            request!(Dig, with_tx: Some(actor.position.x), with_ty: Some(actor.position.y));
         let mut state = DigState::from_request(&request).expect("state created");
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0); position: actor.position);
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -639,14 +559,10 @@
 
     #[test]
     fn dig_reached_check_uses_bottom_center_target() {
-        let mut actor = snapshot_with_id(64);
-        actor.position = Vector2::new(100, 93);
-        actor.shape_top = -10;
-        actor.action_procedure = ActionProcedure::Dig;
+        let mut actor = command_object!(64; position = Vector2::new(100, 93); shape_top = -10;
+            action_procedure = ActionProcedure::Dig);
 
-        let request = CommandRequest::new(CommandId::Dig)
-            .with_tx(Some(100))
-            .with_ty(Some(100));
+        let request = request!(Dig, with_tx: Some(100), with_ty: Some(100));
         let result = step_dig_once(actor.clone(), request.clone());
         assert_eq!(
             result.status,
@@ -665,16 +581,12 @@
 
     #[test]
     fn dig_steering_keeps_cpp_downleft_quirk_and_emits_no_plain_up() {
-        let mut actor = snapshot_with_id(65);
-        actor.position = Vector2::new(100, 100);
-        actor.shape_top = -10;
-        actor.action_procedure = ActionProcedure::Dig;
+        let mut actor = command_object!(65; position = Vector2::new(100, 100); shape_top = -10;
+            action_procedure = ActionProcedure::Dig);
 
         let below = step_dig_once(
             actor.clone(),
-            CommandRequest::new(CommandId::Dig)
-                .with_tx(Some(100))
-                .with_ty(Some(127)),
+            request!(Dig, with_tx: Some(100), with_ty: Some(127)),
         );
         assert_eq!(
             below.update.and_then(|update| update.command_direction),
@@ -692,9 +604,7 @@
         ] {
             let result = step_dig_once(
                 actor.clone(),
-                CommandRequest::new(CommandId::Dig)
-                    .with_tx(Some(target_x))
-                    .with_ty(Some(73)),
+                request!(Dig, with_tx: Some(target_x), with_ty: Some(73)),
             );
             let emitted = result.update.and_then(|update| update.command_direction);
             assert_eq!(emitted, expected, "raw target x={target_x}");
@@ -704,16 +614,10 @@
 
     #[test]
     fn dig_routes_can_dig_failure_through_the_live_helper() {
-        let mut actor = snapshot_with_id(66);
-        actor.action_procedure = ActionProcedure::Walk;
+        let mut actor = command_object!(66; action_procedure = ActionProcedure::Walk);
         actor.physical.can_dig = 0;
 
-        let result = step_dig_once(
-            actor,
-            CommandRequest::new(CommandId::Dig)
-                .with_tx(Some(0))
-                .with_ty(Some(20)),
-        );
+        let result = step_dig_once(actor, request!(Dig, with_tx: Some(0), with_ty: Some(20)));
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.update.is_none(), "the Dig action never starts");
         assert!(result.operations.is_empty());
@@ -725,14 +629,10 @@
 
     #[test]
     fn dig_uses_positive_definition_move_to_range() {
-        let mut actor = snapshot_with_id(67);
-        actor.position = Vector2::new(100, 100);
-        actor.shape_top = -10;
-        actor.action_procedure = ActionProcedure::Dig;
+        let mut actor = command_object!(67; position = Vector2::new(100, 100); shape_top = -10;
+            action_procedure = ActionProcedure::Dig);
 
-        let request = CommandRequest::new(CommandId::Dig)
-            .with_tx(Some(115))
-            .with_ty(Some(107));
+        let request = request!(Dig, with_tx: Some(115), with_ty: Some(107));
         assert_eq!(
             step_dig_once(actor.clone(), request.clone()).status,
             CommandStatus::Running,
@@ -751,15 +651,10 @@
     fn dig_scale_and_hangle_use_object_com_let_go() {
         for procedure in [ActionProcedure::Scale, ActionProcedure::Hang] {
             for (direction, xdirf) in [(Direction::Left, 1), (Direction::Right, -1)] {
-                let mut actor = snapshot_with_id(68);
-                actor.action_procedure = procedure;
-                actor.direction = direction;
-                let result = step_dig_once(
-                    actor,
-                    CommandRequest::new(CommandId::Dig)
-                        .with_tx(Some(100))
-                        .with_ty(Some(100)),
-                );
+                let actor =
+                    command_object!(68; action_procedure = procedure; direction = direction);
+                let result =
+                    step_dig_once(actor, request!(Dig, with_tx: Some(100), with_ty: Some(100)));
                 assert_eq!(result.status, CommandStatus::Running);
                 let update = result.update.expect("let-go produces an object update");
                 assert_eq!(
@@ -779,16 +674,12 @@
 
     #[test]
     fn dig_out_material_reasserts_data_while_already_digging() {
-        let mut actor = snapshot_with_id(69);
-        actor.action_procedure = ActionProcedure::Dig;
-        actor.command_direction = CommandDirection::DownLeft;
+        let actor = command_object!(69; action_procedure = ActionProcedure::Dig;
+            command_direction = CommandDirection::DownLeft);
 
         let result = step_dig_once(
             actor,
-            CommandRequest::new(CommandId::Dig)
-                .with_tx(Some(0))
-                .with_ty(Some(20))
-                .with_data(CommandData::Integer(1)),
+            request!(Dig, with_tx: Some(0), with_ty: Some(20), with_data: CommandData::Integer(1)),
         );
         assert_eq!(result.status, CommandStatus::Running);
         let update = result.update.expect("dig-out data is refreshed");
@@ -807,27 +698,21 @@
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Retry).with_update_interval(3))
+            .push_back(request!(Retry, with_update_interval: 3))
             .expect("retry command accepted");
 
         for frame in 0..2 {
-            let ctx = CommandRuntimeContext {
-                position: actor.position,
-                ..command_ctx(
-                    objects.get(&actor_id).expect("actor present"),
-                    &objects,
-                    frame,
-                )
-            };
+            let ctx = command_context!(command_ctx(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                frame,
+            ); position: actor.position);
             let result = stack.step(&ctx).expect("running result");
             assert_eq!(result.status, CommandStatus::Running);
             assert!(result.update.is_none());
         }
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 2)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 2); position: actor.position);
         let result = stack.step(&ctx).expect("completion result");
         assert_eq!(result.status, CommandStatus::Completed);
         assert!(result.update.is_none());
@@ -838,12 +723,10 @@
         let actor_id = ObjectId::new(30);
         let target_id = ObjectId::new(40);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(10, 10);
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(10, 10);
+            command_direction = CommandDirection::Right);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(18, 16);
+        let mut target = command_object!(target_id.as_u64(); position = Vector2::new(18, 16));
         // C4Command::Enter checks Target->At(cx, cy) — the actor point in
         // the target's absolute shape (C4Command.cpp:586-588).
         target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
@@ -854,15 +737,10 @@
 
         let objects = command_objects([actor.clone(), target]);
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0); position: actor.position);
 
-        let mut state = EnterState::from_request(
-            &CommandRequest::new(CommandId::Enter).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = EnterState::from_request(&request!(Enter, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -888,14 +766,12 @@
         let actor_id = ObjectId::new(36);
         let target_id = ObjectId::new(46);
         let actor = snapshot_with_id(actor_id.as_u64());
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.status = ObjectStatus::Inactive;
-        target.shape = DefinitionRect::new(-10, -10, 20, 20);
-        target.entrance = Some(DefinitionRect::new(-3, -3, 6, 6));
-        target.ocf = ocf::ENTRANCE;
-        target.entrance_status = true;
+        let target = command_object!(target_id.as_u64(); status = ObjectStatus::Inactive;
+            shape = DefinitionRect::new(-10, -10, 20, 20);
+            entrance = Some(DefinitionRect::new(-3, -3, 6, 6)); ocf = ocf::ENTRANCE;
+            entrance_status = true);
         let mut objects = command_objects([actor, target]);
-        let request = CommandRequest::new(CommandId::Enter).with_target(Some(target_id));
+        let request = request!(Enter, with_target: Some(target_id));
 
         let actor = objects.get(&actor_id).expect("actor present");
         let ctx = command_ctx(actor, &objects, 0);
@@ -939,7 +815,7 @@
 
         let mut nil_target = CommandStack::new();
         nil_target
-            .push_front(CommandRequest::new(CommandId::Enter))
+            .push_front(request!(Enter))
             .expect("C++ queues Enter before its handler rejects nil Target");
         assert_eq!(
             nil_target.execute_front(&ctx).map(|result| result.status),
@@ -948,7 +824,7 @@
 
         let mut cleared_target = CommandStack::new();
         cleared_target
-            .push_front(CommandRequest::new(CommandId::Enter).with_target(Some(target_id)))
+            .push_front(request!(Enter, with_target: Some(target_id)))
             .expect("Enter queues");
         assert!(cleared_target.clear_object_reference(target_id));
         assert_eq!(
@@ -966,10 +842,8 @@
         retained_target.destroyed = true;
         let retained_actor = retained_objects.get(&actor_id).expect("actor present");
         let retained_ctx = command_ctx(retained_actor, &retained_objects, 0);
-        let mut retained = EnterState::from_request(
-            &CommandRequest::new(CommandId::Enter).with_target(Some(target_id)),
-        )
-        .expect("retained Enter state");
+        let mut retained = EnterState::from_request(&request!(Enter, with_target: Some(target_id)))
+            .expect("retained Enter state");
         let result = retained.step(&retained_ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(
@@ -991,73 +865,45 @@
         let deleted_linekit_id = ObjectId::new(78);
         let linekit_id = ObjectId::new(79);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.owner = 0;
-        actor.controller = 0;
-        actor.command_direction = CommandDirection::Right;
-        actor.action_procedure = ActionProcedure::Walk;
+        let mut actor = command_object!(actor_id.as_u64(); owner = 0; controller = 0;
+            command_direction = CommandDirection::Right; action_procedure = ActionProcedure::Walk);
         actor.physical.can_chop = 1;
         actor.physical.can_construct = 1;
         actor.contents = vec![deleted_conkit_id, conkit_id, deleted_linekit_id, linekit_id];
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.status = ObjectStatus::Inactive;
-        target.alive = false;
-        target.ocf = 0;
-        target.command_direction = CommandDirection::Left;
-        target.need_energy = true;
-        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        let target = command_object!(target_id.as_u64(); status = ObjectStatus::Inactive; alive = false;
+            ocf = 0; command_direction = CommandDirection::Left; need_energy = true;
+            line_connect = LINE_CONNECT_POWER_INPUT);
 
-        let mut source = snapshot_with_id(source_id.as_u64());
-        source.status = ObjectStatus::Inactive;
-        source.alive = false;
-        source.ocf = ocf::POWER_SUPPLY;
-        source.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
-        source.shape = DefinitionRect::new(-10, -10, 20, 20);
+        let source = command_object!(source_id.as_u64(); status = ObjectStatus::Inactive; alive = false;
+            ocf = ocf::POWER_SUPPLY; line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+            shape = DefinitionRect::new(-10, -10, 20, 20));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.status = ObjectStatus::Inactive;
-        container.alive = false;
-        container.ocf = ocf::ENTRANCE;
-        container.entrance_status = false;
-        container.contents = vec![deleted_content_id, content_id];
+        let container = command_object!(container_id.as_u64(); status = ObjectStatus::Inactive;
+            alive = false; ocf = ocf::ENTRANCE; entrance_status = false;
+            contents = vec![deleted_content_id, content_id]);
 
-        let mut deleted_conkit = snapshot_with_id(deleted_conkit_id.as_u64());
-        deleted_conkit.definition_id = CONKIT_DEFINITION.into();
-        deleted_conkit.status = ObjectStatus::Deleted;
-        deleted_conkit.destroyed = true;
-        deleted_conkit.container = Some(actor_id);
+        let deleted_conkit = command_object!(deleted_conkit_id.as_u64();
+            definition_id = CONKIT_DEFINITION.into(); status = ObjectStatus::Deleted; destroyed = true;
+            container = Some(actor_id));
 
-        let mut conkit = snapshot_with_id(conkit_id.as_u64());
-        conkit.definition_id = CONKIT_DEFINITION.into();
-        conkit.status = ObjectStatus::Inactive;
-        conkit.alive = false;
-        conkit.container = Some(actor_id);
+        let conkit = command_object!(conkit_id.as_u64(); definition_id = CONKIT_DEFINITION.into();
+            status = ObjectStatus::Inactive; alive = false; container = Some(actor_id));
 
-        let mut deleted_linekit = snapshot_with_id(deleted_linekit_id.as_u64());
-        deleted_linekit.definition_id = LINEKIT_DEFINITION.into();
-        deleted_linekit.status = ObjectStatus::Deleted;
-        deleted_linekit.destroyed = true;
-        deleted_linekit.container = Some(actor_id);
+        let deleted_linekit = command_object!(deleted_linekit_id.as_u64();
+            definition_id = LINEKIT_DEFINITION.into(); status = ObjectStatus::Deleted; destroyed = true;
+            container = Some(actor_id));
 
-        let mut linekit = snapshot_with_id(linekit_id.as_u64());
-        linekit.definition_id = LINEKIT_DEFINITION.into();
-        linekit.status = ObjectStatus::Inactive;
-        linekit.alive = false;
-        linekit.container = Some(actor_id);
+        let linekit = command_object!(linekit_id.as_u64(); definition_id = LINEKIT_DEFINITION.into();
+            status = ObjectStatus::Inactive; alive = false; container = Some(actor_id));
 
-        let mut deleted_content = snapshot_with_id(deleted_content_id.as_u64());
-        deleted_content.definition_id = "ROCK".into();
-        deleted_content.status = ObjectStatus::Deleted;
-        deleted_content.destroyed = true;
-        deleted_content.container = Some(container_id);
+        let deleted_content = command_object!(deleted_content_id.as_u64();
+            definition_id = "ROCK".into(); status = ObjectStatus::Deleted; destroyed = true;
+            container = Some(container_id));
 
-        let mut content = snapshot_with_id(content_id.as_u64());
-        content.definition_id = "ROCK".into();
-        content.status = ObjectStatus::Inactive;
-        content.alive = false;
-        content.collectible = true;
-        content.container = Some(container_id);
+        let content = command_object!(content_id.as_u64(); definition_id = "ROCK".into();
+            status = ObjectStatus::Inactive; alive = false; collectible = true;
+            container = Some(container_id));
 
         let objects = command_objects([
             actor.clone(),
@@ -1082,16 +928,11 @@
             },
         );
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = CommandRuntimeContext {
-            structures_need_energy: true,
-            transfer_zones: &transfer_zones,
-            ..command_ctx(actor, &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(actor, &objects, 0); structures_need_energy: true,
+        transfer_zones: &transfer_zones);
 
-        let mut follow = FollowState::from_request(
-            &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
-        )
-        .expect("Follow state");
+        let mut follow = FollowState::from_request(&request!(Follow, with_target: Some(target_id)))
+            .expect("Follow state");
         let follow_result = follow.step(&ctx);
         assert_eq!(follow_result.status, CommandStatus::Running);
         assert_eq!(
@@ -1102,10 +943,8 @@
             "inactive Follow target remains a retained pointer"
         );
 
-        let mut chop = ChopState::from_request(
-            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
-        )
-        .expect("Chop state");
+        let mut chop = ChopState::from_request(&request!(Chop, with_target: Some(target_id)))
+            .expect("Chop state");
         assert_eq!(
             chop.step(&ctx).status,
             CommandStatus::Completed,
@@ -1113,19 +952,14 @@
         );
 
         let mut push_to = PushToState::from_request(
-            &CommandRequest::new(CommandId::PushTo)
-                .with_target(Some(target_id))
-                .with_tx(Some(0))
-                .with_ty(Some(0))
-                .with_evaluated(true),
+            &request!(PushTo, with_target: Some(target_id), with_tx: Some(0), with_ty: Some(0), with_evaluated: true),
         )
         .expect("PushTo state");
         assert_eq!(push_to.step(&ctx).status, CommandStatus::Completed);
 
-        let mut transfer = TransferState::from_request(
-            &CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
-        )
-        .expect("Transfer state");
+        let mut transfer =
+            TransferState::from_request(&request!(Transfer, with_target: Some(target_id)))
+                .expect("Transfer state");
         let transfer_result = transfer.step(&ctx);
         assert_eq!(transfer_result.status, CommandStatus::Running);
         assert!(matches!(
@@ -1133,10 +967,9 @@
             [CommandEvent::ControlTransfer { object_id, .. }] if *object_id == target_id
         ));
 
-        let mut context = ContextState::from_request(
-            &CommandRequest::new(CommandId::Context).with_target2(Some(target_id)),
-        )
-        .expect("Context state");
+        let mut context =
+            ContextState::from_request(&request!(Context, with_target2: Some(target_id)))
+                .expect("Context state");
         let context_result = context.step(&ctx);
         assert_eq!(context_result.status, CommandStatus::Completed);
         assert!(matches!(
@@ -1148,10 +981,7 @@
         ));
 
         let mut call = CallState::from_request(
-            &CommandRequest::new(CommandId::Call)
-                .with_target(Some(target_id))
-                .with_target2(Some(source_id))
-                .with_data(CommandData::Text("Work".into())),
+            &request!(Call, with_target: Some(target_id), with_target2: Some(source_id), with_data: CommandData::Text("Work".into())),
         )
         .expect("Call state");
         let call_result = call.step(&ctx);
@@ -1166,9 +996,7 @@
         ));
 
         let mut energy = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy)
-                .with_target(Some(target_id))
-                .with_target2(Some(source_id)),
+            &request!(Energy, with_target: Some(target_id), with_target2: Some(source_id)),
         )
         .expect("Energy state");
         let energy_result = energy.step(&ctx);
@@ -1179,10 +1007,9 @@
                 if *from == source_id && *to == linekit_id
         ));
 
-        let mut auto_energy = EnergyState::from_request(
-            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
-        )
-        .expect("auto-source Energy state");
+        let mut auto_energy =
+            EnergyState::from_request(&request!(Energy, with_target: Some(target_id)))
+                .expect("auto-source Energy state");
         assert_eq!(
             auto_energy.step(&ctx).status,
             CommandStatus::Failed,
@@ -1190,33 +1017,28 @@
         );
 
         let construct = ConstructState::from_request(
-            &CommandRequest::new(CommandId::Construct).with_data(CommandData::Text("HUT1".into())),
+            &request!(Construct, with_data: CommandData::Text("HUT1".into())),
         );
         assert_eq!(construct.builder_has_conkit(&ctx), Some(conkit_id));
 
         let activate = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate)
-                .with_target2(Some(container_id))
-                .with_data(CommandData::Text("ROCK".into())),
+            &request!(Activate, with_target2: Some(container_id), with_data: CommandData::Text("ROCK".into())),
         )
         .expect("Activate state");
         assert_eq!(
             activate.find_release_candidate(&ctx, container_id, &HashSet::new()),
             Some(content_id)
         );
-        let mut activate_inactive = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate).with_target(Some(target_id)),
-        )
-        .expect("inactive-target Activate state");
+        let mut activate_inactive =
+            ActivateState::from_request(&request!(Activate, with_target: Some(target_id)))
+                .expect("inactive-target Activate state");
         assert_eq!(
             activate_inactive.step(&ctx).status,
             CommandStatus::Completed
         );
         let mut activate_deleted = CommandStack::new();
         activate_deleted
-            .push_front(
-                CommandRequest::new(CommandId::Activate).with_target(Some(deleted_content_id)),
-            )
+            .push_front(request!(Activate, with_target: Some(deleted_content_id)))
             .expect("removed-target Activate queues");
         assert!(activate_deleted.clear_object_reference(deleted_content_id));
         assert_eq!(
@@ -1227,17 +1049,14 @@
         );
 
         let mut get = GetState::from_request(
-            &CommandRequest::new(CommandId::Get)
-                .with_target2(Some(container_id))
-                .with_data(CommandData::Text("ROCK".into())),
+            &request!(Get, with_target2: Some(container_id), with_data: CommandData::Text("ROCK".into())),
         )
         .expect("Get state");
         assert_eq!(get.resolve_target(&ctx), Some(content_id));
 
-        let mut put_contents = PutState::from_request(
-            &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
-        )
-        .expect("Put contents state");
+        let mut put_contents =
+            PutState::from_request(&request!(Put, with_target: Some(container_id)))
+                .expect("Put contents state");
         assert_eq!(
             put_contents
                 .resolve_item(&ctx)
@@ -1247,29 +1066,24 @@
         );
 
         let mut put = PutState::from_request(
-            &CommandRequest::new(CommandId::Put)
-                .with_target(Some(container_id))
-                .with_target2(Some(content_id)),
+            &request!(Put, with_target: Some(container_id), with_target2: Some(content_id)),
         )
         .expect("Put state");
         assert_eq!(put.step(&ctx).status, CommandStatus::Completed);
 
         let mut acquire = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire)
-                .with_data(CommandData::Text(CONKIT_DEFINITION.into()))
-                .with_evaluated(true),
+            &request!(Acquire, with_data: CommandData::Text(CONKIT_DEFINITION.into()), with_evaluated: true),
         )
         .expect("Acquire state");
         assert_eq!(acquire.step(&ctx).status, CommandStatus::Completed);
 
-        let mut drop_state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
+        let mut drop_state = DropState::from_request(&request!(Drop));
         assert_eq!(
             drop_state.resolve_item(&ctx).map(|(id, _)| id),
             Some(conkit_id)
         );
 
-        let throw_state =
-            ThrowState::from_request(&CommandRequest::new(CommandId::Throw)).expect("Throw state");
+        let throw_state = ThrowState::from_request(&request!(Throw)).expect("Throw state");
         let throw_result = throw_state.step_object_com_throw(&ctx, false);
         assert!(matches!(
             throw_result.events.as_slice(),
@@ -1277,7 +1091,7 @@
         ));
         let mut cleared_throw_stack = CommandStack::new();
         cleared_throw_stack
-            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(deleted_content_id)))
+            .push_front(request!(Throw, with_target: Some(deleted_content_id)))
             .expect("removed-target Throw queues");
         assert!(cleared_throw_stack.clear_object_reference(deleted_content_id));
         let CommandState::Throw(cleared_throw) = &mut cleared_throw_stack
@@ -1298,13 +1112,9 @@
 
         let mut contained_actor = actor.clone();
         contained_actor.container = Some(container_id);
-        let contained_ctx = CommandRuntimeContext {
-            object: &contained_actor,
-            ..ctx.clone()
-        };
+        let contained_ctx = command_context!(ctx.clone(); object: &contained_actor);
         let mut exit =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
-                .expect("Exit state");
+            ExitState::from_request(&request!(Exit, with_evaluated: true)).expect("Exit state");
         let exit_result = exit.step(&contained_ctx);
         assert_eq!(exit_result.status, CommandStatus::Running);
         assert!(matches!(
@@ -1312,8 +1122,7 @@
             [CommandEvent::ActivateEntrance { object_id, .. }] if *object_id == container_id
         ));
 
-        let mut take2 =
-            Take2State::from_request(&CommandRequest::new(CommandId::Take2)).expect("Take2 state");
+        let mut take2 = Take2State::from_request(&request!(Take2)).expect("Take2 state");
         let take2_result = take2.step(&contained_ctx);
         assert_eq!(take2_result.status, CommandStatus::Completed);
         assert!(matches!(
@@ -1325,13 +1134,13 @@
         ));
 
         let required_targets = [
-            CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
-            CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
-            CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
-            CommandRequest::new(CommandId::Put).with_target(Some(target_id)),
-            CommandRequest::new(CommandId::Attack).with_target(Some(target_id)),
-            CommandRequest::new(CommandId::Context).with_target2(Some(target_id)),
-            CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
+            request!(Build, with_target: Some(target_id)),
+            request!(Transfer, with_target: Some(target_id)),
+            request!(Chop, with_target: Some(target_id)),
+            request!(Put, with_target: Some(target_id)),
+            request!(Attack, with_target: Some(target_id)),
+            request!(Context, with_target2: Some(target_id)),
+            request!(Energy, with_target: Some(target_id)),
         ];
         for request in required_targets {
             let command = request.id;
@@ -1370,21 +1179,16 @@
         // (C4Command.cpp:545-616,1545-1555).
         let actor_id = ObjectId::new(32);
         let target_id = ObjectId::new(42);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(10, 10);
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.shape = DefinitionRect::new(0, 0, 20, 20);
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(10, 10));
+        let mut target =
+            command_object!(target_id.as_u64(); shape = DefinitionRect::new(0, 0, 20, 20));
         target.entrance = Some(target.shape);
         target.ocf = ocf::ENTRANCE;
         target.entrance_status = false;
         let mut objects = command_objects([actor, target]);
         let mut stack = CommandStack::new();
         stack
-            .push_front(
-                CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(target_id))
-                    .with_update_interval(50),
-            )
+            .push_front(request!(Enter, with_target: Some(target_id), with_update_interval: 50))
             .expect("Enter queues");
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
@@ -1421,8 +1225,8 @@
         let actor_id = ObjectId::new(33);
         let target_id = ObjectId::new(43);
         let actor = snapshot_with_id(actor_id.as_u64());
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.shape = DefinitionRect::new(-10, -10, 20, 20);
+        let mut target =
+            command_object!(target_id.as_u64(); shape = DefinitionRect::new(-10, -10, 20, 20));
         target.entrance = Some(target.shape);
         target.ocf = ocf::ENTRANCE;
         target.entrance_status = false;
@@ -1430,14 +1234,11 @@
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .push_back(request!(Wait, with_mode: CommandMode::Base))
             .expect("base queues");
         stack
             .push_front(
-                CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(target_id))
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::SilentSub),
+                request!(Enter, with_target: Some(target_id), with_update_interval: 50, with_mode: CommandMode::SilentSub),
             )
             .expect("Enter queues");
 
@@ -1476,25 +1277,18 @@
     fn enter_without_entrance_moves_to_center_and_expires_successfully() {
         let actor_id = ObjectId::new(35);
         let target_id = ObjectId::new(45);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.command_direction = CommandDirection::Right;
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(75, 35);
-        target.shape = DefinitionRect::new(65, 25, 20, 20);
-        target.ocf = ocf::AVAILABLE;
-        target.entrance = None;
+        let actor = command_object!(actor_id.as_u64(); command_direction = CommandDirection::Right);
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(75, 35);
+            shape = DefinitionRect::new(65, 25, 20, 20); ocf = ocf::AVAILABLE; entrance = None);
         let objects = command_objects([actor, target]);
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .push_back(request!(Wait, with_mode: CommandMode::Base))
             .expect("base queues");
         stack
             .push_front(
-                CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(target_id))
-                    .with_update_interval(2)
-                    .with_mode(CommandMode::SilentSub),
+                request!(Enter, with_target: Some(target_id), with_update_interval: 2, with_mode: CommandMode::SilentSub),
             )
             .expect("Enter queues");
 
@@ -1543,11 +1337,7 @@
 
         let mut stack = CommandStack::new();
         stack
-            .push_front(
-                CommandRequest::new(CommandId::Jump)
-                    .with_tx(Some(100))
-                    .with_update_interval(1),
-            )
+            .push_front(request!(Jump, with_tx: Some(100), with_update_interval: 1))
             .expect("Jump queues");
         let result = stack.step(&ctx).expect("Jump expires");
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1569,20 +1359,15 @@
         let vehicle_id = ObjectId::new(41);
         let entrance_id = ObjectId::new(42);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = actor_position;
-        actor.command_direction = CommandDirection::Right;
-        actor.action_procedure = ActionProcedure::Push;
-        actor.action_target = Some(pushed_target);
-        actor.controller = 7;
+        let actor = command_object!(actor_id.as_u64(); position = actor_position;
+            command_direction = CommandDirection::Right; action_procedure = ActionProcedure::Push;
+            action_target = Some(pushed_target); controller = 7);
 
-        let mut vehicle = snapshot_with_id(vehicle_id.as_u64());
-        vehicle.position = vehicle_position;
-        vehicle.controller = 9;
+        let vehicle =
+            command_object!(vehicle_id.as_u64(); position = vehicle_position; controller = 9);
 
-        let mut entrance = snapshot_with_id(entrance_id.as_u64());
-        entrance.position = Vector2::new(100, 0);
-        entrance.shape = DefinitionRect::new(90, -10, 20, 20);
+        let mut entrance = command_object!(entrance_id.as_u64(); position = Vector2::new(100, 0);
+            shape = DefinitionRect::new(90, -10, 20, 20));
         entrance.entrance = Some(entrance.shape);
         entrance.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
         entrance.entrance_status = false;
@@ -1592,25 +1377,19 @@
         let definitions = HashMap::from([
             (
                 vehicle.definition_id.clone(),
-                CommandDefinitionSnapshot {
-                    value: 0,
-                    can_chop: false,
-                    chop_action: None,
-                    constructable: false,
-                    grab: vehicle_grab,
-                    ..CommandDefinitionSnapshot::default()
-                },
+                command_definition! { value: 0,
+                can_chop: false,
+                chop_action: None,
+                constructable: false,
+                grab: vehicle_grab },
             ),
             (
                 entrance.definition_id.clone(),
-                CommandDefinitionSnapshot {
-                    value: 0,
-                    can_chop: false,
-                    chop_action: None,
-                    constructable: false,
-                    grab: 1,
-                    ..CommandDefinitionSnapshot::default()
-                },
+                command_definition! { value: 0,
+                can_chop: false,
+                chop_action: None,
+                constructable: false,
+                grab: 1 },
             ),
         ]);
         (actor, objects, definitions)
@@ -1638,7 +1417,7 @@
             let (actor, objects, definitions) =
                 enter_push_fixture(grab, vehicle_id, Vector2::ZERO, Vector2::new(100, 0));
             let ctx = command_ctx_with_definitions(&actor, &objects, &definitions, 5);
-            let mut request = CommandRequest::new(CommandId::Enter).with_target(Some(entrance_id));
+            let mut request = request!(Enter, with_target: Some(entrance_id));
             if push_flag {
                 request = request.with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
             }
@@ -1653,9 +1432,7 @@
         let (actor, objects, definitions) =
             enter_push_fixture(1, entrance_id, Vector2::new(100, 0), Vector2::ZERO);
         let ctx = command_ctx_with_definitions(&actor, &objects, &definitions, 5);
-        let request = CommandRequest::new(CommandId::Enter)
-            .with_target(Some(entrance_id))
-            .with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
+        let request = request!(Enter, with_target: Some(entrance_id), with_data: CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
         let mut state = EnterState::from_request(&request).expect("Enter state");
         assert_enter_requests_ungrab(&state.step(&ctx));
     }
@@ -1664,9 +1441,7 @@
     fn enter_push_uses_vehicle_position_and_sets_its_enter_command() {
         let vehicle_id = ObjectId::new(41);
         let entrance_id = ObjectId::new(42);
-        let request = CommandRequest::new(CommandId::Enter)
-            .with_target(Some(entrance_id))
-            .with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
+        let request = request!(Enter, with_target: Some(entrance_id), with_data: CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
 
         // Actor inside but vehicle outside: the Enter must keep approaching.
         let (actor, objects, definitions) =
@@ -1718,12 +1493,10 @@
         let actor_id = ObjectId::new(31);
         let target_id = ObjectId::new(41);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(111, 0);
-        actor.command_direction = CommandDirection::Left;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(111, 0);
+            command_direction = CommandDirection::Left);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(120, 0);
+        let mut target = command_object!(target_id.as_u64(); position = Vector2::new(120, 0));
         target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
         target.entrance = Some(DefinitionRect::new(124, -4, 6, 8));
         target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
@@ -1731,12 +1504,9 @@
 
         let objects = command_objects([actor.clone(), target]);
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 5)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 5); position: actor.position);
 
-        let parent_request = CommandRequest::new(CommandId::Enter).with_target(Some(target_id));
+        let parent_request = request!(Enter, with_target: Some(target_id));
         let mut state = EnterState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
@@ -1773,9 +1543,7 @@
         // C4Command::Enter passes C4CMD_MoveTo_PushTarget through when
         // its own Data carries C4CMD_Enter_PushTarget (C4Command.cpp:615).
         let mut state = EnterState::from_request(
-            &CommandRequest::new(CommandId::Enter)
-                .with_target(Some(target_id))
-                .with_data(CommandData::Integer(2)),
+            &request!(Enter, with_target: Some(target_id), with_data: CommandData::Integer(2)),
         )
         .expect("state created");
         let result = state.step(&ctx);
@@ -1797,16 +1565,15 @@
         let actor_id = ObjectId::new(42);
         let target_id = ObjectId::new(43);
         let actor = snapshot_with_id(actor_id.as_u64());
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(120, 0);
-        target.shape = DefinitionRect::new(110, -10, 20, 20);
+        let mut target = command_object!(target_id.as_u64(); position = Vector2::new(120, 0);
+            shape = DefinitionRect::new(110, -10, 20, 20));
         target.entrance = Some(target.shape);
         target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
         let objects = command_objects([actor, target]);
 
         let mut stack = CommandStack::new();
         stack
-            .push_front(CommandRequest::new(CommandId::Enter).with_target(Some(target_id)))
+            .push_front(request!(Enter, with_target: Some(target_id)))
             .expect("Enter queues");
 
         let actor = objects.get(&actor_id).expect("actor present");
@@ -1841,22 +1608,17 @@
         let actor_id = ObjectId::new(51);
         let current_container_id = ObjectId::new(52);
         let target_id = ObjectId::new(53);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(120, 20);
-        actor.container = Some(current_container_id);
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(120, 20);
+            container = Some(current_container_id));
         let current_container = snapshot_with_id(current_container_id.as_u64());
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(120, 20);
-        target.shape = DefinitionRect::new(110, 10, 20, 20);
-        target.entrance = Some(DefinitionRect::new(115, 15, 10, 10));
-        target.ocf = ocf::ENTRANCE;
-        target.entrance_status = true;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(120, 20);
+            shape = DefinitionRect::new(110, 10, 20, 20);
+            entrance = Some(DefinitionRect::new(115, 15, 10, 10)); ocf = ocf::ENTRANCE;
+            entrance_status = true);
         let objects = command_objects([actor.clone(), current_container, target]);
         let ctx = command_ctx(&actor, &objects, 10);
-        let mut state = EnterState::from_request(
-            &CommandRequest::new(CommandId::Enter).with_target(Some(target_id)),
-        )
-        .expect("Enter state");
+        let mut state = EnterState::from_request(&request!(Enter, with_target: Some(target_id)))
+            .expect("Enter state");
 
         let result = state.step(&ctx);
 
@@ -1881,13 +1643,10 @@
         let actor_id = ObjectId::new(200);
         let target_id = ObjectId::new(300);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(0, 0);
-        actor.command_direction = CommandDirection::Left;
-        actor.action_procedure = ActionProcedure::Walk;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(0, 0);
+            command_direction = CommandDirection::Left; action_procedure = ActionProcedure::Walk);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(60, 0);
+        let mut target = command_object!(target_id.as_u64(); position = Vector2::new(60, 0));
         target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
         // C++ passes OCF_All to At: any nonzero OCF qualifies; the target
         // does not need OCF_Grab.
@@ -1895,15 +1654,10 @@
 
         let objects = command_objects([actor.clone(), target.clone()]);
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0); position: actor.position);
 
-        let mut state = GrabState::from_request(
-            &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = GrabState::from_request(&request!(Grab, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1935,24 +1689,17 @@
     fn grab_retained_status_zero_target_queues_move_without_stopping() {
         let actor_id = ObjectId::new(201);
         let target_id = ObjectId::new(301);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(10, 10);
-        actor.command_direction = CommandDirection::Left;
-        actor.action_procedure = ActionProcedure::Walk;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(10, 10);
+            command_direction = CommandDirection::Left; action_procedure = ActionProcedure::Walk);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(40, 10);
-        target.shape = DefinitionRect::new(30, 0, 20, 20);
-        target.ocf = ocf::NORMAL;
-        target.status = crate::ObjectStatus::Inactive;
-        target.alive = false;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(40, 10);
+            shape = DefinitionRect::new(30, 0, 20, 20); ocf = ocf::NORMAL;
+            status = crate::ObjectStatus::Inactive; alive = false);
 
         let objects = command_objects([actor.clone(), target]);
         let ctx = command_ctx(&actor, &objects, 0);
-        let mut state = GrabState::from_request(
-            &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
-        )
-        .expect("Grab state");
+        let mut state = GrabState::from_request(&request!(Grab, with_target: Some(target_id)))
+            .expect("Grab state");
 
         let result = state.step(&ctx);
 
@@ -1980,10 +1727,9 @@
             &retained_deleted_objects,
             0,
         );
-        let mut deleted_state = GrabState::from_request(
-            &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
-        )
-        .expect("deleted-target Grab state");
+        let mut deleted_state =
+            GrabState::from_request(&request!(Grab, with_target: Some(target_id)))
+                .expect("deleted-target Grab state");
         let deleted_result = deleted_state.step(&deleted_ctx);
         assert_eq!(deleted_result.status, CommandStatus::Running);
         assert!(matches!(
@@ -2000,13 +1746,10 @@
         let actor_id = ObjectId::new(310);
         let target_id = ObjectId::new(320);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(10, 10);
-        actor.command_direction = CommandDirection::Right;
-        actor.action_procedure = ActionProcedure::Walk;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(10, 10);
+            command_direction = CommandDirection::Right; action_procedure = ActionProcedure::Walk);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(14, 12);
+        let mut target = command_object!(target_id.as_u64(); position = Vector2::new(14, 12));
         // C4Command::Grab tests the actor point in the target's shape
         // (Target->At, C4Command.cpp:689-691).
         target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
@@ -2014,15 +1757,10 @@
 
         let objects = command_objects([actor.clone(), target]);
 
-        let ctx = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 1)
-        };
+        let ctx = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 1); position: actor.position);
 
-        let mut state = GrabState::from_request(
-            &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = GrabState::from_request(&request!(Grab, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -2045,22 +1783,18 @@
         let actor_id = ObjectId::new(312);
         let target_id = ObjectId::new(322);
         let container_id = ObjectId::new(323);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(10, 10);
-        actor.action_procedure = ActionProcedure::Walk;
+        let actor = command_object!(actor_id.as_u64(); position = Vector2::new(10, 10);
+            action_procedure = ActionProcedure::Walk);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(10, 10);
-        target.shape = DefinitionRect::new(0, 0, 20, 20);
+        let mut target = command_object!(target_id.as_u64(); position = Vector2::new(10, 10);
+            shape = DefinitionRect::new(0, 0, 20, 20));
 
         let run = |target: CommandObjectSnapshot| {
             let objects = command_objects([actor.clone(), target]);
             let ctx = command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 1);
-            GrabState::from_request(
-                &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
-            )
-            .expect("Grab state")
-            .step(&ctx)
+            GrabState::from_request(&request!(Grab, with_target: Some(target_id)))
+                .expect("Grab state")
+                .step(&ctx)
         };
 
         target.ocf = ocf::NONE;

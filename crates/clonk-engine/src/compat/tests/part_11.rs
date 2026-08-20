@@ -1,6 +1,6 @@
-// Contiguous slice 11 of 11 of the `compat::tests` battery, spliced by
-// `include!` from compat.rs so every test id stays `compat::tests::*`.
-// Mostly: objects, object state, misc.
+    // Contiguous slice 11 of 11 of the `compat::tests` battery, spliced by
+    // `include!` from compat.rs so every test id stays `compat::tests::*`.
+    // Mostly: objects, object state, misc.
 
     #[test]
     fn place_vegetation_uses_relative_surface_area_and_raw_growth_like_cpp() {
@@ -10,7 +10,8 @@
         // NO_OWNER (C4Game.cpp:2980-3022).
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
-        ).test_value();
+        )
+        .test_value();
         let materials = MaterialSet::from_resource_library(&library);
         let earth = materials.id_of("Earth").test_value();
         let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
@@ -45,14 +46,14 @@
         assert_eq!(expected_rng.random(200), 94);
         assert_eq!(expected_rng.random(200), 2);
         let guard = enter_random_context(LcgRng::new(17));
-        let (result, outcome) = with_effect_context(Some(caller), &[], world, 2, || {
+        let (result, outcome) = with_compat_context!(Some(caller), world, 2, || {
             place_vegetation(&[
-                Value::C4Id("TREE".into()),
-                Value::Int(-100),
-                Value::Int(-100),
-                Value::Int(200),
-                Value::Int(200),
-                Value::Int(10),
+                v_id("TREE".into()),
+                v_int(-100),
+                v_int(-100),
+                v_int(200),
+                v_int(200),
+                v_int(10),
             ])
         });
         let rng_after = guard.finish();
@@ -63,7 +64,7 @@
         );
         assert_eq!(
             result.expect("PlaceVegetation succeeds"),
-            object_reference_value(ObjectId::new(2))
+            v_object(ObjectId::new(2))
         );
         assert_eq!(outcome.spawns.len(), 1);
         let spawn = &outcome.spawns[0];
@@ -126,18 +127,16 @@ public func SeedFull()
 "#;
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
-        ).test_value();
+        )
+        .test_value();
         let mut engine = crate::Engine::with_seed(17);
         engine.configure_materials_from_library(&library);
-        let earth = engine
-            .materials()
-            .id_of("Earth").test_value();
+        let earth = engine.materials().id_of("Earth").test_value();
         let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
         landscape.set_world_height(300);
         engine.set_landscape(landscape);
 
-        let mut tree =
-            test_definition("TREE", "Tree", script);
+        let mut tree = test_definition("TREE", "Tree", script);
         tree.set_category(crate::CATEGORY_STATIC_BACK);
         tree.set_shape_rect(Some(DefinitionRect::new(-20, -28, 40, 56)));
         tree.set_placement(0);
@@ -148,12 +147,15 @@ public func SeedFull()
             count: 100,
         }]);
         engine.register_test_definition(tree);
-        let caller = engine.spawn_test_object(SpawnConfig::new("TREE")
-            .with_position(Vector2::new(200, 160))
-            .with_category(crate::CATEGORY_STATIC_BACK));
+        let caller = engine.spawn_test_object(
+            SpawnConfig::new("TREE")
+                .with_position(Vector2::new(200, 160))
+                .with_category(crate::CATEGORY_STATIC_BACK),
+        );
         let caller_index = engine.find_object_index(caller).test_value();
         let value = engine
-            .call_object_function(caller_index, "Seed", Vec::new()).test_value();
+            .call_object_function(caller_index, "Seed", Vec::new())
+            .test_value();
         let child_id = object_id_from_value(&value).test_value();
         let child_index = engine.find_object_index(child_id).test_value();
         let child = &engine.objects[child_index].state;
@@ -164,11 +166,11 @@ public func SeedFull()
         );
         assert_eq!(
             child.local_vars.get("iConstructionCon"),
-            Some(&Value::Int(0)),
+            Some(&INT_0),
             "Construction observes the pre-growth Con=0 state"
         );
-        assert_eq!(child.local_vars.get("iCompletion"), Some(&Value::Nil));
-        assert_eq!(child.local_vars.get("iInitialized"), Some(&Value::Nil));
+        assert_eq!(child.local_vars.get("iCompletion"), Some(&NIL));
+        assert_eq!(child.local_vars.get("iInitialized"), Some(&NIL));
         assert_eq!(child.components.get("ROCK"), Some(1));
         let caller_index = engine.find_object_index(caller).test_value();
         assert_eq!(
@@ -176,27 +178,21 @@ public func SeedFull()
                 .state
                 .local_vars
                 .get("iObservedCon"),
-            Some(&Value::Int(0)),
+            Some(&INT_0),
             "the Construction write is visible before PlaceVegetation returns"
         );
 
         let value = engine
-            .call_object_function(caller_index, "SeedFull", Vec::new()).test_value();
+            .call_object_function(caller_index, "SeedFull", Vec::new())
+            .test_value();
         let full_child = object_id_from_value(&value).test_value();
-        let full_index = engine
-            .find_object_index(full_child).test_value();
+        let full_index = engine.find_object_index(full_child).test_value();
         let full = &engine.objects[full_index].state;
         assert_eq!(full.construction, FULL_CON);
-        assert_eq!(
-            full.local_vars.get("iConstructionCon"),
-            Some(&Value::Int(0))
-        );
-        assert_eq!(full.local_vars.get("iCompletion"), Some(&Value::Int(1)));
-        assert_eq!(
-            full.local_vars.get("iCompletionRock"),
-            Some(&Value::Int(100))
-        );
-        assert_eq!(full.local_vars.get("iInitialized"), Some(&Value::Int(1)));
+        assert_eq!(full.local_vars.get("iConstructionCon"), Some(&INT_0));
+        assert_eq!(full.local_vars.get("iCompletion"), Some(&INT_1));
+        assert_eq!(full.local_vars.get("iCompletionRock"), Some(&v_int(100)));
+        assert_eq!(full.local_vars.get("iInitialized"), Some(&INT_1));
         assert_eq!(full.components.get("ROCK"), Some(100));
     }
 
@@ -216,7 +212,8 @@ public func SeedFull()
             Name=Water
             Density=25
             "#,
-        ).test_value();
+        )
+        .test_value();
         let materials = MaterialSet::from_resource_library(&library);
         let rock = materials.id_of("Rock").test_value();
         let water = materials.id_of("Water").test_value();
@@ -246,14 +243,14 @@ public func SeedFull()
         assert_eq!(expected_rng.random(1), 0);
         assert_eq!(expected_rng.random(1), 0);
         let guard = enter_random_context(LcgRng::new(23));
-        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+        let (result, outcome) = with_compat_context!(None, world, 1, || {
             place_vegetation(&[
-                Value::C4Id("PLNT".into()),
-                Value::Int(50),
-                Value::Int(120),
-                Value::Int(1),
-                Value::Int(1),
-                Value::Int(500),
+                v_id("PLNT".into()),
+                v_int(50),
+                v_int(120),
+                INT_1,
+                INT_1,
+                v_int(500),
             ])
         });
         let rng_after = guard.finish();
@@ -261,7 +258,7 @@ public func SeedFull()
         assert_eq!(rng_after, expected_rng, "the point costs exactly two draws");
         assert_eq!(
             result.expect("PlaceVegetation succeeds"),
-            object_reference_value(ObjectId::new(1))
+            v_object(ObjectId::new(1))
         );
         assert_eq!(outcome.spawns.len(), 1);
         assert_eq!(outcome.spawns[0].position, Vector2::new(49, 202));
@@ -275,7 +272,8 @@ public func SeedFull()
         // (C4Game.cpp:2988-2992), before the placement-point draws.
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
-        ).test_value();
+        )
+        .test_value();
         let materials = MaterialSet::from_resource_library(&library);
         let earth = materials.id_of("Earth").test_value();
         let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
@@ -304,14 +302,14 @@ public func SeedFull()
         assert_eq!(expected_rng.random(1), 0);
         assert_eq!(expected_rng.random(1), 0);
         let guard = enter_random_context(LcgRng::new(2));
-        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+        let (result, outcome) = with_compat_context!(None, world, 1, || {
             place_vegetation(&[
-                Value::C4Id("TREE".into()),
-                Value::Int(200),
-                Value::Int(50),
-                Value::Int(1),
-                Value::Int(1),
-                Value::Int(0),
+                v_id("TREE".into()),
+                v_int(200),
+                v_int(50),
+                INT_1,
+                INT_1,
+                INT_0,
             ])
         });
         let rng_after = guard.finish();
@@ -319,7 +317,7 @@ public func SeedFull()
         assert_eq!(rng_after, expected_rng);
         assert_eq!(
             result.expect("PlaceVegetation succeeds"),
-            object_reference_value(ObjectId::new(1))
+            v_object(ObjectId::new(1))
         );
         assert_eq!(outcome.spawns[0].construction, expected_growth);
     }
@@ -333,12 +331,12 @@ public func SeedFull()
         // allocator therefore starts the first created content at 2.
         let (result, outcome) =
             with_object_host_context_with_world_and_next_id(HostWorldContext::default(), 2, || {
-                create_contents(&[Value::C4Id("WOOD".into()), Value::Int(0), Value::Int(4)])
+                create_contents(&[v_id("WOOD".into()), INT_0, v_int(4)])
             });
 
         assert_eq!(
             result.expect("CreateContents accepts the null object slot"),
-            object_reference_value(ObjectId::new(5))
+            v_object(ObjectId::new(5))
         );
         assert_eq!(outcome.spawns.len(), 4);
         assert!(outcome.spawns.iter().all(|spawn| {
@@ -364,8 +362,7 @@ public func SeedFull()
         }
         let mut densities = vec![0; 2];
         densities[1] = 100;
-        let mut landscape =
-            Landscape::new(WIDTH, vec![0; WIDTH as usize]).test_value();
+        let mut landscape = Landscape::new(WIDTH, vec![0; WIDTH as usize]).test_value();
         landscape.set_world_height(HEIGHT as i32);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             WIDTH,
@@ -394,21 +391,20 @@ public func SeedFull()
             HashMap::new(),
         );
         let args = [
-            Value::C4Id("ELEV".into()),
-            Value::Int(32),
-            Value::Int(148),
-            Value::Int(1),
-            Value::Int(1),
-            Value::Bool(true),
-            Value::Bool(true),
+            v_id("ELEV".into()),
+            v_int(32),
+            v_int(148),
+            INT_1,
+            INT_1,
+            TRUE,
+            TRUE,
         ];
 
-        let (result, outcome) =
-            with_effect_context(None, &[], world, 1, || create_construction(&args));
+        let (result, outcome) = with_compat_context!(None, world, 1, || create_construction(&args));
 
         assert_eq!(
             result.expect("CreateConstruction checks the cave site"),
-            object_reference_value(ObjectId::new(1))
+            v_object(ObjectId::new(1))
         );
         assert_eq!(outcome.spawns.len(), 1);
         assert!(matches!(
@@ -445,18 +441,16 @@ public func SeedFull()
             HashMap::new(),
         );
         let args = [
-            Value::C4Id("WORK".into()),
-            Value::Int(32),
-            Value::Int(50),
-            Value::Int(1),
-            Value::Int(50),
-            Value::Bool(false),
-            Value::Bool(true),
+            v_id("WORK".into()),
+            v_int(32),
+            v_int(50),
+            INT_1,
+            v_int(50),
+            FALSE,
+            TRUE,
         ];
-        let (result, outcome) =
-            with_effect_context(None, &[], world, 1, || create_construction(&args));
-        let value = result.test_value();
-        assert_eq!(value, object_reference_value(ObjectId::new(1)));
+        let (result, outcome) = with_compat_context!(None, world, 1, || create_construction(&args));
+        assert_eq!(result.test_value(), v_object(ObjectId::new(1)));
         assert_eq!(outcome.spawns.len(), 1);
         let spawn = &outcome.spawns[0];
         assert_eq!(spawn.definition_id, "WORK");
@@ -464,11 +458,9 @@ public func SeedFull()
         assert_eq!(spawn.owner, 1);
         assert_eq!(spawn.construction, crate::FULL_CON / 2);
         assert_eq!(spawn.category, Some(crate::CATEGORY_STRUCTURE));
-        let component_update = outcome
-            .other_objects
-            .iter()
-            .find(|nested| nested.object_id == ObjectId::new(1))
-            .and_then(|nested| nested.update.as_ref()).test_value();
+        let component_update = foreign_outcome(&outcome, ObjectId::new(1))
+            .and_then(|nested| nested.update.as_ref())
+            .test_value();
         assert_eq!(
             component_update
                 .components
@@ -503,21 +495,20 @@ public func SeedFull()
             HashMap::new(),
         );
         let args = [
-            Value::C4Id("WORK".into()),
-            Value::Int(5),
-            Value::Int(50),
-            Value::Int(1),
-            Value::Int(50),
-            Value::Bool(false),
-            Value::Bool(true),
+            v_id("WORK".into()),
+            v_int(5),
+            v_int(50),
+            INT_1,
+            v_int(50),
+            FALSE,
+            TRUE,
         ];
 
-        let (result, outcome) =
-            with_effect_context(None, &[], world, 1, || create_construction(&args));
+        let (result, outcome) = with_compat_context!(None, world, 1, || create_construction(&args));
 
         assert_eq!(
             result.expect("open side permits the partial construction rectangle"),
-            object_reference_value(ObjectId::new(1))
+            v_object(ObjectId::new(1))
         );
         assert_eq!(outcome.spawns.len(), 1);
         assert_eq!(outcome.spawns[0].position, Vector2::new(5, 50));
@@ -537,7 +528,8 @@ public func SeedFull()
             Density=100
             DigFree=0
             "#,
-        ).test_value();
+        )
+        .test_value();
         let materials = MaterialSet::from_resource_library(&library);
         let mut landscape = Landscape::new(40, vec![0; 40]).test_value();
         landscape.set_world_height(40);
@@ -553,35 +545,37 @@ public func SeedFull()
         let mut engine = crate::Engine::with_seed(5);
         engine.set_materials(materials);
         engine.set_landscape(landscape);
-        let mut structure = test_definition("HUT1", "Hut", r#"#strict
+        let mut structure = test_definition(
+            "HUT1",
+            "Hut",
+            r#"#strict
         local saw_clear_footprint, saw_granite_basement;
         protected func Construction()
         {
             saw_clear_footprint = GBackSky(0, -4);
             saw_granite_basement = GetMaterial(0, 0) == Material("Granite");
         }
-        "#);
+        "#,
+        );
         structure.set_category(crate::CATEGORY_STRUCTURE);
         structure.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 8)));
         structure.set_basement(1);
         engine.register_test_definition(structure);
         engine.register_test_definition(test_definition("CALL", "Builder", "#strict\npublic func Build() { return CreateConstruction(HUT1, 0, 0, -1, 100, true, false); }"));
-        let builder = engine.spawn_test_object(SpawnConfig::new("CALL").with_position(Vector2::new(20, 30)));
+        let builder =
+            engine.spawn_test_object(SpawnConfig::new("CALL").with_position(Vector2::new(20, 30)));
         let builder_index = engine.find_object_index(builder).test_value();
 
         let structure = engine
-            .call_object_function(builder_index, "Build", Vec::new()).test_value();
+            .call_object_function(builder_index, "Build", Vec::new())
+            .test_value();
         let structure = object_id_from_value(&structure).test_value();
-        let structure = engine
-            .object_snapshot(structure).test_value();
+        let structure = engine.object_snapshot(structure).test_value();
 
-        assert_eq!(
-            structure.local_vars.get("saw_clear_footprint"),
-            Some(&Value::Bool(true))
-        );
+        assert_eq!(structure.local_vars.get("saw_clear_footprint"), Some(&TRUE));
         assert_eq!(
             structure.local_vars.get("saw_granite_basement"),
-            Some(&Value::Bool(true))
+            Some(&TRUE)
         );
         assert_eq!(engine.debug_landscape_material_name(20, 26), None);
         assert_eq!(
@@ -617,17 +611,10 @@ public func SeedFull()
             1,
             false,
         );
-        let args = [
-            Value::C4Id("WORK".into()),
-            Value::Int(32),
-            Value::Int(50),
-            Value::Int(1),
-            Value::Int(0),
-        ];
-        let (result, outcome) =
-            with_effect_context(None, &[], world, 1, || create_construction(&args));
+        let args = [v_id("WORK".into()), v_int(32), v_int(50), INT_1, INT_0];
+        let (result, outcome) = with_compat_context!(None, world, 1, || create_construction(&args));
 
-        assert_eq!(result.expect("CreateConstruction completes"), Value::Nil);
+        assert_eq!(result.expect("CreateConstruction completes"), NIL);
         assert!(outcome.spawns.is_empty());
         assert_eq!(outcome.next_object_id, 2, "removed object consumed its id");
     }
@@ -672,18 +659,17 @@ public func SeedFull()
         );
         let world = world_with(vec![existing], Some(landscape), definitions, HashMap::new());
         let args = [
-            Value::C4Id("WORK".into()),
-            Value::Int(32),
-            Value::Int(50),
-            Value::Int(1),
-            Value::Int(0),
-            Value::Bool(false),
-            Value::Bool(true),
+            v_id("WORK".into()),
+            v_int(32),
+            v_int(50),
+            INT_1,
+            INT_0,
+            FALSE,
+            TRUE,
         ];
         let (result, outcome) =
             with_object_host_context_with_world(world, || create_construction(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Nil);
+        assert_eq!(result.test_value(), NIL);
         assert!(outcome.spawns.is_empty());
         assert_eq!(outcome.next_object_id, 1);
     }
@@ -691,17 +677,16 @@ public func SeedFull()
     #[test]
     fn create_particle_registers_command() {
         let args = [
-            Value::String("Smoke".into()),
-            Value::Int(8),
-            Value::Int(-4),
-            Value::Int(20),
-            Value::Int(-10),
-            Value::Int(15),
-            Value::Int(60),
+            v_string("Smoke".into()),
+            v_int(8),
+            v_int(-4),
+            v_int(20),
+            v_int(-10),
+            v_int(15),
+            v_int(60),
         ];
         let (result, outcome) = with_object_host_context(|| create_particle(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.test_value(), TRUE);
         assert_eq!(outcome.particles.len(), 1);
         match &outcome.particles[0] {
             ParticleCommand::Create(config) => {
@@ -722,20 +707,19 @@ public func SeedFull()
         let target_id = ObjectId::new(5);
         let world = HostWorldContext::from_objects(vec![fixture_world_object(target_id, "Torch")]);
         let args = [
-            Value::String("Spark".into()),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(30),
-            object_reference_value(target_id),
-            Value::Bool(true),
+            v_string("Spark".into()),
+            INT_0,
+            INT_0,
+            INT_0,
+            INT_0,
+            INT_0,
+            v_int(30),
+            v_object(target_id),
+            TRUE,
         ];
         let (result, outcome) =
             with_object_host_context_with_world(world, || create_particle(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.test_value(), TRUE);
         assert_eq!(outcome.particles.len(), 1);
         match &outcome.particles[0] {
             ParticleCommand::Create(config) => {
@@ -751,18 +735,17 @@ public func SeedFull()
     #[test]
     fn create_particle_rejects_unknown_object() {
         let args = [
-            Value::String("Spark".into()),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(10),
-            object_reference_value(ObjectId::new(99)),
+            v_string("Spark".into()),
+            INT_0,
+            INT_0,
+            INT_0,
+            INT_0,
+            INT_0,
+            v_int(10),
+            v_object(ObjectId::new(99)),
         ];
         let (result, outcome) = with_object_host_context(|| create_particle(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(false));
+        assert_eq!(result.test_value(), FALSE);
         assert!(outcome.particles.is_empty());
     }
 
@@ -787,15 +770,14 @@ public func SeedFull()
 
         let older = engine.spawn_test_object(crate::SpawnConfig::new("HUT1"));
         let newer = engine.spawn_test_object(crate::SpawnConfig::new("HUT1"));
-        let owned_non_base = engine.spawn_test_object(crate::SpawnConfig::new("HUT1").with_owner(0));
+        let owned_non_base =
+            engine.spawn_test_object(crate::SpawnConfig::new("HUT1").with_owner(0));
         let deleted_base = engine.spawn_test_object(crate::SpawnConfig::new("HUT1"));
         let inactive_base = engine.spawn_test_object(crate::SpawnConfig::new("HUT1"));
         let older_index = engine.find_object_index(older).test_value();
         let newer_index = engine.find_object_index(newer).test_value();
-        let deleted_index = engine
-            .find_object_index(deleted_base).test_value();
-        let inactive_index = engine
-            .find_object_index(inactive_base).test_value();
+        let deleted_index = engine.find_object_index(deleted_base).test_value();
+        let inactive_index = engine.find_object_index(inactive_base).test_value();
         engine.objects[older_index].state.base = 0;
         engine.objects[newer_index].state.base = 0;
         engine.objects[deleted_index].state.base = 0;
@@ -810,10 +792,11 @@ public func SeedFull()
         let world = engine.host_world_context();
         let call = |args: Vec<Value>| {
             with_object_host_context_with_world(world.clone(), || find_base(&args))
-                .0.test_value()
+                .0
+                .test_value()
         };
-        let first = call(vec![Value::Int(0)]);
-        let second = call(vec![Value::Int(0), Value::Int(1)]);
+        let first = call(vec![INT_0]);
+        let second = call(vec![INT_0, INT_1]);
 
         assert_eq!(
             object_id_from_value(&first),
@@ -827,18 +810,18 @@ public func SeedFull()
             "missing C4ValueInt slots default player/index to zero"
         );
         assert_eq!(
-            call(vec![Value::Int(0), Value::Int(-1)]),
-            Value::Nil,
+            call(vec![INT_0, v_int(-1)]),
+            NIL,
             "a negative index decrements away from zero and never matches"
         );
         assert_eq!(
-            call(vec![Value::Int(0), Value::Int(2)]),
-            Value::Nil,
+            call(vec![INT_0, v_int(2)]),
+            NIL,
             "an out-of-range index returns nil"
         );
         assert_eq!(
-            call(vec![Value::Int(7)]),
-            Value::Nil,
+            call(vec![v_int(7)]),
+            NIL,
             "FnFindBase rejects a player absent from Game.Players"
         );
     }
@@ -857,7 +840,7 @@ public func SeedFull()
         engine.objects[hut_index].state.base = 0;
 
         let world = engine.host_world_context();
-        let (result, _) = with_effect_context(None, &[], world, 2, || {
+        let (result, _) = with_compat_context!(None, world, 2, || {
             let mut script = clonk_script::Engine::new();
             register_host_functions(&mut script);
             script
@@ -866,13 +849,13 @@ public func SeedFull()
                 )
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
             script
-                .call("Probe", &[object_reference_value(hut)])
+                .call("Probe", &[v_object(hut)])
                 .map_err(|error| RuntimeError::new(error.to_string()))
         });
 
         assert_eq!(
             result.expect("GetBase succeeds"),
-            Value::Array(vec![Value::Int(0), Value::Int(OWNER_NONE)])
+            Value::Array(vec![INT_0, v_int(OWNER_NONE)])
         );
     }
 
@@ -895,11 +878,10 @@ public func SeedFull()
         engine.objects[newer_index].state.base = 0;
 
         let state = engine.capture_state();
-        let mut restored = crate::Engine::with_seed(0);
-        restored.register_test_definition(definition);
+        let mut restored = engine_with_definitions([definition]);
         restored.restore_state(&state).test_value();
         let world = restored.host_world_context();
-        let (first, _) = with_object_host_context_with_world(world, || find_base(&[Value::Int(0)]));
+        let (first, _) = with_object_host_context_with_world(world, || find_base(&[INT_0]));
 
         assert_eq!(
             object_id_from_value(&first.expect("FindBase after restore succeeds")),
@@ -918,13 +900,13 @@ public func SeedFull()
             find_world_object(2, "TREE", 50, 10, 2),
             find_world_object(3, "ROCK", 90, 10, 2),
         ]);
-        for terminator in [Value::Nil, Value::Int(0), Value::Bool(false)] {
+        for terminator in [NIL, INT_0, FALSE] {
             // [ID ROCK], falsy, [Owner 2]: C++ uses only the ROCK criterion,
             // so both rock objects remain in the FindObjects result.
             let args = vec![
-                Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+                Value::Array(vec![v_int(20), v_string("ROCK".into())]),
                 terminator,
-                Value::Array(vec![Value::Int(50), Value::Int(2)]),
+                Value::Array(vec![v_int(50), v_int(2)]),
             ];
             let (result, _) =
                 with_object_host_context_with_world(world.clone(), || find_objects2(&args));
@@ -968,7 +950,8 @@ public func SeedFull()
                         Find_ID(ROCK), Find_ID(ROCK), Find_Category(2));
                 }
                 "#,
-            ).test_value();
+            )
+            .test_value();
 
         let call = |function: &str| {
             with_object_host_context_with_world(world.clone(), || {
@@ -1021,15 +1004,17 @@ public func SeedFull()
         // C4FindObjectFunc may mutate it between sibling checks
         // (oracle-src-pinned src/C4FindObject.cpp:390-679).
         let target = test_definition("ROCK", "Rock", "#strict");
-        let caller = test_definition("CALL", "Caller", r#"#strict
+        let caller = test_definition(
+            "CALL",
+            "Caller",
+            r#"#strict
         public func Probe()
         {
             return ObjectCount2([20, ROCK], [10, 0, 0, 30, 40], [40, 0]);
         }
-        "#);
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(target);
-        engine.register_test_definition(caller);
+        "#,
+        );
+        let mut engine = engine_with_definitions([target, caller]);
         engine.spawn_test_object(SpawnConfig::new("ROCK").with_position(Vector2::new(10, 20)));
         let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
         let caller = engine.find_object_index(caller).test_value();
@@ -1039,7 +1024,7 @@ public func SeedFull()
             engine
                 .call_object_function(caller, "Probe", Vec::new())
                 .expect("condition checks"),
-            Value::Int(1)
+            INT_1
         );
         assert_eq!(
             FIND_CONDITION_OBJECT_REFRESHES.with(Cell::get),
@@ -1053,20 +1038,32 @@ public func SeedFull()
         // C4ObjectList::Contents changes only through the native list-link
         // operations; unrelated nested calls do not scan all live objects
         // (oracle-src-pinned src/C4Object.cpp:1529-1605).
-        let stippel = test_definition("STIP", "Stippel", r#"#strict
+        let stippel = test_definition(
+            "STIP",
+            "Stippel",
+            r#"#strict
         protected func Initialize() { GameCallEx("ReportCreation", this); }
-        "#);
-        let mut rule = test_definition("RULE", "Rule", r#"#strict
+        "#,
+        );
+        let mut rule = test_definition(
+            "RULE",
+            "Rule",
+            r#"#strict
         public func ReportCreation(object created) { return !!created; }
-        "#);
+        "#,
+        );
         rule.set_category(1 << 19);
-        let caller = test_definition("CALL", "Caller", r#"#strict
+        let caller = test_definition(
+            "CALL",
+            "Caller",
+            r#"#strict
         public func Trigger()
         {
             for (var i = 0; i < 8; i++) CreateObject(STIP);
             return ObjectCount2([20, STIP]);
         }
-        "#);
+        "#,
+        );
         let mut engine = crate::Engine::with_seed(0);
         for definition in [stippel, rule, caller] {
             engine.register_test_definition(definition);
@@ -1080,7 +1077,7 @@ public func SeedFull()
             engine
                 .call_object_function(caller, "Trigger", Vec::new())
                 .expect("nested broadcasts run"),
-            Value::Int(8)
+            v_int(8)
         );
         assert_eq!(
             CONTENTS_SCOPE_GROWTH_VISITS.with(Cell::get),
@@ -1106,69 +1103,36 @@ public func SeedFull()
         // Distance → enclosing square, NO shapes (C4FindObject.h:253,260-261);
         // all remaining criteria → no bounds (base default).
         assert_eq!(
-            parsed_condition(vec![
-                Value::Int(10),
-                Value::Int(5),
-                Value::Int(6),
-                Value::Int(20),
-                Value::Int(30),
-            ])
-            .bounds(),
+            parsed_condition(vec![v_int(10), v_int(5), v_int(6), v_int(20), v_int(30),]).bounds(),
             Some((DefinitionRect::new(5, 6, 20, 30), false))
         );
         assert_eq!(
-            parsed_condition(vec![Value::Int(11), Value::Int(70), Value::Int(80)]).bounds(),
+            parsed_condition(vec![v_int(11), v_int(70), v_int(80)]).bounds(),
             Some((DefinitionRect::new(70, 80, 1, 1), true))
         );
         assert_eq!(
-            parsed_condition(vec![
-                Value::Int(12),
-                Value::Int(5),
-                Value::Int(6),
-                Value::Int(20),
-                Value::Int(30),
-            ])
-            .bounds(),
+            parsed_condition(vec![v_int(12), v_int(5), v_int(6), v_int(20), v_int(30),]).bounds(),
             Some((DefinitionRect::new(5, 6, 20, 30), true))
         );
         assert_eq!(
-            parsed_condition(vec![
-                Value::Int(13),
-                Value::Int(90),
-                Value::Int(10),
-                Value::Int(20),
-                Value::Int(45),
-            ])
-            .bounds(),
+            parsed_condition(vec![v_int(13), v_int(90), v_int(10), v_int(20), v_int(45),]).bounds(),
             Some((DefinitionRect::new(20, 10, 71, 36), true)),
             "OnLine: union of the two 1x1 endpoint rects (C4FindObject.h:234-237)"
         );
         assert_eq!(
-            parsed_condition(vec![
-                Value::Int(14),
-                Value::Int(100),
-                Value::Int(50),
-                Value::Int(30),
-            ])
-            .bounds(),
+            parsed_condition(vec![v_int(14), v_int(100), v_int(50), v_int(30),]).bounds(),
             Some((DefinitionRect::new(70, 20, 61, 61), false)),
             "Distance: (x-r, y-r, 2r+1, 2r+1) (C4FindObject.h:253)"
         );
         assert_eq!(
-            parsed_condition(vec![Value::Int(21), Value::Int(16)]).bounds(),
+            parsed_condition(vec![v_int(21), v_int(16)]).bounds(),
             None,
             "OCF has no bounds"
         );
         assert_eq!(
             parsed_condition(vec![
-                Value::Int(1),
-                Value::Array(vec![
-                    Value::Int(10),
-                    Value::Int(5),
-                    Value::Int(6),
-                    Value::Int(20),
-                    Value::Int(30),
-                ]),
+                INT_1,
+                Value::Array(vec![v_int(10), v_int(5), v_int(6), v_int(20), v_int(30),]),
             ])
             .bounds(),
             None,
@@ -1178,29 +1142,16 @@ public func SeedFull()
 
     #[test]
     fn find_condition_combinator_bounds_match_cpp_constructors() {
-        let in_rect = |x, y, w, h| {
-            Value::Array(vec![
-                Value::Int(10),
-                Value::Int(x),
-                Value::Int(y),
-                Value::Int(w),
-                Value::Int(h),
-            ])
-        };
-        let ocf = Value::Array(vec![Value::Int(21), Value::Int(16)]);
-        let at_rect = Value::Array(vec![
-            Value::Int(12),
-            Value::Int(60),
-            Value::Int(60),
-            Value::Int(10),
-            Value::Int(10),
-        ]);
+        let in_rect =
+            |x, y, w, h| Value::Array(vec![v_int(10), v_int(x), v_int(y), v_int(w), v_int(h)]);
+        let ocf = Value::Array(vec![v_int(21), v_int(16)]);
+        let at_rect = Value::Array(vec![v_int(12), v_int(60), v_int(60), v_int(10), v_int(10)]);
 
         // C4FindObjectAnd constructor (C4FindObject.cpp:411-434): intersect
         // the bounded children; boundless children are skipped.
         assert_eq!(
             parsed_condition(vec![
-                Value::Int(2),
+                v_int(2),
                 in_rect(0, 0, 100, 100),
                 ocf.clone(),
                 in_rect(50, 40, 100, 100),
@@ -1212,12 +1163,7 @@ public func SeedFull()
         // walk ("do not intersect an atpoint bound with an rect bound",
         // C4FindObject.cpp:417-425).
         assert_eq!(
-            parsed_condition(vec![
-                Value::Int(2),
-                in_rect(0, 0, 100, 100),
-                at_rect.clone()
-            ])
-            .bounds(),
+            parsed_condition(vec![v_int(2), in_rect(0, 0, 100, 100), at_rect.clone()]).bounds(),
             Some((DefinitionRect::new(60, 60, 10, 10), true))
         );
 
@@ -1225,7 +1171,7 @@ public func SeedFull()
         // the child bounds; any boundless or shapes child kills the bounds.
         assert_eq!(
             parsed_condition(vec![
-                Value::Int(3),
+                v_int(3),
                 in_rect(0, 0, 20, 20),
                 in_rect(80, 90, 20, 20),
             ])
@@ -1233,12 +1179,12 @@ public func SeedFull()
             Some((DefinitionRect::new(0, 0, 100, 110), false))
         );
         assert_eq!(
-            parsed_condition(vec![Value::Int(3), in_rect(0, 0, 20, 20), ocf]).bounds(),
+            parsed_condition(vec![v_int(3), in_rect(0, 0, 20, 20), ocf]).bounds(),
             None,
             "boundless child → no Or bounds (C4FindObject.cpp:481)"
         );
         assert_eq!(
-            parsed_condition(vec![Value::Int(3), in_rect(0, 0, 20, 20), at_rect]).bounds(),
+            parsed_condition(vec![v_int(3), in_rect(0, 0, 20, 20), at_rect]).bounds(),
             None,
             "shapes child → no Or bounds (C4FindObject.cpp:482-488)"
         );
@@ -1310,43 +1256,28 @@ public func SeedFull()
         "#;
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .set_landscape(Landscape::new(200, vec![120; 200]).test_value());
+        engine.set_landscape(Landscape::new(200, vec![120; 200]).test_value());
         let mut target_definition = test_definition("TARG", "Target", target_script);
         target_definition.set_shape_rect(Some(DefinitionRect::new(-2, -2, 4, 4)));
         engine.register_test_definition(target_definition);
         engine.register_test_definition(test_definition("CALL", "Caller", caller_script));
-        let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_position(Vector2::new(75, 25)));
-        let caller = engine.spawn_test_object(SpawnConfig::new("CALL").with_position(Vector2::new(10, 100)));
+        let target =
+            engine.spawn_test_object(SpawnConfig::new("TARG").with_position(Vector2::new(75, 25)));
+        let caller =
+            engine.spawn_test_object(SpawnConfig::new("CALL").with_position(Vector2::new(10, 100)));
         let caller_index = engine.find_object_index(caller).test_value();
 
         let before = Value::Array(vec![
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(1),
-            Value::Int(0),
+            INT_0, INT_0, INT_0, INT_0, INT_0, INT_0, INT_0, INT_1, INT_0,
         ]);
         let after = Value::Array(vec![
-            Value::Int(1),
-            Value::Int(0),
-            Value::Int(1),
-            Value::Int(0),
-            Value::Int(1),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
+            INT_1, INT_0, INT_1, INT_0, INT_1, INT_0, INT_0, INT_0, INT_0,
         ]);
         assert_eq!(
             engine
-                .call_object_function(caller_index, "Probe", vec![object_reference_value(target)],)
+                .call_object_function(caller_index, "Probe", vec![v_object(target)],)
                 .expect("same-call shape probe runs"),
-            Value::Array(vec![before, Value::Bool(true), after.clone()])
+            Value::Array(vec![before, TRUE, after.clone()])
         );
         assert_eq!(
             engine.object_current_shape_rect(target),
@@ -1365,7 +1296,7 @@ public func SeedFull()
             engine
                 .call_object_function(caller_index, "ProbeFuncMutation", Vec::new())
                 .expect("Find_Func shape mutation probe runs"),
-            Value::Int(1),
+            INT_1,
             "a later sibling criterion observes Find_Func's live SetShape write"
         );
 
@@ -1397,11 +1328,11 @@ public func SeedFull()
         );
         // [C4FO_InRect(10), 0, 0, 150, 40] — bounded, no shapes
         let bounded = vec![Value::Array(vec![
-            Value::Int(10),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(150),
-            Value::Int(40),
+            v_int(10),
+            INT_0,
+            INT_0,
+            v_int(150),
+            v_int(40),
         ])];
         let (result, _) =
             with_object_host_context_with_world(world.clone(), || find_objects2(&bounded));
@@ -1426,10 +1357,7 @@ public func SeedFull()
         );
 
         // [C4FO_ID(20), ROCK] — no bounds → master-list order
-        let boundless = vec![Value::Array(vec![
-            Value::Int(20),
-            Value::String("ROCK".into()),
-        ])];
+        let boundless = vec![Value::Array(vec![v_int(20), v_string("ROCK".into())])];
         let (result, _) = with_object_host_context_with_world(world, || find_objects2(&boundless));
         let Ok(Value::Array(values)) = result else {
             panic!("FindObjects returns array");
@@ -1455,16 +1383,15 @@ public func SeedFull()
             ]
         };
         let bounded = vec![Value::Array(vec![
-            Value::Int(10),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(50),
-            Value::Int(50),
+            v_int(10),
+            INT_0,
+            INT_0,
+            v_int(50),
+            v_int(50),
         ])];
 
         let snapshot_objects = objects();
-        let snapshot_landscape =
-            Landscape::new(150, vec![120; 150]).test_value();
+        let snapshot_landscape = Landscape::new(150, vec![120; 150]).test_value();
         let definitions = HashMap::new();
         let (width, height) = crate::compat::landscape_extent(&snapshot_landscape);
         let mut sectors = build_host_sector_map(
@@ -1530,10 +1457,7 @@ public func SeedFull()
         let mut sectors = build_host_sector_map(objects.iter(), &definitions, width, height);
 
         assert!(!sectors.set_master_order_if_changed(&[ObjectId::new(1)]));
-        assert!(sectors.set_master_order_if_changed(&[
-            ObjectId::new(2),
-            ObjectId::new(1),
-        ]));
+        assert!(sectors.set_master_order_if_changed(&[ObjectId::new(2), ObjectId::new(1),]));
     }
 
     /// `C4FindObject::Find`/`FindMany` walk `Objs.First -> Next`, the forward
@@ -1558,10 +1482,7 @@ public func SeedFull()
         )
         .with_master_order([ObjectId::new(3), ObjectId::new(2), ObjectId::new(1)]);
         // [C4FO_ID(20), ROCK] — no bounds, so the walk is the master list.
-        let boundless = vec![Value::Array(vec![
-            Value::Int(20),
-            Value::String("ROCK".into()),
-        ])];
+        let boundless = vec![Value::Array(vec![v_int(20), v_string("ROCK".into())])];
         let (result, _) =
             with_object_host_context_with_world(world.clone(), || find_objects2(&boundless));
         let Ok(Value::Array(values)) = result else {
@@ -1576,8 +1497,7 @@ public func SeedFull()
             ],
             "boundless criteria walk the master list, newest-first"
         );
-        let (result, _) =
-            with_object_host_context_with_world(world, || find_object2(&boundless));
+        let (result, _) = with_object_host_context_with_world(world, || find_object2(&boundless));
         assert_eq!(
             object_id_from_value(&result.expect("FindObject2 succeeds")),
             Some(ObjectId::new(3)),
@@ -1605,11 +1525,11 @@ public func SeedFull()
         .with_master_order([ObjectId::new(3), ObjectId::new(1), ObjectId::new(2)]);
         // [C4FO_InRect(10), 0, 0, 50, 50] — one sector holds all three.
         let bounded = vec![Value::Array(vec![
-            Value::Int(10),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(50),
-            Value::Int(50),
+            v_int(10),
+            INT_0,
+            INT_0,
+            v_int(50),
+            v_int(50),
         ])];
         let (result, _) = with_object_host_context_with_world(world, || find_objects2(&bounded));
         let Ok(Value::Array(values)) = result else {
@@ -1661,11 +1581,11 @@ public func SeedFull()
         );
         // [C4FO_AtRect(12), 0, 0, 120, 40] — bounded, shapes
         let args = vec![Value::Array(vec![
-            Value::Int(12),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(120),
-            Value::Int(40),
+            v_int(12),
+            INT_0,
+            INT_0,
+            v_int(120),
+            v_int(40),
         ])];
         let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
         let Ok(Value::Array(values)) = result else {
@@ -1695,14 +1615,8 @@ public func SeedFull()
             HashMap::new(),
         );
         let args = vec![
-            Value::Array(vec![
-                Value::Int(10),
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(150),
-                Value::Int(40),
-            ]),
-            Value::Array(vec![Value::Int(120)]), // C4SO_Random
+            Value::Array(vec![v_int(10), INT_0, INT_0, v_int(150), v_int(40)]),
+            Value::Array(vec![v_int(120)]), // C4SO_Random
         ];
         let rng = LcgRng::seed_from_u64(3);
         let mut mirror = rng.clone();
@@ -1744,14 +1658,8 @@ public func SeedFull()
             HashMap::new(),
         );
         let args = vec![
-            Value::Array(vec![
-                Value::Int(10),
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(150),
-                Value::Int(40),
-            ]),
-            Value::Array(vec![Value::Int(140)]), // C4SO_Mass — all equal
+            Value::Array(vec![v_int(10), INT_0, INT_0, v_int(150), v_int(40)]),
+            Value::Array(vec![v_int(140)]), // C4SO_Mass — all equal
         ];
         let (result, _) = with_object_host_context_with_world(world, || find_object2(&args));
         assert_eq!(
@@ -1795,14 +1703,8 @@ public func SeedFull()
             definitions,
         );
         let args = vec![
-            Value::Array(vec![
-                Value::Int(12),
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(120),
-                Value::Int(40),
-            ]),
-            Value::Array(vec![Value::Int(120)]), // C4SO_Random
+            Value::Array(vec![v_int(12), INT_0, INT_0, v_int(120), v_int(40)]),
+            Value::Array(vec![v_int(120)]), // C4SO_Random
         ];
         let rng = LcgRng::seed_from_u64(7);
         let mut mirror = rng.clone();
@@ -1842,8 +1744,8 @@ public func SeedFull()
             find_world_object(3, "ROCK", 90, 10, 1),
         ]);
         let args = vec![
-            Value::Array(vec![Value::Int(22), Value::Int(0)]), // ensured
-            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+            Value::Array(vec![v_int(22), INT_0]), // ensured
+            Value::Array(vec![v_int(20), v_string("ROCK".into())]),
         ];
         let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
         let Ok(Value::Array(values)) = result else {
@@ -1871,15 +1773,9 @@ public func SeedFull()
             HashMap::new(),
         );
         let args = vec![Value::Array(vec![
-            Value::Int(3), // C4FO_Or
-            Value::Array(vec![
-                Value::Int(10),
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(150),
-                Value::Int(40),
-            ]),
-            Value::Array(vec![Value::Int(21), Value::Int(0)]), // impossible
+            v_int(3), // C4FO_Or
+            Value::Array(vec![v_int(10), INT_0, INT_0, v_int(150), v_int(40)]),
+            Value::Array(vec![v_int(21), INT_0]), // impossible
         ])];
         let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
         let Ok(Value::Array(values)) = result else {
@@ -1907,24 +1803,24 @@ public func SeedFull()
             find_world_object(3, "ROCK", 90, 10, 1),
         ]);
         let args = vec![Value::Array(vec![
-            Value::Int(3),
-            Value::Array(vec![Value::Int(22), Value::Int(0)]), // ensured
-            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+            v_int(3),
+            Value::Array(vec![v_int(22), INT_0]), // ensured
+            Value::Array(vec![v_int(20), v_string("ROCK".into())]),
         ])];
         let (result, _) =
             with_object_host_context_with_world(world.clone(), || object_count2(&args));
-        assert_eq!(result.expect("ObjectCount2 succeeds"), Value::Int(3));
+        assert_eq!(result.expect("ObjectCount2 succeeds"), v_int(3));
 
         // Same through the Func-criterion view path: the unknown-Func child
         // is impossible (C4FindObject.cpp:664-667), pruned from the Or —
         // the ensured Category(0) child remains and the shortcut fires.
         let args = vec![Value::Array(vec![
-            Value::Int(3),
-            Value::Array(vec![Value::Int(22), Value::Int(0)]),
-            Value::Array(vec![Value::Int(60), Value::String("NoSuchFunc".into())]),
+            v_int(3),
+            Value::Array(vec![v_int(22), INT_0]),
+            Value::Array(vec![v_int(60), v_string("NoSuchFunc".into())]),
         ])];
         let (result, _) = with_object_host_context_with_world(world, || object_count2(&args));
-        assert_eq!(result.expect("ObjectCount2 succeeds"), Value::Int(3));
+        assert_eq!(result.expect("ObjectCount2 succeeds"), v_int(3));
     }
 
     #[test]
@@ -1946,11 +1842,11 @@ public func SeedFull()
         )
         .with_master_order([ObjectId::new(12), ObjectId::new(11)]);
         let args = vec![
-            Value::Nil,      // id
-            Value::Int(0),   // x
-            Value::Int(0),   // y
-            Value::Int(150), // wdt
-            Value::Int(40),  // hgt
+            NIL,        // id
+            INT_0,      // x
+            INT_0,      // y
+            v_int(150), // wdt
+            v_int(40),  // hgt
         ];
         let (result, _) = with_object_host_context_with_world(world, || find_object(&args));
         assert_eq!(
@@ -1998,8 +1894,8 @@ public func SeedFull()
         ]);
         // [C4FO_ID(20), "ROCK"] AND [C4FO_Owner(50), 2] → object 3
         let args = vec![
-            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
-            Value::Array(vec![Value::Int(50), Value::Int(2)]),
+            Value::Array(vec![v_int(20), v_string("ROCK".into())]),
+            Value::Array(vec![v_int(50), v_int(2)]),
         ];
         let (result, _) =
             with_object_host_context_with_world(world.clone(), || find_object2(&args));
@@ -2010,8 +1906,8 @@ public func SeedFull()
 
         // [C4FO_Not(1), [C4FO_ID, "ROCK"]] → first non-rock (object 2)
         let args = vec![Value::Array(vec![
-            Value::Int(1),
-            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+            INT_1,
+            Value::Array(vec![v_int(20), v_string("ROCK".into())]),
         ])];
         let (result, _) =
             with_object_host_context_with_world(world.clone(), || find_object2(&args));
@@ -2022,23 +1918,16 @@ public func SeedFull()
 
         // [C4FO_Or(3), [ID TREE], [InRect around object 3]] → objects 2 and 3
         let args = vec![Value::Array(vec![
-            Value::Int(3),
-            Value::Array(vec![Value::Int(20), Value::String("TREE".into())]),
-            Value::Array(vec![
-                Value::Int(10),
-                Value::Int(85),
-                Value::Int(5),
-                Value::Int(10),
-                Value::Int(10),
-            ]),
+            v_int(3),
+            Value::Array(vec![v_int(20), v_string("TREE".into())]),
+            Value::Array(vec![v_int(10), v_int(85), v_int(5), v_int(10), v_int(10)]),
         ])];
         let (result, _) =
             with_object_host_context_with_world(world.clone(), || object_count2(&args));
-        assert_eq!(result.expect("ObjectCount2 succeeds"), Value::Int(2));
+        assert_eq!(result.expect("ObjectCount2 succeeds"), v_int(2));
 
         // No valid criterions → script error (C4Script.cpp:2042-2043)
-        let (result, _) =
-            with_object_host_context_with_world(world, || find_object2(&[Value::Int(5)]));
+        let (result, _) = with_object_host_context_with_world(world, || find_object2(&[v_int(5)]));
         assert!(result.is_err());
     }
 
@@ -2054,8 +1943,8 @@ public func SeedFull()
             find_world_object(3, "ROCK", 90, 10, 1),
         ]);
         let args = vec![
-            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
-            Value::Array(vec![Value::Int(120)]), // C4SO_Random
+            Value::Array(vec![v_int(20), v_string("ROCK".into())]),
+            Value::Array(vec![v_int(120)]), // C4SO_Random
         ];
         let rng = LcgRng::seed_from_u64(99);
         let mut mirror = rng.clone();
@@ -2121,8 +2010,8 @@ public func SeedFull()
             10,
             false,
         );
-        let all = Value::Array(vec![Value::Int(22), Value::Int(0xFFFF)]); // C4FO_Category any
-        let args = vec![all.clone(), Value::Array(vec![Value::Int(140)])]; // C4SO_Mass
+        let all = Value::Array(vec![v_int(22), v_int(0xFFFF)]); // C4FO_Category any
+        let args = vec![all.clone(), Value::Array(vec![v_int(140)])]; // C4SO_Mass
         let (result, _) =
             with_object_host_context_with_world(world.clone(), || find_objects2(&args));
         let Ok(Value::Array(values)) = result else {
@@ -2137,7 +2026,7 @@ public func SeedFull()
         // [C4SO_Reverse(101), [C4SO_Mass]] → heaviest first
         let args = vec![
             all,
-            Value::Array(vec![Value::Int(101), Value::Array(vec![Value::Int(140)])]),
+            Value::Array(vec![v_int(101), Value::Array(vec![v_int(140)])]),
         ];
         let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
         let Ok(Value::Array(values)) = result else {
@@ -2158,19 +2047,19 @@ public func SeedFull()
         let defs: std::collections::HashSet<String> = ["Mist".to_string()].into_iter().collect();
         let world = HostWorldContext::from_objects(vec![]).with_particle_defs(defs.clone());
         let args = [
-            Value::String("Mist".into()),
-            Value::Int(12),
-            Value::Int(20),
-            Value::Int(5),
-            Value::Int(6),
-            Value::Int(10),
-            Value::Int(20),
-            Value::Int(0x11223344),
-            Value::Int(0x55667788),
+            v_string("Mist".into()),
+            v_int(12),
+            v_int(20),
+            v_int(5),
+            v_int(6),
+            v_int(10),
+            v_int(20),
+            v_int(0x11223344),
+            v_int(0x55667788),
         ];
         let (result, outcome) =
             with_object_host_context_with_world(world, || cast_particles(&args));
-        assert_eq!(result.expect("CastParticles succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("CastParticles succeeds"), TRUE);
         assert_eq!(outcome.particles.len(), 1);
         match &outcome.particles[0] {
             ParticleCommand::Cast {
@@ -2202,28 +2091,16 @@ public func SeedFull()
         // Unknown def with a registry attached → false, no command
         // (C4Script.cpp:4893).
         let world = HostWorldContext::from_objects(vec![]).with_particle_defs(defs);
-        let args = [
-            Value::String("NoSuchDef".into()),
-            Value::Int(1),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-        ];
+        let args = [v_string("NoSuchDef".into()), INT_1, INT_0, INT_0, INT_0];
         let (result, outcome) =
             with_object_host_context_with_world(world, || cast_particles(&args));
-        assert_eq!(result.expect("CastParticles succeeds"), Value::Bool(false));
+        assert_eq!(result.expect("CastParticles succeeds"), FALSE);
         assert!(outcome.particles.is_empty());
 
         // No registry attached (legacy fixture context) → permissive.
-        let args = [
-            Value::String("Anything".into()),
-            Value::Int(1),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-        ];
+        let args = [v_string("Anything".into()), INT_1, INT_0, INT_0, INT_0];
         let (result, outcome) = with_object_host_context(|| cast_particles(&args));
-        assert_eq!(result.expect("CastParticles succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("CastParticles succeeds"), TRUE);
         assert_eq!(outcome.particles.len(), 1);
     }
 
@@ -2234,23 +2111,20 @@ public func SeedFull()
         let target_id = ObjectId::new(9);
         let world = HostWorldContext::from_objects(vec![fixture_world_object(target_id, "Engine")]);
         let args = [
-            Value::String("Exhaust".into()),
-            Value::Int(3),
-            Value::Int(10),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            object_reference_value(target_id),
+            v_string("Exhaust".into()),
+            v_int(3),
+            v_int(10),
+            INT_0,
+            INT_0,
+            INT_0,
+            INT_0,
+            INT_0,
+            INT_0,
+            v_object(target_id),
         ];
         let (result, outcome) =
             with_object_host_context_with_world(world, || cast_back_particles(&args));
-        assert_eq!(
-            result.expect("CastBackParticles succeeds"),
-            Value::Bool(true)
-        );
+        assert_eq!(result.expect("CastBackParticles succeeds"), TRUE);
         match &outcome.particles[0] {
             ParticleCommand::Cast { layer, .. } => {
                 assert!(matches!(layer, ParticleLayer::ObjectBack(id) if *id == target_id));
@@ -2264,10 +2138,9 @@ public func SeedFull()
         // FnPushParticles (C4Script.cpp:4910-4923): nil name pushes all
         // particles; deltas are script ints /10; a named def that is not
         // loaded → false.
-        let (result, outcome) = with_object_host_context(|| {
-            push_particles(&[Value::Nil, Value::Int(15), Value::Int(-5)])
-        });
-        assert_eq!(result.expect("PushParticles succeeds"), Value::Bool(true));
+        let (result, outcome) =
+            with_object_host_context(|| push_particles(&[NIL, v_int(15), v_int(-5)]));
+        assert_eq!(result.expect("PushParticles succeeds"), TRUE);
         match &outcome.particles[0] {
             ParticleCommand::Push {
                 definition_id,
@@ -2284,21 +2157,16 @@ public func SeedFull()
         let defs: std::collections::HashSet<String> = ["Spark".to_string()].into_iter().collect();
         let world = HostWorldContext::from_objects(vec![]).with_particle_defs(defs);
         let (result, outcome) = with_object_host_context_with_world(world, || {
-            push_particles(&[
-                Value::String("Missing".into()),
-                Value::Int(0),
-                Value::Int(0),
-            ])
+            push_particles(&[v_string("Missing".into()), INT_0, INT_0])
         });
-        assert_eq!(result.expect("PushParticles succeeds"), Value::Bool(false));
+        assert_eq!(result.expect("PushParticles succeeds"), FALSE);
         assert!(outcome.particles.is_empty());
     }
 
     #[test]
     fn clear_particles_registers_command() {
         let (result, outcome) = with_object_host_context(|| clear_particles(&[]));
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.test_value(), TRUE);
         assert_eq!(outcome.particles.len(), 1);
         match &outcome.particles[0] {
             ParticleCommand::Clear {
@@ -2315,18 +2183,12 @@ public func SeedFull()
     #[test]
     fn clear_particles_with_object_sets_scope() {
         let target_id = ObjectId::new(12);
-        let world = HostWorldContext::from_objects(vec![fixture_world_object(
-            target_id,
-            "Emitter")],
-        );
-        let args = [
-            Value::String("Smoke".into()),
-            object_reference_value(target_id),
-        ];
+        let world =
+            HostWorldContext::from_objects(vec![fixture_world_object(target_id, "Emitter")]);
+        let args = [v_string("Smoke".into()), v_object(target_id)];
         let (result, outcome) =
             with_object_host_context_with_world(world, || clear_particles(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.test_value(), TRUE);
         assert_eq!(outcome.particles.len(), 1);
         match &outcome.particles[0] {
             ParticleCommand::Clear {
@@ -2343,8 +2205,7 @@ public func SeedFull()
     #[test]
     fn contained_returns_nil_when_object_has_no_container() {
         let (result, _) = with_object_host_context(|| contained(&[]));
-        let value = result.test_value();
-        assert_eq!(value, Value::Nil);
+        assert_eq!(result.test_value(), NIL);
     }
 
     #[test]
@@ -2352,8 +2213,7 @@ public func SeedFull()
         let container_id = ObjectId::new(42);
         let object_id = ObjectId::new(7);
         let world = HostWorldContext::from_objects(vec![
-            fixture_world_object(container_id, "Chest")
-                .with_energy(0),
+            fixture_world_object(container_id, "Chest").with_energy(0),
             fixture_world_object(object_id, "Gem")
                 .with_energy(0)
                 .with_container(Some(container_id)),
@@ -2363,9 +2223,8 @@ public func SeedFull()
             container: Some(container_id),
             ..idle_object_context()
         };
-        let (result, _) = with_effect_context(Some(context), &[], world, 100, || contained(&[]));
-        let value = result.test_value();
-        assert_eq!(value, object_reference_value(container_id));
+        let (result, _) = with_compat_context!(Some(context), world, 100, || contained(&[]));
+        assert_eq!(result.test_value(), v_object(container_id));
     }
 
     #[test]
@@ -2378,7 +2237,7 @@ public func SeedFull()
 
         let container = fixture_world_object(container_id, "Crew")
             .with_action_name("Walk")
-        .with_contents(vec![attached_id, deleted_id, first_item_id, second_item_id]);
+            .with_contents(vec![attached_id, deleted_id, first_item_id, second_item_id]);
 
         let attached = fixture_world_object(attached_id, "Banner")
             .with_action_name("Attach")
@@ -2415,9 +2274,9 @@ public func SeedFull()
         };
 
         let call_contents = |index, include_attached| {
-            let args = [Value::Int(index), Value::Nil, Value::Bool(include_attached)];
+            let args = [v_int(index), NIL, v_bool(include_attached)];
             let (result, _) =
-                with_effect_context(Some(context.clone()), &[], world.clone(), 200, || {
+                with_compat_context!(Some(context.clone()), world.clone(), 200, || {
                     contents(&args)
                 });
             result.test_value()
@@ -2425,30 +2284,15 @@ public func SeedFull()
 
         // C++ first indexes [attached, first, second] after filtering only
         // Status==0, then advances if that selected raw slot is attached.
-        assert_eq!(
-            call_contents(0, false),
-            object_reference_value(first_item_id)
-        );
-        assert_eq!(
-            call_contents(1, false),
-            object_reference_value(first_item_id)
-        );
-        assert_eq!(
-            call_contents(2, false),
-            object_reference_value(second_item_id)
-        );
-        assert_eq!(call_contents(3, false), Value::Nil);
+        assert_eq!(call_contents(0, false), v_object(first_item_id));
+        assert_eq!(call_contents(1, false), v_object(first_item_id));
+        assert_eq!(call_contents(2, false), v_object(second_item_id));
+        assert_eq!(call_contents(3, false), NIL);
 
-        assert_eq!(call_contents(0, true), object_reference_value(attached_id));
-        assert_eq!(
-            call_contents(1, true),
-            object_reference_value(first_item_id)
-        );
-        assert_eq!(
-            call_contents(2, true),
-            object_reference_value(second_item_id)
-        );
-        assert_eq!(call_contents(-1, false), Value::Nil);
+        assert_eq!(call_contents(0, true), v_object(attached_id));
+        assert_eq!(call_contents(1, true), v_object(first_item_id));
+        assert_eq!(call_contents(2, true), v_object(second_item_id));
+        assert_eq!(call_contents(-1, false), NIL);
     }
 
     #[test]
@@ -2458,7 +2302,7 @@ public func SeedFull()
 
         let container = fixture_world_object(container_id, "Crew")
             .with_action_name("Walk")
-        .with_contents(vec![attached_id]);
+            .with_contents(vec![attached_id]);
 
         let attached = fixture_world_object(attached_id, "Banner")
             .with_action_name("Attach")
@@ -2474,10 +2318,9 @@ public func SeedFull()
             ..idle_object_context()
         };
 
-        let args = [Value::Nil, Value::Nil, Value::Bool(true)];
-        let (result, _) = with_effect_context(Some(context), &[], world, 200, || contents(&args));
-        let value = result.test_value();
-        assert_eq!(value, object_reference_value(attached_id));
+        let args = [NIL, NIL, TRUE];
+        let (result, _) = with_compat_context!(Some(context), world, 200, || contents(&args));
+        assert_eq!(result.test_value(), v_object(attached_id));
     }
 
     #[test]
@@ -2486,8 +2329,8 @@ public func SeedFull()
         let gem_id = ObjectId::new(121);
         let hammer_id = ObjectId::new(122);
 
-        let container = fixture_world_object(container_id, "CHST")
-        .with_contents(vec![gem_id, hammer_id]);
+        let container =
+            fixture_world_object(container_id, "CHST").with_contents(vec![gem_id, hammer_id]);
 
         let gem = fixture_world_object(gem_id, "GEM1")
             .with_energy(0)
@@ -2507,18 +2350,17 @@ public func SeedFull()
             ..idle_object_context()
         };
 
-        let (result, _) = with_effect_context(Some(context_all), &[], world.clone(), 300, || {
+        let (result, _) = with_compat_context!(Some(context_all), world.clone(), 300, || {
             contents_count(&[])
         });
-        let value = result.test_value();
-        assert_eq!(value, Value::Int(2));
+        assert_eq!(result.test_value(), v_int(2));
 
-        let args = [Value::C4Id("GEM1".into())];
-        let (filtered, _) = with_effect_context(Some(context_filtered), &[], world, 300, || {
+        let args = [v_id("GEM1".into())];
+        let (filtered, _) = with_compat_context!(Some(context_filtered), world, 300, || {
             contents_count(&args)
         });
         let filtered_value = filtered.test_value();
-        assert_eq!(filtered_value, Value::Int(1));
+        assert_eq!(filtered_value, INT_1);
     }
 
     #[test]
@@ -2527,8 +2369,8 @@ public func SeedFull()
         let gem_id = ObjectId::new(131);
         let hammer_id = ObjectId::new(132);
 
-        let container = fixture_world_object(container_id, "CHST")
-        .with_contents(vec![hammer_id, gem_id]);
+        let container =
+            fixture_world_object(container_id, "CHST").with_contents(vec![hammer_id, gem_id]);
 
         let hammer = fixture_world_object(hammer_id, "HAMR")
             .with_energy(0)
@@ -2544,11 +2386,9 @@ public func SeedFull()
             ..idle_object_context()
         };
 
-        let args = [Value::C4Id("GEM1".into())];
-        let (result, _) =
-            with_effect_context(Some(context), &[], world, 400, || find_contents(&args));
-        let value = result.test_value();
-        assert_eq!(value, object_reference_value(gem_id));
+        let args = [v_id("GEM1".into())];
+        let (result, _) = with_compat_context!(Some(context), world, 400, || find_contents(&args));
+        assert_eq!(result.test_value(), v_object(gem_id));
     }
 
     #[test]
@@ -2557,8 +2397,8 @@ public func SeedFull()
         let gem_id = ObjectId::new(141);
         let hammer_id = ObjectId::new(142);
 
-        let container = fixture_world_object(container_id, "CHST")
-        .with_contents(vec![hammer_id, gem_id]);
+        let container =
+            fixture_world_object(container_id, "CHST").with_contents(vec![hammer_id, gem_id]);
 
         let gem = fixture_world_object(gem_id, "GEM1")
             .with_energy(0)
@@ -2581,22 +2421,14 @@ public func SeedFull()
         }
         .with_definition_id("HAMR");
 
-        let args = [
-            Value::C4Id("GEM1".into()),
-            object_reference_value(container_id),
-        ];
-        let (result, _) =
-            with_effect_context(Some(context.clone()), &[], world.clone(), 500, || {
-                find_other_contents(&args)
-            });
-        let value = result.test_value();
-        assert_eq!(value, object_reference_value(hammer_id));
+        let args = [v_id("GEM1".into()), v_object(container_id)];
+        let (result, _) = with_compat_context!(Some(context.clone()), world.clone(), 500, || {
+            find_other_contents(&args)
+        });
+        assert_eq!(result.test_value(), v_object(hammer_id));
 
-        let (same_call, _) = with_effect_context(Some(context), &[], world, 500, || {
-            let changed = change_def(&[
-                Value::C4Id("GEM1".into()),
-                object_reference_value(hammer_id),
-            ])?;
+        let (same_call, _) = with_compat_context!(Some(context), world, 500, || {
+            let changed = change_def(&[v_id("GEM1".into()), v_object(hammer_id)])?;
             let matching = find_contents(&args)?;
             let other = find_other_contents(&args)?;
             Ok::<_, RuntimeError>(Value::Array(vec![changed, matching, other]))
@@ -2605,11 +2437,7 @@ public func SeedFull()
         // both now have GEM1, so FindOtherContents must find no child.
         assert_eq!(
             same_call.expect("same-call ChangeDef content searches succeed"),
-            Value::Array(vec![
-                Value::Bool(true),
-                object_reference_value(gem_id),
-                Value::Nil,
-            ]),
+            Value::Array(vec![TRUE, v_object(gem_id), NIL,]),
             "both searches must see the live definition after contents re-insertion"
         );
     }
@@ -2617,7 +2445,7 @@ public func SeedFull()
     #[test]
     fn remove_object_marks_destroy_flag() {
         let (result, outcome) = with_object_host_context(|| remove_object(&[]));
-        assert_eq!(result.expect("RemoveObject succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("RemoveObject succeeds"), TRUE);
         assert!(outcome.destroy_object);
     }
 
@@ -2630,25 +2458,27 @@ public func MoveThenRemove()
   return RemoveObject(0, true);
 }
 "#;
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(test_definition("BOX1", "Container", container_script));
-        engine.register_test_definition(test_definition("ITEM", "Item", "#strict\n"));
+        let mut engine = engine_with_definitions([
+            test_definition("BOX1", "Container", container_script),
+            test_definition("ITEM", "Item", "#strict\n"),
+        ]);
 
-        let container = engine.spawn_test_object(SpawnConfig::new("BOX1").with_position(Vector2::new(120, 80)));
-        let child = engine.spawn_test_object(SpawnConfig::new("ITEM")
-            .with_position(Vector2::new(7, 11))
-            .with_container(container));
-        let container_index = engine
-            .find_object_index(container).test_value();
+        let container =
+            engine.spawn_test_object(SpawnConfig::new("BOX1").with_position(Vector2::new(120, 80)));
+        let child = engine.spawn_test_object(
+            SpawnConfig::new("ITEM")
+                .with_position(Vector2::new(7, 11))
+                .with_container(container),
+        );
+        let container_index = engine.find_object_index(container).test_value();
 
         assert_eq!(
             engine
                 .call_object_function(container_index, "MoveThenRemove", Vec::new())
                 .expect("same-call move and removal succeeds"),
-            Value::Bool(true)
+            TRUE
         );
-        let child = engine
-            .object_snapshot(child).test_value();
+        let child = engine.object_snapshot(child).test_value();
         assert_eq!(child.container, None);
         assert_eq!(
             child.position,
@@ -2717,20 +2547,17 @@ public func GetCalcCalls() { return calc_calls; }
                 .call_object_function(
                     actor_index,
                     "RemoveNested",
-                    vec![
-                        object_reference_value(victim),
-                        object_reference_value(child)
-                    ],
+                    vec![v_object(victim), v_object(child)],
                 )
                 .expect("nested removal returns"),
-            Value::Bool(true)
+            TRUE
         );
         let witness_index = engine.find_object_index(witness).test_value();
         assert_eq!(
             engine
                 .call_object_function(witness_index, "GetCalcCalls", Vec::new())
                 .expect("definition-static counter reads"),
-            Value::Int(1),
+            INT_1,
             "the live menu iterator must enumerate VICT while its Status-zero link remains"
         );
     }
@@ -2743,23 +2570,26 @@ public func RemoveForeignWithEject(object target) { return RemoveObject(target, 
 public func RemoveSelfWithFalse() { return RemoveObject(0, false); }
 public func RemoveSelfWithoutEject() { return RemoveObject(); }
 "#;
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(test_definition("BOX1", "Container", container_script));
-        engine.register_test_definition(test_definition("ITEM", "Item", "#strict\n"));
+        let mut engine = engine_with_definitions([
+            test_definition("BOX1", "Container", container_script),
+            test_definition("ITEM", "Item", "#strict\n"),
+        ]);
 
         let self_position = Vector2::new(120, 80);
-        let self_container = engine.spawn_test_object(SpawnConfig::new("BOX1").with_position(self_position));
-        let self_child = engine.spawn_test_object(SpawnConfig::new("ITEM")
-            .with_position(Vector2::new(7, 11))
-            .with_container(self_container));
-        let self_index = engine
-            .find_object_index(self_container).test_value();
+        let self_container =
+            engine.spawn_test_object(SpawnConfig::new("BOX1").with_position(self_position));
+        let self_child = engine.spawn_test_object(
+            SpawnConfig::new("ITEM")
+                .with_position(Vector2::new(7, 11))
+                .with_container(self_container),
+        );
+        let self_index = engine.find_object_index(self_container).test_value();
 
         assert_eq!(
             engine
                 .call_object_function(self_index, "RemoveSelfWithEject", Vec::new())
                 .expect("RemoveObject(0, 1) succeeds"),
-            Value::Bool(true)
+            TRUE
         );
         assert_eq!(
             engine
@@ -2768,18 +2598,20 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                 .status,
             ObjectStatus::Deleted
         );
-        let self_child = engine
-            .object_snapshot(self_child).test_value();
+        let self_child = engine.object_snapshot(self_child).test_value();
         assert_eq!(self_child.status, ObjectStatus::Normal);
         assert_eq!(self_child.container, None);
         assert_eq!(self_child.position, self_position);
 
         let caller = engine.spawn_test_object(SpawnConfig::new("BOX1"));
         let foreign_position = Vector2::new(300, 160);
-        let foreign_container = engine.spawn_test_object(SpawnConfig::new("BOX1").with_position(foreign_position));
-        let foreign_child = engine.spawn_test_object(SpawnConfig::new("ITEM")
-            .with_position(Vector2::new(19, 23))
-            .with_container(foreign_container));
+        let foreign_container =
+            engine.spawn_test_object(SpawnConfig::new("BOX1").with_position(foreign_position));
+        let foreign_child = engine.spawn_test_object(
+            SpawnConfig::new("ITEM")
+                .with_position(Vector2::new(19, 23))
+                .with_container(foreign_container),
+        );
         let caller_index = engine.find_object_index(caller).test_value();
 
         assert_eq!(
@@ -2787,10 +2619,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                 .call_object_function(
                     caller_index,
                     "RemoveForeignWithEject",
-                    vec![object_reference_value(foreign_container)],
+                    vec![v_object(foreign_container)],
                 )
                 .expect("foreign RemoveObject(target, true) succeeds"),
-            Value::Bool(true)
+            TRUE
         );
         assert_eq!(
             engine
@@ -2799,24 +2631,24 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                 .status,
             ObjectStatus::Deleted
         );
-        let foreign_child = engine
-            .object_snapshot(foreign_child).test_value();
+        let foreign_child = engine.object_snapshot(foreign_child).test_value();
         assert_eq!(foreign_child.status, ObjectStatus::Normal);
         assert_eq!(foreign_child.container, None);
         assert_eq!(foreign_child.position, foreign_position);
 
         for function in ["RemoveSelfWithFalse", "RemoveSelfWithoutEject"] {
             let recursive_container = engine.spawn_test_object(SpawnConfig::new("BOX1"));
-            let recursive_child = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(recursive_container));
-            let recursive_grandchild = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(recursive_child));
-            let recursive_index = engine
-                .find_object_index(recursive_container).test_value();
+            let recursive_child = engine
+                .spawn_test_object(SpawnConfig::new("ITEM").with_container(recursive_container));
+            let recursive_grandchild =
+                engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(recursive_child));
+            let recursive_index = engine.find_object_index(recursive_container).test_value();
 
             assert_eq!(
                 engine
                     .call_object_function(recursive_index, function, Vec::new())
                     .expect("non-ejecting RemoveObject succeeds"),
-                Value::Bool(true)
+                TRUE
             );
             for removed in [recursive_container, recursive_child, recursive_grandchild] {
                 assert_eq!(
@@ -2833,16 +2665,13 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn find_object_returns_first_matching_definition() {
         let world = HostWorldContext::from_objects(vec![
-            fixture_world_object(ObjectId::new(1), "FLAG")
-                .with_position(Vector2::new(10, 5)),
-            fixture_world_object(ObjectId::new(2), "ROCK")
-                .with_position(Vector2::new(50, 5)),
+            fixture_world_object(ObjectId::new(1), "FLAG").with_position(Vector2::new(10, 5)),
+            fixture_world_object(ObjectId::new(2), "ROCK").with_position(Vector2::new(50, 5)),
         ]);
 
-        let args = [Value::C4Id("FLAG".into())];
-        let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
-        let value = result.test_value();
-        assert_eq!(value, object_reference_value(ObjectId::new(1)));
+        let args = [v_id("FLAG".into())];
+        let (result, _) = with_compat_context!(None, world, 1, || find_object(&args));
+        assert_eq!(result.test_value(), v_object(ObjectId::new(1)));
     }
 
     #[test]
@@ -2858,23 +2687,23 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         // FnFindObject has NO owner parameter — C++ always searches with
         // ANY_OWNER (C4Script.cpp:2133); only FindObjectOwner filters.
         let args = [
-            Value::C4Id("DUMY".into()),
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Int(2),
+            v_id("DUMY".into()),
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            v_int(2),
         ];
-        let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
+        let (result, _) = with_compat_context!(None, world, 1, || find_object(&args));
         let value = result.test_value();
         assert_eq!(
             value,
-            object_reference_value(ObjectId::new(10)),
+            v_object(ObjectId::new(10)),
             "the trailing int is beyond pFindNext and ignored; owner never filters"
         );
     }
@@ -2882,42 +2711,30 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn find_object_closest_mode_orders_by_distance() {
         let world = HostWorldContext::from_objects(vec![
-            fixture_world_object(ObjectId::new(20), "DUMY")
-                .with_position(Vector2::new(2, 0)),
-            fixture_world_object(ObjectId::new(21), "DUMY")
-                .with_position(Vector2::new(6, 0)),
+            fixture_world_object(ObjectId::new(20), "DUMY").with_position(Vector2::new(2, 0)),
+            fixture_world_object(ObjectId::new(21), "DUMY").with_position(Vector2::new(6, 0)),
         ]);
-        let args = [
-            Value::C4Id("DUMY".into()),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(-1),
-            Value::Int(-1),
-        ];
-        let (first_result, _) =
-            with_effect_context(None, &[], world.clone(), 1, || find_object(&args));
-        let first_value = first_result.test_value();
-        assert_eq!(first_value, object_reference_value(ObjectId::new(20)));
+        let args = [v_id("DUMY".into()), INT_0, INT_0, v_int(-1), v_int(-1)];
+        let (first_result, _) = with_compat_context!(None, world.clone(), 1, || find_object(&args));
+        assert_eq!(first_result.test_value(), v_object(ObjectId::new(20)));
 
-        let mut find_next = ValueMap::new();
-        find_next.insert("id".into(), Value::Int(20));
+        let find_next = object_proplist(20);
         let args_with_next = [
-            Value::C4Id("DUMY".into()),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(-1),
-            Value::Int(-1),
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
+            v_id("DUMY".into()),
+            INT_0,
+            INT_0,
+            v_int(-1),
+            v_int(-1),
+            NIL,
+            NIL,
+            NIL,
+            NIL,
             // pFindNext is FindObject's 10th parameter (C4Script.cpp:2113).
-            Value::Proplist(find_next),
+            find_next,
         ];
         let (second_result, _) =
-            with_effect_context(None, &[], world, 1, || find_object(&args_with_next));
-        let second_value = second_result.test_value();
-        assert_eq!(second_value, object_reference_value(ObjectId::new(21)));
+            with_compat_context!(None, world, 1, || find_object(&args_with_next));
+        assert_eq!(second_result.test_value(), v_object(ObjectId::new(21)));
     }
 
     #[test]
@@ -2926,25 +2743,19 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         // Game.Objects.First -> Next and replaces the best only for a
         // strictly smaller distance (C4Game.cpp:1367-1424). Storage order
         // must not decide an equal-distance tie.
-        let first_in_storage = fixture_world_object(ObjectId::new(30), "DUMY")
-            .with_position(Vector2::new(-2, 0));
-        let first_in_master = fixture_world_object(ObjectId::new(31), "DUMY")
-            .with_position(Vector2::new(2, 0));
+        let first_in_storage =
+            fixture_world_object(ObjectId::new(30), "DUMY").with_position(Vector2::new(-2, 0));
+        let first_in_master =
+            fixture_world_object(ObjectId::new(31), "DUMY").with_position(Vector2::new(2, 0));
         let world = HostWorldContext::from_objects([first_in_storage, first_in_master])
             .with_master_order([ObjectId::new(31), ObjectId::new(30)]);
-        let args = [
-            Value::C4Id("DUMY".into()),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(-1),
-            Value::Int(-1),
-        ];
+        let args = [v_id("DUMY".into()), INT_0, INT_0, v_int(-1), v_int(-1)];
 
-        let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
+        let (result, _) = with_compat_context!(None, world, 1, || find_object(&args));
 
         assert_eq!(
             result.expect("FindObject closest succeeds"),
-            object_reference_value(ObjectId::new(31))
+            v_object(ObjectId::new(31))
         );
     }
 
@@ -2954,21 +2765,12 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let world = HostWorldContext::from_objects(vec![
             fixture_world_object(matching_id, "Dummy")
                 .with_position(Vector2::new(0, 0))
-            .with_ocf(ocf::AVAILABLE | ocf::ALIVE),
-            fixture_world_object(ObjectId::new(52), "Dummy")
-                .with_position(Vector2::new(5, 0)),
+                .with_ocf(ocf::AVAILABLE | ocf::ALIVE),
+            fixture_world_object(ObjectId::new(52), "Dummy").with_position(Vector2::new(5, 0)),
         ]);
-        let args = [
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Int(ocf::AVAILABLE as i32),
-        ];
-        let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
-        let value = result.test_value();
-        assert_eq!(value, object_reference_value(matching_id));
+        let args = [NIL, NIL, NIL, NIL, NIL, v_int(ocf::AVAILABLE as i32)];
+        let (result, _) = with_compat_context!(None, world, 1, || find_object(&args));
+        assert_eq!(result.test_value(), v_object(matching_id));
     }
 
     #[test]
@@ -2983,8 +2785,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             },
         );
         let world = HostWorldContext::with_landscape(
-            vec![fixture_world_object(id, "WIDE")
-                .with_position(Vector2::new(40, 10))],
+            vec![fixture_world_object(id, "WIDE").with_position(Vector2::new(40, 10))],
             Some(Landscape::flat(120, 120)),
             definitions,
             Vec::new(),
@@ -2994,18 +2795,9 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             false,
         );
 
-        let args = [
-            Value::C4Id("WIDE".into()),
-            Value::Int(31),
-            Value::Int(10),
-            Value::Int(0),
-            Value::Int(0),
-        ];
-        let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
-        assert_eq!(
-            result.expect("FindObject succeeds"),
-            object_reference_value(id)
-        );
+        let args = [v_id("WIDE".into()), v_int(31), v_int(10), INT_0, INT_0];
+        let (result, _) = with_compat_context!(None, world, 1, || find_object(&args));
+        assert_eq!(result.expect("FindObject succeeds"), v_object(id));
     }
 
     #[test]
@@ -3019,10 +2811,8 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let second = ObjectId::new(72);
         let world = HostWorldContext::with_landscape(
             vec![
-                fixture_world_object(first, "DUMY")
-                    .with_position(Vector2::new(70, 10)),
-                fixture_world_object(second, "DUMY")
-                    .with_position(Vector2::new(10, 10)),
+                fixture_world_object(first, "DUMY").with_position(Vector2::new(70, 10)),
+                fixture_world_object(second, "DUMY").with_position(Vector2::new(10, 10)),
             ],
             Some(Landscape::flat(120, 120)),
             HashMap::new(),
@@ -3032,24 +2822,12 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             1,
             false,
         );
-        let args = [
-            Value::C4Id("DUMY".into()),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(120),
-            Value::Int(20),
-        ];
-        let (result, _) = with_effect_context(None, &[], world, 1, || find_objects(&args));
+        let args = [v_id("DUMY".into()), INT_0, INT_0, v_int(120), v_int(20)];
+        let (result, _) = with_compat_context!(None, world, 1, || find_objects(&args));
         let value = result.test_value();
         match value {
             Value::Array(entries) => {
-                assert_eq!(
-                    entries,
-                    vec![
-                        object_reference_value(second),
-                        object_reference_value(first)
-                    ]
-                );
+                assert_eq!(entries, vec![v_object(second), v_object(first)]);
             }
             other => panic!("expected array, got {other:?}"),
         }
@@ -3091,7 +2869,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         .with_base_graphics(None)
         .with_ocf(ocf_mask);
 
-        let (result, _) = with_effect_context(Some(object_context), &[], world, 2, || get_ocf(&[]));
+        let (result, _) = with_compat_context!(Some(object_context), world, 2, || get_ocf(&[]));
         let value = result.test_value();
         let Value::Int(raw) = value else {
             panic!("expected integer mask, got {value:?}");
@@ -3107,30 +2885,28 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     fn set_graphics_records_overlay_update() {
         let object_id = ObjectId::new(42);
         let object_context = idle_object_scope(object_id)
-        .with_graphics_overlays(Vec::new())
-        .with_base_graphics(None);
+            .with_graphics_overlays(Vec::new())
+            .with_base_graphics(None);
 
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(object_context),
-            &[],
             HostWorldContext::default(),
             100,
             || {
                 set_graphics(&[
-                    Value::String("Default".into()),
-                    Value::Nil,
-                    Value::C4Id("CLNK".into()),
-                    Value::Int(1),
-                    Value::Int(GraphicsOverlayMode::Action as i32),
-                    Value::String("Walk".into()),
+                    v_string("Default".into()),
+                    NIL,
+                    v_id("CLNK".into()),
+                    INT_1,
+                    v_int(GraphicsOverlayMode::Action as i32),
+                    v_string("Walk".into()),
                 ])
             },
         );
 
-        assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("SetGraphics succeeds"), TRUE);
         let update = outcome.object_update.test_value();
-        let overlays = update
-            .graphics_overlays.test_value();
+        let overlays = update.graphics_overlays.test_value();
         assert_eq!(overlays.len(), 1);
         let overlay = &overlays[0];
         assert_eq!(overlay.id, 1);
@@ -3148,19 +2924,16 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         // (Sentry Gun.c4d/Script.c:51).
         let (result, _) = with_object_host_context(|| {
             set_graphics(&[
-                Value::Nil,
-                Value::Nil,
-                Value::Nil,
-                Value::Int(1),
-                Value::Int(GraphicsOverlayMode::Action as i32),
-                Value::Int(0),
+                NIL,
+                NIL,
+                NIL,
+                INT_1,
+                v_int(GraphicsOverlayMode::Action as i32),
+                INT_0,
             ])
         });
 
-        assert_eq!(
-            result.expect("zero action converts to nil"),
-            Value::Bool(false)
-        );
+        assert_eq!(result.expect("zero action converts to nil"), FALSE);
     }
 
     #[test]
@@ -3178,33 +2951,31 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         existing.phase = 7;
 
         let object_context = idle_object_scope(object_id)
-        .with_graphics_overlays(vec![existing])
-        .with_base_graphics(None);
+            .with_graphics_overlays(vec![existing])
+            .with_base_graphics(None);
 
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(object_context),
-            &[],
             HostWorldContext::default(),
             100,
             || {
                 set_graphics(&[
-                    Value::Nil,
-                    Value::Nil,
-                    Value::C4Id("Clonk".into()),
-                    Value::Int(1),
-                    Value::Int(GraphicsOverlayMode::IngamePicture as i32),
+                    NIL,
+                    NIL,
+                    v_id("Clonk".into()),
+                    INT_1,
+                    v_int(GraphicsOverlayMode::IngamePicture as i32),
                 ])
             },
         );
 
-        assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("SetGraphics succeeds"), TRUE);
         let overlays = outcome
             .object_update
             .expect("object update expected")
-            .graphics_overlays.test_value();
-        let overlay = overlays
-            .iter()
-            .find(|overlay| overlay.id == 1).test_value();
+            .graphics_overlays
+            .test_value();
+        let overlay = overlays.iter().find(|overlay| overlay.id == 1).test_value();
         assert_eq!(overlay.mode, GraphicsOverlayMode::IngamePicture);
         assert_eq!(
             overlay.transform,
@@ -3230,23 +3001,22 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             .with_action(Some("Pointer".into()));
 
         let object_context = idle_object_scope(object_id)
-        .with_graphics_overlays(vec![existing])
-        .with_base_graphics(None);
+            .with_graphics_overlays(vec![existing])
+            .with_base_graphics(None);
 
         // Two identical calls in one scope: the second changes nothing.
         let call = || {
             set_graphics(&[
-                Value::Nil,
-                Value::Nil,
-                Value::C4Id("Clonk".into()),
-                Value::Int(1),
-                Value::Int(GraphicsOverlayMode::Action as i32),
-                Value::String("Pointer".into()),
+                NIL,
+                NIL,
+                v_id("Clonk".into()),
+                INT_1,
+                v_int(GraphicsOverlayMode::Action as i32),
+                v_string("Pointer".into()),
             ])
         };
-        let (results, _outcome) = with_effect_context(
+        let (results, _outcome) = with_compat_context!(
             Some(object_context),
-            &[],
             HostWorldContext::default(),
             100,
             || -> Result<Vec<Value>, RuntimeError> { Ok(vec![call()?, call()?]) },
@@ -3255,7 +3025,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let results = results.test_value();
         assert_eq!(
             results,
-            vec![Value::Bool(true), Value::Bool(true)],
+            vec![TRUE, TRUE],
             "re-setting an identical overlay is still a valid overlay set"
         );
     }
@@ -3266,29 +3036,27 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let overlay = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Action)
             .with_definition(Some("Clonk".into()));
         let object_context = idle_object_scope(object_id)
-        .with_graphics_overlays(vec![overlay])
-        .with_base_graphics(None);
+            .with_graphics_overlays(vec![overlay])
+            .with_base_graphics(None);
 
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(object_context),
-            &[],
             HostWorldContext::default(),
             100,
             || {
                 set_graphics(&[
-                    Value::String("Default".into()),
-                    Value::Nil,
-                    Value::Nil,
-                    Value::Int(1),
-                    Value::Int(GraphicsOverlayMode::Action as i32),
+                    v_string("Default".into()),
+                    NIL,
+                    NIL,
+                    INT_1,
+                    v_int(GraphicsOverlayMode::Action as i32),
                 ])
             },
         );
 
-        assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("SetGraphics succeeds"), TRUE);
         let update = outcome.object_update.test_value();
-        let overlays = update
-            .graphics_overlays.test_value();
+        let overlays = update.graphics_overlays.test_value();
         assert!(overlays.is_empty());
     }
 
@@ -3314,26 +3082,19 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
 
         let object_context = idle_object_scope(object_id);
 
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(object_context.with_base_graphics(None)),
-            &[],
             world,
             100,
-            || {
-                set_graphics(&[
-                    Value::String("Alt".into()),
-                    Value::Nil,
-                    Value::C4Id("BRIK".into()),
-                    Value::Int(0),
-                ])
-            },
+            || { set_graphics(&[v_string("Alt".into()), NIL, v_id("BRIK".into()), INT_0,]) },
         );
 
-        assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("SetGraphics succeeds"), TRUE);
         let update = outcome.object_update.test_value();
         let base = update
             .base_graphics
-            .expect("base graphics update expected").test_value();
+            .expect("base graphics update expected")
+            .test_value();
         assert_eq!(base.definition, "BRIK");
         assert_eq!(base.graphics_name.as_deref(), Some("Alt"));
         assert_eq!(base.blit_mode, 0);
@@ -3364,14 +3125,13 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             blit_mode: 0,
         };
 
-        let object_context = idle_object_scope(object_id)
-        .with_base_graphics(Some(base));
+        let object_context = idle_object_scope(object_id).with_base_graphics(Some(base));
 
-        let (result, outcome) = with_effect_context(Some(object_context), &[], world, 100, || {
-            set_graphics(&[Value::Nil, Value::Nil, Value::Nil, Value::Int(0)])
+        let (result, outcome) = with_compat_context!(Some(object_context), world, 100, || {
+            set_graphics(&[NIL, NIL, NIL, INT_0])
         });
 
-        assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("SetGraphics succeeds"), TRUE);
         let update = outcome.object_update.test_value();
         let base = update.base_graphics.test_value();
         assert!(base.is_none());
@@ -3384,31 +3144,28 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
 
         let object_context = object_context.with_base_graphics(None);
 
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(object_context),
-            &[],
             HostWorldContext::default(),
             100,
             || {
                 set_obj_draw_transform(&[
-                    Value::Int(866),
-                    Value::Int(-500),
-                    Value::Int(0),
-                    Value::Int(500),
-                    Value::Int(866),
-                    Value::Int(0),
+                    v_int(866),
+                    v_int(-500),
+                    INT_0,
+                    v_int(500),
+                    v_int(866),
+                    INT_0,
                 ])
             },
         );
 
-        assert_eq!(
-            result.expect("SetObjDrawTransform succeeds"),
-            Value::Bool(true)
-        );
+        assert_eq!(result.expect("SetObjDrawTransform succeeds"), TRUE);
         let update = outcome.object_update.test_value();
         let transform = update
             .draw_transform
-            .expect("transform update expected").test_value();
+            .expect("transform update expected")
+            .test_value();
         assert_eq!(
             transform.matrix(),
             [
@@ -3433,18 +3190,14 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             ..idle_object_scope(object_id)
         };
 
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(object_context),
-            &[],
             HostWorldContext::default(),
             100,
             || set_obj_draw_transform(&[]),
         );
 
-        assert_eq!(
-            result.expect("SetObjDrawTransform succeeds"),
-            Value::Bool(true)
-        );
+        assert_eq!(result.expect("SetObjDrawTransform succeeds"), TRUE);
         assert_eq!(
             outcome
                 .object_update
@@ -3460,57 +3213,53 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let overlay = ObjectGraphicsOverlay::new(-2, GraphicsOverlayMode::Base);
         let zero_overlay = ObjectGraphicsOverlay::new(-3, GraphicsOverlayMode::Base);
         let object_context = idle_object_scope(object_id)
-        .with_graphics_overlays(vec![overlay, zero_overlay])
-        .with_base_graphics(None);
+            .with_graphics_overlays(vec![overlay, zero_overlay])
+            .with_base_graphics(None);
 
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(object_context),
-            &[],
             HostWorldContext::default(),
             100,
             || {
                 let rotated = set_obj_draw_transform(&[
-                    Value::Int(866),
-                    Value::Int(-500),
-                    Value::Int(125),
-                    Value::Int(500),
-                    Value::Int(866),
-                    Value::Int(-250),
+                    v_int(866),
+                    v_int(-500),
+                    v_int(125),
+                    v_int(500),
+                    v_int(866),
+                    v_int(-250),
                     Value::Proplist({
                         let mut map = ValueMap::new();
-                        map.insert("id".into(), Value::Int(object_id.as_u64() as i32));
+                        map.insert("id".into(), v_int(object_id.as_u64() as i32));
                         map
                     }),
-                    Value::Int(-2),
+                    v_int(-2),
                 ])?;
                 let zero = set_obj_draw_transform(&[
-                    Value::Int(0),
-                    Value::Int(0),
-                    Value::Int(0),
-                    Value::Int(0),
-                    Value::Int(0),
-                    Value::Int(0),
+                    INT_0,
+                    INT_0,
+                    INT_0,
+                    INT_0,
+                    INT_0,
+                    INT_0,
                     Value::Proplist({
                         let mut map = ValueMap::new();
-                        map.insert("id".into(), Value::Int(object_id.as_u64() as i32));
+                        map.insert("id".into(), v_int(object_id.as_u64() as i32));
                         map
                     }),
-                    Value::Int(-3),
+                    v_int(-3),
                 ])?;
                 Ok::<_, RuntimeError>((rotated, zero))
             },
         );
 
-        assert_eq!(
-            result.expect("SetObjDrawTransform succeeds"),
-            (Value::Bool(true), Value::Bool(true))
-        );
+        assert_eq!(result.expect("SetObjDrawTransform succeeds"), (TRUE, TRUE));
         let update = outcome.object_update.test_value();
-        let overlays = update
-            .graphics_overlays.test_value();
+        let overlays = update.graphics_overlays.test_value();
         let overlay = overlays
             .iter()
-            .find(|overlay| overlay.id == -2).test_value();
+            .find(|overlay| overlay.id == -2)
+            .test_value();
         let transform = overlay.transform.test_value();
         assert_eq!(
             transform.matrix(),
@@ -3528,7 +3277,8 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         );
         let zero_overlay = overlays
             .iter()
-            .find(|overlay| overlay.id == -3).test_value();
+            .find(|overlay| overlay.id == -3)
+            .test_value();
         assert_eq!(
             zero_overlay
                 .transform
@@ -3573,35 +3323,32 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             None,
         );
 
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(object_context),
-            &[],
             HostWorldContext::default(),
             100,
             || {
                 set_obj_draw_transform2(&[
-                    Value::Int(2000),
-                    Value::Int(3000),
-                    Value::Int(5000),
-                    Value::Int(7000),
-                    Value::Int(11000),
-                    Value::Int(13000),
-                    Value::Int(17000),
-                    Value::Int(19000),
-                    Value::Int(23000),
+                    v_int(2000),
+                    v_int(3000),
+                    v_int(5000),
+                    v_int(7000),
+                    v_int(11000),
+                    v_int(13000),
+                    v_int(17000),
+                    v_int(19000),
+                    v_int(23000),
                 ])
             },
         );
 
-        assert_eq!(
-            result.expect("SetObjDrawTransform2 succeeds"),
-            Value::Bool(true)
-        );
+        assert_eq!(result.expect("SetObjDrawTransform2 succeeds"), TRUE);
         let transform = outcome
             .object_update
             .expect("object update expected")
             .draw_transform
-            .expect("transform update expected").test_value();
+            .expect("transform update expected")
+            .test_value();
         assert_eq!(
             transform.matrix(),
             [49.0, 59.0, 74.0, 142.0, 173.0, 217.0, 254.0, 313.0, 395.0]
@@ -3613,30 +3360,26 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let object_id = ObjectId::new(7);
         let object_context = idle_object_scope(object_id);
 
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(object_context),
-            &[],
             HostWorldContext::default(),
             100,
             || {
                 set_obj_draw_transform2(&[
-                    Value::Int(1000),
-                    Value::Int(0),
-                    Value::Int(0),
-                    Value::Int(0),
-                    Value::Int(1000),
-                    Value::Int(0),
-                    Value::Int(0),
-                    Value::Int(0),
-                    Value::Int(1000),
+                    v_int(1000),
+                    INT_0,
+                    INT_0,
+                    INT_0,
+                    v_int(1000),
+                    INT_0,
+                    INT_0,
+                    INT_0,
+                    v_int(1000),
                 ])
             },
         );
 
-        assert_eq!(
-            result.expect("SetObjDrawTransform2 succeeds"),
-            Value::Bool(true)
-        );
+        assert_eq!(result.expect("SetObjDrawTransform2 succeeds"), TRUE);
         assert_eq!(
             outcome
                 .object_update
@@ -3658,46 +3401,42 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                     GraphicsOverlayMode::Base,
                 )]);
         let args = [
-            Value::Int(1000),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(1000),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(1000),
-            Value::Int(1),
+            v_int(1000),
+            INT_0,
+            INT_0,
+            INT_0,
+            v_int(1000),
+            INT_0,
+            INT_0,
+            INT_0,
+            v_int(1000),
+            INT_1,
         ];
 
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(with_overlay.clone()),
-            &[],
             HostWorldContext::default(),
             100,
             || set_obj_draw_transform2(&args),
         );
         assert_eq!(
             result.expect("the tenth integer is not parsed as an object"),
-            Value::Bool(true)
+            TRUE
         );
         let overlays = outcome
             .object_update
             .expect("object update expected")
-            .graphics_overlays.test_value();
+            .graphics_overlays
+            .test_value();
         assert_eq!(overlays[0].transform, Some(DrawTransform::identity()));
 
-        let (result, _) = with_effect_context(
+        let (result, _) = with_compat_context!(
             Some(object_context),
-            &[],
             HostWorldContext::default(),
             100,
             || set_obj_draw_transform2(&args),
         );
-        assert_eq!(
-            result.expect("a missing overlay is not an error"),
-            Value::Bool(false)
-        );
+        assert_eq!(result.expect("a missing overlay is not an error"), FALSE);
 
         let (result, _) = with_effect_context_with_state_and_definition(
             Some(with_overlay.clone()),
@@ -3711,19 +3450,16 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         );
         assert_eq!(
             result.expect("a definition-only call is not an error"),
-            Value::Bool(false),
+            FALSE,
             "a mutable carrier does not substitute for missing cthr->Obj"
         );
 
         let mut surplus = args.to_vec();
-        surplus.push(Value::Int(0));
-        let (result, _) = with_effect_context(
-            Some(with_overlay),
-            &[],
-            HostWorldContext::default(),
-            100,
-            || set_obj_draw_transform2(&surplus),
-        );
+        surplus.push(INT_0);
+        let (result, _) =
+            with_compat_context!(Some(with_overlay), HostWorldContext::default(), 100, || {
+                set_obj_draw_transform2(&surplus)
+            },);
         let error = result.expect_err("an eleventh argument is not accepted");
         assert!(error.message().contains("additional arguments"));
     }
@@ -3731,15 +3467,12 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn object_count_returns_number_of_matches() {
         let world = HostWorldContext::from_objects(vec![
-            fixture_world_object(ObjectId::new(30), "DUMY")
-                .with_position(Vector2::new(0, 0)),
-            fixture_world_object(ObjectId::new(31), "DUMY")
-                .with_position(Vector2::new(10, 0)),
+            fixture_world_object(ObjectId::new(30), "DUMY").with_position(Vector2::new(0, 0)),
+            fixture_world_object(ObjectId::new(31), "DUMY").with_position(Vector2::new(10, 0)),
         ]);
-        let args = [Value::C4Id("DUMY".into())];
-        let (result, _) = with_effect_context(None, &[], world, 1, || object_count(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Int(2));
+        let args = [v_id("DUMY".into())];
+        let (result, _) = with_compat_context!(None, world, 1, || object_count(&args));
+        assert_eq!(result.test_value(), v_int(2));
     }
 
     #[test]
@@ -3753,29 +3486,27 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                 .with_position(Vector2::new(5, 0)),
         ]);
         let args = [
-            Value::C4Id("DUMY".into()),
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
+            v_id("DUMY".into()),
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
             // iOwner is ObjectCount's 10th parameter (C4Script.cpp:2085).
-            Value::Int(2),
+            v_int(2),
         ];
-        let (result, _) = with_effect_context(None, &[], world, 1, || object_count(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Int(1));
+        let (result, _) = with_compat_context!(None, world, 1, || object_count(&args));
+        assert_eq!(result.test_value(), INT_1);
     }
 
     #[test]
     fn find_objects_returns_all_matches_in_order() {
         let container = ObjectId::new(40);
         let world = HostWorldContext::from_objects(vec![
-            fixture_world_object(container, "CONT")
-                .with_position(Vector2::new(0, 0)),
+            fixture_world_object(container, "CONT").with_position(Vector2::new(0, 0)),
             fixture_world_object(ObjectId::new(41), "ITEM")
                 .with_position(Vector2::new(3, 0))
                 .with_container(Some(container)),
@@ -3784,24 +3515,24 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                 .with_container(Some(container)),
         ]);
         let args = [
-            Value::C4Id("ITEM".into()),
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Int(ANY_CONTAINER_SENTINEL),
+            v_id("ITEM".into()),
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            NIL,
+            v_int(ANY_CONTAINER_SENTINEL),
         ];
-        let (result, _) = with_effect_context(None, &[], world, 1, || find_objects(&args));
+        let (result, _) = with_compat_context!(None, world, 1, || find_objects(&args));
         let value = result.test_value();
         match value {
             Value::Array(entries) => {
                 assert_eq!(entries.len(), 2);
-                assert_eq!(entries[0], object_reference_value(ObjectId::new(41)));
-                assert_eq!(entries[1], object_reference_value(ObjectId::new(42)));
+                assert_eq!(entries[0], v_object(ObjectId::new(41)));
+                assert_eq!(entries[1], v_object(ObjectId::new(42)));
             }
             other => panic!("expected array, got {:?}", other),
         }
@@ -3818,14 +3549,9 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                 start_energy,
                 DEFAULT_MAX_ENERGY,
             );
-            let (result, outcome) = with_effect_context(
-                Some(object),
-                &[],
-                HostWorldContext::default(),
-                1,
-                move || {
+            let (result, outcome) = with_compat_context!(Some(object), HostWorldContext::default(), 1, move || {
                     for delta in sequence.iter().copied() {
-                        let value = do_energy(&[Value::Int(delta)])?;
+                        let value = do_energy(&[v_int(delta)])?;
                         match value {
                             Value::Bool(true) => {}
                             Value::Bool(false) => {
@@ -3839,9 +3565,8 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                             }
                         }
                     }
-                    Ok(Value::Nil)
-                },
-            );
+                    Ok(NIL)
+                },);
 
             prop_assert!(result.is_ok());
 
@@ -3870,13 +3595,11 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
 
     #[test]
     fn add_global_effect_records_global_command() {
-        let (result, outcome) =
-            with_effect_context(None, &[], HostWorldContext::default(), 1, || {
-                add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(120)])
-            });
+        let (result, outcome) = with_compat_context!(None, HostWorldContext::default(), 1, || {
+            add_effect(&[v_string("Glow".into()), NIL, v_int(120)])
+        });
 
-        let value = result.test_value();
-        assert_eq!(value, Value::Int(1));
+        assert_eq!(result.test_value(), INT_1);
         assert!(outcome.object.is_empty());
         assert_eq!(outcome.global.len(), 1);
         match &outcome.global[0] {
@@ -3890,34 +3613,26 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
 
     #[test]
     fn global_effect_queries_use_context_view() {
-        let (result, _) = with_effect_context(
+        let (result, _) = with_compat_context!(
             None,
-            &[],
             HostWorldContext::default(),
             1,
             || -> Result<Value, RuntimeError> {
-                add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(90)])?;
-                get_effect(&[
-                    Value::String("Glow".into()),
-                    Value::Nil,
-                    Value::Int(0),
-                    Value::Int(1),
-                ])
+                add_effect(&[v_string("Glow".into()), NIL, v_int(90)])?;
+                get_effect(&[v_string("Glow".into()), NIL, INT_0, INT_1])
             },
         );
 
-        let value = result.test_value();
-        assert_eq!(value, Value::String("Glow".into()));
+        assert_eq!(result.test_value(), v_string("Glow".into()));
     }
 
     #[test]
     fn remove_global_effect_handles_missing() {
-        let (result, _) = with_effect_context(None, &[], HostWorldContext::default(), 1, || {
-            remove_effect(&[Value::Nil, Value::Nil, Value::Int(0)])
+        let (result, _) = with_compat_context!(None, HostWorldContext::default(), 1, || {
+            remove_effect(&[NIL, NIL, INT_0])
         });
 
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(false));
+        assert_eq!(result.test_value(), FALSE);
     }
 
     #[test]
@@ -3927,116 +3642,81 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         // shared low Data.Int through C4ValueConv<C4ValueInt>::_FromC4V
         // (C4Value.h:317-322; C4Script.cpp:6170-6174).
         let raw_bool = Value::from_c4_bool_raw;
-        let (result, _) = with_effect_context(
+        let (result, _) = with_compat_context!(
             None,
-            &[],
             HostWorldContext::default(),
             1,
             || -> Result<Value, RuntimeError> {
                 assert_eq!(
-                    add_effect(&[
-                        Value::String("Probe".into()),
-                        Value::Nil,
-                        Value::Bool(true),
-                        raw_bool(2),
-                    ])?,
-                    Value::Int(1),
+                    add_effect(&[v_string("Probe".into()), NIL, TRUE, raw_bool(2),])?,
+                    INT_1,
                     "Bool priority and raw-Bool interval extract as integers"
                 );
                 assert_eq!(
-                    add_effect(&[
-                        Value::String("Aux".into()),
-                        Value::Nil,
-                        Value::Bool(true),
-                        raw_bool(3),
-                    ])?,
-                    Value::Int(2)
+                    add_effect(&[v_string("Aux".into()), NIL, TRUE, raw_bool(3),])?,
+                    v_int(2)
                 );
 
                 assert_eq!(
-                    check_effect(&[
-                        Value::String("Candidate".into()),
-                        Value::Nil,
-                        raw_bool(2),
-                        raw_bool(3),
-                    ])?,
-                    Value::Int(0),
+                    check_effect(&[v_string("Candidate".into()), NIL, raw_bool(2), raw_bool(3),])?,
+                    INT_0,
                     "CheckEffect extracts both integer slots"
                 );
+                assert_eq!(get_effect_count(&[NIL, NIL, TRUE])?, v_int(2));
                 assert_eq!(
-                    get_effect_count(&[Value::Nil, Value::Nil, Value::Bool(true)])?,
-                    Value::Int(2)
-                );
-                assert_eq!(
-                    get_effect(&[
-                        Value::String("Probe".into()),
-                        Value::Nil,
-                        Value::Bool(false),
-                        raw_bool(3),
-                        Value::Bool(true),
-                    ])?,
-                    Value::Int(2),
+                    get_effect(&[v_string("Probe".into()), NIL, FALSE, raw_bool(3), TRUE,])?,
+                    v_int(2),
                     "Bool index/max-priority and raw-Bool query retain Data.Int"
                 );
 
                 assert_eq!(
                     change_effect(&[
-                        Value::String("Probe".into()),
-                        Value::Nil,
-                        Value::Bool(false),
-                        Value::String("Changed".into()),
+                        v_string("Probe".into()),
+                        NIL,
+                        FALSE,
+                        v_string("Changed".into()),
                         raw_bool(4),
                     ])?,
-                    Value::Bool(true)
+                    TRUE
                 );
                 assert_eq!(
-                    get_effect(&[
-                        Value::String("Changed".into()),
-                        Value::Nil,
-                        Value::Bool(false),
-                        raw_bool(3),
-                    ])?,
-                    Value::Int(4),
+                    get_effect(&[v_string("Changed".into()), NIL, FALSE, raw_bool(3),])?,
+                    v_int(4),
                     "ChangeEffect extracts its Bool index and raw-Bool timer"
                 );
 
-                effect_var(&[raw_bool(2), Value::Nil, raw_bool(2), Value::Int(77)])?;
+                effect_var(&[raw_bool(2), NIL, raw_bool(2), v_int(77)])?;
                 assert_eq!(
-                    effect_var(&[raw_bool(2), Value::Nil, raw_bool(2)])?,
-                    Value::Int(77),
+                    effect_var(&[raw_bool(2), NIL, raw_bool(2)])?,
+                    v_int(77),
                     "EffectVar extracts both raw-Bool integer address slots"
                 );
                 assert_eq!(
-                    effect_call(&[Value::Nil, raw_bool(2), Value::String("Missing".into()),])?,
-                    Value::Nil,
+                    effect_call(&[NIL, raw_bool(2), v_string("Missing".into()),])?,
+                    NIL,
                     "EffectCall accepts a raw-Bool effect number"
                 );
 
-                for name in [Value::String("Changed".into()), Value::Nil] {
+                for name in [v_string("Changed".into()), NIL] {
                     assert_eq!(
-                        remove_effect(&[name, Value::Nil, Value::Int(-1), Value::Bool(true),])?,
-                        Value::Bool(false),
+                        remove_effect(&[name, NIL, v_int(-1), TRUE,])?,
+                        FALSE,
                         "a negative named index or effect number is a miss, not an error"
                     );
                 }
 
                 assert_eq!(
-                    remove_effect(&[
-                        Value::String("Changed".into()),
-                        Value::Nil,
-                        Value::Bool(false),
-                        raw_bool(2),
-                    ])?,
-                    Value::Bool(true),
+                    remove_effect(&[v_string("Changed".into()), NIL, FALSE, raw_bool(2),])?,
+                    TRUE,
                     "RemoveEffect extracts its Bool index and raw-Bool flag"
                 );
-                get_effect_count(&[Value::Nil, Value::Nil])
+                get_effect_count(&[NIL, NIL])
             },
         );
 
         assert_eq!(
             result.expect("all typed effect arguments extract like C++"),
-            Value::Int(1),
+            INT_1,
             "only Aux remains after removing Changed"
         );
     }
@@ -4047,12 +3727,12 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let (result, outcome) = with_object_host_context(|| {
             let random = enter_random_context(LcgRng::new(9));
             let result = add_effect(&[
-                Value::String(crate::C4FX_FIRE.to_string().into()),
+                v_string(crate::C4FX_FIRE.to_string().into()),
                 Value::Object(1),
-                Value::Int(crate::C4FX_FIRE_PRIORITY),
-                Value::Int(crate::C4FX_FIRE_TIMER_INTERVAL),
-                Value::Nil,
-                Value::Nil,
+                v_int(crate::C4FX_FIRE_PRIORITY),
+                v_int(crate::C4FX_FIRE_TIMER_INTERVAL),
+                NIL,
+                NIL,
                 Value::from_c4_bool_raw(2),
                 high_word_bool,
             ]);
@@ -4068,7 +3748,8 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             .find_map(|command| match command {
                 EffectCommand::Update(effect) if effect.name == crate::C4FX_FIRE => Some(effect),
                 _ => None,
-            }).test_value();
+            })
+            .test_value();
         assert_eq!(effect.var(1), EffectVarValue::Int(2));
         assert_eq!(
             effect.var(2),
@@ -4088,83 +3769,65 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             assert_eq!(null_scope, EffectScope::Global);
             assert_eq!(
                 effect_callback_target_value(null_scope, &null_object),
-                Value::Nil,
+                NIL,
                 "C4VObj(nullptr) canonicalizes the Fx callback target to nil"
             );
             let number = add_effect(&[
-                Value::String("Global".into()),
+                v_string("Global".into()),
                 null_object.clone(),
-                Value::Int(100),
-                Value::Int(2),
+                v_int(100),
+                v_int(2),
             ])?;
-            assert_eq!(number, Value::Int(1));
+            assert_eq!(number, INT_1);
+            assert_eq!(get_effect_count(&[NIL, null_object.clone()])?, INT_1);
             assert_eq!(
-                get_effect_count(&[Value::Nil, null_object.clone()])?,
-                Value::Int(1)
+                get_effect(&[v_string("Global".into()), null_object.clone(), INT_0, INT_1,])?,
+                v_string("Global".into())
             );
             assert_eq!(
-                get_effect(&[
-                    Value::String("Global".into()),
-                    null_object.clone(),
-                    Value::Int(0),
-                    Value::Int(1),
-                ])?,
-                Value::String("Global".into())
-            );
-            assert_eq!(
-                get_effect(&[Value::String("Global".into()), Value::Object(1),])?,
-                Value::Nil,
+                get_effect(&[v_string("Global".into()), Value::Object(1),])?,
+                NIL,
                 "the active object's list remains untouched"
             );
             assert_eq!(
                 check_effect(&[
-                    Value::String("Candidate".into()),
+                    v_string("Candidate".into()),
                     null_object.clone(),
-                    Value::Int(50),
-                    Value::Int(1),
+                    v_int(50),
+                    INT_1,
                 ])?,
-                Value::Int(0)
+                INT_0
             );
             assert_eq!(
                 change_effect(&[
-                    Value::String("Global".into()),
+                    v_string("Global".into()),
                     null_object.clone(),
-                    Value::Int(0),
-                    Value::String("Renamed".into()),
-                    Value::Int(-1),
+                    INT_0,
+                    v_string("Renamed".into()),
+                    v_int(-1),
                 ])?,
-                Value::Bool(true)
+                TRUE
             );
 
-            effect_var(&[
-                Value::Int(0),
-                null_object.clone(),
-                number.clone(),
-                Value::Int(55),
-            ])?;
+            effect_var(&[INT_0, null_object.clone(), number.clone(), v_int(55)])?;
             assert_eq!(
-                effect_var(&[Value::Int(0), null_object.clone(), number.clone()])?,
-                Value::Int(55)
+                effect_var(&[INT_0, null_object.clone(), number.clone()])?,
+                v_int(55)
             );
             assert_eq!(
-                effect_call(&[null_object.clone(), number, Value::String("Missing".into()),])?,
-                Value::Nil
+                effect_call(&[null_object.clone(), number, v_string("Missing".into()),])?,
+                NIL
             );
             assert_eq!(
-                remove_effect(&[
-                    Value::String("Renamed".into()),
-                    null_object.clone(),
-                    Value::Int(0),
-                    Value::Bool(true),
-                ])?,
-                Value::Bool(true)
+                remove_effect(&[v_string("Renamed".into()), null_object.clone(), INT_0, TRUE,])?,
+                TRUE
             );
-            get_effect_count(&[Value::Nil, null_object])
+            get_effect_count(&[NIL, null_object])
         });
 
         assert_eq!(
             result.expect("typed null object consistently selects globals"),
-            Value::Int(0)
+            INT_0
         );
         assert!(outcome.object.is_empty());
         assert!(
@@ -4177,20 +3840,16 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     fn synthetic_proplist_effect_target_still_selects_the_active_object() {
         let state = empty_state();
         let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[
-                Value::String("Synthetic".into()),
-                state.clone(),
-                Value::Int(100),
-            ])?;
+            add_effect(&[v_string("Synthetic".into()), state.clone(), v_int(100)])?;
             Ok(Value::Array(vec![
-                get_effect_count(&[Value::Nil, state])?,
-                get_effect_count(&[Value::Nil, Value::Object(0)])?,
+                get_effect_count(&[NIL, state])?,
+                get_effect_count(&[NIL, Value::Object(0)])?,
             ]))
         });
 
         assert_eq!(
             result.expect("synthetic target remains object-scoped"),
-            Value::Array(vec![Value::Int(1), Value::Int(0)])
+            Value::Array(vec![INT_1, INT_0])
         );
         assert!(!outcome.object.is_empty());
         assert!(outcome.global.is_empty());

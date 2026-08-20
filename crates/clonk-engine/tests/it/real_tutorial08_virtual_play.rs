@@ -2,41 +2,19 @@
 
 use std::error::Error;
 
-use crate::support::real_scenario::load_tutorial;
+use crate::support::real_scenario::{
+    load_tutorial_with_local_player, object_with_definition, tutorial_message_contains,
+};
 use crate::support::virtual_player::VirtualPlayer;
 use clonk_engine::{
-    Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_SPECIAL2,
-    COM_THROW, COM_UP,
+    Engine, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_SPECIAL2, COM_THROW, COM_UP,
 };
 
 fn load_tutorial08() -> (Engine, i32) {
     // C4Game::InitAnimals uses the scenario RNG and PlaceAnimal for every
     // WIPF. Seed 202 deterministically places all ten WIPFs on the walkable
     // surface under MapSeed propagation while exercising the C++ path.
-    let mut engine = load_tutorial(8, 202);
-    let owner = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-        name: "Tutorial 8 virtual player".to_owned(),
-        player_info_id: 0,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff_00_00,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: false,
-        auto_context_menu: false,
-        startup_player_count: 1,
-    }))
-    .number();
-    (engine, owner)
-}
-
-fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine.first_object_for_definition(definition)
+    load_tutorial_with_local_player(8, 202, "Tutorial 8 virtual player", false, false)
 }
 
 fn definition_count(engine: &Engine, definition: &str) -> usize {
@@ -51,10 +29,6 @@ fn carried_object(engine: &Engine, carrier: ObjectId) -> Option<ObjectId> {
     engine
         .object_snapshot(carrier)
         .and_then(|carrier| carrier.contents.first().copied())
-}
-
-fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine.message_line_contains(needle)
 }
 
 fn wait_for_tutorial_message_lines(

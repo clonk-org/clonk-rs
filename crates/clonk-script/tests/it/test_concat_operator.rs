@@ -8,38 +8,14 @@
 
 use clonk_script::{Engine, ScriptError, Value};
 
-fn eval(source: &str) -> Value {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("script should load");
-    engine.call("Test", &[]).expect("call succeeds")
-}
+use crate::support::{eval, runtime_error};
 
-fn runtime_error(source: &str, args: &[Value]) -> String {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("script should load");
-    match engine
-        .call("Test", args)
-        .expect_err("unsupported concatenation must fail")
-    {
-        ScriptError::Runtime(error) => error.message().to_string(),
-        other => panic!("expected runtime error, got {other}"),
-    }
-}
-
-#[test]
-fn concat_two_strings() {
-    assert_eq!(
-        eval(r#"func Test() { return "Hello, " .. "World"; }"#),
-        Value::String("Hello, World".into())
-    );
-}
-
-#[test]
-fn concat_string_and_int() {
-    assert_eq!(
-        eval(r#"func Test() { return "n=" .. 42; }"#),
-        Value::String("n=42".into())
-    );
+eval_cases! {
+    concat_two_strings:
+        r#"func Test() { return "Hello, " .. "World"; }"# =>
+        Value::String("Hello, World".into());
+    concat_string_and_int:
+        r#"func Test() { return "n=" .. 42; }"# => Value::String("n=42".into());
 }
 
 #[test]
@@ -140,29 +116,16 @@ func Test() { var value; value ..= nil; return value; }"#,
     );
 }
 
-#[test]
-fn concat_two_ints_is_string_not_addition() {
+eval_cases! {
     // 5 .. 3 == "53" (concat), not 8 (`+` would add).
-    assert_eq!(
-        eval("func Test() { return 5 .. 3; }"),
-        Value::String("53".into())
-    );
-}
-
-#[test]
-fn concat_assign_operator() {
-    assert_eq!(
-        eval(r#"func Test() { var s = "a"; s ..= "b"; return s; }"#),
-        Value::String("ab".into())
-    );
-}
-
-#[test]
-fn concat_arrays_appends() {
-    assert_eq!(
-        eval("#strict\nfunc Test() { return [1, 2] .. [3]; }"),
-        Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
-    );
+    concat_two_ints_is_string_not_addition:
+        "func Test() { return 5 .. 3; }" => Value::String("53".into());
+    concat_assign_operator:
+        r#"func Test() { var s = "a"; s ..= "b"; return s; }"# =>
+        Value::String("ab".into());
+    concat_arrays_appends:
+        "#strict\nfunc Test() { return [1, 2] .. [3]; }" =>
+        Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
 }
 
 #[test]
@@ -215,31 +178,17 @@ fn array_concat_rejects_result_over_max_size() {
     assert_eq!(values.last(), Some(&Value::Int(7)));
 }
 
-#[test]
-fn concat_maps_merges_with_right_side_winning() {
-    assert_eq!(
-        eval(
-            "#strict 3\nfunc Test() { var merged = { a = 1, b = 2 } .. { b = 3, c = 4 }; return [merged.a, merged.b, merged.c]; }"
-        ),
-        Value::Array(vec![Value::Int(1), Value::Int(3), Value::Int(4)])
-    );
-}
+eval_cases! {
+    concat_maps_merges_with_right_side_winning:
+        "#strict 3\nfunc Test() { var merged = { a = 1, b = 2 } .. { b = 3, c = 4 }; return [merged.a, merged.b, merged.c]; }" =>
+        Value::Array(vec![Value::Int(1), Value::Int(3), Value::Int(4)]);
 
-#[test]
-fn concat_binds_looser_than_addition() {
     // "x" .. 1 + 2  ==  "x" .. (1 + 2)  ==  "x3"
-    assert_eq!(
-        eval(r#"func Test() { return "x" .. 1 + 2; }"#),
-        Value::String("x3".into())
-    );
-}
+    concat_binds_looser_than_addition:
+        r#"func Test() { return "x" .. 1 + 2; }"# => Value::String("x3".into());
 
-#[test]
-fn ellipsis_still_lexes_as_varargs() {
     // `...` must still tokenize as the varargs forwarder, not `..` + `.`.
-    let mut engine = Engine::new();
-    engine
-        .load_script("func Inner(a, b) { return a + b; } func Test() { return Inner(2, 3, ...); }")
-        .expect("script with ... should still parse");
-    assert_eq!(engine.call("Test", &[]).expect("call"), Value::Int(5));
+    ellipsis_still_lexes_as_varargs:
+        "func Inner(a, b) { return a + b; } func Test() { return Inner(2, 3, ...); }" =>
+        Value::Int(5);
 }

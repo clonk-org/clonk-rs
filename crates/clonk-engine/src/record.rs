@@ -430,21 +430,13 @@ mod tests {
     use crate::rng::LcgRng;
     use crate::{
         ActionState, CommandDirection, CommandStackSnapshot, ComponentList, Direction,
-        EnvironmentFrame, HudSnapshot, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2,
-        OWNER_NONE,
+        ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, OWNER_NONE,
     };
     use std::collections::HashMap;
 
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
         SimulationSnapshot {
             frame,
-            game_time: 0,
-            game_over: false,
-            round_results: Default::default(),
-            league_name: Vec::new(),
-            player_info_league_progress_data: Default::default(),
-            player_info_league_scores: Default::default(),
-            physics: None,
             objects: vec![ObjectSnapshot {
                 id: crate::ObjectId::new(1),
                 definition_id: "Test".into(),
@@ -513,32 +505,8 @@ mod tests {
                 rotation_velocity: None,
                 fixed_rotation: None,
             }],
-            render_order: Vec::new(),
-            environment: EnvironmentFrame::default(),
-            sky: None,
-            weather_events: Vec::new(),
-            global_effects: Vec::new(),
-            script_globals: Default::default(),
-            particles: Vec::new(),
-            players: Vec::new(),
-            fow_players: Default::default(),
-            crew_selection: HashMap::new(),
-            crew_roles: HashMap::new(),
-            known_crew_owners: Vec::new(),
-            eliminated_crew_owners: Vec::new(),
-            landscape: None,
             rng: LcgRng::seed_from_u64(frame),
-            hud: HudSnapshot::default(),
-            surfaces: Vec::new(),
-            controls: Vec::new(),
-            network_packets: Vec::new(),
-            definition_categories: HashMap::new(),
-            definition_closed_containers: Default::default(),
-            definition_lines: HashMap::new(),
-            transfer_zones: Vec::new(),
-            pathfinder_debug: Default::default(),
-            menu_requests: Vec::new(),
-            audio: Vec::new(),
+            ..Default::default()
         }
     }
 

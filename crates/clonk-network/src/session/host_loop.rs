@@ -1693,10 +1693,10 @@ async fn update_chase_targets(state: &mut HostState) {
         return;
     }
 
-    let status = NetworkStatus {
-        target_tick: i32::try_from(state.coordinator.current_tick()).unwrap_or(i32::MAX),
-        ..state.status_barrier.status
-    };
+    let status = state
+        .status_barrier
+        .status
+        .with_target_tick(i32::try_from(state.coordinator.current_tick()).unwrap_or(i32::MAX));
     for client_id in chasing_clients {
         let _ = send_host_message(
             state,

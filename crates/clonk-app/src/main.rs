@@ -226,11 +226,13 @@ use clonk_engine::{
     ScoreboardPresentationRequest, ScriptControlPolicy, ShowCommandsRequestStore,
     SimulationSnapshot, SkyConfig, SpawnConfig, SpeechPlaybackOutcome, SyncCheckPacket,
     TeamConfiguration, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
-    FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
-    FLAG_X_REL, FLAG_Y_REL, MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL,
-    MESSAGE_TYPE_PRIVATE, MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM,
-    MESSAGE_TYPE_TEAM, OWNER_NONE, PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
+    FLAG_HCENTER, FLAG_RIGHT, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
+    MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
+    MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM, OWNER_NONE,
+    PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
 };
+#[cfg(test)]
+use clonk_engine::{FLAG_LEFT, FLAG_NO_BREAK, FLAG_TOP};
 use clonk_frontend::clonk_fonts::expand_hotkey_markup;
 use clonk_frontend::context_menu::{
     ClassicContextMenu, ClassicTooltipTracker, ContextMenuDirection, ContextMenuEntry,

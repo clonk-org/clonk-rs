@@ -9,9 +9,8 @@
 //! 3. the drag line, in white;
 //! 4. the drop-target icon.
 //!
-//! Where this list is drawn is [`crate::developer_cursor`]'s neighbour in
-//! `clonk-frontend::viewport_draw_order`: after the custom-GUI objects, before
-//! the per-player HUD, and never in a fullscreen game.
+//! The viewport draws this list after custom-GUI objects, before the player
+//! HUD, and only in windowed mode (`C4Viewport.cpp:1093-1108`).
 //!
 //! `DrawSelectMark` is the fiddly part. It is **twelve individual pixels**
 //! forming an L at each corner — not a rectangle outline — and it draws nothing

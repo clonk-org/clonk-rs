@@ -1,61 +1,18 @@
-use std::env;
-use std::path::PathBuf;
-
-use clonk_engine::scenario::LegacyDefinitionResolver;
-use clonk_engine::{
-    Engine, JoinPlayerConfig, ObjectMenuComponent, ObjectMenuExtra, ObjectUpdate, Scenario,
-    ScenarioError, COM_DIG,
+use crate::support::real_scenario::{
+    join_local_player_with_preferences, load_raw_content_scenario,
 };
-use clonk_resources::Group;
+use clonk_engine::{Engine, ObjectMenuComponent, ObjectMenuExtra, ObjectUpdate, COM_DIG};
 use clonk_script::Value;
 
-struct ContentResolver {
-    root: PathBuf,
-}
-
-impl LegacyDefinitionResolver for ContentResolver {
-    fn resolve_definition_groups(
-        &self,
-        _scenario: &Group,
-        identifier: &str,
-    ) -> Result<Vec<Group>, ScenarioError> {
-        Group::open(self.root.join(identifier.replace('\\', "/")))
-            .map(|group| vec![group])
-            .map_err(ScenarioError::Resources)
-    }
-}
-
 fn load_tutorial04() -> (Engine, i32) {
-    let content = env::var_os("LC_CONTENT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content"));
-    let resolver = ContentResolver {
-        root: content.clone(),
-    };
-    let scenario = crate::support::TestValueExt::test_value(Scenario::load_from_path_with(
-        content.join("Tutorial.c4f/Tutorial04.c4s"),
-        &resolver,
+    let scenario = crate::support::TestValueExt::test_value(load_raw_content_scenario(
+        "Tutorial.c4f/Tutorial04.c4s",
     ));
     let mut engine = Engine::with_seed(0);
     crate::support::TestValueExt::test_value(scenario.apply(&mut engine));
-    let player = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-        name: "Tutorial04 construction".to_string(),
-        player_info_id: 0,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff_00_00,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: false,
-        auto_context_menu: false,
-        startup_player_count: 1,
-    }));
-    (engine, player.number())
+    let player =
+        join_local_player_with_preferences(&mut engine, "Tutorial04 construction", false, false);
+    (engine, player)
 }
 
 #[test]

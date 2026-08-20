@@ -2763,12 +2763,12 @@ impl Engine {
         }
         self.host_requests
             .pending_client_updates
-            .push(ClientUpdateControlData {
-                update_type: CLIENT_UPDATE_ACTIVATE,
-                client_id: at_client.get(),
-                data: 0,
-                by_client: 0,
-            });
+            .push(ClientUpdateControlData::new(
+                CLIENT_UPDATE_ACTIVATE,
+                at_client.get(),
+                0,
+                0,
+            ));
     }
 
     /// Drain each player's control/action counters in exact native

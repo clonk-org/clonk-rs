@@ -2,47 +2,16 @@
 
 use std::error::Error;
 
-use crate::support::real_scenario::load_tutorial;
-use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
-use clonk_engine::{
-    Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
+use crate::support::real_scenario::{
+    clonk_carries, load_tutorial_with_local_player,
+    object_contents_count as carried_definition_count, object_with_definition,
+    tutorial_message_contains,
 };
+use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
+use clonk_engine::{Engine, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP};
 
 fn load_tutorial09() -> (Engine, i32) {
-    let mut engine = load_tutorial(9, 0);
-    let owner = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-        name: "Tutorial 9 virtual player".to_owned(),
-        player_info_id: 0,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff_00_00,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: true,
-        auto_context_menu: true,
-        startup_player_count: 1,
-    }))
-    .number();
-    (engine, owner)
-}
-
-fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine.first_object_for_definition(definition)
-}
-
-fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
-    engine.object_snapshot(clonk).is_some_and(|clonk| {
-        clonk.contents.iter().any(|item| {
-            engine
-                .object_snapshot(*item)
-                .is_some_and(|item| item.definition_id == definition)
-        })
-    })
+    load_tutorial_with_local_player(9, 0, "Tutorial 9 virtual player", true, true)
 }
 
 fn carried_object(engine: &Engine, clonk: ObjectId, definition: &str) -> Option<ObjectId> {
@@ -55,20 +24,6 @@ fn carried_object(engine: &Engine, clonk: ObjectId, definition: &str) -> Option<
                 .object_snapshot(*item)
                 .is_some_and(|item| item.definition_id == definition)
         })
-}
-
-fn carried_definition_count(engine: &Engine, clonk: ObjectId, definition: &str) -> usize {
-    engine.object_snapshot(clonk).map_or(0, |clonk| {
-        clonk
-            .contents
-            .iter()
-            .filter(|item| {
-                engine
-                    .object_snapshot(**item)
-                    .is_some_and(|item| item.definition_id == definition)
-            })
-            .count()
-    })
 }
 
 fn closest_free_fish(engine: &Engine, clonk: ObjectId) -> Option<ObjectId> {
@@ -352,10 +307,6 @@ fn catch_and_deposit_another_fish(
         object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(14))
     })?;
     Ok(fish)
-}
-
-fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine.message_line_contains(needle)
 }
 
 fn player_wealth(engine: &Engine, owner: i32) -> i32 {

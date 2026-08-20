@@ -1,68 +1,19 @@
-use crate::support::EngineTestExt;
-use std::env;
-use std::path::PathBuf;
-
-use clonk_engine::scenario::LegacyDefinitionResolver;
-use clonk_engine::{
-    CommandDirection, Engine, JoinPlayerConfig, Scenario, ScenarioError, COM_DOWN, COM_UP,
+use crate::support::real_scenario::{
+    join_local_player_with_preferences, load_raw_content_scenario,
 };
-use clonk_resources::Group;
+use crate::support::EngineTestExt;
 
-struct ContentResolver {
-    root: PathBuf,
-}
-
-impl LegacyDefinitionResolver for ContentResolver {
-    fn resolve_definition_groups(
-        &self,
-        _scenario: &Group,
-        identifier: &str,
-    ) -> Result<Vec<Group>, ScenarioError> {
-        let path = self.root.join(identifier.replace('\\', "/"));
-        Group::open(path)
-            .map(|group| vec![group])
-            .map_err(ScenarioError::Resources)
-    }
-}
-
-fn content_root() -> PathBuf {
-    env::var_os("LC_CONTENT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content"))
-}
+use clonk_engine::{CommandDirection, Engine, COM_DOWN, COM_UP};
 
 fn load_tutorial(number: u8) -> (Engine, i32) {
-    let content = content_root();
-    let path = content.join(format!("Tutorial.c4f/Tutorial{number:02}.c4s"));
-    let resolver = ContentResolver {
-        root: content.clone(),
-    };
-    let scenario = Scenario::load_from_path_with(&path, &resolver)
+    let scenario = load_raw_content_scenario(format!("Tutorial.c4f/Tutorial{number:02}.c4s"))
         .unwrap_or_else(|error| panic!("Tutorial{number:02} loads: {error}"));
     let mut engine = Engine::with_seed(0);
     scenario
         .apply(&mut engine)
         .unwrap_or_else(|error| panic!("Tutorial{number:02} applies: {error}"));
-    let joined = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial campaign".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        })
-        .unwrap_or_else(|error| panic!("Tutorial{number:02} player joins: {error}"));
-    (engine, joined.number())
+    let player = join_local_player_with_preferences(&mut engine, "Tutorial campaign", false, false);
+    (engine, player)
 }
 
 #[test]

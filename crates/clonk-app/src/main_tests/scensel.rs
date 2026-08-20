@@ -1,6 +1,60 @@
 // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
+macro_rules! scensel_fixture {
+    (frontend_scenario: $binding:ident, $identifier:expr, $title:expr $(,)?) => {
+        let mut $binding = FrontendScenario::fallback();
+        $binding.identifier = $identifier;
+        $binding.title = $title;
+    };
+    (scenario: $identifier:expr, $title:expr, $kind:expr $(,)?) => {
+        clonk_frontend::ScenarioSummary {
+            identifier: $identifier,
+            title: $title,
+            kind: $kind,
+        }
+    };
+    (goal_rule: $definition_id:expr, $name:expr $(,)?) => {
+        GoalRuleEntry {
+            definition_id: $definition_id,
+            name: $name,
+            description: None,
+            fulfilled: false,
+        }
+    };
+}
+
+fn scensel_window_app(player_name: &str) -> (EnvGuard, tempfile::TempDir, GameApp) {
+    let user_data = tempdir();
+    let guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(test_repository_root())),
+        ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ("LC_LANGUAGE", Some(Path::new("US"))),
+    ]);
+    let paths = test_app_paths();
+    let mut app = GameApp::new(
+        800,
+        600,
+        disabled_audio_options(),
+        Some(&paths),
+        test_runtime_config_with(player_name, false),
+    )
+    .test_value();
+    wait_for_menu(&mut app);
+    app.open_scenario_browser();
+    (guard, user_data, app)
+}
+
+fn scensel_app(scenarios: &[FrontendScenario]) -> GameApp {
+    let menu =
+        StartupMenu::new(build_menu_entries(scenarios, false), test_font(), None).test_value();
+    let mut app = new_menu_app(800, 600);
+    app.menu_state = MenuState::new(menu, scenarios.to_vec());
+    app.scenario_catalog = build_scenario_catalog(scenarios);
+    app.open_scenario_browser();
+    app
+}
+
 // The C++ book has no Back list row (C4StartupScenSelDlg has a Back
 // button/K_LEFT instead) and selects the first entry
 // (SelectFirstEntry, cpp:1536-1537).
@@ -13,22 +67,11 @@ fn scensel_menu_state_without_back_row_selects_first_entry() {
     state.menu().resize(1280.0, 720.0);
 
     state.set_include_back(false);
-    assert!(state
-        .menu()
-        .entries()
-        .iter()
-        .all(|entry| entry.identifier != BACK_ENTRY_IDENTIFIER));
+    main_assert!(state.menu().entries().iter().all(|entry| entry.identifier != BACK_ENTRY_IDENTIFIER));
 
     let selection = state.select_default_entry();
-    assert!(matches!(
-        selection.as_slice(),
-        [StartupMenuAction::SelectionChanged(summary)]
-        if summary.identifier == "folder_missions"
-    ));
-    assert_eq!(
-        state.selected_scenario().map(|entry| entry.title.as_str()),
-        Some("Missions")
-    );
+    main_assert!(matches!(selection.as_slice(), [StartupMenuAction::SelectionChanged(summary)] if summary.identifier == "folder_missions"));
+    main_assert_eq!(state.selected_scenario().map(|entry| entry.title.as_str()) => Some("Missions"));
 }
 
 #[test]
@@ -50,38 +93,30 @@ fn scensel_definition_checkbox_resets_only_on_selection_change() {
     state.set_include_back(false);
     let _ = state.select_default_entry();
     state.sync_definition_checkbox_to_selection();
-    assert!(state.definition_checkbox_enabled);
-    assert!(state.definition_checkbox_checked);
-    assert_eq!(
-        scenario_fixed_definition_modules(state.selected_scenario().unwrap()),
-        ["Objects.c4d", "Knights.c4d"]
-    );
+    main_assert!(state.definition_checkbox_enabled);
+    main_assert!(state.definition_checkbox_checked);
+    main_assert_eq!(scenario_fixed_definition_modules(state.selected_scenario().unwrap()) => ["Objects.c4d", "Knights.c4d"]);
 
-    assert!(state.toggle_definition_checkbox());
-    assert!(!state.definition_checkbox_checked);
-    assert!(state.set_definition_checkbox_focused(true));
+    main_assert!(state.toggle_definition_checkbox());
+    main_assert!(!state.definition_checkbox_checked);
+    main_assert!(state.set_definition_checkbox_focused(true));
     // Opening/canceling the child selector does not resync this state.
-    assert!(!state.definition_checkbox_checked);
+    main_assert!(!state.definition_checkbox_checked);
 
     let _ = state.select_list_index(1);
     state.sync_definition_checkbox_to_selection();
-    assert!(!state.definition_checkbox_enabled);
-    assert!(state.definition_checkbox_checked);
-    assert!(!state.definition_checkbox_focused);
-    assert!(!state.toggle_definition_checkbox());
-    assert_eq!(
-        scenario_fixed_definition_modules(state.selected_scenario().unwrap()),
-        ["Objects.c4d"]
-    );
+    main_assert!(!state.definition_checkbox_enabled);
+    main_assert!(state.definition_checkbox_checked);
+    main_assert!(!state.definition_checkbox_focused);
+    main_assert!(!state.toggle_definition_checkbox());
+    main_assert_eq!(scenario_fixed_definition_modules(state.selected_scenario().unwrap()) => ["Objects.c4d"]);
 }
 
 #[test]
 fn checked_definition_checkbox_intercepts_start_even_when_local_only_disables_it() {
     let mut app = new_menu_app(640, 480);
     app.open_scenario_browser();
-    let mut scenario = FrontendScenario::fallback();
-    scenario.identifier = "definition_intercept".to_string();
-    scenario.title = "Definition intercept".to_string();
+    scensel_fixture!(frontend_scenario: scenario, "definition_intercept".to_string(), "Definition intercept".to_string());
     scenario.path = Some(PathBuf::from("DefinitionIntercept.c4s"));
     scenario.local_only = Some(true);
     scenario.allow_user_change = Some(true);
@@ -92,25 +127,24 @@ fn checked_definition_checkbox_intercepts_start_even_when_local_only_disables_it
     app.menu_state.definition_checkbox_checked = true;
 
     app.handle_menu_input(|_| {
-        vec![StartupMenuAction::StartScenario(
-            clonk_frontend::ScenarioSummary {
-                identifier: scenario.identifier.clone(),
-                title: scenario.title.clone(),
-                kind: ScenarioKind::Scenario,
-            },
-        )]
+        vec![StartupMenuAction::StartScenario(scensel_fixture!(
+            scenario:
+                scenario.identifier.clone(),
+                scenario.title.clone(),
+                ScenarioKind::Scenario,
+        ))]
     })
     .test_value();
 
     let selector = app.definition_selector.test_ref();
-    assert_eq!(selector.accepted_selection(), ["Objects.c4d"]);
-    assert!(app.loading_state.is_none());
+    main_assert_eq!(selector.accepted_selection() => ["Objects.c4d"]);
+    main_assert!(app.loading_state.is_none());
     app.process_definition_selector_actions(vec![
         clonk_frontend::definition_sel::DefinitionSelAction::Cancelled,
     ])
     .test_value();
-    assert!(app.menu_state.definition_checkbox_checked);
-    assert!(matches!(app.mode, AppMode::Menu));
+    main_assert!(app.menu_state.definition_checkbox_checked);
+    main_assert!(matches!(app.mode, AppMode::Menu));
 }
 
 #[test]
@@ -178,10 +212,10 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     app.scenario_catalog = build_scenario_catalog(&scenarios);
     app.open_scenario_browser();
 
-    assert_eq!(app.scenario_entry_enabled.get("Allowed.c4s"), Some(&true));
-    assert_eq!(app.scenario_entry_enabled.get("Locked.c4s"), Some(&false));
-    assert_eq!(app.scenario_entry_enabled.get("Native.c4s"), Some(&false));
-    assert_eq!(app.scenario_entry_enabled.get("TooFew.c4s"), Some(&false));
+    main_assert_eq!(app.scenario_entry_enabled.get("Allowed.c4s") => Some(&true));
+    main_assert_eq!(app.scenario_entry_enabled.get("Locked.c4s") => Some(&false));
+    main_assert_eq!(app.scenario_entry_enabled.get("Native.c4s") => Some(&false));
+    main_assert_eq!(app.scenario_entry_enabled.get("TooFew.c4s") => Some(&false));
 
     // The dynamic renderer must pass CanOpen to ScenListItem: only the
     // label alpha changes; icons and row activation remain intact.
@@ -217,98 +251,63 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
             .unwrap_or(0);
         let enabled = app.scenario_entry_enabled[&entry.identifier];
         if enabled {
-            assert!(
-                max_alpha > 200,
-                "{} row is enabled (max alpha {max_alpha})",
-                entry.title
-            );
+            main_assert!(max_alpha > 200, "{} row is enabled (max alpha {max_alpha})", entry.title);
         } else {
-            assert!(
-                max_alpha > 0 && max_alpha < 200,
-                "{} row uses disabled 50%-black text (max alpha {max_alpha})",
-                entry.title
-            );
+            main_assert!(max_alpha > 0 && max_alpha < 200, "{} row uses disabled 50%-black text (max alpha {max_alpha})", entry.title);
         }
     }
 
     let locked = app.scenario_catalog["Locked.c4s"].clone();
-    assert!(locked.is_playable, "denied rows remain actionable");
-    assert!(!locked.has_mission_access(&app.mission_access));
+    main_assert!(locked.is_playable, "denied rows remain actionable");
+    main_assert!(!locked.has_mission_access(&app.mission_access));
     app.enter_scenario_folder("Map.c4f");
-    assert_eq!(
-        app.menu_state
-            .current_map()
-            .expect("mission-gated map view")
-            .scenarios
-            .len(),
-        0,
-        "a denied scenario produces no map button"
-    );
+    main_assert_eq!(app.menu_state.current_map().expect("mission-gated map view").scenarios.len() => 0, "a denied scenario produces no map button");
     app.menu_state.leave_folder();
     app.configure_current_folder_map();
 
     app.menu_state.definition_checkbox_checked = true;
     app.handle_menu_input(|_| {
-        vec![StartupMenuAction::StartScenario(
-            clonk_frontend::ScenarioSummary {
-                identifier: locked.identifier.clone(),
-                title: locked.title.clone(),
-                kind: ScenarioKind::Scenario,
-            },
-        )]
+        vec![StartupMenuAction::StartScenario(scensel_fixture!(
+            scenario:
+                locked.identifier.clone(),
+                locked.title.clone(),
+                ScenarioKind::Scenario,
+        ))]
     })
     .test_value();
-    assert!(app.loading_state.is_none());
-    assert!(app.definition_selector.is_none());
-    assert_eq!(app.message_dialogs.len(), 1);
-    assert_eq!(
-        app.message_dialogs[0].state.caption(),
-        "Start nicht möglich."
-    );
-    assert_eq!(
-        app.message_dialogs[0].state.message(),
-        "Noch kein Zugang zu dieser Mission."
-    );
-    assert_eq!(
-        app.message_dialogs[0].state.icon(),
-        clonk_frontend::message_dialog::MessageDialogIcon::ERROR
-    );
+    main_assert!(app.loading_state.is_none());
+    main_assert!(app.definition_selector.is_none());
+    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.message_dialogs[0].state.caption() => "Start nicht möglich.");
+    main_assert_eq!(app.message_dialogs[0].state.message() => "Noch kein Zugang zu dieser Mission.");
+    main_assert_eq!(app.message_dialogs[0].state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
 
     let native_password = clonk_script::c4_string_from_bytes(b"Secr\x80t");
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    assert_eq!(
-        app.game_option_input_dialog
-            .as_ref()
-            .expect("Mission Access dialog")
-            .purpose,
-        PendingInputDialogPurpose::ScenarioMissionAccess
-    );
+    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("Mission Access dialog").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
         " secret ".to_string(),
     )])
     .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    assert_eq!(app.mission_access.snapshot(), "secret");
+    main_assert_eq!(app.mission_access.snapshot() => "secret");
     // C++ keeps this in memory until a save (C4Script.cpp:2466-2471;
     // C4StartupScenSelDlg.cpp:1838-1856); the port writes earned access
     // straight out instead (`persist_mission_access_if_changed`).
-    assert_eq!(
-        load_configured_mission_access(&paths).expect("read saved mission access"),
-        "secret"
-    );
-    assert_eq!(app.scenario_entry_enabled.get("Locked.c4s"), Some(&true));
-    assert_eq!(app.scenario_entry_enabled.get("Native.c4s"), Some(&false));
-    assert!(locked.has_mission_access(&app.mission_access));
+    main_assert_eq!(load_configured_mission_access(&paths).expect("read saved mission access") => "secret");
+    main_assert_eq!(app.scenario_entry_enabled.get("Locked.c4s") => Some(&true));
+    main_assert_eq!(app.scenario_entry_enabled.get("Native.c4s") => Some(&false));
+    main_assert!(locked.has_mission_access(&app.mission_access));
     app.enter_scenario_folder("Map.c4f");
-    assert_eq!(
+    main_assert_eq!(
         app.menu_state
             .current_map()
             .expect("granted map view")
             .scenarios
-            .len(),
+            .len() =>
         1,
         "Alt+M grant immediately enables map-button creation after reload"
     );
@@ -320,94 +319,69 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     app.apply_scenario_mission_access(&native_password)
         .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    assert_eq!(
-        app.mission_access.snapshot(),
-        format!("secret;{native_password}")
-    );
-    assert_eq!(app.scenario_entry_enabled.get("Native.c4s"), Some(&true));
-    assert_eq!(app.scenario_entry_enabled.get("TooFew.c4s"), Some(&false));
-    assert_eq!(
+    main_assert_eq!(app.mission_access.snapshot() => format!("secret;{native_password}"));
+    main_assert_eq!(app.scenario_entry_enabled.get("Native.c4s") => Some(&true));
+    main_assert_eq!(app.scenario_entry_enabled.get("TooFew.c4s") => Some(&false));
+    main_assert_eq!(
         app.scenario_selector_open_error(
             &app.scenario_catalog["Native.c4s"],
             ScenarioSelectorMode::Local,
         )
-        .expect("inspect native-byte access"),
+        .expect("inspect native-byte access") =>
         None,
         "granted native bytes survive both catalog and loader-head parsers"
     );
 
     app.menu_state.definition_checkbox_checked = true;
     app.handle_menu_input(|_| {
-        vec![StartupMenuAction::StartScenario(
-            clonk_frontend::ScenarioSummary {
-                identifier: locked.identifier.clone(),
-                title: locked.title.clone(),
-                kind: ScenarioKind::Scenario,
-            },
-        )]
+        vec![StartupMenuAction::StartScenario(scensel_fixture!(
+            scenario:
+                locked.identifier.clone(),
+                locked.title.clone(),
+                ScenarioKind::Scenario,
+        ))]
     })
     .test_value();
-    assert!(app.message_dialogs.is_empty());
-    assert!(
-        app.definition_selector.is_some(),
-        "the same catalog entry proceeds to the start flow after grant"
-    );
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert!(app.definition_selector.is_some(), "the same catalog entry proceeds to the start flow after grant");
     reset_cached_app_paths();
 }
 
 #[test]
 fn scensel_recursive_focus_and_gamepad_pass_through_match_dialog_order() {
-    let mut first = FrontendScenario::fallback();
-    first.identifier = "first".to_string();
-    first.title = "First".to_string();
+    scensel_fixture!(frontend_scenario: first, "first".to_string(), "First".to_string());
     first.allow_user_change = Some(false);
-    let mut second = FrontendScenario::fallback();
-    second.identifier = "second".to_string();
-    second.title = "Second".to_string();
+    scensel_fixture!(frontend_scenario: second, "second".to_string(), "Second".to_string());
     second.local_only = Some(true);
     second.allow_user_change = Some(false);
     let scenarios = vec![first, second];
-    let menu =
-        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
-    let mut app = new_menu_app(800, 600);
-    app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
-    app.open_scenario_browser();
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
-    assert!(app.menu_state.definition_checkbox_enabled);
+    let mut app = scensel_app(&scenarios);
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::List);
+    main_assert!(app.menu_state.definition_checkbox_enabled);
 
     let tap_tab = |app: &mut GameApp| {
         app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
         app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     };
     tap_tab(&mut app);
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Back);
     tap_tab(&mut app);
-    assert_eq!(
-        app.menu_state.dialog_focus(),
-        ScenselDialogFocus::Definitions
-    );
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Definitions);
     tap_tab(&mut app);
-    assert_eq!(
-        app.scenario_game_options.focused_button(),
-        Some(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew)
-    );
+    main_assert_eq!(app.scenario_game_options.focused_button() => Some(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew));
     tap_tab(&mut app);
-    assert_eq!(
-        app.scenario_game_options.focused_button(),
-        Some(clonk_frontend::game_option_buttons::GameOptionButton::Record)
-    );
+    main_assert_eq!(app.scenario_game_options.focused_button() => Some(clonk_frontend::game_option_buttons::GameOptionButton::Record));
     tap_tab(&mut app);
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Open);
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Open);
     tap_tab(&mut app);
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Search);
     tap_tab(&mut app);
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::List);
 
     app.test_modifiers(ModifiersState::SHIFT);
     tap_tab(&mut app);
     app.test_modifiers(ModifiersState::empty());
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Search);
 
     app.set_scensel_dialog_focus(ScenselDialogFocus::List);
     app.handle_gamepad_direction(
@@ -416,27 +390,21 @@ fn scensel_recursive_focus_and_gamepad_pass_through_match_dialog_order() {
         ElementState::Pressed,
     )
     .test_value();
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Back);
     app.handle_gamepad_direction(
         GamepadSlot::new(0),
         ControlButton::Right,
         ElementState::Pressed,
     )
     .test_value();
-    assert_eq!(
-        app.menu_state.dialog_focus(),
-        ScenselDialogFocus::Definitions
-    );
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Definitions);
     app.handle_gamepad_direction(
         GamepadSlot::new(0),
         ControlButton::Right,
         ElementState::Pressed,
     )
     .test_value();
-    assert_eq!(
-        app.scenario_game_options.focused_button(),
-        Some(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew)
-    );
+    main_assert_eq!(app.scenario_game_options.focused_button() => Some(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew));
 
     let selected_before = app.menu_state.menu.selected_index();
     app.handle_gamepad_direction(
@@ -445,12 +413,9 @@ fn scensel_recursive_focus_and_gamepad_pass_through_match_dialog_order() {
         ElementState::Pressed,
     )
     .test_value();
-    assert_ne!(app.menu_state.menu.selected_index(), selected_before);
-    assert_eq!(
-        app.scenario_game_options.focused_button(),
-        Some(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew)
-    );
-    assert!(!app.menu_state.definition_checkbox_enabled);
+    main_assert_ne!(app.menu_state.menu.selected_index() => selected_before);
+    main_assert_eq!(app.scenario_game_options.focused_button() => Some(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew));
+    main_assert!(!app.menu_state.definition_checkbox_enabled);
 
     app.set_scensel_dialog_focus(ScenselDialogFocus::List);
     app.handle_gamepad_direction(
@@ -465,17 +430,14 @@ fn scensel_recursive_focus_and_gamepad_pass_through_match_dialog_order() {
         ElementState::Pressed,
     )
     .test_value();
-    assert_eq!(
-        app.scenario_game_options.focused_button(),
-        Some(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew)
-    );
+    main_assert_eq!(app.scenario_game_options.focused_button() => Some(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew));
     app.handle_gamepad_direction(
         GamepadSlot::new(0),
         ControlButton::Left,
         ElementState::Pressed,
     )
     .test_value();
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Back);
 
     app.handle_menu_input(|menu| menu.select_list_index(0))
         .test_value();
@@ -497,7 +459,7 @@ fn scensel_recursive_focus_and_gamepad_pass_through_match_dialog_order() {
         ElementState::Released,
     )
     .test_value();
-    assert_eq!(app.mode, AppMode::Running);
+    main_assert_eq!(app.mode => AppMode::Running);
 }
 
 #[test]
@@ -510,45 +472,18 @@ fn empty_search_clears_forced_crew_constraint() {
         "[Head]\nTitle=Forced\nForcedNoCrew=2\n",
     )
     .test_value();
-    let mut scenario = FrontendScenario::fallback();
-    scenario.identifier = "forced".to_string();
-    scenario.title = "Forced".to_string();
+    scensel_fixture!(frontend_scenario: scenario, "forced".to_string(), "Forced".to_string());
     scenario.path = Some(scenario_path);
     let scenarios = vec![scenario];
-    let menu =
-        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
-    let mut app = new_menu_app(800, 600);
-    app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
-    app.open_scenario_browser();
-    assert_eq!(
-        app.scenario_game_options
-            .values()
-            .selector_fair_crew_constraint,
-        FairCrewConstraint::ForceNormal
-    );
-    assert!(
-        !app.scenario_game_options
-            .view(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew)
-            .expect("fair-crew option")
-            .enabled
-    );
+    let mut app = scensel_app(&scenarios);
+    main_assert_eq!(app.scenario_game_options.values().selector_fair_crew_constraint => FairCrewConstraint::ForceNormal);
+    main_assert!(!app.scenario_game_options.view(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew).expect("fair-crew option").enabled);
 
     app.menu_state.set_search_text("no matching scenario");
     app.submit_scenario_search().test_value();
-    assert!(app.menu_state.selected_scenario().is_none());
-    assert_eq!(
-        app.scenario_game_options
-            .values()
-            .selector_fair_crew_constraint,
-        FairCrewConstraint::Free
-    );
-    assert!(
-        app.scenario_game_options
-            .view(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew)
-            .expect("reset fair-crew option")
-            .enabled
-    );
+    main_assert!(app.menu_state.selected_scenario().is_none());
+    main_assert_eq!(app.scenario_game_options.values().selector_fair_crew_constraint => FairCrewConstraint::Free);
+    main_assert!(app.scenario_game_options.view(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew).expect("reset fair-crew option").enabled);
 }
 
 // C++ edit pointer handling and the Back button use standard control
@@ -560,34 +495,18 @@ fn empty_search_clears_forced_crew_constraint() {
 #[test]
 fn scensel_touch_uses_live_search_and_classic_back_bounds() {
     let _lock = env_lock().lock();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
-    let mut target = FrontendScenario::fallback();
-    target.identifier = "outer/inner/target".to_string();
-    target.title = "Touch Target".to_string();
-    let mut inner = FrontendScenario::fallback();
-    inner.identifier = "outer/inner".to_string();
-    inner.title = "Inner Touch Folder".to_string();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    scensel_fixture!(frontend_scenario: target, "outer/inner/target".to_string(), "Touch Target".to_string());
+    scensel_fixture!(frontend_scenario: inner, "outer/inner".to_string(), "Inner Touch Folder".to_string());
     inner.kind = ScenarioKind::Folder;
     inner.is_playable = false;
     inner.children = vec![target];
-    let mut outer = FrontendScenario::fallback();
-    outer.identifier = "outer".to_string();
-    outer.title = "Outer Touch Folder".to_string();
+    scensel_fixture!(frontend_scenario: outer, "outer".to_string(), "Outer Touch Folder".to_string());
     outer.kind = ScenarioKind::Folder;
     outer.is_playable = false;
     outer.children = vec![inner];
-    let mut sibling = FrontendScenario::fallback();
-    sibling.identifier = "sibling".to_string();
-    sibling.title = "Sibling Folder".to_string();
+    scensel_fixture!(frontend_scenario: sibling, "sibling".to_string(), "Sibling Folder".to_string());
     sibling.kind = ScenarioKind::Folder;
     sibling.is_playable = false;
     let scenarios = vec![outer, sibling];
@@ -614,10 +533,10 @@ fn scensel_touch_uses_live_search_and_classic_back_bounds() {
             (layout.list.y + 3 + pitch + 4) as f32,
         ),
     );
-    assert_eq!(
+    main_assert_eq!(
         app.menu_state
             .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
+            .map(|entry| entry.identifier.as_str()) =>
         Some("sibling"),
         "touch list hit-testing must use the rendered book rows"
     );
@@ -626,19 +545,14 @@ fn scensel_touch_uses_live_search_and_classic_back_bounds() {
         &mut app,
         GuiPoint::new((layout.list.x + 12) as f32, (layout.list.y + 3 + 4) as f32),
     );
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("outer")
-    );
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("outer"));
     let open = GuiPoint::new(
         (layout.open_button.x + layout.open_button.w / 2) as f32,
         (layout.open_button.y + layout.open_button.h / 2) as f32,
     );
     tap(&mut app, open);
-    assert_eq!(app.menu_state.stack.len(), 2);
-    assert_eq!(app.menu_state.book_caption(), "Outer Touch Folder");
+    main_assert_eq!(app.menu_state.stack.len() => 2);
+    main_assert_eq!(app.menu_state.book_caption() => "Outer Touch Folder");
 
     tap(
         &mut app,
@@ -652,54 +566,36 @@ fn scensel_touch_uses_live_search_and_classic_back_bounds() {
     }
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("outer/inner/target")
-    );
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("outer/inner/target"));
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("outer/inner")
-    );
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("outer/inner"));
     tap(&mut app, open);
-    assert_eq!(app.menu_state.stack.len(), 3);
-    assert_eq!(app.menu_state.book_caption(), "Inner Touch Folder");
+    main_assert_eq!(app.menu_state.stack.len() => 3);
+    main_assert_eq!(app.menu_state.book_caption() => "Inner Touch Folder");
 
     let back = GuiPoint::new(
         (layout.back_button.x + layout.back_button.w / 2) as f32,
         (layout.back_button.y + layout.back_button.h / 2) as f32,
     );
     tap(&mut app, back);
-    assert_eq!(app.menu_state.stack.len(), 2);
+    main_assert_eq!(app.menu_state.stack.len() => 2);
     tap(&mut app, back);
-    assert_eq!(app.menu_state.stack.len(), 1);
+    main_assert_eq!(app.menu_state.stack.len() => 1);
     tap(&mut app, back);
-    assert_eq!(app.startup_view, StartupView::NetworkGame);
+    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
 
     app.open_scenario_browser();
     tap(&mut app, back);
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
     reset_cached_app_paths();
 }
 
 #[test]
 fn scensel_cached_chrome_leaves_game_option_bounds_empty_in_both_modes() {
     let _lock = env_lock().lock();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     let app = new_menu_app_with_paths(800, 600, &paths);
     let assets = app.assets.scensel_assets().test_value();
     let fonts = app.assets.clonk_fonts.as_deref().test_value();
@@ -723,11 +619,7 @@ fn scensel_cached_chrome_leaves_game_option_bounds_empty_in_both_modes() {
         );
         for y in bounds.y..bounds.y + bounds.h {
             for x in bounds.x..bounds.x + bounds.w {
-                assert_eq!(
-                    chrome.get_pixel(x as u32, y as u32),
-                    background.get_pixel(x as u32, y as u32),
-                    "{title} base chrome must not pre-render FairCrew/Record"
-                );
+                main_assert_eq!(chrome.get_pixel(x as u32, y as u32) => background.get_pixel(x as u32, y as u32), "{title} base chrome must not pre-render FairCrew/Record");
             }
         }
     }
@@ -740,13 +632,9 @@ fn scensel_cached_chrome_leaves_game_option_bounds_empty_in_both_modes() {
 // (C4StartupScenSelDlg.cpp:1511-1537).
 #[test]
 fn scensel_search_does_not_recurse_into_unopened_folders() {
-    let mut cavern = FrontendScenario::fallback();
-    cavern.identifier = "pack/cavern".to_string();
-    cavern.title = "<c ff0000>Cavern</c>".to_string();
+    scensel_fixture!(frontend_scenario: cavern, "pack/cavern".to_string(), "<c ff0000>Cavern</c>".to_string());
 
-    let mut pack = FrontendScenario::fallback();
-    pack.identifier = "pack".to_string();
-    pack.title = "Pack".to_string();
+    scensel_fixture!(frontend_scenario: pack, "pack".to_string(), "Pack".to_string());
     pack.kind = ScenarioKind::Folder;
     pack.is_playable = false;
     pack.children = vec![cavern];
@@ -761,9 +649,9 @@ fn scensel_search_does_not_recurse_into_unopened_folders() {
     state.set_search_text("cAvErN");
     let actions = state.submit_search();
 
-    assert!(state.visible_entries().is_empty());
-    assert!(state.selected_scenario().is_none());
-    assert!(actions.is_empty());
+    main_assert!(state.visible_entries().is_empty());
+    main_assert!(state.selected_scenario().is_none());
+    main_assert!(actions.is_empty());
 }
 
 // C++ UpdateList deliberately filters only the current folder
@@ -772,17 +660,11 @@ fn scensel_search_does_not_recurse_into_unopened_folders() {
 // of a catalog-earlier prefix match.
 #[test]
 fn scensel_enhanced_search_recurses_and_ranks_exact_titles_first() {
-    let mut prefix = FrontendScenario::fallback();
-    prefix.identifier = "gold_rush_extended".to_string();
-    prefix.title = "Gold Rush Extended".to_string();
+    scensel_fixture!(frontend_scenario: prefix, "gold_rush_extended".to_string(), "Gold Rush Extended".to_string());
 
-    let mut exact = FrontendScenario::fallback();
-    exact.identifier = "western/gold_rush".to_string();
-    exact.title = "Gold Rush".to_string();
+    scensel_fixture!(frontend_scenario: exact, "western/gold_rush".to_string(), "Gold Rush".to_string());
 
-    let mut folder = FrontendScenario::fallback();
-    folder.identifier = "western".to_string();
-    folder.title = "Western Pack".to_string();
+    scensel_fixture!(frontend_scenario: folder, "western".to_string(), "Western Pack".to_string());
     folder.kind = ScenarioKind::Folder;
     folder.is_playable = false;
     folder.children = vec![exact];
@@ -796,20 +678,9 @@ fn scensel_enhanced_search_recurses_and_ranks_exact_titles_first() {
 
     let actions = state.apply_enhanced_search();
 
-    assert_eq!(
-        state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["western/gold_rush", "gold_rush_extended"]
-    );
-    assert_eq!(state.search_result_context(0), Some("Western Pack"));
-    assert!(matches!(
-        actions.as_slice(),
-        [StartupMenuAction::SelectionChanged(summary)]
-        if summary.identifier == "western/gold_rush"
-    ));
+    main_assert_eq!(state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["western/gold_rush", "gold_rush_extended"]);
+    main_assert_eq!(state.search_result_context(0) => Some("Western Pack"));
+    main_assert!(matches!(actions.as_slice(), [StartupMenuAction::SelectionChanged(summary)] if summary.identifier == "western/gold_rush"));
 }
 
 // C++ emits matches in current-folder traversal order
@@ -817,12 +688,8 @@ fn scensel_enhanced_search_recurses_and_ranks_exact_titles_first() {
 // that catalog order as the deterministic tie-breaker.
 #[test]
 fn scensel_enhanced_search_preserves_catalog_order_for_equal_ranks() {
-    let mut first = FrontendScenario::fallback();
-    first.identifier = "zeta".to_string();
-    first.title = "Crystal Cavern".to_string();
-    let mut second = FrontendScenario::fallback();
-    second.identifier = "alpha".to_string();
-    second.title = "Crystal Crossing".to_string();
+    scensel_fixture!(frontend_scenario: first, "zeta".to_string(), "Crystal Cavern".to_string());
+    scensel_fixture!(frontend_scenario: second, "alpha".to_string(), "Crystal Crossing".to_string());
     let scenarios = vec![first, second];
     let menu =
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
@@ -832,14 +699,7 @@ fn scensel_enhanced_search_preserves_catalog_order_for_equal_ranks() {
 
     state.apply_enhanced_search();
 
-    assert_eq!(
-        state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["zeta", "alpha"]
-    );
+    main_assert_eq!(state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["zeta", "alpha"]);
 }
 
 // C++ validates the selected current-folder entry before activation
@@ -848,22 +708,14 @@ fn scensel_enhanced_search_preserves_catalog_order_for_equal_ranks() {
 // path must instead resolve that result from the catalog root.
 #[test]
 fn scensel_enhanced_search_resolves_a_global_result_from_inside_a_folder() {
-    let mut local = FrontendScenario::fallback();
-    local.identifier = "local/mission".to_string();
-    local.title = "Local Mission".to_string();
-    let mut local_folder = FrontendScenario::fallback();
-    local_folder.identifier = "local".to_string();
-    local_folder.title = "Local Pack".to_string();
+    scensel_fixture!(frontend_scenario: local, "local/mission".to_string(), "Local Mission".to_string());
+    scensel_fixture!(frontend_scenario: local_folder, "local".to_string(), "Local Pack".to_string());
     local_folder.kind = ScenarioKind::Folder;
     local_folder.is_playable = false;
     local_folder.children = vec![local];
 
-    let mut remote = FrontendScenario::fallback();
-    remote.identifier = "remote/crystal".to_string();
-    remote.title = "Crystal Cavern".to_string();
-    let mut remote_folder = FrontendScenario::fallback();
-    remote_folder.identifier = "remote".to_string();
-    remote_folder.title = "Remote Pack".to_string();
+    scensel_fixture!(frontend_scenario: remote, "remote/crystal".to_string(), "Crystal Cavern".to_string());
+    scensel_fixture!(frontend_scenario: remote_folder, "remote".to_string(), "Remote Pack".to_string());
     remote_folder.kind = ScenarioKind::Folder;
     remote_folder.is_playable = false;
     remote_folder.children = vec![remote];
@@ -878,18 +730,8 @@ fn scensel_enhanced_search_resolves_a_global_result_from_inside_a_folder() {
 
     state.apply_enhanced_search();
 
-    assert_eq!(
-        state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("remote/crystal")
-    );
-    assert_eq!(
-        state
-            .require_supported_activation("remote/crystal")
-            .expect("validate global result"),
-        Some(ScenarioKind::Scenario)
-    );
+    main_assert_eq!(state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("remote/crystal"));
+    main_assert_eq!(state.require_supported_activation("remote/crystal").expect("validate global result") => Some(ScenarioKind::Scenario));
 }
 
 // C++ F5 reloads the current folder and rebuilds UpdateList from the live
@@ -899,19 +741,13 @@ fn scensel_enhanced_search_resolves_a_global_result_from_inside_a_folder() {
 #[test]
 fn scensel_enhanced_search_survives_catalog_rediscovery() {
     let build_scenarios = |extra: bool| {
-        let mut first = FrontendScenario::fallback();
-        first.identifier = "pack/crystal".to_string();
-        first.title = "Crystal Cavern".to_string();
+        scensel_fixture!(frontend_scenario: first, "pack/crystal".to_string(), "Crystal Cavern".to_string());
         let mut children = vec![first];
         if extra {
-            let mut second = FrontendScenario::fallback();
-            second.identifier = "pack/crystal_lake".to_string();
-            second.title = "Crystal Lake".to_string();
+            scensel_fixture!(frontend_scenario: second, "pack/crystal_lake".to_string(), "Crystal Lake".to_string());
             children.push(second);
         }
-        let mut folder = FrontendScenario::fallback();
-        folder.identifier = "pack".to_string();
-        folder.title = "Adventure Pack".to_string();
+        scensel_fixture!(frontend_scenario: folder, "pack".to_string(), "Adventure Pack".to_string());
         folder.kind = ScenarioKind::Folder;
         folder.is_playable = false;
         folder.children = children;
@@ -927,18 +763,8 @@ fn scensel_enhanced_search_survives_catalog_rediscovery() {
 
     state.replace_discovered_entries(build_scenarios(true), None, true, true);
 
-    assert_eq!(
-        state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["pack/crystal", "pack/crystal_lake"]
-    );
-    assert_eq!(
-        state.enhanced_search_caption().as_deref(),
-        Some("2 of 2 scenarios")
-    );
+    main_assert_eq!(state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["pack/crystal", "pack/crystal_lake"]);
+    main_assert_eq!(state.enhanced_search_caption().as_deref() => Some("2 of 2 scenarios"));
 }
 
 // C++ lowercases only the markup-stripped display title
@@ -946,15 +772,11 @@ fn scensel_enhanced_search_survives_catalog_rediscovery() {
 // normalizes user-visible metadata and lets terms span safe fields.
 #[test]
 fn scensel_enhanced_search_normalizes_terms_and_matches_safe_metadata() {
-    let mut scenario = FrontendScenario::fallback();
-    scenario.identifier = "western/crystal_run.c4s".to_string();
-    scenario.title = "Café-Cavern".to_string();
+    scensel_fixture!(frontend_scenario: scenario, "western/crystal_run.c4s".to_string(), "Café-Cavern".to_string());
     scenario.description = Some("A crystal expedition underground.".to_string());
     scenario.author = Some("Zoë".to_string());
 
-    let mut folder = FrontendScenario::fallback();
-    folder.identifier = "western".to_string();
-    folder.title = "Western Adventures".to_string();
+    scensel_fixture!(frontend_scenario: folder, "western".to_string(), "Western Adventures".to_string());
     folder.kind = ScenarioKind::Folder;
     folder.is_playable = false;
     folder.children = vec![scenario];
@@ -973,15 +795,7 @@ fn scensel_enhanced_search_normalizes_terms_and_matches_safe_metadata() {
     ] {
         state.set_search_text(query);
         state.apply_enhanced_search();
-        assert_eq!(
-            state
-                .visible_entries()
-                .iter()
-                .map(|entry| entry.identifier.as_str())
-                .collect::<Vec<_>>(),
-            vec!["western/crystal_run.c4s"],
-            "query {query:?}"
-        );
+        main_assert_eq!(state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["western/crystal_run.c4s"], "query {query:?}");
     }
 }
 
@@ -990,17 +804,11 @@ fn scensel_enhanced_search_normalizes_terms_and_matches_safe_metadata() {
 // requires every normalized term, even when terms span indexed fields.
 #[test]
 fn scensel_enhanced_search_requires_all_terms_across_fields() {
-    let mut match_all = FrontendScenario::fallback();
-    match_all.identifier = "crystal_cavern".to_string();
-    match_all.title = "Crystal Cavern".to_string();
+    scensel_fixture!(frontend_scenario: match_all, "crystal_cavern".to_string(), "Crystal Cavern".to_string());
     match_all.author = Some("Zoë".to_string());
-    let mut title_only = FrontendScenario::fallback();
-    title_only.identifier = "crystal_canyon".to_string();
-    title_only.title = "Crystal Canyon".to_string();
+    scensel_fixture!(frontend_scenario: title_only, "crystal_canyon".to_string(), "Crystal Canyon".to_string());
     title_only.author = Some("Anne".to_string());
-    let mut author_only = FrontendScenario::fallback();
-    author_only.identifier = "amber_mine".to_string();
-    author_only.title = "Amber Mine".to_string();
+    scensel_fixture!(frontend_scenario: author_only, "amber_mine".to_string(), "Amber Mine".to_string());
     author_only.author = Some("Zoë".to_string());
     let scenarios = vec![match_all, title_only, author_only];
     let menu =
@@ -1011,14 +819,7 @@ fn scensel_enhanced_search_requires_all_terms_across_fields() {
 
     state.apply_enhanced_search();
 
-    assert_eq!(
-        state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["crystal_cavern"]
-    );
+    main_assert_eq!(state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["crystal_cavern"]);
 }
 
 // C++ uses a literal title substring
@@ -1026,9 +827,7 @@ fn scensel_enhanced_search_requires_all_terms_across_fields() {
 // adds conservative title-only typo recovery behind exact tiers.
 #[test]
 fn scensel_enhanced_search_tolerates_conservative_title_typos() {
-    let mut scenario = FrontendScenario::fallback();
-    scenario.identifier = "crystal_cavern".to_string();
-    scenario.title = "Crystal Cavern".to_string();
+    scensel_fixture!(frontend_scenario: scenario, "crystal_cavern".to_string(), "Crystal Cavern".to_string());
     let scenarios = vec![scenario];
     let menu =
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
@@ -1038,14 +837,7 @@ fn scensel_enhanced_search_tolerates_conservative_title_typos() {
 
     state.apply_enhanced_search();
 
-    assert_eq!(
-        state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["crystal_cavern"]
-    );
+    main_assert_eq!(state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["crystal_cavern"]);
 }
 
 // C++ uses an exact title substring with no typo fallback
@@ -1060,9 +852,7 @@ fn scensel_enhanced_search_rejects_unsafe_title_typos() {
     ]
     .into_iter()
     .map(|(identifier, title)| {
-        let mut scenario = FrontendScenario::fallback();
-        scenario.identifier = identifier.to_string();
-        scenario.title = title.to_string();
+        scensel_fixture!(frontend_scenario: scenario, identifier.to_string(), title.to_string());
         scenario
     })
     .collect::<Vec<_>>();
@@ -1074,10 +864,7 @@ fn scensel_enhanced_search_rejects_unsafe_title_typos() {
     for query in ["crt", "1235", "crab"] {
         state.set_search_text(query);
         state.apply_enhanced_search();
-        assert!(
-            state.visible_entries().is_empty(),
-            "unsafe typo query {query:?} must not match"
-        );
+        main_assert!(state.visible_entries().is_empty(), "unsafe typo query {query:?} must not match");
     }
 }
 
@@ -1098,40 +885,22 @@ fn scensel_search_applies_on_submit_case_insensitively() {
     state.set_include_back(false);
     state.enter_folder("folder_missions");
     let _ = state.menu().select_entry_by_index(2).test_value();
-    assert_eq!(
-        state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("scenario_gamma")
-    );
+    main_assert_eq!(state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("scenario_gamma"));
 
     state.set_search_text("cRyStAl cAvErN");
-    assert_eq!(
-        state.visible_entries().len(),
-        3,
-        "typing alone does not submit"
-    );
+    main_assert_eq!(state.visible_entries().len() => 3, "typing alone does not submit");
 
     let actions = state.submit_search();
-    assert_eq!(
+    main_assert_eq!(
         state
             .visible_entries()
             .iter()
             .map(|entry| entry.title.as_str())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec!["<c ff0000>Crystal</c> Cavern", "Crystal Cavern Annex"]
     );
-    assert!(matches!(
-        actions.as_slice(),
-        [StartupMenuAction::SelectionChanged(summary)]
-        if summary.identifier == "scenario_gamma"
-    ));
-    assert_eq!(
-        state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("scenario_gamma")
-    );
+    main_assert!(matches!(actions.as_slice(), [StartupMenuAction::SelectionChanged(summary)] if summary.identifier == "scenario_gamma"));
+    main_assert_eq!(state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("scenario_gamma"));
 }
 
 #[test]
@@ -1139,81 +908,73 @@ fn scensel_search_edit_matches_selection_word_and_length_rules() {
     let mut edit = SearchEditState::default();
     edit.set_text("Alpha beta");
     edit.focus();
-    assert_eq!(edit.selected_text(), Some("Alpha beta"));
+    main_assert_eq!(edit.selected_text() => Some("Alpha beta"));
     edit.insert_text("Z");
-    assert_eq!(edit.text(), "Z", "typing replaces Ctrl+F select-all");
+    main_assert_eq!(edit.text() => "Z", "typing replaces Ctrl+F select-all");
 
     edit.set_text("one  two_three!");
     edit.move_cursor(SearchCursorOperation::End, false, false);
     edit.move_cursor(SearchCursorOperation::Left, false, false);
     edit.move_cursor(SearchCursorOperation::Left, true, false);
-    assert_eq!(edit.caret(), 5, "Ctrl+Left stops at the final word start");
+    main_assert_eq!(edit.caret() => 5, "Ctrl+Left stops at the final word start");
     edit.backspace(true, false);
-    assert_eq!(edit.text(), "two_three!", "Ctrl+Backspace removes one word");
+    main_assert_eq!(edit.text() => "two_three!", "Ctrl+Backspace removes one word");
     edit.move_cursor(SearchCursorOperation::Home, false, false);
     edit.move_cursor(SearchCursorOperation::Right, true, true);
-    assert_eq!(edit.selected_text(), Some("two_three!"));
+    main_assert_eq!(edit.selected_text() => Some("two_three!"));
     edit.delete(false, false);
-    assert_eq!(edit.text(), "");
+    main_assert_eq!(edit.text() => "");
 
     edit.set_text("");
     edit.insert_text(&"a".repeat(300));
-    assert_eq!(edit.text().len(), SEARCH_EDIT_MAX_BYTES);
+    main_assert_eq!(edit.text().len() => SEARCH_EDIT_MAX_BYTES);
     edit.set_text("");
     edit.insert_text("left|right");
-    assert_eq!(edit.text(), "left¦right");
+    main_assert_eq!(edit.text() => "left¦right");
     edit.set_text("éé");
     edit.move_cursor(SearchCursorOperation::Left, false, false);
-    assert_eq!(edit.caret(), "é".len(), "caret stays on UTF-8 boundaries");
+    main_assert_eq!(edit.caret() => "é".len(), "caret stays on UTF-8 boundaries");
     edit.backspace(false, false);
-    assert_eq!(edit.text(), "é");
+    main_assert_eq!(edit.text() => "é");
 
     edit.set_text("alpha beta");
     edit.select_word_at(8);
-    assert_eq!(edit.selected_text(), Some("beta"));
+    main_assert_eq!(edit.selected_text() => Some("beta"));
     edit.begin_pointer_selection(0);
     edit.drag_pointer_selection(edit.text().len());
     edit.end_pointer_selection(edit.text().len());
-    assert_eq!(edit.selected_text(), Some("alpha beta"));
+    main_assert_eq!(edit.selected_text() => Some("alpha beta"));
 
     edit.set_text("abcdef");
     edit.begin_pointer_selection(5);
     edit.drag_pointer_selection(2);
-    assert_eq!(edit.selected_text(), Some("cde"));
-    assert!(edit.backspace(false, false));
-    assert_eq!(edit.text(), "abf");
+    main_assert_eq!(edit.selected_text() => Some("cde"));
+    main_assert!(edit.backspace(false, false));
+    main_assert_eq!(edit.text() => "abf");
     edit.drag_pointer_selection(edit.text().len());
-    assert_eq!(
-        edit.selected_text(),
-        Some("f"),
-        "selection deletion updates the still-active physical drag anchor"
-    );
+    main_assert_eq!(edit.selected_text() => Some("f"), "selection deletion updates the still-active physical drag anchor");
     edit.end_pointer_selection(edit.text().len());
 
     edit.set_text("abcdef");
     edit.begin_pointer_selection(5);
-    assert!(edit.backspace(false, false));
-    assert_eq!(edit.text(), "abcdf");
-    assert_eq!(edit.caret(), 4);
+    main_assert!(edit.backspace(false, false));
+    main_assert_eq!(edit.text() => "abcdf");
+    main_assert_eq!(edit.caret() => 4);
     edit.drag_pointer_selection(2);
-    assert_eq!(
-        edit.selected_text(),
-        Some("cdf"),
-        "collapsed cursor deletion preserves C++'s hidden drag anchor"
-    );
+    main_assert_eq!(edit.selected_text() => Some("cdf"), "collapsed cursor deletion preserves C++'s hidden drag anchor");
     edit.end_pointer_selection(2);
 
     edit.set_text("W".repeat(100));
     edit.scroll_cursor_in_view(500, 100, 3);
-    assert!(edit.horizontal_scroll > 0);
+    main_assert!(edit.horizontal_scroll > 0);
     edit.move_cursor(SearchCursorOperation::Home, false, false);
     edit.scroll_cursor_in_view(0, 100, 3);
-    assert_eq!(edit.horizontal_scroll, 1);
-    assert!(edit.cursor_visible());
+    main_assert_eq!(edit.horizontal_scroll => 1);
+    main_assert!(edit.cursor_visible());
     for _ in 0..18 {
         edit.tick_blink();
     }
-    assert!(!edit.cursor_visible());
+    main_assert!(!edit.cursor_visible());
 }
 
 // C++ notifies text change while deleting the selection before a
@@ -1228,8 +989,8 @@ fn scensel_search_edit_reports_selection_deletion_when_replacement_does_not_fit(
 
     let changed = edit.insert_text("é");
 
-    assert!(changed);
-    assert_eq!(edit.text().len(), SEARCH_EDIT_MAX_BYTES - 1);
+    main_assert!(changed);
+    main_assert_eq!(edit.text().len() => SEARCH_EDIT_MAX_BYTES - 1);
 }
 
 #[test]
@@ -1242,32 +1003,20 @@ fn scensel_middle_down_inserts_raw_primary_without_focus_or_submit() {
     app.menu_state.set_search_text("alpha beta");
     app.menu_state.search_edit.anchor = 0;
     app.menu_state.search_edit.caret = 5;
-    assert!(!app.menu_state.search_focused());
+    main_assert!(!app.menu_state.search_focused());
     let insertion = "raw|primary\ntext";
     let clicked_position = "alpha ".len();
     let point = GuiPoint::new(
         (layout.search_edit.x + 4 + fonts.text.measure("alpha ", false).0) as f32,
         (layout.search_edit.y + layout.search_edit.h / 2) as f32,
     );
-    assert_eq!(
-        app.scensel_search_char_pos(point, true),
-        Some(clicked_position)
-    );
-    assert!(app.handle_scensel_search_middle_down(point, Some(insertion)));
-    assert_eq!(app.menu_state.search_text(), "alpha raw|primary\ntextbeta");
-    assert_eq!(
-        app.menu_state.search_edit.caret(),
-        clicked_position + insertion.len()
-    );
-    assert!(app.menu_state.search_edit.selection_range().is_none());
-    assert!(
-        !app.menu_state.search_focused(),
-        "middle-down does not focus"
-    );
-    assert_eq!(
-        app.menu_state.applied_search_text, "",
-        "raw PRIMARY insertion does not submit the search"
-    );
+    main_assert_eq!(app.scensel_search_char_pos(point, true) => Some(clicked_position));
+    main_assert!(app.handle_scensel_search_middle_down(point, Some(insertion)));
+    main_assert_eq!(app.menu_state.search_text() => "alpha raw|primary\ntextbeta");
+    main_assert_eq!(app.menu_state.search_edit.caret() => clicked_position + insertion.len());
+    main_assert!(app.menu_state.search_edit.selection_range().is_none());
+    main_assert!(!app.menu_state.search_focused(), "middle-down does not focus");
+    main_assert_eq!(app.menu_state.applied_search_text => "", "raw PRIMARY insertion does not submit the search");
 
     let unchanged = app.menu_state.search_text().to_string();
     app.menu_state.search_edit.horizontal_scroll = 0;
@@ -1277,31 +1026,24 @@ fn scensel_middle_down_inserts_raw_primary_without_focus_or_submit() {
     );
     app.menu_state.search_edit.blink_ticks = 7;
     app.menu_state.search_edit.dragging = true;
-    assert!(app.handle_scensel_search_middle_down(start, None));
-    assert_eq!(app.menu_state.search_text(), unchanged);
-    assert_eq!(app.menu_state.search_edit.caret(), 0);
-    assert_eq!(app.menu_state.search_edit.blink_ticks, 7);
-    assert!(
-        app.menu_state.search_edit.dragging,
-        "middle-down does not cancel an active left-button drag"
-    );
-    assert!(!app.handle_scensel_search_middle_down(GuiPoint::new(-10.0, -10.0), Some("ignored")));
-    assert_eq!(app.menu_state.search_text(), unchanged);
+    main_assert!(app.handle_scensel_search_middle_down(start, None));
+    main_assert_eq!(app.menu_state.search_text() => unchanged);
+    main_assert_eq!(app.menu_state.search_edit.caret() => 0);
+    main_assert_eq!(app.menu_state.search_edit.blink_ticks => 7);
+    main_assert!(app.menu_state.search_edit.dragging, "middle-down does not cancel an active left-button drag");
+    main_assert!(!app.handle_scensel_search_middle_down(GuiPoint::new(-10.0, -10.0), Some("ignored")));
+    main_assert_eq!(app.menu_state.search_text() => unchanged);
 
     app.menu_state.set_search_text("tail");
     app.menu_state.search_edit.begin_pointer_selection(2);
-    assert!(app.handle_scensel_search_middle_down(start, Some("raw")));
-    assert!(app.menu_state.search_edit.dragging);
+    main_assert!(app.handle_scensel_search_middle_down(start, Some("raw")));
+    main_assert!(app.menu_state.search_edit.dragging);
     let end = app.menu_state.search_text().len();
     app.menu_state.search_edit.drag_pointer_selection(end);
-    assert_eq!(
-        app.menu_state.search_edit.selected_text(),
-        Some("rawtail"),
-        "an active left drag retains the pre-insertion click as its anchor"
-    );
+    main_assert_eq!(app.menu_state.search_edit.selected_text() => Some("rawtail"), "an active left drag retains the pre-insertion click as its anchor");
     app.menu_state.search_edit.end_pointer_selection(0);
-    assert!(app.menu_state.search_edit.selection_range().is_none());
-    assert_eq!(app.menu_state.search_edit.caret(), 0);
+    main_assert!(app.menu_state.search_edit.selection_range().is_none());
+    main_assert_eq!(app.menu_state.search_edit.caret() => 0);
 
     app.menu_state.set_search_text("tail");
     app.menu_state.search_edit.begin_pointer_selection(0);
@@ -1309,17 +1051,13 @@ fn scensel_middle_down_inserts_raw_primary_without_focus_or_submit() {
         (layout.search_edit.x + 4 + fonts.text.measure("tail", false).0) as f32,
         (layout.search_edit.y + layout.search_edit.h / 2) as f32,
     );
-    assert_eq!(app.scensel_search_char_pos(tail_end, true), Some(4));
-    assert!(app.handle_scensel_search_middle_down(tail_end, Some("raw")));
+    main_assert_eq!(app.scensel_search_char_pos(tail_end, true) => Some(4));
+    main_assert!(app.handle_scensel_search_middle_down(tail_end, Some("raw")));
     app.menu_state
         .search_edit
         .move_cursor(SearchCursorOperation::End, false, true);
     app.menu_state.search_edit.drag_pointer_selection(0);
-    assert_eq!(
-        app.menu_state.search_edit.selected_text(),
-        Some("tail"),
-        "a no-op Shift+End preserves the hidden pre-insertion drag anchor"
-    );
+    main_assert_eq!(app.menu_state.search_edit.selected_text() => Some("tail"), "a no-op Shift+End preserves the hidden pre-insertion drag anchor");
     app.menu_state.search_edit.end_pointer_selection(0);
 
     app.menu_state.set_search_text("x".repeat(252));
@@ -1327,19 +1065,19 @@ fn scensel_middle_down_inserts_raw_primary_without_focus_or_submit() {
     app.menu_state.search_edit.caret = 20;
     app.menu_state.search_edit.blink_ticks = 9;
     app.menu_state.search_edit.dragging = false;
-    assert!(app.handle_scensel_search_middle_down(start, Some("raw")));
-    assert_eq!(app.menu_state.search_text().len(), SEARCH_EDIT_MAX_BYTES);
-    assert!(app.menu_state.search_text().starts_with("ra"));
-    assert_eq!(app.menu_state.search_edit.caret(), 2);
-    assert_eq!(app.menu_state.search_edit.blink_ticks, 0);
-    assert!(app.menu_state.search_edit.selection_range().is_none());
+    main_assert!(app.handle_scensel_search_middle_down(start, Some("raw")));
+    main_assert_eq!(app.menu_state.search_text().len() => SEARCH_EDIT_MAX_BYTES);
+    main_assert!(app.menu_state.search_text().starts_with("ra"));
+    main_assert_eq!(app.menu_state.search_edit.caret() => 2);
+    main_assert_eq!(app.menu_state.search_edit.blink_ticks => 0);
+    main_assert!(app.menu_state.search_edit.selection_range().is_none());
 
     let insertion_position = 100;
     let narrow_text = "i".repeat(insertion_position + 3);
     app.menu_state.set_search_text(narrow_text);
     let client_width = layout.search_edit.w - 8;
     let prefix_width = fonts.text.measure(&"i".repeat(insertion_position), false).0;
-    assert!(prefix_width > client_width);
+    main_assert!(prefix_width > client_width);
     let pointer_offset = client_width - 2;
     let old_scroll = prefix_width - pointer_offset;
     app.menu_state.search_edit.horizontal_scroll = old_scroll;
@@ -1347,27 +1085,14 @@ fn scensel_middle_down_inserts_raw_primary_without_focus_or_submit() {
         (layout.search_edit.x + 4 + pointer_offset) as f32,
         (layout.search_edit.y + layout.search_edit.h / 2) as f32,
     );
-    assert_eq!(
-        app.scensel_search_char_pos(same_index_point, true),
-        Some(insertion_position)
-    );
-    assert!(app.handle_scensel_search_middle_down(same_index_point, Some("WWW")));
-    assert_eq!(
-        app.menu_state.search_edit.caret(),
-        insertion_position + 3,
-        "the insertion can end at the old caret byte index"
-    );
-    assert!(
-        app.menu_state.search_edit.horizontal_scroll > old_scroll,
-        "a successful same-index insertion still recomputes cursor scrolling"
-    );
+    main_assert_eq!(app.scensel_search_char_pos(same_index_point, true) => Some(insertion_position));
+    main_assert!(app.handle_scensel_search_middle_down(same_index_point, Some("WWW")));
+    main_assert_eq!(app.menu_state.search_edit.caret() => insertion_position + 3, "the insertion can end at the old caret byte index");
+    main_assert!(app.menu_state.search_edit.horizontal_scroll > old_scroll, "a successful same-index insertion still recomputes cursor scrolling");
 
     app.menu_state.set_search_text("");
-    assert!(app.handle_scensel_search_middle_down(start, Some(&"W".repeat(SEARCH_EDIT_MAX_BYTES))));
-    assert!(
-        app.menu_state.search_edit.horizontal_scroll > 0,
-        "raw insertion scrolls the advanced caret into view"
-    );
+    main_assert!(app.handle_scensel_search_middle_down(start, Some(&"W".repeat(SEARCH_EDIT_MAX_BYTES))));
+    main_assert!(app.menu_state.search_edit.horizontal_scroll > 0, "raw insertion scrolls the advanced caret into view");
 
     app.menu_state
         .set_search_text("W".repeat(SEARCH_EDIT_MAX_BYTES));
@@ -1378,45 +1103,36 @@ fn scensel_middle_down_inserts_raw_primary_without_focus_or_submit() {
     app.startup_dialog_fade = None;
     app.handle_other_mouse_button(ElementState::Pressed)
         .test_value();
-    assert_eq!(app.menu_state.search_text().len(), SEARCH_EDIT_MAX_BYTES);
-    assert_eq!(app.menu_state.search_edit.caret(), 0);
-    assert!(app.menu_state.search_edit.selection_range().is_none());
-    assert_eq!(
-        app.menu_state.search_edit.blink_ticks, 7,
-        "a full buffer cannot insert PRIMARY and does not restart blink"
-    );
-    assert!(app.menu_state.search_edit.dragging);
+    main_assert_eq!(app.menu_state.search_text().len() => SEARCH_EDIT_MAX_BYTES);
+    main_assert_eq!(app.menu_state.search_edit.caret() => 0);
+    main_assert!(app.menu_state.search_edit.selection_range().is_none());
+    main_assert_eq!(app.menu_state.search_edit.blink_ticks => 7, "a full buffer cannot insert PRIMARY and does not restart blink");
+    main_assert!(app.menu_state.search_edit.dragging);
 }
 
 #[test]
 fn scensel_search_context_entries_match_cpp_conditions_and_order() {
     let mut edit = SearchEditState::default();
-    assert!(scensel_search_context_entries(&edit, false).is_empty());
+    main_assert!(scensel_search_context_entries(&edit, false).is_empty());
 
     let paste_only = scensel_search_context_entries(&edit, true);
-    assert_eq!(paste_only.len(), 1);
-    assert_eq!(paste_only[0].text, "Paste");
+    main_assert_eq!(paste_only.len() => 1);
+    main_assert_eq!(paste_only[0].text => "Paste");
 
     edit.set_text("alpha beta");
     let select_only = scensel_search_context_entries(&edit, false);
-    assert_eq!(select_only.len(), 1);
-    assert_eq!(select_only[0].text, "Select all");
+    main_assert_eq!(select_only.len() => 1);
+    main_assert_eq!(select_only[0].text => "Select all");
 
     edit.anchor = 0;
     edit.caret = 5;
     let entries = scensel_search_context_entries(&edit, true);
-    assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry.text.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Cut", "Copy", "Paste", "Clear", "Select all"]
-    );
-    assert_eq!(
+    main_assert_eq!(entries.iter().map(|entry| entry.text.as_str()).collect::<Vec<_>>() => vec!["Cut", "Copy", "Paste", "Clear", "Select all"]);
+    main_assert_eq!(
         entries
             .iter()
             .map(|entry| entry.tooltip.as_deref())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![
             Some("Moves the selection to the clipboard."),
             Some("Copies the selection to the clipboard."),
@@ -1425,18 +1141,16 @@ fn scensel_search_context_entries_match_cpp_conditions_and_order() {
             Some("Selects the complete text"),
         ]
     );
-    assert!(entries
-        .iter()
-        .all(|entry| { entry.icon == ContextMenuIcon::None && entry.hotkey.is_none() }));
+    main_assert!(entries.iter().all(|entry| { entry.icon == ContextMenuIcon::None && entry.hotkey.is_none() }));
 
     edit.anchor = edit.text().len();
     edit.caret = 0;
     let whole_reverse = scensel_search_context_entries(&edit, false);
-    assert_eq!(
+    main_assert_eq!(
         whole_reverse
             .iter()
             .map(|entry| entry.text.as_str())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec!["Cut", "Copy", "Clear"],
         "whole selection omits Select all in either direction"
     );
@@ -1460,14 +1174,14 @@ fn scensel_search_space_stays_in_the_focused_edit() {
     // (src/C4GuiDialogs.cpp:552-560; src/C4GuiEdit.cpp:448-455;
     // src/C4Gui.h:1622-1635).
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
-    assert_eq!(app.menu_state.stack.len(), 1);
-    assert!(app.menu_state.search_focused());
+    main_assert_eq!(app.menu_state.stack.len() => 1);
+    main_assert!(app.menu_state.search_focused());
     app.test_text_input(' ');
     app.test_key(VirtualKeyCode::Space, ElementState::Released);
 
-    assert_eq!(app.menu_state.search_text(), "two ");
-    assert_eq!(app.menu_state.stack.len(), 1);
-    assert!(app.menu_state.search_focused());
+    main_assert_eq!(app.menu_state.search_text() => "two ");
+    main_assert_eq!(app.menu_state.stack.len() => 1);
+    main_assert!(app.menu_state.search_focused());
 }
 
 // C4GUI::Edit consumes plain cursor operations and moves the caret by one
@@ -1485,26 +1199,16 @@ fn scensel_search_plain_arrows_move_the_caret_without_navigating() {
         .map(|entry| entry.identifier.clone());
 
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
-    assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
-    assert_eq!(app.menu_state.stack.len(), 1);
-    assert_eq!(app.menu_state.search_edit.caret(), 3);
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.clone()),
-        selected
-    );
+    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.menu_state.stack.len() => 1);
+    main_assert_eq!(app.menu_state.search_edit.caret() => 3);
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.clone()) => selected);
 
     app.test_key(VirtualKeyCode::ArrowRight, ElementState::Pressed);
-    assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
-    assert_eq!(app.menu_state.stack.len(), 1);
-    assert_eq!(app.menu_state.search_edit.caret(), 4);
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.clone()),
-        selected
-    );
+    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert_eq!(app.menu_state.stack.len() => 1);
+    main_assert_eq!(app.menu_state.search_edit.caret() => 4);
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.clone()) => selected);
 }
 
 // C++ binds Ctrl+F through the startup dialog accelerator
@@ -1520,13 +1224,13 @@ fn scensel_search_command_f_focuses_and_reselects_the_query() {
     app.menu_state
         .search_edit
         .move_cursor(SearchCursorOperation::Left, false, false);
-    assert!(app.menu_state.search_edit.selection_range().is_none());
+    main_assert!(app.menu_state.search_edit.selection_range().is_none());
     app.test_modifiers(ModifiersState::SUPER);
 
     app.test_key(VirtualKeyCode::KeyF, ElementState::Pressed);
 
-    assert!(app.menu_state.search_focused());
-    assert_eq!(app.menu_state.search_edit.selected_text(), Some("crystal"));
+    main_assert!(app.menu_state.search_focused());
+    main_assert_eq!(app.menu_state.search_edit.selected_text() => Some("crystal"));
 }
 
 // C++ registers Ctrl for edit commands (src/C4GuiEdit.cpp:61-78).
@@ -1546,7 +1250,7 @@ fn scensel_search_command_a_selects_the_query() {
 
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
 
-    assert_eq!(app.menu_state.search_edit.selected_text(), Some("crystal"));
+    main_assert_eq!(app.menu_state.search_edit.selected_text() => Some("crystal"));
 }
 
 // C++ waits for Enter and only blurs on Escape
@@ -1555,19 +1259,10 @@ fn scensel_search_command_a_selects_the_query() {
 // clears and restores browsing state, and the second leaves the edit.
 #[test]
 fn scensel_enhanced_search_filters_live_and_escape_restores_browsing_state() {
-    let mut alpha = FrontendScenario::fallback();
-    alpha.identifier = "alpha".to_string();
-    alpha.title = "Alpha Mission".to_string();
-    let mut beta = FrontendScenario::fallback();
-    beta.identifier = "beta".to_string();
-    beta.title = "Beta Mission".to_string();
+    scensel_fixture!(frontend_scenario: alpha, "alpha".to_string(), "Alpha Mission".to_string());
+    scensel_fixture!(frontend_scenario: beta, "beta".to_string(), "Beta Mission".to_string());
     let scenarios = vec![alpha, beta];
-    let menu =
-        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
-    let mut app = new_menu_app(800, 600);
-    app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
-    app.open_scenario_browser();
+    let mut app = scensel_app(&scenarios);
     app.handle_menu_input(|menu| menu.select_list_index(1))
         .test_value();
     app.menu_state.scenario_list_scroll = 47;
@@ -1577,44 +1272,20 @@ fn scensel_enhanced_search_filters_live_and_escape_restores_browsing_state() {
         app.test_text_input(character);
     }
 
-    assert_eq!(app.menu_state.applied_search_text, "Alpha");
-    assert_eq!(
-        app.menu_state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["alpha"]
-    );
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("alpha")
-    );
-    assert!(app.menu_state.search_focused());
+    main_assert_eq!(app.menu_state.applied_search_text => "Alpha");
+    main_assert_eq!(app.menu_state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["alpha"]);
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("alpha"));
+    main_assert!(app.menu_state.search_focused());
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert_eq!(app.menu_state.search_text(), "");
-    assert_eq!(
-        app.menu_state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["alpha", "beta"]
-    );
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("beta")
-    );
-    assert_eq!(app.menu_state.scenario_list_scroll, 47);
-    assert!(app.menu_state.search_focused());
+    main_assert_eq!(app.menu_state.search_text() => "");
+    main_assert_eq!(app.menu_state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["alpha", "beta"]);
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("beta"));
+    main_assert_eq!(app.menu_state.scenario_list_scroll => 47);
+    main_assert!(app.menu_state.search_focused());
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(!app.menu_state.search_focused());
+    main_assert!(!app.menu_state.search_focused());
 }
 
 // C++ exposes the search edit without a trailing action
@@ -1622,19 +1293,10 @@ fn scensel_enhanced_search_filters_live_and_escape_restores_browsing_state() {
 // immediately from its field-contained target and retains edit focus.
 #[test]
 fn scensel_enhanced_search_clear_button_restores_browsing_state() {
-    let mut alpha = FrontendScenario::fallback();
-    alpha.identifier = "alpha".to_string();
-    alpha.title = "Alpha Mission".to_string();
-    let mut beta = FrontendScenario::fallback();
-    beta.identifier = "beta".to_string();
-    beta.title = "Beta Mission".to_string();
+    scensel_fixture!(frontend_scenario: alpha, "alpha".to_string(), "Alpha Mission".to_string());
+    scensel_fixture!(frontend_scenario: beta, "beta".to_string(), "Beta Mission".to_string());
     let scenarios = vec![alpha, beta];
-    let menu =
-        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
-    let mut app = new_menu_app(800, 600);
-    app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
-    app.open_scenario_browser();
+    let mut app = scensel_app(&scenarios);
     app.handle_menu_input(|menu| menu.select_list_index(1))
         .test_value();
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
@@ -1652,22 +1314,10 @@ fn scensel_enhanced_search_clear_button_restores_browsing_state() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
 
-    assert_eq!(app.menu_state.search_text(), "");
-    assert_eq!(
-        app.menu_state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["alpha", "beta"]
-    );
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("beta")
-    );
-    assert!(app.menu_state.search_focused());
+    main_assert_eq!(app.menu_state.search_text() => "");
+    main_assert_eq!(app.menu_state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["alpha", "beta"]);
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("beta"));
+    main_assert!(app.menu_state.search_focused());
 }
 
 // C4GUI::Edit mutates the buffer immediately while C++ waits for Enter to
@@ -1676,33 +1326,19 @@ fn scensel_enhanced_search_clear_button_restores_browsing_state() {
 // keyboard deletion.
 #[test]
 fn scensel_enhanced_search_updates_after_keyboard_deletion() {
-    let mut alpha = FrontendScenario::fallback();
-    alpha.identifier = "alpha".to_string();
-    alpha.title = "Alpha Mission".to_string();
+    scensel_fixture!(frontend_scenario: alpha, "alpha".to_string(), "Alpha Mission".to_string());
     let scenarios = vec![alpha];
-    let menu =
-        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
-    let mut app = new_menu_app(800, 600);
-    app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
-    app.open_scenario_browser();
+    let mut app = scensel_app(&scenarios);
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
     for character in "Alphzz".chars() {
         app.test_text_input(character);
     }
-    assert!(app.menu_state.visible_entries().is_empty());
+    main_assert!(app.menu_state.visible_entries().is_empty());
 
     app.test_key(VirtualKeyCode::Backspace, ElementState::Pressed);
 
-    assert_eq!(app.menu_state.search_text(), "Alphz");
-    assert_eq!(
-        app.menu_state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["alpha"]
-    );
+    main_assert_eq!(app.menu_state.search_text() => "Alphz");
+    main_assert_eq!(app.menu_state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["alpha"]);
 }
 
 // C++ routes Clear through the edit context command but does not rebuild
@@ -1713,38 +1349,22 @@ fn scensel_enhanced_search_updates_after_keyboard_deletion() {
 // immediately.
 #[test]
 fn scensel_enhanced_search_context_clear_updates_results_immediately() {
-    let mut alpha = FrontendScenario::fallback();
-    alpha.identifier = "alpha".to_string();
-    alpha.title = "Alpha Mission".to_string();
-    let mut beta = FrontendScenario::fallback();
-    beta.identifier = "beta".to_string();
-    beta.title = "Beta Mission".to_string();
+    scensel_fixture!(frontend_scenario: alpha, "alpha".to_string(), "Alpha Mission".to_string());
+    scensel_fixture!(frontend_scenario: beta, "beta".to_string(), "Beta Mission".to_string());
     let scenarios = vec![alpha, beta];
-    let menu =
-        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
-    let mut app = new_menu_app(800, 600);
-    app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
-    app.open_scenario_browser();
+    let mut app = scensel_app(&scenarios);
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
     for character in "Alpha".chars() {
         app.test_text_input(character);
     }
-    assert_eq!(app.menu_state.visible_entries().len(), 1);
+    main_assert_eq!(app.menu_state.visible_entries().len() => 1);
     app.menu_state.search_edit.select_all();
 
     app.execute_scenario_search_context_command(ScenselSearchContextCommand::Clear)
         .test_value();
 
-    assert_eq!(app.menu_state.search_text(), "");
-    assert_eq!(
-        app.menu_state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["alpha", "beta"]
-    );
+    main_assert_eq!(app.menu_state.search_text() => "");
+    main_assert_eq!(app.menu_state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["alpha", "beta"]);
 }
 
 // C++ routes Paste through the edit context command but does not rebuild
@@ -1755,19 +1375,10 @@ fn scensel_enhanced_search_context_clear_updates_results_immediately() {
 // immediately.
 #[test]
 fn scensel_enhanced_search_paste_updates_results_immediately() {
-    let mut alpha = FrontendScenario::fallback();
-    alpha.identifier = "alpha".to_string();
-    alpha.title = "Alpha Mission".to_string();
-    let mut beta = FrontendScenario::fallback();
-    beta.identifier = "beta".to_string();
-    beta.title = "Beta Mission".to_string();
+    scensel_fixture!(frontend_scenario: alpha, "alpha".to_string(), "Alpha Mission".to_string());
+    scensel_fixture!(frontend_scenario: beta, "beta".to_string(), "Beta Mission".to_string());
     let scenarios = vec![alpha, beta];
-    let menu =
-        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
-    let mut app = new_menu_app(800, 600);
-    app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
-    app.open_scenario_browser();
+    let mut app = scensel_app(&scenarios);
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
     for character in "Alpha".chars() {
         app.test_text_input(character);
@@ -1776,15 +1387,8 @@ fn scensel_enhanced_search_paste_updates_results_immediately() {
 
     app.paste_scenario_search_text("Beta").test_value();
 
-    assert_eq!(app.menu_state.search_text(), "Beta");
-    assert_eq!(
-        app.menu_state
-            .visible_entries()
-            .iter()
-            .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["beta"]
-    );
+    main_assert_eq!(app.menu_state.search_text() => "Beta");
+    main_assert_eq!(app.menu_state.visible_entries().iter().map(|entry| entry.identifier.as_str()).collect::<Vec<_>>() => vec!["beta"]);
 }
 
 // C++ retains the folder caption and leaves an unmatched list blank
@@ -1796,9 +1400,7 @@ fn scensel_enhanced_search_reports_counts_and_a_query_aware_empty_state() {
         .into_iter()
         .enumerate()
         .map(|(index, title)| {
-            let mut scenario = FrontendScenario::fallback();
-            scenario.identifier = format!("scenario_{index}");
-            scenario.title = title.to_string();
+            scensel_fixture!(frontend_scenario: scenario, format!("scenario_{index}"), title.to_string());
             scenario
         })
         .collect::<Vec<_>>();
@@ -1808,22 +1410,13 @@ fn scensel_enhanced_search_reports_counts_and_a_query_aware_empty_state() {
     state.set_include_back(false);
     state.set_search_text("mission");
     state.apply_enhanced_search();
-    assert_eq!(
-        state.enhanced_search_caption().as_deref(),
-        Some("2 of 2 scenarios")
-    );
-    assert_eq!(state.enhanced_search_empty_message(), None);
+    main_assert_eq!(state.enhanced_search_caption().as_deref() => Some("2 of 2 scenarios"));
+    main_assert_eq!(state.enhanced_search_empty_message() => None);
 
     state.set_search_text("missing castle");
     state.apply_enhanced_search();
-    assert_eq!(
-        state.enhanced_search_caption().as_deref(),
-        Some("No matches among 2 scenarios")
-    );
-    assert_eq!(
-        state.enhanced_search_empty_message().as_deref(),
-        Some("No scenarios match \"missing castle\".")
-    );
+    main_assert_eq!(state.enhanced_search_caption().as_deref() => Some("No matches among 2 scenarios"));
+    main_assert_eq!(state.enhanced_search_empty_message().as_deref() => Some("No scenarios match \"missing castle\"."));
 }
 
 // C++ keeps the folder title as the caption
@@ -1831,9 +1424,7 @@ fn scensel_enhanced_search_reports_counts_and_a_query_aware_empty_state() {
 // uses grammatically correct result status for a one-item catalog.
 #[test]
 fn scensel_enhanced_search_uses_singular_result_status() {
-    let mut scenario = FrontendScenario::fallback();
-    scenario.identifier = "alpha".to_string();
-    scenario.title = "Alpha Mission".to_string();
+    scensel_fixture!(frontend_scenario: scenario, "alpha".to_string(), "Alpha Mission".to_string());
     let scenarios = vec![scenario];
     let menu =
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
@@ -1841,17 +1432,11 @@ fn scensel_enhanced_search_uses_singular_result_status() {
     state.set_include_back(false);
     state.set_search_text("Alpha");
     state.apply_enhanced_search();
-    assert_eq!(
-        state.enhanced_search_caption().as_deref(),
-        Some("1 of 1 scenario")
-    );
+    main_assert_eq!(state.enhanced_search_caption().as_deref() => Some("1 of 1 scenario"));
 
     state.set_search_text("missing");
     state.apply_enhanced_search();
-    assert_eq!(
-        state.enhanced_search_caption().as_deref(),
-        Some("No matches among 1 scenario")
-    );
+    main_assert_eq!(state.enhanced_search_caption().as_deref() => Some("No matches among 1 scenario"));
 }
 
 // The real window route must consume Ctrl+F/text/Enter in the search
@@ -1862,38 +1447,7 @@ fn scensel_enhanced_search_uses_singular_result_status() {
 #[test]
 fn scensel_search_routes_window_text_and_enter() {
     let _lock = env_lock().lock();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
-    let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-        ("LC_LANGUAGE", Some(Path::new("US"))),
-    ]);
-    let paths = test_app_paths();
-    let mut app = GameApp::new(
-        800,
-        600,
-        AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        },
-        Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Search Tester".to_string(),
-            network: None,
-            record_enabled: false,
-        },
-    )
-    .test_value();
-    wait_for_menu(&mut app);
-    app.open_scenario_browser();
+    let (_guard, _user_data, mut app) = scensel_window_app("Search Tester");
 
     let mut query = app.menu_state.visible_entries()[0].title.clone();
     Markup::strip_markup(&mut query);
@@ -1902,17 +1456,14 @@ fn scensel_search_routes_window_text_and_enter() {
     app.menu_state.set_search_text("replace this");
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::KeyF, ElementState::Pressed);
-    assert_eq!(
-        app.menu_state.search_edit.selected_text(),
-        Some("replace this")
-    );
+    main_assert_eq!(app.menu_state.search_edit.selected_text() => Some("replace this"));
     app.test_modifiers(ModifiersState::empty());
     for character in query.chars() {
         app.test_text_input(character);
     }
-    assert!(app.menu_state.search_focused());
-    assert_eq!(app.menu_state.applied_search_text, query);
-    assert!(!app.menu_state.visible_entries().is_empty());
+    main_assert!(app.menu_state.search_focused());
+    main_assert_eq!(app.menu_state.applied_search_text => query);
+    main_assert!(!app.menu_state.visible_entries().is_empty());
     let mut selected_title = app
         .menu_state
         .selected_scenario()
@@ -1921,12 +1472,12 @@ fn scensel_search_routes_window_text_and_enter() {
         .clone();
     Markup::strip_markup(&mut selected_title);
     selected_title.make_ascii_lowercase();
-    assert_eq!(selected_title, query);
+    main_assert_eq!(selected_title => query);
 
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    assert_eq!(app.mode, AppMode::Menu, "Enter must not start a scenario");
-    assert!(!app.menu_state.visible_entries().is_empty());
-    assert_eq!(app.menu_state.applied_search_text, query);
+    main_assert_eq!(app.mode => AppMode::Menu, "Enter must not start a scenario");
+    main_assert!(!app.menu_state.visible_entries().is_empty());
+    main_assert_eq!(app.menu_state.applied_search_text => query);
 
     let fonts = app.assets.clonk_fonts.clone().test_value();
     let layout = clonk_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
@@ -1938,7 +1489,7 @@ fn scensel_search_routes_window_text_and_enter() {
         app.test_left_button(ElementState::Pressed);
         app.test_left_button(ElementState::Released);
     }
-    assert_eq!(app.menu_state.search_edit.selected_text(), Some("beta"));
+    main_assert_eq!(app.menu_state.search_edit.selected_text() => Some("beta"));
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(layout.search_edit.x + 4),
@@ -1950,18 +1501,15 @@ fn scensel_search_routes_window_text_and_enter() {
         f64::from(edit_y),
     ));
     app.test_left_button(ElementState::Released);
-    assert_eq!(
-        app.menu_state.search_edit.selected_text(),
-        Some("alpha beta")
-    );
+    main_assert_eq!(app.menu_state.search_edit.selected_text() => Some("alpha beta"));
 
     app.menu_state.set_search_text("W".repeat(100));
     let mut frame = vec![0_u8; 800 * 600 * 4];
     app.test_render(&mut frame);
-    assert!(app.menu_state.search_edit.horizontal_scroll > 0);
+    main_assert!(app.menu_state.search_edit.horizontal_scroll > 0);
     app.test_key(VirtualKeyCode::Home, ElementState::Pressed);
     app.test_render(&mut frame);
-    assert!(app.menu_state.search_edit.horizontal_scroll <= 2);
+    main_assert!(app.menu_state.search_edit.horizontal_scroll <= 2);
     reset_cached_app_paths();
 }
 
@@ -1977,9 +1525,7 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
         "[Head]\nTitle=Shortcut Target\n",
     )
     .test_value();
-    let mut scenario = FrontendScenario::fallback();
-    scenario.identifier = "Shortcut.c4s".to_string();
-    scenario.title = "Shortcut Target".to_string();
+    scensel_fixture!(frontend_scenario: scenario, "Shortcut.c4s".to_string(), "Shortcut Target".to_string());
     scenario.path = Some(scenario_path);
     scenario.source_paths = vec![scenario.path.clone().expect("scenario path")];
     let scenarios = vec![scenario];
@@ -1988,7 +1534,7 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     app.menu_state = MenuState::new(menu, scenarios);
     app.open_network_host_scenario_browser();
-    assert!(app.menu_state.selected_scenario().is_some());
+    main_assert!(app.menu_state.selected_scenario().is_some());
 
     let values = GameOptionValues {
         comment: "unchanged comment".to_string(),
@@ -2003,32 +1549,23 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
     app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    assert_eq!(
-        app.game_option_input_dialog
-            .as_ref()
-            .expect("Mission Access input dialog")
-            .purpose,
-        PendingInputDialogPurpose::ScenarioMissionAccess
-    );
-    assert_eq!(
-        app.scenario_game_options.values().comment,
-        "unchanged comment"
-    );
+    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("Mission Access input dialog").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
+    main_assert_eq!(app.scenario_game_options.values().comment => "unchanged comment");
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
-    assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.game_option_input_dialog.is_none());
 
     app.test_modifiers(ModifiersState::ALT | ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.game_option_input_dialog.is_none());
 
     app.test_modifiers(ModifiersState::ALT | ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    assert_eq!(
+    main_assert_eq!(
         app.game_option_input_dialog
             .as_ref()
             .expect("Comment input dialog")
-            .purpose,
+            .purpose =>
         PendingInputDialogPurpose::GameOption(GameOptionInputKind::Comment)
     );
     app.game_option_input_dialog = None;
@@ -2037,13 +1574,7 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
 
     app.test_modifiers(ModifiersState::ALT | ModifiersState::SUPER);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    assert_eq!(
-        app.game_option_input_dialog
-            .as_ref()
-            .expect("Mission Access input dialog")
-            .purpose,
-        PendingInputDialogPurpose::ScenarioMissionAccess
-    );
+    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("Mission Access input dialog").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
 
@@ -2051,35 +1582,22 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
     app.menu_state.set_search_text("context");
     app.menu_state.set_search_focused(true);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    assert!(app.context_menu.is_some());
+    main_assert!(app.context_menu.is_some());
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    assert!(app.context_menu.is_some());
-    assert!(app.game_option_input_dialog.is_none());
-    assert_eq!(
-        app.scenario_game_options.values().comment,
-        "unchanged comment"
-    );
+    main_assert!(app.context_menu.is_some());
+    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert_eq!(app.scenario_game_options.values().comment => "unchanged comment");
     app.close_context_menu_silently();
 
     app.test_modifiers(ModifiersState::empty());
     app.menu_state.set_search_text("");
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    assert_eq!(
-        app.menu_state
-            .rename_edit
-            .as_ref()
-            .map(|rename| rename.edit.selected_text()),
-        Some(Some("Shortcut Target"))
-    );
+    main_assert_eq!(app.menu_state.rename_edit.as_ref().map(|rename| rename.edit.selected_text()) => Some(Some("Shortcut Target")));
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_none());
-    assert_eq!(
-        app.menu_state.dialog_focus(),
-        ScenselDialogFocus::Search,
-        "RenameEdit restores the control focused before F2"
-    );
-    assert!(app.menu_state.search_focused());
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Search, "RenameEdit restores the control focused before F2");
+    main_assert!(app.menu_state.search_focused());
 
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     app.test_modifiers(ModifiersState::SUPER);
@@ -2092,8 +1610,8 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
     app.menu_state.search_edit.anchor = 0;
     app.menu_state.search_edit.caret = 0;
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    assert_eq!(app.message_dialogs.len(), 1);
-    assert_eq!(app.menu_state.search_text(), "alpha beta");
+    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.menu_state.search_text() => "alpha beta");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
 
@@ -2101,18 +1619,16 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
     // edit operation, matching Edit::RegisterCursorOp's modifier list.
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    assert_eq!(app.menu_state.search_text(), "beta");
+    main_assert_eq!(app.menu_state.search_text() => "beta");
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    assert_eq!(app.menu_state.search_text(), "beta");
+    main_assert_eq!(app.menu_state.search_text() => "beta");
     reset_cached_app_paths();
 }
 
 #[test]
 fn scensel_rename_restores_search_and_specific_option_focus() {
-    let mut scenario = FrontendScenario::fallback();
-    scenario.identifier = "Focus.c4s".to_string();
-    scenario.title = "Focus Target".to_string();
+    scensel_fixture!(frontend_scenario: scenario, "Focus.c4s".to_string(), "Focus Target".to_string());
     let scenarios = vec![scenario];
     let menu =
         StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
@@ -2122,29 +1638,26 @@ fn scensel_rename_restores_search_and_specific_option_focus() {
 
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    assert!(!app.menu_state.search_focused(), "inline edit steals focus");
+    main_assert!(!app.menu_state.search_focused(), "inline edit steals focus");
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
-    assert!(app.menu_state.search_focused());
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Search);
+    main_assert!(app.menu_state.search_focused());
 
     app.set_scensel_dialog_focus(ScenselDialogFocus::Options);
     app.scenario_game_options
         .set_focused_button(Some(GameOptionButton::Record));
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    assert_eq!(app.scenario_game_options.focused_button(), None);
+    main_assert_eq!(app.scenario_game_options.focused_button() => None);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Options);
-    assert_eq!(
-        app.scenario_game_options.focused_button(),
-        Some(GameOptionButton::Record)
-    );
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Options);
+    main_assert_eq!(app.scenario_game_options.focused_button() => Some(GameOptionButton::Record));
 
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_none());
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
-    assert!(app.menu_state.search_focused());
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Search);
+    main_assert!(app.menu_state.search_focused());
 
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     let original_title = app
@@ -2156,62 +1669,40 @@ fn scensel_rename_restores_search_and_specific_option_focus() {
         .to_string();
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    assert_eq!(
-        app.menu_state
-            .rename_edit
-            .as_ref()
-            .expect("Alt+Delete keeps rename active")
-            .edit
-            .text(),
-        original_title
-    );
+    main_assert_eq!(app.menu_state.rename_edit.as_ref().expect("Alt+Delete keeps rename active").edit.text() => original_title);
     app.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_some());
+    main_assert!(app.menu_state.rename_edit.is_some());
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_some());
-    assert_eq!(
-        app.game_option_input_dialog
-            .as_ref()
-            .expect("Mission Access input")
-            .purpose,
-        PendingInputDialogPurpose::ScenarioMissionAccess
-    );
+    main_assert!(app.menu_state.rename_edit.is_some());
+    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("Mission Access input").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
-    assert!(app.menu_state.rename_edit.is_some());
+    main_assert!(app.menu_state.rename_edit.is_some());
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_some());
+    main_assert!(app.menu_state.rename_edit.is_some());
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_some());
+    main_assert!(app.menu_state.rename_edit.is_some());
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_none());
+    main_assert!(app.menu_state.rename_edit.is_none());
 
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::KeyF, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_none());
-    assert_eq!(
-        app.menu_state.dialog_focus(),
-        ScenselDialogFocus::List,
-        "RR_Deleted focus cancels the original Control+F transfer"
-    );
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::List, "RR_Deleted focus cancels the original Control+F transfer");
 
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_none());
-    assert_eq!(
-        app.menu_state.dialog_focus(),
-        ScenselDialogFocus::Search,
-        "empty abort restores focus and cancels the original Tab transfer"
-    );
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Search, "empty abort restores focus and cancels the original Tab transfer");
 
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_modifiers(ModifiersState::ALT);
@@ -2220,36 +1711,23 @@ fn scensel_rename_restores_search_and_specific_option_focus() {
         "MissionPass".to_string(),
     )])
     .test_value();
-    assert!(app.menu_state.rename_edit.is_none());
-    assert_eq!(
-        app.menu_state.dialog_focus(),
-        ScenselDialogFocus::Search,
-        "UpdateList aborts rename and restores its saved focus before rebuilding"
-    );
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::Search, "UpdateList aborts rename and restores its saved focus before rebuilding");
 }
 
 #[test]
 fn scensel_rename_gamepad_low_and_directions_match_dialog_bindings() {
-    let mut child = FrontendScenario::fallback();
-    child.identifier = "Folder.c4f/Child.c4s".to_string();
-    child.title = "Child".to_string();
+    scensel_fixture!(frontend_scenario: child, "Folder.c4f/Child.c4s".to_string(), "Child".to_string());
     child.path = None;
 
-    let mut folder = FrontendScenario::fallback();
-    folder.identifier = "Folder.c4f".to_string();
-    folder.title = "Folder".to_string();
+    scensel_fixture!(frontend_scenario: folder, "Folder.c4f".to_string(), "Folder".to_string());
     folder.kind = ScenarioKind::Folder;
     folder.is_playable = false;
     folder.path = None;
     folder.children = vec![child];
 
     let scenarios = vec![folder];
-    let menu =
-        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
-    let mut app = new_menu_app(800, 600);
-    app.menu_state = MenuState::new(menu, scenarios.clone());
-    app.scenario_catalog = build_scenario_catalog(&scenarios);
-    app.open_scenario_browser();
+    let mut app = scensel_app(&scenarios);
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
 
@@ -2262,69 +1740,44 @@ fn scensel_rename_gamepad_low_and_directions_match_dialog_bindings() {
     app.process_sourced_gamepad_event_batch(
         [source(
             0,
-            GamepadEvent::Direction {
-                slot,
-                button: ControlButton::Right,
-                state: ElementState::Pressed,
-            },
+            gamepad_direction_event(slot, ControlButton::Right, ElementState::Pressed),
         )],
         false,
     )
     .test_value();
-    assert!(app.menu_state.rename_edit.is_some());
+    main_assert!(app.menu_state.rename_edit.is_some());
     let wrong_slot = GamepadSlot::new(1);
     app.process_sourced_gamepad_event_batch(
         [source(
             1,
-            GamepadEvent::Direction {
-                slot: wrong_slot,
-                button: ControlButton::Left,
-                state: ElementState::Pressed,
-            },
+            gamepad_direction_event(wrong_slot, ControlButton::Left, ElementState::Pressed),
         )],
         true,
     )
     .test_value();
-    assert!(app.menu_state.rename_edit.is_some());
-    app.test_gamepad_events([GamepadEvent::Direction {
+    main_assert!(app.menu_state.rename_edit.is_some());
+    app.test_gamepad_events([gamepad_direction_event(
         slot,
-        button: ControlButton::Up,
-        state: ElementState::Pressed,
-    }]);
-    assert!(app.menu_state.rename_edit.is_some());
-    app.test_gamepad_events([GamepadEvent::Direction {
+        ControlButton::Up,
+        ElementState::Pressed,
+    )]);
+    main_assert!(app.menu_state.rename_edit.is_some());
+    app.test_gamepad_events([gamepad_direction_event(
         slot,
-        button: ControlButton::Right,
-        state: ElementState::Pressed,
-    }]);
-    assert!(app.menu_state.rename_edit.is_none());
-    assert_eq!(
-        app.menu_state.dialog_focus(),
-        ScenselDialogFocus::List,
-        "successful RR_Deleted rename owns focus; the original advance is cancelled"
-    );
-    assert!(app.menu_state.current_folder().is_none());
+        ControlButton::Right,
+        ElementState::Pressed,
+    )]);
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::List, "successful RR_Deleted rename owns focus; the original advance is cancelled");
+    main_assert!(app.menu_state.current_folder().is_none());
 
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_gamepad_events([
-        GamepadEvent::GuiButton {
-            slot,
-            class: GuiButtonClass::Low,
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Action {
-            slot,
-            action: GamepadActionType::Cancel,
-            state: ElementState::Pressed,
-        },
+        gamepad_gui_button_event(slot, GuiButtonClass::Low, ElementState::Pressed),
+        gamepad_action_event(slot, GamepadActionType::Cancel, ElementState::Pressed),
     ]);
-    assert!(app.menu_state.rename_edit.is_none());
-    assert_eq!(
-        app.menu_state
-            .current_folder()
-            .map(|folder| folder.identifier.as_str()),
-        Some("Folder.c4f")
-    );
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert_eq!(app.menu_state.current_folder().map(|folder| folder.identifier.as_str()) => Some("Folder.c4f"));
 }
 
 #[test]
@@ -2354,12 +1807,12 @@ fn scensel_rename_abort_paths_do_not_mutate_and_focus_loss_commits() {
         app.test_text_input(character);
     }
     let slot = GamepadSlot::new(0);
-    app.test_gamepad_events([GamepadEvent::Action {
+    app.test_gamepad_events([gamepad_action_event(
         slot,
-        action: GamepadActionType::Cancel,
-        state: ElementState::Pressed,
-    }]);
-    assert!(app.menu_state.rename_edit.is_some());
+        GamepadActionType::Cancel,
+        ElementState::Pressed,
+    )]);
+    main_assert!(app.menu_state.rename_edit.is_some());
 
     let source = |gamepad, cluster, event| SourcedGamepadEvent {
         gamepad,
@@ -2371,26 +1824,18 @@ fn scensel_rename_abort_paths_do_not_mutate_and_focus_loss_commits() {
             source(
                 0,
                 10,
-                GamepadEvent::GuiButton {
-                    slot,
-                    class: GuiButtonClass::High,
-                    state: ElementState::Pressed,
-                },
+                gamepad_gui_button_event(slot, GuiButtonClass::High, ElementState::Pressed),
             ),
             source(
                 0,
                 10,
-                GamepadEvent::Action {
-                    slot,
-                    action: GamepadActionType::MenuToggle,
-                    state: ElementState::Pressed,
-                },
+                gamepad_action_event(slot, GamepadActionType::MenuToggle, ElementState::Pressed),
             ),
         ],
         false,
     )
     .test_value();
-    assert!(app.menu_state.rename_edit.is_some());
+    main_assert!(app.menu_state.rename_edit.is_some());
 
     let wrong_slot = GamepadSlot::new(1);
     app.process_sourced_gamepad_event_batch(
@@ -2398,50 +1843,38 @@ fn scensel_rename_abort_paths_do_not_mutate_and_focus_loss_commits() {
             source(
                 1,
                 11,
-                GamepadEvent::GuiButton {
-                    slot: wrong_slot,
-                    class: GuiButtonClass::High,
-                    state: ElementState::Pressed,
-                },
+                gamepad_gui_button_event(wrong_slot, GuiButtonClass::High, ElementState::Pressed),
             ),
             source(
                 1,
                 11,
-                GamepadEvent::Action {
-                    slot: wrong_slot,
-                    action: GamepadActionType::MenuToggle,
-                    state: ElementState::Pressed,
-                },
+                gamepad_action_event(
+                    wrong_slot,
+                    GamepadActionType::MenuToggle,
+                    ElementState::Pressed,
+                ),
             ),
         ],
         true,
     )
     .test_value();
-    assert!(app.menu_state.rename_edit.is_some());
+    main_assert!(app.menu_state.rename_edit.is_some());
 
     app.test_gamepad_events([
-        GamepadEvent::GuiButton {
-            slot,
-            class: GuiButtonClass::High,
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Action {
-            slot,
-            action: GamepadActionType::MenuToggle,
-            state: ElementState::Pressed,
-        },
+        gamepad_gui_button_event(slot, GuiButtonClass::High, ElementState::Pressed),
+        gamepad_action_event(slot, GamepadActionType::MenuToggle, ElementState::Pressed),
     ]);
-    assert!(app.menu_state.rename_edit.is_none());
-    assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
-    assert!(old_path.exists());
-    assert!(!new_path.exists());
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
+    main_assert!(old_path.exists());
+    main_assert!(!new_path.exists());
 
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_none());
-    assert!(old_path.exists());
-    assert!(!new_path.exists());
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert!(old_path.exists());
+    main_assert!(!new_path.exists());
 
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
@@ -2450,16 +1883,11 @@ fn scensel_rename_abort_paths_do_not_mutate_and_focus_loss_commits() {
     }
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     wait_for_scenario_selector_discovery(&mut app);
-    assert!(app.menu_state.rename_edit.is_none());
-    assert!(!old_path.exists());
-    assert!(new_path.exists());
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| (entry.identifier.as_str(), entry.title.as_str())),
-        Some(("New.c4s", "New"))
-    );
-    assert!(app.scenario_catalog.contains_key("New.c4s"));
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert!(!old_path.exists());
+    main_assert!(new_path.exists());
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| (entry.identifier.as_str(), entry.title.as_str())) => Some(("New.c4s", "New")));
+    main_assert!(app.scenario_catalog.contains_key("New.c4s"));
     reset_cached_app_paths();
 }
 
@@ -2469,14 +1897,14 @@ fn scensel_delete_falls_through_to_search_edit_without_a_selection() {
     let mut app = new_menu_app(800, 600);
     app.menu_state = MenuState::new(menu, Vec::new());
     app.open_scenario_browser();
-    assert!(app.menu_state.selected_scenario().is_none());
+    main_assert!(app.menu_state.selected_scenario().is_none());
 
     app.menu_state.set_search_text("abc");
     app.menu_state.set_search_focused(true);
     app.menu_state.search_edit.anchor = 0;
     app.menu_state.search_edit.caret = 0;
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    assert_eq!(app.menu_state.search_text(), "bc");
+    main_assert_eq!(app.menu_state.search_text() => "bc");
 
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
@@ -2513,12 +1941,7 @@ fn scensel_f5_rediscovers_current_folder_and_applies_live_search() {
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     app.open_scenario_browser();
     app.menu_state.enter_folder("RefreshPack.c4f");
-    assert_eq!(
-        app.menu_state
-            .current_folder()
-            .map(|folder| folder.identifier.as_str()),
-        Some("RefreshPack.c4f")
-    );
+    main_assert_eq!(app.menu_state.current_folder().map(|folder| folder.identifier.as_str()) => Some("RefreshPack.c4f"));
     let beta_index = app
         .menu_state
         .visible_entries()
@@ -2539,68 +1962,45 @@ fn scensel_f5_rediscovers_current_folder_and_applies_live_search() {
     .test_value();
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
 
-    assert_eq!(
-        app.scenario_selector_loading_label().as_deref(),
-        Some("Loading... (0%)"),
-        "the loading book is observable before the worker can be polled"
-    );
+    main_assert_eq!(app.scenario_selector_loading_label().as_deref() => Some("Loading... (0%)"), "the loading book is observable before the worker can be polled");
     let mut zero_percent_frame = vec![0_u8; 800 * 600 * 4];
     app.test_render(&mut zero_percent_frame);
     app.scenario_selector_discovery.test_mut().progress_percent = 37;
     let mut progressed_frame = vec![0_u8; 800 * 600 * 4];
     app.test_render(&mut progressed_frame);
-    assert_ne!(
-        zero_percent_frame, progressed_frame,
-        "the visible loading label must track the percentage state"
-    );
-    assert_eq!(app.menu_state.search_text(), "refresh mission");
+    main_assert_ne!(zero_percent_frame => progressed_frame, "the visible loading label must track the percentage state");
+    main_assert_eq!(app.menu_state.search_text() => "refresh mission");
     app.test_key(VirtualKeyCode::Home, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    assert_eq!(app.menu_state.search_text(), "efresh mission");
-    assert_eq!(
+    main_assert_eq!(app.menu_state.search_text() => "efresh mission");
+    main_assert_eq!(
         app.menu_state
             .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
+            .map(|entry| entry.identifier.as_str()) =>
         Some("RefreshPack.c4f/Beta.c4s"),
         "the old tree remains intact behind the loading book"
     );
-    assert!(
-        !app.scenario_catalog
-            .contains_key("RefreshPack.c4f/Gamma.c4s"),
-        "the discovered tree must not leak in before the atomic completion"
-    );
+    main_assert!(!app.scenario_catalog.contains_key("RefreshPack.c4f/Gamma.c4s"), "the discovered tree must not leak in before the atomic completion");
 
     wait_for_scenario_selector_discovery(&mut app);
 
-    assert_eq!(
-        app.menu_state
-            .current_folder()
-            .map(|folder| folder.identifier.as_str()),
-        Some("RefreshPack.c4f")
-    );
-    assert_eq!(
+    main_assert_eq!(app.menu_state.current_folder().map(|folder| folder.identifier.as_str()) => Some("RefreshPack.c4f"));
+    main_assert_eq!(
         app.menu_state
             .visible_entries()
             .iter()
             .map(|entry| entry.identifier.as_str())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![
             "RefreshPack.c4f/Alpha.c4s",
             "RefreshPack.c4f/Beta.c4s",
             "RefreshPack.c4f/Gamma.c4s",
         ]
     );
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("RefreshPack.c4f/Beta.c4s")
-    );
-    assert_eq!(app.menu_state.search_text(), "efresh mission");
-    assert_eq!(app.menu_state.applied_search_text, "efresh mission");
-    assert!(app
-        .scenario_catalog
-        .contains_key("RefreshPack.c4f/Gamma.c4s"));
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("RefreshPack.c4f/Beta.c4s"));
+    main_assert_eq!(app.menu_state.search_text() => "efresh mission");
+    main_assert_eq!(app.menu_state.applied_search_text => "efresh mission");
+    main_assert!(app.scenario_catalog.contains_key("RefreshPack.c4f/Gamma.c4s"));
     reset_cached_app_paths();
 }
 
@@ -2631,19 +2031,13 @@ fn scensel_f2_renames_unpacked_scenario_rewrites_title_and_refocuses() {
         .test_value();
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(old_path.exists());
-    assert!(app.menu_state.rename_edit.is_none());
+    main_assert!(old_path.exists());
+    main_assert!(app.menu_state.rename_edit.is_none());
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    assert_eq!(
-        app.menu_state
-            .rename_edit
-            .as_ref()
-            .map(|rename| rename.edit.text()),
-        Some("")
-    );
-    assert!(app.message_dialogs.is_empty());
+    main_assert_eq!(app.menu_state.rename_edit.as_ref().map(|rename| rename.edit.text()) => Some(""));
+    main_assert!(app.message_dialogs.is_empty());
     for character in "New Name".chars() {
         app.test_text_input(character);
     }
@@ -2651,22 +2045,14 @@ fn scensel_f2_renames_unpacked_scenario_rewrites_title_and_refocuses() {
     wait_for_scenario_selector_discovery(&mut app);
 
     let new_path = paths.scenario_dir().join("New Name.c4s");
-    assert!(!old_path.exists());
-    assert!(new_path.is_dir());
-    assert_eq!(
-        fs::read_to_string(new_path.join("Title.txt")).expect("read rewritten title"),
-        "DE:New Name"
-    );
-    assert!(app.menu_state.rename_edit.is_none());
-    assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
-    assert!(!app.menu_state.search_focused());
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| (entry.identifier.as_str(), entry.title.as_str())),
-        Some(("New Name.c4s", "New Name"))
-    );
-    assert!(app.scenario_catalog.contains_key("New Name.c4s"));
+    main_assert!(!old_path.exists());
+    main_assert!(new_path.is_dir());
+    main_assert_eq!(fs::read_to_string(new_path.join("Title.txt")).expect("read rewritten title") => "DE:New Name");
+    main_assert!(app.menu_state.rename_edit.is_none());
+    main_assert_eq!(app.menu_state.dialog_focus() => ScenselDialogFocus::List);
+    main_assert!(!app.menu_state.search_focused());
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| (entry.identifier.as_str(), entry.title.as_str())) => Some(("New Name.c4s", "New Name")));
+    main_assert!(app.scenario_catalog.contains_key("New Name.c4s"));
     reset_cached_app_paths();
 }
 
@@ -2687,22 +2073,10 @@ fn scenario_storage_renames_and_deletes_nested_packed_child() {
     campaign.add_child("Chapter.c4f", chapter).test_value();
     fs::write(&outer_path, campaign.pack().test_value()).test_value();
 
-    assert_eq!(
-        scenario_filename_from_title("Foo.c4s", ScenarioKind::Scenario, Path::new("Old.c4s")),
-        "Fooc4s.c4s"
-    );
-    assert_eq!(
-        scenario_filename_from_title(".!", ScenarioKind::Scenario, Path::new("Old.c4s")),
-        "unnamed.c4s"
-    );
-    assert_eq!(
-        scenario_filename_from_title("New Pack", ScenarioKind::Folder, Path::new("Old.c4f")),
-        "New Pack.c4f"
-    );
-    assert_eq!(
-        scenario_filename_from_title("New Dir", ScenarioKind::Folder, Path::new("OldDir")),
-        "New Dir"
-    );
+    main_assert_eq!(scenario_filename_from_title("Foo.c4s", ScenarioKind::Scenario, Path::new("Old.c4s")) => "Fooc4s.c4s");
+    main_assert_eq!(scenario_filename_from_title(".!", ScenarioKind::Scenario, Path::new("Old.c4s")) => "unnamed.c4s");
+    main_assert_eq!(scenario_filename_from_title("New Pack", ScenarioKind::Folder, Path::new("Old.c4f")) => "New Pack.c4f");
+    main_assert_eq!(scenario_filename_from_title("New Dir", ScenarioKind::Folder, Path::new("OldDir")) => "New Dir");
     let renamed = rename_scenario_storage(
         &outer_path.join("Chapter.c4f/Old.c4s"),
         ScenarioKind::Scenario,
@@ -2710,22 +2084,17 @@ fn scenario_storage_renames_and_deletes_nested_packed_child() {
         "US",
     )
     .test_value();
-    assert_eq!(renamed, outer_path.join("Chapter.c4f/Packed New.c4s"));
+    main_assert_eq!(renamed => outer_path.join("Chapter.c4f/Packed New.c4s"));
     let campaign = Group::open(&outer_path).test_value();
     let chapter = campaign.open_child("Chapter.c4f").test_value();
-    assert!(!chapter.exists("Old.c4s"));
+    main_assert!(!chapter.exists("Old.c4s"));
     let renamed_group = chapter.open_child("Packed New.c4s").test_value();
-    assert_eq!(
-        renamed_group
-            .read_file("Title.txt")
-            .expect("read packed title"),
-        b"US:Packed New"
-    );
+    main_assert_eq!(renamed_group.read_file("Title.txt").expect("read packed title") => b"US:Packed New");
 
     delete_scenario_storage(&renamed).test_value();
     let campaign = Group::open(&outer_path).test_value();
     let chapter = campaign.open_child("Chapter.c4f").test_value();
-    assert!(!chapter.exists("Packed New.c4s"));
+    main_assert!(!chapter.exists("Packed New.c4s"));
 }
 
 #[test]
@@ -2758,18 +2127,18 @@ fn scensel_rename_collision_is_modal_and_keeps_editor_and_storage() {
     }
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
 
-    assert!(paths.scenario_dir().join("Source.c4s").exists());
-    assert!(paths.scenario_dir().join("Taken.c4s").exists());
+    main_assert!(paths.scenario_dir().join("Source.c4s").exists());
+    main_assert!(paths.scenario_dir().join("Taken.c4s").exists());
     let rename = app.menu_state.rename_edit.test_ref();
-    assert!(rename.edit.is_focused());
-    assert_eq!(rename.edit.selected_text(), Some("Taken"));
-    assert_eq!(app.message_dialogs.len(), 1);
-    assert_eq!(app.message_dialogs[0].state.caption(), "Rename failure");
+    main_assert!(rename.edit.is_focused());
+    main_assert_eq!(rename.edit.selected_text() => Some("Taken"));
+    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.message_dialogs[0].state.caption() => "Rename failure");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     let rename = app.menu_state.rename_edit.test_ref();
-    assert!(rename.edit.is_focused());
-    assert_eq!(rename.edit.selected_text(), Some("Taken"));
+    main_assert!(rename.edit.is_focused());
+    main_assert_eq!(rename.edit.selected_text() => Some("Taken"));
     reset_cached_app_paths();
 }
 
@@ -2807,29 +2176,14 @@ fn scensel_delete_confirms_exact_subject_deletes_and_selects_next() {
     app.menu_state
         .set_search_text("pending query that excludes Gamma");
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    assert_eq!(
-        app.message_dialogs
-            .last()
-            .expect("delete confirmation")
-            .state
-            .message(),
-        "Delete Scenario Beta?"
-    );
+    main_assert_eq!(app.message_dialogs.last().expect("delete confirmation").state.message() => "Delete Scenario Beta?");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    assert!(!paths.scenario_dir().join("B.c4s").exists());
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some(expected_next.as_str())
-    );
-    assert_eq!(
-        app.menu_state.search_text(),
-        "pending query that excludes Gamma"
-    );
-    assert!(!app.scenario_catalog.contains_key("B.c4s"));
+    main_assert!(!paths.scenario_dir().join("B.c4s").exists());
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some(expected_next.as_str()));
+    main_assert_eq!(app.menu_state.search_text() => "pending query that excludes Gamma");
+    main_assert!(!app.scenario_catalog.contains_key("B.c4s"));
     reset_cached_app_paths();
 }
 
@@ -2858,17 +2212,17 @@ fn scensel_delete_uses_original_group_warning() {
     app.handle_menu_input(|menu| menu.select_list_index(index))
         .test_value();
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    assert_eq!(
+    main_assert_eq!(
         app.message_dialogs
             .last()
             .expect("original warning")
             .state
-            .message(),
+            .message() =>
         "Scenario Original is an original file. Are your sure you want to delete it?"
     );
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
-    assert!(original_path.exists());
+    main_assert!(original_path.exists());
     reset_cached_app_paths();
 }
 
@@ -2900,15 +2254,10 @@ fn scensel_delete_failure_is_nonfatal_and_keeps_row_selected() {
         .test_value();
 
     let failure = app.message_dialogs.last().test_value();
-    assert_eq!(failure.state.caption(), "Delete");
-    assert_eq!(failure.state.message(), "Delete failure.");
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("Failure.c4s")
-    );
-    assert!(app.scenario_catalog.contains_key("Failure.c4s"));
+    main_assert_eq!(failure.state.caption() => "Delete");
+    main_assert_eq!(failure.state.message() => "Delete failure.");
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("Failure.c4s"));
+    main_assert!(app.scenario_catalog.contains_key("Failure.c4s"));
     reset_cached_app_paths();
 }
 
@@ -2922,27 +2271,21 @@ fn scensel_alt_m_updates_shared_and_persisted_mission_access() {
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
     let dialog = app.game_option_input_dialog.test_ref();
-    assert_eq!(
-        dialog.purpose,
-        PendingInputDialogPurpose::ScenarioMissionAccess
-    );
-    assert_eq!(dialog.controller.caption(), "Mission Access");
-    assert_eq!(dialog.controller.message(), "Enter mission password:");
-    assert_eq!(dialog.controller.icon(), InputDialogIcon::OPTIONS);
+    main_assert_eq!(dialog.purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
+    main_assert_eq!(dialog.controller.caption() => "Mission Access");
+    main_assert_eq!(dialog.controller.message() => "Enter mission password:");
+    main_assert_eq!(dialog.controller.icon() => InputDialogIcon::OPTIONS);
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
         "Secret;Second".to_string(),
     )])
     .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    assert_eq!(app.mission_access.snapshot(), "Secret;Second");
+    main_assert_eq!(app.mission_access.snapshot() => "Secret;Second");
     // Both native mutation sites change `Config.General.MissionAccess` in
     // memory alone and neither calls `Config.Save()`
     // (C4Script.cpp:2466-2471; C4StartupScenSelDlg.cpp:1838-1856). The port
     // writes the changed list out at once so no aborted run can lose it.
-    assert_eq!(
-        load_configured_mission_access(&paths).expect("read granted mission access"),
-        "Secret;Second"
-    );
+    main_assert_eq!(load_configured_mission_access(&paths).expect("read granted mission access") => "Secret;Second");
 
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
@@ -2950,9 +2293,9 @@ fn scensel_alt_m_updates_shared_and_persisted_mission_access() {
     )])
     .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    assert_eq!(app.mission_access.snapshot(), "Second");
-    assert_eq!(
-        load_configured_mission_access(&paths).expect("read reduced mission access"),
+    main_assert_eq!(app.mission_access.snapshot() => "Second");
+    main_assert_eq!(
+        load_configured_mission_access(&paths).expect("read reduced mission access") =>
         "Second",
         "a removal replaces the saved value rather than appending a second one"
     );
@@ -2977,18 +2320,12 @@ fn script_earned_mission_access_reaches_the_saved_config() {
 
     app.persist_mission_access_if_changed();
 
-    assert_eq!(
-        load_configured_mission_access(&paths).expect("read saved mission access"),
-        "Earned"
-    );
+    main_assert_eq!(load_configured_mission_access(&paths).expect("read saved mission access") => "Earned");
     // `C4Config` registers MissionAccess as a `CFG_MaxString` escaped
     // string (C4Config.cpp:379), so the quoted C++ form is the only one a
     // shared LegacyClonk install reads back.
     let saved = fs::read_to_string(paths.config_file()).test_value();
-    assert!(
-        saved.contains("MissionAccess=\"Earned\""),
-        "escaped C4Config string expected, got: {saved}"
-    );
+    main_assert!(saved.contains("MissionAccess=\"Earned\""), "escaped C4Config string expected, got: {saved}");
     reset_cached_app_paths();
 }
 
@@ -3008,45 +2345,14 @@ fn earned_mission_access_survives_an_aborted_session() {
 
     let restarted = new_menu_app_with_paths(800, 600, &paths);
 
-    assert!(restarted.mission_access.contains("westgr"));
+    main_assert!(restarted.mission_access.contains("westgr"));
     reset_cached_app_paths();
 }
 
 #[test]
 fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
     let _lock = env_lock().lock();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
-    let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-        ("LC_LANGUAGE", Some(Path::new("US"))),
-    ]);
-    let paths = test_app_paths();
-    let mut app = GameApp::new(
-        800,
-        600,
-        AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        },
-        Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Search Context Tester".to_string(),
-            network: None,
-            record_enabled: false,
-        },
-    )
-    .test_value();
-    wait_for_menu(&mut app);
-    app.open_scenario_browser();
+    let (_guard, _user_data, mut app) = scensel_window_app("Search Context Tester");
 
     let fonts = app.assets.clonk_fonts.clone().test_value();
     let layout = clonk_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
@@ -3056,15 +2362,12 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
     );
     app.test_cursor(label_point);
     app.test_right_button(ElementState::Pressed);
-    assert!(
-        app.context_menu.is_none(),
-        "wooden label has no edit context"
-    );
+    main_assert!(app.context_menu.is_none(), "wooden label has no edit context");
 
     app.menu_state.set_search_text("alpha beta");
     app.menu_state.search_edit.anchor = 0;
     app.menu_state.search_edit.caret = 5;
-    assert!(!app.menu_state.search_focused());
+    main_assert!(!app.menu_state.search_focused());
     let edit_point = PhysicalPosition::new(
         f64::from(layout.search_edit.x + 4),
         f64::from(layout.search_edit.y + layout.search_edit.h / 2),
@@ -3084,13 +2387,10 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         .test_value();
     app.test_right_button(ElementState::Pressed);
     let popup = app.context_menu.test_ref();
-    assert_eq!(popup.pointer_position(), anchor);
-    assert_eq!(popup.layout().panels[0].rows.len(), expected_entries.len());
-    assert_eq!(app.menu_state.search_edit.selected_text(), Some("alpha"));
-    assert!(
-        !app.menu_state.search_focused(),
-        "right-down does not focus edit"
-    );
+    main_assert_eq!(popup.pointer_position() => anchor);
+    main_assert_eq!(popup.layout().panels[0].rows.len() => expected_entries.len());
+    main_assert_eq!(app.menu_state.search_edit.selected_text() => Some("alpha"));
+    main_assert!(!app.menu_state.search_focused(), "right-down does not focus edit");
     app.test_right_button(ElementState::Released);
 
     let popup_margin = app.context_menu.test_ref().layout().panels[0].bounds;
@@ -3099,20 +2399,13 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         f64::from(popup_margin.y + 1),
     ));
     app.test_left_button(ElementState::Pressed);
-    assert_eq!(
-        app.context_menu_pointer_capture,
-        Some(ContextMenuPointerButton::Left)
-    );
+    main_assert_eq!(app.context_menu_pointer_capture => Some(ContextMenuPointerButton::Left));
     app.pointer_left().test_value();
-    assert_eq!(
-        app.context_menu_pointer_capture,
-        Some(ContextMenuPointerButton::Left),
-        "an open popup retains capture across CursorLeft"
-    );
+    main_assert_eq!(app.context_menu_pointer_capture => Some(ContextMenuPointerButton::Left), "an open popup retains capture across CursorLeft");
     app.test_cursor(PhysicalPosition::new(0.0, 0.0));
     app.test_left_button(ElementState::Released);
-    assert!(app.context_menu.is_some());
-    assert_eq!(app.context_menu_pointer_capture, None);
+    main_assert!(app.context_menu.is_some());
+    main_assert_eq!(app.context_menu_pointer_capture => None);
 
     let clear = app.context_menu.test_ref().layout().panels[0].rows[clear_index].rect;
     app.test_cursor(PhysicalPosition::new(
@@ -3120,15 +2413,12 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         f64::from(clear.y + 1),
     ));
     app.test_left_button(ElementState::Pressed);
-    assert!(app.context_menu.is_none());
-    assert_eq!(app.menu_state.search_text(), " beta");
-    assert_eq!(app.menu_state.applied_search_text, " beta");
+    main_assert!(app.context_menu.is_none());
+    main_assert_eq!(app.menu_state.search_text() => " beta");
+    main_assert_eq!(app.menu_state.applied_search_text => " beta");
     app.test_left_button(ElementState::Released);
-    assert!(
-        !app.menu_state.search_focused(),
-        "activation release must not click the underlying edit"
-    );
-    assert_eq!(app.context_menu_pointer_capture, None);
+    main_assert!(!app.menu_state.search_focused(), "activation release must not click the underlying edit");
+    main_assert_eq!(app.context_menu_pointer_capture => None);
 
     app.menu_state.set_search_focused(true);
     app.menu_state.search_edit.anchor = app.menu_state.search_edit.caret;
@@ -3138,23 +2428,17 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         (layout.search_edit.x + layout.search_edit.w / 2) as f32,
         (layout.search_edit.y + layout.search_edit.h / 2) as f32,
     );
-    assert_eq!(
-        app.context_menu
-            .as_ref()
-            .expect("Apps context")
-            .pointer_position(),
-        expected_center
-    );
+    main_assert_eq!(app.context_menu.as_ref().expect("Apps context").pointer_position() => expected_center);
     app.test_text_input('Z');
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
-    assert_eq!(app.menu_state.search_text(), before);
-    assert!(app.menu_state.search_edit.selection_range().is_none());
+    main_assert_eq!(app.menu_state.search_text() => before);
+    main_assert!(app.menu_state.search_edit.selection_range().is_none());
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    assert!(app.context_menu.is_none());
-    assert!(app.menu_state.search_focused(), "logical focus is retained");
+    main_assert!(app.context_menu.is_none());
+    main_assert!(app.menu_state.search_focused(), "logical focus is retained");
 
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     let select_all = app.context_menu.test_ref().layout().panels[0]
@@ -3167,36 +2451,27 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         f64::from(select_all.y + 1),
     ));
     app.test_left_button(ElementState::Pressed);
-    assert!(app.context_menu.is_none());
-    assert_eq!(
-        app.context_menu_pointer_capture,
-        Some(ContextMenuPointerButton::Left)
-    );
+    main_assert!(app.context_menu.is_none());
+    main_assert_eq!(app.context_menu_pointer_capture => Some(ContextMenuPointerButton::Left));
     app.pointer_left().test_value();
-    assert_eq!(app.context_menu_pointer_capture, None);
+    main_assert_eq!(app.context_menu_pointer_capture => None);
 
     app.test_cursor(edit_point);
     app.test_left_button(ElementState::Pressed);
-    assert!(app.menu_state.search_edit.dragging);
+    main_assert!(app.menu_state.search_edit.dragging);
     app.test_left_button(ElementState::Released);
-    assert!(
-        !app.menu_state.search_edit.dragging,
-        "stale context capture must not swallow a later release"
-    );
+    main_assert!(!app.menu_state.search_edit.dragging, "stale context capture must not swallow a later release");
 
     app.menu_state.set_search_focused(false);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    assert!(app.context_menu.is_none());
+    main_assert!(app.context_menu.is_none());
 
     let empty_entries = scensel_search_context_entries(&SearchEditState::default(), false);
     app.open_context_menu_at(empty_entries, expected_center)
         .test_value();
     let empty = app.context_menu.test_ref().layout();
-    assert!(empty.panels[0].rows.is_empty());
-    assert_eq!(
-        (empty.panels[0].bounds.w, empty.panels[0].bounds.h),
-        (40, 7)
-    );
+    main_assert!(empty.panels[0].rows.is_empty());
+    main_assert_eq!((empty.panels[0].bounds.w, empty.panels[0].bounds.h) => (40, 7));
     app.close_context_menu_silently();
 
     let assets = app.assets.scensel_assets().test_value();
@@ -3233,7 +2508,7 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         false,
     )
     .test_value();
-    assert!(focused.pixels() != suppressed.pixels());
+    main_assert!(focused.pixels() != suppressed.pixels());
     reset_cached_app_paths();
 }
 
@@ -3243,38 +2518,7 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
 #[test]
 fn scensel_description_wheel_scrolls_and_clamps() {
     let _lock = env_lock().lock();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
-    let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-        ("LC_LANGUAGE", Some(Path::new("US"))),
-    ]);
-    let paths = test_app_paths();
-    let mut app = GameApp::new(
-        800,
-        600,
-        AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        },
-        Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Scroll Tester".to_string(),
-            network: None,
-            record_enabled: false,
-        },
-    )
-    .test_value();
-    wait_for_menu(&mut app);
-    app.open_scenario_browser();
+    let (_guard, _user_data, mut app) = scensel_window_app("Scroll Tester");
     app.menu_state.stack[0].entries[0].description = Some(
         (0..100)
             .map(|index| format!("long description line {index}"))
@@ -3291,22 +2535,22 @@ fn scensel_description_wheel_scrolls_and_clamps() {
     )));
 
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    assert_eq!(app.menu_state.selection_info_scroll, 60);
+    main_assert_eq!(app.menu_state.selection_info_scroll => 60);
 
     app.menu_state.selection_info_scroll = 0;
     app.test_mouse_wheel(
         MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -180.0)),
         3.0,
     );
-    assert_eq!(app.menu_state.selection_info_scroll, 60);
+    main_assert_eq!(app.menu_state.selection_info_scroll => 60);
 
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 100.0), 1.0);
-    assert_eq!(app.menu_state.selection_info_scroll, 0);
+    main_assert_eq!(app.menu_state.selection_info_scroll => 0);
 
     app.menu_state
         .set_pointer_position(Some(GuiPoint::new(0.0, 0.0)));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    assert_eq!(app.menu_state.selection_info_scroll, 0);
+    main_assert_eq!(app.menu_state.selection_info_scroll => 0);
 
     let template = app.menu_state.stack[0].entries[0].clone();
     app.menu_state.stack[0].entries = (0..20)
@@ -3324,14 +2568,10 @@ fn scensel_description_wheel_scrolls_and_clamps() {
         (layout.list.y + 8) as f32,
     )));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    assert_eq!(app.menu_state.scenario_list_scroll(), 60);
+    main_assert_eq!(app.menu_state.scenario_list_scroll() => 60);
     let mut scrolled_frame = vec![0_u8; 800 * 600 * 4];
     app.test_render(&mut scrolled_frame);
-    assert_eq!(
-        app.menu_state.scenario_list_scroll(),
-        60,
-        "rendering must not snap a manually scrolled list back to its unchanged selection"
-    );
+    main_assert_eq!(app.menu_state.scenario_list_scroll() => 60, "rendering must not snap a manually scrolled list back to its unchanged selection");
 
     let book_fonts = app.assets.book_fonts.clone().test_value();
     let item_height = clonk_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
@@ -3341,12 +2581,7 @@ fn scensel_description_wheel_scrolls_and_clamps() {
     );
     app.test_cursor(click);
     app.test_left_button(ElementState::Released);
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("scroll_02")
-    );
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("scroll_02"));
 
     // Pressing the list track jumps the fixed pin under the pointer and
     // captures subsequent motion even outside the scrollbar.
@@ -3360,14 +2595,14 @@ fn scensel_description_wheel_scrolls_and_clamps() {
     let list_max_scroll = app
         .menu_state
         .scenario_list_max_scroll(layout.list.h - 6, item_height + 1);
-    assert_eq!(app.menu_state.scenario_list_scroll(), list_max_scroll);
+    main_assert_eq!(app.menu_state.scenario_list_scroll() => list_max_scroll);
     app.test_cursor(PhysicalPosition::new(
         f64::from(list_bar.x - 200),
         f64::from(list_bar.y - 200),
     ));
-    assert_eq!(app.menu_state.scenario_list_scroll(), 0);
+    main_assert_eq!(app.menu_state.scenario_list_scroll() => 0);
     app.test_left_button(ElementState::Released);
-    assert!(app.menu_state.scrollbar_interaction.is_none());
+    main_assert!(app.menu_state.scrollbar_interaction.is_none());
 
     // Held arrows advance their persistent bar position by one on every
     // startup draw/update instead of applying a row-sized scroll.
@@ -3377,20 +2612,10 @@ fn scensel_description_wheel_scrolls_and_clamps() {
     ));
     app.test_left_button(ElementState::Pressed);
     app.test_update();
-    assert!(matches!(
-        app.menu_state.scrollbar_interaction,
-        Some(ScenselScrollbarInteraction {
-            kind: ScenselScrollbarInteractionKind::Arrow(1),
-            pin: 1,
-            ..
-        })
-    ));
-    assert!(app.menu_state.scenario_list_scroll() > 0);
+    main_assert!(matches!(app.menu_state.scrollbar_interaction, Some(ScenselScrollbarInteraction {kind: ScenselScrollbarInteractionKind::Arrow(1), pin: 1,..})));
+    main_assert!(app.menu_state.scenario_list_scroll() > 0);
     app.test_update();
-    assert!(matches!(
-        app.menu_state.scrollbar_interaction,
-        Some(ScenselScrollbarInteraction { pin: 2, .. })
-    ));
+    main_assert!(matches!(app.menu_state.scrollbar_interaction, Some(ScenselScrollbarInteraction { pin: 2, .. })));
     app.test_left_button(ElementState::Released);
 
     // The right description page uses the same captured fixed-thumb
@@ -3409,15 +2634,12 @@ fn scensel_description_wheel_scrolls_and_clamps() {
             &info,
         )
     };
-    assert_eq!(
-        app.menu_state.selection_info_scroll,
-        description_metrics.max_scroll
-    );
+    main_assert_eq!(app.menu_state.selection_info_scroll => description_metrics.max_scroll);
     app.test_cursor(PhysicalPosition::new(
         f64::from(description_bar.x + 200),
         f64::from(description_bar.y - 200),
     ));
-    assert_eq!(app.menu_state.selection_info_scroll, 0);
+    main_assert_eq!(app.menu_state.selection_info_scroll => 0);
     app.test_left_button(ElementState::Released);
     reset_cached_app_paths();
 }
@@ -3428,19 +2650,19 @@ fn scensel_description_wheel_scrolls_and_clamps() {
 // (C4GuiContainers.cpp:343-473).
 #[test]
 fn scensel_fixed_scrollbar_geometry_matches_cpp() {
-    assert_eq!(scensel_scrollbar_pin_travel(48), None);
-    assert_eq!(scensel_scrollbar_pin_travel(49), Some(1));
-    assert_eq!(scensel_scrollbar_pin_travel(100), Some(52));
-    assert_eq!(scensel_scrollbar_pin_from_offset(0, 101, 100), Some(0));
-    assert_eq!(scensel_scrollbar_pin_from_offset(50, 101, 100), Some(25));
-    assert_eq!(scensel_scrollbar_pin_from_offset(101, 101, 100), Some(52));
-    assert_eq!(scensel_scrollbar_offset_from_pin(0, 101, 100), Some(0));
-    assert_eq!(scensel_scrollbar_offset_from_pin(26, 101, 100), Some(50));
-    assert_eq!(scensel_scrollbar_offset_from_pin(52, 101, 100), Some(101));
-    assert_eq!(scensel_scrollbar_jump_pin(-50, 100), Some(0));
-    assert_eq!(scensel_scrollbar_jump_pin(50, 100), Some(26));
-    assert_eq!(scensel_scrollbar_jump_pin(500, 100), Some(52));
-    assert_eq!(scensel_scrollbar_offset_from_pin(0, 0, 100), None);
+    main_assert_eq!(scensel_scrollbar_pin_travel(48) => None);
+    main_assert_eq!(scensel_scrollbar_pin_travel(49) => Some(1));
+    main_assert_eq!(scensel_scrollbar_pin_travel(100) => Some(52));
+    main_assert_eq!(scensel_scrollbar_pin_from_offset(0, 101, 100) => Some(0));
+    main_assert_eq!(scensel_scrollbar_pin_from_offset(50, 101, 100) => Some(25));
+    main_assert_eq!(scensel_scrollbar_pin_from_offset(101, 101, 100) => Some(52));
+    main_assert_eq!(scensel_scrollbar_offset_from_pin(0, 101, 100) => Some(0));
+    main_assert_eq!(scensel_scrollbar_offset_from_pin(26, 101, 100) => Some(50));
+    main_assert_eq!(scensel_scrollbar_offset_from_pin(52, 101, 100) => Some(101));
+    main_assert_eq!(scensel_scrollbar_jump_pin(-50, 100) => Some(0));
+    main_assert_eq!(scensel_scrollbar_jump_pin(50, 100) => Some(26));
+    main_assert_eq!(scensel_scrollbar_jump_pin(500, 100) => Some(52));
+    main_assert_eq!(scensel_scrollbar_offset_from_pin(0, 0, 100) => None);
 }
 
 // C4GUI::ListBox::SelectEntry calls ScrollRangeInView so keyboard
@@ -3450,9 +2672,7 @@ fn scensel_fixed_scrollbar_geometry_matches_cpp() {
 fn scensel_list_scroll_keeps_selection_in_view() {
     let scenarios = (0..20)
         .map(|index| {
-            let mut entry = FrontendScenario::fallback();
-            entry.identifier = format!("scenario_{index:02}");
-            entry.title = format!("Scenario {index:02}");
+            scensel_fixture!(frontend_scenario: entry, format!("scenario_{index:02}"), format!("Scenario {index:02}"));
             entry
         })
         .collect::<Vec<_>>();
@@ -3463,23 +2683,21 @@ fn scensel_list_scroll_keeps_selection_in_view() {
 
     let _ = state.menu().select_entry_by_index(19).test_value();
     state.ensure_list_selection_visible(100, 27, 26);
-    assert_eq!(state.scenario_list_scroll(), 439);
+    main_assert_eq!(state.scenario_list_scroll() => 439);
 
-    assert!(state.scroll_scenario_list_by(-60, 100, 27));
-    assert_eq!(state.scenario_list_scroll(), 379);
+    main_assert!(state.scroll_scenario_list_by(-60, 100, 27));
+    main_assert_eq!(state.scenario_list_scroll() => 379);
 
     let _ = state.menu().select_entry_by_index(0).test_value();
     state.ensure_list_selection_visible(100, 27, 26);
-    assert_eq!(state.scenario_list_scroll(), 0);
+    main_assert_eq!(state.scenario_list_scroll() => 0);
 }
 
 #[test]
 fn scensel_list_keys_stop_at_ends_and_page_by_visible_rows() {
     let scenarios = (0..10)
         .map(|index| {
-            let mut entry = FrontendScenario::fallback();
-            entry.identifier = format!("scenario_{index:02}");
-            entry.title = format!("Scenario {index:02}");
+            scensel_fixture!(frontend_scenario: entry, format!("scenario_{index:02}"), format!("Scenario {index:02}"));
             entry
         })
         .collect::<Vec<_>>();
@@ -3489,29 +2707,29 @@ fn scensel_list_keys_stop_at_ends_and_page_by_visible_rows() {
     state.set_include_back(false);
     let _ = state.select_default_entry();
 
-    assert!(state.move_list_selection_clamped(-1).is_empty());
-    assert_eq!(state.menu.selected_index(), Some(0));
+    main_assert!(state.move_list_selection_clamped(-1).is_empty());
+    main_assert_eq!(state.menu.selected_index() => Some(0));
     let _ = state.select_list_end();
-    assert_eq!(state.menu.selected_index(), Some(9));
-    assert!(state.move_list_selection_clamped(1).is_empty());
-    assert_eq!(state.menu.selected_index(), Some(9));
+    main_assert_eq!(state.menu.selected_index() => Some(9));
+    main_assert!(state.move_list_selection_clamped(1).is_empty());
+    main_assert_eq!(state.menu.selected_index() => Some(9));
     let _ = state.select_list_home();
 
     // With 26px rows, 1px spacing and a 100px viewport, rows 0..=2
     // are fully visible. PageDown chooses row 2; another PageDown first
     // scrolls one viewport and chooses the last fully visible row 6.
-    assert!(!state.page_list_selection(1, 100, 27, 26).is_empty());
-    assert_eq!(state.menu.selected_index(), Some(2));
-    assert_eq!(state.scenario_list_scroll(), 0);
-    assert!(!state.page_list_selection(1, 100, 27, 26).is_empty());
-    assert_eq!(state.menu.selected_index(), Some(6));
-    assert_eq!(state.scenario_list_scroll(), 100);
+    main_assert!(!state.page_list_selection(1, 100, 27, 26).is_empty());
+    main_assert_eq!(state.menu.selected_index() => Some(2));
+    main_assert_eq!(state.scenario_list_scroll() => 0);
+    main_assert!(!state.page_list_selection(1, 100, 27, 26).is_empty());
+    main_assert_eq!(state.menu.selected_index() => Some(6));
+    main_assert_eq!(state.scenario_list_scroll() => 100);
 
-    assert!(!state.page_list_selection(-1, 100, 27, 26).is_empty());
-    assert_eq!(state.menu.selected_index(), Some(4));
-    assert!(!state.page_list_selection(-1, 100, 27, 26).is_empty());
-    assert_eq!(state.menu.selected_index(), Some(0));
-    assert_eq!(state.scenario_list_scroll(), 0);
+    main_assert!(!state.page_list_selection(-1, 100, 27, 26).is_empty());
+    main_assert_eq!(state.menu.selected_index() => Some(4));
+    main_assert!(!state.page_list_selection(-1, 100, 27, 26).is_empty());
+    main_assert_eq!(state.menu.selected_index() => Some(0));
+    main_assert_eq!(state.scenario_list_scroll() => 0);
 }
 
 #[test]
@@ -3520,9 +2738,7 @@ fn scensel_typeahead_cycles_only_with_list_focus() {
         .into_iter()
         .enumerate()
         .map(|(index, title)| {
-            let mut entry = FrontendScenario::fallback();
-            entry.identifier = format!("scenario_{index}");
-            entry.title = title.to_string();
+            scensel_fixture!(frontend_scenario: entry, format!("scenario_{index}"), title.to_string());
             entry
         })
         .collect::<Vec<_>>();
@@ -3536,34 +2752,29 @@ fn scensel_typeahead_cycles_only_with_list_focus() {
     for (character, expected) in [('T', 2), ('T', 3), ('t', 0), ('T', 2)] {
         let sound_count = app.ui_sound_log.len();
         app.test_text_input(character);
-        assert_eq!(app.menu_state.menu.selected_index(), Some(expected));
-        assert_eq!(app.ui_sound_log.len(), sound_count + 1);
-        assert_eq!(app.ui_sound_log.last().map(String::as_str), Some("Command"));
+        main_assert_eq!(app.menu_state.menu.selected_index() => Some(expected));
+        main_assert_eq!(app.ui_sound_log.len() => sound_count + 1);
+        main_assert_eq!(app.ui_sound_log.last().map(String::as_str) => Some("Command"));
     }
 
     let sound_count = app.ui_sound_log.len();
     app.test_text_input('x');
-    assert_eq!(app.menu_state.menu.selected_index(), Some(2));
-    assert_eq!(app.ui_sound_log.len(), sound_count);
+    main_assert_eq!(app.menu_state.menu.selected_index() => Some(2));
+    main_assert_eq!(app.ui_sound_log.len() => sound_count);
 
     app.menu_state.set_search_text("");
     app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
     app.test_text_input('T');
-    assert_eq!(app.menu_state.search_text(), "T");
-    assert_eq!(app.menu_state.menu.selected_index(), Some(1));
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("scenario_2")
-    );
-    assert_eq!(app.ui_sound_log.len(), sound_count);
+    main_assert_eq!(app.menu_state.search_text() => "T");
+    main_assert_eq!(app.menu_state.menu.selected_index() => Some(1));
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("scenario_2"));
+    main_assert_eq!(app.ui_sound_log.len() => sound_count);
 
     app.set_scensel_dialog_focus(ScenselDialogFocus::Back);
     app.test_text_input('T');
-    assert_eq!(app.menu_state.search_text(), "T");
-    assert_eq!(app.menu_state.menu.selected_index(), Some(1));
-    assert_eq!(app.ui_sound_log.len(), sound_count);
+    main_assert_eq!(app.menu_state.search_text() => "T");
+    main_assert_eq!(app.menu_state.menu.selected_index() => Some(1));
+    main_assert_eq!(app.ui_sound_log.len() => sound_count);
 }
 
 #[test]
@@ -3574,7 +2785,7 @@ fn window_keys_map_to_shared_list_navigation_codes() {
         (VirtualKeyCode::PageUp, KeyCode::PageUp),
         (VirtualKeyCode::PageDown, KeyCode::PageDown),
     ] {
-        assert_eq!(map_key_code(window_key), Some(gui_key));
+        main_assert_eq!(map_key_code(window_key) => Some(gui_key));
     }
 }
 
@@ -3589,12 +2800,9 @@ fn selected_scenario_maps_through_back_row_offset() {
     state.menu().resize(1280.0, 720.0);
 
     let _ = state.menu().select_entry_by_index(0); // Back row
-    assert!(state.selected_scenario().is_none());
+    main_assert!(state.selected_scenario().is_none());
     let _ = state.menu().select_entry_by_index(1);
-    assert_eq!(
-        state.selected_scenario().map(|entry| entry.title.as_str()),
-        Some("Missions")
-    );
+    main_assert_eq!(state.selected_scenario().map(|entry| entry.title.as_str()) => Some("Missions"));
 }
 
 // Caption above the list: current folder name, "Scenarios" at root
@@ -3609,18 +2817,15 @@ fn book_caption_and_folder_fallback_track_the_stack() {
     state.menu().resize(1280.0, 720.0);
     state.set_include_back(false);
 
-    assert_eq!(state.book_caption(), "Scenarios");
-    assert!(state.current_folder().is_none(), "root has no folder info");
+    main_assert_eq!(state.book_caption() => "Scenarios");
+    main_assert!(state.current_folder().is_none(), "root has no folder info");
 
     state.enter_folder("folder_missions");
-    assert_eq!(state.book_caption(), "Missions");
-    assert_eq!(
-        state.current_folder().map(|folder| folder.title.as_str()),
-        Some("Missions")
-    );
+    main_assert_eq!(state.book_caption() => "Missions");
+    main_assert_eq!(state.current_folder().map(|folder| folder.title.as_str()) => Some("Missions"));
 
     state.leave_folder();
-    assert_eq!(state.book_caption(), "Scenarios");
+    main_assert_eq!(state.book_caption() => "Scenarios");
 }
 
 // List icon defaults (C4StartupScenSelDlg.cpp:705-710,951-952,1036-1037):
@@ -3631,33 +2836,29 @@ fn scensel_entry_icons_follow_cpp_defaults() {
     let mut scenario = FrontendScenario::fallback();
     scenario.kind = ScenarioKind::Scenario;
     scenario.icon_index = Some(15);
-    assert_eq!(scensel_entry_icon(&scenario), 15);
+    main_assert_eq!(scensel_entry_icon(&scenario) => 15);
     scenario.icon_index = Some(99);
-    assert_eq!(scensel_entry_icon(&scenario), 14);
+    main_assert_eq!(scensel_entry_icon(&scenario) => 14);
     scenario.icon_index = None;
-    assert_eq!(scensel_entry_icon(&scenario), 14);
+    main_assert_eq!(scensel_entry_icon(&scenario) => 14);
 
     let mut folder = FrontendScenario::fallback();
     folder.kind = ScenarioKind::Folder;
     folder.path = Some(PathBuf::from("/tmp/Fantasy.c4f"));
-    assert_eq!(scensel_entry_icon(&folder), 0);
+    main_assert_eq!(scensel_entry_icon(&folder) => 0);
     folder.path = Some(PathBuf::from("/tmp/Downloads"));
-    assert_eq!(scensel_entry_icon(&folder), 44);
+    main_assert_eq!(scensel_entry_icon(&folder) => 44);
 }
 
 fn map_test_scenario(folder: &Path, filename: &str, title: &str) -> FrontendScenario {
-    let mut scenario = FrontendScenario::fallback();
-    scenario.identifier = format!("Map.c4f/{filename}");
-    scenario.title = title.to_string();
+    scensel_fixture!(frontend_scenario: scenario, format!("Map.c4f/{filename}"), title.to_string());
     scenario.description = Some(format!("Description for {title}"));
     scenario.path = Some(folder.join(filename));
     scenario
 }
 
 fn map_test_folder(path: &Path, children: Vec<FrontendScenario>) -> FrontendScenario {
-    let mut folder = FrontendScenario::fallback();
-    folder.identifier = "Map.c4f".to_string();
-    folder.title = "Map Folder".to_string();
+    scensel_fixture!(frontend_scenario: folder, "Map.c4f".to_string(), "Map Folder".to_string());
     folder.kind = ScenarioKind::Folder;
     folder.is_playable = false;
     folder.path = Some(path.to_path_buf());
@@ -3673,13 +2874,12 @@ fn open_map_test_folder(app: &mut GameApp, folder: FrontendScenario) {
     app.scenario_catalog = build_scenario_catalog(&scenarios);
     app.open_scenario_browser();
     app.handle_menu_input(|_| {
-        vec![StartupMenuAction::OpenEntry(
-            clonk_frontend::ScenarioSummary {
-                identifier: folder.identifier.clone(),
-                title: folder.title.clone(),
-                kind: ScenarioKind::Folder,
-            },
-        )]
+        vec![StartupMenuAction::OpenEntry(scensel_fixture!(
+            scenario:
+                folder.identifier.clone(),
+                folder.title.clone(),
+                ScenarioKind::Folder,
+        ))]
     })
     .test_value();
 }
@@ -3735,10 +2935,10 @@ fn folder_map_image_dump_and_dynamic_title_font_match_cpp() {
     let dumped = image::open(map_path.join("Dumped.png"))
         .test_value()
         .into_rgba8();
-    assert_eq!(dumped.dimensions(), (4, 4));
-    assert!(dumped.pixels().all(|pixel| pixel.0 == [200, 100, 50, 255]));
+    main_assert_eq!(dumped.dimensions() => (4, 4));
+    main_assert!(dumped.pixels().all(|pixel| pixel.0 == [200, 100, 50, 255]));
     // `continue` skips the ordinary base load, so no base image is retained.
-    assert!(map.scenarios[0].base_image.is_none());
+    main_assert!(map.scenarios[0].base_image.is_none());
 
     // GetFontByHeight ladders on line height, not on 15/20 thresholds.
     let app = new_real_classic_menu_app(320, 200);
@@ -3747,20 +2947,17 @@ fn folder_map_image_dump_and_dynamic_title_font_match_cpp() {
         let (font, zoom) = gui_font_by_height(fonts, height);
         (font.line_height, zoom)
     };
-    assert_eq!(pick(fonts.mini.line_height), (fonts.mini.line_height, 1.0));
-    assert_eq!(pick(fonts.text.line_height), (fonts.text.line_height, 1.0));
-    assert_eq!(
-        pick(fonts.caption.line_height),
-        (fonts.caption.line_height, 1.0)
-    );
+    main_assert_eq!(pick(fonts.mini.line_height) => (fonts.mini.line_height, 1.0));
+    main_assert_eq!(pick(fonts.text.line_height) => (fonts.text.line_height, 1.0));
+    main_assert_eq!(pick(fonts.caption.line_height) => (fonts.caption.line_height, 1.0));
     // Above every tier the title font takes over and keeps a real zoom.
     let huge = fonts.title.line_height * 3;
     let (line_height, zoom) = pick(huge);
-    assert_eq!(line_height, fonts.title.line_height);
-    assert!((zoom - huge as f32 / fonts.title.line_height as f32).abs() < 1e-4);
+    main_assert_eq!(line_height => fonts.title.line_height);
+    main_assert!((zoom - huge as f32 / fonts.title.line_height as f32).abs() < 1e-4);
     // Inside the tolerance band the zoom snaps back to 1.0.
     let tolerated = (fonts.caption.line_height as f32 * 0.9).round() as i32;
-    assert_eq!(pick(tolerated).1, 1.0);
+    main_assert_eq!(pick(tolerated).1 => 1.0);
 }
 
 #[test]
@@ -3783,25 +2980,20 @@ fn folder_map_f5_refresh_preserves_map_and_book_only_shortcuts() {
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     app.open_scenario_browser();
     app.enter_scenario_folder("Map.c4f");
-    assert!(app.menu_state.current_map().is_some());
+    main_assert!(app.menu_state.current_map().is_some());
 
     let select_alpha = app.menu_state.activate_map_button(0).test_value();
     app.handle_menu_input(move |_| vec![select_alpha])
         .test_value();
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some("Map.c4f/Alpha.c4s")
-    );
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("Map.c4f/Alpha.c4s"));
 
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    assert!(app.menu_state.rename_edit.is_none());
+    main_assert!(app.menu_state.rename_edit.is_none());
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
-    assert!(app.message_dialogs.is_empty());
+    main_assert!(app.message_dialogs.is_empty());
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.game_option_input_dialog.is_none());
     app.test_modifiers(ModifiersState::empty());
 
     let beta_path = map_path.join("Beta.c4s");
@@ -3814,24 +3006,11 @@ fn folder_map_f5_refresh_preserves_map_and_book_only_shortcuts() {
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     wait_for_scenario_selector_discovery(&mut app);
 
-    assert_eq!(
-        app.menu_state
-            .current_folder()
-            .map(|folder| folder.identifier.as_str()),
-        Some("Map.c4f")
-    );
+    main_assert_eq!(app.menu_state.current_folder().map(|folder| folder.identifier.as_str()) => Some("Map.c4f"));
     let map = app.menu_state.current_map().test_value();
-    assert!(
-        map.selected_entry().is_none(),
-        "F5 rebuild clears the visible map selection"
-    );
-    assert!(map.scenarios.iter().any(|button| {
-        button
-            .entry
-            .as_ref()
-            .is_some_and(|entry| entry.identifier == "Map.c4f/Beta.c4s")
-    }));
-    assert!(app.scenario_catalog.contains_key("Map.c4f/Beta.c4s"));
+    main_assert!(map.selected_entry().is_none(), "F5 rebuild clears the visible map selection");
+    main_assert!(map.scenarios.iter().any(|button| {button.entry.as_ref().is_some_and(|entry| entry.identifier == "Map.c4f/Beta.c4s")}));
+    main_assert!(app.scenario_catalog.contains_key("Map.c4f/Beta.c4s"));
     reset_cached_app_paths();
 }
 
@@ -3852,23 +3031,18 @@ fn folder_map_disabled_opens_a_normal_book_without_inspecting_the_marker() {
 
     open_map_test_folder(&mut app, folder.clone());
 
-    assert_eq!(app.menu_state.stack.len(), 2);
-    assert!(app.menu_state.current_map().is_none());
-    assert_eq!(app.menu_state.visible_entries().len(), 1);
-    assert_eq!(
-        app.menu_state
-            .selected_scenario()
-            .map(|entry| entry.identifier.as_str()),
-        Some(alpha.identifier.as_str())
-    );
-    assert_eq!(app.mode, AppMode::Menu);
-    assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+    main_assert_eq!(app.menu_state.stack.len() => 2);
+    main_assert!(app.menu_state.current_map().is_none());
+    main_assert_eq!(app.menu_state.visible_entries().len() => 1);
+    main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some(alpha.identifier.as_str()));
+    main_assert_eq!(app.mode => AppMode::Menu);
+    main_assert_eq!(app.startup_view => StartupView::ScenarioBrowser);
 
     let mut invalid_map_app = new_menu_app(640, 480);
     open_map_test_folder(&mut invalid_map_app, folder);
-    assert!(invalid_map_app.menu_state.current_map().is_none());
-    assert_eq!(invalid_map_app.menu_state.visible_entries().len(), 1);
-    assert_eq!(invalid_map_app.mode, AppMode::Menu);
+    main_assert!(invalid_map_app.menu_state.current_map().is_none());
+    main_assert_eq!(invalid_map_app.menu_state.visible_entries().len() => 1);
+    main_assert_eq!(invalid_map_app.mode => AppMode::Menu);
 }
 
 #[test]
@@ -3876,10 +3050,10 @@ fn folder_map_parser_honors_indentation_dedents_and_first_scalar() {
     let parsed = parse_map_folder(
             "[FolderMap]\nMinResX=640\nMinResX=999\n    [Other]\n        [Scenario]\n        File=Nested.c4s\n    [Scenario]\n    File=Direct.c4s\nMinResY=480\n",
         ).test_value();
-    assert_eq!(parsed.min_res_x, 640);
-    assert_eq!(parsed.min_res_y, 480);
-    assert_eq!(parsed.scenarios.len(), 1);
-    assert_eq!(parsed.scenarios[0].filename, "Direct.c4s");
+    main_assert_eq!(parsed.min_res_x => 640);
+    main_assert_eq!(parsed.min_res_y => 480);
+    main_assert_eq!(parsed.scenarios.len() => 1);
+    main_assert_eq!(parsed.scenarios[0].filename => "Direct.c4s");
 }
 
 #[test]
@@ -3947,44 +3121,23 @@ fn folder_map_loads_renders_titles_access_overlays_and_cpp_click_semantics() {
     open_map_test_folder(&mut app, folder);
 
     let map = app.menu_state.current_map().test_value();
-    assert_eq!(map.source_path, map_path);
-    assert_eq!(map.scenarios.len(), 3);
-    assert_eq!(map.scenarios[0].title, "Play Alpha Mission");
-    assert_eq!(map.scenarios[1].title, "Visit Beta Mission now");
-    assert!(map.scenarios[2].entry.is_none());
-    assert_eq!(map.scenarios[2].title, "<c ff0000>ERROR</c>");
-    assert_eq!(map.access_overlays.len(), 2);
-    assert_eq!(
-        map.access_overlays[0]
-            .image
-            .as_ref()
-            .expect("unconditional access image")
-            .pixels()[..4],
-        [0, 0, 80, 255]
-    );
-    assert_eq!(
-        map.access_overlays[1]
-            .image
-            .as_ref()
-            .expect("granted access image")
-            .pixels()[..4],
-        [0, 0, 120, 255]
-    );
+    main_assert_eq!(map.source_path => map_path);
+    main_assert_eq!(map.scenarios.len() => 3);
+    main_assert_eq!(map.scenarios[0].title => "Play Alpha Mission");
+    main_assert_eq!(map.scenarios[1].title => "Visit Beta Mission now");
+    main_assert!(map.scenarios[2].entry.is_none());
+    main_assert_eq!(map.scenarios[2].title => "<c ff0000>ERROR</c>");
+    main_assert_eq!(map.access_overlays.len() => 2);
+    main_assert_eq!(map.access_overlays[0].image.as_ref().expect("unconditional access image").pixels()[..4] => [0, 0, 80, 255]);
+    main_assert_eq!(map.access_overlays[1].image.as_ref().expect("granted access image").pixels()[..4] => [0, 0, 120, 255]);
 
     let first = app.menu_state.activate_map_button(0).test_value();
-    assert!(matches!(
-        &first,
-        StartupMenuAction::SelectionChanged(summary)
-            if summary.identifier == alpha.identifier
-    ));
+    main_assert!(matches!(&first, StartupMenuAction::SelectionChanged(summary) if summary.identifier == alpha.identifier));
     app.process_menu_actions(vec![first]).test_value();
-    assert_eq!(
-        scensel_selection_info(&app.menu_state).title,
-        Some("Alpha Mission")
-    );
+    main_assert_eq!(scensel_selection_info(&app.menu_state).title => Some("Alpha Mission"));
     let second = app.menu_state.activate_map_button(0).test_value();
     let (start, _) = app.process_menu_actions(vec![second]).test_value();
-    assert_eq!(start.as_deref(), Some(alpha.identifier.as_str()));
+    main_assert_eq!(start.as_deref() => Some(alpha.identifier.as_str()));
 
     let layout = clonk_frontend::startup_scensel::scen_sel_layout(
         640,
@@ -3994,20 +3147,10 @@ fn folder_map_loads_renders_titles_access_overlays_and_cpp_click_semantics() {
     let transform =
         MapFolderTransform::for_map(app.menu_state.current_map().test_value(), &layout, 640, 480);
     let (background_x, background_y) = transform.point(50, 50);
-    assert!(app
-        .handle_scensel_map_pointer_down(GuiPoint::new(background_x as f32, background_y as f32,)));
-    assert!(app
-        .menu_state
-        .current_map()
-        .expect("map remains active")
-        .selected_entry()
-        .is_none());
+    main_assert!(app.handle_scensel_map_pointer_down(GuiPoint::new(background_x as f32, background_y as f32,)));
+    main_assert!(app.menu_state.current_map().expect("map remains active").selected_entry().is_none());
     let single = app.menu_state.activate_map_button(1).test_value();
-    assert!(matches!(
-        single,
-        StartupMenuAction::StartScenario(summary)
-            if summary.identifier == beta.identifier
-    ));
+    main_assert!(matches!(single, StartupMenuAction::StartScenario(summary) if summary.identifier == beta.identifier));
 
     let (sample_x, sample_y) = transform.point(50, 50);
     let mut frame = vec![0_u8; 640 * 480 * 4];
@@ -4017,7 +3160,7 @@ fn folder_map_loads_renders_titles_access_overlays_and_cpp_click_semantics() {
         .surface()
         .get_pixel(sample_x as u32, sample_y as u32)
         .test_value();
-    assert_eq!([pixel.r, pixel.g, pixel.b], [20, 30, 40]);
+    main_assert_eq!([pixel.r, pixel.g, pixel.b] => [20, 30, 40]);
 }
 
 #[test]
@@ -4046,30 +3189,14 @@ fn folder_map_hides_locked_button_until_access_is_granted() {
     app.open_scenario_browser();
     app.enter_scenario_folder("Map.c4f");
 
-    assert_eq!(
-        app.menu_state
-            .current_map()
-            .expect("map view active")
-            .scenarios
-            .len(),
-        0,
-        "a denied real scenario has no map button or base image"
-    );
+    main_assert_eq!(app.menu_state.current_map().expect("map view active").scenarios.len() => 0, "a denied real scenario has no map button or base image");
 
     app.apply_scenario_mission_access("MissingPass")
         .test_value();
     wait_for_scenario_selector_discovery(&mut app);
-    assert_eq!(app.mission_access.snapshot(), "OtherPass;MissingPass");
+    main_assert_eq!(app.mission_access.snapshot() => "OtherPass;MissingPass");
     app.enter_scenario_folder("Map.c4f");
-    assert_eq!(
-        app.menu_state
-            .current_map()
-            .expect("map view restored")
-            .scenarios
-            .len(),
-        1,
-        "granting the module creates the map button on rebuild"
-    );
+    main_assert_eq!(app.menu_state.current_map().expect("map view restored").scenarios.len() => 1, "granting the module creates the map button on rebuild");
     reset_cached_app_paths();
 }
 
@@ -4090,11 +3217,7 @@ fn folder_map_minimum_resolution_and_image_failures_fall_back_to_book() {
             format!("[FolderMap]\nMinResX={min_x}\nMinResY={min_y}\n"),
         )
         .test_value();
-        assert_eq!(
-            load_map_folder_data(&folder, 640, 480, &access, &["US".to_string()],).is_some(),
-            loads,
-            "minimum {min_x}x{min_y}"
-        );
+        main_assert_eq!(load_map_folder_data(&folder, 640, 480, &access, &["US".to_string()],).is_some() => loads, "minimum {min_x}x{min_y}");
     }
 
     fs::write(
@@ -4102,7 +3225,7 @@ fn folder_map_minimum_resolution_and_image_failures_fall_back_to_book() {
         "[FolderMap]\n    [AccessGfx]\n    Access=Never\n    OverlayImage=Missing.png\n",
     )
     .test_value();
-    assert!(
+    main_assert!(
         load_map_folder_data(&folder, 640, 480, &access, &["US".to_string()],).is_none(),
         "even an inaccessible named image is loaded before access filtering"
     );
@@ -4112,7 +3235,7 @@ fn folder_map_minimum_resolution_and_image_failures_fall_back_to_book() {
         "[FolderMap]\n    [Scenario]\n    File=Alpha.c4s\n    BaseImage=Missing.png\n",
     )
     .test_value();
-    assert!(
+    main_assert!(
         load_map_folder_data(&folder, 640, 480, &access, &["US".to_string()],).is_none(),
         "a denied scenario image is still loaded before the button is filtered"
     );
@@ -4143,15 +3266,9 @@ fn extensionless_regular_folder_ignores_folder_map_marker() {
     let mut state = MenuState::new(menu, entries);
     state.enter_folder("Regular");
 
-    assert!(!state.configure_current_folder_map(
-        true,
-        640,
-        480,
-        &MissionAccessStore::default(),
-        &["US".to_string()],
-    ));
-    assert!(state.current_map().is_none());
-    assert_eq!(state.current_entries()[0].identifier, child.identifier);
+    main_assert!(!state.configure_current_folder_map(true, 640, 480, &MissionAccessStore::default(), &["US".to_string()],));
+    main_assert!(state.current_map().is_none());
+    main_assert_eq!(state.current_entries()[0].identifier => child.identifier);
 }
 
 #[test]
@@ -4175,7 +3292,7 @@ fn merged_folder_map_uses_a_later_contributing_group() {
         &["US".to_string()],
     )
     .test_value();
-    assert_eq!(map.source_path, later);
+    main_assert_eq!(map.source_path => later);
 }
 
 #[test]
@@ -4186,10 +3303,10 @@ fn merged_scenario_keeps_first_root_mission_access_requirement() {
     locked.mission_access = Some("Secret".to_string());
 
     let user_first = merge_frontend_scenarios(vec![unlocked.clone(), locked.clone()], false);
-    assert_eq!(user_first[0].mission_access, None);
+    main_assert_eq!(user_first[0].mission_access => None);
 
     let install_first = merge_frontend_scenarios(vec![locked, unlocked], false);
-    assert_eq!(install_first[0].mission_access.as_deref(), Some("Secret"));
+    main_assert_eq!(install_first[0].mission_access.as_deref() => Some("Secret"));
 }
 
 #[test]
@@ -4211,20 +3328,11 @@ fn folder_group_rewrite_restores_original_when_commit_fails() {
         Err(io::Error::other("synthetic commit failure"))
     })
     .expect_err("commit failure must roll the original folder group back");
-    assert!(format!("{error:#}").contains("synthetic commit failure"));
-    assert_eq!(
-        fs::read(destination.join("Player.txt")).unwrap(),
-        b"old player"
-    );
-    assert_eq!(
-        fs::read(destination.join("Keep.dat")).unwrap(),
-        b"old sentinel"
-    );
-    assert_eq!(
-        fs::read(destination.join(".metadata")).unwrap(),
-        b"hidden sentinel"
-    );
-    assert!(fs::read_dir(directory.path())
+    main_assert!(format!("{error:#}").contains("synthetic commit failure"));
+    main_assert_eq!(fs::read(destination.join("Player.txt")).unwrap() => b"old player");
+    main_assert_eq!(fs::read(destination.join("Keep.dat")).unwrap() => b"old sentinel");
+    main_assert_eq!(fs::read(destination.join(".metadata")).unwrap() => b"hidden sentinel");
+    main_assert!(fs::read_dir(directory.path())
         .expect("enumerate folder-group root")
         .all(|entry| !entry
             .expect("folder-group root entry")
@@ -4245,14 +3353,8 @@ fn packed_group_rewrite_safely_replaces_an_existing_directory() {
         .test_value();
 
     persist_console_save_group(&replacement, &destination, false).test_value();
-    assert!(destination.is_file());
-    assert_eq!(
-        Group::open(&destination)
-            .expect("open packed replacement")
-            .read_file("Scenario.txt")
-            .unwrap(),
-        b"new"
-    );
+    main_assert!(destination.is_file());
+    main_assert_eq!(Group::open(&destination).expect("open packed replacement").read_file("Scenario.txt").unwrap() => b"new");
 }
 
 #[cfg(unix)]
@@ -4273,17 +3375,11 @@ fn folder_group_rewrite_never_follows_nested_directory_symlinks() {
     replacement.add_child("Hero.c4i", hero).test_value();
     persist_console_save_group(&replacement, &destination, true).test_value();
 
-    assert_eq!(fs::read(external.join("Outside.dat")).unwrap(), b"outside");
-    assert!(!external.join("ObjectInfo.txt").exists());
+    main_assert_eq!(fs::read(external.join("Outside.dat")).unwrap() => b"outside");
+    main_assert!(!external.join("ObjectInfo.txt").exists());
     let saved_child = destination.join("Hero.c4i");
-    assert!(fs::symlink_metadata(&saved_child)
-        .expect("saved child metadata")
-        .file_type()
-        .is_dir());
-    assert_eq!(
-        fs::read(saved_child.join("ObjectInfo.txt")).unwrap(),
-        b"new crew"
-    );
+    main_assert!(fs::symlink_metadata(&saved_child).expect("saved child metadata").file_type().is_dir());
+    main_assert_eq!(fs::read(saved_child.join("ObjectInfo.txt")).unwrap() => b"new crew");
 }
 
 #[cfg(unix)]
@@ -4301,11 +3397,8 @@ fn folder_group_rewrite_preserves_a_root_directory_symlink() {
         .test_value();
 
     persist_console_save_group(&replacement, &linked, true).test_value();
-    assert!(fs::symlink_metadata(&linked)
-        .expect("linked profile metadata")
-        .file_type()
-        .is_symlink());
-    assert_eq!(fs::read(physical.join("Player.txt")).unwrap(), b"new");
+    main_assert!(fs::symlink_metadata(&linked).expect("linked profile metadata").file_type().is_symlink());
+    main_assert_eq!(fs::read(physical.join("Player.txt")).unwrap() => b"new");
 }
 
 #[test]
@@ -4314,20 +3407,10 @@ fn cache_definition_icons_distinguishes_blank_from_malformed_picture() {
     let mut blank = test_definition("BLNK", "Blank rule", "#strict 3\n");
     blank.set_category(C4D_RULE);
     app.engine.register_test_definition(blank);
-    let blank_entry = GoalRuleEntry {
-        definition_id: "BLNK".to_string(),
-        name: "Blank rule".to_string(),
-        description: None,
-        fulfilled: false,
-    };
+    let blank_entry = scensel_fixture!(goal_rule: "BLNK".to_string(), "Blank rule".to_string());
     app.cache_definition_icons(std::slice::from_ref(&blank_entry))
         .test_value();
-    assert!(!app
-        .ingame_menu_gfx
-        .as_ref()
-        .expect("blank cache initializes menu graphics")
-        .definition_icons
-        .contains_key("BLNK"));
+    main_assert!(!app.ingame_menu_gfx.as_ref().expect("blank cache initializes menu graphics").definition_icons.contains_key("BLNK"));
 
     let temp = tempdir();
     let valid_dir = temp.path().join("Valid.c4d");
@@ -4345,17 +3428,8 @@ fn cache_definition_icons_distinguishes_blank_from_malformed_picture() {
     let mut valid = Definition::from_resource(&valid_resource).test_value();
     valid.set_category(C4D_RULE);
     app.engine.register_test_definition(valid);
-    assert!(app
-        .engine
-        .try_definition_picture_image("PCTR")
-        .expect("valid definition resolves")
-        .is_some());
-    let valid_entry = GoalRuleEntry {
-        definition_id: "PCTR".to_string(),
-        name: "Pictured rule".to_string(),
-        description: None,
-        fulfilled: false,
-    };
+    main_assert!(app.engine.try_definition_picture_image("PCTR").expect("valid definition resolves").is_some());
+    let valid_entry = scensel_fixture!(goal_rule: "PCTR".to_string(), "Pictured rule".to_string());
 
     let malformed_dir = temp.path().join("Malformed.c4d");
     fs::create_dir(&malformed_dir).test_value();
@@ -4369,29 +3443,22 @@ fn cache_definition_icons_distinguishes_blank_from_malformed_picture() {
         .save(malformed_dir.join("Graphics.bmp"))
         .test_value();
     let malformed_group = Group::open(&malformed_dir).test_value();
-    assert!(matches!(
+    main_assert!(matches!(
         ResourceDefinitionData::load(&malformed_group),
         Err(ResourceDefinitionError::Graphics { path, reason })
             if path == Path::new("Graphics.png") && !reason.is_empty()
     ));
 
-    let malformed_entry = GoalRuleEntry {
-        definition_id: "BADG".to_string(),
-        name: "Malformed rule".to_string(),
-        description: None,
-        fulfilled: false,
-    };
+    let malformed_entry =
+        scensel_fixture!(goal_rule: "BADG".to_string(), "Malformed rule".to_string());
     let error = app
         .cache_definition_icons(&[valid_entry, blank_entry, malformed_entry])
         .expect_err("a rejected graphics definition must not become a blank menu symbol");
     let EngineError::ClassicMenuParityBoundary { detail } = error else {
         panic!("unexpected malformed definition error: {error:?}");
     };
-    assert_eq!(
-            detail,
-            "classic in-game goal/rule symbol definition `BADG` is unavailable: unknown definition `BADG`; refusing a blank symbol substitute"
-        );
-    assert!(
+    main_assert_eq!(detail => "classic in-game goal/rule symbol definition `BADG` is unavailable: unknown definition `BADG`; refusing a blank symbol substitute");
+    main_assert!(
         app.ingame_menu_gfx
             .as_ref()
             .expect("menu graphics remain allocated")
@@ -4472,11 +3539,11 @@ fn definition_pack_graphics_sits_below_scenario_folders_and_extra_but_above_base
         .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_roots)
         .test_value();
 
-    assert_eq!(
+    main_assert_eq!(
         graphics
             .iter()
             .map(|group| group.root().to_path_buf())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         [
             scenario_graphics.clone(),
             folder_graphics.clone(),
@@ -4493,13 +3560,9 @@ fn definition_pack_graphics_sits_below_scenario_folders_and_extra_but_above_base
             .map(|group| group.root().to_path_buf())
             .test_value()
     };
-    assert_eq!(winner("ScenarioWins.png"), scenario_graphics);
-    assert_eq!(winner("FolderWins.png"), folder_graphics);
-    assert_eq!(winner("ExtraWins.png"), extra_graphics);
-    assert_eq!(winner("PackWins.png"), first_graphics);
-    assert_eq!(
-        winner("PackTie.png"),
-        first_pack.join("Graphics.c4g"),
-        "RegisterMainGroups' second reversal makes the first selected definition pack win"
-    );
+    main_assert_eq!(winner("ScenarioWins.png") => scenario_graphics);
+    main_assert_eq!(winner("FolderWins.png") => folder_graphics);
+    main_assert_eq!(winner("ExtraWins.png") => extra_graphics);
+    main_assert_eq!(winner("PackWins.png") => first_graphics);
+    main_assert_eq!(winner("PackTie.png") => first_pack.join("Graphics.c4g"), "RegisterMainGroups' second reversal makes the first selected definition pack win");
 }

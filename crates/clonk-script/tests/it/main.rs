@@ -3,8 +3,9 @@
 // one link instead of one per file. nextest still runs every #[test]
 // separately (process-per-test), so isolation and parallelism are unchanged.
 
-mod integration_tests;
+#[macro_use]
 mod support;
+mod integration_tests;
 mod test_any_type;
 mod test_appendto;
 mod test_array_append;

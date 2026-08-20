@@ -1,8 +1,8 @@
 // Test for FBRG script parsing
 
-#[test]
-fn parse_fbrg_script() {
-    let source = r#"/* Magische Brücke */
+crate::support::compile_case!(
+    parse_fbrg_script,
+    r#"/* Magische Brücke */
 
 #strict
 
@@ -50,16 +50,5 @@ public func Activate(caster, real_caster) {
 public func GetSpellClass(object pMage) { return(WATR); }
 public func GetSpellCombo(pMage) { return ("233"); }
 public func GetResearchBase () { return (MFFS); }
-"#;
-
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok(), "FBRG script should parse successfully");
-}
+"#,
+);

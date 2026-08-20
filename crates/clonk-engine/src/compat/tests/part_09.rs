@@ -1,6 +1,6 @@
-// Contiguous slice 9 of 11 of the `compat::tests` battery, spliced by
-// `include!` from compat.rs so every test id stays `compat::tests::*`.
-// Mostly: object state, effects, players.
+    // Contiguous slice 9 of 11 of the `compat::tests` battery, spliced by
+    // `include!` from compat.rs so every test id stays `compat::tests::*`.
+    // Mostly: object state, effects, players.
 
     #[test]
     fn get_effect_negative_index_returns_nil() {
@@ -10,61 +10,45 @@
         // probes `i - 1` while i is still nil/zero (Weapon.c4d/Script.c:551-554).
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[
-                Value::String("Bonus".into()),
-                state.clone(),
-                Value::Int(100),
-            ])?;
-            get_effect(&[Value::String("Bonus".into()), state, Value::Int(-1)])
+            add_effect(&[v_string("Bonus".into()), state.clone(), v_int(100)])?;
+            get_effect(&[v_string("Bonus".into()), state, v_int(-1)])
         });
 
-        assert_eq!(result.expect("negative index is not an error"), Value::Nil);
+        assert_eq!(result.expect("negative index is not an error"), NIL);
     }
 
     #[test]
     fn get_effect_returns_command_target_metadata() {
         let state = empty_state();
-        let mut target_map = ValueMap::new();
-        target_map.insert("id".into(), Value::Int(7));
-        let target = Value::Proplist(target_map);
+        let target_map = object_proplist(7);
+        let target = target_map;
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[
-                Value::String("Glow".into()),
+                v_string("Glow".into()),
                 state.clone(),
-                Value::Int(100),
-                Value::Int(1),
+                v_int(100),
+                INT_1,
                 target.clone(),
-                Value::C4Id("BARL".into()),
+                v_id("BARL".into()),
             ])?;
-            get_effect(&[
-                Value::String("Glow".into()),
-                state.clone(),
-                Value::Int(0),
-                Value::Int(4),
-            ])
+            get_effect(&[v_string("Glow".into()), state.clone(), INT_0, v_int(4)])
         });
         let value = result.test_value();
         assert_eq!(value, Value::Object(7));
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[
-                Value::String("Glow".into()),
+                v_string("Glow".into()),
                 state.clone(),
-                Value::Int(100),
-                Value::Int(1),
+                v_int(100),
+                INT_1,
                 target.clone(),
-                Value::C4Id("BARL".into()),
+                v_id("BARL".into()),
             ])?;
-            get_effect(&[
-                Value::String("Glow".into()),
-                state.clone(),
-                Value::Int(0),
-                Value::Int(5),
-            ])
+            get_effect(&[v_string("Glow".into()), state.clone(), INT_0, v_int(5)])
         });
-        let value = result.test_value();
-        assert_eq!(value, Value::C4Id("BARL".into()));
+        assert_eq!(result.test_value(), v_id("BARL".into()));
     }
 
     #[test]
@@ -83,26 +67,20 @@ public func Probe(object carrier)
             GetEffect("Typed", carrier, 0, 7)];
 }
 "#;
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(test_definition("CMND", "Command target", command_script));
-        engine.register_test_definition(test_definition("HOLD", "Effect holder", "#strict 2"));
-        engine.register_test_definition(test_definition("NEWD", "Changed command target", "#strict 2"));
+        let mut engine = engine_with_definitions([
+            test_definition("CMND", "Command target", command_script),
+            test_definition("HOLD", "Effect holder", "#strict 2"),
+            test_definition("NEWD", "Changed command target", "#strict 2"),
+        ]);
         let command = engine.spawn_test_object(crate::SpawnConfig::new("CMND"));
         let holder = engine.spawn_test_object(crate::SpawnConfig::new("HOLD"));
-        let command_index = engine
-            .find_object_index(command).test_value();
+        let command_index = engine.find_object_index(command).test_value();
 
         assert_eq!(
             engine
-                .call_object_function(command_index, "Probe", vec![object_reference_value(holder)],)
+                .call_object_function(command_index, "Probe", vec![v_object(holder)],)
                 .expect("typed GetEffect probe runs"),
-            Value::Array(vec![
-                Value::Bool(true),
-                Value::Int(42),
-                Value::Bool(true),
-                Value::Bool(true),
-                Value::Nil,
-            ])
+            Value::Array(vec![TRUE, v_int(42), TRUE, TRUE, NIL,])
         );
     }
 
@@ -114,22 +92,16 @@ public func Probe(object carrier)
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[
-                Value::String("Glow".into()),
+                v_string("Glow".into()),
                 state.clone(),
-                Value::Int(100),
-                Value::Int(1),
-                Value::Nil,
-                Value::C4Id("BARL".into()),
+                v_int(100),
+                INT_1,
+                NIL,
+                v_id("BARL".into()),
             ])?;
-            get_effect(&[
-                Value::String("Glow".into()),
-                state.clone(),
-                Value::Int(0),
-                Value::Int(5),
-            ])
+            get_effect(&[v_string("Glow".into()), state.clone(), INT_0, v_int(5)])
         });
-        let value = result.test_value();
-        assert_eq!(value, Value::C4Id("BARL".into()));
+        assert_eq!(result.test_value(), v_id("BARL".into()));
     }
 
     #[test]
@@ -141,23 +113,15 @@ public func Probe(object carrier)
         // EffectCall (Clonk.c4d/Script.c:860-875).
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[
-                Value::String("First".into()),
-                state.clone(),
-                Value::Int(100),
-            ])?;
-            add_effect(&[
-                Value::String("XControl".into()),
-                state.clone(),
-                Value::Int(100),
-            ])?;
-            remove_effect(&[Value::String("First".into()), state.clone()])?;
-            get_effect(&[Value::String("*Control*".into()), state.clone()])
+            add_effect(&[v_string("First".into()), state.clone(), v_int(100)])?;
+            add_effect(&[v_string("XControl".into()), state.clone(), v_int(100)])?;
+            remove_effect(&[v_string("First".into()), state.clone()])?;
+            get_effect(&[v_string("*Control*".into()), state.clone()])
         });
         let value = result.test_value();
         assert_eq!(
             value,
-            Value::Int(2),
+            v_int(2),
             "the surviving effect keeps its allocated iNumber"
         );
     }
@@ -170,23 +134,15 @@ public func Probe(object carrier)
         // `GetEffect(0, this(), iEffect, 1)` relies on it.
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[
-                Value::String("First".into()),
-                state.clone(),
-                Value::Int(100),
-            ])?;
-            add_effect(&[
-                Value::String("XControl".into()),
-                state.clone(),
-                Value::Int(100),
-            ])?;
-            remove_effect(&[Value::String("First".into()), state.clone()])?;
-            get_effect(&[Value::Int(0), state.clone(), Value::Int(2), Value::Int(1)])
+            add_effect(&[v_string("First".into()), state.clone(), v_int(100)])?;
+            add_effect(&[v_string("XControl".into()), state.clone(), v_int(100)])?;
+            remove_effect(&[v_string("First".into()), state.clone()])?;
+            get_effect(&[INT_0, state.clone(), v_int(2), INT_1])
         });
         let value = result.test_value();
         assert_eq!(
             value,
-            Value::String("XControl".into()),
+            v_string("XControl".into()),
             "number 2 resolves the effect even at list position 0"
         );
     }
@@ -198,25 +154,24 @@ public func Probe(object carrier)
         // never errors.
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            let number = add_effect(&[Value::String("Potion".into()), state.clone()])?;
+            let number = add_effect(&[v_string("Potion".into()), state.clone()])?;
             assert_eq!(
-                effect_call(&[state.clone(), number.clone(), Value::Nil])?,
-                Value::Nil,
+                effect_call(&[state.clone(), number.clone(), NIL])?,
+                NIL,
                 "nil call name is a silent nil"
             );
             assert_eq!(
-                effect_call(&[state.clone(), number, Value::String(String::new().into())])?,
-                Value::Nil,
+                effect_call(&[state.clone(), number, v_string(String::new().into())])?,
+                NIL,
                 "empty call name is a silent nil"
             );
-            effect_call(&[
-                state.clone(),
-                Value::Int(99),
-                Value::String("Activate".into()),
-            ])
+            effect_call(&[state.clone(), v_int(99), v_string("Activate".into())])
         });
-        let value = result.test_value();
-        assert_eq!(value, Value::Nil, "unknown effect number is a silent nil");
+        assert_eq!(
+            result.test_value(),
+            NIL,
+            "unknown effect number is a silent nil"
+        );
     }
 
     #[test]
@@ -225,7 +180,7 @@ public func Probe(object carrier)
         // ConvertTo error (C4AulExec.cpp:1364-1396).
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            effect_call(&[state.clone(), Value::Int(1), Value::Int(7)])
+            effect_call(&[state.clone(), INT_1, v_int(7)])
         });
         result.expect_err("truthy int call name errors like C++ ConvertTo");
     }
@@ -237,11 +192,10 @@ public func Probe(object carrier)
         // function the call is a silent C4VNull (:454-455).
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            let number = add_effect(&[Value::String("Potion".into()), state.clone()])?;
-            effect_call(&[state.clone(), number, Value::String("Activate".into())])
+            let number = add_effect(&[v_string("Potion".into()), state.clone()])?;
+            effect_call(&[state.clone(), number, v_string("Activate".into())])
         });
-        let value = result.test_value();
-        assert_eq!(value, Value::Nil);
+        assert_eq!(result.test_value(), NIL);
     }
 
     #[test]
@@ -250,15 +204,14 @@ public func Probe(object carrier)
         // C4Effect::DoCall (C4Script.cpp:5589-5601); it does not copy the list.
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            let number = add_effect(&[Value::String("Potion".into()), state.clone()])?;
+            let number = add_effect(&[v_string("Potion".into()), state.clone()])?;
             reset_effect_snapshot_count();
-            let value =
-                effect_call(&[state.clone(), number, Value::String("Activate".into())])?;
+            let value = effect_call(&[state.clone(), number, v_string("Activate".into())])?;
             assert_eq!(effect_snapshot_count(), 0);
             Ok(value)
         });
 
-        assert_eq!(result.expect("EffectCall succeeds"), Value::Nil);
+        assert_eq!(result.expect("EffectCall succeeds"), NIL);
     }
 
     /// `AddEffect` must not copy the effect stack to decide whether an
@@ -273,56 +226,44 @@ public func Probe(object carrier)
     fn add_effect_checks_blocking_priorities_without_cloning_the_effect_stack() {
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[
-                Value::String("Glow".into()),
-                state.clone(),
-                Value::Int(120),
-            ])?;
+            add_effect(&[v_string("Glow".into()), state.clone(), v_int(120)])?;
             reset_effect_snapshot_count();
-            let number = add_effect(&[
-                Value::String("Spark".into()),
-                state.clone(),
-                Value::Int(80),
-            ])?;
+            let number = add_effect(&[v_string("Spark".into()), state.clone(), v_int(80)])?;
             assert_eq!(effect_snapshot_count(), 0);
             Ok(number)
         });
 
-        assert!(matches!(
-            result.expect("AddEffect succeeds"),
-            Value::Int(_)
-        ));
+        assert!(matches!(result.expect("AddEffect succeeds"), Value::Int(_)));
     }
 
     #[test]
     fn get_effect_count_filters_by_name_and_priority() {
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
-            add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
-            add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
-            get_effect_count(&[Value::Nil, state.clone()])
+            add_effect(&[v_string("Glow".into()), state.clone(), v_int(120)])?;
+            add_effect(&[v_string("Spark".into()), state.clone(), v_int(80)])?;
+            add_effect(&[v_string("Flame".into()), state.clone(), v_int(50)])?;
+            get_effect_count(&[NIL, state.clone()])
         });
         let value = result.test_value();
-        assert_eq!(value, Value::Int(3));
+        assert_eq!(value, v_int(3));
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
-            add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
-            add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
-            get_effect_count(&[Value::String("Glow".into()), state.clone()])
+            add_effect(&[v_string("Glow".into()), state.clone(), v_int(120)])?;
+            add_effect(&[v_string("Spark".into()), state.clone(), v_int(80)])?;
+            add_effect(&[v_string("Flame".into()), state.clone(), v_int(50)])?;
+            get_effect_count(&[v_string("Glow".into()), state.clone()])
         });
         let value = result.test_value();
-        assert_eq!(value, Value::Int(1));
+        assert_eq!(value, INT_1);
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
-            add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
-            add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
-            get_effect_count(&[Value::Nil, state.clone(), Value::Int(90)])
+            add_effect(&[v_string("Glow".into()), state.clone(), v_int(120)])?;
+            add_effect(&[v_string("Spark".into()), state.clone(), v_int(80)])?;
+            add_effect(&[v_string("Flame".into()), state.clone(), v_int(50)])?;
+            get_effect_count(&[NIL, state.clone(), v_int(90)])
         });
-        let value = result.test_value();
-        assert_eq!(value, Value::Int(2));
+        assert_eq!(result.test_value(), v_int(2));
     }
 
     #[test]
@@ -331,15 +272,15 @@ public func Probe(object carrier)
         // (C4Script.cpp:5559-5568); counting does not copy the C4Effect list.
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
-            add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
+            add_effect(&[v_string("Glow".into()), state.clone(), v_int(120)])?;
+            add_effect(&[v_string("Spark".into()), state.clone(), v_int(80)])?;
             reset_effect_snapshot_count();
-            let value = get_effect_count(&[Value::Nil, state.clone()])?;
+            let value = get_effect_count(&[NIL, state.clone()])?;
             assert_eq!(effect_snapshot_count(), 0);
             Ok(value)
         });
 
-        assert_eq!(result.expect("GetEffectCount succeeds"), Value::Int(2));
+        assert_eq!(result.expect("GetEffectCount succeeds"), v_int(2));
     }
 
     #[test]
@@ -349,24 +290,24 @@ public func Probe(object carrier)
         // Clonk.c4d Script.c:587 gates riding controls on
         // `WildcardMatch(GetAction(), "Ride*")`.
         let m = |s: &str, w: &str| {
-            wildcard_match(&[Value::String(s.into()), Value::String(w.into())]).test_value()
+            wildcard_match(&[v_string(s.into()), v_string(w.into())]).test_value()
         };
-        assert_eq!(m("Walk", "Ride*"), Value::Int(0));
-        assert_eq!(m("Ride", "Ride*"), Value::Int(1));
-        assert_eq!(m("RideStill", "Ride*"), Value::Int(1));
-        assert_eq!(m("IntJnRAimControl", "*Control*"), Value::Int(1));
-        assert_eq!(m("abc", "*b"), Value::Int(0));
-        assert_eq!(m("ab", "a?"), Value::Int(1));
-        assert_eq!(m("ab", "*"), Value::Int(1));
-        assert_eq!(m("", ""), Value::Int(1));
+        assert_eq!(m("Walk", "Ride*"), INT_0);
+        assert_eq!(m("Ride", "Ride*"), INT_1);
+        assert_eq!(m("RideStill", "Ride*"), INT_1);
+        assert_eq!(m("IntJnRAimControl", "*Control*"), INT_1);
+        assert_eq!(m("abc", "*b"), INT_0);
+        assert_eq!(m("ab", "a?"), INT_1);
+        assert_eq!(m("ab", "*"), INT_1);
+        assert_eq!(m("", ""), INT_1);
         // FnStringPar maps nil (and Set0'd falsy pars) to "" (C4Script.cpp:78-81).
         assert_eq!(
-            wildcard_match(&[Value::Nil, Value::Int(0)]).expect("falsy args succeed"),
-            Value::Int(1)
+            wildcard_match(&[NIL, INT_0]).expect("falsy args succeed"),
+            INT_1
         );
         assert_eq!(
-            wildcard_match(&[Value::String("x".into()), Value::Nil]).expect("nil wildcard"),
-            Value::Int(0)
+            wildcard_match(&[v_string("x".into()), NIL]).expect("nil wildcard"),
+            INT_0
         );
     }
 
@@ -379,22 +320,19 @@ public func Probe(object carrier)
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[
-                Value::String("IntJnRAimControl".into()),
+                v_string("IntJnRAimControl".into()),
                 state.clone(),
-                Value::Int(100),
+                v_int(100),
             ])?;
-            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(50)])?;
-            let count = get_effect_count(&[Value::String("*Control*".into()), state.clone()])?;
-            assert_eq!(count, Value::Int(1));
-            let number = get_effect(&[Value::String("*Control*".into()), state.clone()])?;
+            add_effect(&[v_string("Glow".into()), state.clone(), v_int(50)])?;
+            let count = get_effect_count(&[v_string("*Control*".into()), state.clone()])?;
+            assert_eq!(count, INT_1);
+            let number = get_effect(&[v_string("*Control*".into()), state.clone()])?;
             assert!(matches!(number, Value::Int(n) if n > 0));
-            remove_effect(&[Value::String("*Contr?l*".into()), state.clone()])?;
-            get_effect_count(&[Value::Nil, state.clone()])
+            remove_effect(&[v_string("*Contr?l*".into()), state.clone()])?;
+            get_effect_count(&[NIL, state.clone()])
         });
-        assert_eq!(
-            result.expect("wildcard filter chain succeeds"),
-            Value::Int(1)
-        );
+        assert_eq!(result.expect("wildcard filter chain succeeds"), INT_1);
     }
 
     #[test]
@@ -405,22 +343,21 @@ public func Probe(object carrier)
         // Control2Effect) counts all effects like a nil name.
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
-            add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
-            get_effect_count(&[Value::Int(0), state.clone()])
+            add_effect(&[v_string("Glow".into()), state.clone(), v_int(120)])?;
+            add_effect(&[v_string("Spark".into()), state.clone(), v_int(80)])?;
+            get_effect_count(&[INT_0, state.clone()])
         });
         let value = result.test_value();
-        assert_eq!(value, Value::Int(2));
+        assert_eq!(value, v_int(2));
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
-            get_effect_count(&[Value::Bool(false), state.clone()])
+            add_effect(&[v_string("Glow".into()), state.clone(), v_int(120)])?;
+            get_effect_count(&[FALSE, state.clone()])
         });
-        let value = result.test_value();
-        assert_eq!(value, Value::Int(1));
+        assert_eq!(result.test_value(), INT_1);
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            get_effect_count(&[Value::Int(7), state.clone()])
+            get_effect_count(&[v_int(7), state.clone()])
         });
         result.expect_err("GetEffectCount with truthy int name errors like C++ ConvertTo");
     }
@@ -435,45 +372,43 @@ public func Probe(object carrier)
         // nothing (numbers start at 1, C4Effect.cpp:76-78).
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            let number =
-                add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
+            let number = add_effect(&[v_string("Glow".into()), state.clone(), v_int(120)])?;
             assert!(matches!(number, Value::Int(n) if n > 0));
             assert_eq!(
-                get_effect(&[Value::Int(0), state.clone(), number.clone()])?,
+                get_effect(&[INT_0, state.clone(), number.clone()])?,
                 number,
                 "the AddEffect handle resolves by number"
             );
             assert_eq!(
-                get_effect(&[Value::Int(0), state.clone()])?,
-                Value::Nil,
+                get_effect(&[INT_0, state.clone()])?,
+                NIL,
                 "number 0 matches no effect like C4Effect::Get"
             );
-            remove_effect(&[Value::Int(0), state.clone(), number])?;
-            get_effect_count(&[Value::Nil, state.clone()])
+            remove_effect(&[INT_0, state.clone(), number])?;
+            get_effect_count(&[NIL, state.clone()])
         });
-        let value = result.test_value();
-        assert_eq!(value, Value::Int(0));
+        assert_eq!(result.test_value(), INT_0);
     }
 
     #[test]
     fn get_effect_count_reads_state_snapshot_when_no_context() {
         let mut glow = ValueMap::new();
-        glow.insert("name".into(), Value::String("Glow".into()));
-        glow.insert("priority".into(), Value::Int(100));
-        glow.insert("interval".into(), Value::Int(1));
-        glow.insert("timer".into(), Value::Int(0));
+        glow.insert("name".into(), v_string("Glow".into()));
+        glow.insert("priority".into(), v_int(100));
+        glow.insert("interval".into(), INT_1);
+        glow.insert("timer".into(), INT_0);
 
         let mut spark = ValueMap::new();
-        spark.insert("name".into(), Value::String("Spark".into()));
-        spark.insert("priority".into(), Value::Int(60));
-        spark.insert("interval".into(), Value::Int(1));
-        spark.insert("timer".into(), Value::Int(0));
+        spark.insert("name".into(), v_string("Spark".into()));
+        spark.insert("priority".into(), v_int(60));
+        spark.insert("interval".into(), INT_1);
+        spark.insert("timer".into(), INT_0);
 
         let mut upper = ValueMap::new();
-        upper.insert("name".into(), Value::String("Upper".into()));
-        upper.insert("priority".into(), Value::Int(-200));
-        upper.insert("interval".into(), Value::Int(1));
-        upper.insert("timer".into(), Value::Int(0));
+        upper.insert("name".into(), v_string("Upper".into()));
+        upper.insert("priority".into(), v_int(-200));
+        upper.insert("interval".into(), INT_1);
+        upper.insert("timer".into(), INT_0);
 
         let state = {
             let mut map = ValueMap::new();
@@ -488,20 +423,20 @@ public func Probe(object carrier)
             Value::Proplist(map)
         };
 
-        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Nil]).test_value();
-        assert_eq!(value, Value::Int(3));
+        let value = get_effect_count(&[NIL, state.clone(), NIL]).test_value();
+        assert_eq!(value, v_int(3));
 
-        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(0)]).test_value();
-        assert_eq!(value, Value::Int(3));
+        let value = get_effect_count(&[NIL, state.clone(), INT_0]).test_value();
+        assert_eq!(value, v_int(3));
 
-        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(100)]).test_value();
-        assert_eq!(value, Value::Int(3));
+        let value = get_effect_count(&[NIL, state.clone(), v_int(100)]).test_value();
+        assert_eq!(value, v_int(3));
 
-        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(-100)]).test_value();
-        assert_eq!(value, Value::Int(1));
+        let value = get_effect_count(&[NIL, state.clone(), v_int(-100)]).test_value();
+        assert_eq!(value, INT_1);
 
-        let value = get_effect_count(&[Value::String("Spark".into()), state, Value::Int(50)]).test_value();
-        assert_eq!(value, Value::Int(0));
+        let value = get_effect_count(&[v_string("Spark".into()), state, v_int(50)]).test_value();
+        assert_eq!(value, INT_0);
     }
 
     #[test]
@@ -509,45 +444,35 @@ public func Probe(object carrier)
         let state = empty_state();
         let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[
-                Value::String("Spark".into()),
+                v_string("Spark".into()),
                 state.clone(),
-                Value::Int(100),
-                Value::Int(1),
-                Value::Nil,
-                Value::Nil,
-                Value::Int(3),
-                object_reference_value(ObjectId::new(44)),
+                v_int(100),
+                INT_1,
+                NIL,
+                NIL,
+                v_int(3),
+                v_object(ObjectId::new(44)),
             ])?;
 
-            let initial = effect_var(&[Value::Int(0), state.clone(), Value::Int(1)])?;
-            assert_eq!(initial, Value::Nil);
+            let initial = effect_var(&[INT_0, state.clone(), INT_1])?;
+            assert_eq!(initial, NIL);
 
-            let object = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)])?;
-            assert_eq!(object, Value::Nil);
+            let object = effect_var(&[INT_1, state.clone(), INT_1])?;
+            assert_eq!(object, NIL);
 
-            effect_var(&[Value::Int(0), state.clone(), Value::Int(1), Value::Int(3)])?;
-            effect_var(&[
-                Value::Int(1),
-                state.clone(),
-                Value::Int(1),
-                object_reference_value(ObjectId::new(44)),
-            ])?;
+            effect_var(&[INT_0, state.clone(), INT_1, v_int(3)])?;
+            effect_var(&[INT_1, state.clone(), INT_1, v_object(ObjectId::new(44))])?;
 
-            let unset = effect_var(&[Value::Int(2), state.clone(), Value::Int(1)])?;
-            assert_eq!(unset, Value::Nil);
+            let unset = effect_var(&[v_int(2), state.clone(), INT_1])?;
+            assert_eq!(unset, NIL);
 
-            let updated = effect_var(&[
-                Value::Int(2),
-                state.clone(),
-                Value::Int(1),
-                Value::String("beam".into()),
-            ])?;
-            assert_eq!(updated, Value::String("beam".into()));
+            let updated = effect_var(&[v_int(2), state.clone(), INT_1, v_string("beam".into())])?;
+            assert_eq!(updated, v_string("beam".into()));
 
-            let reread = effect_var(&[Value::Int(2), state.clone(), Value::Int(1)])?;
-            assert_eq!(reread, Value::String("beam".into()));
+            let reread = effect_var(&[v_int(2), state.clone(), INT_1])?;
+            assert_eq!(reread, v_string("beam".into()));
 
-            Ok(Value::Nil)
+            Ok(NIL)
         });
 
         result.test_value();
@@ -568,13 +493,13 @@ public func Probe(object carrier)
     #[test]
     fn effect_var_reads_from_state_without_context() {
         let mut effect_map = ValueMap::new();
-        effect_map.insert("name".into(), Value::String("Glow".into()));
-        effect_map.insert("priority".into(), Value::Int(80));
-        effect_map.insert("interval".into(), Value::Int(1));
-        effect_map.insert("timer".into(), Value::Int(0));
+        effect_map.insert("name".into(), v_string("Glow".into()));
+        effect_map.insert("priority".into(), v_int(80));
+        effect_map.insert("interval".into(), INT_1);
+        effect_map.insert("timer".into(), INT_0);
         effect_map.insert(
             "vars".into(),
-            Value::Array(vec![Value::Int(9), Value::String("pulse".into())]),
+            Value::Array(vec![v_int(9), v_string("pulse".into())]),
         );
 
         let mut state_map = ValueMap::new();
@@ -584,22 +509,21 @@ public func Probe(object carrier)
         );
         let state = Value::Proplist(state_map);
 
-        let read_value = effect_var(&[Value::Int(0), state.clone(), Value::Int(1)]).test_value();
-        assert_eq!(read_value, Value::Int(9));
+        let read_value = effect_var(&[INT_0, state.clone(), INT_1]).test_value();
+        assert_eq!(read_value, v_int(9));
 
-        let read_string = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)]).test_value();
-        assert_eq!(read_string, Value::String("pulse".into()));
+        let read_string = effect_var(&[INT_1, state.clone(), INT_1]).test_value();
+        assert_eq!(read_string, v_string("pulse".into()));
 
-        let set_result = effect_var(&[Value::Int(0), state, Value::Int(1), Value::Int(5)]);
+        let set_result = effect_var(&[INT_0, state, INT_1, v_int(5)]);
         assert!(set_result.is_err());
     }
 
     #[test]
     fn set_action_records_object_update() {
-        let args = vec![Value::String("Walk".into())];
+        let args = vec![v_string("Walk".into())];
         let (result, outcome) = with_object_host_context_actions(&["Walk"], || set_action(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.test_value(), TRUE);
         let update = outcome.object_update.test_value();
         let action = update.action.test_value();
         assert_eq!(action.name.as_deref(), Some("Walk"));
@@ -612,12 +536,10 @@ public func Probe(object carrier)
         // FnSetAction (C4Script.cpp:747-753): the object arguments are the
         // ACTION's targets — SetActionByName(name, pTarget, pTarget2) —
         // never a which-object guard.
-        let mut target_map = ValueMap::new();
-        target_map.insert("id".into(), Value::Int(2));
-        let args = vec![Value::String("Jump".into()), Value::Proplist(target_map)];
+        let target_map = object_proplist(2);
+        let args = vec![v_string("Jump".into()), target_map];
         let (result, outcome) = with_object_host_context_actions(&["Jump"], || set_action(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.test_value(), TRUE);
         let update = outcome.object_update.test_value();
         let action = update.action.test_value();
         assert_eq!(action.target, Some(Some(ObjectId::new(2))));
@@ -629,10 +551,9 @@ public func Probe(object carrier)
         // (C4Object.cpp:4123-4125: `if (pTarget) Action.Target = pTarget;`)
         // — SetAction(name, nil, nil) keeps the previous targets, for
         // explicit nils and omitted arguments alike.
-        let args = vec![Value::String("Jump".into()), Value::Nil, Value::Nil];
+        let args = vec![v_string("Jump".into()), NIL, NIL];
         let (result, outcome) = with_object_host_context_actions(&["Jump"], || set_action(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.test_value(), TRUE);
         let update = outcome.object_update.test_value();
         let action = update.action.test_value();
         assert_eq!(action.target, None, "nil target1 must not stage a clear");
@@ -644,14 +565,15 @@ public func Probe(object carrier)
         let target1 = Value::Object(2);
         let target2 = Value::Object(3);
         for name in ["Idle", "ActIdle"] {
-            let args = vec![Value::String(name.into()), target1.clone(), target2.clone()];
+            let args = vec![v_string(name.into()), target1.clone(), target2.clone()];
             let (result, outcome) =
                 with_object_host_context_actions(&["Idle", "ActIdle"], || set_action(&args));
-            assert_eq!(result.expect("SetAction returns bool"), Value::Bool(true));
+            assert_eq!(result.expect("SetAction returns bool"), TRUE);
             let action = outcome
                 .object_update
                 .expect("action update recorded")
-                .action.test_value();
+                .action
+                .test_value();
             assert_eq!(action.name.as_deref(), Some("Idle"));
             assert_eq!(action.target, None, "{name} must ignore target1");
             assert_eq!(action.target2, None, "{name} must ignore target2");
@@ -660,19 +582,20 @@ public func Probe(object carrier)
 
     #[test]
     fn same_slot_set_action_always_clears_phase_delay_like_cpp() {
-        let args = [Value::String("Idle".into())];
+        let args = [v_string("Idle".into())];
         let (result, outcome) = with_object_host_context_actions_and_ticks(&[], 6, || {
             Ok::<_, RuntimeError>(Value::Array(vec![set_action(&args)?, get_act_time(&[])?]))
         });
         assert_eq!(
             result.expect("SetAction returns bool"),
-            Value::Array(vec![Value::Bool(true), Value::Int(6)]),
+            Value::Array(vec![TRUE, v_int(6)]),
             "same-slot SetAction preserves Action.Time"
         );
         let action = outcome
             .object_update
             .expect("action update recorded")
-            .action.test_value();
+            .action
+            .test_value();
         assert_eq!(action.name.as_deref(), Some("Idle"));
         assert_eq!(action.phase, None, "already-zero phase needs no write");
         assert_eq!(action.ticks, Some(0), "PhaseDelay resets unconditionally");
@@ -700,15 +623,7 @@ public func Probe(object carrier)
         let target_ocf = ocf::NORMAL | if target_ready { ocf::FIGHT_READY } else { 0 };
 
         let world_object = |id, definition: &str, cached_ocf| {
-            let mut state = crate::preview_spawn_state(
-                Vector2::ZERO,
-                OWNER_NONE,
-                OWNER_NONE,
-                DEFAULT_CATEGORY,
-                crate::FULL_CON,
-                crate::CONTACT_DENSITY_SOLID,
-                Vec::new(),
-            );
+            let mut state = compat_preview_state(OWNER_NONE, OWNER_NONE, DEFAULT_CATEGORY);
             state.action = crate::ActionState::new("Walk");
             state.ocf = cached_ocf;
             fixture_world_object(id, definition)
@@ -729,8 +644,7 @@ public func Probe(object carrier)
                 source.push_str(body);
                 source.push_str(" }\n");
             }
-            script
-                .load_script(&source).test_value();
+            script.load_script(&source).test_value();
             Arc::new(script)
         };
 
@@ -773,7 +687,7 @@ public func Probe(object carrier)
         .with_definition_id("CLNK")
         .with_ocf(caller_ocf);
 
-        with_effect_context(Some(caller), &[], world, 3, || {
+        with_compat_context!(Some(caller), world, 3, || {
             call_world_object_own_function(caller_id, "Probe", &args)
                 .unwrap_or_else(|| Err(RuntimeError::new("FightWith fixture Probe is missing")))
         })
@@ -786,10 +700,7 @@ public func Probe(object carrier)
         if object == ObjectId::new(1) {
             outcome.object_update.as_ref()?.action.as_ref()
         } else {
-            outcome
-                .other_objects
-                .iter()
-                .find(|entry| entry.object_id == object)?
+            foreign_outcome(outcome, object)?
                 .update
                 .as_ref()?
                 .action
@@ -806,16 +717,14 @@ public func Probe(object carrier)
             true,
             Some("return(who != this());"),
             Some("return(who != this());"),
-            vec![object_reference_value(target_id), Value::Nil],
+            vec![v_object(target_id), NIL],
         );
 
-        assert_eq!(result.expect("FightWith succeeds"), Value::Bool(true));
-        let caller_action =
-            fight_with_action(&outcome, caller_id).test_value();
+        assert_eq!(result.expect("FightWith succeeds"), TRUE);
+        let caller_action = fight_with_action(&outcome, caller_id).test_value();
         assert_eq!(caller_action.name.as_deref(), Some("Fight"));
         assert_eq!(caller_action.target, Some(Some(target_id)));
-        let target_action =
-            fight_with_action(&outcome, target_id).test_value();
+        let target_action = fight_with_action(&outcome, target_id).test_value();
         assert_eq!(target_action.name.as_deref(), Some("Fight"));
         assert_eq!(target_action.target, Some(Some(caller_id)));
     }
@@ -828,10 +737,10 @@ public func Probe(object carrier)
                 target_ready,
                 Some("SetAction(\"Checked\"); return(false);"),
                 Some("SetAction(\"Checked\"); return(false);"),
-                vec![object_reference_value(ObjectId::new(2)), Value::Nil],
+                vec![v_object(ObjectId::new(2)), NIL],
             );
 
-            assert_eq!(result.expect("FightWith returns false"), Value::Bool(false));
+            assert_eq!(result.expect("FightWith returns false"), FALSE);
             assert!(outcome.object_update.is_none(), "caller remains unchanged");
             assert!(
                 outcome.other_objects.is_empty(),
@@ -847,13 +756,10 @@ public func Probe(object carrier)
             true,
             Some("SetAction(\"Checked\"); return(false);"),
             Some("SetAction(\"Checked\"); return(true);"),
-            vec![object_reference_value(ObjectId::new(2)), Value::Nil],
+            vec![v_object(ObjectId::new(2)), NIL],
         );
 
-        assert_eq!(
-            result.expect("target veto returns false"),
-            Value::Bool(false)
-        );
+        assert_eq!(result.expect("target veto returns false"), FALSE);
         assert!(
             fight_with_action(&outcome, ObjectId::new(1)).is_none(),
             "clonk callback and Fight action are both skipped"
@@ -869,13 +775,10 @@ public func Probe(object carrier)
             true,
             Some("SetAction(\"Checked\"); return(true);"),
             Some("SetAction(\"Checked\"); return(false);"),
-            vec![object_reference_value(ObjectId::new(2)), Value::Nil],
+            vec![v_object(ObjectId::new(2)), NIL],
         );
 
-        assert_eq!(
-            result.expect("clonk veto returns false"),
-            Value::Bool(false)
-        );
+        assert_eq!(result.expect("clonk veto returns false"), FALSE);
         let caller_action = fight_with_action(&outcome, ObjectId::new(1)).test_value();
         assert_eq!(caller_action.name.as_deref(), Some("Checked"));
         let target_action = fight_with_action(&outcome, ObjectId::new(2)).test_value();
@@ -889,13 +792,10 @@ public func Probe(object carrier)
             true,
             Some("SetAction(\"Checked\"); return(false);"),
             Some("SetAction(\"Checked\"); return(false);"),
-            vec![Value::Nil, object_reference_value(ObjectId::new(1))],
+            vec![NIL, v_object(ObjectId::new(1))],
         );
 
-        assert_eq!(
-            result.expect("nil target returns false"),
-            Value::Bool(false)
-        );
+        assert_eq!(result.expect("nil target returns false"), FALSE);
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
         assert!(
             outcome.other_objects.is_empty(),
@@ -908,41 +808,26 @@ public func Probe(object carrier)
     ) -> (ObjectId, ObjectId, HostWorldContext) {
         let target_id = ObjectId::new(2);
         let holder_id = ObjectId::new(3);
-        let mut target_state = crate::preview_spawn_state(
-            Vector2::ZERO,
-            OWNER_NONE,
-            OWNER_NONE,
-            DEFAULT_CATEGORY,
-            crate::FULL_CON,
-            crate::CONTACT_DENSITY_SOLID,
-            Vec::new(),
-        );
+        let mut target_state = compat_preview_state(OWNER_NONE, OWNER_NONE, DEFAULT_CATEGORY);
         target_state.status = target_status;
         target_state.action.target = Some(target_id);
         let target = fixture_world_object(target_id, "TARG")
             .with_status(target_status)
             .with_action_target(Some(target_id))
-        .with_full_state(Rc::new(target_state));
+            .with_full_state(Rc::new(target_state));
 
-        let mut holder_state = crate::preview_spawn_state(
-            Vector2::ZERO,
-            OWNER_NONE,
-            OWNER_NONE,
-            DEFAULT_CATEGORY,
-            crate::FULL_CON,
-            crate::CONTACT_DENSITY_SOLID,
-            Vec::new(),
-        );
+        let mut holder_state = compat_preview_state(OWNER_NONE, OWNER_NONE, DEFAULT_CATEGORY);
         holder_state.action.target = Some(target_id);
         holder_state.layer = Some(target_id);
         let mut holder_commands = CommandStack::new();
         holder_commands
-            .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(target_id))).test_value();
+            .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(target_id)))
+            .test_value();
         let holder = fixture_world_object(holder_id, "HOLD")
             .with_action_target(Some(target_id))
-        .with_full_state(Rc::new(holder_state))
-        .with_commands(holder_commands.command_views())
-        .with_command_stack(holder_commands.snapshot());
+            .with_full_state(Rc::new(holder_state))
+            .with_commands(holder_commands.command_views())
+            .with_command_stack(holder_commands.snapshot());
 
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
@@ -960,10 +845,9 @@ public func Probe(object carrier)
 
     #[test]
     fn set_object_status_records_update() {
-        let args = vec![Value::Int(ObjectStatus::Inactive.to_script_value())];
+        let args = vec![v_int(ObjectStatus::Inactive.to_script_value())];
         let (result, outcome) = with_object_host_context(|| set_object_status(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.test_value(), TRUE);
         let update = outcome.object_update.test_value();
         assert_eq!(update.status, Some(ObjectStatus::Inactive));
     }
@@ -971,17 +855,17 @@ public func Probe(object carrier)
     #[test]
     fn set_object_status_deactivates_a_foreign_target_without_clearing_pointers() {
         let (target_id, holder_id, world) = set_object_status_target_world(ObjectStatus::Normal);
-        let target = object_reference_value(target_id);
-        let holder = object_reference_value(holder_id);
+        let target = v_object(target_id);
+        let holder = v_object(holder_id);
         let (result, outcome) = with_object_host_context_with_world(world, || {
             Ok(Value::Array(vec![
                 set_object_status(&[
-                    Value::Int(ObjectStatus::Inactive.to_script_value()),
+                    v_int(ObjectStatus::Inactive.to_script_value()),
                     target.clone(),
                 ])?,
                 get_object_status(std::slice::from_ref(&target))?,
-                get_action_target(&[Value::Int(0), holder.clone()])?,
-                get_command(&[holder.clone(), Value::Int(1)])?,
+                get_action_target(&[INT_0, holder.clone()])?,
+                get_command(&[holder.clone(), INT_1])?,
                 get_object_layer(&[holder])?,
             ]))
         });
@@ -989,19 +873,17 @@ public func Probe(object carrier)
         assert_eq!(
             result.expect("foreign SetObjectStatus succeeds"),
             Value::Array(vec![
-                Value::Bool(true),
-                Value::Int(ObjectStatus::Inactive.to_script_value()),
-                object_reference_value(target_id),
-                object_reference_value(target_id),
-                object_reference_value(target_id),
+                TRUE,
+                v_int(ObjectStatus::Inactive.to_script_value()),
+                v_object(target_id),
+                v_object(target_id),
+                v_object(target_id),
             ])
         );
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
-        let update = outcome
-            .other_objects
-            .iter()
-            .find(|object| object.object_id == target_id)
-            .and_then(|object| object.update.as_ref()).test_value();
+        let update = foreign_outcome(&outcome, target_id)
+            .and_then(|object| object.update.as_ref())
+            .test_value();
         assert_eq!(update.status, Some(ObjectStatus::Inactive));
         assert!(
             outcome
@@ -1015,20 +897,20 @@ public func Probe(object carrier)
     #[test]
     fn set_object_status_clear_pointers_clears_foreign_action_and_command_targets() {
         let (target_id, holder_id, world) = set_object_status_target_world(ObjectStatus::Normal);
-        let target = object_reference_value(target_id);
-        let holder = object_reference_value(holder_id);
+        let target = v_object(target_id);
+        let holder = v_object(holder_id);
         let (result, outcome) = with_object_host_context_with_world(world, || {
             Ok(Value::Array(vec![
-                get_action_target(&[Value::Int(0), holder.clone()])?,
-                get_command(&[holder.clone(), Value::Int(1)])?,
+                get_action_target(&[INT_0, holder.clone()])?,
+                get_command(&[holder.clone(), INT_1])?,
                 get_object_layer(std::slice::from_ref(&holder))?,
                 set_object_status(&[
-                    Value::Int(ObjectStatus::Inactive.to_script_value()),
+                    v_int(ObjectStatus::Inactive.to_script_value()),
                     target.clone(),
-                    Value::Bool(true),
+                    TRUE,
                 ])?,
-                get_action_target(&[Value::Int(0), holder.clone()])?,
-                get_command(&[holder.clone(), Value::Int(1)])?,
+                get_action_target(&[INT_0, holder.clone()])?,
+                get_command(&[holder.clone(), INT_1])?,
                 get_object_layer(&[holder])?,
                 get_object_status(&[target])?,
             ]))
@@ -1037,24 +919,19 @@ public func Probe(object carrier)
         assert_eq!(
             result.expect("foreign SetObjectStatus succeeds"),
             Value::Array(vec![
-                object_reference_value(target_id),
-                object_reference_value(target_id),
-                object_reference_value(target_id),
-                Value::Bool(true),
-                Value::Nil,
-                Value::Nil,
-                Value::Nil,
-                Value::Int(ObjectStatus::Inactive.to_script_value()),
+                v_object(target_id),
+                v_object(target_id),
+                v_object(target_id),
+                TRUE,
+                NIL,
+                NIL,
+                NIL,
+                v_int(ObjectStatus::Inactive.to_script_value()),
             ])
         );
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
-        let target_outcome = outcome
-            .other_objects
-            .iter()
-            .find(|object| object.object_id == target_id).test_value();
-        let target_update = target_outcome
-            .update
-            .as_ref().test_value();
+        let target_outcome = foreign_outcome(&outcome, target_id).test_value();
+        let target_update = target_outcome.update.as_ref().test_value();
         assert_eq!(target_update.status, Some(ObjectStatus::Inactive));
         assert_eq!(
             target_update
@@ -1064,13 +941,8 @@ public func Probe(object carrier)
                 .target,
             Some(None)
         );
-        let holder_outcome = outcome
-            .other_objects
-            .iter()
-            .find(|object| object.object_id == holder_id).test_value();
-        let holder_update = holder_outcome
-            .update
-            .as_ref().test_value();
+        let holder_outcome = foreign_outcome(&outcome, holder_id).test_value();
+        let holder_update = holder_outcome.update.as_ref().test_value();
         assert_eq!(
             holder_update
                 .action
@@ -1096,26 +968,22 @@ public func Probe(object carrier)
     #[test]
     fn set_object_status_same_status_is_a_side_effect_free_success() {
         let (target_id, holder_id, world) = set_object_status_target_world(ObjectStatus::Inactive);
-        let target = object_reference_value(target_id);
-        let holder = object_reference_value(holder_id);
+        let target = v_object(target_id);
+        let holder = v_object(holder_id);
         let (result, outcome) = with_object_host_context_with_world(world, || {
             Ok(Value::Array(vec![
                 set_object_status(&[
-                    Value::Int(ObjectStatus::Inactive.to_script_value()),
+                    v_int(ObjectStatus::Inactive.to_script_value()),
                     target,
-                    Value::Bool(true),
+                    TRUE,
                 ])?,
-                get_action_target(&[Value::Int(0), holder.clone()])?,
-                get_command(&[holder, Value::Int(1)])?,
+                get_action_target(&[INT_0, holder.clone()])?,
+                get_command(&[holder, INT_1])?,
             ]))
         });
         assert_eq!(
             result.expect("same-status call succeeds"),
-            Value::Array(vec![
-                Value::Bool(true),
-                object_reference_value(target_id),
-                object_reference_value(target_id),
-            ])
+            Value::Array(vec![TRUE, v_object(target_id), v_object(target_id),])
         );
         assert!(outcome.object_update.is_none());
         assert!(outcome.other_objects.is_empty());
@@ -1127,11 +995,11 @@ public func Probe(object carrier)
         let (target_id, _, world) = set_object_status_target_world(ObjectStatus::Deleted);
         let (result, outcome) = with_object_host_context_with_world(world, || {
             set_object_status(&[
-                Value::Int(ObjectStatus::Inactive.to_script_value()),
-                object_reference_value(target_id),
+                v_int(ObjectStatus::Inactive.to_script_value()),
+                v_object(target_id),
             ])
         });
-        assert_eq!(result.expect("dead target is rejected"), Value::Bool(false));
+        assert_eq!(result.expect("dead target is rejected"), FALSE);
         assert!(outcome.object_update.is_none());
         assert!(outcome.other_objects.is_empty());
         assert!(outcome.player_commands.is_empty());
@@ -1139,24 +1007,24 @@ public func Probe(object carrier)
 
     #[test]
     fn set_object_status_rejects_deleted() {
-        let args = vec![Value::Int(ObjectStatus::Deleted.to_script_value())];
+        let args = vec![v_int(ObjectStatus::Deleted.to_script_value())];
         let (result, outcome) = with_object_host_context(|| set_object_status(&args));
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(false));
+        assert_eq!(result.test_value(), FALSE);
         assert!(outcome.object_update.is_none());
     }
 
     #[test]
     fn get_object_status_reflects_pending_update() {
         let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            let set_value =
-                set_object_status(&[Value::Int(ObjectStatus::Inactive.to_script_value())])?;
-            assert_eq!(set_value, Value::Bool(true));
+            let set_value = set_object_status(&[v_int(ObjectStatus::Inactive.to_script_value())])?;
+            assert_eq!(set_value, TRUE);
             get_object_status(&[])
         });
 
-        let value = result.test_value();
-        assert_eq!(value, Value::Int(ObjectStatus::Inactive.to_script_value()));
+        assert_eq!(
+            result.test_value(),
+            v_int(ObjectStatus::Inactive.to_script_value())
+        );
         let update = outcome.object_update.test_value();
         assert_eq!(update.status, Some(ObjectStatus::Inactive));
     }
@@ -1165,40 +1033,36 @@ public func Probe(object carrier)
     fn get_entrance_without_an_object_returns_nil() {
         assert_eq!(
             get_entrance(&[]).expect("GetEntrance without a host context succeeds"),
-            Value::Nil
+            NIL
         );
     }
 
     #[test]
     fn get_owner_returns_current_owner() {
-        let (result, _) = with_effect_context(
+        let (result, _) = with_compat_context!(
             Some(HostObjectContext {
                 owner: 5,
                 controller: 5,
                 ..idle_object_context()
             }),
-            &[],
             HostWorldContext::default(),
             1,
             || get_owner(&[]),
         );
 
-        let value = result.test_value();
-        assert_eq!(value, Value::Int(5));
+        assert_eq!(result.test_value(), v_int(5));
     }
 
     #[test]
     fn get_owner_reads_world_when_target_provided() {
-        let world = HostWorldContext::from_objects(vec![fixture_world_object(
-            ObjectId::new(7),
-            "Dummy",
-        )
-            .with_owner(42)]);
-        let args = [object_reference_value(ObjectId::new(7))];
-        let (result, _) = with_effect_context(None, &[], world, 1, || get_owner(&args));
+        let world =
+            HostWorldContext::from_objects(vec![
+                fixture_world_object(ObjectId::new(7), "Dummy").with_owner(42)
+            ]);
+        let args = [v_object(ObjectId::new(7))];
+        let (result, _) = with_compat_context!(None, world, 1, || get_owner(&args));
 
-        let value = result.test_value();
-        assert_eq!(value, Value::Int(42));
+        assert_eq!(result.test_value(), v_int(42));
     }
 
     #[test]
@@ -1218,36 +1082,34 @@ func ChangeAndProbe()
 "#;
         let caller_dir = tempfile::Builder::new()
             .prefix("lc-test-")
-            .tempdir().test_value();
+            .tempdir()
+            .test_value();
         std::fs::write(
             caller_dir.path().join("DefCore.txt"),
             b"[DefCore]\nid=CALL\nName=Caller\nCrewMember=-2\n",
-        ).test_value();
+        )
+        .test_value();
         std::fs::write(caller_dir.path().join("Script.c"), script).test_value();
-        let caller_group =
-            clonk_resources::Group::open(caller_dir.path()).test_value();
+        let caller_group = clonk_resources::Group::open(caller_dir.path()).test_value();
         let caller_resource = clonk_resources::ResourceDefinition::load(&caller_group).test_value();
-        let caller_definition =
-            crate::Definition::from_resource(&caller_resource).test_value();
+        let caller_definition = crate::Definition::from_resource(&caller_resource).test_value();
         assert_eq!(caller_definition.crew_member_value(), -2);
         assert!(caller_definition.is_crew());
-        let mut raw_definition =
-            test_definition("RAWW", "Raw", "#strict\n");
+        let mut raw_definition = test_definition("RAWW", "Raw", "#strict\n");
         raw_definition.set_crew_member_value(7);
-        let zero_definition =
-            test_definition("ZERO", "Zero", "#strict\n");
+        let zero_definition = test_definition("ZERO", "Zero", "#strict\n");
 
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(caller_definition);
-        engine.register_test_definition(raw_definition);
-        engine.register_test_definition(zero_definition);
+        let mut engine =
+            engine_with_definitions([caller_definition, raw_definition, zero_definition]);
 
         // Runtime crew membership is deliberately the inverse of the
         // definitions. FnCrewMember reads Def->CrewMember, not Object state
         // or OCF_CrewMember.
-        let caller = engine.spawn_test_object(crate::SpawnConfig::new("CALL").with_crew_member(false));
+        let caller =
+            engine.spawn_test_object(crate::SpawnConfig::new("CALL").with_crew_member(false));
         let raw = engine.spawn_test_object(crate::SpawnConfig::new("RAWW").with_crew_member(false));
-        let runtime_crew = engine.spawn_test_object(crate::SpawnConfig::new("ZERO").with_crew_member(true));
+        let runtime_crew =
+            engine.spawn_test_object(crate::SpawnConfig::new("ZERO").with_crew_member(true));
         let caller_index = engine.find_object_index(caller).test_value();
 
         assert_eq!(
@@ -1255,23 +1117,15 @@ func ChangeAndProbe()
                 .call_object_function(
                     caller_index,
                     "Probe",
-                    vec![
-                        object_reference_value(raw),
-                        object_reference_value(runtime_crew),
-                    ],
+                    vec![v_object(raw), v_object(runtime_crew),],
                 )
                 .expect("CrewMember probe runs"),
-            Value::Array(vec![
-                Value::Int(-2),
-                Value::Int(7),
-                Value::Int(-2),
-                Value::Int(7),
-                Value::Int(0),
-            ])
+            Value::Array(vec![v_int(-2), v_int(7), v_int(-2), v_int(7), INT_0,])
         );
 
         let changed = engine
-            .call_object_function(caller_index, "ChangeAndProbe", vec![]).test_value();
+            .call_object_function(caller_index, "ChangeAndProbe", vec![])
+            .test_value();
 
         let carrier = HostObjectContext {
             id: ObjectId::new(99),
@@ -1290,13 +1144,12 @@ func ChangeAndProbe()
         );
         assert_eq!(
             global.expect("definition-only CrewMember succeeds"),
-            Value::Nil,
+            NIL,
             "cthr->Def must not substitute for a missing cthr->Obj"
         );
 
         assert_eq!(
-            changed,
-            Value::Int(0),
+            changed, INT_0,
             "same-call ChangeDef must switch the effective definition"
         );
     }
@@ -1307,18 +1160,10 @@ func ChangeAndProbe()
         players: Vec<PlayerState>,
     ) -> (ObjectId, HostWorldContext) {
         let target_id = ObjectId::new(2);
-        let target_state = crate::preview_spawn_state(
-            Vector2::ZERO,
-            owner,
-            controller,
-            DEFAULT_CATEGORY,
-            crate::FULL_CON,
-            crate::CONTACT_DENSITY_SOLID,
-            Vec::new(),
-        );
+        let target_state = compat_preview_state(owner, controller, DEFAULT_CATEGORY);
         let target = fixture_world_object(target_id, "TARG")
             .with_owner(owner)
-        .with_full_state(Rc::new(target_state));
+            .with_full_state(Rc::new(target_state));
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
         let world = HostWorldContext::from_objects_with_players([target], players)
@@ -1335,13 +1180,12 @@ func ChangeAndProbe()
 
     #[test]
     fn set_owner_records_owner_update() {
-        let (result, outcome) = with_effect_context(
+        let (result, outcome) = with_compat_context!(
             Some(HostObjectContext {
                 owner: 1,
                 controller: 1,
                 ..idle_object_context()
             }),
-            &[],
             HostWorldContext::from_objects_with_players(
                 Vec::<HostWorldObject>::new(),
                 [PlayerState {
@@ -1350,11 +1194,10 @@ func ChangeAndProbe()
                 }],
             ),
             1,
-            || set_owner(&[Value::Int(3)]),
+            || set_owner(&[v_int(3)]),
         );
 
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.test_value(), TRUE);
         let update = outcome.object_update.test_value();
         assert_eq!(update.owner, Some(3));
         assert_eq!(update.controller, Some(3));
@@ -1373,16 +1216,13 @@ func ChangeAndProbe()
             }],
         );
 
-        let (result, outcome) = with_object_host_context_with_world(world, || {
-            set_owner(&[Value::Int(1), object_reference_value(target_id)])
-        });
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || set_owner(&[INT_1, v_object(target_id)]));
 
-        assert_eq!(result.expect("SetOwner succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("SetOwner succeeds"), TRUE);
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
         assert_eq!(outcome.other_objects.len(), 1, "target changes once");
-        let update = outcome.other_objects[0]
-            .update
-            .as_ref().test_value();
+        let update = outcome.other_objects[0].update.as_ref().test_value();
         assert_eq!(update.owner, Some(1));
         assert_eq!(update.controller, Some(1));
     }
@@ -1397,9 +1237,9 @@ func ChangeAndProbe()
             }],
         );
         let (result, outcome) =
-            with_object_host_context_with_world(world, || set_owner(&[Value::Int(7)]));
+            with_object_host_context_with_world(world, || set_owner(&[v_int(7)]));
 
-        assert_eq!(result.expect("SetOwner returns bool"), Value::Bool(false));
+        assert_eq!(result.expect("SetOwner returns bool"), FALSE);
         assert!(outcome.object_update.is_none());
         assert!(outcome.other_objects.is_empty());
     }
@@ -1408,29 +1248,19 @@ func ChangeAndProbe()
     fn set_owner_accepts_no_owner_for_a_foreign_object() {
         let (target_id, world) = set_owner_target_world(1, 4, Vec::new());
         let (result, outcome) = with_object_host_context_with_world(world, || {
-            set_owner(&[Value::Int(OWNER_NONE), object_reference_value(target_id)])
+            set_owner(&[v_int(OWNER_NONE), v_object(target_id)])
         });
 
-        assert_eq!(result.expect("SetOwner succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("SetOwner succeeds"), TRUE);
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
         assert_eq!(outcome.other_objects.len(), 1, "target changes once");
-        let update = outcome.other_objects[0]
-            .update
-            .as_ref().test_value();
+        let update = outcome.other_objects[0].update.as_ref().test_value();
         assert_eq!(update.owner, Some(OWNER_NONE));
         assert_eq!(update.controller, Some(OWNER_NONE));
     }
 
     fn set_category_target_world(target_id: ObjectId, category: i32) -> HostWorldContext {
-        let state = crate::preview_spawn_state(
-            Vector2::ZERO,
-            OWNER_NONE,
-            OWNER_NONE,
-            category,
-            crate::FULL_CON,
-            crate::CONTACT_DENSITY_SOLID,
-            Vec::new(),
-        );
+        let state = compat_preview_state(OWNER_NONE, OWNER_NONE, category);
         let target = HostWorldObject::with_category(
             target_id,
             "TARG",
@@ -1459,33 +1289,24 @@ func ChangeAndProbe()
     }
 
     fn foreign_category_update(outcome: &EffectContextOutcome, target: ObjectId) -> Option<i32> {
-        outcome
-            .other_objects
-            .iter()
-            .find(|object| object.object_id == target)?
-            .update
-            .as_ref()?
-            .category
+        foreign_outcome(outcome, target)?.update.as_ref()?.category
     }
 
     #[test]
     fn set_category_changes_a_foreign_target_and_leaves_the_caller_unchanged() {
         let target_id = ObjectId::new(2);
         let world = set_category_target_world(target_id, crate::CATEGORY_VEHICLE);
-        let target = object_reference_value(target_id);
+        let target = v_object(target_id);
         let (result, outcome) = with_object_host_context_with_world(world, || {
             Ok(Value::Array(vec![
-                set_category(&[Value::Int(crate::CATEGORY_STATIC_BACK), target.clone()])?,
+                set_category(&[v_int(crate::CATEGORY_STATIC_BACK), target.clone()])?,
                 get_category(&[target])?,
             ]))
         });
 
         assert_eq!(
             result.expect("foreign SetCategory succeeds"),
-            Value::Array(vec![
-                Value::Bool(true),
-                Value::Int(crate::CATEGORY_STATIC_BACK),
-            ])
+            Value::Array(vec![TRUE, v_int(crate::CATEGORY_STATIC_BACK),])
         );
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
         assert_eq!(
@@ -1498,18 +1319,18 @@ func ChangeAndProbe()
     fn set_category_merges_the_foreign_targets_own_sort_bits() {
         let target_id = ObjectId::new(2);
         let world = set_category_target_world(target_id, crate::CATEGORY_VEHICLE);
-        let target = object_reference_value(target_id);
+        let target = v_object(target_id);
         let expected = crate::CATEGORY_MAGIC | crate::CATEGORY_VEHICLE;
         let (result, outcome) = with_object_host_context_with_world(world, || {
             Ok(Value::Array(vec![
-                set_category(&[Value::Int(crate::CATEGORY_MAGIC), target.clone()])?,
+                set_category(&[v_int(crate::CATEGORY_MAGIC), target.clone()])?,
                 get_category(&[target])?,
             ]))
         });
 
         assert_eq!(
             result.expect("foreign SetCategory merge succeeds"),
-            Value::Array(vec![Value::Bool(true), Value::Int(expected)])
+            Value::Array(vec![TRUE, v_int(expected)])
         );
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
         assert_eq!(foreign_category_update(&outcome, target_id), Some(expected));
@@ -1519,18 +1340,18 @@ func ChangeAndProbe()
     fn set_category_does_not_invent_sort_bits_when_the_target_has_none() {
         let target_id = ObjectId::new(2);
         let world = set_category_target_world(target_id, 0);
-        let target = object_reference_value(target_id);
+        let target = v_object(target_id);
         let expected = crate::CATEGORY_MAGIC;
         let (result, outcome) = with_object_host_context_with_world(world, || {
             Ok(Value::Array(vec![
-                set_category(&[Value::Int(expected), target.clone()])?,
+                set_category(&[v_int(expected), target.clone()])?,
                 get_category(&[target])?,
             ]))
         });
 
         assert_eq!(
             result.expect("foreign SetCategory succeeds"),
-            Value::Array(vec![Value::Bool(true), Value::Int(expected)])
+            Value::Array(vec![TRUE, v_int(expected)])
         );
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
         assert_eq!(foreign_category_update(&outcome, target_id), Some(expected));
@@ -1540,20 +1361,17 @@ func ChangeAndProbe()
     fn set_category_accepts_an_explicit_target_without_an_object_context() {
         let target_id = ObjectId::new(2);
         let world = set_category_target_world(target_id, crate::CATEGORY_VEHICLE);
-        let target = object_reference_value(target_id);
-        let (result, outcome) = with_effect_context(None, &[], world, 3, || {
+        let target = v_object(target_id);
+        let (result, outcome) = with_compat_context!(None, world, 3, || {
             Ok::<_, RuntimeError>(Value::Array(vec![
-                set_category(&[Value::Int(crate::CATEGORY_STATIC_BACK), target.clone()])?,
+                set_category(&[v_int(crate::CATEGORY_STATIC_BACK), target.clone()])?,
                 get_category(&[target])?,
             ]))
         });
 
         assert_eq!(
             result.expect("scenario-scope SetCategory succeeds"),
-            Value::Array(vec![
-                Value::Bool(true),
-                Value::Int(crate::CATEGORY_STATIC_BACK),
-            ])
+            Value::Array(vec![TRUE, v_int(crate::CATEGORY_STATIC_BACK),])
         );
         assert!(outcome.object_update.is_none());
         assert_eq!(
@@ -1564,37 +1382,24 @@ func ChangeAndProbe()
 
     #[test]
     fn set_alive_records_alive_update() {
-        let (result, outcome) = with_effect_context(
-            Some(
-                idle_object_context()
-                .with_alive(true),
-            ),
-            &[],
+        let (result, outcome) = with_compat_context!(
+            Some(idle_object_context().with_alive(true),),
             HostWorldContext::default(),
             1,
-            || set_alive(&[Value::Bool(false)]),
+            || set_alive(&[FALSE]),
         );
 
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.test_value(), TRUE);
         let update = outcome.object_update.test_value();
         assert_eq!(update.alive, Some(false));
     }
 
     fn set_alive_target_world(target_id: ObjectId, alive: bool) -> HostWorldContext {
-        let mut state = crate::preview_spawn_state(
-            Vector2::ZERO,
-            OWNER_NONE,
-            OWNER_NONE,
-            DEFAULT_CATEGORY,
-            crate::FULL_CON,
-            crate::CONTACT_DENSITY_SOLID,
-            Vec::new(),
-        );
+        let mut state = compat_preview_state(OWNER_NONE, OWNER_NONE, DEFAULT_CATEGORY);
         state.alive = alive;
         let target = fixture_world_object(target_id, "CLNK")
-        .with_alive(alive)
-        .with_full_state(Rc::new(state));
+            .with_alive(alive)
+            .with_full_state(Rc::new(state));
         HostWorldContext::from_objects(vec![target])
     }
 
@@ -1602,10 +1407,10 @@ func ChangeAndProbe()
     fn set_alive_revives_a_foreign_target_and_exposes_the_staged_state() {
         let target_id = ObjectId::new(2);
         let world = set_alive_target_world(target_id, false);
-        let target = object_reference_value(target_id);
+        let target = v_object(target_id);
         let (result, outcome) = with_object_host_context_with_world(world, || {
             Ok(Value::Array(vec![
-                set_alive(&[Value::Bool(true), target.clone()])?,
+                set_alive(&[TRUE, target.clone()])?,
                 get_alive(std::slice::from_ref(&target))?,
                 get_alive(&[])?,
             ]))
@@ -1613,18 +1418,12 @@ func ChangeAndProbe()
 
         assert_eq!(
             result.expect("foreign SetAlive succeeds"),
-            Value::Array(vec![
-                Value::Bool(true),
-                Value::Bool(true),
-                Value::Bool(true),
-            ])
+            Value::Array(vec![TRUE, TRUE, TRUE,])
         );
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
-        let update = outcome
-            .other_objects
-            .iter()
-            .find(|object| object.object_id == target_id)
-            .and_then(|object| object.update.as_ref()).test_value();
+        let update = foreign_outcome(&outcome, target_id)
+            .and_then(|object| object.update.as_ref())
+            .test_value();
         assert_eq!(update.alive, Some(true));
     }
 
@@ -1632,42 +1431,35 @@ func ChangeAndProbe()
     fn set_alive_clears_a_foreign_target() {
         let target_id = ObjectId::new(2);
         let world = set_alive_target_world(target_id, true);
-        let target = object_reference_value(target_id);
+        let target = v_object(target_id);
         let (result, outcome) = with_object_host_context_with_world(world, || {
             Ok(Value::Array(vec![
-                set_alive(&[Value::Bool(false), target.clone()])?,
+                set_alive(&[FALSE, target.clone()])?,
                 get_alive(&[target])?,
             ]))
         });
 
         assert_eq!(
             result.expect("foreign SetAlive succeeds"),
-            Value::Array(vec![Value::Bool(true), Value::Bool(false)])
+            Value::Array(vec![TRUE, FALSE])
         );
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
-        let update = outcome
-            .other_objects
-            .iter()
-            .find(|object| object.object_id == target_id)
-            .and_then(|object| object.update.as_ref()).test_value();
+        let update = foreign_outcome(&outcome, target_id)
+            .and_then(|object| object.update.as_ref())
+            .test_value();
         assert_eq!(update.alive, Some(false));
     }
 
     #[test]
     fn get_alive_returns_current_state() {
-        let (result, _) = with_effect_context(
-            Some(
-                idle_object_context()
-                .with_alive(false),
-            ),
-            &[],
+        let (result, _) = with_compat_context!(
+            Some(idle_object_context().with_alive(false),),
             HostWorldContext::default(),
             1,
             || get_alive(&[]),
         );
 
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(false));
+        assert_eq!(result.test_value(), FALSE);
     }
 
     #[test]
@@ -1691,11 +1483,10 @@ func ChangeAndProbe()
             None,
         )
         .with_alive(false)]);
-        let args = [object_reference_value(ObjectId::new(7))];
-        let (result, _) = with_effect_context(None, &[], world, 1, || get_alive(&args));
+        let args = [v_object(ObjectId::new(7))];
+        let (result, _) = with_compat_context!(None, world, 1, || get_alive(&args));
 
-        let value = result.test_value();
-        assert_eq!(value, Value::Bool(false));
+        assert_eq!(result.test_value(), FALSE);
     }
 
     #[test]
@@ -1705,15 +1496,11 @@ func ChangeAndProbe()
         // already false to the rest of the VM call, so a repeat is false
         // (oracle-src-pinned src/C4Script.cpp:335-345;
         // src/C4Object.cpp:1164-1205).
-        let args = [
-            Value::Nil,
-            Value::Bool(true),
-            Value::String("discarded".to_string().into()),
-        ];
+        let args = [NIL, TRUE, v_string("discarded".to_string().into())];
         let (result, outcome) = with_object_host_context(|| {
-            assert_eq!(kill(&args)?, Value::Bool(true));
-            assert_eq!(get_alive(&[])?, Value::Bool(false));
-            assert_eq!(kill(&[])?, Value::Bool(false));
+            assert_eq!(kill(&args)?, TRUE);
+            assert_eq!(get_alive(&[])?, FALSE);
+            assert_eq!(kill(&[])?, FALSE);
             Ok::<_, RuntimeError>(())
         });
         result.test_value();
@@ -1721,8 +1508,7 @@ func ChangeAndProbe()
             outcome.other_objects.is_empty(),
             "the active object's synchronous death stays on its update channel"
         );
-        let update = outcome
-            .object_update.test_value();
+        let update = outcome.object_update.test_value();
         assert_eq!(update.alive, Some(false));
         assert_eq!(update.selected, Some(false));
     }
@@ -1733,18 +1519,10 @@ func ChangeAndProbe()
         // before completing AssignDeath synchronously
         // (oracle-src-pinned src/C4Script.cpp:335-345;
         // src/C4Object.cpp:1164-1205).
-        let target_state = Rc::new(crate::preview_spawn_state(
-            Vector2::ZERO,
-            1,
-            1,
-            crate::DEFAULT_CATEGORY,
-            crate::FULL_CON,
-            crate::CONTACT_DENSITY_SOLID,
-            Vec::new(),
-        ));
+        let target_state = Rc::new(compat_preview_state(1, 1, crate::DEFAULT_CATEGORY));
         let target = fixture_world_object(ObjectId::new(7), "Dummy")
             .with_owner(1)
-        .with_full_state(target_state);
+            .with_full_state(target_state);
         let world = HostWorldContext::from_objects_with_players(
             [target],
             [PlayerState {
@@ -1761,23 +1539,17 @@ func ChangeAndProbe()
             controller: 0,
             ..idle_object_context()
         };
-        let (result, outcome) = with_effect_context(Some(caller), &[], world, 8, || {
+        let (result, outcome) = with_compat_context!(Some(caller), world, 8, || {
+            assert_eq!(kill(&[v_object(ObjectId::new(7))])?, TRUE);
             assert_eq!(
-                kill(&[object_reference_value(ObjectId::new(7))])?,
-                Value::Bool(true)
-            );
-            assert_eq!(
-                get_alive(&[object_reference_value(ObjectId::new(7))])?,
-                Value::Bool(false),
+                get_alive(&[v_object(ObjectId::new(7))])?,
+                FALSE,
                 "foreign GetAlive reads the live nested Kill preview"
             );
             Ok::<_, RuntimeError>(())
         });
         result.test_value();
-        let death = outcome
-            .other_objects
-            .iter()
-            .find(|outcome| outcome.object_id == ObjectId::new(7)).test_value();
+        let death = foreign_outcome(&outcome, ObjectId::new(7)).test_value();
         assert_eq!(
             death.update.as_ref().and_then(|update| update.alive),
             Some(false),
@@ -1799,7 +1571,10 @@ func ChangeAndProbe()
         // C4Object::DoEnergy calls AssignDeath inline on the nonzero -> zero
         // transition, and AssignDeath calls Death before DoEnergy returns
         // (oracle-src-pinned src/C4Object.cpp:1164-1205,1372-1393).
-        let mut definition = test_definition("CLNK", "Clonk", r#"#strict
+        let mut definition = test_definition(
+            "CLNK",
+            "Clonk",
+            r#"#strict
         local order;
         public func Trigger()
         {
@@ -1812,7 +1587,8 @@ func ChangeAndProbe()
         {
             order = order * 10 + 2;
         }
-        "#);
+        "#,
+        );
         definition.set_physical(PhysicalInfo {
             energy: C4_MAX_PHYSICAL,
             ..PhysicalInfo::default()
@@ -1826,15 +1602,15 @@ func ChangeAndProbe()
                 }
             },
         ));
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(definition);
+        let mut engine = engine_with_definitions([definition]);
         let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
         let index = engine.find_object_index(clonk).test_value();
         engine.objects[index].state.energy = 10;
         engine.objects[index].state.alive = true;
 
         let result = engine
-            .call_object_function(index, "Trigger", Vec::new()).test_value();
+            .call_object_function(index, "Trigger", Vec::new())
+            .test_value();
         assert_eq!(engine.objects[index].state.energy, 0);
         assert_eq!(
             death_calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -1843,7 +1619,7 @@ func ChangeAndProbe()
         );
         assert_eq!(
             result,
-            Value::Int(123),
+            v_int(123),
             "Death must run between DoEnergy and the following statement"
         );
     }
@@ -1856,13 +1632,20 @@ func ChangeAndProbe()
         // src/C4ObjectCom.cpp:737-767; src/C4Object.cpp:2224-2227).
         let catch_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_catch_calls = Arc::clone(&catch_calls);
-        let attacker_definition = test_definition("PATK", "Punch attacker", r#"#strict
+        let attacker_definition = test_definition(
+            "PATK",
+            "Punch attacker",
+            r#"#strict
         public func Trigger(target)
         {
             return Punch(target, 10);
         }
-        "#);
-        let mut target_definition = test_definition("PTGT", "Punch target", r#"#strict
+        "#,
+        );
+        let mut target_definition = test_definition(
+            "PTGT",
+            "Punch target",
+            r#"#strict
         protected func Death()
         {
             RemoveObject();
@@ -1871,16 +1654,13 @@ func ChangeAndProbe()
         {
             return 1;
         }
-        "#);
+        "#,
+        );
         target_definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
-        target_definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), crate::ActionSpec::default()),
-                ("Dead".to_string(), crate::ActionSpec::default()),
-                ("Tumble".to_string(), crate::ActionSpec::default()),
-                ("GetPunched".to_string(), crate::ActionSpec::default()),
-            ]),
+        configure_default_actions(
+            &mut target_definition,
+            Some("Idle"),
+            &["Idle", "Dead", "Tumble", "GetPunched"],
         );
         target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
             move |name, _| {
@@ -1890,9 +1670,7 @@ func ChangeAndProbe()
             },
         ));
 
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(attacker_definition);
-        engine.register_test_definition(target_definition);
+        let mut engine = engine_with_definitions([attacker_definition, target_definition]);
         let attacker = engine.spawn_test_object(SpawnConfig::new("PATK"));
         let target = engine.spawn_test_object(SpawnConfig::new("PTGT").with_alive(true));
         let target_index = engine.find_object_index(target).test_value();
@@ -1901,13 +1679,9 @@ func ChangeAndProbe()
 
         assert_eq!(
             engine
-                .call_object_function(
-                    attacker_index,
-                    "Trigger",
-                    vec![object_reference_value(target)],
-                )
+                .call_object_function(attacker_index, "Trigger", vec![v_object(target)],)
                 .expect("lethal Punch completes"),
-            Value::Bool(true)
+            TRUE
         );
         assert!(engine.objects[target_index].destroyed);
         assert_eq!(
@@ -1926,7 +1700,10 @@ func ChangeAndProbe()
         let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_first = Arc::clone(&first_calls);
         let observed_second = Arc::clone(&second_calls);
-        let mut target_definition = test_definition("TARG", "Target", r#"#strict
+        let mut target_definition = test_definition(
+            "TARG",
+            "Target",
+            r#"#strict
         public func Setup()
         {
             AddEffect("First", this, 10, 0, this);
@@ -1941,7 +1718,8 @@ func ChangeAndProbe()
         {
             return change;
         }
-        "#);
+        "#,
+        );
         target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
             move |name, _| match name {
                 "FxFirstDamage" => {
@@ -1953,32 +1731,31 @@ func ChangeAndProbe()
                 _ => {}
             },
         ));
-        let caller_definition = test_definition("CALL", "Caller", r#"#strict
+        let caller_definition = test_definition(
+            "CALL",
+            "Caller",
+            r#"#strict
         public func Trigger(target)
         {
             return DoEnergy(-1, target, true);
         }
-        "#);
+        "#,
+        );
 
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(target_definition);
-        engine.register_test_definition(caller_definition);
+        let mut engine = engine_with_definitions([target_definition, caller_definition]);
         let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_alive(true));
         let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
         let target_index = engine.find_object_index(target).test_value();
         engine
-            .call_object_function(target_index, "Setup", Vec::new()).test_value();
+            .call_object_function(target_index, "Setup", Vec::new())
+            .test_value();
         let caller_index = engine.find_object_index(caller).test_value();
 
         assert_eq!(
             engine
-                .call_object_function(
-                    caller_index,
-                    "Trigger",
-                    vec![object_reference_value(target)],
-                )
+                .call_object_function(caller_index, "Trigger", vec![v_object(target)],)
                 .expect("foreign DoEnergy returns"),
-            Value::Bool(true)
+            TRUE
         );
         assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
@@ -1998,7 +1775,10 @@ func ChangeAndProbe()
         let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_first = Arc::clone(&first_calls);
         let observed_second = Arc::clone(&second_calls);
-        let mut target_definition = test_definition("TARG", "Target", r#"#strict
+        let mut target_definition = test_definition(
+            "TARG",
+            "Target",
+            r#"#strict
         public func Setup()
         {
             AddEffect("First", this, 10, 0, this);
@@ -2017,7 +1797,8 @@ func ChangeAndProbe()
         {
             return change;
         }
-        "#);
+        "#,
+        );
         target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
             move |name, _| match name {
                 "FxFirstDamage" => {
@@ -2030,18 +1811,18 @@ func ChangeAndProbe()
             },
         ));
 
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(target_definition);
+        let mut engine = engine_with_definitions([target_definition]);
         let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_alive(true));
         let target_index = engine.find_object_index(target).test_value();
         engine
-            .call_object_function(target_index, "Setup", Vec::new()).test_value();
+            .call_object_function(target_index, "Setup", Vec::new())
+            .test_value();
 
         assert_eq!(
             engine
                 .call_object_function(target_index, "Trigger", Vec::new())
                 .expect("DoEnergy returns"),
-            Value::Bool(true)
+            TRUE
         );
         assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
@@ -2057,7 +1838,10 @@ func ChangeAndProbe()
         // only after Fx*Damage returns. An effect inserted after that node is
         // therefore visited in this chain; one inserted before it is not
         // (oracle-src-pinned src/C4Effect.cpp:427-436,59-93).
-        let definition = test_definition("TARG", "Target", r#"#strict
+        let definition = test_definition(
+            "TARG",
+            "Target",
+            r#"#strict
         local order;
         public func Setup()
         {
@@ -2092,20 +1876,21 @@ func ChangeAndProbe()
             order = order * 10 + 3;
             return change;
         }
-        "#);
+        "#,
+        );
 
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(definition);
+        let mut engine = engine_with_definitions([definition]);
         let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_alive(true));
         let target_index = engine.find_object_index(target).test_value();
         engine
-            .call_object_function(target_index, "Setup", Vec::new()).test_value();
+            .call_object_function(target_index, "Setup", Vec::new())
+            .test_value();
 
         assert_eq!(
             engine
                 .call_object_function(target_index, "Trigger", Vec::new())
                 .expect("DoEnergy returns"),
-            Value::Int(123),
+            v_int(123),
             "the walk visits the new successor before the old successor without restarting at the new head"
         );
     }
@@ -2118,7 +1903,10 @@ func ChangeAndProbe()
         // src/C4Object.cpp:1164-1205; src/C4Effect.cpp:407-425;
         // src/C4Object.h:361).
         fn run(forced: bool) -> (Value, bool, String, usize, usize, usize, Value) {
-            let mut definition = test_definition("CLNK", "Clonk", r#"#strict
+            let mut definition = test_definition(
+                "CLNK",
+                "Clonk",
+                r#"#strict
             local order, stop_alive, stop_ocf_alive;
             public func Trigger(forced)
             {
@@ -2149,15 +1937,10 @@ func ChangeAndProbe()
                 if (stop_alive) return -1;
                 return stop_ocf_alive;
             }
-            "#);
-            definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
-            definition.configure_actions(
-                Some("Idle".to_string()),
-                HashMap::from([
-                    ("Idle".to_string(), crate::ActionSpec::default()),
-                    ("Dead".to_string(), crate::ActionSpec::default()),
-                ]),
+            "#,
             );
+            definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
+            configure_default_actions(&mut definition, Some("Idle"), &["Idle", "Dead"]);
 
             let stop_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2175,17 +1958,18 @@ func ChangeAndProbe()
                 },
             ));
 
-            let mut engine = crate::Engine::with_seed(0);
-            engine.register_test_definition(definition);
+            let mut engine = engine_with_definitions([definition]);
             let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
             let index = engine.find_object_index(clonk).test_value();
             engine.objects[index].state.alive = true;
             engine.refresh_object_ocf(index);
 
             let result = engine
-                .call_object_function(index, "Trigger", vec![Value::Bool(forced)]).test_value();
+                .call_object_function(index, "Trigger", vec![v_bool(forced)])
+                .test_value();
             let stop_probe = engine
-                .call_object_function(index, "StopProbe", Vec::new()).test_value();
+                .call_object_function(index, "StopProbe", Vec::new())
+                .test_value();
             let object = &engine.objects[index];
             (
                 result,
@@ -2199,7 +1983,7 @@ func ChangeAndProbe()
         }
 
         let revived = run(false);
-        assert_eq!(revived.0, Value::Int(13));
+        assert_eq!(revived.0, v_int(13));
         assert!(
             revived.1,
             "RemoveDeath SetAlive revival aborts ordinary Kill"
@@ -2210,14 +1994,14 @@ func ChangeAndProbe()
         assert_eq!(revived.5, 0, "an accepted revival suppresses Death");
         assert_eq!(
             revived.6,
-            Value::Int(crate::ocf::ALIVE as i32),
+            v_int(crate::ocf::ALIVE as i32),
             "AssignDeath's raw Alive=false is visible while cached OCF stays stale during Stop"
         );
 
         let forced = run(true);
         assert_eq!(
             forced.0,
-            Value::Int(123),
+            v_int(123),
             "forced Kill runs Death before the invoking script resumes"
         );
         assert!(
@@ -2230,7 +2014,7 @@ func ChangeAndProbe()
         assert_eq!(forced.5, 1, "forced Kill calls Death exactly once");
         assert_eq!(
             forced.6,
-            Value::Int(crate::ocf::ALIVE as i32),
+            v_int(crate::ocf::ALIVE as i32),
             "forced death uses the same raw-Alive/cached-OCF ordering"
         );
     }
@@ -2248,7 +2032,10 @@ func ChangeAndProbe()
         let observed_high = Arc::clone(&high_calls);
         let observed_old_low = Arc::clone(&old_low_calls);
         let observed_changed_low = Arc::clone(&changed_low_calls);
-        let mut definition = test_definition("TARG", "Target", r#"#strict
+        let mut definition = test_definition(
+            "TARG",
+            "Target",
+            r#"#strict
         public func Trigger()
         {
             AddEffect("Low", this, 10, 0, this);
@@ -2268,7 +2055,8 @@ func ChangeAndProbe()
         {
             return 0;
         }
-        "#);
+        "#,
+        );
         definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
             move |name, _| match name {
                 "FxHighStop" => {
@@ -2284,8 +2072,7 @@ func ChangeAndProbe()
             },
         ));
 
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(definition);
+        let mut engine = engine_with_definitions([definition]);
         let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_alive(true));
         let target_index = engine.find_object_index(target).test_value();
 
@@ -2293,7 +2080,7 @@ func ChangeAndProbe()
             engine
                 .call_object_function(target_index, "Trigger", Vec::new())
                 .expect("forced Kill returns"),
-            Value::Bool(true)
+            TRUE
         );
         assert_eq!(high_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
@@ -2314,7 +2101,10 @@ func ChangeAndProbe()
         // SetAction performs SetOCF, which also makes a dead living object
         // non-inflammable (oracle-src-pinned src/C4Object.cpp:564-568,
         // 1164-1205, 4165-4169).
-        let mut definition = test_definition("DCOF", "Death OCF", r#"#strict
+        let mut definition = test_definition(
+            "DCOF",
+            "Death OCF",
+            r#"#strict
         local stop_alive, stop_ocf_alive, stop_ocf_crew, stop_ocf_inflammable;
         local start_ocf_alive, start_ocf_crew, start_ocf_inflammable;
         local abort_ocf_alive, abort_ocf_crew, abort_ocf_inflammable;
@@ -2351,7 +2141,8 @@ func ChangeAndProbe()
             death_ocf_crew = GetOCF() & OCF_CrewMember;
             death_ocf_inflammable = GetOCF() & OCF_Inflammable;
         }
-        "#);
+        "#,
+        );
         definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         definition.set_crew_member(true);
         definition.set_fire_properties(1, false, false);
@@ -2369,32 +2160,33 @@ func ChangeAndProbe()
             ]),
         );
 
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(definition);
-        let object_id = engine.spawn_test_object(SpawnConfig::new("DCOF")
-            .with_alive(true)
-            .with_action(ActionState::new("Walk")));
-        let index = engine
-            .find_object_index(object_id).test_value();
+        let mut engine = engine_with_definitions([definition]);
+        let object_id = engine.spawn_test_object(
+            SpawnConfig::new("DCOF")
+                .with_alive(true)
+                .with_action(ActionState::new("Walk")),
+        );
+        let index = engine.find_object_index(object_id).test_value();
         engine.refresh_object_ocf(index);
 
         engine
-            .call_object_function(index, "Trigger", Vec::new()).test_value();
+            .call_object_function(index, "Trigger", Vec::new())
+            .test_value();
 
         let locals = &engine.objects[index].state.local_vars;
-        assert_eq!(locals.get("stop_alive"), Some(&Value::Bool(false)));
+        assert_eq!(locals.get("stop_alive"), Some(&FALSE));
         assert_eq!(
             locals.get("stop_ocf_alive"),
-            Some(&Value::Int(crate::ocf::ALIVE as i32)),
+            Some(&v_int(crate::ocf::ALIVE as i32)),
             "the initial raw Alive write leaves OCF stale during RemoveDeath"
         );
         assert_eq!(
             locals.get("stop_ocf_crew"),
-            Some(&Value::Int(crate::ocf::CREW_MEMBER as i32))
+            Some(&v_int(crate::ocf::CREW_MEMBER as i32))
         );
         assert_eq!(
             locals.get("stop_ocf_inflammable"),
-            Some(&Value::Int(crate::ocf::INFLAMMABLE as i32)),
+            Some(&v_int(crate::ocf::INFLAMMABLE as i32)),
             "the initial raw Alive write leaves OCF_Inflammable stale during RemoveDeath"
         );
         for name in [
@@ -2410,7 +2202,7 @@ func ChangeAndProbe()
         ] {
             assert_eq!(
                 locals.get(name),
-                Some(&Value::Int(0)),
+                Some(&INT_0),
                 "{name} observes SetAction's explicit SetOCF"
             );
         }
@@ -2428,7 +2220,10 @@ func ChangeAndProbe()
         // must win both immediately and at copy-out (oracle-src-pinned
         // src/C4Object.h:311; src/C4Object.cpp:564-568,602-624,
         // 1164-1205).
-        let mut definition = test_definition("DCTG", "Death category", r#"#strict
+        let mut definition = test_definition(
+            "DCTG",
+            "Death category",
+            r#"#strict
         local before_category_ocf, after_category_ocf;
         public func Trigger()
         {
@@ -2438,40 +2233,35 @@ func ChangeAndProbe()
             after_category_ocf = GetOCF();
             return true;
         }
-        "#);
+        "#,
+        );
         definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         definition.set_fire_properties(1, false, false);
-        definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), crate::ActionSpec::default()),
-                ("Dead".to_string(), crate::ActionSpec::default()),
-            ]),
-        );
+        configure_default_actions(&mut definition, Some("Idle"), &["Idle", "Dead"]);
 
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(definition);
+        let mut engine = engine_with_definitions([definition]);
         let target = engine.spawn_test_object(SpawnConfig::new("DCTG").with_alive(true));
-        let index = engine
-            .find_object_index(target).test_value();
+        let index = engine.find_object_index(target).test_value();
         engine.refresh_object_ocf(index);
 
         assert_eq!(
             engine
                 .call_object_function(index, "Trigger", Vec::new())
                 .expect("death-category trigger succeeds"),
-            Value::Bool(true)
+            TRUE
         );
 
         let state = &engine.objects[index].state;
         let before = state
             .local_vars
             .get("before_category_ocf")
-            .and_then(Value::as_c4_int).test_value() as u32;
+            .and_then(Value::as_c4_int)
+            .test_value() as u32;
         let after = state
             .local_vars
             .get("after_category_ocf")
-            .and_then(Value::as_c4_int).test_value() as u32;
+            .and_then(Value::as_c4_int)
+            .test_value() as u32;
         assert_ne!(before & crate::ocf::LIVING, 0);
         assert_eq!(before & crate::ocf::INFLAMMABLE, 0);
         assert_eq!(after & crate::ocf::LIVING, 0);
@@ -2491,7 +2281,10 @@ func ChangeAndProbe()
         // src/C4Object.cpp:1164-1205).
         let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_deaths = Arc::clone(&death_calls);
-        let mut target_definition = test_definition("TARG", "Target", r#"#strict
+        let mut target_definition = test_definition(
+            "TARG",
+            "Target",
+            r#"#strict
         local death_count;
         protected func Death()
         {
@@ -2502,14 +2295,9 @@ func ChangeAndProbe()
         {
             return death_count;
         }
-        "#);
-        target_definition.configure_actions(
-            Some("Idle".to_string()),
-            HashMap::from([
-                ("Idle".to_string(), crate::ActionSpec::default()),
-                ("Dead".to_string(), crate::ActionSpec::default()),
-            ]),
+        "#,
         );
+        configure_default_actions(&mut target_definition, Some("Idle"), &["Idle", "Dead"]);
         target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
             move |name, _| {
                 if name == "Death" {
@@ -2517,35 +2305,31 @@ func ChangeAndProbe()
                 }
             },
         ));
-        let caller_definition = test_definition("CALL", "Caller", r#"#strict
+        let caller_definition = test_definition(
+            "CALL",
+            "Caller",
+            r#"#strict
         public func Trigger(target)
         {
             if (!Kill(target)) return -1;
             if (GetAlive(target)) return -2;
             return target->DeathCount();
         }
-        "#);
+        "#,
+        );
 
-        let mut engine = crate::Engine::with_seed(0);
-        engine.register_test_definition(target_definition);
-        engine.register_test_definition(caller_definition);
+        let mut engine = engine_with_definitions([target_definition, caller_definition]);
         let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
         let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
-        let caller_index = engine
-            .find_object_index(caller).test_value();
-        let target_index = engine
-            .find_object_index(target).test_value();
+        let caller_index = engine.find_object_index(caller).test_value();
+        let target_index = engine.find_object_index(target).test_value();
         engine.objects[target_index].state.alive = true;
 
         assert_eq!(
             engine
-                .call_object_function(
-                    caller_index,
-                    "Trigger",
-                    vec![object_reference_value(target)],
-                )
+                .call_object_function(caller_index, "Trigger", vec![v_object(target)],)
                 .expect("foreign Kill succeeds"),
-            Value::Int(1),
+            INT_1,
             "Death and the raw Alive write are visible before Kill returns"
         );
         assert!(

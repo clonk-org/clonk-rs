@@ -1,12 +1,15 @@
 use std::error::Error;
 
-use crate::support::real_scenario::{prepare_installed_scenario, PreparedInstalledScenario};
+use crate::support::real_scenario::{
+    join_local_player_with_preferences, object_with_definition, object_with_definition_near_x,
+    prepare_installed_scenario, tutorial_message_contains, PreparedInstalledScenario,
+};
 use crate::support::virtual_player::VirtualPlayer;
 use clonk_engine::math::{fixed100, FixedVec2};
 use clonk_engine::{
-    Direction, EffectVarValue, Engine, JoinPlayerConfig, ObjectId, ObjectUpdate, PlayerState,
-    COM_CURSOR_RIGHT, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, OWNER_NONE,
-    PLAYER_VIEW_MODE_CURSOR, PLAYER_VIEW_MODE_TARGET,
+    Direction, EffectVarValue, Engine, ObjectId, ObjectUpdate, PlayerState, COM_CURSOR_RIGHT,
+    COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, OWNER_NONE, PLAYER_VIEW_MODE_CURSOR,
+    PLAYER_VIEW_MODE_TARGET,
 };
 use clonk_script::Value;
 
@@ -16,52 +19,16 @@ fn instantiate_tutorial05_with_controls(
     auto_context_menu: bool,
 ) -> (Engine, i32) {
     let mut engine = prepared.instantiate();
-    let owner = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial 5 virtual player".to_owned(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style,
-            auto_context_menu,
-            startup_player_count: 1,
-        })
-        .expect("local Tutorial05 virtual player joins")
-        .number();
+    let owner = join_local_player_with_preferences(
+        &mut engine,
+        "Tutorial 5 virtual player",
+        control_style,
+        auto_context_menu,
+    );
     (engine, owner)
 }
 fn instantiate_tutorial05(prepared: &PreparedInstalledScenario) -> (Engine, i32) {
     instantiate_tutorial05_with_controls(prepared, false, false)
-}
-
-fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine.first_object_for_definition(definition)
-}
-
-fn object_with_definition_near_x(
-    engine: &Engine,
-    definition: &str,
-    expected_x: i32,
-) -> Option<ObjectId> {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .filter(|object| object.definition_id == definition)
-        .min_by_key(|object| (object.position.x - expected_x).abs())
-        .map(|object| object.id)
-}
-
-fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine.message_line_contains(needle)
 }
 
 fn player_state(engine: &Engine, owner: i32) -> PlayerState {

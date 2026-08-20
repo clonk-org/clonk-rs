@@ -117,7 +117,7 @@ impl Engine {
         Ok(())
     }
 
-    fn apply_live_movement_vertical_bounds(
+    pub(crate) fn apply_live_movement_vertical_bounds(
         &mut self,
         object_id: ObjectId,
         target_y: &mut i32,
@@ -608,7 +608,7 @@ impl Engine {
         Ok(outcome)
     }
 
-    fn advance_live_rotation(
+    pub(crate) fn advance_live_rotation(
         &mut self,
         object_id: ObjectId,
         solid_masks: &mut Vec<SolidMaskRect>,

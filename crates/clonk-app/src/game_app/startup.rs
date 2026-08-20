@@ -222,14 +222,14 @@ impl GameApp {
             .filter(|dialog| dialog.is_crew_mode())?;
         let layout = dialog.layout();
         let row = i32::try_from(rename.index).unwrap_or(i32::MAX);
-        Some(clonk_frontend::classic_gui::IntRect {
-            x: layout.list_viewport.x + (layout.item_height + 2) * 2,
-            y: layout.list_viewport.y + layout.item_pitch.saturating_mul(row)
+        Some(clonk_frontend::classic_gui::IntRect::new(
+            layout.list_viewport.x + (layout.item_height + 2) * 2,
+            layout.list_viewport.y + layout.item_pitch.saturating_mul(row)
                 - dialog.list_scroll_offset()
                 + 2,
-            w: (layout.item_width - (layout.item_height + 2) * 2 - 2).max(1),
-            h: (layout.item_height - 4).max(1),
-        })
+            (layout.item_width - (layout.item_height + 2) * 2 - 2).max(1),
+            (layout.item_height - 4).max(1),
+        ))
     }
 
     pub(crate) fn startup_crew_rename_char_pos(

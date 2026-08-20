@@ -1359,10 +1359,7 @@ impl ClientStatusState {
         let requested = self
             .requested
             .filter(|requested| same_client_status_barrier(*requested, expected))?;
-        let acknowledgement = NetworkStatus {
-            target_tick: current_control_tick,
-            ..requested
-        };
+        let acknowledgement = requested.with_target_tick(current_control_tick);
         self.requested = None;
         self.awaiting_commit = Some(acknowledgement);
         Some(acknowledgement)
@@ -4088,7 +4085,7 @@ impl NetworkManager {
             .map_err(|_| anyhow!("local client id exceeds the ready-check wire field"))?;
         self.command_tx
             .blocking_send(NetworkCommand::SubmitReadyCheck(
-                clonk_network::ReadyCheckPacket { client_id, data },
+                clonk_network::ReadyCheckPacket::new(client_id, data),
             ))
             .map_err(|_| anyhow!("network worker is not accepting ready checks"))
     }
@@ -8575,10 +8572,9 @@ fn announce_connected_client(
 }
 
 fn initial_client_status(join_data: &clonk_network::JoinDataEnvelope) -> NetworkStatus {
-    NetworkStatus {
-        target_tick: join_data.start_control_tick,
-        ..join_data.status
-    }
+    join_data
+        .status
+        .with_target_tick(join_data.start_control_tick)
 }
 
 // Event forwarding deliberately receives each independently mutable state
@@ -8959,12 +8955,7 @@ fn control_packet_for_event(
     };
     let by_client = i32::try_from(client_id).ok()?;
     Some(clonk_engine::ControlPacket::PlayerControl(
-        PlayerControlData {
-            player: owner,
-            command,
-            data,
-            by_client,
-        },
+        PlayerControlData::new(owner, command, data, by_client),
     ))
 }
 
@@ -9189,6 +9180,107 @@ mod tests {
         event_rx.recv().test_value()
     }
 
+    type TestHostWorker = (
+        tokio_mpsc::Sender<NetworkCommand>,
+        Receiver<NetworkEvent>,
+        mpsc::Receiver<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
+        Arc<Mutex<NetworkNetpuncherState>>,
+        tokio::task::JoinHandle<Result<()>>,
+        Receiver<NetworkEvent>,
+    );
+
+    fn start_test_host_worker(settings: HostSettings) -> TestHostWorker {
+        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
+        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let netpuncher_state = test_netpuncher_state();
+        let worker_state = Arc::clone(&netpuncher_state);
+        let worker = tokio::spawn(async move {
+            run_host_worker(
+                settings,
+                0,
+                &mut command_rx,
+                &mut control_tick_rx,
+                &mut control_performance_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                worker_state,
+            )
+            .await
+        });
+        (
+            command_tx,
+            event_rx,
+            local_id_rx,
+            netpuncher_state,
+            worker,
+            telemetry_rx,
+        )
+    }
+
+    type TestClientWorker = (
+        tokio_mpsc::Sender<NetworkCommand>,
+        Receiver<NetworkEvent>,
+        mpsc::Receiver<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
+        tokio::task::JoinHandle<Result<()>>,
+        Receiver<NetworkEvent>,
+    );
+
+    fn start_test_client_worker(
+        settings: ClientSettings,
+        local_owner: i32,
+        command_capacity: usize,
+    ) -> TestClientWorker {
+        let (command_tx, mut command_rx) = tokio_mpsc::channel(command_capacity);
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            run_client_worker(
+                settings,
+                local_owner,
+                &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
+                &mut tokio_mpsc::unbounded_channel().1,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                test_netpuncher_state(),
+                Arc::new(AtomicI32::new(0)),
+                None,
+            )
+            .await
+        });
+        (command_tx, event_rx, local_id_rx, worker, telemetry_rx)
+    }
+
+    fn test_host_settings(
+        bind_addr: SocketAddr,
+        prepared: Option<PreparedHostBootstrap>,
+    ) -> HostSettings {
+        HostSettings {
+            bind_addr,
+            player_name: "Host".to_string(),
+            prepared,
+        }
+    }
+
+    fn test_league_host_config(
+        endpoint: String,
+        league_server_signup: bool,
+    ) -> PreparedLeagueHostConfig {
+        PreparedLeagueHostConfig {
+            endpoint,
+            transport: clonk_network::LeagueHttpTransportConfig::default(),
+            update_period_secs: 120,
+            league_server_signup,
+        }
+    }
+
     #[test]
     fn failed_client_join_names_the_connect_failure_once() {
         // `ClientError::Connect` already carries the caption, so the startup
@@ -9260,11 +9352,7 @@ mod tests {
     fn worker_mode_carries_the_explicit_voice_policy_to_either_role() {
         let address = SocketAddr::from(([127, 0, 0, 1], 11_112));
         let host = WorkerMode::for_mode(
-            NetworkMode::Host(HostSettings {
-                bind_addr: address,
-                player_name: "Host".to_string(),
-                prepared: None,
-            }),
+            NetworkMode::Host(test_host_settings(address, None)),
             0,
             false,
         );
@@ -10081,12 +10169,7 @@ mod tests {
         let (event_tx, event_rx) = NetworkEventSender::channel();
         let reference = minimal_league_reference();
         let (start, command_tx) = register_league_host(
-            PreparedLeagueHostConfig {
-                endpoint,
-                transport: clonk_network::LeagueHttpTransportConfig::default(),
-                update_period_secs: 120,
-                league_server_signup: true,
-            },
+            test_league_host_config(endpoint, true),
             &reference,
             event_tx,
         )
@@ -10097,30 +10180,16 @@ mod tests {
         assert_eq!(start.max_players, 4);
         command_tx.try_update(100, reference.clone());
         command_tx.try_update(100, reference.clone());
-        let (first_complete, first_done) = tokio::sync::oneshot::channel();
-        command_tx
-            .send_priority(LeagueRuntimeCommand::End {
-                reference: reference.clone(),
-                record: None,
-                completion: first_complete,
-            })
-            .await
-            .test_value();
         assert!(matches!(
-            first_done.await.expect("first End completes"),
+            finish_league_runtime_attempt(&command_tx, reference.clone(), None)
+                .await
+                .test_value(),
             LeagueEndAttempt::Finished(Some(_))
         ));
-        let (second_complete, second_done) = tokio::sync::oneshot::channel();
-        command_tx
-            .send_priority(LeagueRuntimeCommand::End {
-                reference,
-                record: None,
-                completion: second_complete,
-            })
-            .await
-            .test_value();
         assert_eq!(
-            second_done.await.expect("latched End completes"),
+            finish_league_runtime_attempt(&command_tx, reference, None)
+                .await
+                .test_value(),
             LeagueEndAttempt::Finished(None)
         );
         drop(command_tx);
@@ -10149,12 +10218,7 @@ mod tests {
         let (event_tx, _event_rx) = NetworkEventSender::channel();
         let reference = minimal_league_reference();
         let (_start, command_tx) = register_league_host(
-            PreparedLeagueHostConfig {
-                endpoint,
-                transport: clonk_network::LeagueHttpTransportConfig::default(),
-                update_period_secs: 120,
-                league_server_signup: true,
-            },
+            test_league_host_config(endpoint, true),
             &reference,
             event_tx,
         )
@@ -10163,17 +10227,10 @@ mod tests {
         assert_eq!(server.join().expect("join one-request fixture").len(), 1);
 
         for _ in 0..2 {
-            let (completion, completed) = tokio::sync::oneshot::channel();
-            command_tx
-                .send_priority(LeagueRuntimeCommand::End {
-                    reference: reference.clone(),
-                    record: None,
-                    completion,
-                })
-                .await
-                .test_value();
             assert!(matches!(
-                completed.await.expect("retryable End completes"),
+                finish_league_runtime_attempt(&command_tx, reference.clone(), None)
+                    .await
+                    .test_value(),
                 LeagueEndAttempt::Retryable {
                     phase: LeagueEndFailurePhase::Send,
                     ..
@@ -10181,39 +10238,27 @@ mod tests {
             ));
         }
 
-        let (completion, completed) = tokio::sync::oneshot::channel();
-        command_tx
-            .send_priority(LeagueRuntimeCommand::FinalizeEndFailure {
-                packet: clonk_network::LeagueRoundResultsPacket {
-                    success: false,
-                    result_string: legacy_runtime_message("Could not send game result: offline"),
-                    players: Vec::new(),
-                },
-                completion,
-            })
-            .await
-            .test_value();
-        let packet = completed
-            .await
-            .expect("failure finalization completes")
-            .test_value();
+        let packet = finalize_league_end_failure_runtime(
+            &command_tx,
+            clonk_network::LeagueRoundResultsPacket {
+                success: false,
+                result_string: legacy_runtime_message("Could not send game result: offline"),
+                players: Vec::new(),
+            },
+        )
+        .await
+        .test_value()
+        .test_value();
         assert!(!packet.success);
         assert_eq!(
             packet.result_string.as_bytes(),
             b"Could not send game result: offline"
         );
 
-        let (completion, completed) = tokio::sync::oneshot::channel();
-        command_tx
-            .send_priority(LeagueRuntimeCommand::End {
-                reference,
-                record: None,
-                completion,
-            })
-            .await
-            .test_value();
         assert_eq!(
-            completed.await.expect("latched End completes"),
+            finish_league_runtime_attempt(&command_tx, reference, None)
+                .await
+                .test_value(),
             LeagueEndAttempt::Finished(None)
         );
     }
@@ -10237,12 +10282,7 @@ Message=Server says Andr\xe9\r\n\
         let (event_tx, _event_rx) = NetworkEventSender::channel();
         let reference = minimal_league_reference();
         let (_start, command_tx) = register_league_host(
-            PreparedLeagueHostConfig {
-                endpoint,
-                transport: clonk_network::LeagueHttpTransportConfig::default(),
-                update_period_secs: 120,
-                league_server_signup: true,
-            },
+            test_league_host_config(endpoint, true),
             &reference,
             event_tx,
         )
@@ -10251,16 +10291,11 @@ Message=Server says Andr\xe9\r\n\
 
         let mut first_rejection = None;
         for _ in 0..2 {
-            let (completion, completed) = tokio::sync::oneshot::channel();
-            command_tx
-                .send_priority(LeagueRuntimeCommand::End {
-                    reference: reference.clone(),
-                    record: None,
-                    completion,
-                })
-                .await
-                .test_value();
-            let LeagueEndAttempt::Rejected(packet) = completed.await.test_value() else {
+            let LeagueEndAttempt::Rejected(packet) =
+                finish_league_runtime_attempt(&command_tx, reference.clone(), None)
+                    .await
+                    .test_value()
+            else {
                 panic!("server rejection must remain an explicit terminal choice");
             };
             assert_eq!(packet.result_string.as_bytes(), b"Server says Andr\xe9");
@@ -10270,30 +10305,17 @@ Message=Server says Andr\xe9\r\n\
         }
         assert_eq!(server.join().expect("join rejection fixture").len(), 3);
 
-        let (completion, completed) = tokio::sync::oneshot::channel();
-        command_tx
-            .send_priority(LeagueRuntimeCommand::FinalizeEndFailure {
-                packet: first_rejection.test_value(),
-                completion,
-            })
-            .await
-            .test_value();
-        assert!(completed
-            .await
-            .expect("rejection finalization completes")
-            .is_some());
+        assert!(
+            finalize_league_end_failure_runtime(&command_tx, first_rejection.test_value())
+                .await
+                .test_value()
+                .is_some()
+        );
 
-        let (completion, completed) = tokio::sync::oneshot::channel();
-        command_tx
-            .send_priority(LeagueRuntimeCommand::End {
-                reference,
-                record: None,
-                completion,
-            })
-            .await
-            .test_value();
         assert_eq!(
-            completed.await.expect("latched rejected End completes"),
+            finish_league_runtime_attempt(&command_tx, reference, None)
+                .await
+                .test_value(),
             LeagueEndAttempt::Finished(None)
         );
         drop(command_tx);
@@ -10445,12 +10467,7 @@ Message=Server says Andr\xe9\r\n\
         let (event_tx, _event_rx) = NetworkEventSender::channel();
         let reference = minimal_league_reference();
         let (_start, runtime) = register_league_host(
-            PreparedLeagueHostConfig {
-                endpoint,
-                transport: clonk_network::LeagueHttpTransportConfig::default(),
-                update_period_secs: 120,
-                league_server_signup: true,
-            },
+            test_league_host_config(endpoint, true),
             &reference,
             event_tx,
         )
@@ -10653,33 +10670,9 @@ Message=Server says Andr\xe9\r\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn host_worker_binds_and_advertises_tcp_and_udp_on_one_endpoint() {
-        let settings = HostSettings {
-            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            player_name: "Host".to_string(),
-            prepared: None,
-        };
-        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let netpuncher_state = test_netpuncher_state();
-        let worker_state = Arc::clone(&netpuncher_state);
-        let worker = tokio::spawn(async move {
-            run_host_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut control_tick_rx,
-                &mut control_performance_rx,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                worker_state,
-            )
-            .await
-        });
+        let settings = test_host_settings(SocketAddr::from(([127, 0, 0, 1], 0)), None);
+        let (command_tx, _event_rx, local_id_rx, netpuncher_state, worker, _telemetry_rx) =
+            start_test_host_worker(settings);
 
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(2))
@@ -10702,37 +10695,16 @@ Message=Server says Andr\xe9\r\n\
         let (occupied_tcp, udp_reservation, configured_address) =
             reserve_tcp_and_udp_at_same_address().await;
         drop(udp_reservation);
-        let settings = HostSettings {
-            bind_addr: configured_address,
-            player_name: "Host".to_string(),
-            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+        let settings = test_host_settings(
+            configured_address,
+            Some(PreparedHostBootstrap::transport_test_fixture(
                 configured_address.port(),
                 configured_address.port(),
                 None,
             )),
-        };
-        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let netpuncher_state = test_netpuncher_state();
-        let worker_state = Arc::clone(&netpuncher_state);
-        let worker = tokio::spawn(async move {
-            run_host_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut control_tick_rx,
-                &mut control_performance_rx,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                worker_state,
-            )
-            .await
-        });
+        );
+        let (command_tx, event_rx, local_id_rx, netpuncher_state, worker, _telemetry_rx) =
+            start_test_host_worker(settings);
 
         local_id_rx
             .recv_timeout(Duration::from_secs(2))
@@ -10762,37 +10734,16 @@ Message=Server says Andr\xe9\r\n\
         let (occupied_tcp, udp_reservation, configured_address) =
             reserve_tcp_and_udp_at_same_address().await;
         drop(udp_reservation);
-        let settings = HostSettings {
-            bind_addr: configured_address,
-            player_name: "Host".to_string(),
-            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+        let settings = test_host_settings(
+            configured_address,
+            Some(PreparedHostBootstrap::transport_test_fixture(
                 0,
                 configured_address.port(),
                 None,
             )),
-        };
-        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let netpuncher_state = test_netpuncher_state();
-        let worker_state = Arc::clone(&netpuncher_state);
-        let worker = tokio::spawn(async move {
-            run_host_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut control_tick_rx,
-                &mut control_performance_rx,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                worker_state,
-            )
-            .await
-        });
+        );
+        let (command_tx, event_rx, local_id_rx, netpuncher_state, worker, _telemetry_rx) =
+            start_test_host_worker(settings);
 
         local_id_rx
             .recv_timeout(Duration::from_secs(2))
@@ -10828,42 +10779,16 @@ Message=Server says Andr\xe9\r\n\
         let league_listener = std::net::TcpListener::bind("127.0.0.1:0").test_value();
         league_listener.set_nonblocking(true).test_value();
         let league_endpoint = format!("http://{}/", league_listener.local_addr().unwrap());
-        let settings = HostSettings {
-            bind_addr: configured_address,
-            player_name: "Host".to_string(),
-            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+        let settings = test_host_settings(
+            configured_address,
+            Some(PreparedHostBootstrap::transport_test_fixture(
                 configured_address.port(),
                 configured_address.port(),
-                Some(PreparedLeagueHostConfig {
-                    endpoint: league_endpoint,
-                    transport: clonk_network::LeagueHttpTransportConfig::default(),
-                    update_period_secs: 120,
-                    league_server_signup: false,
-                }),
+                Some(test_league_host_config(league_endpoint, false)),
             )),
-        };
-        let (_command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let netpuncher_state = test_netpuncher_state();
-        let worker_state = Arc::clone(&netpuncher_state);
-        let worker = tokio::spawn(async move {
-            run_host_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut control_tick_rx,
-                &mut control_performance_rx,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                worker_state,
-            )
-            .await
-        });
+        );
+        let (_command_tx, event_rx, local_id_rx, netpuncher_state, worker, _telemetry_rx) =
+            start_test_host_worker(settings);
 
         let error = local_id_rx
             .recv_timeout(Duration::from_secs(2))
@@ -10895,40 +10820,16 @@ Message=Server says Andr\xe9\r\n\
             b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\nSeed=305419896\r\nMaxPlayers=-1\r\n",
             b"[Response]\r\nStatus=Success\r\n",
         ]);
-        let settings = HostSettings {
-            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            player_name: "Host".to_string(),
-            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+        let settings = test_host_settings(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            Some(PreparedHostBootstrap::transport_test_fixture(
                 1,
                 0,
-                Some(PreparedLeagueHostConfig {
-                    endpoint,
-                    transport: clonk_network::LeagueHttpTransportConfig::default(),
-                    update_period_secs: 120,
-                    league_server_signup: false,
-                }),
+                Some(test_league_host_config(endpoint, false)),
             )),
-        };
-        let (_command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            run_host_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut control_tick_rx,
-                &mut control_performance_rx,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-            )
-            .await
-        });
+        );
+        let (_command_tx, _event_rx, local_id_rx, _netpuncher, worker, _telemetry_rx) =
+            start_test_host_worker(settings);
 
         let error = local_id_rx
             .recv_timeout(Duration::from_secs(2))
@@ -10970,40 +10871,16 @@ Message=Server says Andr\xe9\r\n\
             b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\nSeed=305419896\r\nMaxPlayers=4\r\n",
             b"[Response]\r\nStatus=Success\r\n",
         ]);
-        let settings = HostSettings {
-            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            player_name: "Host".to_string(),
-            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+        let settings = test_host_settings(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            Some(PreparedHostBootstrap::transport_test_fixture(
                 1,
                 0,
-                Some(PreparedLeagueHostConfig {
-                    endpoint,
-                    transport: clonk_network::LeagueHttpTransportConfig::default(),
-                    update_period_secs: 120,
-                    league_server_signup: false,
-                }),
+                Some(test_league_host_config(endpoint, false)),
             )),
-        };
-        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            run_host_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut control_tick_rx,
-                &mut control_performance_rx,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-            )
-            .await
-        });
+        );
+        let (command_tx, _event_rx, local_id_rx, _netpuncher, worker, _telemetry_rx) =
+            start_test_host_worker(settings);
 
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(2))
@@ -11040,40 +10917,16 @@ Message=Server says Andr\xe9\r\n\
         let (endpoint, league_server) = league_http_fixture(vec![
             b"[Response]\r\nStatus=Failure\r\nMessage=already registered\r\n",
         ]);
-        let settings = HostSettings {
-            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            player_name: "Host".to_string(),
-            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+        let settings = test_host_settings(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            Some(PreparedHostBootstrap::transport_test_fixture(
                 1,
                 0,
-                Some(PreparedLeagueHostConfig {
-                    endpoint,
-                    transport: clonk_network::LeagueHttpTransportConfig::default(),
-                    update_period_secs: 120,
-                    league_server_signup: false,
-                }),
+                Some(test_league_host_config(endpoint, false)),
             )),
-        };
-        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            run_host_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut control_tick_rx,
-                &mut control_performance_rx,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-            )
-            .await
-        });
+        );
+        let (command_tx, _event_rx, local_id_rx, _netpuncher, worker, _telemetry_rx) =
+            start_test_host_worker(settings);
 
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(2))
@@ -11128,31 +10981,9 @@ Message=Server says Andr\xe9\r\n\
             clonk_network::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                 .test_value();
         let puncher_address = puncher.local_addr();
-        let settings = HostSettings {
-            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            player_name: "Host".to_string(),
-            prepared: None,
-        };
-        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            run_host_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut control_tick_rx,
-                &mut control_performance_rx,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-            )
-            .await
-        });
+        let settings = test_host_settings(SocketAddr::from(([127, 0, 0, 1], 0)), None);
+        let (command_tx, _event_rx, local_id_rx, _netpuncher, worker, _telemetry_rx) =
+            start_test_host_worker(settings);
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
@@ -11161,12 +10992,7 @@ Message=Server says Andr\xe9\r\n\
 
         let failed_reference = minimal_league_reference();
         let reference = minimal_league_reference_with_netpuncher(puncher_address);
-        let config = PreparedLeagueHostConfig {
-            endpoint,
-            transport: clonk_network::LeagueHttpTransportConfig::default(),
-            update_period_secs: 120,
-            league_server_signup: false,
-        };
+        let config = test_league_host_config(endpoint, false);
         let (failed_tx, failed_rx) = mpsc::channel();
         let (_failed_cancel, failed_cancellation) = tokio::sync::oneshot::channel();
         let failed_transition = Arc::new(std::sync::atomic::AtomicU8::new(
@@ -11303,43 +11129,16 @@ Message=Server says Andr\xe9\r\n\
                 }
             },
         );
-        let settings = HostSettings {
-            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            player_name: "Host".to_string(),
-            prepared: None,
-        };
-        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            run_host_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut control_tick_rx,
-                &mut control_performance_rx,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-            )
-            .await
-        });
+        let settings = test_host_settings(SocketAddr::from(([127, 0, 0, 1], 0)), None);
+        let (command_tx, _event_rx, local_id_rx, _netpuncher, worker, _telemetry_rx) =
+            start_test_host_worker(settings);
         local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
             .test_value();
 
         let reference = minimal_league_reference();
-        let config = PreparedLeagueHostConfig {
-            endpoint,
-            transport: clonk_network::LeagueHttpTransportConfig::default(),
-            update_period_secs: 120,
-            league_server_signup: false,
-        };
+        let config = test_league_host_config(endpoint, false);
         let (enabled_tx, enabled_rx) = mpsc::channel();
         let (_enabled_cancel, enabled_cancellation) = tokio::sync::oneshot::channel();
         command_tx
@@ -11438,26 +11237,8 @@ Message=Server says Andr\xe9\r\n\
         let temporary = tempfile::tempdir().test_value();
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
-        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (event_tx, _event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            run_client_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut tokio_mpsc::unbounded_channel().1,
-                &mut tokio_mpsc::unbounded_channel().1,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-                Arc::new(AtomicI32::new(0)),
-                None,
-            )
-            .await
-        });
+        let (command_tx, _event_rx, local_id_rx, worker, _telemetry_rx) =
+            start_test_client_worker(settings, 0, 8);
 
         local_id_rx
             .recv_timeout(Duration::from_secs(4))
@@ -11493,27 +11274,8 @@ Message=Server says Andr\xe9\r\n\
         let temporary = tempfile::tempdir().test_value();
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
-        let (command_tx, command_rx) = tokio_mpsc::channel(16);
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            let mut command_rx = command_rx;
-            run_client_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut tokio_mpsc::unbounded_channel().1,
-                &mut tokio_mpsc::unbounded_channel().1,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-                Arc::new(AtomicI32::new(0)),
-                None,
-            )
-            .await
-        });
+        let (command_tx, event_rx, local_id_rx, worker, _telemetry_rx) =
+            start_test_client_worker(settings, 0, 16);
 
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(4))
@@ -11681,40 +11443,20 @@ Message=Server says Andr\xe9\r\n\
             udp_bind_address: Some(address),
             ..HostConfig::default()
         };
-        let expected_status = NetworkStatus {
-            target_tick: host_config
+        let expected_status = host_config.initial_status.with_target_tick(
+            host_config
                 .initial_join_snapshot
                 .as_ref()
                 .test_value()
                 .dynamic_tick,
-            ..host_config.initial_status
-        };
+        );
         let mut host = start_host(listener, host_config).await.test_value();
         let mut host_events = host.take_event_receiver();
         let temporary = tempfile::tempdir().test_value();
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
-        let (command_tx, command_rx) = tokio_mpsc::channel(16);
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, _local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            let mut command_rx = command_rx;
-            run_client_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut tokio_mpsc::unbounded_channel().1,
-                &mut tokio_mpsc::unbounded_channel().1,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-                Arc::new(AtomicI32::new(0)),
-                None,
-            )
-            .await
-        });
+        let (command_tx, event_rx, _local_id_rx, worker, _telemetry_rx) =
+            start_test_client_worker(settings, 0, 16);
 
         let client_id = loop {
             match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
@@ -11727,15 +11469,15 @@ Message=Server says Andr\xe9\r\n\
             }
         };
         let wire_client_id = i32::try_from(client_id).test_value();
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: wire_client_id,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            wire_client_id,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 name: legacy_string(b"Worker Player"),
                 league_progress_data_is_null: false,
                 ..Default::default()
             }],
-        };
+        );
         command_tx
             .send(NetworkCommand::SubmitPlayerInfoUpdate(request.clone()))
             .await
@@ -11795,11 +11537,11 @@ Message=Server says Andr\xe9\r\n\
             }
         }
 
-        let delayed_status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_PAUSE,
-            control_mode: 0,
-            target_tick: expected_status.target_tick.saturating_add(4),
-        };
+        let delayed_status = NetworkStatus::new(
+            clonk_network::NETWORK_STATE_PAUSE,
+            0,
+            expected_status.target_tick.saturating_add(4),
+        );
         host.change_status(delayed_status).await.test_value();
         loop {
             match event_rx.recv_timeout(Duration::from_secs(2)).test_value() {
@@ -11873,40 +11615,20 @@ Message=Server says Andr\xe9\r\n\
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let address = listener.local_addr().test_value();
         let host_config = HostConfig::default();
-        let expected_status = NetworkStatus {
-            target_tick: host_config
+        let expected_status = host_config.initial_status.with_target_tick(
+            host_config
                 .initial_join_snapshot
                 .as_ref()
                 .test_value()
                 .dynamic_tick,
-            ..host_config.initial_status
-        };
+        );
         let mut host = start_host(listener, host_config).await.test_value();
         let mut host_events = host.take_event_receiver();
         let temporary = tempfile::tempdir().test_value();
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
-        let (command_tx, command_rx) = tokio_mpsc::channel(32);
-        let (event_tx, _event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            let mut command_rx = command_rx;
-            run_client_worker(
-                settings,
-                3,
-                &mut command_rx,
-                &mut tokio_mpsc::unbounded_channel().1,
-                &mut tokio_mpsc::unbounded_channel().1,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-                Arc::new(AtomicI32::new(0)),
-                None,
-            )
-            .await
-        });
+        let (command_tx, _event_rx, local_id_rx, worker, _telemetry_rx) =
+            start_test_client_worker(settings, 3, 32);
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(4))
             .expect("client worker readiness timeout")
@@ -11997,12 +11719,12 @@ Message=Server says Andr\xe9\r\n\
             }
         }
 
-        let update = clonk_engine::ClientUpdateControlData {
-            update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
-            client_id: i32::try_from(client_id).test_value(),
-            data: 1,
-            by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
-        };
+        let update = clonk_engine::ClientUpdateControlData::new(
+            clonk_engine::CLIENT_UPDATE_ACTIVATE,
+            i32::try_from(client_id).test_value(),
+            1,
+            i32::try_from(HOST_CLIENT_ID).test_value(),
+        );
         host.submit_packet(
             ControlDelivery::Sync,
             encode_control_entry_payload(&clonk_engine::ControlPacket::ClientUpdate(
@@ -12087,27 +11809,8 @@ Message=Server says Andr\xe9\r\n\
             ])
             .with_password(password);
         settings.resource_directory = temporary.path().join("Network");
-        let (command_tx, command_rx) = tokio_mpsc::channel(8);
-        let (event_tx, _event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            let mut command_rx = command_rx;
-            run_client_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut tokio_mpsc::unbounded_channel().1,
-                &mut tokio_mpsc::unbounded_channel().1,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-                Arc::new(AtomicI32::new(0)),
-                None,
-            )
-            .await
-        });
+        let (command_tx, _event_rx, local_id_rx, worker, _telemetry_rx) =
+            start_test_client_worker(settings, 0, 8);
 
         assert!(matches!(
             local_id_rx
@@ -12169,27 +11872,8 @@ Message=Server says Andr\xe9\r\n\
         settings.mesh_udp_bind_address = None;
         settings.resource_directory = client_root.join("Network");
         settings.local_system_path = Some(client_system.clone());
-        let (command_tx, command_rx) = tokio_mpsc::channel(8);
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel();
-        let worker = tokio::spawn(async move {
-            let mut command_rx = command_rx;
-            run_client_worker(
-                settings,
-                0,
-                &mut command_rx,
-                &mut tokio_mpsc::unbounded_channel().1,
-                &mut tokio_mpsc::unbounded_channel().1,
-                event_tx,
-                telemetry_tx,
-                local_id_tx,
-                test_netpuncher_state(),
-                Arc::new(AtomicI32::new(0)),
-                None,
-            )
-            .await
-        });
+        let (command_tx, event_rx, local_id_rx, worker, _telemetry_rx) =
+            start_test_client_worker(settings, 0, 8);
 
         assert!(matches!(
             local_id_rx
@@ -12230,14 +11914,14 @@ Message=Server says Andr\xe9\r\n\
         // (src/C4Network2Players.cpp:142-166;
         // src/C4PlayerInfo.cpp:1800-1803).
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: 3,
-            flags: 1,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            3,
+            1,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 0,
                 ..Default::default()
             }],
-        };
+        );
 
         manager
             .submit_player_info_update(request.clone())
@@ -12719,11 +12403,7 @@ Message=Server says Andr\xe9\r\n\
     #[test]
     fn host_manager_waits_for_atomic_go_and_surfaces_worker_failure() {
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 2,
-            target_tick: 41,
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 41);
         let caller = thread::spawn(move || {
             let applied = manager.begin_go(status, false);
             let rejected = manager.begin_go(status, true);
@@ -12764,11 +12444,7 @@ Message=Server says Andr\xe9\r\n\
         // host's local arrival independently of remote acknowledgements
         // (src/C4Network2.cpp:2017-2051,2053-2086).
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 23,
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 1, 23);
 
         manager.change_status(status).test_value();
         assert_eq!(commands.take_status_changes(), vec![status]);
@@ -12801,11 +12477,7 @@ Message=Server says Andr\xe9\r\n\
         // remains byte-for-byte identical (src/C4Network2.cpp:2074-2084).
         let (mut manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 2,
-            target_tick: 41,
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 41);
         event_tx
             .send(NetworkEvent::StatusRequested(status))
             .test_value();
@@ -12830,15 +12502,8 @@ Message=Server says Andr\xe9\r\n\
         // a delayed activation request (src/C4Network2.cpp:2041-2058,2073-2084).
         let (mut manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        let requested = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_PAUSE,
-            control_mode: 2,
-            target_tick: 41,
-        };
-        let acknowledgement = NetworkStatus {
-            target_tick: 44,
-            ..requested
-        };
+        let requested = NetworkStatus::new(clonk_network::NETWORK_STATE_PAUSE, 2, 41);
+        let acknowledgement = requested.with_target_tick(44);
         event_tx
             .send(NetworkEvent::StatusRequested(requested))
             .test_value();
@@ -12887,15 +12552,8 @@ Message=Server says Andr\xe9\r\n\
     fn client_manager_rejects_a_drained_stale_status_before_acking_the_latest() {
         let (mut manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        let first = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_PAUSE,
-            control_mode: 2,
-            target_tick: 41,
-        };
-        let latest = NetworkStatus {
-            target_tick: 44,
-            ..first
-        };
+        let first = NetworkStatus::new(clonk_network::NETWORK_STATE_PAUSE, 2, 41);
+        let latest = first.with_target_tick(44);
         event_tx
             .send(NetworkEvent::StatusRequested(first))
             .test_value();
@@ -12939,11 +12597,11 @@ Message=Server says Andr\xe9\r\n\
         // (src/C4Network2Players.cpp:124-136;
         // src/C4Network2.cpp:2041-2058,2116-2145).
         let mut activation = ClientActivationState::default();
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: 7,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
-        };
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            7,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_engine::ControlPlayerInfoEntry::default()],
+        );
         let now = tokio::time::Instant::now();
 
         activation.arm_for_queued_player_info(&request, 7);
@@ -12959,11 +12617,11 @@ Message=Server says Andr\xe9\r\n\
         // including CIF_AddPlayers from a running game
         // (src/C4Network2Players.cpp:124-136).
         let mut activation = ClientActivationState::default();
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: 7,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
-        };
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            7,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![clonk_engine::ControlPlayerInfoEntry::default()],
+        );
         let now = tokio::time::Instant::now();
         activation.status_reached();
 
@@ -12982,12 +12640,12 @@ Message=Server says Andr\xe9\r\n\
         assert_eq!(activation.request_tick_if_due(now, 123), Some(123));
         assert!(!activation.can_finalize());
 
-        let activate = clonk_engine::ClientUpdateControlData {
-            update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
-            client_id: 7,
-            data: 1,
-            by_client: 0,
-        };
+        let activate = clonk_engine::ClientUpdateControlData::new(
+            clonk_engine::CLIENT_UPDATE_ACTIVATE,
+            7,
+            1,
+            0,
+        );
         activation.apply_executed_client_update(7, &activate);
         activation.arm_for_queued_control();
         assert_eq!(activation.request_tick_if_due(now, 124), None);
@@ -13025,11 +12683,11 @@ Message=Server says Andr\xe9\r\n\
         // current Game.FrameCounter (src/C4Network2.cpp:739-743,2116-2145;
         // src/C4Network2.h:57-60).
         let mut activation = ClientActivationState::default();
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: 7,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
-        };
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            7,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_engine::ControlPlayerInfoEntry::default()],
+        );
         let first_sent_at = tokio::time::Instant::now();
         activation.arm_for_queued_player_info(&request, 7);
         activation.status_reached();
@@ -13055,11 +12713,11 @@ Message=Server says Andr\xe9\r\n\
         // request only after sending the new PID_StatusAck
         // (src/C4Network2.cpp:2039-2058,2133-2145).
         let mut activation = ClientActivationState::default();
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: 7,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
-        };
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            7,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_engine::ControlPlayerInfoEntry::default()],
+        );
         let first_sent_at = tokio::time::Instant::now();
         activation.arm_for_queued_player_info(&request, 7);
         activation.status_reached();
@@ -13081,11 +12739,11 @@ Message=Server says Andr\xe9\r\n\
         // outstanding RequestActivate retries (src/C4Control.cpp:578-606;
         // src/C4Network2.cpp:2116-2145).
         let mut activation = ClientActivationState::default();
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: 7,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
-        };
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            7,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_engine::ControlPlayerInfoEntry::default()],
+        );
         let first_sent_at = tokio::time::Instant::now();
         activation.arm_for_queued_player_info(&request, 7);
         activation.status_reached();
@@ -13093,24 +12751,24 @@ Message=Server says Andr\xe9\r\n\
         let retry_at = first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL;
 
         for update in [
-            clonk_engine::ClientUpdateControlData {
-                update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
-                client_id: 7,
-                data: 1,
-                by_client: 3,
-            },
-            clonk_engine::ClientUpdateControlData {
-                update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
-                client_id: 8,
-                data: 1,
-                by_client: 0,
-            },
-            clonk_engine::ClientUpdateControlData {
-                update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
-                client_id: 7,
-                data: 0,
-                by_client: 0,
-            },
+            clonk_engine::ClientUpdateControlData::new(
+                clonk_engine::CLIENT_UPDATE_ACTIVATE,
+                7,
+                1,
+                3,
+            ),
+            clonk_engine::ClientUpdateControlData::new(
+                clonk_engine::CLIENT_UPDATE_ACTIVATE,
+                8,
+                1,
+                0,
+            ),
+            clonk_engine::ClientUpdateControlData::new(
+                clonk_engine::CLIENT_UPDATE_ACTIVATE,
+                7,
+                0,
+                0,
+            ),
         ] {
             activation.apply_executed_client_update(7, &update);
             assert_eq!(activation.request_tick_if_due(retry_at, 41), Some(41));
@@ -13118,12 +12776,12 @@ Message=Server says Andr\xe9\r\n\
 
         activation.apply_executed_client_update(
             7,
-            &clonk_engine::ClientUpdateControlData {
-                update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
-                client_id: 7,
-                data: 1,
-                by_client: 0,
-            },
+            &clonk_engine::ClientUpdateControlData::new(
+                clonk_engine::CLIENT_UPDATE_ACTIVATE,
+                7,
+                1,
+                0,
+            ),
         );
         assert_eq!(activation.request_tick_if_due(retry_at, 41), None);
     }
@@ -13134,11 +12792,11 @@ Message=Server says Andr\xe9\r\n\
         // player infos, but JoinLocalPlayer calls RequestActivate only when at
         // least one player was present (src/C4Network2Players.cpp:124-136).
         let mut activation = ClientActivationState::default();
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: 7,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: Vec::new(),
-        };
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            7,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            Vec::new(),
+        );
         activation.arm_for_queued_player_info(&request, 7);
         activation.status_reached();
 
@@ -13154,11 +12812,11 @@ Message=Server says Andr\xe9\r\n\
         // clears its outstanding retry state (src/C4Control.cpp:607-619;
         // src/C4Network2.cpp:2116-2122).
         let mut activation = ClientActivationState::default();
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: 7,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
-        };
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            7,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_engine::ControlPlayerInfoEntry::default()],
+        );
         let first_sent_at = tokio::time::Instant::now();
         activation.arm_for_queued_player_info(&request, 7);
         activation.status_reached();
@@ -13166,12 +12824,12 @@ Message=Server says Andr\xe9\r\n\
 
         activation.apply_executed_client_update(
             7,
-            &clonk_engine::ClientUpdateControlData {
-                update_type: clonk_engine::CLIENT_UPDATE_SET_OBSERVER,
-                client_id: 7,
-                data: 0,
-                by_client: 0,
-            },
+            &clonk_engine::ClientUpdateControlData::new(
+                clonk_engine::CLIENT_UPDATE_SET_OBSERVER,
+                7,
+                0,
+                0,
+            ),
         );
 
         assert_eq!(
@@ -13189,16 +12847,12 @@ Message=Server says Andr\xe9\r\n\
         // src/C4Network2.cpp:2041-2058,2116-2145).
         let (mut manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_LOBBY,
-            control_mode: 0,
-            target_tick: 23,
-        };
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: 7,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_LOBBY, 0, 23);
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            7,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_engine::ControlPlayerInfoEntry::default()],
+        );
         event_tx
             .send(NetworkEvent::StatusRequested(status))
             .test_value();
@@ -13236,11 +12890,11 @@ Message=Server says Andr\xe9\r\n\
         // src/C4Network2Players.cpp:124-136).
         let (manager, _events, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        let request = clonk_network::PlayerInfoUpdateRequest {
-            client_id: 8,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![clonk_engine::ControlPlayerInfoEntry::default()],
-        };
+        let request = clonk_network::PlayerInfoUpdateRequest::new(
+            8,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![clonk_engine::ControlPlayerInfoEntry::default()],
+        );
 
         assert_eq!(
             manager
@@ -13260,12 +12914,12 @@ Message=Server says Andr\xe9\r\n\
         // 558-588; src/C4Control.cpp:578-606).
         let (manager, _event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        let update = clonk_engine::ClientUpdateControlData {
-            update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
-            client_id: 7,
-            data: 1,
-            by_client: 0,
-        };
+        let update = clonk_engine::ClientUpdateControlData::new(
+            clonk_engine::CLIENT_UPDATE_ACTIVATE,
+            7,
+            1,
+            0,
+        );
 
         manager
             .notify_client_update_executed(update.clone())
@@ -13341,11 +12995,7 @@ Message=Server says Andr\xe9\r\n\
         // (src/C4Network2.cpp:1513-1543).
         let (mut manager, event_tx, _commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 2,
-            target_tick: 41,
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 41);
         event_tx
             .send(NetworkEvent::StatusRequested(status))
             .test_value();
@@ -13354,10 +13004,7 @@ Message=Server says Andr\xe9\r\n\
             .acknowledge_requested_status_at_frame(41, 0)
             .test_value();
 
-        let stale = NetworkStatus {
-            target_tick: 40,
-            ..status
-        };
+        let stale = status.with_target_tick(40);
         event_tx
             .send(NetworkEvent::StatusCommitted(stale))
             .test_value();
@@ -13381,11 +13028,7 @@ Message=Server says Andr\xe9\r\n\
         // (pristine 9ffa0a5d src/C4Network2.cpp:1513-1548).
         let (mut manager, event_tx, _commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        let requested = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 2,
-            target_tick: 41,
-        };
+        let requested = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 41);
         event_tx
             .send(NetworkEvent::StatusRequested(requested))
             .test_value();
@@ -13394,10 +13037,7 @@ Message=Server says Andr\xe9\r\n\
             .acknowledge_requested_status_at_frame(41, 0)
             .test_value();
 
-        let committed = NetworkStatus {
-            control_mode: 9,
-            ..requested
-        };
+        let committed = requested.with_control_mode(9);
         event_tx
             .send(NetworkEvent::StatusCommitted(committed))
             .test_value();
@@ -13414,11 +13054,7 @@ Message=Server says Andr\xe9\r\n\
         // ChangeGameStatus is host-only, while the non-host branch of
         // CheckStatusReached sends PID_StatusAck back to the host
         // (src/C4Network2.cpp:2017-2021,2073-2084).
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 23,
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 1, 23);
         let (client, _events) = NetworkManager::test_stub_for_client_id(7);
         assert_eq!(
             client
@@ -13459,18 +13095,8 @@ Message=Server says Andr\xe9\r\n\
             sync_clearance: true,
             by_client: 0,
         };
-        let right = PlayerControlData {
-            player: 4,
-            command: i32::from(COM_RIGHT),
-            data: 0,
-            by_client: 0,
-        };
-        let left = PlayerControlData {
-            player: 9,
-            command: i32::from(COM_LEFT),
-            data: 0,
-            by_client: 1,
-        };
+        let right = PlayerControlData::new(4, i32::from(COM_RIGHT), 0, 0);
+        let left = PlayerControlData::new(9, i32::from(COM_LEFT), 0, 1);
         let event = ready_event(
             17,
             99,
@@ -13551,12 +13177,7 @@ Message=Server says Andr\xe9\r\n\
             by_client: 4,
             ..Default::default()
         };
-        let player = PlayerControlData {
-            player: 7,
-            command: i32::from(COM_RIGHT),
-            data: 0,
-            by_client: 4,
-        };
+        let player = PlayerControlData::new(7, i32::from(COM_RIGHT), 0, 4);
         let event = ready_event(
             23,
             0,
@@ -13634,12 +13255,12 @@ Message=Server says Andr\xe9\r\n\
         // C4GameControlNetwork drains one FIFO SyncControl list at the tagged
         // control tick; ClientUpdate must remain ahead of ClientRemove
         // (src/C4GameControlNetwork.cpp:260-297,786-830).
-        let update = clonk_engine::ClientUpdateControlData {
-            update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
-            client_id: 3,
-            data: 1,
-            by_client: 0,
-        };
+        let update = clonk_engine::ClientUpdateControlData::new(
+            clonk_engine::CLIENT_UPDATE_ACTIVATE,
+            3,
+            1,
+            0,
+        );
         let remove = clonk_engine::ClientRemoveControlData {
             client_id: 4,
             reason: legacy_string(b"bye"),
@@ -13848,11 +13469,10 @@ Message=Server says Andr\xe9\r\n\
         // retaining a lockstep clock with no producer
         // (src/C4Network2.cpp:475-510,746-789).
         let manager = NetworkManager::for_mode(
-            NetworkMode::Host(HostSettings {
-                bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-                player_name: "Host".to_string(),
-                prepared: None,
-            }),
+            NetworkMode::Host(test_host_settings(
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                None,
+            )),
             0,
         )
         .test_value();
@@ -14016,11 +13636,7 @@ Message=Server says Andr\xe9\r\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn host_status_change_is_forwarded_to_the_app() {
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_PAUSE,
-            control_mode: 1,
-            target_tick: 23,
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_PAUSE, 1, 23);
         let event = forwarded_host_event(HostEvent::StatusChanged(status)).await;
 
         assert_eq!(event, NetworkEvent::HostStatusChanged(status));
@@ -14046,11 +13662,7 @@ Message=Server says Andr\xe9\r\n\
     #[tokio::test(flavor = "current_thread")]
     async fn host_status_ack_is_forwarded_to_the_app_with_client_identity() {
         let client_id = 7;
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 23,
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 1, 23);
         let event = forwarded_host_event(HostEvent::StatusAck { client_id, status }).await;
 
         assert_eq!(event, NetworkEvent::HostStatusAck { client_id, status });
@@ -14100,11 +13712,7 @@ Message=Server says Andr\xe9\r\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn host_status_commit_is_forwarded_to_the_app() {
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 23,
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 1, 23);
         let event = forwarded_host_event(HostEvent::StatusCommitted(status)).await;
 
         assert_eq!(event, NetworkEvent::StatusCommitted(status));
@@ -14215,10 +13823,7 @@ Message=Server says Andr\xe9\r\n\
         // C4Network2::HandlePacket passes the compiled packet, including its
         // claimed Client field, directly to HandleReadyCheck
         // (src/C4Network2.cpp:949-953,1625-1635).
-        let packet = clonk_network::ReadyCheckPacket {
-            client_id: 7,
-            data: clonk_network::ReadyCheckData::Ready,
-        };
+        let packet = clonk_network::ReadyCheckPacket::new(7, clonk_network::ReadyCheckData::Ready);
         let event = forwarded_host_event(HostEvent::ReadyCheck { packet }).await;
 
         assert_eq!(event, NetworkEvent::ReadyCheck(packet));
@@ -14276,11 +13881,7 @@ Message=Server says Andr\xe9\r\n\
         // HandleStatus stores the host-authored status, but the client sends
         // PID_StatusAck only after CheckStatusReached observes local arrival
         // (src/C4Network2.cpp:2017-2051,2053-2086).
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 23,
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 1, 23);
         let event = forwarded_client_event(ClientEvent::Status(status)).await;
 
         assert_eq!(event, NetworkEvent::StatusRequested(status));
@@ -14291,10 +13892,8 @@ Message=Server says Andr\xe9\r\n\
         // The client receives PID_ReadyCheck through the same packet handler
         // and preserves its compiled Client/Data fields
         // (src/C4Network2.cpp:949-953,1625-1635).
-        let packet = clonk_network::ReadyCheckPacket {
-            client_id: 9,
-            data: clonk_network::ReadyCheckData::NotReady,
-        };
+        let packet =
+            clonk_network::ReadyCheckPacket::new(9, clonk_network::ReadyCheckData::NotReady);
         let event = forwarded_client_event(ClientEvent::ReadyCheck { packet }).await;
 
         assert_eq!(event, NetworkEvent::ReadyCheck(packet));
@@ -14368,11 +13967,7 @@ Message=Server says Andr\xe9\r\n\
         // The host broadcasts PID_StatusAck only when its local state and all
         // waited-for clients have reached the barrier; that packet releases
         // the client's status wait (src/C4Network2.cpp:2088-2113).
-        let status = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 2,
-            target_tick: 41,
-        };
+        let status = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 41);
         let event = forwarded_client_event(ClientEvent::StatusAck(status)).await;
 
         assert_eq!(event, NetworkEvent::StatusCommitted(status));
@@ -14381,18 +13976,15 @@ Message=Server says Andr\xe9\r\n\
     #[tokio::test(flavor = "current_thread")]
     async fn lobby_messages_are_forwarded_as_typed_app_events() {
         let countdown = clonk_network::LobbyCountdownPacket::new(10);
-        let request = clonk_network::ReadyCheckPacket {
-            client_id: HOST_CLIENT_ID as i32,
-            data: clonk_network::ReadyCheckData::Request,
-        };
-        let ready = clonk_network::ReadyCheckPacket {
-            client_id: 7,
-            data: clonk_network::ReadyCheckData::Ready,
-        };
-        let host_ready = clonk_network::ReadyCheckPacket {
-            client_id: HOST_CLIENT_ID as i32,
-            data: clonk_network::ReadyCheckData::Ready,
-        };
+        let request = clonk_network::ReadyCheckPacket::new(
+            HOST_CLIENT_ID as i32,
+            clonk_network::ReadyCheckData::Request,
+        );
+        let ready = clonk_network::ReadyCheckPacket::new(7, clonk_network::ReadyCheckData::Ready);
+        let host_ready = clonk_network::ReadyCheckPacket::new(
+            HOST_CLIENT_ID as i32,
+            clonk_network::ReadyCheckData::Ready,
+        );
         let mut events = EventHarness::new();
         events
             .host(HostEvent::LobbyCountdown { packet: countdown })
@@ -14476,11 +14068,7 @@ Message=Server says Andr\xe9\r\n\
             event_tx.try_send(NetworkEvent::Error("overflow".to_string())),
             Err(mpsc::TrySendError::Full(_))
         ));
-        let committed = NetworkStatus {
-            state: clonk_network::NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 23,
-        };
+        let committed = NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 1, 23);
         critical_tx
             .send(NetworkEvent::StatusCommitted(committed))
             .test_value();
@@ -14682,12 +14270,7 @@ Message=Server says Andr\xe9\r\n\
             "decoded execution must receive the same signed Data payload"
         );
 
-        let raw = PlayerControlData {
-            player: 7,
-            command: 273,
-            data: 4,
-            by_client: 3,
-        };
+        let raw = PlayerControlData::new(7, 273, 4, 3);
         assert_eq!(
             network_control_for_packet(clonk_engine::ControlPacket::PlayerControl(raw.clone())),
             Some(NetworkControl::PlayerControl(raw)),
@@ -14726,12 +14309,7 @@ Message=Server says Andr\xe9\r\n\
         let encoded = encode_control_packet(&frame).test_value();
         let decoded = decode_control_packet(&encoded).test_value();
         for (command, packet) in (1..=u8::MAX).zip(decoded.controls) {
-            let expected = PlayerControlData {
-                player: 7,
-                command: i32::from(command),
-                data: 0,
-                by_client: 3,
-            };
+            let expected = PlayerControlData::new(7, i32::from(command), 0, 3);
             assert_eq!(
                 network_control_for_packet(packet),
                 Some(NetworkControl::PlayerControl(expected)),

@@ -2549,46 +2549,6 @@ impl Default for HostWorldContext {
 }
 
 impl HostWorldContext {
-    /// Replace the live object/landscape portion of a partially built host
-    /// context. Engine movement uses this to defer the expensive object-state
-    /// materialization until a Contact* callback actually fires.
-    pub(crate) fn with_objects_and_landscape<I>(
-        mut self,
-        objects: I,
-        landscape: Option<Landscape>,
-    ) -> Self
-    where
-        I: IntoIterator<Item = HostWorldObject>,
-    {
-        let _ = self.master_object_ids();
-        let objects = objects.into_iter().collect::<Vec<HostWorldObject>>();
-        let mut store = HostWorldObjectStore {
-            objects: HashMap::with_capacity(objects.len()),
-            order: Vec::with_capacity(objects.len()),
-            indices: HashMap::with_capacity(objects.len()),
-            removed: HashSet::new(),
-            complete: true,
-        };
-        for (index, object) in objects.into_iter().enumerate() {
-            let id = object.id;
-            store.order.push(id);
-            store.indices.insert(id, index);
-            store.objects.insert(id, Rc::new(object));
-        }
-        self.object_store = RefCell::new(Rc::new(store));
-        self.lazy_world = None;
-        let replace_landscape = match self.landscape.get() {
-            None => true,
-            Some(current) => current.is_none() && landscape.is_some(),
-        };
-        if replace_landscape {
-            self.landscape = OnceCell::from(landscape.map(Arc::new));
-        }
-        self.sectors = RefCell::new(None);
-        self.borrowed_sector_map_valid.set(false);
-        self
-    }
-
     /// Attach the engine's synchronous lazy source. Empty fixture contexts
     /// remain complete; only engine callback contexts opt into this state.
     pub(crate) fn with_lazy_world_provider(mut self, provider: LazyHostWorldProvider) -> Self {
@@ -3587,18 +3547,6 @@ impl HostWorldContext {
         defs: Rc<std::collections::HashSet<String>>,
     ) -> Self {
         self.particle_defs = Some(defs);
-        self
-    }
-
-    /// Seed the synchronous answer for `FnReloadParticle` and the channel its
-    /// accepted names travel back on.
-    pub(crate) fn with_particle_reloads(
-        mut self,
-        reloadable: std::collections::HashSet<String>,
-        requests: Rc<RefCell<Vec<String>>>,
-    ) -> Self {
-        self.reloadable_particle_defs = Some(Rc::new(reloadable));
-        self.particle_reload_requests = requests;
         self
     }
 
@@ -4799,26 +4747,6 @@ impl HostWorldContext {
             solid_mask_instance_sequences: self.solid_mask_instance_sequences.borrow().clone(),
             next_solid_mask_instance_sequence: self.next_solid_mask_instance_sequence.get(),
         }
-    }
-
-    /// Refresh the parts of a movement callback's world view changed by
-    /// C4Object::DoMotion removing its solid mask. Contact callbacks after
-    /// the first committed pixel must query the restored landscape rather
-    /// than the snapshot from DoMovement entry.
-    pub(crate) fn refresh_after_do_motion(
-        &mut self,
-        mover: ObjectId,
-        landscape: &Landscape,
-        bakes: Vec<(ObjectId, crate::SolidMaskBake)>,
-    ) {
-        // If no terrain host call ran yet, the movement provider already
-        // points at this live landscape; preserve laziness instead of cloning
-        // it merely because DoMotion advanced.
-        if self.landscape.get().is_some() {
-            self.landscape = OnceCell::from(Some(Arc::new(landscape.clone())));
-        }
-        Rc::make_mut(&mut self.movement_solid_masks).retain(|mask| mask.object_id != mover);
-        self.solid_mask_bakes = Rc::new(bakes);
     }
 
     pub(crate) fn movement_density_at(&self, x: i32, y: i32) -> Option<i32> {

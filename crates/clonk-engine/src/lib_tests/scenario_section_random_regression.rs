@@ -2,35 +2,7 @@ use super::*;
 use crate::landscape::{
     LandscapeRasterState, RuntimeTexMapLookup, RuntimeTexMapMaterial, RuntimeTexMapState,
 };
-
-trait TestEngineExt {
-    fn load_test_section(&mut self, name: &str, flags: i32, preserve_ids: Vec<ObjectId>) -> bool;
-    fn register_test_definition(&mut self, definition: Definition);
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
-    fn test_object_index(&self, object: ObjectId) -> usize;
-}
-
-impl TestEngineExt for Engine {
-    #[track_caller]
-    fn load_test_section(&mut self, name: &str, flags: i32, preserve_ids: Vec<ObjectId>) -> bool {
-        crate::TestValueExt::test_value(self.load_scenario_section(name, flags, preserve_ids))
-    }
-
-    #[track_caller]
-    fn register_test_definition(&mut self, definition: Definition) {
-        crate::TestValueExt::test_value(self.register_definition(definition));
-    }
-
-    #[track_caller]
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
-        crate::TestValueExt::test_value(self.spawn_object(config))
-    }
-
-    #[track_caller]
-    fn test_object_index(&self, object: ObjectId) -> usize {
-        crate::TestValueExt::test_value(self.find_object_index(object))
-    }
-}
+use crate::lib_test_support::{spawn_fixture, EngineTestExt};
 
 fn section(name: &str, width: u32, base_extinguish_enabled: bool) -> scenario::ScenarioSectionSpec {
     let mut section = vehicle_section(name, vehicle_section_landscape(width, 40));
@@ -209,10 +181,9 @@ fn section_object_save_enumerates_active_and_inactive_compiler_caches() {
     engine.configure_scenario_sections(&[section("main", 80, true), section("next", 100, true)]);
     engine.set_landscape(vehicle_section_landscape(80, 40));
 
-    let active = engine.spawn_test_object(SpawnConfig::new("ITEM"));
-    let inactive =
-        engine.spawn_test_object(SpawnConfig::new("ITEM").with_status(ObjectStatus::Inactive));
-    let preserved = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+    let active = spawn_fixture!(engine, "ITEM");
+    let inactive = spawn_fixture!(engine, "ITEM", with_status: ObjectStatus::Inactive);
+    let preserved = spawn_fixture!(engine, "ITEM");
     let inactive_number = crate::TestValueExt::test_value(i32::try_from(inactive.as_u64()));
     let active_index = engine.test_object_index(active);
     engine.objects[active_index].state.action.target = Some(inactive);
@@ -586,11 +557,8 @@ fn section_save_landscape_removes_and_restore_reputs_solid_masks_like_cpp() {
     ]);
     engine.set_landscape(main_landscape);
     engine.register_test_definition(gate);
-    let gate = engine.spawn_test_object(
-        SpawnConfig::new("SCGT")
-            .with_position(Vector2::new(10, 10))
-            .with_loaded(true),
-    );
+    let gate =
+        spawn_fixture!(engine, "SCGT", with_position: Vector2::new(10, 10), with_loaded: true);
     let gate_index = engine.test_object_index(gate);
     engine.update_solid_mask(gate_index);
     assert_eq!(
@@ -663,42 +631,13 @@ fn section_save_preserves_overlapping_inactive_solid_mask_like_cpp() {
     engine.register_test_definition(two_pixel_solid_mask_definition("SMFL", 255));
     engine.register_test_definition(two_pixel_solid_mask_definition("SMHF", 0));
 
-    let _overlap_owner = engine.spawn_test_object(
-        SpawnConfig::new("SMFL")
-            .with_position(Vector2::new(OVERLAP_X, 10))
-            .with_loaded(true),
-    );
-    let overlap_survivor = engine.spawn_test_object(
-        SpawnConfig::new("SMHF")
-            .with_position(Vector2::new(OVERLAP_X, 10))
-            .with_loaded(true),
-    );
-    let _active = engine.spawn_test_object(
-        SpawnConfig::new("SMFL")
-            .with_position(Vector2::new(ACTIVE_X, 10))
-            .with_loaded(true),
-    );
-    let _all_active_owner = engine.spawn_test_object(
-        SpawnConfig::new("SMFL")
-            .with_position(Vector2::new(ALL_ACTIVE_X, 10))
-            .with_loaded(true),
-    );
-    let _all_active_second = engine.spawn_test_object(
-        SpawnConfig::new("SMHF")
-            .with_position(Vector2::new(ALL_ACTIVE_X, 10))
-            .with_loaded(true),
-    );
-    let loaded_inactive = engine.spawn_test_object(
-        SpawnConfig::new("SMFL")
-            .with_position(Vector2::new(LOADED_INACTIVE_X, 10))
-            .with_status(ObjectStatus::Inactive)
-            .with_loaded(true),
-    );
-    let standalone_inactive = engine.spawn_test_object(
-        SpawnConfig::new("SMHF")
-            .with_position(Vector2::new(STANDALONE_INACTIVE_X, 10))
-            .with_loaded(true),
-    );
+    let _overlap_owner = spawn_fixture!(engine, "SMFL", with_position: Vector2::new(OVERLAP_X, 10), with_loaded: true);
+    let overlap_survivor = spawn_fixture!(engine, "SMHF", with_position: Vector2::new(OVERLAP_X, 10), with_loaded: true);
+    let _active = spawn_fixture!(engine, "SMFL", with_position: Vector2::new(ACTIVE_X, 10), with_loaded: true);
+    let _all_active_owner = spawn_fixture!(engine, "SMFL", with_position: Vector2::new(ALL_ACTIVE_X, 10), with_loaded: true);
+    let _all_active_second = spawn_fixture!(engine, "SMHF", with_position: Vector2::new(ALL_ACTIVE_X, 10), with_loaded: true);
+    let loaded_inactive = spawn_fixture!(engine, "SMFL", with_position: Vector2::new(LOADED_INACTIVE_X, 10), with_status: ObjectStatus::Inactive, with_loaded: true);
+    let standalone_inactive = spawn_fixture!(engine, "SMHF", with_position: Vector2::new(STANDALONE_INACTIVE_X, 10), with_loaded: true);
 
     let all_active_capture = engine.capture_state();
     let all_active_landscape =

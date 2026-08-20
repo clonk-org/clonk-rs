@@ -1,32 +1,17 @@
-use crate::support::real_scenario::load_tutorial;
+use crate::support::real_scenario::load_tutorial_with_local_player;
 use crate::support::EngineTestExt;
 use clonk_engine::{
-    CommandDirection, Engine, JoinPlayerConfig, ObjectUpdate, Vector2, COM_DOWN,
-    COM_RELEASE_OFFSET, COM_UP,
+    CommandDirection, Engine, ObjectUpdate, Vector2, COM_DOWN, COM_RELEASE_OFFSET, COM_UP,
 };
 
 fn load_tutorial02(control_style: bool) -> (Engine, i32) {
-    let mut engine = load_tutorial(2, 0);
-    let joined = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial 2 balloon platform".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style,
-            auto_context_menu: control_style,
-            startup_player_count: 1,
-        })
-        .unwrap_or_else(|error| panic!("Tutorial02 player joins: {error}"));
-    (engine, joined.number())
+    load_tutorial_with_local_player(
+        2,
+        0,
+        "Tutorial 2 balloon platform",
+        control_style,
+        control_style,
+    )
 }
 
 #[test]

@@ -10,6 +10,9 @@ EXACT_SHA_QUALIFICATION_WORKFLOW = (
     REPOSITORY / ".github" / "workflows" / "exact-sha-qualification.yml"
 )
 RELEASE_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
+RELEASE_PREPARE_WORKFLOW = (
+    REPOSITORY / ".github" / "workflows" / "release-prepare.yml"
+)
 RELEASE_BUILD_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release-build.yml"
 RELEASE_PREBUILD_WORKFLOW = (
     REPOSITORY / ".github" / "workflows" / "release-prebuild.yml"
@@ -17,6 +20,7 @@ RELEASE_PREBUILD_WORKFLOW = (
 MSVC_RUNTIME_CONFIG = REPOSITORY / "scripts" / "configure-msvc-runtime.sh"
 MSVC_RUNTIME_VALIDATION = REPOSITORY / "scripts" / "validate-msvc-runtime.sh"
 WINDOWS_INSTALLER = REPOSITORY / "scripts" / "windows-installer.nsi"
+NSIS_INSTALLER = REPOSITORY / "scripts" / "install-nsis.sh"
 
 
 def step_script(workflow, name):
@@ -316,58 +320,72 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertIn('-DICON="$icon"', script)
 
     def test_windows_installer_toolchain_uses_verified_upstream_archive(self):
-        scripts = (
+        workflow_scripts = (
             step_script(LANDING_WORKFLOW, "Install NSIS"),
             step_script(
                 RELEASE_BUILD_WORKFLOW, "Install the Windows installer toolchain"
             ),
         )
+        self.assertEqual(
+            workflow_scripts,
+            ("scripts/install-nsis.sh", "scripts/install-nsis.sh"),
+        )
+
+        self.assertTrue(NSIS_INSTALLER.stat().st_mode & 0o111)
+        script = NSIS_INSTALLER.read_text(encoding="utf-8")
         url = (
             "https://downloads.sourceforge.net/project/nsis/"
             "NSIS%203/3.12/nsis-3.12.zip"
         )
         digest = "56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f"
-        for script in scripts:
-            with self.subTest(script=script):
-                self.assertIn(f"nsis_url='{url}'", script)
-                self.assertIn(f"nsis_sha256='{digest}'", script)
-                self.assertIn("curl -fsSL --retry 5 --retry-all-errors", script)
-                download = '--output "$archive" "$nsis_url"'
-                checksum = 'actual_sha256=$(sha256sum "$archive"'
-                digest_check = 'if [[ "$actual_sha256" != "$nsis_sha256" ]]; then'
-                extraction = 'python3 -m zipfile -e "$archive" "$runner_temp"'
-                extracted_root = 'nsis_dir="$runner_temp/nsis-3.12"'
-                version_check = '"$nsis_dir/makensis.exe" /VERSION'
-                for fragment in (
-                    download,
-                    checksum,
-                    digest_check,
-                    extraction,
-                    extracted_root,
-                    version_check,
-                ):
-                    self.assertIn(fragment, script)
-                positions = [
-                    script.index(fragment)
-                    for fragment in (
-                        download,
-                        checksum,
-                        digest_check,
-                        extraction,
-                        extracted_root,
-                        version_check,
-                    )
-                ]
-                self.assertEqual(positions, sorted(positions))
-                mismatch_branch = script[
-                    script.index(digest_check) : script.index(extraction)
-                ]
-                self.assertIn("exit 1", mismatch_branch)
-                self.assertIn("expected NSIS v3.12", script)
-                self.assertIn(
-                    'echo "$(cygpath -w "$nsis_dir")" >> "$GITHUB_PATH"', script
-                )
-                self.assertNotIn("choco", script.lower())
+        self.assertIn(f"nsis_url='{url}'", script)
+        self.assertIn(f"nsis_sha256='{digest}'", script)
+        self.assertIn("curl -fsSL --retry 5 --retry-all-errors", script)
+        download = '--output "$archive" "$nsis_url"'
+        checksum = 'actual_sha256=$(sha256sum "$archive"'
+        digest_check = 'if [[ "$actual_sha256" != "$nsis_sha256" ]]; then'
+        extraction = 'python3 -m zipfile -e "$archive" "$runner_temp"'
+        extracted_root = 'nsis_dir="$runner_temp/nsis-3.12"'
+        version_check = '"$nsis_dir/makensis.exe" /VERSION'
+        fragments = (
+            download,
+            checksum,
+            digest_check,
+            extraction,
+            extracted_root,
+            version_check,
+        )
+        for fragment in fragments:
+            self.assertIn(fragment, script)
+        self.assertEqual(
+            [script.index(fragment) for fragment in fragments],
+            sorted(script.index(fragment) for fragment in fragments),
+        )
+        mismatch_branch = script[
+            script.index(digest_check) : script.index(extraction)
+        ]
+        self.assertIn("exit 1", mismatch_branch)
+        self.assertIn("expected NSIS v3.12", script)
+        self.assertIn(
+            'echo "$(cygpath -w "$nsis_dir")" >> "$GITHUB_PATH"', script
+        )
+        self.assertNotIn("choco", script.lower())
+
+    def test_workspace_versions_are_read_from_toml(self):
+        version_read = (
+            'tomllib.load(open("Cargo.toml", "rb"))'
+            '["workspace"]["package"]["version"]'
+        )
+        for workflow in (
+            RELEASE_PREPARE_WORKFLOW,
+            RELEASE_WORKFLOW,
+            RELEASE_PREBUILD_WORKFLOW,
+            RELEASE_BUILD_WORKFLOW,
+        ):
+            with self.subTest(workflow=workflow.name):
+                source = workflow.read_text(encoding="utf-8")
+                self.assertEqual(source.count(version_read), 1)
+                self.assertNotIn(r"^\[workspace\.package\]$", source)
 
     def test_universal_release_verifies_every_shipped_binary(self):
         script = step_script(

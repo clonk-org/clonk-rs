@@ -13,28 +13,22 @@ fn console_open_close_and_message_fallback_follow_app_state() {
             "/open \"Missions/My Round/Scenario.txt\" /network /lobby:17 \"/comment:console game\"",
         )
         .test_value();
-    assert_eq!(
-        startup.classic_command_line.scenario,
-        Some(PathBuf::from("Missions/My Round"))
-    );
-    assert_eq!(startup.classic_command_line.network_active, Some(true));
-    assert_eq!(startup.classic_command_line.lobby_timeout, Some(Some(17)));
-    assert_eq!(
-        startup.classic_command_line.comment.as_deref(),
-        Some("console game")
-    );
-    assert!(startup.auto_start_classic_command_line_scenario);
+    main_assert_eq!(startup.classic_command_line.scenario => Some(PathBuf::from("Missions/My Round")));
+    main_assert_eq!(startup.classic_command_line.network_active => Some(true));
+    main_assert_eq!(startup.classic_command_line.lobby_timeout => Some(Some(17)));
+    main_assert_eq!(startup.classic_command_line.comment.as_deref() => Some("console game"));
+    main_assert!(startup.auto_start_classic_command_line_scenario);
     startup.process_console_command("/close").test_value();
-    assert_eq!(startup.mode, AppMode::Loading);
-    assert!(startup.boot_loading.is_some());
-    assert!(!startup.auto_start_classic_command_line_scenario);
+    main_assert_eq!(startup.mode => AppMode::Loading);
+    main_assert!(startup.boot_loading.is_some());
+    main_assert!(!startup.auto_start_classic_command_line_scenario);
     boot_sender
         .send(BootLoadingEvent::Finished(None))
         .test_value();
     startup.poll_boot_loading();
-    assert_eq!(startup.mode, AppMode::Menu);
-    assert!(startup.boot_loading.is_none());
-    assert!(startup.console_startup_active());
+    main_assert_eq!(startup.mode => AppMode::Menu);
+    main_assert!(startup.boot_loading.is_none());
+    main_assert!(startup.console_startup_active());
 
     let (_query_sender, query_receiver) = mpsc::channel::<
         std::result::Result<ClassicDirectReferenceQueryResult, NetworkStartError>,
@@ -46,18 +40,15 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     startup
         .process_console_command("/open Replacement.c4s")
         .test_value();
-    assert_eq!(startup.classic_command_line, pending_join_arguments);
+    main_assert_eq!(startup.classic_command_line => pending_join_arguments);
     startup.process_console_command("/close").test_value();
-    assert_eq!(startup.mode, AppMode::Menu);
-    assert!(startup.classic_direct_reference_query.is_none());
-    assert!(startup.console_startup_active());
+    main_assert_eq!(startup.mode => AppMode::Menu);
+    main_assert!(startup.classic_direct_reference_query.is_none());
+    main_assert!(startup.console_startup_active());
     startup
         .process_console_command("/open /comment:replacement")
         .test_value();
-    assert_eq!(
-        startup.classic_command_line.comment.as_deref(),
-        Some("replacement")
-    );
+    main_assert_eq!(startup.classic_command_line.comment.as_deref() => Some("replacement"));
 
     let mut running = new_state_only_lightweight_running_sandbox_app();
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
@@ -65,8 +56,8 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     running
         .process_console_command("administrator message")
         .test_value();
-    assert_eq!(
-        commands.take_submitted_messages(),
+    main_assert_eq!(
+        commands.take_submitted_messages() =>
         vec![MessageControlData {
             message_type: MESSAGE_TYPE_NORMAL,
             player: running.local_owner,
@@ -79,10 +70,10 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     running.full_speed = true;
     running.frame_skip = 9;
     running.process_console_command("/close").test_value();
-    assert_eq!(running.mode, AppMode::Menu);
-    assert!(running.active_scenario.is_none());
-    assert!(!running.full_speed);
-    assert_eq!(running.frame_skip, 1);
+    main_assert_eq!(running.mode => AppMode::Menu);
+    main_assert!(running.active_scenario.is_none());
+    main_assert!(!running.full_speed);
+    main_assert_eq!(running.frame_skip => 1);
 }
 
 #[test]
@@ -118,9 +109,7 @@ fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
     ));
     app.test_left_button(ElementState::Pressed);
     app.test_cursor(PhysicalPosition::new(f64::from(end.x), f64::from(end.y)));
-    assert!(app
-        .mouse_state
-        .is_some_and(|state| { state.motion.moved && state.motion.world_drag_started }));
+    main_assert!(app.mouse_state.is_some_and(|state| { state.motion.moved && state.motion.world_drag_started }));
 
     app.start_running_chat(RunningChatMode::All);
     app.push_message_dialog(
@@ -132,14 +121,12 @@ fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
         MessageDialogContinuation::None,
     )
     .test_value();
-    assert!(app
-        .mouse_state
-        .is_some_and(|state| state.motion.world_drag_started));
+    main_assert!(app.mouse_state.is_some_and(|state| state.motion.world_drag_started));
     app.test_left_button(ElementState::Released);
-    assert!(app.mouse_state.is_none());
-    assert!(app.running_chat.is_some());
-    assert_eq!(app.message_dialogs.len(), 1);
-    assert_eq!(app.running_chat_text(), Some(""));
+    main_assert!(app.mouse_state.is_none());
+    main_assert!(app.running_chat.is_some());
+    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert_eq!(app.running_chat_text() => Some(""));
 }
 
 fn message_speech_test_engine(samples: &[String]) -> Engine {
@@ -208,17 +195,17 @@ fn message_speech_falls_back_when_new_instance_is_rejected() {
         r#"Message("hidden$Speech")"#,
         &empty_snapshot,
     );
-    assert!(messages.is_empty(), "a created instance suppresses text");
+    main_assert!(messages.is_empty(), "a created instance suppresses text");
     let messages = execute_message_speech_for_audio(
         &mut duplicate_engine,
         &mut duplicate_audio,
         r#"Message("duplicate fallback$Speech")"#,
         &empty_snapshot,
     );
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].kind, MessageKind::Global);
-    assert_eq!(messages[0].lines, ["duplicate fallback"]);
-    assert_eq!(duplicate_audio.active_channels.len(), 1);
+    main_assert_eq!(messages.len() => 1);
+    main_assert_eq!(messages[0].kind => MessageKind::Global);
+    main_assert_eq!(messages[0].lines => ["duplicate fallback"]);
+    main_assert_eq!(duplicate_audio.active_channels.len() => 1);
 
     // Twenty spatially separated logical instances consume the native
     // per-sample allowance even when they are inaudible and channel-less.
@@ -234,18 +221,7 @@ fn message_speech_falls_back_when_new_instance_is_rejected() {
         .collect::<Vec<_>>();
     let capped_snapshot = make_snapshot(sources.clone(), Vec::new());
     for source in &sources {
-        assert!(capped_audio
-            .try_start_sound(
-                "Speech",
-                Some(source.id),
-                100,
-                false,
-                true,
-                None,
-                &capped_snapshot,
-                &[],
-            )
-            .expect("seed speech instance"));
+        main_assert!(capped_audio.try_start_sound("Speech", Some(source.id), 100, false, true, None, &capped_snapshot, &[],).expect("seed speech instance"));
     }
     let samples = capped_audio.available_sound_samples();
     let mut capped_engine = message_speech_test_engine(&samples);
@@ -255,10 +231,10 @@ fn message_speech_falls_back_when_new_instance_is_rejected() {
         r#"PlayerMessage(0,"cap fallback$Speech")"#,
         &capped_snapshot,
     );
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].kind, MessageKind::GlobalPlayer);
-    assert_eq!(messages[0].lines, ["cap fallback"]);
-    assert_eq!(capped_audio.active_channels.len(), 20);
+    main_assert_eq!(messages.len() => 1);
+    main_assert_eq!(messages[0].kind => MessageKind::GlobalPlayer);
+    main_assert_eq!(messages[0].lines => ["cap fallback"]);
+    main_assert_eq!(capped_audio.active_channels.len() => 20);
 
     // A distinct sample occupying the only mixer slot makes the initial
     // channel allocation fail; the rejected speech is never inserted.
@@ -283,10 +259,10 @@ fn message_speech_falls_back_when_new_instance_is_rejected() {
         r#"PlrMessage("channel fallback$Speech",0)"#,
         &empty_snapshot,
     );
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].kind, MessageKind::GlobalPlayer);
-    assert_eq!(messages[0].lines, ["channel fallback"]);
-    assert!(channel_audio.active_channel_key("Speech", None).is_none());
+    main_assert_eq!(messages.len() => 1);
+    main_assert_eq!(messages[0].kind => MessageKind::GlobalPlayer);
+    main_assert_eq!(messages[0].lines => ["channel fallback"]);
+    main_assert!(channel_audio.active_channel_key("Speech", None).is_none());
 
     // Muting skips physical allocation but still creates C++'s logical
     // instance, so text remains suppressed.
@@ -300,12 +276,12 @@ fn message_speech_falls_back_when_new_instance_is_rejected() {
         r#"Message("muted$Speech")"#,
         &empty_snapshot,
     );
-    assert!(messages.is_empty());
+    main_assert!(messages.is_empty());
     let muted = muted_audio
         .active_channels
         .get(&SoundInstanceKey::new("Speech", None))
         .test_value();
-    assert!(muted.channel.is_none());
+    main_assert!(muted.channel.is_none());
 
     // Filename inventory rejection remains synchronous and never emits a
     // frontend command.
@@ -317,8 +293,8 @@ fn message_speech_falls_back_when_new_instance_is_rejected() {
         r#"Message("missing fallback$Absent")"#,
         &empty_snapshot,
     );
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].lines, ["missing fallback"]);
+    main_assert_eq!(messages.len() => 1);
+    main_assert_eq!(messages[0].lines => ["missing fallback"]);
 }
 
 #[test]
@@ -342,7 +318,7 @@ fn missing_player_scoped_messages_are_not_drawable() {
         content_origin_y: 0.0,
         zoom: 1.0,
     }];
-    assert_ne!(viewports[0].owner, 42);
+    main_assert_ne!(viewports[0].owner => 42);
 
     let mut message = clonk_engine::MessageSnapshot {
         id: 1,
@@ -358,18 +334,12 @@ fn missing_player_scoped_messages_are_not_drawable() {
         frame_decoration: None,
         portrait: None,
     };
-    assert_eq!(
-        app.hud_message_drawability(&message, &viewports),
-        HudMessageDrawability::NotDrawable
-    );
+    main_assert_eq!(app.hud_message_drawability(&message, &viewports) => HudMessageDrawability::NotDrawable);
 
     message.kind = MessageKind::TargetPlayer;
     message.target = app.snapshot.objects.first().map(|object| object.id);
-    assert!(message.target.is_some());
-    assert_eq!(
-        app.hud_message_drawability(&message, &viewports),
-        HudMessageDrawability::NotDrawable
-    );
+    main_assert!(message.target.is_some());
+    main_assert_eq!(app.hud_message_drawability(&message, &viewports) => HudMessageDrawability::NotDrawable);
 }
 
 #[test]
@@ -429,17 +399,14 @@ fn scale_one_point_five_message_batch_carries_its_isolated_clipper() {
         })
         .test_value();
 
-    assert!(batch.logical_layer.is_some(), "message frame is rasterized");
-    assert_eq!(batch.clip, Some(viewport));
-    assert!(batch
-        .text
-        .iter()
-        .all(|command| command.clip == Some(viewport)));
-    assert_eq!(
+    main_assert!(batch.logical_layer.is_some(), "message frame is rasterized");
+    main_assert_eq!(batch.clip => Some(viewport));
+    main_assert!(batch.text.iter().all(|command| command.clip == Some(viewport)));
+    main_assert_eq!(
         plan.batches
             .iter()
             .filter(|candidate| candidate.clip.is_some())
-            .count(),
+            .count() =>
         1,
         "unproven HUD and scoreboard batches keep full-frame composition"
     );
@@ -498,11 +465,8 @@ fn secondary_local_viewport_draws_its_player_global_message_only_there() {
         .enumerate()
         .filter_map(|(index, (actual, before))| (actual != before).then_some(index))
         .collect::<Vec<_>>();
-    assert!(
-        !changed.is_empty(),
-        "the secondary message contributes pixels"
-    );
-    assert!(changed.iter().all(|index| {
+    main_assert!(!changed.is_empty(), "the secondary message contributes pixels");
+    main_assert!(changed.iter().all(|index| {
         let x = (*index % 320) as i32;
         let y = (*index / 320) as i32;
         x >= viewport.x
@@ -540,7 +504,7 @@ fn target_message_regular_parallax_matches_cpp_integer_order() {
 
     let position = c4_message_target_position(&target, Vector2::new(7, 11), 21, viewport);
 
-    assert_eq!(position, Vector2::new(1_107, 95));
+    main_assert_eq!(position => Vector2::new(1_107, 95));
 }
 
 #[test]
@@ -571,11 +535,11 @@ fn target_message_zero_parallax_negative_position_anchors_right_bottom() {
 
     let position = c4_message_target_position(&target, Vector2::new(4, 6), 20, viewport);
 
-    assert_eq!(position, Vector2::new(507, 116));
-    assert!(viewport.contains_logical_point(position));
+    main_assert_eq!(position => Vector2::new(507, 116));
+    main_assert!(viewport.contains_logical_point(position));
     let output = viewport.logical_to_output(position);
-    assert_eq!(output, (778.0, 342.0));
-    assert!(viewport.contains_output_point(output));
+    main_assert_eq!(output => (778.0, 342.0));
+    main_assert!(viewport.contains_output_point(output));
 }
 
 #[test]
@@ -631,13 +595,13 @@ fn fractional_zoom_rounded_border_keeps_logical_edge_message_drawable() {
     };
     let target = app.snapshot.object(target_id).test_value();
     let position = c4_message_target_position(target, message.offset, shape_height, viewport);
-    assert!(viewport.contains_logical_point(position));
+    main_assert!(viewport.contains_logical_point(position));
     let output = viewport.logical_to_output(position);
-    assert!(output.0 > 9.0 && output.0 < 10.0);
-    assert!(!viewport.contains_output_point(output));
+    main_assert!(output.0 > 9.0 && output.0 < 10.0);
+    main_assert!(!viewport.contains_output_point(output));
 
-    assert_eq!(
-        app.hud_message_drawability(&message, &[viewport]),
+    main_assert_eq!(
+        app.hud_message_drawability(&message, &[viewport]) =>
         HudMessageDrawability::Drawable,
         "C++ accepts the logical edge without a second physical-rect test"
     );
@@ -733,10 +697,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     let mut baseline = vec![0; 320 * 200 * 4];
     app.test_render(&mut baseline);
     let viewports = app.graphics.active_viewport_projections();
-    assert_eq!(
-        app.hud_message_drawability(&message, &viewports),
-        HudMessageDrawability::Drawable
-    );
+    main_assert_eq!(app.hud_message_drawability(&message, &viewports) => HudMessageDrawability::Drawable);
     let viewport = viewports
         .iter()
         .copied()
@@ -755,11 +716,8 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         .enumerate()
         .filter_map(|(index, (actual, before))| (actual != before).then_some(index))
         .collect::<Vec<_>>();
-    assert!(
-        !changed.is_empty(),
-        "the visible target message draws pixels"
-    );
-    assert!(changed.iter().all(|index| {
+    main_assert!(!changed.is_empty(), "the visible target message draws pixels");
+    main_assert!(changed.iter().all(|index| {
         let x = (*index % 320) as i32;
         let y = (*index / 320) as i32;
         x >= viewport.rect.x
@@ -782,14 +740,11 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     let mut fog_baseline = vec![0; 320 * 200 * 4];
     app.test_render(&mut fog_baseline);
     let viewports = app.graphics.active_viewport_projections();
-    assert_eq!(
-        app.hud_message_drawability(&message, &viewports),
-        HudMessageDrawability::NotDrawable
-    );
+    main_assert_eq!(app.hud_message_drawability(&message, &viewports) => HudMessageDrawability::NotDrawable);
     app.snapshot.hud.messages = vec![message.clone()];
     let mut fogged = vec![0; 320 * 200 * 4];
     app.test_render(&mut fogged);
-    assert_eq!(fogged, fog_baseline);
+    main_assert_eq!(fogged => fog_baseline);
 
     // C4GM_Target additionally honors C4Object::IsVisible. The player-
     // scoped target variant deliberately does not use that predicate.
@@ -809,19 +764,16 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     let mut visibility_baseline = vec![0; 320 * 200 * 4];
     app.test_render(&mut visibility_baseline);
     let viewports = app.graphics.active_viewport_projections();
-    assert_eq!(
-        app.hud_message_drawability(&message, &viewports),
-        HudMessageDrawability::NotDrawable
-    );
+    main_assert_eq!(app.hud_message_drawability(&message, &viewports) => HudMessageDrawability::NotDrawable);
     app.snapshot.hud.messages = vec![message.clone()];
     let mut invisible = vec![0; 320 * 200 * 4];
     app.test_render(&mut invisible);
-    assert_eq!(invisible, visibility_baseline);
+    main_assert_eq!(invisible => visibility_baseline);
 
     message.kind = MessageKind::TargetPlayer;
     message.player = Some(app.local_owner);
-    assert_eq!(
-        app.hud_message_drawability(&message, &app.graphics.active_viewport_projections()),
+    main_assert_eq!(
+        app.hud_message_drawability(&message, &app.graphics.active_viewport_projections()) =>
         HudMessageDrawability::Drawable,
         "C4GM_TargetPlayer bypasses C4Object::IsVisible"
     );
@@ -842,8 +794,8 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         .test_value();
     target_object.visibility = clonk_engine::VIS_ALL;
     target_object.category |= C4D_IGNORE_FOW;
-    assert_eq!(
-        app.hud_message_drawability(&message, &app.graphics.active_viewport_projections()),
+    main_assert_eq!(
+        app.hud_message_drawability(&message, &app.graphics.active_viewport_projections()) =>
         HudMessageDrawability::Drawable,
         "C4D_IgnoreFoW bypasses only the FoW predicate"
     );
@@ -866,23 +818,20 @@ fn hidden_startup_irc_warning_connects_immediately() {
     install_classic_test_assets(&mut app);
     app.open_network_game_dialog();
     let mut login = app.startup_network_dialog.test_ref().chat_login();
-    assert_eq!(login.server, address);
-    assert_eq!(login.nick, "HiddenNick");
-    assert_eq!(login.real_name, "Hidden Name");
-    assert_eq!(login.channel, "#hidden");
+    main_assert_eq!(login.server => address);
+    main_assert_eq!(login.nick => "HiddenNick");
+    main_assert_eq!(login.real_name => "Hidden Name");
+    main_assert_eq!(login.channel => "#hidden");
     login.password = "not-persisted".into();
     let dialog_count = app.message_dialogs.len();
 
     app.request_startup_irc_connection(login).test_value();
-    assert_eq!(app.message_dialogs.len(), dialog_count);
+    main_assert_eq!(app.message_dialogs.len() => dialog_count);
     let client = app.startup_irc_client.test_ref();
-    assert!(matches!(
-        client.recv_event_timeout(Duration::from_secs(2)),
-        Ok(clonk_network::IrcClientEvent::Connected)
-    ));
+    main_assert!(matches!(client.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
     let persisted = Config::load(paths.config_file()).test_value();
-    assert_eq!(persisted.get_in(Some("IRC"), "Nick"), Some("HiddenNick"));
-    assert_eq!(persisted.get_in(Some("IRC"), "Password"), None);
+    main_assert_eq!(persisted.get_in(Some("IRC"), "Nick") => Some("HiddenNick"));
+    main_assert_eq!(persisted.get_in(Some("IRC"), "Password") => None);
     drop(app);
     server.test_join();
     reset_cached_app_paths();
@@ -900,10 +849,7 @@ fn active_irc_runtime_hud_chat_button_opens_ui_without_disconnecting_transport()
         Duration::from_secs(2),
     )
     .test_value();
-    assert!(matches!(
-        handle.recv_event_timeout(Duration::from_secs(2)),
-        Ok(clonk_network::IrcClientEvent::Connected)
-    ));
+    main_assert!(matches!(handle.recv_event_timeout(Duration::from_secs(2)), Ok(clonk_network::IrcClientEvent::Connected)));
 
     let mut app = new_classic_running_sandbox_app();
     app.startup_irc_server = address;
@@ -911,12 +857,7 @@ fn active_irc_runtime_hud_chat_button_opens_ui_without_disconnecting_transport()
     render_mouse_test_app(&mut app);
     let owner = app.local_owner;
     let chat = viewport_button_point(&app, owner, clonk_frontend::hud::ViewportButton::Chat);
-    assert_eq!(
-        app.ingame_viewport_region(owner, chat),
-        Some(IngameViewportRegion::ViewportButton(
-            clonk_frontend::hud::ViewportButton::Chat,
-        ))
-    );
+    main_assert_eq!(app.ingame_viewport_region(owner, chat) => Some(IngameViewportRegion::ViewportButton(clonk_frontend::hud::ViewportButton::Chat,)));
 
     physical_left_click_with_modifiers(
         &mut app,
@@ -924,10 +865,10 @@ fn active_irc_runtime_hud_chat_button_opens_ui_without_disconnecting_transport()
         ModifiersState::empty(),
         ModifiersState::empty(),
     );
-    assert!(app.external_irc_dialog_visible);
-    assert!(app.startup_irc_client_active());
+    main_assert!(app.external_irc_dialog_visible);
+    main_assert!(app.startup_irc_client_active());
     app.hide_external_irc_dialog();
-    assert!(app.startup_irc_client_active());
+    main_assert!(app.startup_irc_client_active());
 
     drop(app);
     server.test_join();
@@ -947,8 +888,8 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     app.startup_network_dialog = Some(app.new_network_dialog_controller());
     let embedded_controller_ptr = app.startup_network_dialog.as_ref().map(std::ptr::from_ref);
     app.show_external_irc_dialog().test_value();
-    assert_ne!(
-        app.external_irc_dialog.as_ref().map(std::ptr::from_ref),
+    main_assert_ne!(
+        app.external_irc_dialog.as_ref().map(std::ptr::from_ref) =>
         embedded_controller_ptr,
         "C4ChatDlg must own a distinct C4ChatControl from StartupNetDlg"
     );
@@ -957,8 +898,8 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     )])
     .test_value();
     let validation = app.message_dialogs.last().test_value();
-    assert_eq!(validation.state.icon(), MessageDialogIcon::ERROR);
-    assert!(validation.state.message().contains("31"));
+    main_assert_eq!(validation.state.icon() => MessageDialogIcon::ERROR);
+    main_assert!(validation.state.message().contains("31"));
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
 
@@ -970,47 +911,29 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
             nick: "Clonker".into(),
             ..NetDlgChatSnapshot::default()
         });
-    assert_eq!(
-        app.external_irc_dialog.as_ref().unwrap().chat_page(),
-        NetDlgChatPage::Chats
-    );
+    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_page() => NetDlgChatPage::Chats);
     app.process_network_dialog_actions(vec![NetDlgAction::ChatDisconnectConfirmationRequested])
         .test_value();
     let confirmation = app.message_dialogs.last().test_value();
-    assert!(matches!(
-        confirmation.continuation,
-        MessageDialogContinuation::StartupIrcDisconnectConfirm
-    ));
-    assert_eq!(confirmation.state.caption(), "Chat");
-    assert_eq!(
-        confirmation.state.button_label(MessageDialogButton::Cancel),
-        "Abort"
-    );
+    main_assert!(matches!(confirmation.continuation, MessageDialogContinuation::StartupIrcDisconnectConfirm));
+    main_assert_eq!(confirmation.state.caption() => "Chat");
+    main_assert_eq!(confirmation.state.button_label(MessageDialogButton::Cancel) => "Abort");
     app.finish_message_dialog(MessageDialogResult::Cancel)
         .test_value();
-    assert_eq!(
-        app.external_irc_dialog.as_ref().unwrap().chat_page(),
-        NetDlgChatPage::Chats
-    );
+    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_page() => NetDlgChatPage::Chats);
 
     app.process_network_dialog_actions(vec![NetDlgAction::ChatDisconnectConfirmationRequested])
         .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
         .test_value();
-    assert_eq!(
-        app.external_irc_dialog.as_ref().unwrap().chat_page(),
-        NetDlgChatPage::Login
-    );
-    assert!(app.external_irc_dialog_visible);
+    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_page() => NetDlgChatPage::Login);
+    main_assert!(app.external_irc_dialog_visible);
 
     app.process_network_dialog_actions(vec![NetDlgAction::ChatDialogCloseRequested])
         .test_value();
-    assert!(!app.external_irc_dialog_visible);
-    assert!(app.external_irc_dialog.is_none());
-    assert_eq!(
-        app.startup_network_dialog.as_ref().map(std::ptr::from_ref),
-        embedded_controller_ptr
-    );
+    main_assert!(!app.external_irc_dialog_visible);
+    main_assert!(app.external_irc_dialog.is_none());
+    main_assert_eq!(app.startup_network_dialog.as_ref().map(std::ptr::from_ref) => embedded_controller_ptr);
 
     app.show_external_irc_dialog().test_value();
     app.external_irc_dialog
@@ -1024,28 +947,18 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         .chat_login()
         .nick;
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    assert!(app.context_menu.is_some());
+    main_assert!(app.context_menu.is_some());
     app.test_text_input('x');
-    assert_eq!(
-        app.external_irc_dialog.as_ref().unwrap().chat_login().nick,
-        original_nick
-    );
+    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_login().nick => original_nick);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    assert!(app.context_menu.is_none());
-    assert!(app.external_irc_dialog_visible);
+    main_assert!(app.context_menu.is_none());
+    main_assert!(app.external_irc_dialog_visible);
     app.test_text_input('x');
-    assert_eq!(
-        app.external_irc_dialog.as_ref().unwrap().chat_login().nick,
-        format!("{original_nick}x")
-    );
+    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_login().nick => format!("{original_nick}x"));
     app.hide_external_irc_dialog();
     app.show_external_irc_dialog().test_value();
-    assert_eq!(
-        app.external_irc_dialog.as_ref().unwrap().chat_login().nick,
-        original_nick,
-        "closing standalone chat discards its unsent edit state"
-    );
+    main_assert_eq!(app.external_irc_dialog.as_ref().unwrap().chat_login().nick => original_nick, "closing standalone chat discards its unsent edit state");
 
     let initial_bounds = app
         .external_irc_dialog
@@ -1067,17 +980,17 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         TouchPhase::Moved,
         GuiPoint::new(drag_start.x + 50.0, drag_start.y + 40.0),
     );
-    assert_eq!(
+    main_assert_eq!(
         app.external_irc_dialog
             .as_ref()
-            .and_then(|dialog| dialog.chat_bounds_override()),
+            .and_then(|dialog| dialog.chat_bounds_override()) =>
         Some(initial_bounds),
         "touch cancellation clears the standalone caption capture"
     );
-    assert_eq!(
+    main_assert_eq!(
         app.startup_network_dialog
             .as_ref()
-            .and_then(|dialog| dialog.pointer_position()),
+            .and_then(|dialog| dialog.pointer_position()) =>
         Some(embedded_pointer),
         "standalone cancellation must not mutate the embedded startup sheet"
     );
@@ -1090,42 +1003,23 @@ fn message_control_authenticates_players_and_applies_running_visibility() {
 
     let spoofed =
         app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"spoofed", 8));
-    assert!(spoofed.rejected);
-    assert!(app.message_board.log_history.is_empty());
+    main_assert!(spoofed.rejected);
+    main_assert!(app.message_board.log_history.is_empty());
 
     let normal =
         app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"hello", 7));
-    assert!(normal.displayed);
-    assert_eq!(
-        app.message_board_line().as_deref(),
-        Some("<c 123456><Sender> hello")
-    );
+    main_assert!(normal.displayed);
+    main_assert_eq!(app.message_board_line().as_deref() => Some("<c 123456><Sender> hello"));
 
     let queued =
         app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"second", 7));
-    assert!(queued.displayed);
-    assert_eq!(
-        app.message_board_line().as_deref(),
-        Some("<c 123456><Sender> second")
-    );
-    assert_eq!(
-        app.message_board
-            .log_history
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec!["<c 123456><Sender> hello", "<c 123456><Sender> second"]
-    );
+    main_assert!(queued.displayed);
+    main_assert_eq!(app.message_board_line().as_deref() => Some("<c 123456><Sender> second"));
+    main_assert_eq!(app.message_board.log_history.iter().map(String::as_str).collect::<Vec<_>>() => vec!["<c 123456><Sender> hello", "<c 123456><Sender> second"]);
     app.scroll_message_board(true);
-    assert_eq!(
-        app.message_board_line().as_deref(),
-        Some("<c 123456><Sender> hello")
-    );
+    main_assert_eq!(app.message_board_line().as_deref() => Some("<c 123456><Sender> hello"));
     app.scroll_message_board(false);
-    assert_eq!(
-        app.message_board_line().as_deref(),
-        Some("<c 123456><Sender> second")
-    );
+    main_assert_eq!(app.message_board_line().as_deref() => Some("<c 123456><Sender> second"));
 
     app.clear_message_board_log();
     let missing_player = app.execute_message_control(message_control(
@@ -1135,11 +1029,8 @@ fn message_control_authenticates_players_and_applies_running_visibility() {
         b"client message",
         7,
     ));
-    assert!(missing_player.displayed);
-    assert_eq!(
-        latest_message_board_logical_entry(&app).as_deref(),
-        Some("<Remote> client message"),
-    );
+    main_assert!(missing_player.displayed);
+    main_assert_eq!(latest_message_board_logical_entry(&app).as_deref() => Some("<Remote> client message"),);
 
     app.clear_message_board_log();
     app.engine
@@ -1147,33 +1038,18 @@ fn message_control_authenticates_players_and_applies_running_visibility() {
         .test_value();
     let hostile_team =
         app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"hidden", 7));
-    assert!(!hostile_team.displayed);
-    assert!(app.message_board.log_history.is_empty());
+    main_assert!(!hostile_team.displayed);
+    main_assert!(app.message_board.log_history.is_empty());
     app.engine
         .set_hostility(7, app.local_owner, false)
         .test_value();
-    assert!(
-        app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"allied", 7,))
-            .displayed
-    );
+    main_assert!(app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"allied", 7,)).displayed);
 
     app.clear_message_board_log();
-    assert!(
-        app.execute_message_control(message_control(
-            MESSAGE_TYPE_PRIVATE,
-            7,
-            app.local_owner,
-            b"local",
-            7,
-        ))
-        .displayed
-    );
+    main_assert!(app.execute_message_control(message_control(MESSAGE_TYPE_PRIVATE, 7, app.local_owner, b"local", 7,)).displayed);
     app.clear_message_board_log();
-    assert!(
-        !app.execute_message_control(message_control(MESSAGE_TYPE_PRIVATE, 7, 99, b"hidden", 7,))
-            .displayed
-    );
-    assert!(app.message_board.log_history.is_empty());
+    main_assert!(!app.execute_message_control(message_control(MESSAGE_TYPE_PRIVATE, 7, 99, b"hidden", 7,)).displayed);
+    main_assert!(app.message_board.log_history.is_empty());
 }
 
 #[test]
@@ -1190,15 +1066,15 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
     )
     .expect("parse private")
     .test_value();
-    assert_eq!(private.message_type, MESSAGE_TYPE_PRIVATE);
-    assert_eq!(private.to_player, 7);
-    assert_eq!(private.message.as_bytes(), b"secret");
+    main_assert_eq!(private.message_type => MESSAGE_TYPE_PRIVATE);
+    main_assert_eq!(private.to_player => 7);
+    main_assert_eq!(private.message.as_bytes() => b"secret");
 
     let say = parse_running_message_control("\"hello", app.local_owner, false, &app.snapshot)
         .expect("parse say")
         .test_value();
-    assert_eq!(say.message_type, MESSAGE_TYPE_SAY);
-    assert_eq!(say.message.as_bytes(), b"\"hello\"");
+    main_assert_eq!(say.message_type => MESSAGE_TYPE_SAY);
+    main_assert_eq!(say.message.as_bytes() => b"\"hello\"");
 
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
     app.network = Some(network);
@@ -1207,9 +1083,9 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
         app.test_text_input(character);
     }
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    assert!(app.running_chat.is_none());
-    assert_eq!(
-        commands.take_submitted_messages(),
+    main_assert!(app.running_chat.is_none());
+    main_assert_eq!(
+        commands.take_submitted_messages() =>
         vec![MessageControlData {
             message_type: MESSAGE_TYPE_NORMAL,
             player: app.local_owner,
@@ -1225,18 +1101,11 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
         app.test_text_input(character);
     }
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    assert_eq!(app.running_chat_text(), Some("Sender"));
+    main_assert_eq!(app.running_chat_text() => Some("Sender"));
     let sound_enabled = app.audio.test_ref().options.sound_enabled;
     app.keyboard_modifiers = ModifiersState::CONTROL;
     app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
-    assert_eq!(
-        app.audio
-            .as_ref()
-            .expect("sandbox audio context")
-            .options
-            .sound_enabled,
-        sound_enabled
-    );
+    main_assert_eq!(app.audio.as_ref().expect("sandbox audio context").options.sound_enabled => sound_enabled);
     app.keyboard_modifiers = ModifiersState::empty();
 }
 
@@ -1247,28 +1116,18 @@ fn running_help_clear_and_case_sensitive_unknown() {
 
     app.process_running_chat_text("/help");
     let help_entries = message_board_logical_entries(&app);
-    assert!(help_entries
-        .iter()
-        .any(|line| line.contains("Commands available during game")));
-    assert!(help_entries
-        .iter()
-        .any(|line| line.starts_with("/clear - ")));
-    assert!(help_entries
-        .iter()
-        .any(|line| line.starts_with("/fast [x] - ")));
-    assert!(help_entries.iter().any(|line| line.starts_with("/slow - ")));
-    assert!(help_entries
-        .iter()
-        .all(|line| !line.contains("Unknown command")));
+    main_assert!(help_entries.iter().any(|line| line.contains("Commands available during game")));
+    main_assert!(help_entries.iter().any(|line| line.starts_with("/clear - ")));
+    main_assert!(help_entries.iter().any(|line| line.starts_with("/fast [x] - ")));
+    main_assert!(help_entries.iter().any(|line| line.starts_with("/slow - ")));
+    main_assert!(help_entries.iter().all(|line| !line.contains("Unknown command")));
 
     app.process_running_chat_text("/clear");
-    assert!(app.message_board.log_history.is_empty());
-    assert!(app.message_board.current_line().is_none());
+    main_assert!(app.message_board.log_history.is_empty());
+    main_assert!(app.message_board.current_line().is_none());
 
     app.process_running_chat_text("/Clear");
-    assert!(latest_message_board_logical_entry(&app)
-        .as_deref()
-        .is_some_and(|line| line.contains("Unknown command") && line.contains("Clear")));
+    main_assert!(latest_message_board_logical_entry(&app).as_deref().is_some_and(|line| line.contains("Unknown command") && line.contains("Clear")));
 }
 
 #[test]
@@ -1277,14 +1136,14 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
     app.start_running_chat(RunningChatMode::All);
     app.toggle_network_chart();
     app.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
-    assert!(app.network_chart_elevated);
-    assert!(app.network_chart_is_active_dialog());
-    assert!(!app.running_chat_active());
+    main_assert!(app.network_chart_elevated);
+    main_assert!(app.network_chart_is_active_dialog());
+    main_assert!(!app.running_chat_active());
 
     app.set_running_chat_active(true);
-    assert!(app.running_chat_active());
-    assert!(app.network_chart_renders_elevated());
-    assert!(!app.network_chart_is_active_dialog());
+    main_assert!(app.running_chat_active());
+    main_assert!(app.network_chart_renders_elevated());
+    main_assert!(!app.network_chart_is_active_dialog());
 
     let resources = app.assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
@@ -1303,18 +1162,15 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
     app.running_pointer_position = Some(chart_point);
     app.handle_mouse_button_classified(ElementState::Pressed, false)
         .test_value();
-    assert!(app.network_chart_is_active_dialog());
-    assert!(!app.running_chat_active());
+    main_assert!(app.network_chart_is_active_dialog());
+    main_assert!(!app.running_chat_active());
     app.handle_mouse_button_classified(ElementState::Released, false)
         .test_value();
 
     app.set_running_chat_active(true);
     app.toggle_network_chart();
-    assert!(app.network_chart_dialog.is_none());
-    assert!(
-        app.running_chat_active(),
-        "closing an inactive elevated chart must not overwrite reactivated chat ownership"
-    );
+    main_assert!(app.network_chart_dialog.is_none());
+    main_assert!(app.running_chat_active(), "closing an inactive elevated chart must not overwrite reactivated chat ownership");
 }
 
 #[test]
@@ -1339,27 +1195,24 @@ fn chart_restores_projected_successor_after_active_underlay_is_removed() {
 
     app.toggle_network_chart();
     app.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
-    assert!(app.network_chart_elevated_owns_input());
+    main_assert!(app.network_chart_elevated_owns_input());
 
     app.message_dialog_active_index = Some(1);
     app.activate_running_dialog(RunningDialogStackEntry::Message(removed));
-    assert!(app.network_chart_renders_elevated());
-    assert!(!app.network_chart_is_active_dialog());
+    main_assert!(app.network_chart_renders_elevated());
+    main_assert!(!app.network_chart_is_active_dialog());
 
     let (_, was_active) = app.remove_message_dialog_at(1).test_value();
-    assert!(was_active);
-    assert_eq!(
-        app.running_active_dialog,
-        Some(RunningDialogStackEntry::Message(successor))
-    );
-    assert!(app.network_chart_elevated_owns_input());
-    assert!(app.network_chart_is_active_dialog());
-    assert_eq!(app.active_message_dialog_index(), None);
+    main_assert!(was_active);
+    main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Message(successor)));
+    main_assert!(app.network_chart_elevated_owns_input());
+    main_assert!(app.network_chart_is_active_dialog());
+    main_assert_eq!(app.active_message_dialog_index() => None);
 
     app.toggle_network_chart();
-    assert!(app.network_chart_dialog.is_none());
-    assert_eq!(app.message_dialog_active_index, Some(0));
-    assert_eq!(app.active_message_dialog_index(), Some(0));
+    main_assert!(app.network_chart_dialog.is_none());
+    main_assert_eq!(app.message_dialog_active_index => Some(0));
+    main_assert_eq!(app.active_message_dialog_index() => Some(0));
 }
 
 #[test]
@@ -1382,16 +1235,13 @@ fn chart_hide_restores_projected_message_instead_of_inactive_chat() {
 
     app.toggle_network_chart();
     app.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
-    assert!(app.network_chart_elevated_owns_input());
-    assert_eq!(
-        app.running_active_dialog,
-        Some(RunningDialogStackEntry::Message(message))
-    );
+    main_assert!(app.network_chart_elevated_owns_input());
+    main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Message(message)));
 
     app.toggle_network_chart();
-    assert!(app.network_chart_dialog.is_none());
-    assert_eq!(app.message_dialog_active_index, Some(0));
-    assert!(!app.running_chat_active());
+    main_assert!(app.network_chart_dialog.is_none());
+    main_assert_eq!(app.message_dialog_active_index => Some(0));
+    main_assert!(!app.running_chat_active());
 }
 
 #[test]
@@ -1416,9 +1266,9 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
         );
     app.finish_game_option_input_dialog_actions(actions)
         .test_value();
-    assert_eq!(app.running_chat_text(), Some("second"));
-    assert_eq!(
-        commands.take_submitted_messages(),
+    main_assert_eq!(app.running_chat_text() => Some("second"));
+    main_assert_eq!(
+        commands.take_submitted_messages() =>
         vec![MessageControlData {
             message_type: MESSAGE_TYPE_NORMAL,
             player: app.local_owner,
@@ -1428,15 +1278,12 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
             by_client: 0,
         }]
     );
-    assert_eq!(
-        app.message_input_history.front().map(String::as_str),
-        Some("first")
-    );
+    main_assert_eq!(app.message_input_history.front().map(String::as_str) => Some("first"));
 
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    assert!(app.running_chat.is_none());
-    assert_eq!(
-        commands.take_submitted_messages(),
+    main_assert!(app.running_chat.is_none());
+    main_assert_eq!(
+        commands.take_submitted_messages() =>
         vec![MessageControlData {
             message_type: MESSAGE_TYPE_NORMAL,
             player: app.local_owner,
@@ -1460,30 +1307,20 @@ fn running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() 
         .running_chat_controller()
         .test_value()
         .horizontal_scroll();
-    assert!(long_scroll > 0);
+    main_assert!(long_scroll > 0);
 
     app.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
-    assert_eq!(app.running_chat_text(), Some("history"));
+    main_assert_eq!(app.running_chat_text() => Some("history"));
     let history_scroll = app
         .running_chat_controller()
         .test_value()
         .horizontal_scroll();
-    assert!(history_scroll < long_scroll);
-    assert_eq!(
-        app.running_chat_controller()
-            .expect("history chat controller")
-            .selection(),
-        Some((0, "history".len()))
-    );
+    main_assert!(history_scroll < long_scroll);
+    main_assert_eq!(app.running_chat_controller().expect("history chat controller").selection() => Some((0, "history".len())));
 
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
-    assert_eq!(app.running_chat_text(), Some(""));
-    assert_eq!(
-        app.running_chat_controller()
-            .expect("cleared chat controller")
-            .horizontal_scroll(),
-        history_scroll
-    );
+    main_assert_eq!(app.running_chat_text() => Some(""));
+    main_assert_eq!(app.running_chat_controller().expect("cleared chat controller").horizontal_scroll() => history_scroll);
 }
 
 #[test]
@@ -1501,15 +1338,15 @@ fn running_chat_close_forgets_releases_swallowed_by_the_modal() {
     // the chat modal swallows still drops the physical latch. Only
     // `scoreboard_tab_raw_pressed`, which has no oracle counterpart and is
     // maintained inside the scoreboard route, survives to the close below.
-    assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
-    assert!(app.scoreboard_tab_raw_pressed);
+    main_assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
+    main_assert!(app.scoreboard_tab_raw_pressed);
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(app.pressed_engine_keys.is_empty());
-    assert!(!app.scoreboard_tab_raw_pressed);
+    main_assert!(app.pressed_engine_keys.is_empty());
+    main_assert!(!app.scoreboard_tab_raw_pressed);
 
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
-    assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
+    main_assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
 }
 
 #[test]
@@ -1523,7 +1360,7 @@ fn running_chat_exclusive_scope_blocks_rebound_tab_player_control() {
         if context_open {
             app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
             app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
-            assert!(app.context_menu.is_some());
+            main_assert!(app.context_menu.is_some());
         }
         app.engine
             .test_player_mut(app.local_owner)
@@ -1531,15 +1368,7 @@ fn running_chat_exclusive_scope_blocks_rebound_tab_player_control() {
             .pressed_coms = 0;
         app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
         app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-        assert_eq!(
-            app.engine
-                .player(app.local_owner)
-                .expect("local sandbox player")
-                .control
-                .pressed_coms
-                & (1 << clonk_engine::COM_LEFT),
-            0
-        );
+        main_assert_eq!(app.engine.player(app.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
         if context_open {
             app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
             app.test_key(VirtualKeyCode::Escape, ElementState::Released);
@@ -1563,19 +1392,17 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         app.test_text_input(character);
     }
     app.test_modifiers(ModifiersState::ALT);
-    assert!(!app
-        .handle_game_option_input_dialog_key(VirtualKeyCode::F11, ElementState::Pressed)
-        .expect("non-character Alt key has no input-dialog mnemonic"));
-    assert!(!app
+    main_assert!(!app.handle_game_option_input_dialog_key(VirtualKeyCode::F11, ElementState::Pressed).expect("non-character Alt key has no input-dialog mnemonic"));
+    main_assert!(!app
         .handle_game_option_input_dialog_key(VirtualKeyCode::F11, ElementState::Released)
         .expect("non-character Alt release is also down-only fallthrough"));
     app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-    assert!(app.external_irc_dialog_visible);
-    assert!(app.running_chat.is_none());
+    main_assert!(app.external_irc_dialog_visible);
+    main_assert!(app.running_chat.is_none());
     app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
-    assert!(!app.external_irc_dialog_visible);
+    main_assert!(!app.external_irc_dialog_visible);
     app.test_modifiers(ModifiersState::empty());
     app.start_running_chat(RunningChatMode::All);
     for character in "alpha beta".chars() {
@@ -1583,7 +1410,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     }
     app.push_message_dialog(notice(), MessageDialogContinuation::None)
         .test_value();
-    assert_eq!(app.game_option_input_activity(), (true, true));
+    main_assert_eq!(app.game_option_input_activity() => (true, true));
     let message_layout = app.top_message_dialog_layout().test_value();
     let message_button = message_layout.buttons[0].rect;
     let message_point = PhysicalPosition::new(
@@ -1591,7 +1418,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(message_button.y + message_button.h / 2),
     );
     app.test_cursor(message_point);
-    assert!(app.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(app.message_dialogs[0].state.has_pointer_hover());
 
     let chat_layout = app.game_option_input_layout().test_value();
     let chat_point = PhysicalPosition::new(
@@ -1609,16 +1436,13 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(context_row.x + 1),
         f64::from(context_row.y + 1),
     ));
-    assert!(!app.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(!app.message_dialogs[0].state.has_pointer_hover());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 
     app.test_cursor(chat_point);
     app.test_left_button(ElementState::Pressed);
-    assert!(app
-        .running_chat_controller()
-        .expect("chat controller during drag")
-        .has_positional_pointer_drag());
+    main_assert!(app.running_chat_controller().expect("chat controller during drag").has_positional_pointer_drag());
     let caret_before_context_drag = app.running_chat_controller().test_value().caret();
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
@@ -1627,21 +1451,10 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(context_panel.x + context_panel.w - 2),
         f64::from(context_panel.y + 1),
     ));
-    assert_ne!(
-        app.running_chat_controller()
-            .expect("chat controller after context drag")
-            .caret(),
-        caret_before_context_drag
-    );
-    assert!(app
-        .running_chat_controller()
-        .expect("chat drag remains retained until up")
-        .has_positional_pointer_drag());
+    main_assert_ne!(app.running_chat_controller().expect("chat controller after context drag").caret() => caret_before_context_drag);
+    main_assert!(app.running_chat_controller().expect("chat drag remains retained until up").has_positional_pointer_drag());
     app.test_left_button(ElementState::Released);
-    assert!(!app
-        .running_chat_controller()
-        .expect("chat remains after context drag release")
-        .has_pointer_capture());
+    main_assert!(!app.running_chat_controller().expect("chat remains after context drag release").has_pointer_capture());
     if app.context_menu.is_some() {
         app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
         app.test_key(VirtualKeyCode::Escape, ElementState::Released);
@@ -1654,7 +1467,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     app.test_cursor(lower_point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert_eq!(app.game_option_input_activity(), (false, true));
+    main_assert_eq!(app.game_option_input_activity() => (false, true));
 
     let start = GuiPoint::new(
         (chat_layout.edit.x + 5) as f32,
@@ -1666,14 +1479,8 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     );
     app.test_touch(TouchPhase::Started, start);
     app.test_touch(TouchPhase::Ended, end);
-    assert!(app
-        .running_chat_controller()
-        .and_then(InputDialogController::selected_text)
-        .is_some_and(|text| !text.is_empty()));
-    assert!(!app
-        .running_chat_controller()
-        .expect("chat remains open")
-        .has_pointer_capture());
+    main_assert!(app.running_chat_controller().and_then(InputDialogController::selected_text).is_some_and(|text| !text.is_empty()));
+    main_assert!(!app.running_chat_controller().expect("chat remains open").has_pointer_capture());
 
     let mut cursor_exit = new_running_sandbox_app();
     let checkbox_dialog = notice().with_checkbox("&Remember", false);
@@ -1687,15 +1494,12 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(checkbox.y + checkbox.h / 2),
     );
     cursor_exit.test_cursor(checkbox_point);
-    assert!(cursor_exit.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(cursor_exit.message_dialogs[0].state.has_pointer_hover());
     cursor_exit.pointer_left().test_value();
-    assert!(cursor_exit.running_pointer_position.is_none());
-    assert!(!cursor_exit.message_dialogs[0].state.has_pointer_hover());
+    main_assert!(cursor_exit.running_pointer_position.is_none());
+    main_assert!(!cursor_exit.message_dialogs[0].state.has_pointer_hover());
     cursor_exit.test_left_button(ElementState::Released);
-    assert_eq!(
-        cursor_exit.message_dialogs[0].state.checkbox_checked(),
-        Some(false)
-    );
+    main_assert_eq!(cursor_exit.message_dialogs[0].state.checkbox_checked() => Some(false));
 
     let button = checkbox_layout.buttons[0].rect;
     cursor_exit.test_cursor(PhysicalPosition::new(
@@ -1703,11 +1507,11 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(button.y + button.h / 2),
     ));
     cursor_exit.test_left_button(ElementState::Pressed);
-    assert_eq!(cursor_exit.message_dialog_pointer_capture_index, Some(0));
+    main_assert_eq!(cursor_exit.message_dialog_pointer_capture_index => Some(0));
     cursor_exit.resize(360, 240).test_value();
-    assert_eq!(cursor_exit.message_dialog_pointer_capture_index, None);
-    assert!(!cursor_exit.message_dialogs[0].state.has_pointer_capture());
-    assert!(!cursor_exit.message_dialogs[0].state.has_pointer_hover());
+    main_assert_eq!(cursor_exit.message_dialog_pointer_capture_index => None);
+    main_assert!(!cursor_exit.message_dialogs[0].state.has_pointer_capture());
+    main_assert!(!cursor_exit.message_dialogs[0].state.has_pointer_hover());
 
     let mut menu = new_menu_app(320, 200);
     let stationary_dialog = notice();
@@ -1723,7 +1527,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         .test_value();
     menu.test_left_button(ElementState::Pressed);
     menu.test_left_button(ElementState::Released);
-    assert!(menu.message_dialogs.is_empty());
+    main_assert!(menu.message_dialogs.is_empty());
 
     menu.open_game_option_input_dialog(GameOptionInputDialogRequest {
         kind: GameOptionInputKind::Password,
@@ -1742,12 +1546,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     );
     menu.test_cursor(input_start);
     menu.test_left_button(ElementState::Pressed);
-    assert!(menu
-        .game_option_input_dialog
-        .as_ref()
-        .expect("regular input dialog")
-        .controller
-        .has_positional_pointer_drag());
+    main_assert!(menu.game_option_input_dialog.as_ref().expect("regular input dialog").controller.has_positional_pointer_drag());
     menu.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     menu.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
     let input_context = menu.context_menu.test_ref().layout().panels[0].bounds;
@@ -1756,12 +1555,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(input_context.y + 1),
     ));
     menu.test_left_button(ElementState::Released);
-    assert!(!menu
-        .game_option_input_dialog
-        .as_ref()
-        .expect("regular input remains open")
-        .controller
-        .has_pointer_capture());
+    main_assert!(!menu.game_option_input_dialog.as_ref().expect("regular input remains open").controller.has_pointer_capture());
 }
 
 #[test]
@@ -1770,40 +1564,27 @@ fn message_board_history_keeps_append_time_width_across_upper_board_modes() {
     let full_message = "X".repeat(200);
     app.enqueue_control_message_board_line(full_message.clone());
     let full_lines = app.message_board.log_history.len();
-    assert!(full_lines > 1, "Full mode stores wrapped physical lines");
-    assert_ne!(
-        app.message_board_line().as_deref(),
-        Some(full_message.as_str())
-    );
+    main_assert!(full_lines > 1, "Full mode stores wrapped physical lines");
+    main_assert_ne!(app.message_board_line().as_deref() => Some(full_message.as_str()));
     let visible_len =
         clonk_script::c4_string_byte_len(app.message_board_line().as_deref().test_value());
     app.message_board.empty = false;
     app.message_board.fader = 0;
     app.message_board.delay = -1;
     app.advance_message_board_overlay();
-    assert_eq!(
-        app.message_board.delay,
-        visible_len as i32 - 1,
-        "the native delay uses the selected physical line's C4 byte length"
-    );
+    main_assert_eq!(app.message_board.delay => visible_len as i32 - 1, "the native delay uses the selected physical line's C4 byte length");
     let full_history = app.message_board.log_history.clone();
 
     app.apply_ingame_menu_action(MenuAction::Display(DisplayToggle::UpperBoard))
         .test_value();
     app.apply_ingame_menu_action(MenuAction::Display(DisplayToggle::UpperBoard))
         .test_value();
-    assert_eq!(
-        app.message_board.log_history, full_history,
-        "reinitializing LBWidth does not reflow existing native log lines"
-    );
+    main_assert_eq!(app.message_board.log_history => full_history, "reinitializing LBWidth does not reflow existing native log lines");
 
     let before_mini = app.message_board.log_history.len();
     app.enqueue_control_message_board_line("Y".repeat(200));
     let mini_lines = app.message_board.log_history.len() - before_mini;
-    assert!(
-        mini_lines > full_lines,
-        "future Mini messages use the newly shortened log-buffer width"
-    );
+    main_assert!(mini_lines > full_lines, "future Mini messages use the newly shortened log-buffer width");
 }
 
 #[test]
@@ -1812,11 +1593,11 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
     app.test_modifiers(ModifiersState::SUPER);
     let frame_before_pause = app.engine.frame();
     app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
-    assert_ne!(app.offline_halt_count, 0);
+    main_assert_ne!(app.offline_halt_count => 0);
     for _ in 0..3 {
         app.test_update();
     }
-    assert_eq!(app.engine.frame(), frame_before_pause);
+    main_assert_eq!(app.engine.frame() => frame_before_pause);
     let mut schedule = frame_schedule_for_mode(
         app.mode,
         app.engine.game_tick_delay_ms(),
@@ -1826,10 +1607,10 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
     let mut accumulator = schedule.simulation_interval;
     let halted_pass =
         advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
-    assert!(halted_pass.did_update);
-    assert_eq!(halted_pass.executed_frames, 0);
-    assert!(!halted_pass.skip_redraw);
-    assert_eq!(app.engine.frame(), frame_before_pause);
+    main_assert!(halted_pass.did_update);
+    main_assert_eq!(halted_pass.executed_frames => 0);
+    main_assert!(!halted_pass.skip_redraw);
+    main_assert_eq!(app.engine.frame() => frame_before_pause);
 
     let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
     app.render_ordered_native_base(&mut frame).test_value();
@@ -1845,25 +1626,22 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
         panic!("expected one fullscreen Pause hold message, got {hold_messages:?}");
     };
     let font = &app.assets.clonk_fonts.test_ref().text;
-    assert_eq!(
-        hold.role,
-        clonk_graphics::clonk_font::ClonkFontRole::GuiText
-    );
-    assert_eq!((hold.x, hold.y), (160, 100 - font.line_height * 2));
-    assert_eq!(hold.color, [255, 255, 255, 255]);
-    assert_eq!(hold.align, clonk_graphics::clonk_font::TextAlign::Center);
+    main_assert_eq!(hold.role => clonk_graphics::clonk_font::ClonkFontRole::GuiText);
+    main_assert_eq!((hold.x, hold.y) => (160, 100 - font.line_height * 2));
+    main_assert_eq!(hold.color => [255, 255, 255, 255]);
+    main_assert_eq!(hold.align => clonk_graphics::clonk_font::TextAlign::Center);
 
     app.test_key(VirtualKeyCode::Pause, ElementState::Released);
-    assert_ne!(app.offline_halt_count, 0, "release does not toggle");
+    main_assert_ne!(app.offline_halt_count => 0, "release does not toggle");
     app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
-    assert_eq!(app.offline_halt_count, 0);
+    main_assert_eq!(app.offline_halt_count => 0);
     app.test_update();
-    assert_eq!(app.engine.frame(), frame_before_pause + 1);
+    main_assert_eq!(app.engine.frame() => frame_before_pause + 1);
 
     app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
-    assert!(!app.take_exit_request());
+    main_assert!(!app.take_exit_request());
     app.return_to_menu();
-    assert_eq!(app.offline_halt_count, 0, "Game::Default clears the halt");
+    main_assert_eq!(app.offline_halt_count => 0, "Game::Default clears the halt");
 }
 
 #[test]
@@ -1887,7 +1665,7 @@ fn c4script_log_lines_reach_the_running_message_board() {
     app.game_log_capture = Some(capture.clone());
     write_line("Beta is dead.");
     app.drain_game_log_capture();
-    assert_eq!(app.message_board_line().as_deref(), Some("Beta is dead."));
+    main_assert_eq!(app.message_board_line().as_deref() => Some("Beta is dead."));
 
     // C4MessageBoard::AddLog returns before touching the log buffer while
     // the board is inactive, which outside a game it always is
@@ -1896,16 +1674,9 @@ fn c4script_log_lines_reach_the_running_message_board() {
     menu.game_log_capture = Some(capture.clone());
     write_line("The goal has been chosen: Alienhunt");
     menu.drain_game_log_capture();
-    assert!(menu.message_board.log_history.is_empty());
+    main_assert!(menu.message_board.log_history.is_empty());
 
     // The drained line is consumed, not replayed into the next game.
     app.drain_game_log_capture();
-    assert_eq!(
-        app.message_board
-            .log_history
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec!["Player join: Player", "Beta is dead."]
-    );
+    main_assert_eq!(app.message_board.log_history.iter().map(String::as_str).collect::<Vec<_>>() => vec!["Player join: Player", "Beta is dead."]);
 }

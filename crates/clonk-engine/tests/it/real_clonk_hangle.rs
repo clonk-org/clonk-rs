@@ -1,21 +1,15 @@
-use crate::support::EngineTestExt;
-use std::env;
-use std::path::PathBuf;
-
-use crate::support::real_scenario::load_installed_scenario;
-use crate::support::ScenarioSubcase;
-use clonk_engine::scenario::LegacyDefinitionResolver;
+use crate::support::real_scenario::{
+    content_root, join_initialized_local_player_details_with_preferences, load_installed_scenario,
+    load_raw_content_scenario,
+};
+use crate::support::{EngineTestExt, ScenarioSubcase};
 use clonk_engine::{
-    ocf, CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, JoinPlayerConfig,
-    Landscape, ObjectUpdate, PhysicalsUpdate, Scenario, ScenarioError, SpawnConfig, Vector2,
-    CATEGORY_STATIC_BACK, CNAT_TOP, COM_DIG, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
+    ocf, CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, Landscape,
+    ObjectUpdate, PhysicalsUpdate, Scenario, SpawnConfig, Vector2, CATEGORY_STATIC_BACK, CNAT_TOP,
+    COM_DIG, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
 };
 use clonk_resources::Group;
 use clonk_script::Value;
-
-struct ContentResolver {
-    root: PathBuf,
-}
 
 #[test]
 fn tutorial01_real_clonk_subcases_batch() {
@@ -26,11 +20,8 @@ fn tutorial01_real_clonk_subcases_batch() {
         "Tutorial01 content is required at {}; set LC_CONTENT_ROOT for an isolated worktree",
         content.display()
     );
-    let resolver = ContentResolver {
-        root: content.clone(),
-    };
-    let scenario = crate::support::TestValueExt::test_value(Scenario::load_from_path_with(
-        &tutorial, &resolver,
+    let scenario = crate::support::TestValueExt::test_value(load_raw_content_scenario(
+        "Tutorial.c4f/Tutorial01.c4s",
     ));
     let subcases: &[ScenarioSubcase] = &[
         (
@@ -78,25 +69,11 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp(scenario: &Sce
     // (C4Object.cpp:3422-3434; C4ObjectCom.cpp:353-362).
     let mut engine = Engine::with_seed(0);
     crate::support::TestValueExt::test_value(scenario.apply(&mut engine));
-    let joined = crate::support::TestValueExt::test_value(
-        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-            name: "Dig tester".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        }))
-        .initialized(),
+    let joined = join_initialized_local_player_details_with_preferences(
+        &mut engine,
+        "Dig tester",
+        false,
+        false,
     );
     let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
 
@@ -136,25 +113,6 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp(scenario: &Sce
     assert_eq!(engine.test_object_snapshot(clonk).action.name, "Dig");
 }
 
-impl LegacyDefinitionResolver for ContentResolver {
-    fn resolve_definition_groups(
-        &self,
-        _scenario: &Group,
-        identifier: &str,
-    ) -> Result<Vec<Group>, ScenarioError> {
-        let path = self.root.join(identifier.replace('\\', "/"));
-        Group::open(path)
-            .map(|group| vec![group])
-            .map_err(ScenarioError::Resources)
-    }
-}
-
-fn content_root() -> PathBuf {
-    env::var_os("LC_CONTENT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content"))
-}
-
 #[test]
 fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     // Tutorial03 waits for C4MN_Context=14, C4MN_Buy=4, then
@@ -162,25 +120,11 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     // permanent menus created/refilled by C4Object/C4ObjectMenu
     // (C4Object.cpp:1919-1980,2044-2062; C4ObjectMenu.cpp:207-435).
     let mut engine = load_installed_scenario("Tutorial.c4f/Tutorial03.c4s", 0);
-    let joined = crate::support::TestValueExt::test_value(
-        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-            name: "Building-menu tester".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: true,
-            startup_player_count: 1,
-        }))
-        .initialized(),
+    let joined = join_initialized_local_player_details_with_preferences(
+        &mut engine,
+        "Building-menu tester",
+        false,
+        true,
     );
     let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
     // ReadyMaterial FLAG enters the ready HUT3 during ScenarioInit, then
@@ -317,25 +261,11 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control(scenario: &Scenario) {
     // (C4ObjectCom.cpp:335-348).
     let mut engine = Engine::with_seed(0);
     crate::support::TestValueExt::test_value(scenario.apply(&mut engine));
-    let joined = crate::support::TestValueExt::test_value(
-        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-            name: "Entrance tester".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        }))
-        .initialized(),
+    let joined = join_initialized_local_player_details_with_preferences(
+        &mut engine,
+        "Entrance tester",
+        false,
+        false,
     );
     let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
     let hut = crate::support::TestValueExt::test_value(
@@ -420,25 +350,11 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
     );
     engine.configure_materials_from_library(&materials);
     crate::support::TestValueExt::test_value(scenario.apply(&mut engine));
-    let joined = crate::support::TestValueExt::test_value(
-        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-            name: "Flag tester".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        }))
-        .initialized(),
+    let joined = join_initialized_local_player_details_with_preferences(
+        &mut engine,
+        "Flag tester",
+        false,
+        false,
     );
     assert_eq!(joined.number, 0, "Tutorial01 scripts address player zero");
     let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
@@ -839,25 +755,11 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp(scenario: &Scenario)
     // facing (C4Object.cpp:4369-4404; C4ObjectCom.cpp:112-118).
     let mut engine = Engine::with_seed(0);
     crate::support::TestValueExt::test_value(scenario.apply_before_players(&mut engine));
-    let joined = crate::support::TestValueExt::test_value(
-        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-            name: "Ceiling tester".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        }))
-        .initialized(),
+    let joined = join_initialized_local_player_details_with_preferences(
+        &mut engine,
+        "Ceiling tester",
+        false,
+        false,
     );
     let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
 
@@ -935,25 +837,11 @@ fn tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick(scenario
     // open space must accelerate past 12 px/tick.
     let mut engine = Engine::with_seed(0);
     crate::support::TestValueExt::test_value(scenario.apply_before_players(&mut engine));
-    let joined = crate::support::TestValueExt::test_value(
-        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-            name: "Flight tester".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        }))
-        .initialized(),
+    let joined = join_initialized_local_player_details_with_preferences(
+        &mut engine,
+        "Flight tester",
+        false,
+        false,
     );
     let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
 

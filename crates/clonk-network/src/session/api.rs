@@ -408,11 +408,7 @@ impl Default for HostConfig {
             start_tick: 0,
             local_core: local_core.clone(),
             group_maker: local_core.name.clone(),
-            initial_status: NetworkStatus {
-                state: NETWORK_STATE_LOBBY,
-                control_mode: 0,
-                target_tick: -1,
-            },
+            initial_status: NetworkStatus::new(NETWORK_STATE_LOBBY, 0, -1),
             password: clonk_engine::LegacyCString::default(),
             allow_join: true,
             udp_bind_address: None,
@@ -608,10 +604,7 @@ pub(crate) fn synthetic_join_snapshot(
     local_core: clonk_engine::ClientCoreControlData,
     max_players: usize,
 ) -> HostJoinSnapshot {
-    let empty_players = crate::PlayerInfoListSnapshot {
-        last_player_id: 0,
-        clients: Vec::new(),
-    };
+    let empty_players = crate::PlayerInfoListSnapshot::default();
     HostJoinSnapshot {
         dynamic: clonk_engine::NetworkResourceCore {
             resource_type: 2,
@@ -628,7 +621,6 @@ pub(crate) fn synthetic_join_snapshot(
         dynamic_tick: 0,
         parameters: crate::JoinGameParametersEnvelope {
             random_seed: 0,
-            startup_player_count: 0,
             max_players: i32::try_from(max_players).unwrap_or(i32::MAX),
             use_fair_crew: false,
             fair_crew_forced: false,
@@ -639,7 +631,6 @@ pub(crate) fn synthetic_join_snapshot(
             auto_frame_skip: false,
             rules: Vec::new(),
             goals: Vec::new(),
-            league: clonk_engine::LegacyCString::default(),
             league_address: clonk_engine::LegacyCString::default(),
             title: clonk_engine::LegacyCString::from_bytes(b"No title".to_vec())
                 .expect("static title is NUL-free"),
@@ -655,27 +646,19 @@ pub(crate) fn synthetic_join_snapshot(
                     .expect("static scenario resource name is NUL-free"),
                 ..Default::default()
             },
-            game_resources: Vec::new(),
             player_infos: empty_players.clone(),
             restore_player_infos: empty_players,
             teams: crate::JoinTeamListSnapshot {
                 active: 1,
-                custom: 0,
                 allow_hostility_change: 1,
-                allow_team_switch: 0,
                 auto_generate_teams: 1,
-                last_team_id: 0,
-                team_distribution: 0,
-                team_colors: 0,
-                max_script_players: 0,
-                script_player_names: clonk_engine::LegacyCString::default(),
-                random_team_count: 0,
-                teams: Vec::new(),
+                ..Default::default()
             },
             clients: JoinClientRegistrySnapshot {
                 clients: vec![local_core],
                 local_client_id: Some(0),
             },
+            ..Default::default()
         },
     }
 }

@@ -117,18 +117,42 @@ mod tests {
         fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
     }
 
-    #[test]
-    fn load_shell_state_none_without_summary() {
+    struct LauncherPathsFixture {
+        _install_dir: TempDir,
+        _user_dir: TempDir,
+        _guard: EnvGuard,
+        paths: AppPaths,
+    }
+
+    impl std::ops::Deref for LauncherPathsFixture {
+        type Target = AppPaths;
+
+        fn deref(&self) -> &Self::Target {
+            &self.paths
+        }
+    }
+
+    fn launcher_paths_fixture() -> LauncherPathsFixture {
         let install_dir = TempDir::new().unwrap();
         prepare_install_root(install_dir.path());
         let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
+        let guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install_dir.path())),
             ("LC_USER_DATA_DIR", Some(user_dir.path())),
         ]);
-
         let paths = AppPaths::discover().unwrap();
         paths.ensure_user_dirs().unwrap();
+        LauncherPathsFixture {
+            _install_dir: install_dir,
+            _user_dir: user_dir,
+            _guard: guard,
+            paths,
+        }
+    }
+
+    #[test]
+    fn load_shell_state_none_without_summary() {
+        let paths = launcher_paths_fixture();
 
         assert!(
             load_shell_state(&paths).unwrap().is_none(),
@@ -138,16 +162,7 @@ mod tests {
 
     #[test]
     fn load_shell_state_aggregates_paths() {
-        let install_dir = TempDir::new().unwrap();
-        prepare_install_root(install_dir.path());
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let paths = launcher_paths_fixture();
 
         let logger = TestLogger::new(paths.logs_dir().join("clonk-launcher.log"));
         logger.log_line("launcher ready").unwrap();
@@ -200,16 +215,7 @@ mod tests {
 
     #[test]
     fn ensure_support_bundle_regenerates_bundle() {
-        let install_dir = TempDir::new().unwrap();
-        prepare_install_root(install_dir.path());
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let paths = launcher_paths_fixture();
 
         let logger = TestLogger::new(paths.logs_dir().join("clonk-launcher.log"));
         logger.log_line("regeneration start").unwrap();
@@ -330,16 +336,7 @@ mod tests {
 
     #[test]
     fn support_artifacts_list_bundle_and_summary() {
-        let install_dir = TempDir::new().unwrap();
-        prepare_install_root(install_dir.path());
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let paths = launcher_paths_fixture();
 
         let logger = TestLogger::new(paths.logs_dir().join("clonk-launcher.log"));
         logger.log_line("artifacts start").unwrap();
@@ -392,16 +389,7 @@ mod tests {
 
     #[test]
     fn write_launcher_summary_records_provider_automation() {
-        let install_dir = TempDir::new().unwrap();
-        prepare_install_root(install_dir.path());
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let paths = launcher_paths_fixture();
 
         let logger = TestLogger::new(paths.logs_dir().join("clonk-launcher.log"));
         logger.log_line("provider automation test start").unwrap();
@@ -462,16 +450,7 @@ mod tests {
 
     #[test]
     fn write_launcher_summary_includes_override_provenance() {
-        let install_dir = TempDir::new().unwrap();
-        prepare_install_root(install_dir.path());
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let paths = launcher_paths_fixture();
 
         let logger = TestLogger::new(paths.logs_dir().join("clonk-launcher.log"));
         logger
@@ -550,16 +529,7 @@ mod tests {
 
     #[test]
     fn write_launcher_summary_records_bulk_retarget_summary() {
-        let install_dir = TempDir::new().unwrap();
-        prepare_install_root(install_dir.path());
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let paths = launcher_paths_fixture();
 
         let logger = TestLogger::new(paths.logs_dir().join("clonk-launcher.log"));
         logger
@@ -627,16 +597,7 @@ mod tests {
 
     #[test]
     fn write_launcher_summary_records_history_cleared_marker() {
-        let install_dir = TempDir::new().unwrap();
-        prepare_install_root(install_dir.path());
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let paths = launcher_paths_fixture();
 
         let logger = TestLogger::new(paths.logs_dir().join("clonk-launcher.log"));
         let runtime_log = paths.logs_dir().join("Clonk-bulk.log");
@@ -675,16 +636,7 @@ mod tests {
 
     #[test]
     fn write_launcher_summary_records_report_search_preferences() {
-        let install_dir = TempDir::new().unwrap();
-        prepare_install_root(install_dir.path());
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let paths = launcher_paths_fixture();
 
         let logger = TestLogger::new(paths.logs_dir().join("clonk-launcher.log"));
         logger.log_line("report search summary test").unwrap();

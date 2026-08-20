@@ -1,6 +1,119 @@
 // Contiguous slice 1 of 8 of the `scenario/tests` battery, spliced
 // by `include!` from the parent module so every test id is unchanged.
 
+    use crate::chunky::ChunkShape;
+
+    fn parsed_scenario(source: &str) -> LegacyScenarioManifest {
+        parse_legacy_scenario_text(source).test_value()
+    }
+
+    fn parsed_objects(source: &str) -> Vec<LegacyObjectRecord> {
+        parse_legacy_objects(source).test_value()
+    }
+
+    fn scenario_test_group(root: &Path, name: &str, scenario_source: impl AsRef<[u8]>) -> PathBuf {
+        let scenario_dir = root.join(name);
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(scenario_dir.join("Scenario.txt"), scenario_source);
+        scenario_dir
+    }
+
+    fn scenario_test_root(scenario_source: impl AsRef<[u8]>) -> tempfile::TempDir {
+        let directory = test_tempdir();
+        write_test_file(directory.path().join("Scenario.txt"), scenario_source);
+        directory
+    }
+
+    fn write_definition_fixture(path: &Path, defcore: impl AsRef<[u8]>) {
+        std::fs::create_dir_all(path).test_value();
+        write_test_file(path.join("DefCore.txt"), defcore);
+        write_test_definition_graphics(path);
+    }
+
+    fn write_scripted_definition_fixture(
+        path: &Path,
+        defcore: impl AsRef<[u8]>,
+        script: impl AsRef<[u8]>,
+    ) {
+        std::fs::create_dir_all(path).test_value();
+        write_test_file(path.join("DefCore.txt"), defcore);
+        write_test_file(path.join("Script.c"), script);
+        write_test_definition_graphics(path);
+    }
+
+    fn applied_test_scenario(scenario: &Scenario) -> Engine {
+        let mut engine = Engine::with_seed(0);
+        apply_test_scenario(scenario, &mut engine);
+        engine
+    }
+
+    fn map_classifier(slots: &[(usize, &str, i32, ChunkShape)]) -> MapPixelClassifier {
+        let mut densities = [0; 128];
+        let mut names = vec![None; 128];
+        let mut shapes = vec![None; 128];
+        for &(slot, name, density, shape) in slots {
+            densities[slot] = density;
+            names[slot] = Some(name.to_string());
+            shapes[slot] = Some(shape);
+        }
+        MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes)
+    }
+
+    fn script_int(value: i32) -> clonk_script::Value {
+        clonk_script::Value::Int(value)
+    }
+
+    fn script_bool(value: bool) -> clonk_script::Value {
+        clonk_script::Value::Bool(value)
+    }
+
+    fn script_string(value: clonk_script::C4StringValue) -> clonk_script::Value {
+        clonk_script::Value::String(value)
+    }
+
+    fn script_object(value: u64) -> clonk_script::Value {
+        clonk_script::Value::Object(value)
+    }
+
+    fn scenario_int(value: i32) -> ScenarioValue {
+        ScenarioValue::Int(value)
+    }
+
+    fn scenario_bool(value: bool) -> ScenarioValue {
+        ScenarioValue::Bool(value)
+    }
+
+    fn scenario_string(value: String) -> ScenarioValue {
+        ScenarioValue::String(value)
+    }
+
+    fn scenario_id(value: String) -> ScenarioValue {
+        ScenarioValue::C4Id(value)
+    }
+
+    fn c4s(std: i32, rnd: i32, min: i32, max: i32) -> LegacyC4SVal {
+        LegacyC4SVal::new(std, rnd, min, max)
+    }
+
+    fn oid(value: u64) -> ObjectId {
+        ObjectId::new(value)
+    }
+
+    macro_rules! assert_scenario_values {
+        ($values:expr; $(
+            $name:literal, $section:expr, $index:expr => $expected:expr
+            $(, $message:literal)?;
+        )+) => {
+            $(
+                assert_eq!(
+                    $values.get($name, $section, $index),
+                    $expected
+                    $(, $message)?
+                );
+            )+
+        };
+    }
+
     // C4GameMessage.cpp:233-244,340-345 — ReloadDef's last act, after either
     // arm: a frame decoration the definition no longer supplies is deleted
     // rather than left drawing from a definition that is gone.
@@ -57,14 +170,12 @@
 
         let mut engine = crate::Engine::new();
         let mut definition =
-            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "").test_value();
+            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "")
+                .test_value();
         definition.set_source_path(Some(group.clone()));
         engine.register_test_definition(definition);
         let object = engine.spawn_test_object(crate::SpawnConfig::new("WIPF"));
-        let before = engine
-            .snapshot()
-            .object(object).test_value()
-            .clone();
+        let before = engine.snapshot().object(object).test_value().clone();
 
         // A named graphic that the reloaded definition no longer supplies must
         // fall back to the object's own definition rather than being left
@@ -96,8 +207,7 @@
         // are untouched — a reload refreshes an object, it does not
         // reinitialise one.
         let snapshot = engine.snapshot();
-        let live = snapshot
-            .object(object).test_value();
+        let live = snapshot.object(object).test_value();
         assert_eq!(live.position, before.position);
         assert_eq!(live.rotation, before.rotation);
         assert_eq!(live.energy, before.energy);
@@ -117,10 +227,14 @@
 
         let mut engine = crate::Engine::new();
         let mut definition =
-            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "").test_value();
+            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "")
+                .test_value();
         definition.set_source_path(Some(group.clone()));
         engine.register_test_definition(definition);
-        assert_eq!(engine.definition("WIPF").map(crate::Definition::name), Some("placeholder"));
+        assert_eq!(
+            engine.definition("WIPF").map(crate::Definition::name),
+            Some("placeholder")
+        );
 
         assert!(
             engine.reload_definition("WIPF", false),
@@ -168,7 +282,8 @@
         // Two definitions sharing one group register it once — C++ skips a
         // location it already has.
         let mut sibling =
-            crate::Definition::from_script("ROK2".to_string(), "Rock 2".to_string(), "").test_value();
+            crate::Definition::from_script("ROK2".to_string(), "Rock 2".to_string(), "")
+                .test_value();
         sibling.set_source_path(Some(unpacked.clone()));
         engine.register_test_definition(sibling);
         assert_eq!(engine.monitored_definition_directories(), vec![unpacked]);
@@ -200,7 +315,8 @@
         // A definition with no stored group cannot reload, and nothing is
         // disturbed by the attempt.
         let mut pathless =
-            crate::Definition::from_script("STON".to_string(), "Stone".to_string(), "").test_value();
+            crate::Definition::from_script("STON".to_string(), "Stone".to_string(), "")
+                .test_value();
         pathless.set_source_path(None);
         engine.register_test_definition(pathless);
         assert!(!engine.reload_definition("STON", false));
@@ -250,7 +366,8 @@
 
         // The id is free again, which it would not be if the map entry were
         // the only thing dropped.
-        let definition = crate::Definition::from_script("AAAA".to_string(), "A".to_string(), "").test_value();
+        let definition =
+            crate::Definition::from_script("AAAA".to_string(), "A".to_string(), "").test_value();
         engine.register_test_definition(definition);
     }
 
@@ -365,7 +482,8 @@ global func Step(state, frame, random)
             None,
             None,
             None,
-        ).test_value();
+        )
+        .test_value();
         assert_eq!(state.name, "Idle");
         assert_eq!(state.act_map_index, None);
     }
@@ -380,7 +498,8 @@ global func Step(state, frame, random)
             None,
             None,
             None,
-        ).test_value();
+        )
+        .test_value();
 
         assert_eq!(state.name, "Walk");
         assert_eq!(
@@ -406,29 +525,19 @@ global func Step(state, frame, random)
                 ("Probe".to_string(), duplicate),
             ],
         });
-        let spec = converted
-            .specs
-            .get("Probe").test_value();
+        let spec = converted.specs.get("Probe").test_value();
         assert_eq!(
             spec.length,
             Some(7),
             "runtime action selection keeps the first physical slot"
         );
-        let reflection = converted
-            .reflections
-            .get("Probe").test_value();
-        assert_eq!(
-            reflection.get("Length", 0),
-            Some(clonk_script::Value::Int(-3))
-        );
+        let reflection = converted.reflections.get("Probe").test_value();
+        assert_eq!(reflection.get("Length", 0), Some(script_int(-3)));
         assert_eq!(
             reflection.get("Sound", 0),
-            Some(clonk_script::Value::String("Zap".into()))
+            Some(script_string("Zap".into()))
         );
-        assert_eq!(
-            reflection.get("ObjectDisabled", 0),
-            Some(clonk_script::Value::Int(7))
-        );
+        assert_eq!(reflection.get("ObjectDisabled", 0), Some(script_int(7)));
     }
 
     #[test]
@@ -449,9 +558,7 @@ global func Step(state, frame, random)
         assert_eq!(spec.delay, Some(-6));
         assert_eq!(spec.step, Some(-11));
         assert_eq!(spec.directions, Some(-2));
-        let graphics = converted
-            .graphics
-            .get("Odd").test_value();
+        let graphics = converted.graphics.get("Odd").test_value();
         assert_eq!(graphics.length, Some(-4));
         assert_eq!(graphics.directions, -2);
         assert_eq!(graphics.flip_dir, Some(-3));
@@ -462,8 +569,7 @@ global func Step(state, frame, random)
         // C4Object::CompileFunc reads Size directly into Con. Loaded object
         // state may therefore remain above FullCon even independently of a
         // later DoCon clamp decision (C4Object.cpp:2763).
-        let records =
-            parse_legacy_objects("[Object]\nid=OVSZ\nSize=150000\n").test_value();
+        let records = parse_legacy_objects("[Object]\nid=OVSZ\nSize=150000\n").test_value();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].construction, Some(150_000));
     }
@@ -472,8 +578,7 @@ global func Step(state, frame, random)
     fn legacy_objects_size_preserves_small_raw_construction() {
         // C4Object::CompileFunc compiles Size directly into the raw Con field;
         // it does not interpret small values as percentages (C4Object.cpp:2777).
-        let records =
-            parse_legacy_objects("[Object]\nid=PART\nSize=410\n").test_value();
+        let records = parse_legacy_objects("[Object]\nid=PART\nSize=410\n").test_value();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].construction, Some(410));
     }
@@ -482,17 +587,14 @@ global func Step(state, frame, random)
     fn legacy_objects_size_preserves_negative_raw_construction() {
         // C4Object::CompileFunc assigns signed Size directly and its compiler
         // tail does not clamp Con (C4Object.cpp:2777,2858-2891).
-        let records =
-            parse_legacy_objects("[Object]\nid=NEGC\nSize=-1\n").test_value();
+        let records = parse_legacy_objects("[Object]\nid=NEGC\nSize=-1\n").test_value();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].construction, Some(-1));
     }
 
     #[test]
     fn scenario_value_store_follows_c4value_compiler_indexing_and_types() {
-        let directory = test_tempdir();
-        write_test_file(
-            directory.path().join("Scenario.txt"),
+        let directory = scenario_test_root(
             "[Head]\n\
              Version=4,9\n\
              SaveGame=2\n\
@@ -529,147 +631,80 @@ global func Step(state, frame, random)
         let manifest = parse_legacy_scenario_manifest(&group).test_value();
         let values = ScenarioValueStore::from_runtime_core(&manifest.core, false);
 
-        assert_eq!(
-            values.get("MapZoom", Some("Landscape"), 0),
-            Some(&ScenarioValue::Int(8))
-        );
-        assert_eq!(
-            values.get("MapZoom", Some("Landscape"), 1),
-            Some(&ScenarioValue::Int(2))
-        );
-        assert_eq!(
-            values.get("MapZoom", Some("Landscape"), 2),
-            Some(&ScenarioValue::Int(5))
-        );
-        assert_eq!(
-            values.get("MapZoom", Some("Landscape"), 3),
-            Some(&ScenarioValue::Int(15))
-        );
-        assert_eq!(values.get("MapZoom", Some("Landscape"), 4), None);
-        assert_eq!(values.get("MapZoom", Some("Landscape"), -1), None);
-
-        assert_eq!(
-            values.get("HomeBaseMaterial", Some("Player1"), 0),
-            Some(&ScenarioValue::C4Id("WOOD".to_string()))
-        );
-        assert_eq!(
-            values.get("HomeBaseMaterial", Some("Player1"), 1),
-            Some(&ScenarioValue::Int(5))
-        );
-        assert_eq!(
-            values.get("HomeBaseMaterial", Some("Player1"), 2),
-            Some(&ScenarioValue::C4Id("ROCK".to_string()))
-        );
-        assert_eq!(
-            values.get("HomeBaseMaterial", Some("Player1"), 3),
-            Some(&ScenarioValue::Int(0))
-        );
-        assert_eq!(values.get("HomeBaseMaterial", Some("Player1"), 4), None);
-
-        assert_eq!(
-            values.get("SaveGame", Some("Head"), 0),
-            Some(&ScenarioValue::Int(2))
-        );
-        assert_eq!(
-            values.get("Replay", Some("Head"), 0),
-            Some(&ScenarioValue::Int(-3))
-        );
-        assert_eq!(
-            values.get("EnforcePosition", Some("Player1"), 0),
-            Some(&ScenarioValue::Int(7))
-        );
-        assert_eq!(
-            values.get("EnforcePosition", None, 1),
-            Some(&ScenarioValue::Int(8)),
-            "a no-section lookup carries entry_nr across repeated names"
-        );
-        assert_eq!(
-            values.get("Version", Some("Head"), 1),
-            Some(&ScenarioValue::Int(9))
-        );
-        assert_eq!(values.get("Version", Some("Head"), 2), None);
-        assert_eq!(
-            values.get("Definitions", Some("Definitions"), 0),
-            Some(&ScenarioValue::String("Objects.c4d".to_string()))
-        );
-        assert_eq!(
-            values.get("Definitions", Some("Definitions"), 1),
-            Some(&ScenarioValue::String("\"Foo\\Bar.c4d\"  ".to_string()))
-        );
-        assert_eq!(
-            values.get("Definitions", None, 0),
-            None,
-            "the root [Definitions] match shadows its same-name child"
-        );
-        assert_eq!(
-            values.get("StandardCrew", Some("Player1"), 0),
-            Some(&ScenarioValue::C4Id(String::new()))
-        );
-        assert_eq!(
-            values.get("StandardCrew", Some("Player2"), 0),
-            Some(&ScenarioValue::C4Id(String::new()))
-        );
-        assert_eq!(
-            values.get("StandardCrew", Some("Player3"), 0),
-            Some(&ScenarioValue::C4Id("clnk".to_string()))
-        );
-        assert_eq!(
-            values.get("StandardCrew", Some("Player4"), 0),
-            Some(&ScenarioValue::C4Id("CL-N".to_string()))
-        );
+        assert_scenario_values! {
+            values;
+            "MapZoom", Some("Landscape"), 0 => Some(&scenario_int(8));
+            "MapZoom", Some("Landscape"), 1 => Some(&scenario_int(2));
+            "MapZoom", Some("Landscape"), 2 => Some(&scenario_int(5));
+            "MapZoom", Some("Landscape"), 3 => Some(&scenario_int(15));
+            "MapZoom", Some("Landscape"), 4 => None;
+            "MapZoom", Some("Landscape"), -1 => None;
+            "HomeBaseMaterial", Some("Player1"), 0 => Some(&scenario_id("WOOD".to_string()));
+            "HomeBaseMaterial", Some("Player1"), 1 => Some(&scenario_int(5));
+            "HomeBaseMaterial", Some("Player1"), 2 => Some(&scenario_id("ROCK".to_string()));
+            "HomeBaseMaterial", Some("Player1"), 3 => Some(&scenario_int(0));
+            "HomeBaseMaterial", Some("Player1"), 4 => None;
+            "SaveGame", Some("Head"), 0 => Some(&scenario_int(2));
+            "Replay", Some("Head"), 0 => Some(&scenario_int(-3));
+            "EnforcePosition", Some("Player1"), 0 => Some(&scenario_int(7));
+            "EnforcePosition", None, 1 => Some(&scenario_int(8)),
+                "a no-section lookup carries entry_nr across repeated names";
+            "Version", Some("Head"), 1 => Some(&scenario_int(9));
+            "Version", Some("Head"), 2 => None;
+            "Definitions", Some("Definitions"), 0 =>
+                Some(&scenario_string("Objects.c4d".to_string()));
+            "Definitions", Some("Definitions"), 1 =>
+                Some(&scenario_string("\"Foo\\Bar.c4d\"  ".to_string()));
+            "Definitions", None, 0 => None,
+                "the root [Definitions] match shadows its same-name child";
+            "StandardCrew", Some("Player1"), 0 => Some(&scenario_id(String::new()));
+            "StandardCrew", Some("Player2"), 0 => Some(&scenario_id(String::new()));
+            "StandardCrew", Some("Player3"), 0 => Some(&scenario_id("clnk".to_string()));
+            "StandardCrew", Some("Player4"), 0 => Some(&scenario_id("CL-N".to_string()));
+        }
 
         // C4Landscape::Init mutates these three Game.C4S fields before any
         // scenario callback can observe them.
-        assert_eq!(
-            values.get("MapWidth", Some("Landscape"), 3),
-            Some(&ScenarioValue::Int(10_000))
-        );
-        assert_eq!(
-            values.get("MapHeight", Some("Landscape"), 3),
-            Some(&ScenarioValue::Int(10_000))
-        );
-        assert_eq!(
-            values.get("NewStyleLandscape", Some("Landscape"), 0),
-            Some(&ScenarioValue::Int(2))
-        );
-        assert_eq!(
-            values.get("Sky", Some("Landscape"), 0),
-            Some(&ScenarioValue::String("Clouds1;Clouds2".to_string()))
-        );
+        assert_scenario_values! {
+            values;
+            "MapWidth", Some("Landscape"), 3 => Some(&scenario_int(10_000));
+            "MapHeight", Some("Landscape"), 3 => Some(&scenario_int(10_000));
+            "NewStyleLandscape", Some("Landscape"), 0 => Some(&scenario_int(2));
+            "Sky", Some("Landscape"), 0 =>
+                Some(&scenario_string("Clouds1;Clouds2".to_string()));
+        }
         let values_with_sky_surface = ScenarioValueStore::from_runtime_core(&manifest.core, true);
-        assert_eq!(
-            values_with_sky_surface.get("Sky", Some("Landscape"), 0),
-            Some(&ScenarioValue::String("Clouds1,Clouds2".to_string()))
-        );
-        assert_eq!(
-            values.get("Volcano", Some("Disasters"), 0),
-            Some(&ScenarioValue::Int(12))
-        );
-        assert_eq!(values.get("Volcano", Some("Weather"), 0), None);
-        assert_eq!(values.get("StartupPlayerCount", Some("Head"), 0), None);
-        assert_eq!(values.get("mapzoom", Some("Landscape"), 0), None);
+        assert_scenario_values! {
+            values_with_sky_surface;
+            "Sky", Some("Landscape"), 0 =>
+                Some(&scenario_string("Clouds1,Clouds2".to_string()));
+        }
+        assert_scenario_values! {
+            values;
+            "Volcano", Some("Disasters"), 0 => Some(&scenario_int(12));
+            "Volcano", Some("Weather"), 0 => None;
+            "StartupPlayerCount", Some("Head"), 0 => None;
+            "mapzoom", Some("Landscape"), 0 => None;
+        }
 
         let mut engine = Engine::new();
         engine.set_scenario_values(values.clone());
-        let encoded = engine
-            .capture_state()
-            .to_json_string().test_value();
+        let encoded = engine.capture_state().to_json_string().test_value();
         let state = crate::EngineState::from_json_str(&encoded).test_value();
         let mut restored = Engine::new();
-        restored
-            .restore_state(&state).test_value();
+        restored.restore_state(&state).test_value();
         assert_eq!(restored.scenario_values.as_ref(), &values);
 
         let defaults = ScenarioValueStore::default();
-        assert_eq!(
-            defaults.get("MapZoom", Some("Landscape"), 0),
-            Some(&ScenarioValue::Int(10))
-        );
+        assert_scenario_values! {
+            defaults;
+            "MapZoom", Some("Landscape"), 0 => Some(&scenario_int(10));
+        }
     }
 
     #[test]
     fn section_scenario_core_resets_compiled_fields_and_ignores_main_only_entries() {
-        let main = parse_legacy_scenario_text(
+        let main = parsed_scenario(
             "[Head]\n\
              Title=Main title\n\
              Version=4,6,4\n\
@@ -700,8 +735,8 @@ global func Step(state, frame, random)
              \n\
              [Weather]\n\
              Wind=100,0,-100,100\n",
-        ).test_value();
-        let section = parse_legacy_scenario_text(
+        );
+        let section = parsed_scenario(
             "[Head]\n\
              Title=Ignored title\n\
              Version=9,9,9\n\
@@ -719,7 +754,7 @@ global func Step(state, frame, random)
              \n\
              [Landscape]\n\
              Sky=Clouds\n",
-        ).test_value();
+        );
         let compiled = overlay_legacy_scenario_manifest(&main, section).test_value();
 
         assert_eq!(compiled.title.as_deref(), Some("Main title"));
@@ -745,31 +780,16 @@ global func Step(state, frame, random)
         assert!(compiled.core.game.rules.is_empty());
         assert!(compiled.core.game.realism.structures_need_energy);
         assert_eq!(compiled.core.players.len(), MAX_PLAYER_STARTS);
-        assert_eq!(
-            compiled.core.players[0].wealth,
-            LegacyC4SVal::new(0, 0, 0, 250)
-        );
-        assert_eq!(
-            compiled.core.landscape.map_width,
-            LegacyC4SVal::new(100, 0, 64, 250)
-        );
-        assert_eq!(
-            compiled.core.landscape.map_height,
-            LegacyC4SVal::new(50, 0, 40, 250)
-        );
-        assert_eq!(
-            compiled.core.landscape.map_zoom,
-            LegacyC4SVal::new(10, 0, 5, 15)
-        );
+        assert_eq!(compiled.core.players[0].wealth, c4s(0, 0, 0, 250));
+        assert_eq!(compiled.core.landscape.map_width, c4s(100, 0, 64, 250));
+        assert_eq!(compiled.core.landscape.map_height, c4s(50, 0, 40, 250));
+        assert_eq!(compiled.core.landscape.map_zoom, c4s(10, 0, 5, 15));
         assert_eq!(compiled.core.landscape.sky.as_deref(), Some("Clouds"));
         assert!(
             !compiled.core.landscape.shade_materials,
             "the absent default uses retained main Version=4.6.4"
         );
-        assert_eq!(
-            compiled.core.weather.wind,
-            LegacyC4SVal::new(0, 70, -100, 100)
-        );
+        assert_eq!(compiled.core.weather.wind, c4s(0, 70, -100, 100));
         assert_eq!(
             compiled.sections.get("landscape"),
             Some(&vec![("Sky".to_string(), "Clouds".to_string())]),
@@ -777,43 +797,19 @@ global func Step(state, frame, random)
         );
 
         let values = ScenarioValueStore::from_runtime_core(&compiled.core, false);
-        assert_eq!(values.get("Goals", Some("Game"), 0), None);
-        assert_eq!(
-            values.get("Rules", Some("Game"), 0),
-            Some(&ScenarioValue::C4Id("ENRG".to_string()))
-        );
-        assert_eq!(
-            values.get("Rules", Some("Game"), 1),
-            Some(&ScenarioValue::Int(1))
-        );
-        assert_eq!(
-            values.get("StructNeedEnergy", Some("Game"), 0),
-            Some(&ScenarioValue::Bool(false))
-        );
-        assert_eq!(
-            values.get("ValueOverloads", Some("Game"), 0),
-            Some(&ScenarioValue::C4Id("FISH".to_string()))
-        );
-        assert_eq!(
-            values.get("MapWidth", Some("Landscape"), 0),
-            Some(&ScenarioValue::Int(100))
-        );
-        assert_eq!(
-            values.get("MapWidth", Some("Landscape"), 3),
-            Some(&ScenarioValue::Int(10_000))
-        );
-        assert_eq!(
-            values.get("Wind", Some("Weather"), 0),
-            Some(&ScenarioValue::Int(0))
-        );
-        assert_eq!(
-            values.get("Wind", Some("Weather"), 1),
-            Some(&ScenarioValue::Int(70))
-        );
-        assert_eq!(
-            values.get("ShadeMaterials", Some("Landscape"), 0),
-            Some(&ScenarioValue::Bool(false))
-        );
+        assert_scenario_values! {
+            values;
+            "Goals", Some("Game"), 0 => None;
+            "Rules", Some("Game"), 0 => Some(&scenario_id("ENRG".to_string()));
+            "Rules", Some("Game"), 1 => Some(&scenario_int(1));
+            "StructNeedEnergy", Some("Game"), 0 => Some(&scenario_bool(false));
+            "ValueOverloads", Some("Game"), 0 => Some(&scenario_id("FISH".to_string()));
+            "MapWidth", Some("Landscape"), 0 => Some(&scenario_int(100));
+            "MapWidth", Some("Landscape"), 3 => Some(&scenario_int(10_000));
+            "Wind", Some("Weather"), 0 => Some(&scenario_int(0));
+            "Wind", Some("Weather"), 1 => Some(&scenario_int(70));
+            "ShadeMaterials", Some("Landscape"), 0 => Some(&scenario_bool(false));
+        }
 
         let directory = test_tempdir();
         write_test_file(
@@ -821,15 +817,11 @@ global func Step(state, frame, random)
             "map Next { seed=11; };",
         );
         let group = Group::open(directory.path()).test_value();
-        let mut classifier = MapPixelClassifier::from_slots(
-            [0; 128],
-            vec![None; 128],
-            vec![None; 128],
-            vec![None; 128],
-        );
+        let mut classifier = map_classifier(&[]);
         let landscape =
             load_legacy_landscape_body_for_test(&group, &compiled, Some(&mut classifier), 0, 1)
-                .expect("section landscape loads").test_value();
+                .expect("section landscape loads")
+                .test_value();
         let raster = landscape.raster_state().test_value();
         let map = raster.map().test_value();
         assert_eq!((map.width, map.height), (100, 50));
@@ -904,10 +896,7 @@ global func Step(state, frame, random)
 
     fn scenario_with_retained_legacy_core(source: &str) -> Scenario {
         let mut scenario = json_scenario_without_legacy_core();
-        scenario.legacy_core = Some(
-            parse_legacy_scenario_text(source).test_value()
-                .core,
-        );
+        scenario.legacy_core = Some(parsed_scenario(source).core);
         scenario
     }
 
@@ -917,11 +906,8 @@ global func Step(state, frame, random)
         // scenario-derived MaxPlayers default before InitLocal admits players
         // (pristine 9ffa0a5d src/C4Game.cpp:162-166,231-248;
         // src/C4GameParameters.cpp:408-422,553-558).
-        let dir = test_tempdir();
-        write_test_file(
-            dir.path().join("Scenario.txt"),
-            "[Head]\nMaxPlayer=4\n\n[Definitions]\nDefinition1=Missing.c4d\n",
-        );
+        let dir =
+            scenario_test_root("[Head]\nMaxPlayer=4\n\n[Definitions]\nDefinition1=Missing.c4d\n");
         write_test_file(
             dir.path().join("Parameters.txt"),
             "[Parameters]\nRandomSeed=73\nMaxPlayers=2\n",

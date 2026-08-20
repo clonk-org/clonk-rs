@@ -3,32 +3,17 @@
 use crate::support::EngineTestExt;
 use std::error::Error;
 
-use crate::support::real_scenario::{join_local_player, load_tutorial};
+use crate::support::real_scenario::{
+    clonk_carries, join_local_player, load_tutorial, object_with_definition,
+    tutorial_message_contains,
+};
 use crate::support::virtual_player::VirtualPlayer;
-use clonk_engine::{Engine, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP};
+use clonk_engine::{Engine, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP};
 
 fn load_tutorial02() -> (Engine, i32) {
     let mut engine = load_tutorial(2, 0);
     let owner = join_local_player(&mut engine, "Tutorial 2 virtual player");
     (engine, owner)
-}
-
-fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine.first_object_for_definition(definition)
-}
-
-fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine.message_line_contains(needle)
-}
-
-fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
-    engine.object_snapshot(clonk).is_some_and(|clonk| {
-        clonk.contents.iter().any(|item| {
-            engine
-                .object_snapshot(*item)
-                .is_some_and(|item| item.definition_id == definition)
-        })
-    })
 }
 
 #[test]

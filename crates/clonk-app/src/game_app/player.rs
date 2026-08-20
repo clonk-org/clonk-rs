@@ -43,12 +43,12 @@ impl GameApp {
         // or pressed-state mutation (C4Player.cpp:1541-1548). Keep the probe
         // observational so repeated benchmark runs follow the same game state.
         for owner in owners {
-            let left_release = clonk_engine::PlayerControlData {
-                player: owner,
-                command: i32::from(clonk_engine::COM_LEFT + clonk_engine::COM_RELEASE_OFFSET),
-                data: 0,
+            let left_release = clonk_engine::PlayerControlData::new(
+                owner,
+                i32::from(clonk_engine::COM_LEFT + clonk_engine::COM_RELEASE_OFFSET),
+                0,
                 by_client,
-            };
+            );
             let right_release = clonk_engine::PlayerControlData {
                 command: i32::from(clonk_engine::COM_RIGHT + clonk_engine::COM_RELEASE_OFFSET),
                 ..left_release

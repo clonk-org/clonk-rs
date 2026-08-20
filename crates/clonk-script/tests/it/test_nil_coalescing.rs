@@ -4,12 +4,10 @@
 //! NIL only: 0 and false are kept, unlike `||`. Real content depends on it
 //! (Fantasy.c4d/.../Goblet.c4d/Script.c:69).
 
-use clonk_script::{Engine, Script, Value};
+use clonk_script::{Engine, Value};
 
 fn run(source: &str, function: &str) -> Value {
-    let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
-    engine.call(function, &[]).expect("call succeeds")
+    crate::support::run(source, function, &[])
 }
 
 #[test]
@@ -44,7 +42,7 @@ fn nil_coalescing_short_circuits_the_right_side() {
         func Hits() { return hits; }
     "#;
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
     let locals = std::collections::HashMap::new();
     let (value, locals) = engine
         .call_with_locals("Probe", &[], &locals)

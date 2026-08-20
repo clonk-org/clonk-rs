@@ -29,21 +29,8 @@ const FLOAT_ACCEL_RAW: i32 = 10 * FIXED_ONE / 100;
 fn join_pilot(engine: &mut Engine, auto_stop: bool) -> i32 {
     engine
         .join_player(JoinPlayerConfig {
-            name: "Airbike pilot".into(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
             control_style: auto_stop,
-            auto_context_menu: false,
-            startup_player_count: 1,
+            ..crate::support::join_player_config("Airbike pilot")
         })
         .expect("the local virtual player joins")
         .initialized()

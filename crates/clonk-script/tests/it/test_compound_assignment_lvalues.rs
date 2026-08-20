@@ -7,7 +7,7 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use clonk_script::{Engine, Script, Value};
+use clonk_script::{Engine, Value};
 
 #[test]
 fn plain_assignment_resolves_array_index_before_rhs() {
@@ -21,18 +21,16 @@ fn plain_assignment_resolves_array_index_before_rhs() {
         observed_trace.lock().unwrap().push(*marker);
         Ok(Value::Int(if *marker == 1 { 0 } else { 42 }))
     });
-    engine.add_script(
-        Script::compile(
-            r#"
-                #strict
-                func Test() {
-                    var values = [0];
-                    values[Trace(1)] = Trace(2);
-                    return values;
-                }
-            "#,
-        )
-        .expect("side-effecting plain assignment compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict
+        func Test() {
+            var values = [0];
+            values[Trace(1)] = Trace(2);
+            return values;
+        }
+    "#,
     );
 
     assert_eq!(
@@ -58,18 +56,16 @@ fn assignment_expression_resolves_array_index_before_rhs() {
         observed_trace.lock().unwrap().push(*marker);
         Ok(Value::Int(if *marker == 1 { 0 } else { 42 }))
     });
-    engine.add_script(
-        Script::compile(
-            r#"
-                #strict
-                func Test() {
-                    var values = [0];
-                    var assigned = values[Trace(1)] = Trace(2);
-                    return [values, assigned];
-                }
-            "#,
-        )
-        .expect("side-effecting assignment expression compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict
+        func Test() {
+            var values = [0];
+            var assigned = values[Trace(1)] = Trace(2);
+            return [values, assigned];
+        }
+    "#,
     );
 
     assert_eq!(
@@ -95,18 +91,16 @@ fn compound_assignment_evaluates_array_index_once() {
         observed_calls.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Int(0))
     });
-    engine.add_script(
-        Script::compile(
-            r#"
-                #strict
-                func Test() {
-                    var values = [10, 20];
-                    values[SideEffect()] += 5;
-                    return values;
-                }
-            "#,
-        )
-        .expect("side-effecting compound assignment compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict
+        func Test() {
+            var values = [10, 20];
+            values[SideEffect()] += 5;
+            return values;
+        }
+    "#,
     );
 
     assert_eq!(
@@ -132,18 +126,16 @@ fn compound_assignment_consumes_one_deterministic_random_draw() {
         let draw = observed_draws.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Int((draw % 2) as i32))
     });
-    engine.add_script(
-        Script::compile(
-            r#"
-                #strict
-                func Test() {
-                    var values = [10, 20];
-                    values[Random(2)] += 1;
-                    return values;
-                }
-            "#,
-        )
-        .expect("Random-index compound assignment compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict
+        func Test() {
+            var values = [10, 20];
+            values[Random(2)] += 1;
+            return values;
+        }
+    "#,
     );
 
     assert_eq!(
@@ -159,11 +151,8 @@ fn compound_assignment_consumes_one_deterministic_random_draw() {
     );
 }
 
-#[test]
-fn compound_assignment_reads_retained_reference_after_rhs() {
-    let mut engine = Engine::new();
-    engine.add_script(
-        Script::compile(
+run_cases! {
+    compound_assignment_reads_retained_reference_after_rhs:
             r#"
                 func Test() {
                     var value = 1;
@@ -171,24 +160,11 @@ fn compound_assignment_reads_retained_reference_after_rhs() {
                     return value;
                 }
             "#,
-        )
-        .expect("live-reference compound assignment compiles"),
-    );
-
-    assert_eq!(
-        engine
-            .call("Test", &[])
-            .expect("live-reference compound assignment succeeds"),
-        Value::Int(10),
+        "Test", &[] => Value::Int(10),
         "the retained lvalue is read after the RHS mutates it"
-    );
-}
+        ;
 
-#[test]
-fn concat_assignment_preserves_nested_array_identity_below_strict_two() {
-    let mut engine = Engine::new();
-    engine.add_script(
-        Script::compile(
+    concat_assignment_preserves_nested_array_identity_below_strict_two:
             r#"
                 #strict
                 func Test() {
@@ -198,17 +174,9 @@ fn concat_assignment_preserves_nested_array_identity_below_strict_two() {
                     return values[0] == inner;
                 }
             "#,
-        )
-        .expect("identity-sensitive concat assignment compiles"),
-    );
-
-    assert_eq!(
-        engine
-            .call("Test", &[])
-            .expect("identity-sensitive concat assignment succeeds"),
-        Value::Bool(true),
+        "Test", &[] => Value::Bool(true),
         "..= retains the raw identity of existing nested array elements"
-    );
+        ;
 }
 
 #[test]
@@ -236,16 +204,14 @@ fn non_nil_effectvar_coalescing_assignment_skips_rhs_and_write() {
         observed_rhs_calls.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Int(5))
     });
-    engine.add_script(
-        Script::compile(
-            r#"
-                #strict 3
-                func Test() {
-                    return EffectVar(0, 0, 0) ??= MarkRhs();
-                }
-            "#,
-        )
-        .expect("host-backed coalescing assignment compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict 3
+        func Test() {
+            return EffectVar(0, 0, 0) ??= MarkRhs();
+        }
+    "#,
     );
 
     assert_eq!(

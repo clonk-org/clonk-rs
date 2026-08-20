@@ -81,6 +81,50 @@ pub struct MessageSpec {
 }
 
 impl MessageSpec {
+    pub fn target(text: impl Into<String>, target: ObjectId) -> Self {
+        Self::new(MessageKind::Target, text).with_target(Some(target))
+    }
+
+    pub fn global(text: impl Into<String>) -> Self {
+        Self::new(MessageKind::Global, text)
+    }
+
+    pub fn new(kind: MessageKind, text: impl Into<String>) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+            target: None,
+            player: None,
+            offset: Vector2::ZERO,
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        }
+    }
+
+    pub fn with_target(mut self, target: Option<ObjectId>) -> Self {
+        self.target = target;
+        self
+    }
+
+    pub fn with_player(mut self, player: Option<i32>) -> Self {
+        self.player = player;
+        self
+    }
+
+    pub fn with_offset(mut self, offset: Vector2) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    pub fn with_color(mut self, color: u32) -> Self {
+        self.color = color;
+        self
+    }
+
     fn allows_multiple(&self) -> bool {
         (self.flags & FLAG_MULTIPLE) != 0
     }
@@ -574,19 +618,10 @@ mod tests {
         // distinct text extends that record and its delay
         // (C4GameMessage.cpp:73-83,315-329; C4Strings.cpp:110-118).
         let target = ObjectId::new(7);
-        let original = MessageSpec {
-            kind: MessageKind::Target,
-            text: "Site|needs|1x Wood".to_owned(),
-            target: Some(target),
-            player: Some(4),
-            offset: Vector2::new(-1, -1),
-            color: 0xff12_3456,
-            flags: 0,
-            width: None,
-            decoration: None,
-            frame_decoration: None,
-            portrait: None,
-        };
+        let original = MessageSpec::target("Site|needs|1x Wood", target)
+            .with_player(Some(4))
+            .with_offset(Vector2::new(-1, -1))
+            .with_color(0xff12_3456);
         let mut messages = MessageManager::new();
         messages.add_message(original.clone());
         let before = messages.persisted().into_iter().next().expect("message");
@@ -640,33 +675,15 @@ mod tests {
         // (C4GameMessage.cpp:290-305). This is reachable when a global
         // ANY_OWNER append finds a same-player target record first.
         let mut messages = MessageManager::new();
-        messages.add_message(MessageSpec {
-            kind: MessageKind::Target,
-            text: "target".into(),
-            target: Some(ObjectId::new(7)),
-            player: MESSAGE_ANY_OWNER,
-            offset: Vector2::ZERO,
-            color: 0,
-            flags: 0,
-            width: None,
-            decoration: None,
-            frame_decoration: None,
-            portrait: None,
-        });
+        messages.add_message(
+            MessageSpec::target("target", ObjectId::new(7))
+                .with_player(MESSAGE_ANY_OWNER)
+                .with_color(0),
+        );
         messages.append_message(
-            MessageSpec {
-                kind: MessageKind::Global,
-                text: String::new(),
-                target: None,
-                player: MESSAGE_ANY_OWNER,
-                offset: Vector2::ZERO,
-                color: 0,
-                flags: 0,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            },
+            MessageSpec::global(String::new())
+                .with_player(MESSAGE_ANY_OWNER)
+                .with_color(0),
             false,
         );
         assert!(messages.snapshot().is_empty());
@@ -681,19 +698,7 @@ mod tests {
         let raw_text = clonk_script::c4_string_from_bytes(b"123456789\xe9\r|tail");
         let duplicate_text = clonk_script::c4_string_from_bytes(b"123456789\xe9\r");
         let mut messages = MessageManager::new();
-        messages.add_message(MessageSpec {
-            kind: MessageKind::Target,
-            text: raw_text,
-            target: Some(target),
-            player: None,
-            offset: Vector2::ZERO,
-            color: 0xffff_ffff,
-            flags: 0,
-            width: None,
-            decoration: None,
-            frame_decoration: None,
-            portrait: None,
-        });
+        messages.add_message(MessageSpec::target(raw_text, target));
         let persisted = messages.persisted();
         assert_eq!(
             persisted[0].remaining, 32,
@@ -702,22 +707,7 @@ mod tests {
 
         messages.restore(persisted);
         let before = messages.persisted().remove(0);
-        messages.append_message(
-            MessageSpec {
-                kind: MessageKind::Target,
-                text: duplicate_text,
-                target: Some(target),
-                player: None,
-                offset: Vector2::ZERO,
-                color: 0xffff_ffff,
-                flags: 0,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            },
-            true,
-        );
+        messages.append_message(MessageSpec::target(duplicate_text, target), true);
         assert_eq!(messages.persisted()[0].snapshot, before.snapshot);
         assert_eq!(
             messages.persisted()[0].remaining,
@@ -726,22 +716,7 @@ mod tests {
         );
 
         let nul_duplicate = clonk_script::c4_string_from_bytes(b"tail\0ignored");
-        messages.append_message(
-            MessageSpec {
-                kind: MessageKind::Target,
-                text: nul_duplicate,
-                target: Some(target),
-                player: None,
-                offset: Vector2::ZERO,
-                color: 0xffff_ffff,
-                flags: 0,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            },
-            true,
-        );
+        messages.append_message(MessageSpec::target(nul_duplicate, target), true);
         assert_eq!(
             messages.persisted()[0].remaining,
             before.remaining,
@@ -749,22 +724,7 @@ mod tests {
         );
 
         let nul_distinct = clonk_script::c4_string_from_bytes(b"new\0ignored");
-        messages.append_message(
-            MessageSpec {
-                kind: MessageKind::Target,
-                text: nul_distinct,
-                target: Some(target),
-                player: None,
-                offset: Vector2::ZERO,
-                color: 0xffff_ffff,
-                flags: 0,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            },
-            false,
-        );
+        messages.append_message(MessageSpec::target(nul_distinct, target), false);
         assert_eq!(
             messages.persisted()[0].snapshot.lines.last().unwrap(),
             "new"
@@ -776,22 +736,7 @@ mod tests {
         );
 
         let distinct_text = clonk_script::c4_string_from_bytes(b"\xe9");
-        messages.append_message(
-            MessageSpec {
-                kind: MessageKind::Target,
-                text: distinct_text,
-                target: Some(target),
-                player: None,
-                offset: Vector2::ZERO,
-                color: 0xffff_ffff,
-                flags: 0,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            },
-            false,
-        );
+        messages.append_message(MessageSpec::target(distinct_text, target), false);
         assert_eq!(
             messages.persisted()[0].remaining,
             before.remaining + 4 * DELAY_FACTOR,

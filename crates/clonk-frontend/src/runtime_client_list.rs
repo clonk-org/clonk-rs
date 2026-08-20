@@ -760,22 +760,22 @@ impl RuntimeClientListDialog {
                 (preferred.h * 3 / 4).max(120).min(preferred.h.max(1)),
             )
         };
-        let bounds = IntRect {
-            x: (preferred.x + (preferred.w - width) / 2).saturating_add(self.dialog_offset.0),
-            y: (preferred.y + (preferred.h - height) / 2).saturating_add(self.dialog_offset.1),
-            w: width,
-            h: height,
-        };
+        let bounds = IntRect::new(
+            (preferred.x + (preferred.w - width) / 2).saturating_add(self.dialog_offset.0),
+            (preferred.y + (preferred.h - height) / 2).saturating_add(self.dialog_offset.1),
+            width,
+            height,
+        );
         let caption_height = (font_line_height + 8).max(24).min(height);
         let status_height = font_line_height
             .max(1)
             .min((height - caption_height).max(1));
-        let client = IntRect {
-            x: bounds.x + 4,
-            y: bounds.y + caption_height + 3,
-            w: (bounds.w - 8).max(1),
-            h: (bounds.h - caption_height - status_height - 7).max(1),
-        };
+        let client = IntRect::new(
+            bounds.x + 4,
+            bounds.y + caption_height + 3,
+            (bounds.w - 8).max(1),
+            (bounds.h - caption_height - status_height - 7).max(1),
+        );
         let option_row_height = font_line_height.max(1).saturating_add(6);
         let option_count = i32::try_from(self.options.len()).unwrap_or(i32::MAX);
         let option_content_height = option_row_height
@@ -787,20 +787,15 @@ impl RuntimeClientListDialog {
             .saturating_add(2 * LIST_BOX_MARGIN)
             .min(client.h / 2)
             .max(font_line_height.min(client.h));
-        let options = IntRect {
-            x: client.x,
-            y: client.y,
-            w: client.w,
-            h: option_height,
-        };
+        let options = IntRect::new(client.x, client.y, client.w, option_height);
         // ScrollWindow always reserves its 16-pixel scrollbar column. The
         // auto-scroll decoration only hides the bar when every item fits.
-        let option_scrollbar = IntRect {
-            x: options.x + options.w - LIST_BOX_MARGIN - SCROLLBAR_EXTENT,
-            y: options.y + LIST_BOX_MARGIN,
-            w: SCROLLBAR_EXTENT,
-            h: (options.h - 2 * LIST_BOX_MARGIN).max(1),
-        };
+        let option_scrollbar = IntRect::new(
+            options.x + options.w - LIST_BOX_MARGIN - SCROLLBAR_EXTENT,
+            options.y + LIST_BOX_MARGIN,
+            SCROLLBAR_EXTENT,
+            (options.h - 2 * LIST_BOX_MARGIN).max(1),
+        );
         let visible_option_rows = usize::try_from(
             (((options.h - 2 * LIST_BOX_MARGIN).max(1) + OPTION_ITEM_SPACING)
                 / (option_row_height + OPTION_ITEM_SPACING).max(1))
@@ -820,59 +815,54 @@ impl RuntimeClientListDialog {
             .take(visible_option_rows)
             .enumerate()
             .map(|(visible_index, (index, _))| {
-                let rect = IntRect {
-                    x: options.x + LIST_BOX_MARGIN,
-                    y: options.y
+                let rect = IntRect::new(
+                    options.x + LIST_BOX_MARGIN,
+                    options.y
                         + LIST_BOX_MARGIN
                         + i32::try_from(visible_index)
                             .unwrap_or(i32::MAX)
                             .saturating_mul(option_row_height + OPTION_ITEM_SPACING),
-                    w: (options.w - 2 * LIST_BOX_MARGIN - SCROLLBAR_EXTENT).max(1),
-                    h: option_row_height,
-                };
+                    (options.w - 2 * LIST_BOX_MARGIN - SCROLLBAR_EXTENT).max(1),
+                    option_row_height,
+                );
                 let caption_width = self
                     .option_caption_width(font_line_height)
                     .min((rect.w - 10).max(0));
                 RuntimeClientOptionLayout {
                     index,
                     rect,
-                    value: IntRect {
-                        x: rect.x + caption_width + 8,
-                        y: rect.y + 1,
-                        w: (rect.w - caption_width - 9).max(1),
-                        h: font_line_height.max(1) + 4,
-                    },
+                    value: IntRect::new(
+                        rect.x + caption_width + 8,
+                        rect.y + 1,
+                        (rect.w - caption_width - 9).max(1),
+                        font_line_height.max(1) + 4,
+                    ),
                 }
             })
             .collect();
         let layout = RuntimeClientListLayout {
             bounds,
-            caption: IntRect {
-                x: bounds.x,
-                y: bounds.y,
-                w: bounds.w,
-                h: caption_height,
-            },
-            close_button: IntRect {
-                x: bounds.x + bounds.w - 20,
-                y: bounds.y + (caption_height - 16) / 2,
-                w: 16,
-                h: 16,
-            },
+            caption: IntRect::new(bounds.x, bounds.y, bounds.w, caption_height),
+            close_button: IntRect::new(
+                bounds.x + bounds.w - 20,
+                bounds.y + (caption_height - 16) / 2,
+                16,
+                16,
+            ),
             options,
             option_scrollbar,
-            list: IntRect {
-                x: client.x,
-                y: client.y + option_height + 2,
-                w: client.w,
-                h: (client.h - option_height - 2).max(1),
-            },
-            status: IntRect {
-                x: bounds.x + 4,
-                y: bounds.y + bounds.h - status_height - 3,
-                w: (bounds.w - 8).max(1),
-                h: status_height,
-            },
+            list: IntRect::new(
+                client.x,
+                client.y + option_height + 2,
+                client.w,
+                (client.h - option_height - 2).max(1),
+            ),
+            status: IntRect::new(
+                bounds.x + 4,
+                bounds.y + bounds.h - status_height - 3,
+                (bounds.w - 8).max(1),
+                status_height,
+            ),
             option_rows,
             row_height: (font_line_height + 4).max(18),
             icon_size: font_line_height.max(16),
@@ -1272,62 +1262,52 @@ impl RuntimeClientListDialog {
         // in the preferred rectangle independently of a dragged F4 dialog.
         let parent_x = parent.bounds.x.saturating_sub(self.dialog_offset.0);
         let parent_y = parent.bounds.y.saturating_sub(self.dialog_offset.1);
-        let bounds = IntRect {
-            x: (parent_x + (parent.bounds.w - width) / 2).saturating_add(self.info_dialog_offset.0),
-            y: (parent_y + (parent.bounds.h - height) / 2)
-                .saturating_add(self.info_dialog_offset.1),
-            w: width,
-            h: height,
-        };
+        let bounds = IntRect::new(
+            (parent_x + (parent.bounds.w - width) / 2).saturating_add(self.info_dialog_offset.0),
+            (parent_y + (parent.bounds.h - height) / 2).saturating_add(self.info_dialog_offset.1),
+            width,
+            height,
+        );
         let caption_height = if self.info_static {
             font_line_height.max(23)
         } else {
             (parent.row_height + 4).max(24)
         };
-        let caption = IntRect {
-            x: bounds.x,
-            y: bounds.y,
-            w: bounds.w,
-            h: caption_height,
-        };
+        let caption = IntRect::new(bounds.x, bounds.y, bounds.w, caption_height);
         let (text_window, bottom_close_button) = if self.info_static {
-            let inner = IntRect {
-                x: bounds.x + INFO_DIALOG_INDENT,
-                y: caption.y + caption.h + INFO_DIALOG_INDENT,
-                w: (bounds.w - 2 * INFO_DIALOG_INDENT).max(1),
-                h: (bounds.h - caption.h - 2 * INFO_DIALOG_INDENT).max(1),
-            };
+            let inner = IntRect::new(
+                bounds.x + INFO_DIALOG_INDENT,
+                caption.y + caption.h + INFO_DIALOG_INDENT,
+                (bounds.w - 2 * INFO_DIALOG_INDENT).max(1),
+                (bounds.h - caption.h - 2 * INFO_DIALOG_INDENT).max(1),
+            );
             let button_area_height = INFO_BUTTON_AREA_HEIGHT.min(inner.h).max(1);
-            let button_area = IntRect {
-                x: inner.x,
-                y: inner.y + inner.h - button_area_height,
-                w: inner.w,
-                h: button_area_height,
-            };
+            let button_area = IntRect::new(
+                inner.x,
+                inner.y + inner.h - button_area_height,
+                inner.w,
+                button_area_height,
+            );
             let close_width = INFO_CLOSE_BUTTON_WIDTH.min(button_area.w).max(1);
             (
-                IntRect {
-                    h: (inner.h - button_area_height - 2 * INFO_DIALOG_INDENT).max(1),
-                    ..inner
-                },
-                Some(IntRect {
-                    x: button_area.x + (button_area.w - close_width) / 2,
-                    y: button_area.y + (button_area.h - INFO_CLOSE_BUTTON_HEIGHT) / 2,
-                    w: close_width,
-                    h: INFO_CLOSE_BUTTON_HEIGHT.min(button_area.h).max(1),
-                }),
+                inner.with_height((inner.h - button_area_height - 2 * INFO_DIALOG_INDENT).max(1)),
+                Some(IntRect::new(
+                    button_area.x + (button_area.w - close_width) / 2,
+                    button_area.y + (button_area.h - INFO_CLOSE_BUTTON_HEIGHT) / 2,
+                    close_width,
+                    INFO_CLOSE_BUTTON_HEIGHT.min(button_area.h).max(1),
+                )),
             )
         } else {
             (
-                IntRect {
-                    x: bounds.x + 4,
-                    y: caption.y + caption.h + 3,
-                    w: (bounds.w - 8).max(1),
-                    h: self
-                        .info_dialog
+                IntRect::new(
+                    bounds.x + 4,
+                    caption.y + caption.h + 3,
+                    (bounds.w - 8).max(1),
+                    self.info_dialog
                         .preferred_text_window_height(font_line_height)
                         .min((bounds.h - caption.h - 7).max(1)),
-                },
+                ),
                 None,
             )
         };
@@ -1335,16 +1315,16 @@ impl RuntimeClientListDialog {
         Some(RuntimeClientInfoLayout {
             bounds,
             caption,
-            close_button: IntRect {
-                x: bounds.x + bounds.w - 20,
-                y: if self.info_static {
+            close_button: IntRect::new(
+                bounds.x + bounds.w - 20,
+                if self.info_static {
                     caption.y + 4
                 } else {
                     caption.y + (caption.h - 16) / 2
                 },
-                w: 16,
-                h: 16,
-            },
+                16,
+                16,
+            ),
             bottom_close_button,
             text_window,
             text: scrolling.viewport,
@@ -2042,12 +2022,12 @@ impl RuntimeClientListDialog {
                 [255, 255, 255, 255],
                 TextAlign::Left,
                 gamma,
-                IntRect {
-                    x: row_layout.rect.x + 1,
-                    y: row_layout.rect.y,
-                    w: (row_layout.value.x - row_layout.rect.x - 8).max(1),
-                    h: row_layout.rect.h,
-                },
+                IntRect::new(
+                    row_layout.rect.x + 1,
+                    row_layout.rect.y,
+                    (row_layout.value.x - row_layout.rect.x - 8).max(1),
+                    row_layout.rect.h,
+                ),
             );
             let arrow_x = row_layout.value.x + row_layout.value.w - CONTEXT_HEIGHT as i32 - 1;
             if option.editable {
@@ -2089,12 +2069,12 @@ impl RuntimeClientListDialog {
                 [255, 255, 255, 255],
                 TextAlign::Left,
                 gamma,
-                IntRect {
-                    x: row_layout.value.x,
-                    y: row_layout.value.y,
-                    w: (arrow_x - row_layout.value.x).max(1),
-                    h: row_layout.value.h,
-                },
+                IntRect::new(
+                    row_layout.value.x,
+                    row_layout.value.y,
+                    (arrow_x - row_layout.value.x).max(1),
+                    row_layout.value.h,
+                ),
             );
             let hovered = mouse_active
                 && self.pointer.is_some_and(|point| {
@@ -2240,12 +2220,12 @@ impl RuntimeClientListDialog {
                             gamma,
                         );
                     }
-                    let status_rect = IntRect {
-                        x: layout.list.x + 3,
-                        y: y + (layout.row_height - layout.icon_size) / 2,
-                        w: layout.icon_size,
-                        h: layout.icon_size,
-                    };
+                    let status_rect = IntRect::new(
+                        layout.list.x + 3,
+                        y + (layout.row_height - layout.icon_size) / 2,
+                        layout.icon_size,
+                        layout.icon_size,
+                    );
                     draw_icon(
                         surface,
                         status_rect,
@@ -2269,12 +2249,12 @@ impl RuntimeClientListDialog {
                             right -= layout.icon_size;
                             self.draw_icon_button(
                                 surface,
-                                IntRect {
-                                    x: right,
-                                    y: status_rect.y,
-                                    w: layout.icon_size,
-                                    h: layout.icon_size,
-                                },
+                                IntRect::new(
+                                    right,
+                                    status_rect.y,
+                                    layout.icon_size,
+                                    layout.icon_size,
+                                ),
                                 phase,
                                 target,
                                 layout,
@@ -2290,12 +2270,7 @@ impl RuntimeClientListDialog {
                         right -= layout.icon_size;
                         self.draw_icon_button(
                             surface,
-                            IntRect {
-                                x: right,
-                                y: status_rect.y,
-                                w: layout.icon_size,
-                                h: layout.icon_size,
-                            },
+                            IntRect::new(right, status_rect.y, layout.icon_size, layout.icon_size),
                             if row.muted { ICON_NO_SOUND } else { ICON_SOUND },
                             HitTarget::Mute(row.client_id),
                             layout,
@@ -2319,12 +2294,7 @@ impl RuntimeClientListDialog {
                             color,
                             TextAlign::Right,
                             gamma,
-                            IntRect {
-                                x: right,
-                                y,
-                                w: 54,
-                                h: layout.row_height,
-                            },
+                            IntRect::new(right, y, 54, layout.row_height),
                         );
                     }
                     let label_rect = client_label_rect(row, layout, y);
@@ -2371,12 +2341,12 @@ impl RuntimeClientListDialog {
                         connection_right -= layout.icon_size;
                         self.draw_icon_button(
                             surface,
-                            IntRect {
-                                x: connection_right,
-                                y: y + (layout.row_height - layout.icon_size) / 2,
-                                w: layout.icon_size,
-                                h: layout.icon_size,
-                            },
+                            IntRect::new(
+                                connection_right,
+                                y + (layout.row_height - layout.icon_size) / 2,
+                                layout.icon_size,
+                                layout.icon_size,
+                            ),
                             ICON_DISCONNECT,
                             HitTarget::Disconnect(client_id, connection.connection_id),
                             layout,
@@ -2404,12 +2374,7 @@ impl RuntimeClientListDialog {
                         [255, 255, 255, 255],
                         TextAlign::Right,
                         gamma,
-                        IntRect {
-                            x: connection_right,
-                            y,
-                            w: 54,
-                            h: layout.row_height,
-                        },
+                        IntRect::new(connection_right, y, 54, layout.row_height),
                     );
                     let description = format!(
                         "{}: {} ({} l{})",
@@ -2427,12 +2392,12 @@ impl RuntimeClientListDialog {
                         [220, 220, 220, 255],
                         TextAlign::Left,
                         gamma,
-                        IntRect {
-                            x: layout.list.x + layout.icon_size * 2,
+                        IntRect::new(
+                            layout.list.x + layout.icon_size * 2,
                             y,
-                            w: (connection_right - layout.list.x - layout.icon_size * 2).max(1),
-                            h: layout.row_height,
-                        },
+                            (connection_right - layout.list.x - layout.icon_size * 2).max(1),
+                            layout.row_height,
+                        ),
                     );
                 }
             }
@@ -2802,26 +2767,26 @@ impl RuntimeClientListDialog {
             }
             match entry {
                 RuntimeListEntry::Client(row) => {
-                    let row_rect = IntRect {
-                        x: layout.list.x + 2,
+                    let row_rect = IntRect::new(
+                        layout.list.x + 2,
                         y,
-                        w: (layout.list.w - 4).max(1),
-                        h: layout.row_height,
-                    };
+                        (layout.list.w - 4).max(1),
+                        layout.row_height,
+                    );
                     let mut right = layout.list.x + layout.list.w - 3;
                     if !row.host && row.can_moderate {
                         right -= layout.icon_size;
-                        let kick = IntRect {
-                            x: right,
-                            y: y + (layout.row_height - layout.icon_size) / 2,
-                            w: layout.icon_size,
-                            h: layout.icon_size,
-                        };
+                        let kick = IntRect::new(
+                            right,
+                            y + (layout.row_height - layout.icon_size) / 2,
+                            layout.icon_size,
+                            layout.icon_size,
+                        );
                         if contains(kick, point) {
                             return Some(HitTarget::Kick(row.client_id));
                         }
                         right -= layout.icon_size + 2;
-                        let activate = IntRect { x: right, ..kick };
+                        let activate = kick.with_x(right);
                         if contains(activate, point) {
                             return Some(HitTarget::Activate(row.client_id));
                         }
@@ -2829,12 +2794,12 @@ impl RuntimeClientListDialog {
                     }
                     if !row.local {
                         right -= layout.icon_size;
-                        let mute = IntRect {
-                            x: right,
-                            y: y + (layout.row_height - layout.icon_size) / 2,
-                            w: layout.icon_size,
-                            h: layout.icon_size,
-                        };
+                        let mute = IntRect::new(
+                            right,
+                            y + (layout.row_height - layout.icon_size) / 2,
+                            layout.icon_size,
+                            layout.icon_size,
+                        );
                         if contains(mute, point) {
                             return Some(HitTarget::Mute(row.client_id));
                         }
@@ -2848,12 +2813,12 @@ impl RuntimeClientListDialog {
                     connection,
                 } => {
                     if connection.can_disconnect {
-                        let disconnect = IntRect {
-                            x: layout.list.x + layout.list.w - 3 - layout.icon_size,
-                            y: y + (layout.row_height - layout.icon_size) / 2,
-                            w: layout.icon_size,
-                            h: layout.icon_size,
-                        };
+                        let disconnect = IntRect::new(
+                            layout.list.x + layout.list.w - 3 - layout.icon_size,
+                            y + (layout.row_height - layout.icon_size) / 2,
+                            layout.icon_size,
+                            layout.icon_size,
+                        );
                         if contains(disconnect, point) {
                             return Some(HitTarget::Disconnect(
                                 client_id,
@@ -2861,12 +2826,12 @@ impl RuntimeClientListDialog {
                             ));
                         }
                     }
-                    let row_rect = IntRect {
-                        x: layout.list.x + 2,
+                    let row_rect = IntRect::new(
+                        layout.list.x + 2,
                         y,
-                        w: (layout.list.w - 4).max(1),
-                        h: layout.row_height,
-                    };
+                        (layout.list.w - 4).max(1),
+                        layout.row_height,
+                    );
                     if contains(row_rect, point) {
                         return Some(HitTarget::ConnectionRow(
                             client_id,
@@ -3079,12 +3044,7 @@ fn client_label_rect(row: &RuntimeClientRow, layout: &RuntimeClientListLayout, y
         right -= 54;
     }
     let x = status_x + layout.icon_size + 3;
-    IntRect {
-        x,
-        y,
-        w: (right - x - 2).max(1),
-        h: layout.row_height,
-    }
+    IntRect::new(x, y, (right - x - 2).max(1), layout.row_height)
 }
 
 fn status_icon_phase(row: &RuntimeClientRow) -> u32 {
@@ -3321,27 +3281,14 @@ mod tests {
             vec![row()],
             RuntimeClientListStatus::default(),
         );
-        let layout = dialog.layout(
-            IntRect {
-                x: 20,
-                y: 10,
-                w: 800,
-                h: 600,
-            },
-            20,
-        );
+        let layout = dialog.layout(IntRect::new(20, 10, 800, 600), 20);
         assert_eq!((layout.bounds.w, layout.bounds.h), (600, 450));
         assert_eq!((layout.bounds.x, layout.bounds.y), (120, 85));
     }
 
     #[test]
     fn icon_button_visuals_keep_keyboard_and_pointer_activity_independent() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 640,
-            h: 480,
-        };
+        let preferred = IntRect::new(0, 0, 640, 480);
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
             options(true),
@@ -3379,12 +3326,7 @@ mod tests {
 
     #[test]
     fn client_row_and_escape_open_then_close_the_info_child() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 640,
-            h: 200,
-        };
+        let preferred = IntRect::new(0, 0, 640, 200);
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
             options(true),
@@ -3447,12 +3389,7 @@ mod tests {
         );
         assert!(dialog.info_is_open());
         assert_eq!(dialog.info_lines(), ["oldest", "middle", "newest"]);
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 800,
-            h: 600,
-        };
+        let preferred = IntRect::new(0, 0, 800, 600);
         let layout = dialog.info_layout(preferred, 16).expect("static layout");
         assert_eq!(layout.bounds.w, 620);
         assert_eq!(layout.caption.h, 23);
@@ -3473,12 +3410,7 @@ mod tests {
 
     #[test]
     fn static_info_bottom_close_and_enter_dismiss_the_modal() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 800,
-            h: 600,
-        };
+        let preferred = IntRect::new(0, 0, 800, 600);
         let mut dialog =
             RuntimeClientListDialog::new_static_info("Error Log", 10, "retained", "&Close");
         let button = dialog
@@ -3507,12 +3439,7 @@ mod tests {
 
     #[test]
     fn main_and_info_title_drags_retain_independent_offsets_across_refresh() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 640,
-            h: 480,
-        };
+        let preferred = IntRect::new(0, 0, 640, 480);
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
             options(true),
@@ -3621,12 +3548,7 @@ mod tests {
     #[test]
     fn main_and_info_titles_bounce_one_pixel_per_draw_after_three_seconds() {
         let font = unit_width_font("W");
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 240,
-            h: 200,
-        };
+        let preferred = IntRect::new(0, 0, 240, 200);
         let mut dialog = RuntimeClientListDialog::new(
             "W".repeat(158),
             options(true),
@@ -3708,12 +3630,7 @@ mod tests {
 
     #[test]
     fn title_and_close_tooltips_use_the_shared_mouse_delay_with_info_precedence() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 640,
-            h: 480,
-        };
+        let preferred = IntRect::new(0, 0, 640, 480);
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
             options(true),
@@ -3967,12 +3884,7 @@ mod tests {
 
     #[test]
     fn client_info_overflow_is_reachable_and_sec1_refresh_preserves_scroll() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 640,
-            h: 200,
-        };
+        let preferred = IntRect::new(0, 0, 640, 200);
         let font = tooltip_font();
         let mut overflow = row();
         overflow.addresses = (0..12)
@@ -4009,12 +3921,7 @@ mod tests {
             dialog.handle_pointer_up(row_point, preferred, font.line_height),
             Some(RuntimeClientListAction::OpenInfo(7))
         );
-        let roomy = IntRect {
-            x: 0,
-            y: 0,
-            w: 640,
-            h: 480,
-        };
+        let roomy = IntRect::new(0, 0, 640, 480);
         assert_eq!(
             dialog
                 .info_scroll_metrics(roomy, &font)
@@ -4078,12 +3985,7 @@ mod tests {
 
     #[test]
     fn wheel_scroll_makes_an_initially_hidden_client_actionable() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 320,
-            h: 200,
-        };
+        let preferred = IntRect::new(0, 0, 320, 200);
         let rows = (0..8)
             .map(|index| {
                 let mut client = row();
@@ -4132,12 +4034,7 @@ mod tests {
 
     #[test]
     fn runtime_options_emit_mouse_combo_requests() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 640,
-            h: 480,
-        };
+        let preferred = IntRect::new(0, 0, 640, 480);
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
             options(true),
@@ -4200,12 +4097,7 @@ mod tests {
 
     #[test]
     fn runtime_options_auto_scrollbar_reaches_hidden_rows() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 320,
-            h: 200,
-        };
+        let preferred = IntRect::new(0, 0, 320, 200);
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
             options(true),
@@ -4254,12 +4146,7 @@ mod tests {
 
     #[test]
     fn tab_focuses_native_order_and_list_keys_select_every_entry() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 640,
-            h: 480,
-        };
+        let preferred = IntRect::new(0, 0, 640, 480);
         let mut first = row();
         first.connections.push(RuntimeConnectionRow {
             connection_id: 42,
@@ -4401,12 +4288,7 @@ mod tests {
 
     #[test]
     fn name_tooltip_waits_exactly_and_contains_only_player_names() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 640,
-            h: 480,
-        };
+        let preferred = IntRect::new(0, 0, 640, 480);
         let mut client = row();
         client.player_names = vec!["Alpha".to_string(), "Beta".to_string()];
         let mut dialog = RuntimeClientListDialog::new(
@@ -4510,12 +4392,7 @@ mod tests {
 
     #[test]
     fn option_tooltip_uses_the_native_option_row_text() {
-        let preferred = IntRect {
-            x: 0,
-            y: 0,
-            w: 640,
-            h: 480,
-        };
+        let preferred = IntRect::new(0, 0, 640, 480);
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
             options(true),

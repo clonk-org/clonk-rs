@@ -1,53 +1,16 @@
 use std::error::Error;
 
-use crate::support::real_scenario::load_tutorial;
+use crate::support::real_scenario::{
+    clonk_carries, load_tutorial_with_local_player, object_with_definition,
+    tutorial_message_contains,
+};
 use crate::support::virtual_player::VirtualPlayer;
 use clonk_engine::{
-    Direction, Engine, JoinPlayerConfig, ObjectId, COM_CURSOR_RIGHT, COM_DIG, COM_DOWN, COM_LEFT,
-    COM_RIGHT, COM_THROW, COM_UP,
+    Direction, Engine, COM_CURSOR_RIGHT, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
 };
 
 fn load_tutorial06() -> (Engine, i32) {
-    let mut engine = load_tutorial(6, 0);
-    let owner = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial 6 virtual player".to_owned(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: true,
-            startup_player_count: 1,
-        })
-        .expect("local Tutorial06 virtual player joins")
-        .number();
-    (engine, owner)
-}
-
-fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine.first_object_for_definition(definition)
-}
-
-fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
-    engine.object_snapshot(clonk).is_some_and(|clonk| {
-        clonk.contents.iter().any(|item| {
-            engine
-                .object_snapshot(*item)
-                .is_some_and(|item| item.definition_id == definition)
-        })
-    })
-}
-
-fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine.message_line_contains(needle)
+    load_tutorial_with_local_player(6, 0, "Tutorial 6 virtual player", false, true)
 }
 
 fn object_menu_identification(engine: &Engine, owner: i32) -> Option<clonk_script::Value> {

@@ -669,21 +669,8 @@ fn real_clnk_dolphin_jump_uses_sim_flight_to_select_dive() {
     // 139-155). This executes the installed CLNK plus planet System.c4g.
     let mut engine = load_tutorial(1, 0);
     let joined = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-        name: "Dolphin tester".to_string(),
-        player_info_id: 0,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff_00_00,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
         control_style: true,
-        auto_context_menu: false,
-        startup_player_count: 1,
+        ..crate::support::join_player_config("Dolphin tester")
     }));
     let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number()));
     engine.set_landscape(raster_landscape_with_densities(
@@ -717,21 +704,8 @@ fn real_tutorial09_clnk_command_jump_dives_into_deep_water() {
     // C4Movement.cpp:623-670). Tutorial09 is the shipped swimming tutorial.
     let mut engine = load_tutorial(9, 0);
     let joined = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-        name: "Dive tester".to_string(),
-        player_info_id: 0,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff_00_00,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
         control_style: true,
-        auto_context_menu: false,
-        startup_player_count: 1,
+        ..crate::support::join_player_config("Dive tester")
     }));
     let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number()));
     engine.set_landscape(raster_landscape_with_densities(

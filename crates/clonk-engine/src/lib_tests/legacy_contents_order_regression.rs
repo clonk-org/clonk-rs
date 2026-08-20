@@ -1,40 +1,22 @@
 use super::*;
-
-trait TestEngineExt {
-    fn register_test_definition(&mut self, definition: Definition);
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
-    fn test_object_index(&self, object: ObjectId) -> usize;
-}
-
-impl TestEngineExt for Engine {
-    #[track_caller]
-    fn register_test_definition(&mut self, definition: Definition) {
-        crate::TestValueExt::test_value(self.register_definition(definition));
-    }
-
-    #[track_caller]
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
-        crate::TestValueExt::test_value(self.spawn_object(config))
-    }
-
-    #[track_caller]
-    fn test_object_index(&self, object: ObjectId) -> usize {
-        crate::TestValueExt::test_value(self.find_object_index(object))
-    }
-}
+use crate::lib_test_support::{register_fixture, spawn_fixture, EngineTestExt};
 
 #[test]
 fn native_compiled_defaults_are_distinct_from_generic_loaded_fixtures() {
     let mut engine = Engine::new();
-    let mut definition = test_definition("STAT", "Static", "");
-    definition.set_category(CATEGORY_STATIC_BACK);
-    definition.set_mass(100);
-    definition.set_physical(PhysicalInfo {
-        energy: 50_000,
-        breath: 30_000,
-        ..PhysicalInfo::default()
-    });
-    engine.register_test_definition(definition);
+    register_fixture!(
+        engine,
+        "STAT",
+        "Static",
+        "",
+        set_category(CATEGORY_STATIC_BACK),
+        set_mass(100),
+        set_physical(PhysicalInfo {
+            energy: 50_000,
+            breath: 30_000,
+            ..PhysicalInfo::default()
+        })
+    );
 
     let fixed_velocity = FixedVec2::from_ints(7, -5);
     let object = engine.spawn_test_object(
@@ -52,8 +34,7 @@ fn native_compiled_defaults_are_distinct_from_generic_loaded_fixtures() {
     assert_eq!(engine.objects[index].compiled_mass, Some(0));
     assert_eq!(engine.objects[index].fixed_velocity, fixed_velocity);
 
-    let fixture =
-        engine.spawn_test_object(SpawnConfig::new("STAT").with_loaded(true).with_alive(true));
+    let fixture = spawn_fixture!(engine, "STAT", with_loaded: true, with_alive: true);
     let fixture = engine.test_object_index(fixture);
     assert_eq!(engine.objects[fixture].state.category, CATEGORY_STATIC_BACK);
     assert_eq!(engine.objects[fixture].state.energy, 50_000);
@@ -67,17 +48,9 @@ fn compiled_contents_keep_saved_order_and_cpp_duplicate_repair() {
     for id in ["CONT", "ITEM"] {
         crate::TestValueExt::test_value(engine.register_script_definition(id, id, ""));
     }
-    let parent = engine.spawn_test_object(SpawnConfig::new("CONT").with_id(ObjectId::new(1)));
-    let first = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_id(ObjectId::new(2))
-            .with_container(parent),
-    );
-    let second = engine.spawn_test_object(
-        SpawnConfig::new("ITEM")
-            .with_id(ObjectId::new(3))
-            .with_container(parent),
-    );
+    let parent = spawn_fixture!(engine, "CONT", with_id: ObjectId::new(1));
+    let first = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(2), with_container: parent);
+    let second = spawn_fixture!(engine, "ITEM", with_id: ObjectId::new(3), with_container: parent);
 
     engine.restore_legacy_contents_order(&[(parent, vec![second, first])]);
     let parent_index = engine.test_object_index(parent);
@@ -93,8 +66,8 @@ fn compiled_contents_keep_saved_order_and_cpp_duplicate_repair() {
 fn deferred_legacy_containment_preserves_mutual_cycles() {
     let mut engine = Engine::new();
     crate::TestValueExt::test_value(engine.register_script_definition("CYCL", "Cycle", ""));
-    let first = engine.spawn_test_object(SpawnConfig::new("CYCL").with_id(ObjectId::new(1)));
-    let second = engine.spawn_test_object(SpawnConfig::new("CYCL").with_id(ObjectId::new(2)));
+    let first = spawn_fixture!(engine, "CYCL", with_id: ObjectId::new(1));
+    let second = spawn_fixture!(engine, "CYCL", with_id: ObjectId::new(2));
 
     engine.restore_legacy_object_links(&[(first, second), (second, first)], &[]);
 
@@ -109,9 +82,7 @@ fn deferred_legacy_containment_preserves_mutual_cycles() {
 #[test]
 fn loaded_mass_cache_survives_subpercent_docon_until_update_mass() {
     let mut engine = Engine::new();
-    let mut definition = test_definition("MASS", "Mass", "");
-    definition.set_mass(100);
-    engine.register_test_definition(definition);
+    register_fixture!(engine, "MASS", "Mass", "", set_mass(100));
 
     let construction = FULL_CON / 2 + 10;
     let mut config = SpawnConfig::new("MASS")
@@ -133,24 +104,26 @@ fn loaded_mass_cache_survives_subpercent_docon_until_update_mass() {
 #[test]
 fn effective_object_mass_has_no_nesting_depth_cutoff() {
     let mut engine = Engine::new();
-    let mut mass = test_definition(
+    register_fixture!(
+        engine,
         "MASS",
         "Mass",
         "#strict\npublic func TryEnter(target) { return Enter(target); }\n",
+        set_mass(10)
     );
-    mass.set_mass(10);
-    engine.register_test_definition(mass);
 
-    let mut no_component = test_definition("NCMP", "No component mass", "");
-    no_component.set_mass(7);
-    no_component.set_no_component_mass(true);
-    engine.register_test_definition(no_component);
+    register_fixture!(
+        engine,
+        "NCMP",
+        "No component mass",
+        "",
+        set_mass(7),
+        set_no_component_mass(true)
+    );
 
-    let mut hidden = test_definition("HEAV", "Hidden cargo", "");
-    hidden.set_mass(1_000);
-    engine.register_test_definition(hidden);
+    register_fixture!(engine, "HEAV", "Hidden cargo", "", set_mass(1_000));
 
-    let root = engine.spawn_test_object(SpawnConfig::new("MASS"));
+    let root = spawn_fixture!(engine, "MASS");
     let mut chain = vec![root];
     let mut expected_mass = 10;
     for depth in 1..=12 {
@@ -164,8 +137,8 @@ fn effective_object_mass_has_no_nesting_depth_cutoff() {
         expected_mass += ((10 + depth) * construction / FULL_CON).max(1);
     }
 
-    let no_component = engine.spawn_test_object(SpawnConfig::new("NCMP").with_container(root));
-    engine.spawn_test_object(SpawnConfig::new("HEAV").with_container(no_component));
+    let no_component = spawn_fixture!(engine, "NCMP", with_container: root);
+    spawn_fixture!(engine, "HEAV", with_container: no_component);
     expected_mass += 7;
 
     let no_component_index = engine.test_object_index(no_component);
@@ -207,9 +180,9 @@ fn inactive_contents_count_while_deleted_holes_do_not_like_cpp() {
     engine.register_test_definition(carrier);
     engine.register_test_definition(item);
 
-    let carrier = engine.spawn_test_object(SpawnConfig::new("MCAR"));
-    let deleted = engine.spawn_test_object(SpawnConfig::new("MITM").with_container(carrier));
-    let inactive = engine.spawn_test_object(SpawnConfig::new("MITM").with_container(carrier));
+    let carrier = spawn_fixture!(engine, "MCAR");
+    let deleted = spawn_fixture!(engine, "MITM", with_container: carrier);
+    let inactive = spawn_fixture!(engine, "MITM", with_container: carrier);
     let deleted_index = engine.test_object_index(deleted);
     let _ = engine.objects[deleted_index].mark_destroyed();
     let inactive_index = engine.test_object_index(inactive);
@@ -233,18 +206,9 @@ fn inactive_contents_count_while_deleted_holes_do_not_like_cpp() {
 #[test]
 fn objects_info_name_binds_the_named_idle_crew_entry_after_players_exist() {
     let mut engine = Engine::new();
-    let mut definition = test_definition("CLNK", "Clonk", "");
-    definition.set_crew_member(true);
-    engine.register_test_definition(definition);
+    register_fixture!(engine, "CLNK", "Clonk", "", set_crew_member(true));
 
-    let object = engine.spawn_test_object(
-        SpawnConfig::new("CLNK")
-            .with_id(ObjectId::new(17))
-            .with_owner(0)
-            .with_crew_member(false)
-            .with_alive(true)
-            .with_loaded(true),
-    );
+    let object = spawn_fixture!(engine, "CLNK", with_id: ObjectId::new(17), with_owner: 0, with_crew_member: false, with_alive: true, with_loaded: true);
     crate::TestValueExt::test_value(engine.register_player(PlayerConfig::new(0, "Player")));
     let physical = PhysicalInfo {
         energy: 77_000,

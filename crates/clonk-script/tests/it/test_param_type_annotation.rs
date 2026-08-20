@@ -2,12 +2,11 @@
 //! argument slot before entering the callee (`CheckConvertFunctionParameters`,
 //! C4AulExec.cpp:1364-1397).
 
+use crate::support::try_eval;
 use clonk_script::{Engine, Script, TypeAnnotation, Value, ValueMap};
 
 fn eval(source: &str) -> Result<Value, clonk_script::ScriptError> {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("script should load");
-    engine.call("Test", &[])
+    try_eval(source, &[])
 }
 
 fn runtime_message(error: clonk_script::ScriptError) -> String {
@@ -343,17 +342,15 @@ fn int_to_id_conversion_rejects_values_outside_the_legacy_range() {
 fn pre_strict3_callers_bridge_nil_to_typed_int_and_bool_zeroes() {
     for caller_directive in ["", "#strict 2\n"] {
         let mut engine = Engine::new();
-        engine.add_script(
-            Script::compile(
-                "#strict 3\nfunc Accept(int number, bool flag) { return [number, flag]; }",
-            )
-            .expect("strict-3 callee compiles"),
+        crate::support::load_script(
+            &mut engine,
+            "#strict 3\nfunc Accept(int number, bool flag) { return [number, flag]; }",
         );
-        engine.add_script(
-            Script::compile(&format!(
-                "{caller_directive}func Test() {{ var number, flag; return Accept(number, flag); }}"
-            ))
-            .expect("caller compiles"),
+        crate::support::load_script(
+            &mut engine,
+            &format!(
+            "{caller_directive}func Test() {{ var number, flag; return Accept(number, flag); }}"
+        ),
         );
 
         assert_eq!(
@@ -433,15 +430,12 @@ fn pre_strict3_engine_entry_normalizes_every_raw_zero_to_nil() {
 #[test]
 fn caller_source_strictness_wins_over_link_destination_owner() {
     let mut destination = Engine::new();
-    destination.add_script(
-        Script::compile("func Accept(value) { return value; }")
-            .expect("nonstrict destination compiles"),
-    );
+    crate::support::load_script(&mut destination, "func Accept(value) { return value; }");
 
     let mut strict_source = Engine::new();
-    strict_source.add_script(
-        Script::compile("#strict 3\nfunc Test() { return Accept(0); }")
-            .expect("strict source compiles"),
+    crate::support::load_script(
+        &mut strict_source,
+        "#strict 3\nfunc Test() { return Accept(0); }",
     );
     destination.merge_from(&strict_source);
 

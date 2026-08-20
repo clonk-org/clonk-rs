@@ -3745,6 +3745,49 @@ const CATEGORY_FLAGS: &[(&str, i32)] = &[
 
 #[cfg(test)]
 mod tests {
+    macro_rules! check_eq {
+        ($left:expr => $right:expr) => {
+            assert_eq!($left, $right);
+        };
+        ($left:expr => $right:expr, $($message:tt)+) => {
+            assert_eq!($left, $right, $($message)+);
+        };
+    }
+
+    macro_rules! check {
+        ($condition:expr) => {
+            assert!($condition);
+        };
+        ($condition:expr, $($message:tt)+) => {
+            assert!($condition, $($message)+);
+        };
+    }
+
+    macro_rules! check_ne {
+        ($left:expr => $right:expr) => {
+            assert_ne!($left, $right);
+        };
+        ($left:expr => $right:expr, $($message:tt)+) => {
+            assert_ne!($left, $right, $($message)+);
+        };
+    }
+
+    macro_rules! write_fixture {
+        ($path:expr => $contents:expr, $message:expr) => {
+            fs::write($path, $contents).expect($message)
+        };
+        ($path:expr => $contents:expr) => {
+            fs::write($path, $contents).unwrap()
+        };
+    }
+
+    macro_rules! definition_fixture_dir {
+        ($temp:ident, $directory:ident => $name:expr) => {
+            let $temp = tempdir().expect("tempdir");
+            let $directory = $temp.path().join($name);
+            fs::create_dir(&$directory).expect("definition directory");
+        };
+    }
 
     #[test]
     fn parse_def_core_complete_reflection_only_entries_and_cpp_defaults() {
@@ -3780,75 +3823,47 @@ Entrance=1,2,,4
         )
         .expect("complete reflection fields parse");
 
-        assert_eq!(parsed.require_defs, vec!["REQ1", "REQ2"]);
-        assert_eq!(parsed.max_user_select, 7);
-        assert_eq!(parsed.no_standard_crew, -2);
-        assert_eq!(parsed.color_by_material, "Granite");
-        assert_eq!(parsed.explosive, 3);
-        assert_eq!(parsed.drag_image_picture, 4);
-        assert_eq!(parsed.temporary_crew, 5);
-        assert_eq!(parsed.smoke_rate, 88);
-        assert_eq!(parsed.needed_gfx_mode, 6);
-        assert_eq!(parsed.hide_hud_bars, 5);
-        assert_eq!(parsed.hide_hud_elements, 33);
-        assert_eq!(parsed.burn_turn_to.as_deref(), Some("BURN"));
-        assert_eq!(parsed.reflected_ints.get("Value"), Some(&-9));
-        assert_eq!(parsed.reflected_ints.get("ContactCalls"), Some(&6));
-        assert_eq!(parsed.reflected_ints.get("Exclusive"), Some(&7));
-        assert_eq!(parsed.reflected_ints.get("Rebuy"), Some(&-2));
-        assert_eq!(parsed.reflected_ints.get("CollectionLimit"), Some(&-4));
-        assert_eq!(parsed.reflected_ints.get("Vertices"), Some(&-3));
-        assert_eq!(parsed.reflected_ints.get("Scale"), Some(&-5));
-        assert_eq!(parsed.graphics_scale, 4_294_967_291);
-        assert_eq!(parsed.reflected_ints.get("NoGet"), Some(&-8));
-        assert_eq!(parsed.version, [5, 0, 2, 0, 0]);
-        assert_eq!(parsed.vertex_slots[0].x, 10);
-        assert_eq!(parsed.vertex_slots[1].x, 0);
-        assert_eq!(parsed.vertex_slots[2].x, 30);
-        assert_eq!(
-            parsed.entrance,
-            Some(PictureRect {
-                x: 1,
-                y: 2,
-                width: 0,
-                height: 4,
-            })
-        );
-        assert_eq!(
-            parsed.solid_mask,
-            Some(TargetRect {
-                x: 1,
-                y: 2,
-                width: 3,
-                height: 4,
-                target_x: 5,
-                target_y: 0,
-            })
-        );
-        assert_eq!(
-            parsed.top_face,
-            Some(TargetRect {
-                x: 6,
-                y: 7,
-                width: 8,
-                height: 9,
-                target_x: 0,
-                target_y: 0,
-            })
-        );
+        check_eq! { parsed.require_defs => vec!["REQ1", "REQ2"] }
+        check_eq! { parsed.max_user_select => 7 }
+        check_eq! { parsed.no_standard_crew => -2 }
+        check_eq! { parsed.color_by_material => "Granite" }
+        check_eq! { parsed.explosive => 3 }
+        check_eq! { parsed.drag_image_picture => 4 }
+        check_eq! { parsed.temporary_crew => 5 }
+        check_eq! { parsed.smoke_rate => 88 }
+        check_eq! { parsed.needed_gfx_mode => 6 }
+        check_eq! { parsed.hide_hud_bars => 5 }
+        check_eq! { parsed.hide_hud_elements => 33 }
+        check_eq! { parsed.burn_turn_to.as_deref() => Some("BURN") }
+        check_eq! { parsed.reflected_ints.get("Value") => Some(&-9) }
+        check_eq! { parsed.reflected_ints.get("ContactCalls") => Some(&6) }
+        check_eq! { parsed.reflected_ints.get("Exclusive") => Some(&7) }
+        check_eq! { parsed.reflected_ints.get("Rebuy") => Some(&-2) }
+        check_eq! { parsed.reflected_ints.get("CollectionLimit") => Some(&-4) }
+        check_eq! { parsed.reflected_ints.get("Vertices") => Some(&-3) }
+        check_eq! { parsed.reflected_ints.get("Scale") => Some(&-5) }
+        check_eq! { parsed.graphics_scale => 4_294_967_291 }
+        check_eq! { parsed.reflected_ints.get("NoGet") => Some(&-8) }
+        check_eq! { parsed.version => [5, 0, 2, 0, 0] }
+        check_eq! { parsed.vertex_slots[0].x => 10 }
+        check_eq! { parsed.vertex_slots[1].x => 0 }
+        check_eq! { parsed.vertex_slots[2].x => 30 }
+        check_eq! { parsed.entrance => Some(PictureRect {x: 1, y: 2, width: 0, height: 4,}) }
+        check_eq! { parsed.solid_mask => Some(TargetRect {x: 1, y: 2, width: 3, height: 4, target_x: 5, target_y: 0,}) }
+        check_eq! { parsed.top_face => Some(TargetRect {x: 6, y: 7, width: 8, height: 9, target_x: 0, target_y: 0,}) }
 
         let defaults = parse_def_core(b"[DefCore]\nid=DFLT\n").expect("defaults parse");
-        assert!(defaults.require_defs.is_empty());
-        assert_eq!(defaults.max_user_select, 0);
-        assert_eq!(defaults.no_standard_crew, 0);
-        assert_eq!(defaults.color_by_material, "");
-        assert_eq!(defaults.explosive, 0);
-        assert_eq!(defaults.drag_image_picture, 0);
-        assert_eq!(defaults.temporary_crew, 0);
-        assert_eq!(defaults.smoke_rate, 100);
-        assert_eq!(defaults.needed_gfx_mode, 0);
-        assert_eq!(defaults.hide_hud_bars, 0);
-        assert_eq!(defaults.hide_hud_elements, 0);
+        check! { defaults.require_defs.is_empty() }
+        check_eq! { defaults.max_user_select => 0 }
+        check_eq! { defaults.no_standard_crew => 0 }
+        check_eq! { defaults.color_by_material => "" }
+        check_eq! { defaults.explosive => 0 }
+        check_eq! { defaults.drag_image_picture => 0 }
+        check_eq! { defaults.temporary_crew => 0 }
+        check_eq! { defaults.smoke_rate => 100 }
+        check_eq! { defaults.needed_gfx_mode => 0 }
+        check_eq! { defaults.hide_hud_bars => 0 }
+        check_eq! { defaults.hide_hud_elements => 0 }
     }
 
     // C4Def::CompileFunc maps Width/Height/Offset into Shape.Wdt/Hgt/x/y
@@ -3862,52 +3877,17 @@ Entrance=1,2,,4
     #[test]
     fn action_facet_accepts_partial_target_offsets_like_c4targetrect() {
         let five = parse_action_facet("0,328,24,20,-4").expect("5-value facet parses");
-        assert_eq!(
-            (
-                five.x,
-                five.y,
-                five.width,
-                five.height,
-                five.target_x,
-                five.target_y
-            ),
-            (0, 328, 24, 20, -4, 0)
-        );
+        check_eq! { (five.x, five.y, five.width, five.height, five.target_x, five.target_y) => (0, 328, 24, 20, -4, 0) }
         let six = parse_action_facet("0,260,16,24,0,-4").expect("6-value facet parses");
-        assert_eq!((six.target_x, six.target_y), (0, -4));
+        check_eq! { (six.target_x, six.target_y) => (0, -4) }
         let four = parse_action_facet("0,0,16,20").expect("4-value facet parses");
-        assert_eq!((four.target_x, four.target_y), (0, 0));
+        check_eq! { (four.target_x, four.target_y) => (0, 0) }
         let sparse = parse_action_facet("1,,3,4,,6").expect("empty slots default in place");
-        assert_eq!(
-            (
-                sparse.x,
-                sparse.y,
-                sparse.width,
-                sparse.height,
-                sparse.target_x,
-                sparse.target_y
-            ),
-            (1, 0, 3, 4, 0, 6)
-        );
+        check_eq! { (sparse.x, sparse.y, sparse.width, sparse.height, sparse.target_x, sparse.target_y) => (1, 0, 3, 4, 0, 6) }
         let malformed = parse_action_facet("1,bad,3,4").expect("bad slot defaults");
-        assert_eq!(
-            (malformed.x, malformed.y, malformed.width, malformed.height),
-            (1, 0, 0, 0),
-            "a failed primitive leaves the compiler cursor before later separators"
-        );
+        check_eq! { (malformed.x, malformed.y, malformed.width, malformed.height) => (1, 0, 0, 0), "a failed primitive leaves the compiler cursor before later separators" }
         let trailing_junk = parse_action_facet("1junk,2,3,4,5,6").expect("numeric prefix parses");
-        assert_eq!(
-            (
-                trailing_junk.x,
-                trailing_junk.y,
-                trailing_junk.width,
-                trailing_junk.height,
-                trailing_junk.target_x,
-                trailing_junk.target_y
-            ),
-            (1, 0, 0, 0, 0, 0),
-            "a separator mismatch after a numeric prefix blocks later reads"
-        );
+        check_eq! { (trailing_junk.x, trailing_junk.y, trailing_junk.width, trailing_junk.height, trailing_junk.target_x, trailing_junk.target_y) => (1, 0, 0, 0, 0, 0), "a separator mismatch after a numeric prefix blocks later reads" }
     }
 
     #[test]
@@ -3917,10 +3897,7 @@ Entrance=1,2,,4
         )
         .expect("core parses");
         let shape = core.shape.expect("shape synthesized");
-        assert_eq!(
-            (shape.x, shape.y, shape.width, shape.height),
-            (-24, -20, 48, 40)
-        );
+        check_eq! { (shape.x, shape.y, shape.width, shape.height) => (-24, -20, 48, 40) }
     }
     use super::*;
     use std::fs;
@@ -3942,7 +3919,7 @@ Entrance=1,2,,4
         }
 
         const CLIPPED_SUFFIX: &[u8] = b"123456789012345678901234567890";
-        assert_eq!(CLIPPED_SUFFIX.len(), C4_MAX_NAME_BYTES);
+        check_eq! { CLIPPED_SUFFIX.len() => C4_MAX_NAME_BYTES }
 
         let collision_bmp = [
             b"Graphics".as_slice(),
@@ -4028,38 +4005,24 @@ Entrance=1,2,,4
 
         let (_, _, additional) =
             load_definition_graphics(&packed, true).expect("load exact packed graphics entries");
-        assert_eq!(additional.len(), 2);
+        check_eq! { additional.len() => 2 }
 
         let collision_name = clonk_script::c4_string_from_bytes(CLIPPED_SUFFIX);
         let collision = additional
             .get(&normalize_variant_key(&collision_name))
             .expect("truncated collision retained");
-        assert_eq!(
-            clonk_script::c4_string_bytes(&collision.name),
-            CLIPPED_SUFFIX,
-            "the suffix is clipped to 30 native bytes before lookup"
-        );
-        assert_eq!(collision.image.pixels(), &[11, 22, 33, 255]);
-        assert_eq!(
-            collision
-                .color_by_owner_mask
-                .as_ref()
-                .map(|mask| mask.pixels.as_slice()),
-            Some([80, 90, 100, 255].as_slice()),
-            "the first PNG uses its untruncated suffix-matched overlay"
-        );
+        check_eq! { clonk_script::c4_string_bytes(&collision.name) => CLIPPED_SUFFIX, "the suffix is clipped to 30 native bytes before lookup" }
+        check_eq! { collision.image.pixels() => &[11, 22, 33, 255] }
+        check_eq! { collision.color_by_owner_mask.as_ref().map(|mask| mask.pixels.as_slice()) => Some([80, 90, 100, 255].as_slice()), "the first PNG uses its untruncated suffix-matched overlay" }
 
         let legacy_name = clonk_script::c4_string_from_bytes(b"\xfc");
         let legacy = additional
             .get(&normalize_variant_key(&legacy_name))
             .expect("native-byte packed graphics retained");
-        assert_eq!(clonk_script::c4_string_bytes(&legacy.name), b"\xfc");
-        assert_eq!(legacy.image.pixels(), &[77, 88, 99, 255]);
+        check_eq! { clonk_script::c4_string_bytes(&legacy.name) => b"\xfc" }
+        check_eq! { legacy.image.pixels() => &[77, 88, 99, 255] }
         let uppercase_legacy_name = clonk_script::c4_string_from_bytes(b"\xdc");
-        assert!(
-            additional.contains_key(&normalize_variant_key(&uppercase_legacy_name)),
-            "C4 SEqualNoCase folds native umlaut pairs"
-        );
+        check! { additional.contains_key(&normalize_variant_key(&uppercase_legacy_name)), "C4 SEqualNoCase folds native umlaut pairs" }
 
         let packed_portraits =
             load_portrait_graphics(&packed, false).expect("load packed portraits");
@@ -4067,7 +4030,7 @@ Entrance=1,2,,4
             .iter()
             .find(|portrait| clonk_script::c4_string_bytes(&portrait.name) == b"\xf6")
             .expect("native-byte packed portrait retained");
-        assert_eq!(packed_portrait.image.pixels(), &[101, 102, 103, 255]);
+        check_eq! { packed_portrait.image.pixels() => &[101, 102, 103, 255] }
 
         // A colliding PNG is loaded even though lookup keeps the first node.
         // This preserves the native fatal error from a corrupt losing PNG.
@@ -4103,10 +4066,7 @@ Entrance=1,2,,4
             corrupt.pack().expect("pack corrupt collision group"),
         )
         .expect("open corrupt collision group");
-        assert!(matches!(
-            load_definition_graphics(&corrupt, false),
-            Err(DefinitionError::Graphics { .. })
-        ));
+        check! { matches!(load_definition_graphics(&corrupt, false), Err(DefinitionError::Graphics {..})) }
 
         #[cfg(unix)]
         {
@@ -4126,35 +4086,22 @@ Entrance=1,2,,4
             const PORTRAIT_SUFFIX: &[u8] = b"\xf6";
 
             let directory = tempdir().expect("physical portrait directory");
-            fs::write(
-                directory.path().join(OsStr::from_bytes(PORTRAIT_FILENAME)),
-                encoded_image([121, 122, 123, 255], image::ImageFormat::Bmp),
-            )
-            .expect("write physical native-byte portrait");
+            write_fixture! { directory.path().join(OsStr::from_bytes(PORTRAIT_FILENAME)) => encoded_image([121, 122, 123, 255], image::ImageFormat::Bmp), "write physical native-byte portrait" };
             let portraits = load_portrait_graphics(
                 &Group::open(directory.path()).expect("open physical portrait group"),
                 false,
             )
             .expect("load physical portrait");
-            assert_eq!(portraits.len(), 1);
-            assert_eq!(
-                clonk_script::c4_string_bytes(&portraits[0].name),
-                PORTRAIT_SUFFIX
-            );
-            assert_eq!(portraits[0].image.pixels(), &[121, 122, 123, 255]);
+            check_eq! { portraits.len() => 1 }
+            check_eq! { clonk_script::c4_string_bytes(&portraits[0].name) => PORTRAIT_SUFFIX }
+            check_eq! { portraits[0].image.pixels() => &[121, 122, 123, 255] }
         }
     }
 
     #[test]
     fn definition_images_blacken_transparent_rgb_before_owner_mask_generation() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Crew.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=CRWB\nColorByOwner=1\n",
-        )
-        .expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "Crew.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=CRWB\nColorByOwner=1\n", "DefCore" };
         let decoded_pixels = vec![0, 0, 255, 0, 17, 17, 17, 1];
         let save_surface = |name: &str| {
             image::RgbaImage::from_raw(2, 1, decoded_pixels.clone())
@@ -4169,35 +4116,11 @@ Entrance=1,2,,4
         let definition = Definition::load(&group).expect("load definition");
         let expected = [0, 0, 0, 0, 17, 17, 17, 1];
 
-        assert_eq!(
-            definition
-                .graphics_image
-                .as_ref()
-                .expect("definition graphics")
-                .pixels(),
-            expected
-        );
-        assert!(
-            definition.color_by_owner_mask.is_none(),
-            "hidden blue RGB is cleared before C4's owner-color shade scan"
-        );
-        assert_eq!(
-            definition
-                .portrait_image
-                .as_ref()
-                .expect("plain portrait")
-                .pixels(),
-            expected
-        );
-        assert_eq!(
-            definition
-                .portrait_graphics_image
-                .as_ref()
-                .expect("color-aware portrait")
-                .pixels(),
-            expected
-        );
-        assert!(definition.portrait_color_by_owner_mask.is_none());
+        check_eq! { definition.graphics_image.as_ref().expect("definition graphics").pixels() => expected }
+        check! { definition.color_by_owner_mask.is_none(), "hidden blue RGB is cleared before C4's owner-color shade scan" }
+        check_eq! { definition.portrait_image.as_ref().expect("plain portrait").pixels() => expected }
+        check_eq! { definition.portrait_graphics_image.as_ref().expect("color-aware portrait").pixels() => expected }
+        check! { definition.portrait_color_by_owner_mask.is_none() }
     }
 
     fn cpp_color_by_owner_gray(r: i32, g: i32, b: i32) -> Option<u8> {
@@ -4240,8 +4163,8 @@ Entrance=1,2,,4
         let surface_pixel = |r: u8, g: u8, b: u8| {
             u32::from(255_u8) << 24 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
         };
-        assert_eq!(detect_color_by_owner(surface_pixel(0, 0, 255)), Some(255));
-        assert_eq!(detect_color_by_owner(surface_pixel(255, 0, 0)), None);
+        check_eq! { detect_color_by_owner(surface_pixel(0, 0, 255)) => Some(255) }
+        check_eq! { detect_color_by_owner(surface_pixel(255, 0, 0)) => None }
 
         for (rgb, expected) in [
             ([128, 128, 128], None),
@@ -4253,11 +4176,7 @@ Entrance=1,2,,4
             ([37, 0, 255], None),
             ([30, 30, 200], Some(200)),
         ] {
-            assert_eq!(
-                detect_color_by_owner(surface_pixel(rgb[0], rgb[1], rgb[2])),
-                expected,
-                "boundary color {rgb:?}"
-            );
+            check_eq! { detect_color_by_owner(surface_pixel(rgb[0], rgb[1], rgb[2])) => expected, "boundary color {rgb:?}" }
         }
 
         const CHANNELS: [u8; 24] = [
@@ -4282,11 +4201,7 @@ Entrance=1,2,,4
 
         let mask = generate_color_by_owner_mask(&mut image).expect("sweep contains blue shades");
         for (index, expected) in expected.into_iter().enumerate() {
-            assert_eq!(
-                mask.pixels[index],
-                expected.unwrap_or(0),
-                "sample index {index}"
-            );
+            check_eq! { mask.pixels[index] => expected.unwrap_or(0), "sample index {index}" }
         }
     }
 
@@ -4313,68 +4228,47 @@ Entrance=1,2,,4
 
         // The base remains byte-exact; Overlay.png is a second surface, not a
         // scalar mask baked into the first one.
-        assert_eq!(base, original_base);
-        assert_eq!(mask.pixels, overlay.as_raw().to_vec());
+        check_eq! { base => original_base }
+        check_eq! { mask.pixels => overlay.as_raw().to_vec() }
     }
 
     #[test]
     fn picture_uses_decoded_base_graphics_and_corrupt_graphics_is_typed() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Picture.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=PICT\nPicture=0,0,1,1\n",
-        )
-        .expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "Picture.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=PICT\nPicture=0,0,1,1\n", "DefCore" };
         image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
             .save(def_dir.join("Graphics.png"))
             .expect("base graphics");
         image::RgbaImage::from_pixel(2, 1, image::Rgba([200, 210, 220, 255]))
             .save(def_dir.join("Graphics32.png"))
             .expect("additional graphics");
-        fs::write(def_dir.join("Graphics32.bmp"), b"not a bitmap")
-            .expect("ignored losing additional bitmap");
-        fs::write(def_dir.join("GraphicsIgnored.jpg"), b"not a jpeg")
-            .expect("ignored non-native graphics format");
+        write_fixture! { def_dir.join("Graphics32.bmp") => b"not a bitmap", "ignored losing additional bitmap" };
+        write_fixture! { def_dir.join("GraphicsIgnored.jpg") => b"not a jpeg", "ignored non-native graphics format" };
         fs::create_dir(def_dir.join("Graphics.c4g")).expect("nested graphics directory");
-        fs::write(
-            def_dir.join("Graphics.c4g/GraphicsNested.png"),
-            b"not a png",
-        )
-        .expect("ignored nested graphics");
+        write_fixture! { def_dir.join("Graphics.c4g/GraphicsNested.png") => b"not a png", "ignored nested graphics" };
 
         let group = Group::open(&def_dir).expect("open definition");
         let definition = Definition::load(&group).expect("valid graphics load");
         let picture = definition.picture_image.expect("base picture crop");
-        assert_eq!((picture.width(), picture.height()), (1, 1));
-        assert_eq!(picture.pixels(), &[10, 20, 30, 255]);
+        check_eq! { (picture.width(), picture.height()) => (1, 1) }
+        check_eq! { picture.pixels() => &[10, 20, 30, 255] }
 
-        fs::write(def_dir.join("Graphics32.png"), b"not a png")
-            .expect("corrupt recognized additional Graphics");
-        assert!(matches!(
-            Definition::load(&group),
-            Err(DefinitionError::Graphics { path, reason })
-                if path == Path::new("Graphics32.png") && !reason.is_empty()
-        ));
+        write_fixture! { def_dir.join("Graphics32.png") => b"not a png", "corrupt recognized additional Graphics" };
+        check! { matches!(Definition::load(&group), Err(DefinitionError::Graphics {path, reason}) if path == Path::new("Graphics32.png") && !reason.is_empty()) }
 
         let blank_dir = temp.path().join("Blank.c4d");
         fs::create_dir(&blank_dir).expect("blank definition directory");
-        fs::write(blank_dir.join("DefCore.txt"), b"[DefCore]\nid=BLNK\n").expect("blank DefCore");
+        write_fixture! { blank_dir.join("DefCore.txt") => b"[DefCore]\nid=BLNK\n", "blank DefCore" };
         image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]))
             .save(blank_dir.join("Graphics.png"))
             .expect("transparent base graphics");
         let blank = Definition::load(&Group::open(&blank_dir).expect("open blank definition"))
             .expect("zero-sized effective picture remains a valid loaded definition");
-        assert!(blank.picture_image.is_none());
+        check! { blank.picture_image.is_none() }
 
         let transparent_dir = temp.path().join("Transparent.c4d");
         fs::create_dir(&transparent_dir).expect("transparent definition directory");
-        fs::write(
-            transparent_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=TRNS\nPicture=0,0,1,1\n",
-        )
-        .expect("transparent DefCore");
+        write_fixture! { transparent_dir.join("DefCore.txt") => b"[DefCore]\nid=TRNS\nPicture=0,0,1,1\n", "transparent DefCore" };
         image::RgbaImage::from_pixel(1, 1, image::Rgba([99, 88, 77, 0]))
             .save(transparent_dir.join("Graphics.png"))
             .expect("transparent base graphics");
@@ -4382,7 +4276,7 @@ Entrance=1,2,,4
             Definition::load(&Group::open(&transparent_dir).expect("open transparent definition"))
                 .expect("transparent picture remains a valid loaded definition");
         let transparent_picture = transparent.picture_image.expect("nonzero picture crop");
-        assert_eq!(transparent_picture.pixels(), &[0, 0, 0, 0]);
+        check_eq! { transparent_picture.pixels() => &[0, 0, 0, 0] }
     }
 
     #[test]
@@ -4393,14 +4287,8 @@ Entrance=1,2,,4
         // owner-color surface (src/C4DefGraphics.cpp:73-98), so the picture
         // crop must retain the matching mask instead of freezing its raw
         // Graphics.png colors.
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Mage.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=MAGE\nColorByOwner=1\nPicture=1,0,1,1\n",
-        )
-        .expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "Mage.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=MAGE\nColorByOwner=1\nPicture=1,0,1,1\n", "DefCore" };
 
         let base = image::RgbaImage::from_pixel(3, 1, image::Rgba([0, 0, 0, 0]));
         base.save(def_dir.join("Graphics.png")).expect("base png");
@@ -4413,17 +4301,13 @@ Entrance=1,2,,4
         let group = Group::open(&def_dir).expect("open definition");
         let definition = Definition::load(&group).expect("load definition");
         let picture = definition.picture_image.expect("picture crop");
-        assert_eq!((picture.width(), picture.height()), (1, 1));
-        assert_eq!(
-            picture.pixels(),
-            &[0, 0, 0, 0],
-            "the separately retained overlay must not be baked into the base picture"
-        );
+        check_eq! { (picture.width(), picture.height()) => (1, 1) }
+        check_eq! { picture.pixels() => &[0, 0, 0, 0], "the separately retained overlay must not be baked into the base picture" }
         let mask = definition
             .picture_color_by_owner_mask
             .expect("picture must retain owner-color mask");
-        assert_eq!((mask.width, mask.height), (1, 1));
-        assert_eq!(mask.pixels, vec![136, 136, 136, 255]);
+        check_eq! { (mask.width, mask.height) => (1, 1) }
+        check_eq! { mask.pixels => vec![136, 136, 136, 255] }
     }
 
     #[test]
@@ -4437,14 +4321,8 @@ Entrance=1,2,,4
         // `float(X + Wdt * iPhaseX) * scale, ..., float(Wdt) * scale`
         // (src/C4Facet.cpp:137). A Scale=200 definition therefore takes
         // Picture=0,0,1,1 from the bitmap rect (0,0,2,2), not the raw 1x1 rect.
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Scaled.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=SCAL\nScale=200\nPicture=0,0,1,1\n",
-        )
-        .expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "Scaled.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=SCAL\nScale=200\nPicture=0,0,1,1\n", "DefCore" };
 
         let mut graphics = image::RgbaImage::new(2, 2);
         graphics.put_pixel(0, 0, image::Rgba([1, 0, 0, 255]));
@@ -4458,11 +4336,8 @@ Entrance=1,2,,4
         let group = Group::open(&def_dir).expect("open definition");
         let definition = Definition::load(&group).expect("load scaled definition");
         let picture = definition.picture_image.expect("scaled picture crop");
-        assert_eq!((picture.width(), picture.height()), (2, 2));
-        assert_eq!(
-            picture.pixels(),
-            &[1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255, 4, 0, 0, 255],
-        );
+        check_eq! { (picture.width(), picture.height()) => (2, 2) }
+        check_eq! { picture.pixels() => &[1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255, 4, 0, 0, 255] }
     }
 
     #[test]
@@ -4491,14 +4366,10 @@ Entrance=1,2,,4
         ] {
             let directory = temp.path().join(format!("{name}.c4d"));
             fs::create_dir(&directory).expect("definition directory");
-            fs::write(
-                directory.join("DefCore.txt"),
-                format!("[DefCore]\nid=PICT\nWidth=42\nHeight=48\nOffset=-21,-24\n{picture}"),
-            )
-            .expect("DefCore");
+            write_fixture! { directory.join("DefCore.txt") => format!("[DefCore]\nid=PICT\nWidth=42\nHeight=48\nOffset=-21,-24\n{picture}"), "DefCore" };
             let group = Group::open(&directory).expect("open definition");
             let core = DefCore::load(&group).expect("load DefCore");
-            assert_eq!(core.picture, Some(expected), "{name}");
+            check_eq! { core.picture => Some(expected), "{name}" }
         }
     }
 
@@ -4508,13 +4379,7 @@ Entrance=1,2,,4
             let temp = tempdir().expect("tempdir");
             let directory = temp.path().join(format!("{name}.c4d"));
             fs::create_dir(&directory).expect("definition directory");
-            fs::write(
-                directory.join("DefCore.txt"),
-                format!(
-                    "[DefCore]\nid=PICT\nWidth=2\nHeight=1\nOffset=-7,-8\nColorByOwner=1\n{picture}"
-                ),
-            )
-            .expect("DefCore");
+            write_fixture! { directory.join("DefCore.txt") => format!("[DefCore]\nid=PICT\nWidth=2\nHeight=1\nOffset=-7,-8\nColorByOwner=1\n{picture}"), "DefCore" };
             image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 0, 0, 0]))
                 .save(directory.join("Graphics.png"))
                 .expect("base png");
@@ -4524,23 +4389,14 @@ Entrance=1,2,,4
 
             let group = Group::open(&directory).expect("open definition");
             let definition = Definition::load(&group).expect("load definition");
-            assert_eq!(
-                definition.core.picture,
-                Some(PictureRect {
-                    x: 0,
-                    y: 0,
-                    width: 2,
-                    height: 1,
-                }),
-                "{name}"
-            );
+            check_eq! { definition.core.picture => Some(PictureRect {x: 0, y: 0, width: 2, height: 1,}), "{name}" }
             let image = definition.picture_image.expect("picture crop");
-            assert_eq!((image.width(), image.height()), (2, 1), "{name}");
+            check_eq! { (image.width(), image.height()) => (2, 1), "{name}" }
             let mask = definition
                 .picture_color_by_owner_mask
                 .expect("picture owner mask");
-            assert_eq!((mask.width, mask.height), (2, 1), "{name}");
-            assert_eq!(mask.pixels, [136, 136, 136, 255].repeat(2), "{name}");
+            check_eq! { (mask.width, mask.height) => (2, 1), "{name}" }
+            check_eq! { mask.pixels => [136, 136, 136, 255].repeat(2), "{name}" }
         }
     }
 
@@ -4551,21 +4407,13 @@ Entrance=1,2,,4
         let group = Group::open(&directory).expect("open shipped Tent.c4d");
         let definition = Definition::load(&group).expect("load shipped Tent.c4d");
 
-        assert_eq!(
-            definition.core.picture,
-            Some(PictureRect {
-                x: 0,
-                y: 0,
-                width: 42,
-                height: 48,
-            })
-        );
+        check_eq! { definition.core.picture => Some(PictureRect {x: 0, y: 0, width: 42, height: 48,}) }
         let picture = definition.picture_image.expect("Tent picture crop");
-        assert_eq!((picture.width(), picture.height()), (42, 48));
+        check_eq! { (picture.width(), picture.height()) => (42, 48) }
         let mask = definition
             .picture_color_by_owner_mask
             .expect("Tent picture owner mask");
-        assert_eq!((mask.width, mask.height), (42, 48));
+        check_eq! { (mask.width, mask.height) => (42, 48) }
     }
 
     #[test]
@@ -4574,14 +4422,8 @@ Entrance=1,2,,4
         // and loads both with ColorByOwner enabled (C4DefGraphics.cpp:166-205,
         // C4Def.cpp:1250-1264). DrawTextSpecImage later applies the requested
         // portrait color through GetBitmap(dwClr) (C4Game.cpp:4310-4324).
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Sorcerer.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=SCLK\nColorByOwner=1\n",
-        )
-        .expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "Sorcerer.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=SCLK\nColorByOwner=1\n", "DefCore" };
 
         let base = image::RgbaImage::from_pixel(1, 1, image::Rgba([80, 50, 20, 0]));
         base.save(def_dir.join("Portrait1.png"))
@@ -4602,26 +4444,20 @@ Entrance=1,2,,4
         let portrait = definition
             .portrait_graphics_image
             .expect("color-aware portrait image");
-        assert_eq!(portrait.pixels(), &[0, 0, 0, 0]);
+        check_eq! { portrait.pixels() => &[0, 0, 0, 0] }
         let mask = definition
             .portrait_color_by_owner_mask
             .expect("portrait must retain owner-color mask");
-        assert_eq!((mask.width, mask.height), (1, 1));
-        assert_eq!(mask.pixels, vec![136, 136, 136, 255]);
+        check_eq! { (mask.width, mask.height) => (1, 1) }
+        check_eq! { mask.pixels => vec![136, 136, 136, 255] }
         let named = definition
             .portrait_graphics
             .iter()
             .find(|portrait| portrait.name.eq_ignore_ascii_case("captain1"))
             .expect("named portrait retained");
-        assert_eq!(named.name, "Captain1");
-        assert_eq!((named.image.width(), named.image.height()), (2, 1));
-        assert_eq!(
-            named
-                .color_by_owner_mask
-                .as_ref()
-                .map(|mask| mask.pixels.as_slice()),
-            Some([64, 64, 64, 255, 64, 64, 64, 255].as_slice())
-        );
+        check_eq! { named.name => "Captain1" }
+        check_eq! { (named.image.width(), named.image.height()) => (2, 1) }
+        check_eq! { named.color_by_owner_mask.as_ref().map(|mask| mask.pixels.as_slice()) => Some([64, 64, 64, 255, 64, 64, 64, 255].as_slice()) }
     }
 
     #[test]
@@ -4630,11 +4466,7 @@ Entrance=1,2,,4
             env!("CARGO_MANIFEST_DIR"),
             "/../../content/Objects.c4d/Crew.c4d/Clonk.c4d"
         ));
-        assert!(
-            directory.is_dir(),
-            "the initialized official content submodule must provide {}",
-            directory.display()
-        );
+        check! { directory.is_dir(), "the initialized official content submodule must provide {}", directory.display() }
 
         let definition = Definition::load(&Group::open(directory).expect("open Clonk definition"))
             .expect("load Clonk definition");
@@ -4642,18 +4474,15 @@ Entrance=1,2,,4
             .portrait_color_by_owner_mask
             .as_ref()
             .expect("Portrait1 blue shades generate an owner-color mask");
-        assert_eq!((primary.width, primary.height), (150, 150));
-        assert!(primary.pixels.iter().any(|value| *value != 0));
+        check_eq! { (primary.width, primary.height) => (150, 150) }
+        check! { primary.pixels.iter().any(|value| *value != 0) }
 
         let retained = definition
             .portrait_graphics
             .iter()
             .find(|portrait| portrait.name == "1")
             .expect("Portrait1 retained in the full portrait set");
-        assert!(retained
-            .color_by_owner_mask
-            .as_ref()
-            .is_some_and(|mask| mask.pixels.iter().any(|value| *value != 0)));
+        check! { retained.color_by_owner_mask.as_ref().is_some_and(|mask| mask.pixels.iter().any(|value| *value != 0)) }
     }
 
     #[test]
@@ -4662,11 +4491,7 @@ Entrance=1,2,,4
             env!("CARGO_MANIFEST_DIR"),
             "/../../content/Knights.c4d/Crew.c4d/Knight.c4d"
         ));
-        assert!(
-            directory.is_dir(),
-            "the initialized official content submodule must provide {}",
-            directory.display()
-        );
+        check! { directory.is_dir(), "the initialized official content submodule must provide {}", directory.display() }
 
         let group = Group::open(directory).expect("open Knight definition");
         let definition = Definition::load(&group).expect("load Knight definition");
@@ -4698,12 +4523,9 @@ Entrance=1,2,,4
             .color_by_owner_mask
             .as_ref()
             .expect("suffix-matched shield overlay loaded");
-        assert_eq!(
-            (actual_mask.width, actual_mask.height),
-            (expected_mask.width, expected_mask.height)
-        );
-        assert_eq!(actual_mask.pixels, expected_mask.pixels);
-        assert_eq!(shield.image.pixels(), expected_image.as_raw());
+        check_eq! { (actual_mask.width, actual_mask.height) => (expected_mask.width, expected_mask.height) }
+        check_eq! { actual_mask.pixels => expected_mask.pixels }
+        check_eq! { shield.image.pixels() => expected_image.as_raw() }
     }
 
     fn indexed_definition_bmp(indices: Vec<u8>) -> Vec<u8> {
@@ -4725,17 +4547,11 @@ Entrance=1,2,,4
 
     #[test]
     fn indexed_definition_bmps_use_game_palette_for_graphics_picture_and_ranks() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Indexed.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=IBMP\nPicture=0,0,4,1\n",
-        )
-        .expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "Indexed.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=IBMP\nPicture=0,0,4,1\n", "DefCore" };
         let bmp = indexed_definition_bmp(vec![0, 1, 191, 255]);
-        fs::write(def_dir.join("Graphics.bmp"), &bmp).expect("Graphics.bmp");
-        fs::write(def_dir.join("Rank.bmp"), &bmp).expect("Rank.bmp");
+        write_fixture! { def_dir.join("Graphics.bmp") => &bmp, "Graphics.bmp" };
+        write_fixture! { def_dir.join("Rank.bmp") => &bmp, "Rank.bmp" };
 
         let definition = Definition::load(&Group::open(&def_dir).expect("open definition"))
             .expect("load indexed definition");
@@ -4746,98 +4562,39 @@ Entrance=1,2,,4
             [0, 0, 0, 255],
         ]
         .concat();
-        assert_eq!(
-            definition
-                .graphics_image
-                .as_ref()
-                .expect("graphics image")
-                .pixels(),
-            expected,
-            "Graphics.bmp indices use expanded C4.PAL colors and AlphaPalette"
-        );
-        assert_eq!(
-            definition
-                .picture_image
-                .as_ref()
-                .expect("picture image")
-                .pixels(),
-            expected,
-            "the cropped definition picture uses the same decoded palette"
-        );
-        assert_eq!(
-            definition
-                .rank_symbols_image
-                .as_ref()
-                .expect("rank strip")
-                .pixels(),
-            expected,
-            "Rank.bmp uses the same non-owning palette path"
-        );
-        assert_eq!(definition.rank_symbol_count, Some(4));
+        check_eq! { definition.graphics_image.as_ref().expect("graphics image").pixels() => expected, "Graphics.bmp indices use expanded C4.PAL colors and AlphaPalette" }
+        check_eq! { definition.picture_image.as_ref().expect("picture image").pixels() => expected, "the cropped definition picture uses the same decoded palette" }
+        check_eq! { definition.rank_symbols_image.as_ref().expect("rank strip").pixels() => expected, "Rank.bmp uses the same non-owning palette path" }
+        check_eq! { definition.rank_symbol_count => Some(4) }
     }
 
     #[test]
     fn indexed_game_palette_blue_remains_half_alpha_color_by_owner() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("IndexedOwner.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=IOWN\nColorByOwner=1\n",
-        )
-        .expect("DefCore");
-        fs::write(
-            def_dir.join("Graphics.bmp"),
-            indexed_definition_bmp(vec![191]),
-        )
-        .expect("Graphics.bmp");
+        definition_fixture_dir! { temp, def_dir => "IndexedOwner.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=IOWN\nColorByOwner=1\n", "DefCore" };
+        write_fixture! { def_dir.join("Graphics.bmp") => indexed_definition_bmp(vec![191]), "Graphics.bmp" };
 
         let definition = Definition::load(&Group::open(&def_dir).expect("open definition"))
             .expect("load indexed owner-color definition");
-        assert_eq!(
-            definition
-                .graphics_image
-                .as_ref()
-                .expect("graphics image")
-                .pixels(),
-            &[255, 255, 255, 128],
-            "the owner-color sweep preserves index 191's half alpha"
-        );
-        assert_eq!(
-            definition
-                .color_by_owner_mask
-                .as_ref()
-                .expect("blue index generates owner-color mask")
-                .pixels,
-            vec![255]
-        );
+        check_eq! { definition.graphics_image.as_ref().expect("graphics image").pixels() => &[255, 255, 255, 128], "the owner-color sweep preserves index 191's half alpha" }
+        check_eq! { definition.color_by_owner_mask.as_ref().expect("blue index generates owner-color mask").pixels => vec![255] }
     }
 
     #[test]
     fn truecolor_definition_bmp_keeps_file_rgb() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Truecolor.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=TRGB\n").expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "Truecolor.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=TRGB\n", "DefCore" };
         let path = def_dir.join("Graphics.bmp");
         image::RgbImage::from_raw(2, 1, vec![7, 23, 211, 240, 17, 99])
             .expect("RGB image")
             .save_with_format(&path, image::ImageFormat::Bmp)
             .expect("24-bit Graphics.bmp");
         let encoded = fs::read(&path).expect("read Graphics.bmp");
-        assert_eq!(u16::from_le_bytes([encoded[28], encoded[29]]), 24);
+        check_eq! { u16::from_le_bytes([encoded[28], encoded[29]]) => 24 }
 
         let definition = Definition::load(&Group::open(&def_dir).expect("open definition"))
             .expect("load truecolor definition");
-        assert_eq!(
-            definition
-                .graphics_image
-                .as_ref()
-                .expect("graphics image")
-                .pixels(),
-            &[7, 23, 211, 255, 240, 17, 99, 255],
-            "24-bit BMPs remain on the generic truecolor decoder"
-        );
+        check_eq! { definition.graphics_image.as_ref().expect("graphics image").pixels() => &[7, 23, 211, 255, 240, 17, 99, 255], "24-bit BMPs remain on the generic truecolor decoder" }
     }
 
     #[test]
@@ -4846,35 +4603,19 @@ Entrance=1,2,,4
             env!("CARGO_MANIFEST_DIR"),
             "/../../content/Missions.c4f/LastWill.c4s/Dlg.c4d"
         ));
-        assert!(
-            directory.is_dir(),
-            "the initialized official content submodule must provide {}",
-            directory.display()
-        );
+        check! { directory.is_dir(), "the initialized official content submodule must provide {}", directory.display() }
 
         let definition = Definition::load(&Group::open(directory).expect("open Dlg definition"))
             .expect("load Dlg definition");
         let image = definition.graphics_image.as_ref().expect("graphics image");
-        assert_eq!((image.width(), image.height()), (16, 20));
-        assert!(
-            image
-                .pixels()
-                .chunks_exact(4)
-                .all(|pixel| pixel == [0, 0, 0, 0]),
-            "all-index-zero Graphics.bmp must be invisible, not file-palette pink"
-        );
+        check_eq! { (image.width(), image.height()) => (16, 20) }
+        check! { image.pixels().chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 0]), "all-index-zero Graphics.bmp must be invisible, not file-palette pink" }
     }
 
     #[test]
     fn missing_variant_overlay_and_bmp_portrait_auto_generate_masks() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("AutoMasks.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=AUTO\nColorByOwner=1\n",
-        )
-        .expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "AutoMasks.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=AUTO\nColorByOwner=1\n", "DefCore" };
 
         image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
             .save(def_dir.join("Graphics.png"))
@@ -4928,27 +4669,17 @@ Entrance=1,2,,4
             .color_by_owner_mask
             .as_ref()
             .expect("missing OverlayAuto.png triggers auto-generation");
-        assert_eq!(named_mask.pixels, expected_auto_mask.pixels);
-        assert_eq!(named.image.pixels(), expected_auto.as_raw());
-        assert_ne!(named_mask.pixels, vec![32]);
+        check_eq! { named_mask.pixels => expected_auto_mask.pixels }
+        check_eq! { named.image.pixels() => expected_auto.as_raw() }
+        check_ne! { named_mask.pixels => vec![32] }
 
         let primary_portrait_mask = definition
             .portrait_color_by_owner_mask
             .as_ref()
             .expect("missing Overlay1.png triggers portrait auto-generation");
-        assert_eq!(
-            primary_portrait_mask.pixels,
-            expected_primary_portrait_mask.pixels
-        );
-        assert_eq!(
-            definition
-                .portrait_graphics_image
-                .as_ref()
-                .expect("PNG portrait retained")
-                .pixels(),
-            expected_primary_portrait.as_raw()
-        );
-        assert_ne!(primary_portrait_mask.pixels, vec![32]);
+        check_eq! { primary_portrait_mask.pixels => expected_primary_portrait_mask.pixels }
+        check_eq! { definition.portrait_graphics_image.as_ref().expect("PNG portrait retained").pixels() => expected_primary_portrait.as_raw() }
+        check_ne! { primary_portrait_mask.pixels => vec![32] }
 
         let portrait = definition
             .portrait_graphics
@@ -4959,21 +4690,15 @@ Entrance=1,2,,4
             .color_by_owner_mask
             .as_ref()
             .expect("BMP portrait auto-generates without consulting Overlay.png");
-        assert_eq!(portrait_mask.pixels, expected_portrait_mask.pixels);
-        assert_eq!(portrait.image.pixels(), expected_portrait.as_raw());
-        assert_ne!(portrait_mask.pixels, vec![32]);
+        check_eq! { portrait_mask.pixels => expected_portrait_mask.pixels }
+        check_eq! { portrait.image.pixels() => expected_portrait.as_raw() }
+        check_ne! { portrait_mask.pixels => vec![32] }
     }
 
     #[test]
     fn invalid_exact_owner_overlay_rejects_definition() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("BadOverlay.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=BADG\nColorByOwner=1\n",
-        )
-        .expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "BadOverlay.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=BADG\nColorByOwner=1\n", "DefCore" };
         image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
             .save(def_dir.join("Graphics.png"))
             .expect("base graphics");
@@ -4988,20 +4713,12 @@ Entrance=1,2,,4
             .expect("wrong-size named overlay");
 
         let group = Group::open(&def_dir).expect("open definition");
-        assert!(matches!(
-            Definition::load(&group),
-            Err(DefinitionError::ColorByOwnerOverlay { path, reason })
-                if path == Path::new("OverlayBad.png") && reason.contains("does not match")
-        ));
+        check! { matches!(Definition::load(&group), Err(DefinitionError::ColorByOwnerOverlay {path, reason}) if path == Path::new("OverlayBad.png") && reason.contains("does not match")) }
 
         image::RgbaImage::from_pixel(1, 1, image::Rgba([64, 64, 64, 255]))
             .save_with_format(def_dir.join("OverlayBad.png"), image::ImageFormat::Bmp)
             .expect("write BMP bytes under a PNG overlay name");
-        assert!(matches!(
-            Definition::load(&group),
-            Err(DefinitionError::ColorByOwnerOverlay { path, .. })
-                if path == Path::new("OverlayBad.png")
-        ));
+        check! { matches!(Definition::load(&group), Err(DefinitionError::ColorByOwnerOverlay {path,..}) if path == Path::new("OverlayBad.png")) }
     }
 
     #[test]
@@ -5009,61 +4726,30 @@ Entrance=1,2,,4
         // C4Def loads Rank{}.txt|Rank.txt with the active language sequence,
         // then reserves one trailing strip cell for each leading-'*' rank
         // extension (C4Def.cpp:659-706; C4RankSystem.cpp:96-180).
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Ranked.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=RANK\n").expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "Ranked.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=RANK\n", "DefCore" };
         image::RgbaImage::from_pixel(5, 1, image::Rgba([255, 255, 255, 255]))
             .save(def_dir.join("Rank.png"))
             .expect("rank strip");
-        fs::write(def_dir.join("RankUS.txt"), b"Recruit\r\n*First %s\r\n").expect("US ranks");
-        fs::write(
-            def_dir.join("RankDE.txt"),
-            b"Rekrut\r\n*Erster %s\r\n*Zweiter %s\r\n",
-        )
-        .expect("DE ranks");
-        fs::write(
-            def_dir.join("Rank.txt"),
-            b"Fallback\n*One %s\n*Two %s\n*Three %s\n",
-        )
-        .expect("fallback ranks");
+        write_fixture! { def_dir.join("RankUS.txt") => b"Recruit\r\n*First %s\r\n", "US ranks" };
+        write_fixture! { def_dir.join("RankDE.txt") => b"Rekrut\r\n*Erster %s\r\n*Zweiter %s\r\n", "DE ranks" };
+        write_fixture! { def_dir.join("Rank.txt") => b"Fallback\n*One %s\n*Two %s\n*Three %s\n", "fallback ranks" };
 
         let group = Group::open(&def_dir).expect("open definition");
         let us = Definition::load_with_languages(&group, &["US", "DE"])
             .expect("load US-priority definition");
-        assert_eq!(us.rank_symbol_count, Some(4));
-        assert_eq!(
-            us.rank_names.as_ref().map(RankNameTable::resolved_names),
-            Some(vec!["Recruit".to_string(), "First Recruit".to_string()])
-        );
+        check_eq! { us.rank_symbol_count => Some(4) }
+        check_eq! { us.rank_names.as_ref().map(RankNameTable::resolved_names) => Some(vec!["Recruit".to_string(), "First Recruit".to_string()]) }
 
         let de = Definition::load_with_languages(&group, &["DE", "US"])
             .expect("load DE-priority definition");
-        assert_eq!(de.rank_symbol_count, Some(3));
-        assert_eq!(
-            de.rank_names.as_ref().map(RankNameTable::resolved_names),
-            Some(vec![
-                "Rekrut".to_string(),
-                "Erster Rekrut".to_string(),
-                "Zweiter Rekrut".to_string(),
-            ])
-        );
+        check_eq! { de.rank_symbol_count => Some(3) }
+        check_eq! { de.rank_names.as_ref().map(RankNameTable::resolved_names) => Some(vec!["Rekrut".to_string(), "Erster Rekrut".to_string(), "Zweiter Rekrut".to_string(),]) }
 
         let fallback =
             Definition::load_with_languages(&group, &["FR"]).expect("load fallback definition");
-        assert_eq!(fallback.rank_symbol_count, Some(2));
-        assert_eq!(
-            fallback
-                .rank_names
-                .as_ref()
-                .map(RankNameTable::resolved_names),
-            Some(vec![
-                "Fallback".to_string(),
-                "One Fallback".to_string(),
-                "Two Fallback".to_string(),
-                "Three Fallback".to_string(),
-            ])
-        );
+        check_eq! { fallback.rank_symbol_count => Some(2) }
+        check_eq! { fallback.rank_names.as_ref().map(RankNameTable::resolved_names) => Some(vec!["Fallback".to_string(), "One Fallback".to_string(), "Two Fallback".to_string(), "Three Fallback".to_string(),]) }
     }
 
     #[test]
@@ -5074,12 +4760,12 @@ Entrance=1,2,,4
         let content = temp.path().join("content");
         let def_dir = content.join("Ranked.c4d");
         fs::create_dir_all(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=RANK\n").expect("DefCore");
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=RANK\n", "DefCore" };
 
         let language_container = temp.path().join("Language.c4g");
         let pack_def = language_container.join("Pack.c4g/Ranked.c4d");
         fs::create_dir_all(&pack_def).expect("pack definition directory");
-        fs::write(pack_def.join("RankUS.txt"), b"Packed recruit\r\n").expect("pack rank names");
+        write_fixture! { pack_def.join("RankUS.txt") => b"Packed recruit\r\n", "pack rank names" };
 
         let packs = crate::LanguagePacks::discover(
             std::slice::from_ref(&language_container),
@@ -5091,32 +4777,20 @@ Entrance=1,2,,4
         let without_marker =
             Definition::load_with_languages_and_components(&group, &["US", "DE"], &components)
                 .expect("load definition without local marker");
-        assert_eq!(without_marker.rank_names, None);
+        check_eq! { without_marker.rank_names => None }
 
-        fs::write(def_dir.join("RankDE.txt"), b"Lokaler Marker\r\n").expect("local rank marker");
+        write_fixture! { def_dir.join("RankDE.txt") => b"Lokaler Marker\r\n", "local rank marker" };
         let with_marker =
             Definition::load_with_languages_and_components(&group, &["US", "DE"], &components)
                 .expect("load definition with local marker");
-        assert_eq!(
-            with_marker
-                .rank_names
-                .as_ref()
-                .map(RankNameTable::resolved_names),
-            Some(vec!["Packed recruit".to_string()])
-        );
+        check_eq! { with_marker.rank_names.as_ref().map(RankNameTable::resolved_names) => Some(vec!["Packed recruit".to_string()]) }
     }
 
     #[test]
     fn custom_rank_names_expand_extensions_in_cpp_order() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("ExpandedRanks.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=EXPR\n").expect("DefCore");
-        fs::write(
-            def_dir.join("RankUS.txt"),
-            b"# comment\r\n*First %s\r\nBase=500\r\nRecruit\r\nIgnored=setting\r\nVeteran\r\n*100%% %s\r\nUnterminated",
-        )
-        .expect("rank names");
+        definition_fixture_dir! { temp, def_dir => "ExpandedRanks.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=EXPR\n", "DefCore" };
+        write_fixture! { def_dir.join("RankUS.txt") => b"# comment\r\n*First %s\r\nBase=500\r\nRecruit\r\nIgnored=setting\r\nVeteran\r\n*100%% %s\r\nUnterminated", "rank names" };
 
         let definition = Definition::load_with_languages(
             &Group::open(&def_dir).expect("open definition"),
@@ -5137,31 +4811,25 @@ Entrance=1,2,,4
                 "100% Veteran".to_string(),
             ])
         );
-        assert_eq!(definition.rank_base, Some(500));
+        check_eq! { definition.rank_base => Some(500) }
     }
 
     #[test]
     fn custom_rank_extensions_apply_printf_width_and_precision_like_cpp() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("FormattedRanks.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=FMTR\n").expect("DefCore");
-        fs::write(
-            def_dir.join("RankUS.txt"),
-            b"Recruit\r\n\
-*Right|%10s|\r\n\
-*Left|%-10s|\r\n\
-*Precision|%.4s|\r\n\
-*Combined|%8.4s|\r\n\
-*LeftCombined|%-8.4s|\r\n\
-*Flags|%+ #010.4s|\r\n\
-*Escaped|100%% %s|\r\n\
-*Empty|%.s|\r\n\
-*Position|%1$8.4s/%1$s|\r\n\
-*Length|%1$hhs/%1$Ls|\r\n\
-*Literal|plain%%|\r\n",
-        )
-        .expect("formatted rank names");
+        definition_fixture_dir! { temp, def_dir => "FormattedRanks.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=FMTR\n", "DefCore" };
+        write_fixture! { def_dir.join("RankUS.txt") => b"Recruit\r\n\
+        *Right|%10s|\r\n\
+        *Left|%-10s|\r\n\
+        *Precision|%.4s|\r\n\
+        *Combined|%8.4s|\r\n\
+        *LeftCombined|%-8.4s|\r\n\
+        *Flags|%+ #010.4s|\r\n\
+        *Escaped|100%% %s|\r\n\
+        *Empty|%.s|\r\n\
+        *Position|%1$8.4s/%1$s|\r\n\
+        *Length|%1$hhs/%1$Ls|\r\n\
+        *Literal|plain%%|\r\n", "formatted rank names" };
 
         let definition = Definition::load_with_languages(
             &Group::open(&def_dir).expect("open definition"),
@@ -5189,22 +4857,13 @@ Entrance=1,2,,4
             ])
         );
 
-        assert_eq!(
-            format_rank_extension(b"%.2s", "éclair".as_bytes()).expect("UTF-8 precision"),
-            "é".as_bytes()
-        );
-        assert_eq!(
-            format_rank_extension(b"%4s", "界".as_bytes()).expect("wide UTF-8 padding"),
-            "  界".as_bytes()
-        );
-        assert_eq!(
-            format_rank_extension(b"%3s", b"\xfc").expect("legacy-byte padding"),
-            b"  \xfc"
-        );
+        check_eq! { format_rank_extension(b"%.2s", "éclair".as_bytes()).expect("UTF-8 precision") => "é".as_bytes() }
+        check_eq! { format_rank_extension(b"%4s", "界".as_bytes()).expect("wide UTF-8 padding") => "  界".as_bytes() }
+        check_eq! { format_rank_extension(b"%3s", b"\xfc").expect("legacy-byte padding") => b"  \xfc" }
 
         let pointer = format_rank_extension(b"%p", b"Recruit").expect("C-string pointer format");
-        assert!(pointer.starts_with(b"0x"));
-        assert!(pointer[2..].iter().all(u8::is_ascii_hexdigit));
+        check! { pointer.starts_with(b"0x") }
+        check! { pointer[2..].iter().all(u8::is_ascii_hexdigit) }
 
         for (format, expected_reason) in [
             (b"%".as_slice(), "invalid format specifier"),
@@ -5221,24 +4880,11 @@ Entrance=1,2,,4
             (b"%00000000001$s".as_slice(), "argument not found"),
             (b"%0$.*s".as_slice(), "argument not found"),
         ] {
-            assert_eq!(
-                format_rank_extension(format, b"Recruit"),
-                Err(expected_reason),
-                "format {}",
-                String::from_utf8_lossy(format)
-            );
+            check_eq! { format_rank_extension(format, b"Recruit") => Err(expected_reason), "format {}", String::from_utf8_lossy(format) }
         }
-        assert_eq!(
-            format_rank_extension(b"%.00000000001s", b"Recruit"),
-            Ok(Vec::new()),
-            "fmt maps an oversized literal precision to its zero sentinel"
-        );
+        check_eq! { format_rank_extension(b"%.00000000001s", b"Recruit") => Ok(Vec::new()), "fmt maps an oversized literal precision to its zero sentinel" }
 
-        fs::write(
-            def_dir.join("RankUS.txt"),
-            b"Recruit\r\n*Valid %4.2s\r\n*Wrong %d\r\n",
-        )
-        .expect("invalid rank format");
+        write_fixture! { def_dir.join("RankUS.txt") => b"Recruit\r\n*Valid %4.2s\r\n*Wrong %d\r\n", "invalid rank format" };
         let invalid_definition = Definition::load_with_languages(
             &Group::open(&def_dir).expect("reopen definition"),
             &["US"],
@@ -5248,36 +4894,18 @@ Entrance=1,2,,4
             .rank_names
             .as_ref()
             .expect("rank table remains installed");
-        assert_eq!(invalid_table.get(0).as_deref(), Some("Recruit"));
-        assert_eq!(invalid_table.get(1).as_deref(), Some("Valid   Re"));
-        assert_eq!(
-            invalid_table
-                .try_rank_name(usize::MAX, false)
-                .expect("an undefined non-fallback rank does not parse extensions"),
-            None
-        );
+        check_eq! { invalid_table.get(0).as_deref() => Some("Recruit") }
+        check_eq! { invalid_table.get(1).as_deref() => Some("Valid   Re") }
+        check_eq! { invalid_table.try_rank_name(usize::MAX, false).expect("an undefined non-fallback rank does not parse extensions") => None }
         let expected_error = RankExtensionFormatError {
             format: "Wrong %d".to_string(),
             reason: "invalid format specifier",
         };
-        assert_eq!(
-            invalid_table
-                .try_rank_name(2, false)
-                .expect_err("requesting the malformed extension must fail"),
-            expected_error
-        );
-        assert_eq!(
-            invalid_table
-                .try_rank_name(usize::MAX, true)
-                .expect_err("fallback clamps to and evaluates the malformed final extension"),
-            expected_error
-        );
-        assert!(
-            std::panic::catch_unwind(|| invalid_table.get(2)).is_err(),
-            "the normal rank lookup preserves native's uncaught error boundary"
-        );
+        check_eq! { invalid_table.try_rank_name(2, false).expect_err("requesting the malformed extension must fail") => expected_error }
+        check_eq! { invalid_table.try_rank_name(usize::MAX, true).expect_err("fallback clamps to and evaluates the malformed final extension") => expected_error }
+        check! { std::panic::catch_unwind(|| invalid_table.get(2)).is_err(), "the normal rank lookup preserves native's uncaught error boundary" }
 
-        fs::write(def_dir.join("RankUS.txt"), b"Recruit\r\n*%p\r\n").expect("pointer rank format");
+        write_fixture! { def_dir.join("RankUS.txt") => b"Recruit\r\n*%p\r\n", "pointer rank format" };
         let pointer_definition = Definition::load_with_languages(
             &Group::open(&def_dir).expect("reopen pointer definition"),
             &["US"],
@@ -5286,68 +4914,38 @@ Entrance=1,2,,4
         let pointer_table = pointer_definition.rank_names.expect("pointer rank table");
         let pointer_clone = pointer_table.clone();
         let pointer_name = pointer_table.get(1).expect("pointer rank").into_owned();
-        assert!(pointer_name.starts_with("0x"));
-        assert_eq!(
-            pointer_clone.get(1).as_deref(),
-            Some(pointer_name.as_str()),
-            "Arc-backed rank bytes keep `%p` stable across engine table clones"
-        );
+        check! { pointer_name.starts_with("0x") }
+        check_eq! { pointer_clone.get(1).as_deref() => Some(pointer_name.as_str()), "Arc-backed rank bytes keep `%p` stable across engine table clones" }
     }
 
     #[test]
     fn custom_rank_base_matches_cpp_setting_parsing() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("RankBase.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=RBAS\n").expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "RankBase.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=RBAS\n", "DefCore" };
 
-        fs::write(
-            def_dir.join("RankUS.txt"),
-            b"Base=  +500suffix\r\nBase=invalid\r\nRecruit\r\nBase=250",
-        )
-        .expect("custom rank base");
+        write_fixture! { def_dir.join("RankUS.txt") => b"Base=  +500suffix\r\nBase=invalid\r\nRecruit\r\nBase=250", "custom rank base" };
         let parsed = Definition::load_with_languages(
             &Group::open(&def_dir).expect("open definition"),
             &["US"],
         )
         .expect("load definition");
-        assert_eq!(
-            parsed.rank_base,
-            Some(500),
-            "scanf accepts a signed numeric prefix, malformed settings keep the prior value, and an unterminated line is ignored"
-        );
+        check_eq! { parsed.rank_base => Some(500), "scanf accepts a signed numeric prefix, malformed settings keep the prior value, and an unterminated line is ignored" }
 
-        fs::write(
-            def_dir.join("RankUS.txt"),
-            b"Base=500\nBase=0trailing\nRecruit\n",
-        )
-        .expect("zero rank base");
+        write_fixture! { def_dir.join("RankUS.txt") => b"Base=500\nBase=0trailing\nRecruit\n", "zero rank base" };
         let zero = Definition::load_with_languages(
             &Group::open(&def_dir).expect("reopen definition"),
             &["US"],
         )
         .expect("reload definition");
-        assert_eq!(
-            zero.rank_base,
-            Some(1000),
-            "C++ normalizes a final zero base to its global default"
-        );
+        check_eq! { zero.rank_base => Some(1000), "C++ normalizes a final zero base to its global default" }
 
-        fs::write(
-            def_dir.join("RankUS.txt"),
-            b"base=250\nBase =300\nRecruit\n",
-        )
-        .expect("non-matching rank settings");
+        write_fixture! { def_dir.join("RankUS.txt") => b"base=250\nBase =300\nRecruit\n", "non-matching rank settings" };
         let defaulted = Definition::load_with_languages(
             &Group::open(&def_dir).expect("reopen definition"),
             &["US"],
         )
         .expect("reload definition");
-        assert_eq!(
-            defaulted.rank_base,
-            Some(1000),
-            "the Base setting name and equals placement are exact"
-        );
+        check_eq! { defaulted.rank_base => Some(1000), "the Base setting name and equals placement are exact" }
     }
 
     #[test]
@@ -5356,93 +4954,50 @@ Entrance=1,2,,4
 
         let invalid_dir = temp.path().join("InvalidRanks.c4d");
         fs::create_dir(&invalid_dir).expect("invalid definition directory");
-        fs::write(invalid_dir.join("DefCore.txt"), b"[DefCore]\nid=INVR\n").expect("DefCore");
+        write_fixture! { invalid_dir.join("DefCore.txt") => b"[DefCore]\nid=INVR\n", "DefCore" };
         image::RgbaImage::from_pixel(4, 1, image::Rgba([255, 255, 255, 255]))
             .save(invalid_dir.join("Rank.png"))
             .expect("rank strip");
-        fs::write(
-            invalid_dir.join("RankUS.txt"),
-            b"# no ordinary names\nBase=500\n*Unused %s\n",
-        )
-        .expect("invalid ranks");
+        write_fixture! { invalid_dir.join("RankUS.txt") => b"# no ordinary names\nBase=500\n*Unused %s\n", "invalid ranks" };
         let invalid = Definition::load_with_languages(
             &Group::open(&invalid_dir).expect("open invalid definition"),
             &["US"],
         )
         .expect("load invalid-rank definition");
-        assert_eq!(
-            invalid.rank_symbol_count,
-            Some(4),
-            "C4RankSystem rejects a component without ordinary rank names"
-        );
-        assert_eq!(invalid.rank_names, None);
-        assert_eq!(invalid.rank_base, None);
+        check_eq! { invalid.rank_symbol_count => Some(4), "C4RankSystem rejects a component without ordinary rank names" }
+        check_eq! { invalid.rank_names => None }
+        check_eq! { invalid.rank_base => None }
 
         let saturated_dir = temp.path().join("SaturatedRanks.c4d");
         fs::create_dir(&saturated_dir).expect("saturated definition directory");
-        fs::write(saturated_dir.join("DefCore.txt"), b"[DefCore]\nid=SATR\n").expect("DefCore");
+        write_fixture! { saturated_dir.join("DefCore.txt") => b"[DefCore]\nid=SATR\n", "DefCore" };
         image::RgbaImage::from_pixel(2, 1, image::Rgba([255, 255, 255, 255]))
             .save(saturated_dir.join("Rank.png"))
             .expect("rank strip");
-        fs::write(
-            saturated_dir.join("RankUS.txt"),
-            b"Recruit\n*One %s\n*Two %s\n*Three %s\n",
-        )
-        .expect("saturated ranks");
+        write_fixture! { saturated_dir.join("RankUS.txt") => b"Recruit\n*One %s\n*Two %s\n*Three %s\n", "saturated ranks" };
         let saturated = Definition::load_with_languages(
             &Group::open(&saturated_dir).expect("open saturated definition"),
             &["US"],
         )
         .expect("load saturated-rank definition");
-        assert_eq!(
-            saturated.rank_symbol_count,
-            Some(1),
-            "C++ clamps the base rank symbol count to at least one"
-        );
-        assert_eq!(
-            saturated
-                .rank_names
-                .as_ref()
-                .map(RankNameTable::resolved_names),
-            Some(vec![
-                "Recruit".to_string(),
-                "One Recruit".to_string(),
-                "Two Recruit".to_string(),
-                "Three Recruit".to_string(),
-            ])
-        );
+        check_eq! { saturated.rank_symbol_count => Some(1), "C++ clamps the base rank symbol count to at least one" }
+        check_eq! { saturated.rank_names.as_ref().map(RankNameTable::resolved_names) => Some(vec!["Recruit".to_string(), "One Recruit".to_string(), "Two Recruit".to_string(), "Three Recruit".to_string(),]) }
 
-        fs::write(
-            saturated_dir.join("RankUS.txt"),
-            b"Recruit\n*Unterminated %s",
-        )
-        .expect("unterminated ranks");
+        write_fixture! { saturated_dir.join("RankUS.txt") => b"Recruit\n*Unterminated %s", "unterminated ranks" };
         let unterminated = Definition::load_with_languages(
             &Group::open(&saturated_dir).expect("reopen saturated definition"),
             &["US"],
         )
         .expect("load unterminated-rank definition");
-        assert_eq!(
-            unterminated.rank_symbol_count,
-            Some(2),
-            "C++ ignores the final rank line when it has no CR or LF terminator"
-        );
-        assert_eq!(
-            unterminated
-                .rank_names
-                .as_ref()
-                .map(RankNameTable::resolved_names),
-            Some(vec!["Recruit".to_string()])
-        );
+        check_eq! { unterminated.rank_symbol_count => Some(2), "C++ ignores the final rank line when it has no CR or LF terminator" }
+        check_eq! { unterminated.rank_names.as_ref().map(RankNameTable::resolved_names) => Some(vec!["Recruit".to_string()]) }
     }
 
     #[test]
     fn corrupt_rank_png_does_not_fall_through_to_rank_bmp() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("BrokenRank.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=BRKN\n").expect("DefCore");
-        fs::write(def_dir.join("Rank.png"), b"not a png").expect("corrupt PNG");
+        definition_fixture_dir! { temp, def_dir => "BrokenRank.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=BRKN\n", "DefCore" };
+        write_fixture! { def_dir.join("Rank.png") => b"not a png", "corrupt PNG" };
         image::RgbaImage::from_pixel(4, 1, image::Rgba([255, 255, 255, 255]))
             .save(def_dir.join("Rank.bmp"))
             .expect("valid BMP fallback candidate");
@@ -5452,34 +5007,28 @@ Entrance=1,2,,4
             &["US"],
         )
         .expect("definition still loads");
-        assert!(definition.rank_symbols_image.is_none());
-        assert_eq!(definition.rank_symbol_count, None);
+        check! { definition.rank_symbols_image.is_none() }
+        check_eq! { definition.rank_symbol_count => None }
     }
 
     #[test]
     fn rank_strip_narrower_than_one_square_phase_is_rejected() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("NarrowRank.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=NARR\n").expect("DefCore");
+        definition_fixture_dir! { temp, def_dir => "NarrowRank.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=NARR\n", "DefCore" };
         image::RgbaImage::from_pixel(1, 2, image::Rgba([255, 255, 255, 255]))
             .save(def_dir.join("Rank.png"))
             .expect("narrow rank strip");
 
         let definition = Definition::load(&Group::open(&def_dir).expect("open definition"))
             .expect("definition loads");
-        assert!(definition.rank_symbols_image.is_none());
-        assert_eq!(definition.rank_symbol_count, None);
+        check! { definition.rank_symbols_image.is_none() }
+        check_eq! { definition.rank_symbol_count => None }
     }
 
     #[test]
     fn all_shipped_portrait_variants_are_retained_recursively() {
         let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../content"));
-        assert!(
-            root.is_dir(),
-            "the initialized official content submodule must provide {}",
-            root.display()
-        );
+        check! { root.is_dir(), "the initialized official content submodule must provide {}", root.display() }
         let mut definition_dirs = std::collections::BTreeSet::new();
         for entry in walkdir::WalkDir::new(root)
             .into_iter()
@@ -5518,14 +5067,7 @@ Entrance=1,2,,4
             let definition = Definition::load(&Group::open(&directory).expect("open definition"))
                 .expect("load shipped definition");
             for name in &expected {
-                assert!(
-                    definition
-                        .portrait_graphics
-                        .iter()
-                        .any(|portrait| portrait.name.eq_ignore_ascii_case(name)),
-                    "{} must retain Portrait{name}",
-                    directory.display()
-                );
+                check! { definition.portrait_graphics.iter().any(|portrait| portrait.name.eq_ignore_ascii_case(name)), "{} must retain Portrait{name}", directory.display() }
             }
             checked += expected.len();
         }
@@ -5533,7 +5075,7 @@ Entrance=1,2,,4
         // vendored; those add 34 more. The per-directory assertion above is the
         // real check — this census only guards against the walk silently
         // covering less content than it should.
-        assert_eq!(checked, 119, "recursive shipped portrait census changed");
+        check_eq! { checked => 119, "recursive shipped portrait census changed" }
     }
 
     #[test]
@@ -5550,8 +5092,8 @@ Entrance=1,2,,4
         ] {
             let core = parse_def_core(format!("[DefCore]\nid={source}\n").as_bytes())
                 .expect("DefCore parses");
-            assert_eq!(core.id, expected, "source {source}");
-            assert_eq!(core.has_valid_id(), valid, "source {source}");
+            check_eq! { core.id => expected, "source {source}" }
+            check_eq! { core.has_valid_id() => valid, "source {source}" }
         }
     }
 
@@ -5567,27 +5109,27 @@ Entrance=1,2,,4
             MoveToRange=17
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.id, "CLNK");
-        assert_eq!(parsed.name.as_deref(), Some("Clonk"));
-        assert_eq!(parsed.category, (1 << 3) | (1 << 4));
-        assert_eq!(parsed.crew_member, 1);
-        assert_eq!(parsed.blit_mode, 2);
-        assert_eq!(parsed.move_to_range, 17);
-        assert_eq!(parsed.collection, None);
-        assert_eq!(parsed.collection_limit, 0);
-        assert!(!parsed.collectible);
+        check_eq! { parsed.id => "CLNK" }
+        check_eq! { parsed.name.as_deref() => Some("Clonk") }
+        check_eq! { parsed.category => (1 << 3) | (1 << 4) }
+        check_eq! { parsed.crew_member => 1 }
+        check_eq! { parsed.blit_mode => 2 }
+        check_eq! { parsed.move_to_range => 17 }
+        check_eq! { parsed.collection => None }
+        check_eq! { parsed.collection_limit => 0 }
+        check! { !parsed.collectible }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("default parses");
-        assert_eq!(defaulted.blit_mode, 0);
-        assert_eq!(defaulted.move_to_range, 0);
+        check_eq! { defaulted.blit_mode => 0 }
+        check_eq! { defaulted.move_to_range => 0 }
 
         let signed =
             parse_def_core(b"[DefCore]\nid=SIGN\nMoveToRange=-3\n").expect("signed range parses");
-        assert_eq!(signed.move_to_range, -3);
+        check_eq! { signed.move_to_range => -3 }
 
         let raw_crew =
             parse_def_core(b"[DefCore]\nid=CREW\nCrewMember=-2\n").expect("raw crew value parses");
-        assert_eq!(raw_crew.crew_member, -2);
+        check_eq! { raw_crew.crew_member => -2 }
     }
 
     #[test]
@@ -5596,27 +5138,19 @@ Entrance=1,2,,4
             b"[DefCore]\nid=ALIA\nCanBeBase=1\nShape=-8,-16,16,32\nBurnTurnTo=FIRE\n",
         )
         .expect("unknown DefCore aliases are ignored");
-        assert!(!aliases.can_be_base);
-        assert_eq!(aliases.shape, None);
-        assert_eq!(aliases.burn_turn_to, None);
-        assert!(!aliases.reflected_ints.contains_key("Base"));
+        check! { !aliases.can_be_base }
+        check_eq! { aliases.shape => None }
+        check_eq! { aliases.burn_turn_to => None }
+        check! { !aliases.reflected_ints.contains_key("Base") }
 
         let native = parse_def_core(
             b"[DefCore]\nid=NATV\nBase=-2\nWidth=16\nHeight=32\nOffset=-8,-16\nBurnTo=FIREtail\n",
         )
         .expect("native DefCore keys parse");
-        assert!(native.can_be_base);
-        assert_eq!(native.reflected_ints.get("Base"), Some(&-2));
-        assert_eq!(
-            native.shape,
-            Some(PictureRect {
-                x: -8,
-                y: -16,
-                width: 16,
-                height: 32,
-            })
-        );
-        assert_eq!(native.burn_turn_to.as_deref(), Some("FIRE"));
+        check! { native.can_be_base }
+        check_eq! { native.reflected_ints.get("Base") => Some(&-2) }
+        check_eq! { native.shape => Some(PictureRect {x: -8, y: -16, width: 16, height: 32,}) }
+        check_eq! { native.burn_turn_to.as_deref() => Some("FIRE") }
     }
 
     #[test]
@@ -5627,11 +5161,11 @@ Entrance=1,2,,4
         )
         .expect("DefCore RCT_All strings parse");
 
-        assert_eq!(parsed.name.as_deref(), Some("Bar \t"));
-        assert_eq!(parsed.timer_call.as_deref(), Some("Foo \t"));
-        assert_eq!(parsed.color_by_material, "Granite \t");
-        assert_eq!(parsed.burn_turn_to.as_deref(), Some("BURN"));
-        assert_eq!(parsed.build_turn_to.as_deref(), Some("DONE"));
+        check_eq! { parsed.name.as_deref() => Some("Bar \t") }
+        check_eq! { parsed.timer_call.as_deref() => Some("Foo \t") }
+        check_eq! { parsed.color_by_material => "Granite \t" }
+        check_eq! { parsed.burn_turn_to.as_deref() => Some("BURN") }
+        check_eq! { parsed.build_turn_to.as_deref() => Some("DONE") }
     }
 
     #[test]
@@ -5645,7 +5179,7 @@ Entrance=1,2,,4
         ] {
             let parsed = parse_def_core(format!("[DefCore]\nid=EMTY\n{source}\n").as_bytes())
                 .expect("DefCore name fixture parses");
-            assert_eq!(parsed.name.as_deref(), expected, "source {source:?}");
+            check_eq! { parsed.name.as_deref() => expected, "source {source:?}" }
         }
     }
 
@@ -5657,9 +5191,9 @@ Entrance=1,2,,4
         .expect("shipped Hut2 DefCore parses");
         let name = parsed.name.as_deref().expect("Hut2 carries a core name");
 
-        assert_eq!(clonk_script::c4_string_bytes(name), b"Holzh\xfctte");
-        assert!(!name.contains('\u{fffd}'));
-        assert_ne!(name, "Holzhütte", "raw 0xfc is not UTF-8 ü");
+        check_eq! { clonk_script::c4_string_bytes(name) => b"Holzh\xfctte" }
+        check! { !name.contains('\u{fffd}') }
+        check_ne! { name => "Holzhütte", "raw 0xfc is not UTF-8 ü" }
     }
 
     #[test]
@@ -5669,38 +5203,23 @@ Entrance=1,2,,4
         )
         .expect("native-byte DefCore strings parse");
 
-        assert_eq!(
-            clonk_script::c4_string_bytes(&parsed.color_by_material),
-            b"Rock\x80"
-        );
-        assert_eq!(
-            clonk_script::c4_string_bytes(parsed.timer_call.as_deref().expect("TimerCall")),
-            b"F\xfcnc\x80"
-        );
+        check_eq! { clonk_script::c4_string_bytes(&parsed.color_by_material) => b"Rock\x80" }
+        check_eq! { clonk_script::c4_string_bytes(parsed.timer_call.as_deref().expect("TimerCall")) => b"F\xfcnc\x80" }
     }
 
     #[test]
     fn parse_def_core_truncates_native_strings_at_byte_and_nul_boundaries() {
         let parsed = parse_def_core(b"[DefCore]\nid=BYTE\nName=pre\xfc\0ignored\nTimerCall=Late\n")
             .expect("NUL-terminated DefCore parses");
-        assert_eq!(
-            clonk_script::c4_string_bytes(parsed.name.as_deref().expect("Name")),
-            b"pre\xfc"
-        );
-        assert_eq!(parsed.timer_call, None);
+        check_eq! { clonk_script::c4_string_bytes(parsed.name.as_deref().expect("Name")) => b"pre\xfc" }
+        check_eq! { parsed.timer_call => None }
 
         let mut bounded = b"[DefCore]\nid=BYTE\nColorByMaterial=".to_vec();
         bounded.extend_from_slice(b"12345678901234\xc3\xbc\nTimerCall=");
         bounded.extend_from_slice(b"1234567890123456789012345678\xc3\xbc\n");
         let parsed = parse_def_core(&bounded).expect("bounded native strings parse");
-        assert_eq!(
-            clonk_script::c4_string_bytes(&parsed.color_by_material),
-            b"12345678901234\xc3"
-        );
-        assert_eq!(
-            clonk_script::c4_string_bytes(parsed.timer_call.as_deref().expect("TimerCall")),
-            b"1234567890123456789012345678\xc3"
-        );
+        check_eq! { clonk_script::c4_string_bytes(&parsed.color_by_material) => b"12345678901234\xc3" }
+        check_eq! { clonk_script::c4_string_bytes(parsed.timer_call.as_deref().expect("TimerCall")) => b"1234567890123456789012345678\xc3" }
     }
 
     #[test]
@@ -5712,9 +5231,9 @@ Entrance=1,2,,4
         let raw = raw.name.as_deref().expect("raw Name");
         let utf8 = utf8.name.as_deref().expect("UTF-8 Name");
 
-        assert_eq!(clonk_script::c4_string_bytes(raw), b"\x80");
-        assert_eq!(clonk_script::c4_string_bytes(utf8), b"\xe2\x82\xac");
-        assert_ne!(raw, utf8);
+        check_eq! { clonk_script::c4_string_bytes(raw) => b"\x80" }
+        check_eq! { clonk_script::c4_string_bytes(utf8) => b"\xe2\x82\xac" }
+        check_ne! { raw => utf8 }
     }
 
     #[test]
@@ -5735,18 +5254,18 @@ Jump=40000junk
         )
         .expect("DefCore numeric prefixes parse");
 
-        assert_eq!(parsed.mass, 100);
-        assert_eq!(parsed.vertices.len(), 3);
-        assert_eq!(parsed.blit_mode, 17);
-        assert_eq!(parsed.value, 0, "$ is not a C++ integer prefix");
-        assert_eq!(parsed.growth, 0, "0b consumes only the leading zero");
+        check_eq! { parsed.mass => 100 }
+        check_eq! { parsed.vertices.len() => 3 }
+        check_eq! { parsed.blit_mode => 17 }
+        check_eq! { parsed.value => 0, "$ is not a C++ integer prefix" }
+        check_eq! { parsed.growth => 0, "0b consumes only the leading zero" }
         let narrowed_overflow = if std::mem::size_of::<std::os::raw::c_long>() == 8 {
             1
         } else {
             i32::MAX
         };
-        assert_eq!(parsed.move_to_range, narrowed_overflow);
-        assert_eq!(parsed.physical.jump, 40_000);
+        check_eq! { parsed.move_to_range => narrowed_overflow }
+        check_eq! { parsed.physical.jump => 40_000 }
 
         for (raw, expected) in [
             ("0X65junk", 101),
@@ -5756,7 +5275,7 @@ Jump=40000junk
         ] {
             let scale = parse_def_core(format!("[DefCore]\nid=SCAL\nScale={raw}\n").as_bytes())
                 .expect("Scale DefCore parses");
-            assert_eq!(scale.graphics_scale, expected, "Scale={raw}");
+            check_eq! { scale.graphics_scale => expected, "Scale={raw}" }
         }
     }
 
@@ -5765,18 +5284,15 @@ Jump=40000junk
         for value in ["true", "yes"] {
             let parsed = parse_def_core(format!("[DefCore]\nid=REBY\nRebuy={value}\n").as_bytes())
                 .expect("Rebuy DefCore parses");
-            assert!(!parsed.rebuyable, "int32 Rebuy={value} defaults to zero");
+            check! { !parsed.rebuyable, "int32 Rebuy={value} defaults to zero" }
         }
 
         let gold =
             parse_def_core(b"[DefCore]\nid=GOLD\nBaseAutoSell=2\n").expect("GOLD DefCore parses");
-        assert!(
-            gold.base_auto_sell,
-            "invalid Boolean text restores the GOLD-specific default"
-        );
+        check! { gold.base_auto_sell, "invalid Boolean text restores the GOLD-specific default" }
         let ordinary = parse_def_core(b"[DefCore]\nid=ROCK\nBaseAutoSell=2\n")
             .expect("ordinary DefCore parses");
-        assert!(!ordinary.base_auto_sell);
+        check! { !ordinary.base_auto_sell }
     }
 
     #[test]
@@ -5793,7 +5309,7 @@ Jump=40000junk
             ("on", None),
             (" true", None),
         ] {
-            assert_eq!(parse_bool(raw), expected, "Boolean `{raw}`");
+            check_eq! { parse_bool(raw) => expected, "Boolean `{raw}`" }
         }
     }
 
@@ -5803,7 +5319,7 @@ Jump=40000junk
         let load = |directory: &str, source: &str| {
             let path = temp.path().join(directory);
             fs::create_dir(&path).expect("definition directory");
-            fs::write(path.join("DefCore.txt"), source).expect("write DefCore");
+            write_fixture! { path.join("DefCore.txt") => source, "write DefCore" };
             let group = Group::open(&path).expect("open definition group");
             DefCore::load(&group).expect("load DefCore")
         };
@@ -5812,24 +5328,16 @@ Jump=40000junk
             "Ordinary.c4d",
             "[DefCore]\nid=ORDN\nCategory=C4D_Living\nCrewMember=0\n",
         );
-        assert_eq!(ordinary.category, 1 << 3, "CrewMember=0 changes nothing");
+        check_eq! { ordinary.category => 1 << 3, "CrewMember=0 changes nothing" }
 
         let derived = load("Derived.c4d", "[DefCore]\nid=CREW\nCrewMember=-2\n");
-        assert_eq!(
-            derived.category,
-            C4D_CREW_MEMBER | 1,
-            "the crew bit is present before the missing sort bit defaults to StaticBack"
-        );
+        check_eq! { derived.category => C4D_CREW_MEMBER | 1, "the crew bit is present before the missing sort bit defaults to StaticBack" }
 
         let explicit = load(
             "Explicit.c4d",
             "[DefCore]\nid=EXPL\nCategory=C4D_CrewMember|C4D_Object\nCrewMember=0\n",
         );
-        assert_eq!(
-            explicit.category,
-            C4D_CREW_MEMBER | (1 << 4),
-            "CrewMember=0 never clears an explicit category bit"
-        );
+        check_eq! { explicit.category => C4D_CREW_MEMBER | (1 << 4), "CrewMember=0 never clears an explicit category bit" }
     }
 
     #[test]
@@ -5838,10 +5346,10 @@ Jump=40000junk
         // array, zero-filling omitted components (src/C4Def.cpp:124,254).
         let parsed = parse_def_core(b"[DefCore]\nid=VERS\nVersion=4,9,1,3,27\n")
             .expect("versioned DefCore parses");
-        assert_eq!(parsed.version, [4, 9, 1, 3, 27]);
+        check_eq! { parsed.version => [4, 9, 1, 3, 27] }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("defaults parse");
-        assert_eq!(defaulted.version, [0; 5]);
+        check_eq! { defaulted.version => [0; 5] }
     }
 
     #[test]
@@ -5861,52 +5369,12 @@ Jump=40000junk
         )
         .expect("array probe DefCore parses");
 
-        assert_eq!(parsed.version, [4, 9, 0, 0, 0]);
-        assert_eq!(
-            parsed
-                .vertex_slots
-                .iter()
-                .take(3)
-                .map(|vertex| vertex.x)
-                .collect::<Vec<_>>(),
-            [0, 0, 0]
-        );
-        assert_eq!(
-            parsed
-                .vertex_slots
-                .iter()
-                .take(3)
-                .map(|vertex| vertex.y)
-                .collect::<Vec<_>>(),
-            [1, 0, 0]
-        );
-        assert_eq!(
-            parsed.shape,
-            Some(PictureRect {
-                x: 1,
-                y: 0,
-                width: 10,
-                height: 20,
-            })
-        );
-        assert_eq!(
-            parsed.entrance,
-            Some(PictureRect {
-                x: 7,
-                y: 0,
-                width: 0,
-                height: 0,
-            })
-        );
-        assert_eq!(
-            parsed.picture,
-            Some(PictureRect {
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0,
-            })
-        );
+        check_eq! { parsed.version => [4, 9, 0, 0, 0] }
+        check_eq! { parsed.vertex_slots.iter().take(3).map(|vertex| vertex.x).collect::<Vec<_>>() => [0, 0, 0] }
+        check_eq! { parsed.vertex_slots.iter().take(3).map(|vertex| vertex.y).collect::<Vec<_>>() => [1, 0, 0] }
+        check_eq! { parsed.shape => Some(PictureRect {x: 1, y: 0, width: 10, height: 20,}) }
+        check_eq! { parsed.entrance => Some(PictureRect {x: 7, y: 0, width: 0, height: 0,}) }
+        check_eq! { parsed.picture => Some(PictureRect {x: 0, y: 0, width: 0, height: 0,}) }
     }
 
     #[test]
@@ -5916,12 +5384,12 @@ Jump=40000junk
         // nonzero Pathfinder as enabled and SetLevel clamps it later.
         let parsed = parse_def_core(b"[DefCore]\nid=ROUT\nPathfinder=-4\nNoTransferZones=-2\n")
             .expect("pathfinder DefCore parses");
-        assert_eq!(parsed.pathfinder, -4);
-        assert_eq!(parsed.no_transfer_zones, -2);
+        check_eq! { parsed.pathfinder => -4 }
+        check_eq! { parsed.no_transfer_zones => -2 }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("defaults parse");
-        assert_eq!(defaulted.pathfinder, 0);
-        assert_eq!(defaulted.no_transfer_zones, 0);
+        check_eq! { defaulted.pathfinder => 0 }
+        check_eq! { defaulted.no_transfer_zones => 0 }
     }
 
     #[test]
@@ -5930,10 +5398,10 @@ Jump=40000junk
         // its default; command code treats either sign as enabled.
         let parsed = parse_def_core(b"[DefCore]\nid=LOCK\nNoPushEnter=-2\n")
             .expect("NoPushEnter DefCore parses");
-        assert_eq!(parsed.no_push_enter, -2);
+        check_eq! { parsed.no_push_enter => -2 }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=OPEN\n").expect("default DefCore parses");
-        assert_eq!(defaulted.no_push_enter, 0);
+        check_eq! { defaulted.no_push_enter => 0 }
     }
 
     #[test]
@@ -5942,10 +5410,10 @@ Jump=40000junk
         // default; SellFromBase treats either sign of a nonzero value as set.
         let parsed =
             parse_def_core(b"[DefCore]\nid=LOCK\nNoSell=-2\n").expect("NoSell DefCore parses");
-        assert_eq!(parsed.no_sell, -2);
+        check_eq! { parsed.no_sell => -2 }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=OPEN\n").expect("default DefCore parses");
-        assert_eq!(defaulted.no_sell, 0);
+        check_eq! { defaulted.no_sell => 0 }
     }
 
     #[test]
@@ -5956,18 +5424,15 @@ Jump=40000junk
             b"[DefCore]\nid=STACK\nAllowPictureStack=APS_Color|APS_Graphics|APS_Name|APS_Overlay\n",
         )
         .expect("DefCore parses");
-        assert_eq!(
-            parsed.allow_picture_stack,
-            APS_COLOR | APS_GRAPHICS | APS_NAME | APS_OVERLAY
-        );
+        check_eq! { parsed.allow_picture_stack => APS_COLOR | APS_GRAPHICS | APS_NAME | APS_OVERLAY }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("DefCore parses");
-        assert_eq!(defaulted.allow_picture_stack, 0);
-        assert_eq!(defaulted.graphics_scale, 100);
+        check_eq! { defaulted.allow_picture_stack => 0 }
+        check_eq! { defaulted.graphics_scale => 100 }
 
         let scaled =
             parse_def_core(b"[DefCore]\nid=SCALE\nScale=125\n").expect("graphics scale parses");
-        assert_eq!(scaled.graphics_scale, 125);
+        check_eq! { scaled.graphics_scale => 125 }
     }
 
     #[test]
@@ -5990,7 +5455,7 @@ Jump=40000junk
         )
         .expect("HD crew DefCore parses");
 
-        assert_eq!(core.graphics_scale, 300);
+        check_eq! { core.graphics_scale => 300 }
         let shape = core
             .shape
             .expect("Width/Height give the definition a shape");
@@ -6002,25 +5467,13 @@ Jump=40000junk
         );
 
         let walk = parse_action_facet("0,0,16,22,0,-2").expect("HD walk facet parses");
-        assert_eq!(
-            (walk.x, walk.y, walk.width, walk.height),
-            (0, 0, 16, 22),
-            "the facet rect stays logical; only the sheet is scaled"
-        );
-        assert_eq!(
-            (walk.target_x, walk.target_y),
-            (0, -2),
-            "the fifth and sixth components are C4TargetRect tx/ty, not padding"
-        );
+        check_eq! { (walk.x, walk.y, walk.width, walk.height) => (0, 0, 16, 22), "the facet rect stays logical; only the sheet is scaled" }
+        check_eq! { (walk.target_x, walk.target_y) => (0, -2), "the fifth and sixth components are C4TargetRect tx/ty, not padding" }
 
         // The very next action on the same sheet uses a different cell size —
         // which is why cell geometry can only come from the ActMap.
         let scale_action = parse_action_facet("0,22,20,22,-2,-1").expect("HD scale facet parses");
-        assert_eq!(
-            (scale_action.width, scale_action.height),
-            (20, 22),
-            "actions on one sheet legitimately differ in cell size"
-        );
+        check_eq! { (scale_action.width, scale_action.height) => (20, 22), "actions on one sheet legitimately differ in cell size" }
     }
 
     #[test]
@@ -6031,7 +5484,7 @@ Jump=40000junk
         let parsed = parse_def_core(b"[DefCore]\nid=DPIP\nLine=C4D_LinePower|C4D_LineSource\n")
             .expect("drain-pipe DefCore parses");
 
-        assert_eq!(parsed.line, 3);
+        check_eq! { parsed.line => 3 }
     }
 
     #[test]
@@ -6040,7 +5493,7 @@ Jump=40000junk
         let load = |directory: &str, source: &str| {
             let path = temp.path().join(directory);
             fs::create_dir(&path).expect("definition directory");
-            fs::write(path.join("DefCore.txt"), source).expect("write DefCore");
+            write_fixture! { path.join("DefCore.txt") => source, "write DefCore" };
             let group = Group::open(&path).expect("open definition group");
             Definition::load(&group).expect("unknown bit names only warn")
         };
@@ -6049,31 +5502,28 @@ Jump=40000junk
             "Category.c4d",
             "[DefCore]\nid=STRU\nCategory=C4D_Structure|C4D_Bogus\n",
         );
-        assert_eq!(category.core.category, 1 << 1);
+        check_eq! { category.core.category => 1 << 1 }
 
         let line_connect = load(
             "LineConnect.c4d",
             "[DefCore]\nid=LINE\nCategory=C4D_Object\nLineConnect=C4D_PowerInput|Nonsense\n",
         );
-        assert_eq!(line_connect.core.line_connect, 1);
+        check_eq! { line_connect.core.line_connect => 1 }
 
         let stopped = load(
             "Stopped.c4d",
             "[DefCore]\nid=SPAC\nCategory=C4D_Living C4D_Object\n",
         );
-        assert_eq!(stopped.core.category, 1 << 3);
+        check_eq! { stopped.core.category => 1 << 3 }
 
         let wrong_case = parse_def_core(b"[DefCore]\nid=CASE\nCategory=c4d_structure\n")
             .expect("wrong-case name is a valid unknown identifier");
-        assert_eq!(wrong_case.category, 0);
+        check_eq! { wrong_case.category => 0 }
         let wrong_case_loaded = load(
             "WrongCase.c4d",
             "[DefCore]\nid=CASE\nCategory=c4d_structure\n",
         );
-        assert_eq!(
-            wrong_case_loaded.core.category, 1,
-            "the later C4DefCore::Load sort default still adds StaticBack"
-        );
+        check_eq! { wrong_case_loaded.core.category => 1, "the later C4DefCore::Load sort default still adds StaticBack" }
 
         let shared = parse_def_core(
             br#"[DefCore]
@@ -6088,24 +5538,24 @@ HideHUDElements=Portrait|Bogus|Inventory
 "#,
         )
         .expect("unknown identifiers do not abort any DefCore bitfield");
-        assert_eq!(shared.category, (1 << 1) | (1 << 5));
-        assert_eq!(shared.line, 3);
-        assert_eq!(shared.line_connect, 1 | (1 << 3));
-        assert_eq!(shared.grab_put_get, 3);
-        assert_eq!(shared.allow_picture_stack, APS_COLOR | APS_OVERLAY);
-        assert_eq!(shared.hide_hud_bars, 1 | 4);
-        assert_eq!(shared.hide_hud_elements, 1 | 32);
+        check_eq! { shared.category => (1 << 1) | (1 << 5) }
+        check_eq! { shared.line => 3 }
+        check_eq! { shared.line_connect => 1 | (1 << 3) }
+        check_eq! { shared.grab_put_get => 3 }
+        check_eq! { shared.allow_picture_stack => APS_COLOR | APS_OVERLAY }
+        check_eq! { shared.hide_hud_bars => 1 | 4 }
+        check_eq! { shared.hide_hud_elements => 1 | 32 }
 
         let non_pipe = parse_def_core(
             b"[DefCore]\nid=STOP\nCategory=C4D_Structure+C4D_Goal\nLineConnect=C4D_PowerInput,C4D_PowerOutput\n",
         )
         .expect("separator mismatches end the bitfield");
-        assert_eq!(non_pipe.category, 1 << 1);
-        assert_eq!(non_pipe.line_connect, 1);
+        check_eq! { non_pipe.category => 1 << 1 }
+        check_eq! { non_pipe.line_connect => 1 }
 
         let malformed = parse_def_core(b"[DefCore]\nid=ZERO\nCategory=C4D_Structure||C4D_Goal\n")
             .expect("the outer default adaptor handles malformed bitfields");
-        assert_eq!(malformed.category, 0);
+        check_eq! { malformed.category => 0 }
     }
 
     #[test]
@@ -6113,23 +5563,20 @@ HideHUDElements=Portrait|Bogus|Inventory
         // C4Def loads Desc{}.txt into C4Def::Desc and trims it before
         // exposing C4Def::GetDesc (C4Def.cpp:713-717). The Context menu
         // adds Info only for a nonempty GetDesc (C4ObjectMenu.cpp:410-423).
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Hut3.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=HUT3\n").expect("DefCore");
-        fs::write(def_dir.join("DescUS.txt"), b"  A safe home base.\r\n").expect("US description");
+        definition_fixture_dir! { temp, def_dir => "Hut3.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=HUT3\n", "DefCore" };
+        write_fixture! { def_dir.join("DescUS.txt") => b"  A safe home base.\r\n", "US description" };
 
         let group = Group::open(&def_dir).expect("open definition");
         let definition = Definition::load(&group).expect("load definition");
 
-        assert_eq!(definition.description(), Some("A safe home base."));
+        check_eq! { definition.description() => Some("A safe home base.") }
 
         // StdStrBuf::TrimSpaces applies bytewise C-locale isspace; a CP1252
         // non-breaking space survives even after EnsureUnicode converts it.
-        fs::write(def_dir.join("DescUS.txt"), b"\xa0Kept\xa0")
-            .expect("non-ASCII description whitespace");
+        write_fixture! { def_dir.join("DescUS.txt") => b"\xa0Kept\xa0", "non-ASCII description whitespace" };
         let definition = Definition::load(&group).expect("reload definition");
-        assert_eq!(definition.description(), Some("\u{a0}Kept\u{a0}"));
+        check_eq! { definition.description() => Some("\u{a0}Kept\u{a0}") }
     }
 
     #[test]
@@ -6137,31 +5584,26 @@ HideHUDElements=Portrait|Bogus|Inventory
         let temp = tempdir().expect("tempdir");
         let both_dir = temp.path().join("Both.c4d");
         fs::create_dir(&both_dir).expect("both-language definition directory");
-        fs::write(both_dir.join("DefCore.txt"), b"[DefCore]\nid=BOTH\n").expect("DefCore");
-        fs::write(both_dir.join("DescDE.txt"), b"  Deutsche Beschreibung  ")
-            .expect("German description");
-        fs::write(both_dir.join("DescUS.txt"), b"English description").expect("US description");
+        write_fixture! { both_dir.join("DefCore.txt") => b"[DefCore]\nid=BOTH\n", "DefCore" };
+        write_fixture! { both_dir.join("DescDE.txt") => b"  Deutsche Beschreibung  ", "German description" };
+        write_fixture! { both_dir.join("DescUS.txt") => b"English description", "US description" };
         let both = Group::open(&both_dir).expect("open both-language definition");
         let german = Definition::load_with_languages(&both, &["DE", "US"])
             .expect("load German-first definition");
-        assert_eq!(german.description(), Some("Deutsche Beschreibung"));
+        check_eq! { german.description() => Some("Deutsche Beschreibung") }
 
         let de_only_dir = temp.path().join("GermanOnly.c4d");
         fs::create_dir(&de_only_dir).expect("German-only definition directory");
-        fs::write(de_only_dir.join("DefCore.txt"), b"[DefCore]\nid=DEON\n").expect("DefCore");
-        fs::write(de_only_dir.join("DescDE.txt"), b"Nur Deutsch").expect("German description");
-        fs::write(
-            de_only_dir.join("Desc.txt"),
-            b"Plain fallback must not load",
-        )
-        .expect("plain description");
+        write_fixture! { de_only_dir.join("DefCore.txt") => b"[DefCore]\nid=DEON\n", "DefCore" };
+        write_fixture! { de_only_dir.join("DescDE.txt") => b"Nur Deutsch", "German description" };
+        write_fixture! { de_only_dir.join("Desc.txt") => b"Plain fallback must not load", "plain description" };
         let de_only = Group::open(&de_only_dir).expect("open German-only definition");
         let us_only =
             Definition::load_with_languages(&de_only, &["US"]).expect("load US-only sequence");
-        assert_eq!(us_only.description(), None);
+        check_eq! { us_only.description() => None }
         let german_fallback = Definition::load_with_languages(&de_only, &["US", "DE"])
             .expect("load German second candidate");
-        assert_eq!(german_fallback.description(), Some("Nur Deutsch"));
+        check_eq! { german_fallback.description() => Some("Nur Deutsch") }
     }
 
     #[test]
@@ -6169,42 +5611,38 @@ HideHUDElements=Portrait|Bogus|Inventory
         // C4Def::Load gates on a local ClonkNames*.txt marker, then LoadEx
         // tries ClonkNames{lang}.txt for each two-byte language code before
         // the plain component (C4Def.cpp:641-657; C4ComponentHost.cpp:65-94).
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Crew.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=CREW\n").expect("DefCore");
-        fs::write(def_dir.join("ClonkNamesDE.txt"), b"J\xfcrgen\n").expect("German clonk names");
-        fs::write(def_dir.join("ClonkNamesUS.txt"), b"John\n").expect("US clonk names");
-        fs::write(def_dir.join("ClonkNamesD.txt"), b"Nul Code\n")
-            .expect("single-byte language code clonk names");
-        fs::write(def_dir.join("ClonkNames.txt"), b"Plain\n").expect("plain clonk names");
+        definition_fixture_dir! { temp, def_dir => "Crew.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=CREW\n", "DefCore" };
+        write_fixture! { def_dir.join("ClonkNamesDE.txt") => b"J\xfcrgen\n", "German clonk names" };
+        write_fixture! { def_dir.join("ClonkNamesUS.txt") => b"John\n", "US clonk names" };
+        write_fixture! { def_dir.join("ClonkNamesD.txt") => b"Nul Code\n", "single-byte language code clonk names" };
+        write_fixture! { def_dir.join("ClonkNames.txt") => b"Plain\n", "plain clonk names" };
         let group = Group::open(&def_dir).expect("open definition");
 
         let german = Definition::load_with_languages(&group, &["DE", "US"])
             .expect("load German-first definition");
-        assert_eq!(german.clonk_names.as_deref(), Some("Jürgen\n"));
+        check_eq! { german.clonk_names.as_deref() => Some("Jürgen\n") }
 
         let truncated = Definition::load_with_languages(&group, &["DE-extra"])
             .expect("language code truncates to two native bytes");
-        assert_eq!(truncated.clonk_names.as_deref(), Some("Jürgen\n"));
+        check_eq! { truncated.clonk_names.as_deref() => Some("Jürgen\n") }
 
         let nul_code = Definition::load_with_languages(&group, &["D\0E"])
             .expect("language code stops at its native NUL");
-        assert_eq!(nul_code.clonk_names.as_deref(), Some("Nul Code\n"));
+        check_eq! { nul_code.clonk_names.as_deref() => Some("Nul Code\n") }
 
         let plain = Definition::load_with_languages(&group, &["FI"]).expect("load plain fallback");
-        assert_eq!(plain.clonk_names.as_deref(), Some("Plain\n"));
+        check_eq! { plain.clonk_names.as_deref() => Some("Plain\n") }
 
-        fs::write(def_dir.join("ClonkNamesUS.txt"), b"Before\0After\n")
-            .expect("NUL-terminated clonk names");
+        write_fixture! { def_dir.join("ClonkNamesUS.txt") => b"Before\0After\n", "NUL-terminated clonk names" };
         let nul_terminated = Definition::load_with_languages(&group, &["US"])
             .expect("load NUL-terminated component");
-        assert_eq!(nul_terminated.clonk_names.as_deref(), Some("Before"));
+        check_eq! { nul_terminated.clonk_names.as_deref() => Some("Before") }
 
-        fs::write(def_dir.join("ClonkNamesUS.txt"), b"\0After").expect("leading-NUL clonk names");
+        write_fixture! { def_dir.join("ClonkNamesUS.txt") => b"\0After", "leading-NUL clonk names" };
         let empty_owned = Definition::load_with_languages(&group, &["US"])
             .expect("a nonzero component with an empty C string still loads");
-        assert_eq!(empty_owned.clonk_names.as_deref(), Some(""));
+        check_eq! { empty_owned.clonk_names.as_deref() => Some("") }
     }
 
     #[test]
@@ -6213,40 +5651,32 @@ HideHUDElements=Portrait|Bogus|Inventory
 
         let advancing_dir = temp.path().join("Advancing.c4d");
         fs::create_dir(&advancing_dir).expect("advancing definition directory");
-        fs::write(advancing_dir.join("DefCore.txt"), b"[DefCore]\nid=ADVN\n").expect("DefCore");
-        fs::write(advancing_dir.join("DescUS.txt"), []).expect("empty US description");
-        fs::write(advancing_dir.join("descde.TXT"), b"Gemischte Schreibweise")
-            .expect("mixed-case German description");
+        write_fixture! { advancing_dir.join("DefCore.txt") => b"[DefCore]\nid=ADVN\n", "DefCore" };
+        write_fixture! { advancing_dir.join("DescUS.txt") => [], "empty US description" };
+        write_fixture! { advancing_dir.join("descde.TXT") => b"Gemischte Schreibweise", "mixed-case German description" };
         let advancing = Group::open(&advancing_dir).expect("open advancing definition");
         let definition = Definition::load_with_languages(&advancing, &["US", "DE"])
             .expect("zero-byte candidate advances");
-        assert_eq!(definition.description(), Some("Gemischte Schreibweise"));
+        check_eq! { definition.description() => Some("Gemischte Schreibweise") }
 
         let blocking_dir = temp.path().join("Blocking.c4d");
         fs::create_dir(&blocking_dir).expect("blocking definition directory");
-        fs::write(blocking_dir.join("DefCore.txt"), b"[DefCore]\nid=BLOK\n").expect("DefCore");
-        fs::write(blocking_dir.join("DescUS.txt"), b" \r\n\t").expect("whitespace US description");
-        fs::write(blocking_dir.join("DescDE.txt"), b"Must not load").expect("German description");
+        write_fixture! { blocking_dir.join("DefCore.txt") => b"[DefCore]\nid=BLOK\n", "DefCore" };
+        write_fixture! { blocking_dir.join("DescUS.txt") => b" \r\n\t", "whitespace US description" };
+        write_fixture! { blocking_dir.join("DescDE.txt") => b"Must not load", "German description" };
         let blocking = Group::open(&blocking_dir).expect("open blocking definition");
         let definition = Definition::load_with_languages(&blocking, &["US", "DE"])
             .expect("whitespace candidate loads then trims");
-        assert_eq!(definition.description(), None);
+        check_eq! { definition.description() => None }
 
         let plain_dir = temp.path().join("Plain.c4d");
         fs::create_dir(&plain_dir).expect("plain definition directory");
-        fs::write(plain_dir.join("DefCore.txt"), b"[DefCore]\nid=PLAN\n").expect("DefCore");
-        fs::write(
-            plain_dir.join("Desc.txt"),
-            b"Explicit empty-code description",
-        )
-        .expect("plain description");
+        write_fixture! { plain_dir.join("DefCore.txt") => b"[DefCore]\nid=PLAN\n", "DefCore" };
+        write_fixture! { plain_dir.join("Desc.txt") => b"Explicit empty-code description", "plain description" };
         let plain = Group::open(&plain_dir).expect("open plain definition");
         let definition = Definition::load_with_languages(&plain, &[] as &[&str])
             .expect("empty language sequence tries one empty code");
-        assert_eq!(
-            definition.description(),
-            Some("Explicit empty-code description")
-        );
+        check_eq! { definition.description() => Some("Explicit empty-code description") }
     }
 
     #[test]
@@ -6257,17 +5687,14 @@ HideHUDElements=Portrait|Bogus|Inventory
         let content = temp.path().join("content");
         let def_dir = content.join("Hut3.c4d");
         fs::create_dir_all(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=HUT3\n").expect("DefCore");
-        fs::write(def_dir.join("DescUS.txt"), b"Local English description")
-            .expect("local US description");
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=HUT3\n", "DefCore" };
+        write_fixture! { def_dir.join("DescUS.txt") => b"Local English description", "local US description" };
 
         let language_container = temp.path().join("Language.c4g");
         let pack_def = language_container.join("Pack.c4g/Hut3.c4d");
         fs::create_dir_all(&pack_def).expect("pack definition directory");
-        fs::write(pack_def.join("DescDE.txt"), b"Falsche Sprache")
-            .expect("German pack description");
-        fs::write(pack_def.join("DescUS.txt"), b"  Packed home base.\r\n")
-            .expect("US pack description");
+        write_fixture! { pack_def.join("DescDE.txt") => b"Falsche Sprache", "German pack description" };
+        write_fixture! { pack_def.join("DescUS.txt") => b"  Packed home base.\r\n", "US pack description" };
 
         let packs = crate::LanguagePacks::discover(
             std::slice::from_ref(&language_container),
@@ -6279,7 +5706,7 @@ HideHUDElements=Portrait|Bogus|Inventory
             Definition::load_with_languages_and_components(&group, &["DE", "US"], &components)
                 .expect("load pack-described definition");
 
-        assert_eq!(definition.description(), Some("Falsche Sprache"));
+        check_eq! { definition.description() => Some("Falsche Sprache") }
     }
 
     #[test]
@@ -6288,72 +5715,52 @@ HideHUDElements=Portrait|Bogus|Inventory
         // C4Def::Name with the first language-sequence match
         // (C4Def.cpp:635-639; C4ComponentHost.cpp:238-260). HUT3 therefore
         // presents as "Cabin", not its DefCore fallback "Hut".
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("Hut3.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=HUT3\nName=Hut\n",
-        )
-        .expect("DefCore");
-        fs::write(def_dir.join("Names.txt"), b"DE:H\xfctte\r\nUS:Cabin\r\n")
-            .expect("localized names");
+        definition_fixture_dir! { temp, def_dir => "Hut3.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=HUT3\nName=Hut\n", "DefCore" };
+        write_fixture! { def_dir.join("Names.txt") => b"DE:H\xfctte\r\nUS:Cabin\r\n", "localized names" };
 
         let group = Group::open(&def_dir).expect("open definition");
         let definition = Definition::load(&group).expect("load definition");
 
-        assert_eq!(definition.core.name.as_deref(), Some("Cabin"));
+        check_eq! { definition.core.name.as_deref() => Some("Cabin") }
         let german = Definition::load_with_languages(&group, &["DE", "US"])
             .expect("load German definition name");
-        assert_eq!(german.core.name.as_deref(), Some("Hütte"));
+        check_eq! { german.core.name.as_deref() => Some("Hütte") }
         let truncated = Definition::load_with_languages(&group, &["DE-extra", "US"])
             .expect("truncate the definition-name language code too");
-        assert_eq!(truncated.core.name.as_deref(), Some("Hütte"));
+        check_eq! { truncated.core.name.as_deref() => Some("Hütte") }
         let empty = Definition::load_with_languages(&group, &[] as &[&str])
             .expect("empty language sequence uses one empty code");
-        assert_eq!(empty.core.name.as_deref(), Some("Hütte"));
+        check_eq! { empty.core.name.as_deref() => Some("Hütte") }
     }
 
     #[test]
     fn definition_name_line_end_prefers_any_later_cr() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("MixedLines.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=MIXD\nName=Fallback\n",
-        )
-        .expect("DefCore");
-        fs::write(def_dir.join("Names.txt"), b"US:Cabin\nDE:Huette\r\n")
-            .expect("mixed-line-ending names");
+        definition_fixture_dir! { temp, def_dir => "MixedLines.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=MIXD\nName=Fallback\n", "DefCore" };
+        write_fixture! { def_dir.join("Names.txt") => b"US:Cabin\nDE:Huette\r\n", "mixed-line-ending names" };
 
         let group = Group::open(&def_dir).expect("open definition");
         let definition =
             Definition::load_with_languages(&group, &["US", "DE"]).expect("load definition name");
 
-        assert_eq!(definition.core.name.as_deref(), Some("Cabin\nDE:Huette"));
+        check_eq! { definition.core.name.as_deref() => Some("Cabin\nDE:Huette") }
     }
 
     #[test]
     fn definition_name_empty_first_language_value_wins() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("EmptyName.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=EMNM\nName=Core Name\n",
-        )
-        .expect("DefCore");
-        fs::write(def_dir.join("Names.txt"), b"US:\r\nDE:Huette\r\n").expect("localized names");
+        definition_fixture_dir! { temp, def_dir => "EmptyName.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=EMNM\nName=Core Name\n", "DefCore" };
+        write_fixture! { def_dir.join("Names.txt") => b"US:\r\nDE:Huette\r\n", "localized names" };
 
         let group = Group::open(&def_dir).expect("open definition");
         let empty = Definition::load_with_languages(&group, &["US", "DE"])
             .expect("empty first language name");
-        assert_eq!(empty.core.name.as_deref(), Some(""));
+        check_eq! { empty.core.name.as_deref() => Some("") }
 
         let missing =
             Definition::load_with_languages(&group, &["FR"]).expect("missing language name");
-        assert_eq!(missing.core.name.as_deref(), Some("Core Name"));
+        check_eq! { missing.core.name.as_deref() => Some("Core Name") }
     }
 
     #[test]
@@ -6362,58 +5769,40 @@ HideHUDElements=Portrait|Bogus|Inventory
 
         let empty_core_dir = temp.path().join("EmptyCore.c4d");
         fs::create_dir(&empty_core_dir).expect("empty-core definition directory");
-        fs::write(empty_core_dir.join("DefCore.txt"), []).expect("empty DefCore");
+        write_fixture! { empty_core_dir.join("DefCore.txt") => [], "empty DefCore" };
         let empty_core = Group::open(&empty_core_dir).expect("open empty-core definition");
-        assert!(matches!(
-            DefCore::load(&empty_core),
-            Err(DefinitionError::DefCoreMissing)
-        ));
+        check! { matches!(DefCore::load(&empty_core), Err(DefinitionError::DefCoreMissing)) }
 
         let def_dir = temp.path().join("EmptyComponents.c4d");
         fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=EMTY\nName=Core Name\n",
-        )
-        .expect("DefCore");
-        fs::write(def_dir.join("ActMap.txt"), []).expect("empty ActMap");
-        fs::write(def_dir.join("NamesUS.txt"), []).expect("empty localized names");
-        fs::write(def_dir.join("Names.txt"), b"US:Fallback Name\n").expect("fallback names");
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=EMTY\nName=Core Name\n", "DefCore" };
+        write_fixture! { def_dir.join("ActMap.txt") => [], "empty ActMap" };
+        write_fixture! { def_dir.join("NamesUS.txt") => [], "empty localized names" };
+        write_fixture! { def_dir.join("Names.txt") => b"US:Fallback Name\n", "fallback names" };
 
         let group = Group::open(&def_dir).expect("open definition");
         let definition =
             Definition::load_with_languages(&group, &["US"]).expect("empty components are absent");
-        assert!(definition.action_map.is_none());
-        assert_eq!(definition.core.name.as_deref(), Some("Fallback Name"));
+        check! { definition.action_map.is_none() }
+        check_eq! { definition.core.name.as_deref() => Some("Fallback Name") }
 
-        fs::write(def_dir.join("ActMap.txt"), b"malformed action map\n")
-            .expect("malformed nonempty ActMap");
+        write_fixture! { def_dir.join("ActMap.txt") => b"malformed action map\n", "malformed nonempty ActMap" };
         let group = Group::open(&def_dir).expect("reopen definition");
-        assert!(matches!(
-            Definition::load_with_languages(&group, &["US"]),
-            Err(DefinitionError::ActMapParse(_))
-        ));
+        check! { matches!(Definition::load_with_languages(&group, &["US"]), Err(DefinitionError::ActMapParse(_))) }
     }
 
     #[test]
     fn nonempty_names_component_still_blocks_filename_fallback() {
-        let temp = tempdir().expect("tempdir");
-        let def_dir = temp.path().join("NamesBlock.c4d");
-        fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=NBLK\nName=Core Name\n",
-        )
-        .expect("DefCore");
-        fs::write(def_dir.join("NamesUS.txt"), b"DE:Deutsch\n")
-            .expect("nonmatching localized names");
-        fs::write(def_dir.join("Names.txt"), b"US:Fallback Name\n").expect("fallback names");
+        definition_fixture_dir! { temp, def_dir => "NamesBlock.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=NBLK\nName=Core Name\n", "DefCore" };
+        write_fixture! { def_dir.join("NamesUS.txt") => b"DE:Deutsch\n", "nonmatching localized names" };
+        write_fixture! { def_dir.join("Names.txt") => b"US:Fallback Name\n", "fallback names" };
 
         let group = Group::open(&def_dir).expect("open definition");
         let definition = Definition::load_with_languages(&group, &["US"])
             .expect("nonempty selected component loads");
 
-        assert_eq!(definition.core.name.as_deref(), Some("Core Name"));
+        check_eq! { definition.core.name.as_deref() => Some("Core Name") }
     }
 
     #[test]
@@ -6421,20 +5810,14 @@ HideHUDElements=Portrait|Bogus|Inventory
         let temp = tempdir().unwrap();
         let def_dir = temp.path().join("Example.ocd");
         fs::create_dir(&def_dir).unwrap();
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            br#"[DefCore]
+        write_fixture! { def_dir.join("DefCore.txt") => br#"[DefCore]
 id=EXMP
 Name=Example
 Category=C4D_Object
 CrewMember=0
-"#,
-        )
-        .unwrap();
-        fs::write(def_dir.join("Script.c"), b"func Initialize() {}\n").unwrap();
-        fs::write(
-            def_dir.join("ActMap.txt"),
-            br#"
+"# };
+        write_fixture! { def_dir.join("Script.c") => b"func Initialize() {}\n" };
+        write_fixture! { def_dir.join("ActMap.txt") => br#"
 [Action]
 Name=Idle
 Procedure=Walk
@@ -6442,26 +5825,24 @@ Length=20
 NextAction=Idle
 StartCall=OnIdleStart
 EndCall=OnIdleEnd
-"#,
-        )
-        .unwrap();
+"# };
 
         let group = Group::open(&def_dir).unwrap();
         let def = Definition::load(&group).expect("definition load succeeds");
-        assert_eq!(def.core.id, "EXMP");
-        assert_eq!(def.core.name.as_deref(), Some("Example"));
-        assert_eq!(def.core.category, 1 << 4);
-        assert_eq!(def.core.crew_member, 0);
-        assert_eq!(def.script.files.len(), 1);
-        assert!(def.script.combined.contains("Initialize"));
+        check_eq! { def.core.id => "EXMP" }
+        check_eq! { def.core.name.as_deref() => Some("Example") }
+        check_eq! { def.core.category => 1 << 4 }
+        check_eq! { def.core.crew_member => 0 }
+        check_eq! { def.script.files.len() => 1 }
+        check! { def.script.combined.contains("Initialize") }
         let action_map = def.action_map.expect("action map present");
-        assert!(action_map.default_action.is_none());
+        check! { action_map.default_action.is_none() }
         let idle = action_map.get("Idle").expect("idle action present");
-        assert_eq!(idle.procedure.as_deref(), Some("Walk"));
-        assert_eq!(idle.length, Some(20));
-        assert_eq!(idle.next_action.as_deref(), Some("Idle"));
-        assert_eq!(idle.start_call.as_deref(), Some("OnIdleStart"));
-        assert_eq!(idle.end_call.as_deref(), Some("OnIdleEnd"));
+        check_eq! { idle.procedure.as_deref() => Some("Walk") }
+        check_eq! { idle.length => Some(20) }
+        check_eq! { idle.next_action.as_deref() => Some("Idle") }
+        check_eq! { idle.start_call.as_deref() => Some("OnIdleStart") }
+        check_eq! { idle.end_call.as_deref() => Some("OnIdleEnd") }
     }
 
     #[test]
@@ -6501,31 +5882,22 @@ NextAction=Dup
         let map = parse_act_map(data).expect("act map parsed");
         // file order preserved, duplicates kept (C++ array semantics)
         let order: Vec<&str> = map.actions.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(order, ["Walk", "Fall", "Spin", "Dup", "Dup", "Ref"]);
+        check_eq! { order => ["Walk", "Fall", "Spin", "Dup", "Dup", "Ref"] }
 
         let walk = map.get("Walk").expect("walk present");
-        assert_eq!(walk.procedure_index, 0, "WALK → DFA_WALK");
-        assert_eq!(walk.next_action_index, ACT_HOLD, "Hold is case-insensitive");
+        check_eq! { walk.procedure_index => 0, "WALK → DFA_WALK" }
+        check_eq! { walk.next_action_index => ACT_HOLD, "Hold is case-insensitive" }
 
         let fall = map.get("Fall").expect("fall present");
-        assert_eq!(
-            fall.procedure_index, DFA_NONE,
-            "lowercase 'walk' does not match the case-sensitive table"
-        );
-        assert_eq!(fall.next_action_index, 0, "NextAction=Walk → index 0");
+        check_eq! { fall.procedure_index => DFA_NONE, "lowercase 'walk' does not match the case-sensitive table" }
+        check_eq! { fall.next_action_index => 0, "NextAction=Walk → index 0" }
 
         let spin = map.get("Spin").expect("spin present");
-        assert_eq!(
-            spin.next_action_index, ACT_IDLE,
-            "case-sensitive miss leaves ActIdle"
-        );
+        check_eq! { spin.next_action_index => ACT_IDLE, "case-sensitive miss leaves ActIdle" }
 
         let reference = map.get("Ref").expect("ref present");
-        assert_eq!(reference.procedure_index, 1, "FLIGHT → DFA_FLIGHT");
-        assert_eq!(
-            reference.next_action_index, 4,
-            "last duplicate wins (C4Def.cpp:789-791 overwrite loop)"
-        );
+        check_eq! { reference.procedure_index => 1, "FLIGHT → DFA_FLIGHT" }
+        check_eq! { reference.next_action_index => 4, "last duplicate wins (C4Def.cpp:789-791 overwrite loop)" }
     }
 
     #[test]
@@ -6538,8 +5910,8 @@ NextAction=Dup
         ))
         .expect("initialized official content submodule provides Bird DefCore.txt");
         let core = parse_def_core(&bytes).expect("parses");
-        assert_eq!(core.physical.float, 200, "[Physical] Float=200");
-        assert_eq!(core.physical.energy, 40000, "[Physical] Energy=40000");
+        check_eq! { core.physical.float => 200, "[Physical] Float=200" }
+        check_eq! { core.physical.energy => 40000, "[Physical] Energy=40000" }
     }
 
     #[test]
@@ -6560,24 +5932,24 @@ NextAction=Dup
             CorrosionResist=1
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
-        assert_eq!(parsed.physical.energy, 50_000);
-        assert_eq!(parsed.physical.walk, 35_000);
-        assert_eq!(parsed.physical.fight, 20_000);
-        assert_eq!(parsed.physical.can_scale, 1);
-        assert_eq!(parsed.physical.corrosion_resist, 1);
-        assert_eq!(parsed.physical.jump, 0, "unset physicals default to zero");
+        check_eq! { parsed.physical.energy => 50_000 }
+        check_eq! { parsed.physical.walk => 35_000 }
+        check_eq! { parsed.physical.fight => 20_000 }
+        check_eq! { parsed.physical.can_scale => 1 }
+        check_eq! { parsed.physical.corrosion_resist => 1 }
+        check_eq! { parsed.physical.jump => 0, "unset physicals default to zero" }
 
         // TrainValue (C4InfoCore.cpp:279-285): zero stays zero, caps hold,
         // never decreases.
         let mut zero = 0;
         PhysicalInfo::train_value(&mut zero, 100, C4_MAX_PHYSICAL);
-        assert_eq!(zero, 0);
+        check_eq! { zero => 0 }
         let mut value = 99_950;
         PhysicalInfo::train_value(&mut value, 100, C4_MAX_PHYSICAL);
-        assert_eq!(value, C4_MAX_PHYSICAL);
+        check_eq! { value => C4_MAX_PHYSICAL }
         let mut above = 120_000;
         PhysicalInfo::train_value(&mut above, 100, C4_MAX_PHYSICAL);
-        assert_eq!(above, 120_000, "never decreased by training");
+        check_eq! { above => 120_000, "never decreased by training" }
     }
 
     #[test]
@@ -6594,7 +5966,7 @@ Walk=35000
         )
         .expect("def core parses");
 
-        assert_eq!(parsed.physical, PhysicalInfo::default());
+        check_eq! { parsed.physical => PhysicalInfo::default() }
     }
 
     #[test]
@@ -6609,7 +5981,7 @@ id=PREV
         )
         .expect("def core parses");
 
-        assert_eq!(parsed.physical, PhysicalInfo::default());
+        check_eq! { parsed.physical => PhysicalInfo::default() }
     }
 
     #[test]
@@ -6624,7 +5996,7 @@ id=NEST
         )
         .expect("def core parses");
 
-        assert_eq!(parsed.physical, PhysicalInfo::default());
+        check_eq! { parsed.physical => PhysicalInfo::default() }
     }
 
     #[test]
@@ -6640,18 +6012,18 @@ Energy=50000
         )
         .expect("def core parses");
 
-        assert_eq!(parsed.physical.energy, 50_000);
+        check_eq! { parsed.physical.energy => 50_000 }
     }
 
     #[test]
     fn def_core_physical_requires_exact_compiler_key_names() {
         let mismatched = parse_def_core(b"[DefCore]\nid=CASE\n[Physical]\nENERGY=50000\n")
             .expect("case-mismatched physical parses");
-        assert_eq!(mismatched.physical, PhysicalInfo::default());
+        check_eq! { mismatched.physical => PhysicalInfo::default() }
 
         let exact = parse_def_core(b"[DefCore]\nid=GOOD\n[Physical]\nEnergy=50000\n")
             .expect("well-formed physical parses");
-        assert_eq!(exact.physical.energy, 50_000);
+        check_eq! { exact.physical.energy => 50_000 }
     }
 
     #[test]
@@ -6673,11 +6045,11 @@ Value=9
         )
         .expect("duplicate DefCore entries parse");
 
-        assert_eq!(parsed.id, "DUPL");
-        assert_eq!(parsed.mass, 100);
-        assert_eq!(parsed.physical.walk, 35_000);
-        assert_eq!(parsed.physical.jump, 0);
-        assert_eq!(parsed.value, 0);
+        check_eq! { parsed.id => "DUPL" }
+        check_eq! { parsed.mass => 100 }
+        check_eq! { parsed.physical.walk => 35_000 }
+        check_eq! { parsed.physical.jump => 0 }
+        check_eq! { parsed.value => 0 }
     }
 
     #[test]
@@ -6685,7 +6057,7 @@ Value=9
         let parsed = parse_def_core(b"[DefCore]\nid=DUPE\nMass=125\nMass=7\n")
             .expect("duplicate Mass entries parse");
 
-        assert_eq!(parsed.mass, 125);
+        check_eq! { parsed.mass => 125 }
     }
 
     #[test]
@@ -6700,11 +6072,8 @@ Energy=50000
         )
         .expect("case-mismatched names remain inert");
 
-        assert_eq!(parsed.mass, 0, "lowercase mass is not the Mass field");
-        assert_eq!(
-            parsed.physical.energy, 0,
-            "lowercase [physical] is not the [Physical] section"
-        );
+        check_eq! { parsed.mass => 0, "lowercase mass is not the Mass field" }
+        check_eq! { parsed.physical.energy => 0, "lowercase [physical] is not the [Physical] section" }
     }
 
     #[test]
@@ -6712,11 +6081,7 @@ Energy=50000
         let parsed = parse_def_core(b"[DefCore]\nid=BITS\nCategory=C4D_Structure|c4d_goal\n")
             .expect("an unknown category token only warns");
 
-        assert_eq!(
-            parsed.category,
-            1 << 1,
-            "the mismatched token contributes no category bits"
-        );
+        check_eq! { parsed.category => 1 << 1, "the mismatched token contributes no category bits" }
     }
 
     #[test]
@@ -6724,8 +6089,8 @@ Energy=50000
         let parsed = parse_def_core(b"[DefCore]\nid=NUMS\nMass=$FF\nScale=$80\n")
             .expect("invalid numeric prefixes use field defaults");
 
-        assert_eq!(parsed.mass, 0);
-        assert_eq!(parsed.graphics_scale, 100);
+        check_eq! { parsed.mass => 0 }
+        check_eq! { parsed.graphics_scale => 100 }
     }
 
     #[test]
@@ -6736,22 +6101,13 @@ Energy=50000
         )
         .expect("tokenized DefCore parses");
 
-        assert_eq!(parsed.id, "TOKN", "pre-section id stays at the tree root");
-        assert_eq!(parsed.mass, 0, "case and trailing key spaces are exact");
-        assert_eq!(
-            parsed.physical.energy, 123,
-            "section trailing text is ignored"
-        );
-        assert_eq!(
-            parsed.physical.jump, 456,
-            "non-alpha section lines are inert"
-        );
-        assert_eq!(parsed.physical.walk, 0, "section names are case-sensitive");
+        check_eq! { parsed.id => "TOKN", "pre-section id stays at the tree root" }
+        check_eq! { parsed.mass => 0, "case and trailing key spaces are exact" }
+        check_eq! { parsed.physical.energy => 123, "section trailing text is ignored" }
+        check_eq! { parsed.physical.jump => 456, "non-alpha section lines are inert" }
+        check_eq! { parsed.physical.walk => 0, "section names are case-sensitive" }
 
-        assert!(matches!(
-            parse_def_core(b"id=XYZ1\nMass=100\n"),
-            Err(DefinitionError::MissingDefCoreField("id"))
-        ));
+        check! { matches!(parse_def_core(b"id=XYZ1\nMass=100\n"), Err(DefinitionError::MissingDefCoreField("id"))) }
     }
 
     #[test]
@@ -6775,29 +6131,14 @@ Energy=50000
         )
         .expect("hierarchical DefCore parses");
 
-        assert_eq!(
-            parsed.id, "ROOT",
-            "a nested DefCore must not shadow a later root sibling"
-        );
-        assert_eq!(
-            parsed.mass, 42,
-            "an unindented value dedents from the nested section"
-        );
-        assert_eq!(
-            parsed.value, 11,
-            "a malformed named line performs its native dedent before rejection"
-        );
-        assert_eq!(
-            parsed.physical.energy, 50_000,
-            "the shared tree retains native FollowName adjacency"
-        );
+        check_eq! { parsed.id => "ROOT", "a nested DefCore must not shadow a later root sibling" }
+        check_eq! { parsed.mass => 42, "an unindented value dedents from the nested section" }
+        check_eq! { parsed.value => 11, "a malformed named line performs its native dedent before rejection" }
+        check_eq! { parsed.physical.energy => 50_000, "the shared tree retains native FollowName adjacency" }
 
         let section_shadow = parse_def_core(b"[DefCore]\nid=SECT\n [Mass] 8\nMass=77\n")
             .expect("field-named section DefCore parses");
-        assert_eq!(
-            section_shadow.mass, 8,
-            "Name() selects the first matching child without checking node kind"
-        );
+        check_eq! { section_shadow.mass => 8, "Name() selects the first matching child without checking node kind" }
     }
 
     #[test]
@@ -6815,10 +6156,10 @@ Energy=50000
             NoBurnDamage=1
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
-        assert_eq!(parsed.contact_incinerate, 10);
-        assert!(parsed.no_burn_decay);
-        assert!(parsed.no_breath);
-        assert!(parsed.no_burn_damage);
+        check_eq! { parsed.contact_incinerate => 10 }
+        check! { parsed.no_burn_decay }
+        check! { parsed.no_breath }
+        check! { parsed.no_burn_damage }
 
         let data = br#"
             [DefCore]
@@ -6826,10 +6167,10 @@ Energy=50000
             Name=Stone
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
-        assert_eq!(parsed.contact_incinerate, 0, "default: not inflammable");
-        assert!(!parsed.no_burn_decay);
-        assert!(!parsed.no_breath, "default: breathing");
-        assert!(!parsed.no_burn_damage);
+        check_eq! { parsed.contact_incinerate => 0, "default: not inflammable" }
+        check! { !parsed.no_burn_decay }
+        check! { !parsed.no_breath, "default: breathing" }
+        check! { !parsed.no_burn_damage }
     }
 
     #[test]
@@ -6842,10 +6183,10 @@ Energy=50000
             "#,
         )
         .expect("closed container parses");
-        assert_eq!(parsed.closed_container, 2);
+        check_eq! { parsed.closed_container => 2 }
 
         let open = parse_def_core(b"[DefCore]\nid=OPEN\n").expect("default parses");
-        assert_eq!(open.closed_container, 0);
+        check_eq! { open.closed_container => 0 }
     }
 
     #[test]
@@ -6863,8 +6204,8 @@ Energy=50000
             HorizontalFix=1
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
-        assert_eq!(parsed.contain_blast, 1);
-        assert_eq!(parsed.no_horizontal_move, 1);
+        check_eq! { parsed.contain_blast => 1 }
+        check_eq! { parsed.no_horizontal_move => 1 }
 
         let data = br#"
             [DefCore]
@@ -6872,8 +6213,8 @@ Energy=50000
             Name=Stone
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
-        assert_eq!(parsed.contain_blast, 0, "default: contents take blasts");
-        assert_eq!(parsed.no_horizontal_move, 0, "default: movable");
+        check_eq! { parsed.contain_blast => 0, "default: contents take blasts" }
+        check_eq! { parsed.no_horizontal_move => 0, "default: movable" }
     }
 
     #[test]
@@ -6888,7 +6229,7 @@ Energy=50000
             BlastIncinerate=50
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
-        assert_eq!(parsed.blast_incinerate, 50);
+        check_eq! { parsed.blast_incinerate => 50 }
 
         let data = br#"
             [DefCore]
@@ -6896,7 +6237,7 @@ Energy=50000
             Name=Stone
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
-        assert_eq!(parsed.blast_incinerate, 0, "default: no blast incinerate");
+        check_eq! { parsed.blast_incinerate => 0, "default: no blast incinerate" }
     }
 
     #[test]
@@ -6904,20 +6245,20 @@ Energy=50000
         // C4Shape::CompileFunc compiles FireTop directly into DefCore with
         // default zero (C4Shape.cpp:496-510; C4Def.cpp:300-302).
         let parsed = parse_def_core(b"[DefCore]\nid=WMPF\nFireTop=10\n").expect("def core parses");
-        assert_eq!(parsed.fire_top, 10);
+        check_eq! { parsed.fire_top => 10 }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("default def core parses");
-        assert_eq!(defaulted.fire_top, 0);
+        check_eq! { defaulted.fire_top => 0 }
     }
 
     #[test]
     fn parse_def_core_lift_top_and_default() {
         // C4Def.cpp:385 stores LiftTop as a signed DefCore integer.
         let parsed = parse_def_core(b"[DefCore]\nid=ELEV\nLiftTop=20\n").expect("def core parses");
-        assert_eq!(parsed.lift_top, 20);
+        check_eq! { parsed.lift_top => 20 }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=ELEV\n").expect("default def core parses");
-        assert_eq!(defaulted.lift_top, 0);
+        check_eq! { defaulted.lift_top => 0 }
     }
 
     #[test]
@@ -6940,22 +6281,14 @@ Energy=50000
             NoFight=1
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
-        assert_eq!(
-            parsed.entrance,
-            Some(PictureRect {
-                x: -10,
-                y: 20,
-                width: 20,
-                height: 15
-            })
-        );
-        assert!(parsed.exclusive);
-        assert!(parsed.prey);
-        assert!(parsed.edible);
-        assert_eq!(parsed.rotated_entrance, 45);
-        assert!(parsed.chopable);
-        assert!(parsed.attract_lightning);
-        assert!(parsed.no_fight);
+        check_eq! { parsed.entrance => Some(PictureRect {x: -10, y: 20, width: 20, height: 15}) }
+        check! { parsed.exclusive }
+        check! { parsed.prey }
+        check! { parsed.edible }
+        check_eq! { parsed.rotated_entrance => 45 }
+        check! { parsed.chopable }
+        check! { parsed.attract_lightning }
+        check! { parsed.no_fight }
 
         let data = br#"
             [DefCore]
@@ -6963,14 +6296,14 @@ Energy=50000
             Name=Stone
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
-        assert_eq!(parsed.entrance, None, "default: no entrance area");
-        assert!(!parsed.exclusive);
-        assert!(!parsed.prey);
-        assert!(!parsed.edible);
-        assert_eq!(parsed.rotated_entrance, 0);
-        assert!(!parsed.chopable);
-        assert!(!parsed.attract_lightning);
-        assert!(!parsed.no_fight);
+        check_eq! { parsed.entrance => None, "default: no entrance area" }
+        check! { !parsed.exclusive }
+        check! { !parsed.prey }
+        check! { !parsed.edible }
+        check_eq! { parsed.rotated_entrance => 0 }
+        check! { !parsed.chopable }
+        check! { !parsed.attract_lightning }
+        check! { !parsed.no_fight }
     }
 
     #[test]
@@ -6989,8 +6322,8 @@ Name=Walk
 Procedure=Walk
 "#;
         let map = parse_act_map(data).expect("act map parsed");
-        assert!(map.get("Build").expect("build action").disabled);
-        assert!(!map.get("Walk").expect("walk action").disabled);
+        check! { map.get("Build").expect("build action").disabled }
+        check! { !map.get("Walk").expect("walk action").disabled }
     }
 
     #[test]
@@ -7038,53 +6371,36 @@ length=9
 "#;
         let map = parse_act_map(data).expect("complete action table parses");
         let action = map.get("Reflect").expect("reflection action exists");
-        assert_eq!(map.get("").and_then(|action| action.length), Some(5));
+        check_eq! { map.get("").and_then(|action| action.length) => Some(5) }
         let text_defaults = map.get("TextDefaults").expect("text-default action exists");
-        assert_eq!(text_defaults.reflected_ints.get("Directions"), Some(&1));
-        assert_eq!(text_defaults.reflected_ints.get("Reverse"), Some(&0));
-        assert_eq!(text_defaults.reflected_ints.get("Step"), Some(&1));
-        assert_eq!(text_defaults.reflected_ints.get("Attach"), Some(&0));
-        assert_eq!(text_defaults.reflected_ints.get("EnergyUsage"), Some(&12));
-        assert_eq!(text_defaults.length, None, "lower-case key is unknown");
-        assert_eq!(action.procedure.as_deref(), Some("OddProcedure"));
-        assert_eq!(action.next_action.as_deref(), Some("Missing"));
-        assert_eq!(action.start_call, None, "CrossMap clears None callbacks");
-        assert_eq!(
-            action.abort_call, None,
-            "CrossMap clears None case-insensitively"
-        );
-        assert_eq!(action.end_call.as_deref(), Some("End"));
-        assert_eq!(action.phase_call.as_deref(), Some("Phase"));
-        assert_eq!(action.sound.as_deref(), Some("TravelSound"));
-        assert_eq!(action.in_liquid_action.as_deref(), Some("Swim"));
-        assert_eq!(action.turn_action.as_deref(), Some("Turn"));
-        assert_eq!(
-            action.facet,
-            Some(ActionFacet {
-                x: 1,
-                y: 0,
-                width: 3,
-                height: 4,
-                target_x: 0,
-                target_y: 6,
-            })
-        );
-        assert!(action.no_other_action);
-        assert!(action.disabled);
-        assert!(action.facet_base);
-        assert!(action.facet_top_face);
-        assert!(action.facet_target_stretch);
-        assert!(action.reverse);
-        assert_eq!(action.directions, Some(-2));
-        assert_eq!(action.flip_dir, Some(-3));
-        assert_eq!(action.length, Some(-4));
-        assert_eq!(action.delay, Some(-6));
-        assert_eq!(action.step, Some(-11));
-        assert_eq!(
-            action.attach,
-            (-5i32) as u32,
-            "bit tests keep raw two's-complement bits"
-        );
+        check_eq! { text_defaults.reflected_ints.get("Directions") => Some(&1) }
+        check_eq! { text_defaults.reflected_ints.get("Reverse") => Some(&0) }
+        check_eq! { text_defaults.reflected_ints.get("Step") => Some(&1) }
+        check_eq! { text_defaults.reflected_ints.get("Attach") => Some(&0) }
+        check_eq! { text_defaults.reflected_ints.get("EnergyUsage") => Some(&12) }
+        check_eq! { text_defaults.length => None, "lower-case key is unknown" }
+        check_eq! { action.procedure.as_deref() => Some("OddProcedure") }
+        check_eq! { action.next_action.as_deref() => Some("Missing") }
+        check_eq! { action.start_call => None, "CrossMap clears None callbacks" }
+        check_eq! { action.abort_call => None, "CrossMap clears None case-insensitively" }
+        check_eq! { action.end_call.as_deref() => Some("End") }
+        check_eq! { action.phase_call.as_deref() => Some("Phase") }
+        check_eq! { action.sound.as_deref() => Some("TravelSound") }
+        check_eq! { action.in_liquid_action.as_deref() => Some("Swim") }
+        check_eq! { action.turn_action.as_deref() => Some("Turn") }
+        check_eq! { action.facet => Some(ActionFacet {x: 1, y: 0, width: 3, height: 4, target_x: 0, target_y: 6,}) }
+        check! { action.no_other_action }
+        check! { action.disabled }
+        check! { action.facet_base }
+        check! { action.facet_top_face }
+        check! { action.facet_target_stretch }
+        check! { action.reverse }
+        check_eq! { action.directions => Some(-2) }
+        check_eq! { action.flip_dir => Some(-3) }
+        check_eq! { action.length => Some(-4) }
+        check_eq! { action.delay => Some(-6) }
+        check_eq! { action.step => Some(-11) }
+        check_eq! { action.attach => (-5i32) as u32, "bit tests keep raw two's-complement bits" }
         for (entry, expected) in [
             ("Directions", -2),
             ("FlipDir", -3),
@@ -7101,7 +6417,7 @@ length=9
             ("Reverse", 2),
             ("Step", -11),
         ] {
-            assert_eq!(action.reflected_ints.get(entry), Some(&expected), "{entry}");
+            check_eq! { action.reflected_ints.get(entry) => Some(&expected), "{entry}" }
         }
     }
 
@@ -7115,7 +6431,7 @@ DigFree=24
 "#;
         let map = parse_act_map(data).expect("act map parsed");
         let dig = map.get("Dig").expect("dig action present");
-        assert_eq!(dig.dig_free, Some(24));
+        check_eq! { dig.dig_free => Some(24) }
     }
 
     #[test]
@@ -7128,8 +6444,8 @@ Attach=CNAT_Left|CNAT_Bottom
 "#;
         let map = parse_act_map(data).expect("act map parsed");
         let scale = map.get("Scale").expect("scale action present");
-        assert_eq!(scale.attach, 9);
-        assert_eq!(scale.reflected_ints.get("Attach"), Some(&9));
+        check_eq! { scale.attach => 9 }
+        check_eq! { scale.reflected_ints.get("Attach") => Some(&9) }
     }
 
     #[test]
@@ -7144,8 +6460,8 @@ Name=Close
 Length=9
 "#;
         let map = parse_act_map(data).expect("commented action headers parse");
-        assert_eq!(map.get("Open").and_then(|action| action.length), Some(7));
-        assert_eq!(map.get("Close").and_then(|action| action.length), Some(9));
+        check_eq! { map.get("Open").and_then(|action| action.length) => Some(7) }
+        check_eq! { map.get("Close").and_then(|action| action.length) => Some(9) }
     }
 
     #[test]
@@ -7156,9 +6472,9 @@ Length=9
         .expect("CR-only ActMap parses");
 
         let first = map.get("First").expect("first action exists");
-        assert_eq!(first.length, Some(7));
-        assert_eq!(first.next_action_index, 1);
-        assert_eq!(map.get("Second").and_then(|action| action.length), Some(9));
+        check_eq! { first.length => Some(7) }
+        check_eq! { first.next_action_index => 1 }
+        check_eq! { map.get("Second").and_then(|action| action.length) => Some(9) }
     }
 
     #[test]
@@ -7181,15 +6497,15 @@ Name=Second
 Default=Ghost
 "#;
         let map = parse_act_map(data).expect("C++ name-tree edge map parses");
-        assert_eq!(map.default_action, None, "Default is not an ActMap field");
-        assert_eq!(map.actions.len(), 8, "every raw '[' allocates one slot");
-        assert_eq!(map.actions[0].0, "First");
-        assert_eq!(map.actions[0].1.length, Some(7));
-        assert_eq!(map.actions[0].1.delay, Some(5));
-        assert_eq!(map.actions[0].1.sound.as_deref(), Some("["));
-        assert_eq!(map.actions[1].0, "Second");
-        assert!(map.actions[2..].iter().all(|(name, _)| name.is_empty()));
-        assert!(map.get("Nested").is_none(), "nested Action is not root");
+        check_eq! { map.default_action => None, "Default is not an ActMap field" }
+        check_eq! { map.actions.len() => 8, "every raw '[' allocates one slot" }
+        check_eq! { map.actions[0].0 => "First" }
+        check_eq! { map.actions[0].1.length => Some(7) }
+        check_eq! { map.actions[0].1.delay => Some(5) }
+        check_eq! { map.actions[0].1.sound.as_deref() => Some("[") }
+        check_eq! { map.actions[1].0 => "Second" }
+        check! { map.actions[2..].iter().all(|(name, _)| name.is_empty()) }
+        check! { map.get("Nested").is_none(), "nested Action is not root" }
     }
 
     #[test]
@@ -7202,36 +6518,30 @@ Default=Ghost
         data.extend_from_slice(b"\0[Action]\nName=AfterNul\n");
 
         let map = parse_act_map(&data).expect("raw-byte ActMap parses");
-        assert_eq!(map.actions.len(), 1, "post-NUL brackets are invisible");
+        check_eq! { map.actions.len() => 1, "post-NUL brackets are invisible" }
         let raw = map.get("Raw").expect("pre-NUL action exists");
         let sound = clonk_script::c4_string_bytes(raw.sound.as_deref().expect("Sound retained"));
-        assert_eq!(sound, [vec![b'a'; 29], vec![0xc3]].concat());
-        assert_eq!(
-            clonk_script::c4_string_bytes(raw.phase_call.as_deref().expect("raw call retained")),
-            vec![0xff]
-        );
-        assert!(map.get("AfterNul").is_none());
+        check_eq! { sound => [vec![b'a'; 29], vec![0xc3]].concat() }
+        check_eq! { clonk_script::c4_string_bytes(raw.phase_call.as_deref().expect("raw call retained")) => vec![0xff] }
+        check! { map.get("AfterNul").is_none() }
     }
 
     #[test]
     fn action_int_and_attach_parsing_follow_stdcompiler_cursors() {
-        assert_eq!(parse_action_i32("-0x2"), Some(0));
-        assert_eq!(parse_action_i32("+0x2"), Some(0));
-        assert_eq!(parse_action_i32("0x10junk"), Some(16));
-        assert_eq!(parse_action_i32("junk"), None);
+        check_eq! { parse_action_i32("-0x2") => Some(0) }
+        check_eq! { parse_action_i32("+0x2") => Some(0) }
+        check_eq! { parse_action_i32("0x10junk") => Some(16) }
+        check_eq! { parse_action_i32("junk") => None }
         if std::mem::size_of::<std::os::raw::c_long>() == 8 {
-            assert_eq!(parse_action_i32("2147483648"), Some(i32::MIN));
-            assert_eq!(parse_action_i32("0xFFFFFFFF"), Some(-1));
-            assert_eq!(parse_action_i32("999999999999999999999999"), Some(-1));
-            assert_eq!(parse_action_i32("-999999999999999999999999"), Some(0));
+            check_eq! { parse_action_i32("2147483648") => Some(i32::MIN) }
+            check_eq! { parse_action_i32("0xFFFFFFFF") => Some(-1) }
+            check_eq! { parse_action_i32("999999999999999999999999") => Some(-1) }
+            check_eq! { parse_action_i32("-999999999999999999999999") => Some(0) }
         } else {
-            assert_eq!(parse_action_i32("2147483648"), Some(i32::MAX));
-            assert_eq!(parse_action_i32("0xFFFFFFFF"), Some(i32::MAX));
-            assert_eq!(parse_action_i32("999999999999999999999999"), Some(i32::MAX));
-            assert_eq!(
-                parse_action_i32("-999999999999999999999999"),
-                Some(i32::MIN)
-            );
+            check_eq! { parse_action_i32("2147483648") => Some(i32::MAX) }
+            check_eq! { parse_action_i32("0xFFFFFFFF") => Some(i32::MAX) }
+            check_eq! { parse_action_i32("999999999999999999999999") => Some(i32::MAX) }
+            check_eq! { parse_action_i32("-999999999999999999999999") => Some(i32::MIN) }
         }
 
         for (source, expected) in [
@@ -7244,15 +6554,15 @@ Default=Ghost
             ("|CNAT_Left", 0),
             ("CNAT_Left|#comment", 0),
         ] {
-            assert_eq!(parse_action_attach(source), expected, "{source}");
+            check_eq! { parse_action_attach(source) => expected, "{source}" }
         }
 
         let map =
             parse_act_map(b"[Action]\nName=Numbers\nLength=-0x2\nAttach=CNAT_Left # comment\n")
                 .expect("numeric cursor integration parses");
         let action = map.get("Numbers").expect("numeric action exists");
-        assert_eq!(action.reflected_ints.get("Length"), Some(&0));
-        assert_eq!(action.reflected_ints.get("Attach"), Some(&1));
+        check_eq! { action.reflected_ints.get("Length") => Some(&0) }
+        check_eq! { action.reflected_ints.get("Attach") => Some(&1) }
     }
 
     #[test]
@@ -7266,17 +6576,9 @@ Default=Ghost
             Picture=1,2,32,24
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.value, 75);
-        assert_eq!(parsed.mass, 12);
-        assert_eq!(
-            parsed.picture,
-            Some(PictureRect {
-                x: 1,
-                y: 2,
-                width: 32,
-                height: 24
-            })
-        );
+        check_eq! { parsed.value => 75 }
+        check_eq! { parsed.mass => 12 }
+        check_eq! { parsed.picture => Some(PictureRect {x: 1, y: 2, width: 32, height: 24}) }
     }
 
     #[test]
@@ -7292,46 +6594,30 @@ Default=Ghost
             Collectible=1
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(
-            parsed.shape,
-            Some(PictureRect {
-                x: -10,
-                y: -20,
-                width: 20,
-                height: 40
-            })
-        );
-        assert_eq!(
-            parsed.collection,
-            Some(PictureRect {
-                x: -5,
-                y: -10,
-                width: 10,
-                height: 20
-            })
-        );
-        assert_eq!(parsed.collection_limit, 3);
-        assert!(parsed.collectible);
+        check_eq! { parsed.shape => Some(PictureRect {x: -10, y: -20, width: 20, height: 40}) }
+        check_eq! { parsed.collection => Some(PictureRect {x: -5, y: -10, width: 10, height: 20}) }
+        check_eq! { parsed.collection_limit => 3 }
+        check! { parsed.collectible }
     }
 
     #[test]
     fn parse_def_core_fragile_uses_nonzero_truthiness_and_defaults_false() {
         let parsed =
             parse_def_core(b"[DefCore]\nid=BOOM\nFragile=-2\n").expect("Fragile DefCore parses");
-        assert!(parsed.fragile);
+        check! { parsed.fragile }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=SAFE\n").expect("default DefCore parses");
-        assert!(!defaulted.fragile);
+        check! { !defaulted.fragile }
     }
 
     #[test]
     fn parse_def_core_projectile_preserves_signed_value_and_default() {
         let parsed = parse_def_core(b"[DefCore]\nid=ROCK\nProjectile=-2\n")
             .expect("Projectile DefCore parses");
-        assert_eq!(parsed.projectile, -2);
+        check_eq! { parsed.projectile => -2 }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=SAFE\n").expect("default DefCore parses");
-        assert_eq!(defaulted.projectile, 0);
+        check_eq! { defaulted.projectile => 0 }
     }
 
     #[test]
@@ -7341,10 +6627,10 @@ Default=Ghost
         // nonzero value as excluding the object from get/activate menus.
         let parsed =
             parse_def_core(b"[DefCore]\nid=LOCK\nNoGet=-2\n").expect("NoGet DefCore parses");
-        assert_eq!(parsed.no_get, -2);
+        check_eq! { parsed.no_get => -2 }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=OPEN\n").expect("default DefCore parses");
-        assert_eq!(defaulted.no_get, 0);
+        check_eq! { defaulted.no_get => 0 }
     }
 
     #[test]
@@ -7357,7 +6643,7 @@ Default=Ghost
             GrabPutGet=C4D_GrabGet|C4D_GrabPut
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.grab_put_get, 3);
+        check_eq! { parsed.grab_put_get => 3 }
 
         let data = br#"
             [DefCore]
@@ -7365,19 +6651,19 @@ Default=Ghost
             GrabPutGet=C4D_GrabPut
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.grab_put_get, 1);
+        check_eq! { parsed.grab_put_get => 1 }
 
         let get_only = parse_def_core(b"[DefCore]\nid=GETR\nGrabPutGet=C4D_GrabGet\n")
             .expect("get-only DefCore parses");
-        assert_eq!(get_only.grab_put_get, 2);
+        check_eq! { get_only.grab_put_get => 2 }
 
         // Hazard's shipped SupplyBox uses the equivalent decimal form.
         let numeric = parse_def_core(b"[DefCore]\nid=SUPP\nGrabPutGet=3\n")
             .expect("numeric GrabPutGet parses");
-        assert_eq!(numeric.grab_put_get, 3);
+        check_eq! { numeric.grab_put_get => 3 }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("default DefCore parses");
-        assert_eq!(defaulted.grab_put_get, 0);
+        check_eq! { defaulted.grab_put_get => 0 }
     }
 
     #[test]
@@ -7390,14 +6676,14 @@ Default=Ghost
             VehicleControl=2
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.vehicle_control, 2);
+        check_eq! { parsed.vehicle_control => 2 }
 
         let data = br#"
             [DefCore]
             id=CONT
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.vehicle_control, 0, "default 0");
+        check_eq! { parsed.vehicle_control => 0, "default 0" }
     }
 
     #[test]
@@ -7411,17 +6697,7 @@ Default=Ghost
             SolidMask=2,3,8,9,-1,4
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(
-            parsed.solid_mask,
-            Some(TargetRect {
-                x: 2,
-                y: 3,
-                width: 8,
-                height: 9,
-                target_x: -1,
-                target_y: 4,
-            })
-        );
+        check_eq! { parsed.solid_mask => Some(TargetRect {x: 2, y: 3, width: 8, height: 9, target_x: -1, target_y: 4,}) }
     }
 
     #[test]
@@ -7434,20 +6710,10 @@ Default=Ghost
             TopFace=0,1,24,26,-3,4
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(
-            parsed.top_face,
-            Some(TargetRect {
-                x: 0,
-                y: 1,
-                width: 24,
-                height: 26,
-                target_x: -3,
-                target_y: 4,
-            })
-        );
+        check_eq! { parsed.top_face => Some(TargetRect {x: 0, y: 1, width: 24, height: 26, target_x: -3, target_y: 4,}) }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=ELEC\n").expect("defcore parsed");
-        assert_eq!(defaulted.top_face, None, "C4TargetRect defaults empty");
+        check_eq! { defaulted.top_face => None, "C4TargetRect defaults empty" }
     }
 
     #[test]
@@ -7458,7 +6724,7 @@ Default=Ghost
             Rotate=12
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.rotateable, 12);
+        check_eq! { parsed.rotateable => 12 }
     }
 
     #[test]
@@ -7472,10 +6738,10 @@ Default=Ghost
             StretchGrowth=1
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert!(parsed.stretch_growth);
+        check! { parsed.stretch_growth }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=JOLT\n").expect("defcore parsed");
-        assert!(!defaulted.stretch_growth);
+        check! { !defaulted.stretch_growth }
     }
 
     #[test]
@@ -7483,10 +6749,10 @@ Default=Ghost
         // C4Def.cpp:392: nonzero Oversize removes DoCon's upper FullCon
         // clamp, while an omitted field defaults to zero.
         let parsed = parse_def_core(b"[DefCore]\nid=GROW\nOversize=-2\n").expect("defcore parsed");
-        assert!(parsed.oversize, "every nonzero C++ BOOL value is true");
+        check! { parsed.oversize, "every nonzero C++ BOOL value is true" }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=JOLT\n").expect("defcore parsed");
-        assert!(!defaulted.oversize);
+        check! { !defaulted.oversize }
     }
 
     #[test]
@@ -7500,10 +6766,10 @@ Default=Ghost
             RotatedSolidmasks=1
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert!(parsed.rotated_solid_masks);
+        check! { parsed.rotated_solid_masks }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=HUT0\n").expect("defcore parsed");
-        assert!(!defaulted.rotated_solid_masks);
+        check! { !defaulted.rotated_solid_masks }
     }
 
     #[test]
@@ -7513,7 +6779,7 @@ Default=Ghost
         let parsed =
             parse_def_core(b"[DefCore]\nid=HUT3\nAutoContextMenu=1\n").expect("defcore parsed");
 
-        assert!(parsed.auto_context_menu);
+        check! { parsed.auto_context_menu }
     }
 
     #[test]
@@ -7522,7 +6788,7 @@ Default=Ghost
         // `AutoContextMenu` field compiles as zero.
         let parsed = parse_def_core(b"[DefCore]\nid=CLNK\n").expect("defcore parsed");
 
-        assert!(!parsed.auto_context_menu);
+        check! { !parsed.auto_context_menu }
     }
 
     #[test]
@@ -7531,14 +6797,14 @@ Default=Ghost
         // default (src/C4Def.cpp:404), not through the Boolean reader.
         let enabled =
             parse_def_core(b"[DefCore]\nid=CLNK\nSilentCommands=1\n").expect("defcore parsed");
-        assert!(enabled.silent_commands);
+        check! { enabled.silent_commands }
 
         let invalid =
             parse_def_core(b"[DefCore]\nid=CLNK\nSilentCommands=yes\n").expect("defcore parsed");
-        assert!(!invalid.silent_commands);
+        check! { !invalid.silent_commands }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=ROCK\n").expect("defcore parsed");
-        assert!(!defaulted.silent_commands);
+        check! { !defaulted.silent_commands }
     }
 
     #[test]
@@ -7547,14 +6813,14 @@ Default=Ghost
         // DefCore key `ConstructTo` (src/C4Def.cpp:361).
         let parsed =
             parse_def_core(b"[DefCore]\nid=SITE\nConstructTo=DONE\n").expect("defcore parsed");
-        assert_eq!(parsed.build_turn_to.as_deref(), Some("DONE"));
+        check_eq! { parsed.build_turn_to.as_deref() => Some("DONE") }
 
         let defaulted = parse_def_core(b"[DefCore]\nid=SITE\n").expect("defcore parsed");
-        assert!(defaulted.build_turn_to.is_none());
+        check! { defaulted.build_turn_to.is_none() }
 
         let none =
             parse_def_core(b"[DefCore]\nid=SITE\nConstructTo=NONE\n").expect("defcore parsed");
-        assert!(none.build_turn_to.is_none());
+        check! { none.build_turn_to.is_none() }
     }
 
     #[test]
@@ -7587,17 +6853,17 @@ Default=Ghost
             let burn_raw = parsed.burn_turn_to.as_deref().map(clonk_script::c4_id_raw);
             let construct_raw = parsed.build_turn_to.as_deref().map(clonk_script::c4_id_raw);
 
-            assert_eq!(burn_raw, expected_raw, "BurnTo={input}");
-            assert_eq!(construct_raw, expected_raw, "ConstructTo={input}");
+            check_eq! { burn_raw => expected_raw, "BurnTo={input}" }
+            check_eq! { construct_raw => expected_raw, "ConstructTo={input}" }
         }
 
         let high_byte_after_four = parse_def_core(b"[DefCore]\nid=TEST\nBurnTo=FIRE\x80tail\n")
             .expect("a suffix after the fixed buffer is ignored");
-        assert_eq!(high_byte_after_four.burn_turn_to.as_deref(), Some("FIRE"));
+        check_eq! { high_byte_after_four.burn_turn_to.as_deref() => Some("FIRE") }
 
         let high_byte_before_four = parse_def_core(b"[DefCore]\nid=TEST\nBurnTo=FIR\x80E\n")
             .expect("a non-identifier byte terminates the token");
-        assert!(high_byte_before_four.burn_turn_to.is_none());
+        check! { high_byte_before_four.burn_turn_to.is_none() }
     }
 
     #[test]
@@ -7606,16 +6872,16 @@ Default=Ghost
         // with a GOLD-specific default of 1 (src/C4Def.cpp:359,457).
         let explicit = parse_def_core(b"[DefCore]\nid=ORE1\nRebuy=1\nBaseAutoSell=1\n")
             .expect("defcore parsed");
-        assert!(explicit.rebuyable);
-        assert!(explicit.base_auto_sell);
+        check! { explicit.rebuyable }
+        check! { explicit.base_auto_sell }
 
         let gold = parse_def_core(b"[DefCore]\nid=GOLD\n").expect("defcore parsed");
-        assert!(!gold.rebuyable);
-        assert!(gold.base_auto_sell);
+        check! { !gold.rebuyable }
+        check! { gold.base_auto_sell }
 
         let ordinary = parse_def_core(b"[DefCore]\nid=ROCK\n").expect("defcore parsed");
-        assert!(!ordinary.rebuyable);
-        assert!(!ordinary.base_auto_sell);
+        check! { !ordinary.rebuyable }
+        check! { !ordinary.base_auto_sell }
     }
 
     #[test]
@@ -7637,29 +6903,13 @@ Default=Ghost
             UprightAttach=8
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.vertices.len(), 3);
-        assert_eq!(
-            parsed.vertices[0],
-            DefVertex {
-                x: 0,
-                y: 9,
-                cnat: 8,
-                friction: 100,
-            }
-        );
-        assert_eq!(
-            parsed.vertices[2],
-            DefVertex {
-                x: 4,
-                y: 3,
-                cnat: 2,
-                friction: 300,
-            }
-        );
-        assert_eq!(parsed.contact_density, 25);
-        assert!(parsed.contact_function_calls);
-        assert_eq!(parsed.border_bound, 7);
-        assert_eq!(parsed.upright_attach, 8);
+        check_eq! { parsed.vertices.len() => 3 }
+        check_eq! { parsed.vertices[0] => DefVertex {x: 0, y: 9, cnat: 8, friction: 100,} }
+        check_eq! { parsed.vertices[2] => DefVertex {x: 4, y: 3, cnat: 2, friction: 300,} }
+        check_eq! { parsed.contact_density => 25 }
+        check! { parsed.contact_function_calls }
+        check_eq! { parsed.border_bound => 7 }
+        check_eq! { parsed.upright_attach => 8 }
     }
 
     #[test]
@@ -7673,15 +6923,15 @@ Default=Ghost
             VertexFriction=20,30
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.vertices.len(), 4);
-        assert_eq!(parsed.vertices[0].x, -2);
-        assert_eq!(parsed.vertices[1].x, 2);
-        assert_eq!(parsed.vertices[2].x, 0);
-        assert_eq!(parsed.vertices[0].y, 5);
-        assert_eq!(parsed.vertices[1].y, 0);
-        assert_eq!(parsed.vertices[0].friction, 20);
-        assert_eq!(parsed.vertices[1].friction, 30);
-        assert_eq!(parsed.vertices[2].friction, 0);
+        check_eq! { parsed.vertices.len() => 4 }
+        check_eq! { parsed.vertices[0].x => -2 }
+        check_eq! { parsed.vertices[1].x => 2 }
+        check_eq! { parsed.vertices[2].x => 0 }
+        check_eq! { parsed.vertices[0].y => 5 }
+        check_eq! { parsed.vertices[1].y => 0 }
+        check_eq! { parsed.vertices[0].friction => 20 }
+        check_eq! { parsed.vertices[1].friction => 30 }
+        check_eq! { parsed.vertices[2].friction => 0 }
     }
 
     #[test]
@@ -7696,17 +6946,9 @@ Default=Ghost
         )
         .expect("defcore parsed");
 
-        assert_eq!(parsed.vertices.len(), 1);
-        assert_eq!(
-            parsed.vertex_slots[1],
-            DefVertex {
-                x: 30,
-                y: 40,
-                cnat: 10,
-                friction: 250,
-            }
-        );
-        assert_eq!(parsed.vertex_slots.len(), C4D_MAX_VERTEX);
+        check_eq! { parsed.vertices.len() => 1 }
+        check_eq! { parsed.vertex_slots[1] => DefVertex {x: 30, y: 40, cnat: 10, friction: 250,} }
+        check_eq! { parsed.vertex_slots.len() => C4D_MAX_VERTEX }
     }
 
     #[test]
@@ -7770,13 +7012,13 @@ Default=Ghost
             ("NONE=1;ROCK=2", vec![]),
             ("0000=1;ROCK=2", vec![]),
         ] {
-            assert_eq!(parse_components(source), expected, "{source}");
+            check_eq! { parse_components(source) => expected, "{source}" }
         }
 
-        assert!(parse_id_list("Rock").is_empty());
-        assert_eq!(parse_id_list("REQ1;REQ2"), ["REQ1", "REQ2"]);
+        check! { parse_id_list("Rock").is_empty() }
+        check_eq! { parse_id_list("REQ1;REQ2") => ["REQ1", "REQ2"] }
         for source in ["REQ1,REQ2", "REQ1 REQ2", "REQ1;Rock;REQ2", "REQ1=7;REQ2"] {
-            assert_eq!(parse_id_list(source), ["REQ1"], "{source}");
+            check_eq! { parse_id_list(source) => ["REQ1"], "{source}" }
         }
     }
 
@@ -7785,21 +7027,15 @@ Default=Ghost
         let accepted =
             parse_def_core(b"[DefCore]\nid=WSPC\nRequireDef= \tREQ1\nComponents=\t ROCK=2\n")
                 .expect("space/tab-prefixed C4ID lists parse");
-        assert_eq!(accepted.require_defs, ["REQ1"]);
-        assert_eq!(
-            accepted.components,
-            [DefComponent {
-                id: "ROCK".to_string(),
-                count: 2,
-            }]
-        );
+        check_eq! { accepted.require_defs => ["REQ1"] }
+        check_eq! { accepted.components => [DefComponent {id: "ROCK".to_string(), count: 2,}] }
 
         for prefix in ['\u{000b}', '\u{000c}', '\u{00a0}'] {
             let source =
                 format!("[DefCore]\nid=WSPC\nRequireDef={prefix}REQ1\nComponents={prefix}ROCK=2\n");
             let parsed = parse_def_core(source.as_bytes()).expect("DefCore parses");
-            assert!(parsed.require_defs.is_empty(), "prefix {prefix:?}");
-            assert!(parsed.components.is_empty(), "prefix {prefix:?}");
+            check! { parsed.require_defs.is_empty(), "prefix {prefix:?}" }
+            check! { parsed.components.is_empty(), "prefix {prefix:?}" }
         }
     }
 
@@ -7808,20 +7044,16 @@ Default=Ghost
         let temp = tempdir().unwrap();
         let def_dir = temp.path().join("Nested.ocd");
         fs::create_dir(&def_dir).unwrap();
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            br#"[DefCore]
+        write_fixture! { def_dir.join("DefCore.txt") => br#"[DefCore]
 id=NNNN
 Name=Nested
 Category=C4D_Object
-"#,
-        )
-        .unwrap();
-        fs::write(def_dir.join("Script.c"), b"func Root() {}").unwrap();
+"# };
+        write_fixture! { def_dir.join("Script.c") => b"func Root() {}" };
         let script_dir = def_dir.join("Helpers");
         fs::create_dir(&script_dir).unwrap();
-        fs::write(script_dir.join("ScriptUS.c"), b"func NestedLocalized() {}").unwrap();
-        fs::write(script_dir.join("Other.c"), b"func NestedOther() {}").unwrap();
+        write_fixture! { script_dir.join("ScriptUS.c") => b"func NestedLocalized() {}" };
+        write_fixture! { script_dir.join("Other.c") => b"func NestedOther() {}" };
 
         let group = Group::open(&def_dir).unwrap();
         let definition =
@@ -7832,10 +7064,10 @@ Category=C4D_Object
             .iter()
             .map(|file| file.path.as_path())
             .collect::<Vec<_>>();
-        assert_eq!(paths, vec![Path::new("Script.c")]);
-        assert_eq!(definition.script.combined(), "\nfunc Root() {}");
-        assert!(!definition.script.combined().contains("NestedLocalized"));
-        assert!(!definition.script.combined().contains("NestedOther"));
+        check_eq! { paths => vec![Path::new("Script.c")] }
+        check_eq! { definition.script.combined() => "\nfunc Root() {}" }
+        check! { !definition.script.combined().contains("NestedLocalized") }
+        check! { !definition.script.combined().contains("NestedOther") }
     }
 
     #[test]
@@ -7843,13 +7075,13 @@ Category=C4D_Object
         let temp = tempdir().unwrap();
         let def_dir = temp.path().join("Scripts.ocd");
         fs::create_dir(&def_dir).unwrap();
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=SCRP\n").unwrap();
-        fs::write(def_dir.join("Script.c"), b"func Base() {}").unwrap();
-        fs::write(def_dir.join("ScriptUS.c"), b"func Localized() {}\n").unwrap();
-        fs::write(def_dir.join("ScriptDE.c"), b"func German() {}").unwrap();
-        fs::write(def_dir.join("C4ScriptUS.c"), b"func Legacy() {}").unwrap();
-        fs::write(def_dir.join("ScriptOld.c"), b"func Obsolete() {}").unwrap();
-        fs::write(def_dir.join("Other.c"), b"func Other() {}").unwrap();
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\nid=SCRP\n" };
+        write_fixture! { def_dir.join("Script.c") => b"func Base() {}" };
+        write_fixture! { def_dir.join("ScriptUS.c") => b"func Localized() {}\n" };
+        write_fixture! { def_dir.join("ScriptDE.c") => b"func German() {}" };
+        write_fixture! { def_dir.join("C4ScriptUS.c") => b"func Legacy() {}" };
+        write_fixture! { def_dir.join("ScriptOld.c") => b"func Obsolete() {}" };
+        write_fixture! { def_dir.join("Other.c") => b"func Other() {}" };
 
         let definition =
             Definition::load_with_languages(&Group::open(&def_dir).unwrap(), &["US", "DE"])
@@ -7860,29 +7092,19 @@ Category=C4D_Object
             .iter()
             .map(|file| file.path.as_path())
             .collect::<Vec<_>>();
-        assert_eq!(
-            paths,
-            vec![
-                Path::new("Script.c"),
-                Path::new("ScriptUS.c"),
-                Path::new("C4ScriptUS.c"),
-            ]
-        );
-        assert_eq!(
-            definition.script.combined(),
-            "\nfunc Base() {}\nfunc Localized() {}\n\nfunc Legacy() {}"
-        );
-        assert!(!definition.script.combined().contains("//#file"));
-        assert!(!definition.script.combined().contains("German"));
-        assert!(!definition.script.combined().contains("Obsolete"));
-        assert!(!definition.script.combined().contains("Other"));
+        check_eq! { paths => vec![Path::new("Script.c"), Path::new("ScriptUS.c"), Path::new("C4ScriptUS.c"),] }
+        check_eq! { definition.script.combined() => "\nfunc Base() {}\nfunc Localized() {}\n\nfunc Legacy() {}" }
+        check! { !definition.script.combined().contains("//#file") }
+        check! { !definition.script.combined().contains("German") }
+        check! { !definition.script.combined().contains("Obsolete") }
+        check! { !definition.script.combined().contains("Other") }
     }
 
     #[test]
     fn definition_script_restarts_language_order_for_each_segment() {
         let temp = tempdir().unwrap();
-        fs::write(temp.path().join("ScriptDE.c"), b"func German() {}").unwrap();
-        fs::write(temp.path().join("C4ScriptUS.c"), b"func LegacyUS() {}").unwrap();
+        write_fixture! { temp.path().join("ScriptDE.c") => b"func German() {}" };
+        write_fixture! { temp.path().join("C4ScriptUS.c") => b"func LegacyUS() {}" };
 
         let script = load_scripts(
             &Group::open(temp.path()).unwrap(),
@@ -7894,30 +7116,27 @@ Category=C4D_Object
             .iter()
             .map(|file| file.path.as_path())
             .collect::<Vec<_>>();
-        assert_eq!(
-            paths,
-            vec![Path::new("ScriptDE.c"), Path::new("C4ScriptUS.c")]
-        );
-        assert_eq!(script.combined(), "\nfunc German() {}\nfunc LegacyUS() {}");
+        check_eq! { paths => vec![Path::new("ScriptDE.c"), Path::new("C4ScriptUS.c")] }
+        check_eq! { script.combined() => "\nfunc German() {}\nfunc LegacyUS() {}" }
     }
 
     #[test]
     fn definition_script_loads_c4script_localization_without_script_component() {
         let temp = tempdir().unwrap();
-        fs::write(temp.path().join("C4ScriptUS.c"), b"func LegacyOnly() {}").unwrap();
+        write_fixture! { temp.path().join("C4ScriptUS.c") => b"func LegacyOnly() {}" };
 
         let script = load_scripts(&Group::open(temp.path()).unwrap(), &["US"])
             .expect("script component loads");
-        assert_eq!(script.files().len(), 1);
-        assert_eq!(script.files()[0].path, Path::new("C4ScriptUS.c"));
-        assert_eq!(script.combined(), "\nfunc LegacyOnly() {}");
+        check_eq! { script.files().len() => 1 }
+        check_eq! { script.files()[0].path => Path::new("C4ScriptUS.c") }
+        check_eq! { script.combined() => "\nfunc LegacyOnly() {}" }
     }
 
     #[test]
     fn definition_script_empty_language_sequence_uses_one_empty_cpp_segment() {
         let temp = tempdir().unwrap();
-        fs::write(temp.path().join("Script.c"), b"func Base() {}").unwrap();
-        fs::write(temp.path().join("C4Script.c"), b"func Legacy() {}").unwrap();
+        write_fixture! { temp.path().join("Script.c") => b"func Base() {}" };
+        write_fixture! { temp.path().join("C4Script.c") => b"func Legacy() {}" };
         let languages: [&str; 0] = [];
 
         let script = load_scripts(&Group::open(temp.path()).unwrap(), &languages)
@@ -7927,18 +7146,8 @@ Category=C4D_Object
             .iter()
             .map(|file| file.path.as_path())
             .collect::<Vec<_>>();
-        assert_eq!(
-            paths,
-            vec![
-                Path::new("Script.c"),
-                Path::new("Script.c"),
-                Path::new("C4Script.c"),
-            ]
-        );
-        assert_eq!(
-            script.combined(),
-            "\nfunc Base() {}\nfunc Base() {}\nfunc Legacy() {}"
-        );
+        check_eq! { paths => vec![Path::new("Script.c"), Path::new("Script.c"), Path::new("C4Script.c"),] }
+        check_eq! { script.combined() => "\nfunc Base() {}\nfunc Base() {}\nfunc Legacy() {}" }
     }
 
     #[test]
@@ -7947,11 +7156,7 @@ Category=C4D_Object
             env!("CARGO_MANIFEST_DIR"),
             "/../../content/Hazard.c4d/Structural.c4d/Deco.c4d/Screens.c4d/MapScreen.c4d"
         ));
-        assert!(
-            directory.is_dir(),
-            "the initialized official content submodule must provide {}",
-            directory.display()
-        );
+        check! { directory.is_dir(), "the initialized official content submodule must provide {}", directory.display() }
 
         let definition = Definition::load_with_languages(
             &Group::open(directory).expect("open shipped MapScreen definition"),
@@ -7964,38 +7169,28 @@ Category=C4D_Object
             .iter()
             .map(|file| file.path.as_path())
             .collect::<Vec<_>>();
-        assert_eq!(paths, vec![Path::new("Script.c")]);
-        assert!(definition.script.combined().contains("Initialized"));
-        assert!(definition.script.combined().contains("MAP_MasterScreen"));
-        assert!(!definition.script.combined().contains("InitScreens"));
-        assert!(!definition.script.combined().contains("FxMapTimer"));
+        check_eq! { paths => vec![Path::new("Script.c")] }
+        check! { definition.script.combined().contains("Initialized") }
+        check! { definition.script.combined().contains("MAP_MasterScreen") }
+        check! { !definition.script.combined().contains("InitScreens") }
+        check! { !definition.script.combined().contains("FxMapTimer") }
     }
 
     #[test]
     fn script_component_nul_truncates_only_its_own_file() {
         let temp = tempdir().unwrap();
-        fs::write(
-            temp.path().join("Script.c"),
-            b"func Before() {}\0func Hidden() {}",
-        )
-        .unwrap();
-        fs::write(temp.path().join("ScriptUS.c"), b"func After() {}\n").unwrap();
+        write_fixture! { temp.path().join("Script.c") => b"func Before() {}\0func Hidden() {}" };
+        write_fixture! { temp.path().join("ScriptUS.c") => b"func After() {}\n" };
 
         let group = Group::open(temp.path()).unwrap();
         let script = load_scripts(&group, &["US"]).expect("script components load");
         let combined = clonk_script::c4_string_bytes(script.combined());
 
-        assert_eq!(combined, b"\nfunc Before() {}\nfunc After() {}\n");
-        assert!(combined
-            .windows(b"func Before() {}".len())
-            .any(|window| window == b"func Before() {}"));
-        assert!(!combined
-            .windows(b"func Hidden() {}".len())
-            .any(|window| window == b"func Hidden() {}"));
-        assert!(combined
-            .windows(b"func After() {}".len())
-            .any(|window| window == b"func After() {}"));
-        assert!(!combined.contains(&0));
+        check_eq! { combined => b"\nfunc Before() {}\nfunc After() {}\n" }
+        check! { combined.windows(b"func Before() {}".len()).any(|window| window == b"func Before() {}") }
+        check! { !combined.windows(b"func Hidden() {}".len()).any(|window| window == b"func Hidden() {}") }
+        check! { combined.windows(b"func After() {}".len()).any(|window| window == b"func After() {}") }
+        check! { !combined.contains(&0) }
     }
 
     #[test]
@@ -8026,12 +7221,9 @@ Category=C4D_Object
             crate::compress_c4group_image(&raw).unwrap(),
         )
         .unwrap();
-        assert!(group.exists("ScriptUS.c"));
-        assert!(group.read_file("ScriptUS.c").is_err());
-        assert_eq!(
-            group.read_file("ScriptDE.c").unwrap(),
-            b"func Fallback() {}\0func Hidden() {}"
-        );
+        check! { group.exists("ScriptUS.c") }
+        check! { group.read_file("ScriptUS.c").is_err() }
+        check_eq! { group.read_file("ScriptDE.c").unwrap() => b"func Fallback() {}\0func Hidden() {}" }
 
         let definition =
             Definition::load_with_languages(&group, &["US", "DE"]).expect("fallback loads");
@@ -8041,36 +7233,27 @@ Category=C4D_Object
             .iter()
             .map(|file| file.path.as_path())
             .collect::<Vec<_>>();
-        assert_eq!(
-            paths,
-            vec![Path::new("ScriptDE.c"), Path::new("C4ScriptUS.c")]
-        );
-        assert_eq!(
-            definition.script.combined(),
-            "\nfunc Fallback() {}\nfunc Legacy() {}"
-        );
+        check_eq! { paths => vec![Path::new("ScriptDE.c"), Path::new("C4ScriptUS.c")] }
+        check_eq! { definition.script.combined() => "\nfunc Fallback() {}\nfunc Legacy() {}" }
 
         let no_fallback =
             Definition::load_with_languages(&group, &["US"]).expect("failed segment is optional");
-        assert_eq!(no_fallback.script.files().len(), 1);
-        assert_eq!(
-            no_fallback.script.files()[0].path,
-            Path::new("C4ScriptUS.c")
-        );
-        assert_eq!(no_fallback.script.combined(), "\nfunc Legacy() {}");
+        check_eq! { no_fallback.script.files().len() => 1 }
+        check_eq! { no_fallback.script.files()[0].path => Path::new("C4ScriptUS.c") }
+        check_eq! { no_fallback.script.combined() => "\nfunc Legacy() {}" }
     }
 
     #[test]
     fn readable_empty_definition_script_candidate_blocks_language_fallback() {
         let temp = tempdir().unwrap();
-        fs::write(temp.path().join("ScriptUS.c"), []).unwrap();
-        fs::write(temp.path().join("ScriptDE.c"), b"func MustNotLoad() {}").unwrap();
+        write_fixture! { temp.path().join("ScriptUS.c") => [] };
+        write_fixture! { temp.path().join("ScriptDE.c") => b"func MustNotLoad() {}" };
 
         let script = load_scripts(&Group::open(temp.path()).unwrap(), &["US", "DE"])
             .expect("empty candidate loads");
-        assert_eq!(script.files().len(), 1);
-        assert_eq!(script.files()[0].path, Path::new("ScriptUS.c"));
-        assert_eq!(script.combined(), "\n");
+        check_eq! { script.files().len() => 1 }
+        check_eq! { script.files()[0].path => Path::new("ScriptUS.c") }
+        check_eq! { script.combined() => "\n" }
     }
 
     #[test]
@@ -8078,32 +7261,24 @@ Category=C4D_Object
         let temp = tempdir().unwrap();
         let def_dir = temp.path().join("Parent.ocd");
         fs::create_dir(&def_dir).unwrap();
-        fs::write(
-            def_dir.join("DefCore.txt"),
-            br#"[DefCore]
+        write_fixture! { def_dir.join("DefCore.txt") => br#"[DefCore]
 id=PARA
 Name=Parent
 Category=C4D_Object
-"#,
-        )
-        .unwrap();
-        fs::write(def_dir.join("Script.c"), b"func Parent() {}\n").unwrap();
+"# };
+        write_fixture! { def_dir.join("Script.c") => b"func Parent() {}\n" };
         let nested = def_dir.join("Child.ocd");
         fs::create_dir(&nested).unwrap();
-        fs::write(
-            nested.join("DefCore.txt"),
-            br#"[DefCore]
+        write_fixture! { nested.join("DefCore.txt") => br#"[DefCore]
 id=CHLD
 Name=Child
 Category=C4D_Object
-"#,
-        )
-        .unwrap();
-        fs::write(nested.join("Script.c"), b"func Child() {}\n").unwrap();
+"# };
+        write_fixture! { nested.join("Script.c") => b"func Child() {}\n" };
 
         let group = Group::open(&def_dir).unwrap();
         let definition = Definition::load(&group).expect("definition load succeeds");
-        assert_eq!(definition.script.files.len(), 1);
-        assert_eq!(definition.script.files[0].path, PathBuf::from("Script.c"));
+        check_eq! { definition.script.files.len() => 1 }
+        check_eq! { definition.script.files[0].path => PathBuf::from("Script.c") }
     }
 }

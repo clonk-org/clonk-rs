@@ -491,24 +491,19 @@ impl<A: Clone> ContextPanel<A> {
         height: i32,
         local_rows: Vec<(i32, i32, i32)>,
     ) -> Self {
-        let client = IntRect {
-            x: x + MARGIN,
-            y: y + MARGIN,
-            w: (width - 2 * MARGIN).max(0),
-            h: (height - 2 * MARGIN).max(0),
-        };
+        let client = IntRect::new(
+            x + MARGIN,
+            y + MARGIN,
+            (width - 2 * MARGIN).max(0),
+            (height - 2 * MARGIN).max(0),
+        );
         let rows = local_rows
             .into_iter()
             .enumerate()
             .map(
                 |(index, (row_y, row_height, text_indent))| ContextMenuRowLayout {
                     index,
-                    rect: IntRect {
-                        x: client.x,
-                        y: client.y + row_y,
-                        w: client.w,
-                        h: row_height,
-                    },
+                    rect: IntRect::new(client.x, client.y + row_y, client.w, row_height),
                     text_x: client.x + text_indent,
                 },
             )
@@ -516,12 +511,7 @@ impl<A: Clone> ContextPanel<A> {
         Self {
             entries,
             layout: ContextMenuPanelLayout {
-                bounds: IntRect {
-                    x,
-                    y,
-                    w: width,
-                    h: height,
-                },
+                bounds: IntRect::new(x, y, width, height),
                 client,
                 rows,
                 selected: None,
@@ -1651,12 +1641,7 @@ mod tests {
     }
 
     fn screen() -> IntRect {
-        IntRect {
-            x: 0,
-            y: 0,
-            w: 320,
-            h: 200,
-        }
+        IntRect::new(0, 0, 320, 200)
     }
 
     #[test]

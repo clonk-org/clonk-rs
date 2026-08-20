@@ -863,10 +863,9 @@ pub(crate) fn retry_unreached_status_after_disconnect(
         return Vec::new();
     }
 
-    let status = NetworkStatus {
-        target_tick: i32::try_from(current_tick).unwrap_or(i32::MAX),
-        ..barrier.status
-    };
+    let status = barrier
+        .status
+        .with_target_tick(i32::try_from(current_tick).unwrap_or(i32::MAX));
     // ChangeGameStatus immediately asks the runtime to CheckStatusReached.
     // Keep local arrival app-owned even when this target equals the session
     // coordinator's tick; otherwise a one-shot commit can outrun GameApp.

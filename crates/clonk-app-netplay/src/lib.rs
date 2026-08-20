@@ -164,10 +164,10 @@ impl SelectedClientPlayer {
             return Err(SelectedClientPlayerError::PlayerNameContainsNul);
         }
         let color = self.network_color;
-        Ok(clonk_network::PlayerInfoUpdateRequest {
+        Ok(clonk_network::PlayerInfoUpdateRequest::new(
             client_id,
-            flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![ControlPlayerInfoEntry {
+            CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![ControlPlayerInfoEntry {
                 name: self.player_name.clone(),
                 filename: self.module_filename.clone(),
                 flags: PLAYER_INFO_FLAG_HAS_RESOURCE,
@@ -176,7 +176,7 @@ impl SelectedClientPlayer {
                 resource: Some(resource),
                 ..Default::default()
             }],
-        })
+        ))
     }
 
     /// Builds the add-player request sent when an existing client selects a
@@ -208,17 +208,17 @@ impl SelectedClientPlayer {
             return Err(SelectedClientPlayerError::PlayerNameContainsNul);
         }
         let color = self.network_color;
-        Ok(PlayerInfoUpdateRequest {
+        Ok(PlayerInfoUpdateRequest::new(
             client_id,
-            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![ControlPlayerInfoEntry {
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![ControlPlayerInfoEntry {
                 name: self.player_name.clone(),
                 filename: self.module_filename.clone(),
                 color,
                 original_color: color,
                 ..Default::default()
             }],
-        })
+        ))
     }
 }
 
@@ -252,11 +252,7 @@ pub fn build_teamless_offline_initial_player_info(
     let mut registry = ControlPlayerInfoRegistry::default();
     registry
         .admit_request(
-            PlayerInfoUpdateRequest {
-                client_id: 0,
-                flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                players,
-            },
+            PlayerInfoUpdateRequest::new(0, CLIENT_PLAYER_INFO_FLAG_INITIAL, players),
             usize::try_from(max_players).unwrap_or(0),
         )
         .expect("an initial player-info packet remains valid when empty")
@@ -305,11 +301,7 @@ pub fn publish_initial_configured_client_players<E>(
                 .next()
         })
         .collect();
-    clonk_network::PlayerInfoUpdateRequest {
-        client_id,
-        flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-        players,
-    }
+    clonk_network::PlayerInfoUpdateRequest::new(client_id, CLIENT_PLAYER_INFO_FLAG_INITIAL, players)
 }
 
 /// Publishes every configured local participant and combines the successful
@@ -346,11 +338,7 @@ pub fn publish_initial_client_players<E>(
                 .next()
         })
         .collect();
-    clonk_network::PlayerInfoUpdateRequest {
-        client_id,
-        flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-        players,
-    }
+    clonk_network::PlayerInfoUpdateRequest::new(client_id, CLIENT_PLAYER_INFO_FLAG_INITIAL, players)
 }
 
 #[cfg(test)]

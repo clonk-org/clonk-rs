@@ -702,27 +702,6 @@ impl GameApp {
         }
     }
 
-    /// `C4Menu::Lines` as last written by `C4Menu::SetSize`.
-    ///
-    /// `SetMenuSize` writes `Lines` and reruns only `InitSize`, leaving
-    /// `LocationSet` alone (C4Menu.cpp:635-640), so an explicit row count
-    /// issued while the menu is already on screen survives. A row count set
-    /// before the first draw is discarded by that draw's `InitLocation`,
-    /// which recomputes `Lines` from the item count (C4Menu.cpp:713-721,
-    /// 796-797) - the freshly created presentation state reproduces that by
-    /// starting without one.
-    pub(crate) fn script_menu_explicit_lines(
-        &self,
-        owner: i32,
-        target: ObjectId,
-        menu: &clonk_engine::ObjectMenuState,
-    ) -> Option<i32> {
-        self.script_menu_presentations
-            .get(&owner)
-            .filter(|state| same_script_menu_presentation(state, target, menu))
-            .and_then(|state| state.explicit_lines)
-    }
-
     /// `C4Menu::Execute` refills *every* active menu when `Game.iTick35`
     /// wraps, not just the hostility page (C4Menu.cpp:990-1000), so an open
     /// team page follows live joins, switches and the generated-team row.
@@ -2982,12 +2961,12 @@ impl GameApp {
             .context_menu_resources()
             .map_err(|error| Self::gui_overlay_engine_error("C4GUI context menu", error))?;
         let surface = self.graphics.surface();
-        let screen = clonk_frontend::classic_gui::IntRect {
-            x: 0,
-            y: 0,
-            w: surface.width() as i32,
-            h: surface.height() as i32,
-        };
+        let screen = clonk_frontend::classic_gui::IntRect::new(
+            0,
+            0,
+            surface.width() as i32,
+            surface.height() as i32,
+        );
         let (menu, outcome) = ClassicContextMenu::open_with_minimum_width(
             entries,
             anchor,

@@ -712,32 +712,6 @@ impl VoiceChatState {
         Ok(())
     }
 
-    /// Opens a capture no push-to-talk key owns, for a player who has chosen
-    /// voice activation.
-    ///
-    /// A failed open is retried on a bounded cadence. Voice activation has no
-    /// key press to rate-limit it, so a missing or busy microphone must not be
-    /// reopened on every tick; the timer still lets a newly plugged selected
-    /// input recover without leaving the game.
-    pub(crate) fn start_voice_activated_capture(
-        &mut self,
-        echo_reference: Option<VoiceEchoReference>,
-    ) -> Result<(), VoiceCaptureError> {
-        self.start_voice_activated_capture_on_device(echo_reference, None)
-    }
-
-    pub(crate) fn start_voice_activated_capture_on_device(
-        &mut self,
-        echo_reference: Option<VoiceEchoReference>,
-        input_device: Option<VoiceInputDeviceId>,
-    ) -> Result<(), VoiceCaptureError> {
-        self.start_voice_activated_capture_on_device_at(
-            echo_reference,
-            input_device,
-            Instant::now(),
-        )
-    }
-
     pub(crate) fn start_voice_activated_capture_on_device_at(
         &mut self,
         echo_reference: Option<VoiceEchoReference>,

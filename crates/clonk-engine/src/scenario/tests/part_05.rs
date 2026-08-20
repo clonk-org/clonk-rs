@@ -193,23 +193,7 @@
         assert_eq!(created.len(), 0, "no crew at load");
 
         engine
-            .join_player(crate::JoinPlayerConfig {
-                name: "Tester".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
-            }).test_value();
+            .join_player(scenario_join_player_config("Tester")).test_value();
         let snapshot = engine.snapshot();
         let crew: Vec<_> = snapshot
             .objects
@@ -872,23 +856,7 @@
         );
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         engine
-            .join_player(crate::JoinPlayerConfig {
-                name: "Tester".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
-            }).test_value();
+            .join_player(scenario_join_player_config("Tester")).test_value();
         let lingering = engine
             .snapshot()
             .objects

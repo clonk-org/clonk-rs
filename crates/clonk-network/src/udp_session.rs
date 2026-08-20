@@ -3105,11 +3105,8 @@ mod tests {
             .register_route(loopback(), 9, packet_log.clone())
             .expect("test route is unique");
         let drained = sender.lease.drained.clone();
-        let packet = ControlMessage::Status(crate::NetworkStatus {
-            state: crate::NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 5,
-        });
+        let packet =
+            ControlMessage::Status(crate::NetworkStatus::new(crate::NETWORK_STATE_LOBBY, 1, 5));
         let expected = crate::transport::encode_complete_message(packet.clone()).unwrap();
         assert!(sender.try_send(packet).is_ok());
 

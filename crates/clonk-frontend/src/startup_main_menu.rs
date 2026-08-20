@@ -56,15 +56,44 @@ pub struct IntRect {
     pub h: i32,
 }
 
+impl IntRect {
+    pub const fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    pub const fn with_x(self, x: i32) -> Self {
+        Self { x, ..self }
+    }
+
+    pub const fn with_width(self, w: i32) -> Self {
+        Self { w, ..self }
+    }
+
+    pub const fn with_height(self, h: i32) -> Self {
+        Self { h, ..self }
+    }
+
+    pub const fn with_position(self, x: i32, y: i32) -> Self {
+        Self { x, y, ..self }
+    }
+
+    pub const fn with_horizontal(self, x: i32, w: i32) -> Self {
+        Self { x, w, ..self }
+    }
+
+    pub const fn with_vertical(self, y: i32, h: i32) -> Self {
+        Self { y, h, ..self }
+    }
+
+    pub const fn with_size(self, w: i32, h: i32) -> Self {
+        Self { w, h, ..self }
+    }
+}
+
 /// Autosized `C4GUI::Label` bounds for an `ACenter` anchor. Fullscreen
 /// startup titles and the scenario-book caption use this exact geometry.
 pub fn centered_label_rect(anchor: (i32, i32), extent: (i32, i32)) -> IntRect {
-    IntRect {
-        x: anchor.0 - extent.0 / 2,
-        y: anchor.1,
-        w: extent.0,
-        h: extent.1,
-    }
+    IntRect::new(anchor.0 - extent.0 / 2, anchor.1, extent.0, extent.1)
 }
 
 /// Resolves an autosized centered label's own tooltip. Callers supply the
@@ -110,12 +139,12 @@ pub fn main_menu_layout(w: i32, h: i32) -> MainMenuLayout {
     let margin_x = if w < 500 { 2 } else { w / 50 };
     let margin_y = if h < 320 { 2 } else { h * 2 / 75 };
     let margin_top = 50 + margin_y;
-    let client = IntRect {
-        x: margin_x,
-        y: margin_top,
-        w: w - 2 * margin_x,
-        h: h - margin_top - margin_y,
-    };
+    let client = IntRect::new(
+        margin_x,
+        margin_top,
+        w - 2 * margin_x,
+        h - margin_top - margin_y,
+    );
 
     // Button column: right 2/5 of the dialog bounds, inset Wdt/26 horizontally
     // and 40 + Hgt/8 vertically; each button takes 40px (C4GUI_BigButtonHgt)
@@ -130,12 +159,12 @@ pub fn main_menu_layout(w: i32, h: i32) -> MainMenuLayout {
     let padding = 2;
     let mut buttons = [IntRect::default(); 6];
     for (i, rect) in buttons.iter_mut().enumerate() {
-        *rect = IntRect {
-            x: client.x + col_x,
-            y: client.y + inset_y + padding + (i as i32) * (button_h + 2 * padding),
-            w: col_w,
-            h: button_h,
-        };
+        *rect = IntRect::new(
+            client.x + col_x,
+            client.y + inset_y + padding + (i as i32) * (button_h + 2 * padding),
+            col_w,
+            button_h,
+        );
     }
 
     MainMenuLayout {
@@ -324,12 +353,12 @@ impl StartupMainMenu {
             },
             |fonts| fonts.title.measure(&expanded_label, true),
         );
-        IntRect {
-            x: layout.participants_anchor.0 - width,
-            y: layout.participants_anchor.1,
-            w: width,
-            h: height,
-        }
+        IntRect::new(
+            layout.participants_anchor.0 - width,
+            layout.participants_anchor.1,
+            width,
+            height,
+        )
     }
 
     pub fn participants_contains(&self, participants_label: &str, point: GuiPoint) -> bool {
@@ -359,12 +388,12 @@ impl StartupMainMenu {
                 )
             },
         );
-        let rect = IntRect {
-            x: layout.fanproject_anchor_x - width,
-            y: layout.client.y + layout.client.h - line_height / 2,
-            w: width,
-            h: line_height,
-        };
+        let rect = IntRect::new(
+            layout.fanproject_anchor_x - width,
+            layout.client.y + layout.client.h - line_height / 2,
+            width,
+            line_height,
+        );
         point.x >= rect.x as f32
             && point.y >= rect.y as f32
             && point.x < (rect.x + rect.w) as f32
@@ -1049,15 +1078,7 @@ mod tests {
         let rect = menu.participants_rect(label);
         let (expanded, _) = expand_hotkey_markup(label);
         let (width, height) = fonts.title.measure(&expanded, true);
-        assert_eq!(
-            rect,
-            IntRect {
-                x: 1224 - width,
-                y: 637,
-                w: width,
-                h: height,
-            }
-        );
+        assert_eq!(rect, IntRect::new(1224 - width, 637, width, height));
         assert!(menu.participants_contains(label, GuiPoint::new(rect.x as f32, rect.y as f32),));
         assert!(!menu.participants_contains(
             label,
@@ -1126,12 +1147,7 @@ mod tests {
         let target = StartupTooltip::text("&Player Selection");
         assert_eq!(
             centered_label_rect((100, 8), (21, 34)),
-            IntRect {
-                x: 90,
-                y: 8,
-                w: 21,
-                h: 34,
-            }
+            IntRect::new(90, 8, 21, 34)
         );
         assert_eq!(
             centered_label_tooltip_at(GuiPoint::new(90.0, 8.0), (100, 8), (21, 34), target.clone(),),

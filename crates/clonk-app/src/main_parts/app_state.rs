@@ -5129,12 +5129,12 @@ impl NetworkLobbyLayout {
                             .saturating_mul(row_height)
                         - resource_scroll
                         + 1;
-                    let rect = clonk_frontend::classic_gui::IntRect {
-                        x: layout.roster_client.x + layout.roster_client.w - 18,
+                    let rect = clonk_frontend::classic_gui::IntRect::new(
+                        layout.roster_client.x + layout.roster_client.w - 18,
                         y,
-                        w: 16,
-                        h: 16,
-                    };
+                        16,
+                        16,
+                    );
                     let visible = rect.x < layout.roster_client.x + layout.roster_client.w
                         && rect.x + rect.w > layout.roster_client.x
                         && rect.y < layout.roster_client.y + layout.roster_client.h
@@ -5613,12 +5613,12 @@ impl NetworkLobbyState {
             && self.preload.manual_button_present
             && self.preload.eligible
         {
-            layout.preload_button = Some(clonk_frontend::classic_gui::IntRect {
-                x: layout.roster.x,
-                y: layout.roster.y + (layout.roster.h - 32).max(0),
-                w: layout.roster.w,
-                h: 32.min(layout.roster.h),
-            });
+            layout.preload_button = Some(clonk_frontend::classic_gui::IntRect::new(
+                layout.roster.x,
+                layout.roster.y + (layout.roster.h - 32).max(0),
+                layout.roster.w,
+                32.min(layout.roster.h),
+            ));
         }
         self.layout = Some(NetworkLobbyLayout::from_classic(
             &layout,
@@ -5995,23 +5995,6 @@ impl NetworkLobbyState {
                 } else {
                     controller.pointer_down(point, layout, roster)
                 }
-            },
-        )
-    }
-
-    fn classic_pointer_up(
-        &mut self,
-        point: GuiPoint,
-        surface: &Surface,
-        assets: &FrontendAssets,
-        scenario_game_options: &GameOptionButtons,
-    ) -> Result<Vec<ClassicLobbyAction>> {
-        self.with_classic_controller_input(
-            surface,
-            assets,
-            scenario_game_options,
-            |controller, layout, roster| {
-                controller.pointer_up(point, layout, roster, Instant::now())
             },
         )
     }
@@ -6678,21 +6661,6 @@ impl MenuState {
                 self.applied_search_text.trim()
             )
         })
-    }
-
-    /// The scenario-selection screen described for a platform accessibility
-    /// bridge (clonk-org/clonk-rs#392).
-    ///
-    /// The count and the no-result guidance are read from the same accessors
-    /// the screen draws from, so an announcement cannot drift from the pixels
-    /// a sighted player is looking at.
-    pub(crate) fn scen_sel_accessibility(&self) -> clonk_frontend::accessibility::ScenSelSemantics {
-        clonk_frontend::accessibility::scen_sel_semantics(
-            self.search_text(),
-            self.search_focused(),
-            self.enhanced_search_caption().as_deref(),
-            self.enhanced_search_empty_message().as_deref(),
-        )
     }
 
     pub(crate) fn set_search_text(&mut self, text: impl Into<String>) {

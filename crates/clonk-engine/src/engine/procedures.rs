@@ -90,19 +90,8 @@ impl Engine {
                                 .map(|definition| definition.name().to_string())
                         })
                         .unwrap_or_else(|| object.definition_id.clone());
-                    self.messages.add_message(MessageSpec {
-                        kind: message::MessageKind::Target,
-                        text: format!("{name} is stuck!"),
-                        target: Some(target_id),
-                        player: None,
-                        offset: Vector2::ZERO,
-                        color: 0xffff_ffff,
-                        flags: 0,
-                        width: None,
-                        decoration: None,
-                        frame_decoration: None,
-                        portrait: None,
-                    });
+                    self.messages
+                        .add_message(MessageSpec::target(format!("{name} is stuck!"), target_id));
                     let callback_definition_id = self.objects[target_idx].definition_id.clone();
                     if let Some(action_library) = self
                         .definitions
@@ -647,19 +636,11 @@ impl Engine {
                             })
                         {
                             let controller = self.objects[builder_idx].state.controller;
-                            self.messages.add_message(MessageSpec {
-                                kind: message::MessageKind::Target,
-                                text,
-                                target: Some(builder_id),
-                                player: (controller != OWNER_NONE).then_some(controller),
-                                offset: Vector2::new(-1, -1),
-                                color: 0xffff_ffff,
-                                flags: 0,
-                                width: None,
-                                decoration: None,
-                                frame_decoration: None,
-                                portrait: None,
-                            });
+                            self.messages.add_message(
+                                MessageSpec::target(text, builder_id)
+                                    .with_player((controller != OWNER_NONE).then_some(controller))
+                                    .with_offset(Vector2::new(-1, -1)),
+                            );
                         }
                     }
                 }
@@ -1101,58 +1082,6 @@ impl Engine {
             .retain(|&id| id != material_id);
         let _ = self.assign_object_removal(material_id)?;
         Ok(())
-    }
-
-    fn reset_action_to_default(
-        &mut self,
-        idx: usize,
-        definition_id: &DefinitionId,
-        clear_targets: bool,
-    ) {
-        let library = self
-            .definitions
-            .get(definition_id)
-            .map(Definition::shared_action_library_handle)
-            .unwrap_or_default();
-        let default_action = library.default_action().to_string();
-        let previous = self.objects[idx].state.action.clone();
-
-        let update = ActionUpdate {
-            name: Some(default_action),
-            phase: Some(0),
-            ticks: Some(0),
-            force: true,
-            data: None,
-            target: if clear_targets { Some(None) } else { None },
-            target2: if clear_targets { Some(None) } else { None },
-            callbacks_dispatched: false,
-        };
-
-        let object = &mut self.objects[idx];
-        let result = object
-            .state
-            .action
-            .apply_update_with_library(&update, &library);
-        // SetAction fix resync (C4Object.cpp:4144) — only past the
-        // NoOtherAction early returns.
-        if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
-            object.fixed_position =
-                FixedVec2::from_ints(object.state.position.x, object.state.position.y);
-        }
-        if clear_targets {
-            object.state.action.target = None;
-            object.state.action.target2 = None;
-            object.compiler_cache.action_target1 = 0;
-            object.compiler_cache.action_target2 = 0;
-        }
-        object.state.command_direction = CommandDirection::Stop;
-        object.set_velocity(Vector2::ZERO);
-        if matches!(result, ActionUpdateResult::Applied)
-            && (previous.name != object.state.action.name
-                || previous.act_map_index != object.state.action.act_map_index)
-        {
-            object.record_action_event(previous, ActionTransitionKind::Forced);
-        }
     }
 
     /// `ReduceLineSegments` (C4Object.cpp:4683-4694): remove the first
@@ -3517,19 +3446,8 @@ impl Engine {
                                 .map(|definition| definition.name().to_string())
                         })
                         .unwrap_or_else(|| object.definition_id.clone());
-                    self.messages.add_message(MessageSpec {
-                        kind: message::MessageKind::Target,
-                        text: format!("{name} is stuck!"),
-                        target: Some(target_id),
-                        player: None,
-                        offset: Vector2::ZERO,
-                        color: 0xffff_ffff,
-                        flags: 0,
-                        width: None,
-                        decoration: None,
-                        frame_decoration: None,
-                        portrait: None,
-                    });
+                    self.messages
+                        .add_message(MessageSpec::target(format!("{name} is stuck!"), target_id));
                     let _ = tolerate_script_error(self.call_object_function(
                         target_idx,
                         "Stuck",

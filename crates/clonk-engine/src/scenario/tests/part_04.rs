@@ -1,6 +1,26 @@
 // Contiguous slice 4 of 8 of the `scenario/tests` battery, spliced
 // by `include!` from the parent module so every test id is unchanged.
 
+    fn scenario_join_player_config(name: impl Into<String>) -> crate::JoinPlayerConfig {
+        crate::JoinPlayerConfig {
+            name: name.into(),
+            player_info_id: 0,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            startup_player_count: 1,
+            control_style: false,
+            auto_context_menu: false,
+        }
+    }
+
     #[test]
     fn join_player_runs_scenario_init_with_the_cpp_draw_ledger() {
         // C4Player::ScenarioInit (C4Player.cpp:670-777) consumes the synced
@@ -64,21 +84,9 @@
 
         let joined = engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Tyler".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
                 color_dw: 0xf40000,
                 pref_color: 3,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
+                ..scenario_join_player_config("Tyler")
             })
             .expect("join succeeds")
             .initialized().test_value();
@@ -1259,23 +1267,7 @@ public func ActualizePhase(pClonk)
             "Initialize runs with NO arguments for legacy content"
         );
         engine
-            .join_player(crate::JoinPlayerConfig {
-                name: "Tester".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
-            }).test_value();
+            .join_player(scenario_join_player_config("Tester")).test_value();
         assert_eq!(
             engine
                 .script_globals
@@ -1297,21 +1289,8 @@ public func ActualizePhase(pClonk)
         let joined = engine
             .join_player_at_client(
                 crate::JoinPlayerConfig {
-                    name: "Remote".to_string(),
                     player_info_id: 41,
-                    score: 0,
-                    rounds: 0,
-                    rounds_won: 0,
-                    rounds_lost: 0,
-                    total_playing_time: 0,
-                    team: None,
-                    color_dw: 0x00ff_0000,
-                    pref_color: 0,
-                    pref_position: 0,
-                    crew: Vec::new(),
-                    startup_player_count: 1,
-                    control_style: false,
-                    auto_context_menu: false,
+                    ..scenario_join_player_config("Remote")
                 },
                 crate::PlayerAtClient::new(7),
             ).test_value();
@@ -1340,21 +1319,9 @@ public func ActualizePhase(pClonk)
         let joined = engine
             .join_player_at_client_with_info(
                 crate::JoinPlayerConfig {
-                    name: "Remote".to_string(),
                     player_info_id: 42,
-                    score: 0,
-                    rounds: 0,
-                    rounds_won: 0,
-                    rounds_lost: 0,
-                    total_playing_time: 0,
-                    team: None,
                     color_dw: 0x0000_ff00,
-                    pref_color: 0,
-                    pref_position: 0,
-                    crew: Vec::new(),
-                    startup_player_count: 1,
-                    control_style: false,
-                    auto_context_menu: false,
+                    ..scenario_join_player_config("Remote")
                 },
                 crate::PlayerAtClient::new(3),
                 &info,
@@ -1407,23 +1374,7 @@ public func ActualizePhase(pClonk)
         let objects_before = engine.snapshot().objects;
 
         let number = engine
-            .join_player_for_team_selection(crate::JoinPlayerConfig {
-                name: "Chooser".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
-            }).test_value();
+            .join_player_for_team_selection(scenario_join_player_config("Chooser")).test_value();
 
         assert_eq!(number, 0);
         assert_eq!(
@@ -1478,23 +1429,7 @@ public func ActualizePhase(pClonk)
         let rng_before = engine.rng.clone();
 
         let outcome = engine
-            .join_player(crate::JoinPlayerConfig {
-                name: "Chooser".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
-            }).test_value();
+            .join_player(scenario_join_player_config("Chooser")).test_value();
 
         assert_eq!(
             outcome,
@@ -1535,21 +1470,9 @@ public func ActualizePhase(pClonk)
 
         let outcome = engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Assigned".to_string(),
                 player_info_id: 4,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
                 team: Some(4),
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
+                ..scenario_join_player_config("Assigned")
             }).test_value();
 
         assert!(matches!(outcome, crate::JoinPlayerOutcome::Initialized(_)));
@@ -1591,21 +1514,9 @@ public func ActualizePhase(pClonk)
 
         let outcome = engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Generated".to_string(),
                 player_info_id: 5,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
                 team: Some(-1),
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
+                ..scenario_join_player_config("Generated")
             }).test_value();
 
         assert!(matches!(outcome, crate::JoinPlayerOutcome::Initialized(_)));
@@ -1662,21 +1573,9 @@ public func ActualizePhase(pClonk)
 
         let outcome = engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Unresolved".to_string(),
                 player_info_id: 6,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
                 team: Some(-1),
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
+                ..scenario_join_player_config("Unresolved")
             }).test_value();
 
         assert_eq!(
@@ -1716,23 +1615,7 @@ public func ActualizePhase(pClonk)
             crate::TeamInfo::new(2, "Right", 0x0000_c800),
         ]);
         let number = engine
-            .join_player_for_team_selection(crate::JoinPlayerConfig {
-                name: "Chooser".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
-            }).test_value();
+            .join_player_for_team_selection(scenario_join_player_config("Chooser")).test_value();
         let rng_before = engine.rng.clone();
         let object_count_before = engine.snapshot().objects.len();
 
@@ -1782,21 +1665,8 @@ public func ActualizePhase(pClonk)
         // C4Teams.cpp:181-218,375-418). Fixed palette colors consume no
         // SafeRandom or lockstep Random draws.
         let config = crate::JoinPlayerConfig {
-            name: "Chooser".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
             color_dw: 0x0011_2233,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            startup_player_count: 1,
-            control_style: false,
-            auto_context_menu: false,
+            ..scenario_join_player_config("Chooser")
         };
         let first_team = crate::TeamInfo::new(1, "Existing", 0x00f4_0000);
         let second_team = crate::TeamInfo::new(2, "Team 2", 0x0000_c800);
@@ -1855,21 +1725,8 @@ public func ActualizePhase(pClonk)
         engine.set_teams(vec![crate::TeamInfo::new(1, "Existing", 0x00f4_0000)]);
         let number = engine
             .join_player_for_team_selection(crate::JoinPlayerConfig {
-                name: "Chooser".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
                 color_dw: 0x0011_2233,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
+                ..scenario_join_player_config("Chooser")
             }).test_value();
         engine
             .mark_team_selection_pending(number).test_value();
@@ -1901,21 +1758,8 @@ public func ActualizePhase(pClonk)
         // host-selected color is transported, zero is the explicit unresolved
         // team-color marker and must not turn the joined player black.
         let config = crate::JoinPlayerConfig {
-            name: "Chooser".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
             color_dw: 0x0011_2233,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            startup_player_count: 1,
-            control_style: false,
-            auto_context_menu: false,
+            ..scenario_join_player_config("Chooser")
         };
         let existing = crate::TeamInfo::new(11, "Existing", 0x0055_6677);
         let unresolved = crate::TeamInfo::new(12, "Team 12", 0);
@@ -2007,21 +1851,9 @@ public func ActualizePhase(pClonk)
         ] {
             let outcome = engine
                 .join_player(crate::JoinPlayerConfig {
-                    name: name.to_string(),
-                    player_info_id: 0,
-                    score: 0,
-                    rounds: 0,
-                    rounds_won: 0,
-                    rounds_lost: 0,
-                    total_playing_time: 0,
-                    team: None,
                     color_dw: info_color,
-                    pref_color: 0,
-                    pref_position: 0,
-                    crew: Vec::new(),
                     startup_player_count: 2,
-                    control_style: false,
-                    auto_context_menu: false,
+                    ..scenario_join_player_config(name)
                 }).test_value();
             let number = outcome.number();
             assert_eq!(
@@ -2081,21 +1913,8 @@ public func ActualizePhase(pClonk)
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let outcome = engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Solo".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
                 color_dw: 0x0055_cc88,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
+                ..scenario_join_player_config("Solo")
             }).test_value();
         let number = outcome.number();
         engine
@@ -2146,23 +1965,7 @@ public func ActualizePhase(pClonk)
         ]);
         engine.register_test_player(crate::PlayerConfig::new(99, "Occupant").with_team(Some(1)));
         let number = engine
-            .join_player_for_team_selection(crate::JoinPlayerConfig {
-                name: "Chooser".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
-            }).test_value();
+            .join_player_for_team_selection(scenario_join_player_config("Chooser")).test_value();
         engine
             .mark_team_selection_pending(number).test_value();
         let rng_before = engine.rng.clone();
@@ -2461,23 +2264,7 @@ public func ActualizePhase(pClonk)
         replay.random(60);
 
         engine
-            .join_player(crate::JoinPlayerConfig {
-                name: "Tester".to_string(),
-                player_info_id: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                team: None,
-                color_dw: 0xff0000,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                startup_player_count: 1,
-                control_style: false,
-                auto_context_menu: false,
-            }).test_value();
+            .join_player(scenario_join_player_config("Tester")).test_value();
         assert_eq!(engine.rng, replay, "draw ledger matches");
 
         let snapshot = engine.snapshot();
@@ -2636,21 +2423,10 @@ public func ActualizePhase(pClonk)
 
         let joined = engine
             .join_player(crate::JoinPlayerConfig {
-                name: "Team player".to_string(),
                 player_info_id: 1,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
                 team: Some(7),
                 color_dw: 0,
-                pref_color: 0,
-                pref_position: 0,
-                crew: Vec::new(),
-                control_style: false,
-                auto_context_menu: false,
-                startup_player_count: 1,
+                ..scenario_join_player_config("Team player")
             })
             .expect("team player joins")
             .initialized().test_value();

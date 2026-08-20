@@ -11,48 +11,19 @@
 // empty containers falsy — a divergence for content that treats a string/array as
 // a present/absent flag.
 
-use clonk_script::{Engine, Value};
+use clonk_script::Value;
 
-fn eval(source: &str) -> Value {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("script should load");
-    engine.call("Test", &[]).expect("call succeeds")
-}
+eval_cases! {
+    empty_string_is_truthy_like_cpp:
+        r#"func Test() { if ("") { return 1; } return 0; }"# => Value::Int(1);
+    empty_array_is_truthy_like_cpp:
+        "#strict\nfunc Test() { if ([]) { return 1; } return 0; }" => Value::Int(1);
 
-#[test]
-fn empty_string_is_truthy_like_cpp() {
-    assert_eq!(
-        eval(r#"func Test() { if ("") { return 1; } return 0; }"#),
-        Value::Int(1)
-    );
-}
-
-#[test]
-fn empty_array_is_truthy_like_cpp() {
-    assert_eq!(
-        eval("#strict\nfunc Test() { if ([]) { return 1; } return 0; }"),
-        Value::Int(1)
-    );
-}
-
-#[test]
-fn not_of_empty_string_is_false() {
     // "" is truthy, so !"" is false.
-    assert_eq!(eval(r#"func Test() { return !""; }"#), Value::Bool(false));
-}
-
-#[test]
-fn nil_remains_falsy() {
-    assert_eq!(
-        eval("#strict 3\nfunc Test() { if (nil) { return 1; } return 0; }"),
-        Value::Int(0)
-    );
-}
-
-#[test]
-fn zero_int_remains_falsy() {
-    assert_eq!(
-        eval("#strict 3\nfunc Test() { if (0) { return 1; } return 0; }"),
-        Value::Int(0)
-    );
+    not_of_empty_string_is_false:
+        r#"func Test() { return !""; }"# => Value::Bool(false);
+    nil_remains_falsy:
+        "#strict 3\nfunc Test() { if (nil) { return 1; } return 0; }" => Value::Int(0);
+    zero_int_remains_falsy:
+        "#strict 3\nfunc Test() { if (0) { return 1; } return 0; }" => Value::Int(0);
 }

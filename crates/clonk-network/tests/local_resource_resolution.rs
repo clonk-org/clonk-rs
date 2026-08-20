@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clonk_engine::{LegacyCString, NetworkResourceCore};
+use clonk_engine::NetworkResourceCore;
 use clonk_network::{
     build_host_resource_core, encode_resource_packet, resolve_local_resource,
     resolve_local_resource_with_group_maker, HostResourceCoreSpec, HostResourceType,
@@ -127,7 +127,7 @@ fn nonplayer_group_crc_failure_publishes_and_matches_zero_like_cpp() {
         HostResourceCoreSpec::new(
             HostResourceType::System,
             31,
-            LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+            crate::c4(b"System.c4g"),
             "Host",
         ),
     )
@@ -176,7 +176,7 @@ fn nonplayer_group_crc_failure_publishes_and_matches_zero_like_cpp() {
         HostResourceCoreSpec::new(
             HostResourceType::Scenario,
             32,
-            LegacyCString::from_bytes(b"Nested.c4s".to_vec()).unwrap(),
+            crate::c4(b"Nested.c4s"),
             "Host",
         ),
     )
@@ -243,7 +243,7 @@ fn cpp_set_by_core_optimizes_a_local_player_before_the_physical_check() {
             HostResourceCoreSpec::new(
                 HostResourceType::Player,
                 7,
-                LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                crate::c4(b"Shared.c4p"),
                 "Shared Player",
             ),
         )
@@ -344,7 +344,7 @@ fn cpp_set_by_core_packs_a_player_directory_with_the_local_group_maker() {
             HostResourceCoreSpec::new(
                 HostResourceType::Player,
                 8,
-                LegacyCString::from_bytes(b"Directory.c4p".to_vec()).unwrap(),
+                crate::c4(b"Directory.c4p"),
                 "Shared Player",
             ),
         )
@@ -460,7 +460,7 @@ fn network_directory_standalone_matches_cpp_group_packer() {
             HostResourceCoreSpec::new(
                 HostResourceType::Definitions,
                 84,
-                LegacyCString::from_bytes(b"Directory.c4d".to_vec()).unwrap(),
+                crate::c4(b"Directory.c4d"),
                 "Shared Maker",
             ),
         )
@@ -980,7 +980,7 @@ fn core(
         file_size,
         file_crc,
         contents_crc,
-        filename: LegacyCString::from_bytes(filename.to_vec()).unwrap(),
+        filename: crate::c4(filename),
         ..NetworkResourceCore::default()
     }
 }

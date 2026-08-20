@@ -2,62 +2,23 @@
 
 use std::error::Error;
 
-use crate::support::real_scenario::load_tutorial;
+use crate::support::real_scenario::{
+    load_tutorial_with_local_player, object_with_definition, object_with_definition_near_x,
+    tutorial_message_contains,
+};
 use crate::support::virtual_player::VirtualPlayer;
 use clonk_engine::{
-    ocf, Engine, JoinPlayerConfig, ObjectId, CATEGORY_VEHICLE, COM_DIG, COM_DOWN, COM_LEFT,
-    COM_RIGHT, COM_THROW, COM_UP,
+    ocf, Engine, CATEGORY_VEHICLE, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
 };
 
 fn load_tutorial03() -> (Engine, i32) {
-    let mut engine = load_tutorial(3, 0);
-    let owner = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-        name: "Tutorial 3 virtual player".to_owned(),
-        player_info_id: 0,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
-        color_dw: 0xff_00_00,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: true,
-        auto_context_menu: true,
-        startup_player_count: 1,
-    }))
-    .number();
-    (engine, owner)
-}
-
-fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine.first_object_for_definition(definition)
-}
-
-fn object_with_definition_near_x(
-    engine: &Engine,
-    definition: &str,
-    expected_x: i32,
-) -> Option<ObjectId> {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .filter(|object| object.definition_id == definition)
-        .min_by_key(|object| (object.position.x - expected_x).abs())
-        .map(|object| object.id)
+    load_tutorial_with_local_player(3, 0, "Tutorial 3 virtual player", true, true)
 }
 
 fn object_menu_identification(engine: &Engine, owner: i32) -> Option<clonk_script::Value> {
     engine
         .cursor_object_menu(owner)
         .map(|(_, menu)| menu.identification.clone())
-}
-
-fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine.message_line_contains(needle)
 }
 
 #[test]

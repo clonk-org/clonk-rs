@@ -1,41 +1,7 @@
 use super::*;
 use crate::landscape::PixelGrid;
+use crate::lib_test_support::{register_fixture, spawn_fixture, EngineTestExt};
 use std::collections::HashMap;
-
-trait TestEngineExt {
-    fn test_object_index(&self, object: ObjectId) -> usize;
-    fn register_test_definition(&mut self, definition: Definition);
-    fn register_test_player(&mut self, player: PlayerConfig);
-    fn register_test_script_definition(&mut self, id: &str, name: &str, script: &str);
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
-}
-
-impl TestEngineExt for Engine {
-    #[track_caller]
-    fn test_object_index(&self, object: ObjectId) -> usize {
-        crate::TestValueExt::test_value(self.find_object_index(object))
-    }
-
-    #[track_caller]
-    fn register_test_definition(&mut self, definition: Definition) {
-        crate::TestValueExt::test_value(self.register_definition(definition));
-    }
-
-    #[track_caller]
-    fn register_test_player(&mut self, player: PlayerConfig) {
-        crate::TestValueExt::test_value(self.register_player(player));
-    }
-
-    #[track_caller]
-    fn register_test_script_definition(&mut self, id: &str, name: &str, script: &str) {
-        crate::TestValueExt::test_value(self.register_script_definition(id, name, script));
-    }
-
-    #[track_caller]
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
-        crate::TestValueExt::test_value(self.spawn_object(config))
-    }
-}
 
 #[test]
 fn previewing_an_unchanged_effect_list_reuses_the_seeded_object_state() {
@@ -44,7 +10,7 @@ fn previewing_an_unchanged_effect_list_reuses_the_seeded_object_state() {
     // (C4Effect.cpp:319-363; C4Object.cpp:1069-1090).
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("FXOB", "Effect preview fixture", "");
-    let object = engine.spawn_test_object(SpawnConfig::new("FXOB"));
+    let object = spawn_fixture!(engine, "FXOB");
     let index = engine.test_object_index(object);
     engine.objects[index]
         .state
@@ -76,11 +42,14 @@ fn pixel_less_landscape_does_not_invent_column_surface_contact() {
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(20, 5));
 
-    let mut definition = test_definition("FALL", "Falling fixture", "");
-    definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
-    engine.register_test_definition(definition);
-    let object =
-        engine.spawn_test_object(SpawnConfig::new("FALL").with_position(Vector2::new(3, 8)));
+    register_fixture!(
+        engine,
+        "FALL",
+        "Falling fixture",
+        "",
+        set_shape_vertices(vec![ObjectVertex::new(0, 0)])
+    );
+    let object = spawn_fixture!(engine, "FALL", with_position: Vector2::new(3, 8));
 
     crate::TestValueExt::test_value(
         engine.apply_object_update(
@@ -105,8 +74,7 @@ fn synchronize_control_applies_clearance_only_when_requested() {
     // src/C4Game.cpp:3679-3715; src/C4Object.cpp:3803-3815).
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("SYNC", "Sync", "");
-    let object =
-        engine.spawn_test_object(SpawnConfig::new("SYNC").with_position(Vector2::new(10, 20)));
+    let object = spawn_fixture!(engine, "SYNC", with_position: Vector2::new(10, 20));
     let index = engine.test_object_index(object);
     let fractional = crate::math::C4Fixed::from_raw(itofix(10).val().wrapping_add(1));
     engine.objects[index].fixed_position.x = fractional;
@@ -193,21 +161,22 @@ fn free_stabilize_probe_clears_previous_contact_latch() {
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(100, 100));
 
-    let mut definition = test_definition("TILT", "Tilt", "");
-    definition.set_rotateable(1);
-    definition.set_shape_vertices(vec![ObjectVertex {
-        x: 0,
-        y: 1,
-        cnat: CNAT_BOTTOM,
-        friction: 100,
-    }]);
-    engine.register_test_definition(definition);
-
-    let object_id = engine.spawn_test_object(
-        SpawnConfig::new("TILT")
-            .with_position(Vector2::new(50, 50))
-            .with_rotation(5),
+    register_fixture!(
+        engine,
+        "TILT",
+        "Tilt",
+        "",
+        set_rotateable(1),
+        set_shape_vertices(vec![ObjectVertex {
+            x: 0,
+            y: 1,
+            cnat: CNAT_BOTTOM,
+            friction: 100,
+        }])
     );
+
+    let object_id =
+        spawn_fixture!(engine, "TILT", with_position: Vector2::new(50, 50), with_rotation: 5);
     let index = engine.test_object_index(object_id);
     engine.objects[index].frame_t_contact = CNAT_LEFT;
 
@@ -223,20 +192,23 @@ fn command_snapshot_keeps_definition_command_policies() {
     // Rust frame snapshot must preserve the raw engine definition values
     // rather than infer them from crew OCF.
     let mut engine = Engine::with_seed(0);
-    let mut definition = test_definition("ROUT", "Router", "");
-    definition.set_pathfinder(-4);
-    definition.set_no_transfer_zones(-3);
-    definition.set_no_push_enter(-2);
-    definition.configure_actions(
-        Some("Route".to_owned()),
-        HashMap::from([(
-            "Route".to_owned(),
-            ActionSpec::default().with_disabled(true),
-        )]),
+    register_fixture!(
+        engine,
+        "ROUT",
+        "Router",
+        "",
+        set_pathfinder(-4),
+        set_no_transfer_zones(-3),
+        set_no_push_enter(-2),
+        configure_actions(
+            Some("Route".to_owned()),
+            HashMap::from([(
+                "Route".to_owned(),
+                ActionSpec::default().with_disabled(true),
+            )]),
+        )
     );
-    engine.register_test_definition(definition);
-    let object_id =
-        engine.spawn_test_object(SpawnConfig::new("ROUT").with_action(ActionState::new("Route")));
+    let object_id = spawn_fixture!(engine, "ROUT", with_action: ActionState::new("Route"));
     let index = engine.test_object_index(object_id);
 
     let snapshot = engine.live_command_snapshot(index, None);
@@ -255,7 +227,7 @@ fn idle_objects_do_not_materialize_command_snapshots() {
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("IDLE", "Idle", "");
     for x in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("IDLE").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "IDLE", with_position: Vector2::new(x, 10));
     }
 
     COMMAND_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -275,7 +247,7 @@ fn commandless_objects_do_not_enter_the_command_queue_executor() {
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("IDLE", "Idle", "");
     for x in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("IDLE").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "IDLE", with_position: Vector2::new(x, 10));
     }
 
     EMPTY_COMMAND_QUEUE_EXECUTIONS.with(|count| count.set(0));
@@ -293,7 +265,7 @@ fn ordinary_ticks_update_sectors_incrementally() {
     engine.set_landscape(Landscape::flat(200, 200));
     engine.register_test_script_definition("IDLE", "Idle", "");
     for x in 0..128 {
-        engine.spawn_test_object(SpawnConfig::new("IDLE").with_position(Vector2::new(x, 50)));
+        spawn_fixture!(engine, "IDLE", with_position: Vector2::new(x, 50));
     }
 
     SECTOR_FULL_REBUILDS.with(|count| count.set(0));
@@ -309,7 +281,7 @@ fn real_content_without_step_skips_the_synthetic_command_fold() {
     // Rust snapshot-fixture DSL and must stay out of real-content frames.
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("REAL", "Real content", "");
-    engine.spawn_test_object(SpawnConfig::new("REAL"));
+    spawn_fixture!(engine, "REAL");
 
     SYNTHETIC_COMMAND_FOLDS.with(|count| count.set(0));
     crate::TestValueExt::test_value(engine.tick_without_snapshot());
@@ -324,7 +296,7 @@ fn unchanged_actions_skip_the_deferred_callback_drain() {
     // 4160-4185,1058-1127).
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("IDLE", "Idle object", "");
-    engine.spawn_test_object(SpawnConfig::new("IDLE"));
+    spawn_fixture!(engine, "IDLE");
 
     ACTION_CALLBACK_DRAIN_INVOCATIONS.with(|count| count.set(0));
     crate::TestValueExt::test_value(engine.tick_without_snapshot());
@@ -336,7 +308,7 @@ fn unchanged_actions_skip_the_deferred_callback_drain() {
 fn object_action_lookup_stays_on_the_definition_table() {
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("LOOK", "Lookup object", "");
-    let object = engine.spawn_test_object(SpawnConfig::new("LOOK"));
+    let object = spawn_fixture!(engine, "LOOK");
     let index = engine.test_object_index(object);
 
     DEFINITION_METADATA_TABLE_READS.with(|count| count.set(0));
@@ -351,23 +323,23 @@ fn coordinate_move_to_does_not_snapshot_unrelated_objects() {
     // other objects enter only through Action.Target (C4Command.cpp:211-360).
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("FILL", "Filler", "");
-    let mut walker = test_definition("WALK", "Walker", "");
-    walker.configure_actions(
-        Some("Walk".to_owned()),
-        HashMap::from([(
-            "Walk".to_owned(),
-            ActionSpec::default().with_procedure("WALK"),
-        )]),
+    register_fixture!(
+        engine,
+        "WALK",
+        "Walker",
+        "",
+        configure_actions(
+            Some("Walk".to_owned()),
+            HashMap::from([(
+                "Walk".to_owned(),
+                ActionSpec::default().with_procedure("WALK"),
+            )]),
+        )
     );
-    engine.register_test_definition(walker);
     for x in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "FILL", with_position: Vector2::new(x, 10));
     }
-    let walker = engine.spawn_test_object(
-        SpawnConfig::new("WALK")
-            .with_position(Vector2::new(10, 10))
-            .with_action(ActionState::new("Walk")),
-    );
+    let walker = spawn_fixture!(engine, "WALK", with_position: Vector2::new(10, 10), with_action: ActionState::new("Walk"));
     let walker_index = engine.test_object_index(walker);
     crate::TestValueExt::test_value(
         engine.objects[walker_index].commands.push_front(
@@ -397,25 +369,24 @@ fn targeted_move_to_snapshots_only_its_explicit_dependencies() {
     // Action.Target for push/pull, never Game.Objects (C4Command.cpp:211-360).
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("FILL", "Filler", "");
-    let mut walker = test_definition("WALK", "Walker", "");
-    walker.configure_actions(
-        Some("Walk".to_owned()),
-        HashMap::from([(
-            "Walk".to_owned(),
-            ActionSpec::default().with_procedure("WALK"),
-        )]),
+    register_fixture!(
+        engine,
+        "WALK",
+        "Walker",
+        "",
+        configure_actions(
+            Some("Walk".to_owned()),
+            HashMap::from([(
+                "Walk".to_owned(),
+                ActionSpec::default().with_procedure("WALK"),
+            )]),
+        )
     );
-    engine.register_test_definition(walker);
-    let target =
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(100, 10)));
+    let target = spawn_fixture!(engine, "FILL", with_position: Vector2::new(100, 10));
     for x in 0..63 {
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 20)));
+        spawn_fixture!(engine, "FILL", with_position: Vector2::new(x, 20));
     }
-    let walker = engine.spawn_test_object(
-        SpawnConfig::new("WALK")
-            .with_position(Vector2::new(10, 10))
-            .with_action(ActionState::new("Walk")),
-    );
+    let walker = spawn_fixture!(engine, "WALK", with_position: Vector2::new(10, 10), with_action: ActionState::new("Walk"));
     let walker_index = engine.test_object_index(walker);
     crate::TestValueExt::test_value(
         engine.objects[walker_index].commands.push_front(
@@ -458,8 +429,7 @@ fn an_absent_callback_materialises_nothing() {
         "Lazy",
         "#strict\nfunc Present() { return(1); }\n",
     );
-    let object =
-        engine.spawn_test_object(SpawnConfig::new("LAZY").with_position(Vector2::new(50, 50)));
+    let object = spawn_fixture!(engine, "LAZY", with_position: Vector2::new(50, 50));
     let index = engine.test_object_index(object);
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -506,28 +476,28 @@ fn an_absent_callback_materialises_nothing() {
 /// return;` (`C4Object.cpp:4239`). Nothing re-bounds it afterwards.
 fn a_narrower_action_keeps_the_wider_actions_draw_direction() {
     let mut engine = Engine::with_seed(0);
-    let mut definition = test_definition("TURN", "Turner", "");
-    definition.configure_actions(
-        Some("Wide".to_owned()),
-        HashMap::from([
-            (
-                "Wide".to_owned(),
-                ActionSpec::default().with_directions(4).with_flip_dir(0),
-            ),
-            (
-                // The same FlipDir as `Wide`, which is what makes SetAction
-                // skip the refresh.
-                "Narrow".to_owned(),
-                ActionSpec::default().with_directions(2).with_flip_dir(0),
-            ),
-        ]),
+    register_fixture!(
+        engine,
+        "TURN",
+        "Turner",
+        "",
+        configure_actions(
+            Some("Wide".to_owned()),
+            HashMap::from([
+                (
+                    "Wide".to_owned(),
+                    ActionSpec::default().with_directions(4).with_flip_dir(0),
+                ),
+                (
+                    // The same FlipDir as `Wide`, which is what makes SetAction
+                    // skip the refresh.
+                    "Narrow".to_owned(),
+                    ActionSpec::default().with_directions(2).with_flip_dir(0),
+                ),
+            ]),
+        )
     );
-    engine.register_test_definition(definition);
-    let object = engine.spawn_test_object(
-        SpawnConfig::new("TURN")
-            .with_position(Vector2::new(10, 10))
-            .with_action(ActionState::new("Wide")),
-    );
+    let object = spawn_fixture!(engine, "TURN", with_position: Vector2::new(10, 10), with_action: ActionState::new("Wide"));
     let index = engine.test_object_index(object);
 
     let definition_id = engine.objects[index].definition_id.clone();
@@ -577,7 +547,8 @@ fn lazy_host_world_call_object_materializes_only_on_world_access() {
     engine.set_landscape(landscape);
 
     engine.register_test_script_definition("FILL", "Filler", "#strict\n");
-    let mut caller = test_definition(
+    register_fixture!(
+        engine,
         "LAZY",
         "Lazy caller",
         r#"#strict
@@ -594,14 +565,12 @@ fn lazy_host_world_call_object_materializes_only_on_world_access() {
         return(world_count);
     }
     "#,
+        set_c4_callback_convention(true)
     );
-    caller.set_c4_callback_convention(true);
-    engine.register_test_definition(caller);
     for x in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(x % 100, 10)));
+        spawn_fixture!(engine, "FILL", with_position: Vector2::new(x % 100, 10));
     }
-    let caller =
-        engine.spawn_test_object(SpawnConfig::new("LAZY").with_position(Vector2::new(50, 50)));
+    let caller = spawn_fixture!(engine, "LAZY", with_position: Vector2::new(50, 50));
     let caller_index = engine.test_object_index(caller);
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -691,8 +660,7 @@ fn set_position_without_a_solid_mask_bake_does_not_materialize_the_landscape() {
     "#,
     );
     engine.register_test_definition(mover);
-    let mover =
-        engine.spawn_test_object(SpawnConfig::new("MOVE").with_position(Vector2::new(10, 10)));
+    let mover = spawn_fixture!(engine, "MOVE", with_position: Vector2::new(10, 10));
     let mover_index = engine.test_object_index(mover);
 
     HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
@@ -719,7 +687,7 @@ fn lazy_master_order_ignores_stale_object_index_cache() {
     let mut engine = Engine::new();
     engine.register_test_script_definition("ORDR", "Order", "");
     let ids = (0..3)
-        .map(|_| engine.spawn_test_object(SpawnConfig::new("ORDR")))
+        .map(|_| spawn_fixture!(engine, "ORDR"))
         .collect::<Vec<_>>();
     for id in &ids {
         assert!(engine.find_object_index(*id).is_some());
@@ -759,7 +727,7 @@ fn lazy_master_order_reads_live_statuses_without_projecting_a_table() {
     let mut engine = Engine::new();
     engine.register_test_script_definition("ORDR", "Order", "");
     for _ in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("ORDR"));
+        spawn_fixture!(engine, "ORDR");
     }
     let expected = engine.exec_list.iter().rev().copied().collect::<Vec<_>>();
 
@@ -778,25 +746,24 @@ fn lazy_master_order_reads_live_statuses_without_projecting_a_table() {
 fn lazy_host_world_action_callback_seeds_only_caller() {
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("FILL", "Filler", "#strict\n");
-    let mut actor = test_definition(
+    register_fixture!(
+        engine,
         "ACTR",
         "Action caller",
         "#strict\nlocal phase_calls; protected func OnPhase() { phase_calls++; return(0); }",
+        set_c4_callback_convention(true),
+        configure_actions(
+            Some("Swim".to_owned()),
+            HashMap::from([(
+                "Swim".to_owned(),
+                ActionSpec::default().with_phase_call("OnPhase"),
+            )]),
+        )
     );
-    actor.set_c4_callback_convention(true);
-    actor.configure_actions(
-        Some("Swim".to_owned()),
-        HashMap::from([(
-            "Swim".to_owned(),
-            ActionSpec::default().with_phase_call("OnPhase"),
-        )]),
-    );
-    engine.register_test_definition(actor);
     for x in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "FILL", with_position: Vector2::new(x, 10));
     }
-    let actor =
-        engine.spawn_test_object(SpawnConfig::new("ACTR").with_action(ActionState::new("Swim")));
+    let actor = spawn_fixture!(engine, "ACTR", with_action: ActionState::new("Swim"));
     let actor_index = engine.test_object_index(actor);
     let action_index = engine.objects[actor_index].state.action.act_map_index;
 
@@ -846,28 +813,28 @@ fn legacy_find_object_rejects_nonmatches_without_full_state_materialization() {
     ] {
         engine.register_test_definition(definition);
     }
-    let mut searcher = test_definition(
+    register_fixture!(
+        engine,
         "SRCH",
         "Searcher",
         "#strict\n\
          protected func FindTarget() { return(FindObject(TARG)); }\n\
          protected func FindOwned() { return(FindObjectOwner(TARG, 3)); }\n",
+        set_c4_callback_convention(true)
     );
-    searcher.set_c4_callback_convention(true);
-    engine.register_test_definition(searcher);
     for player in [2, 3] {
         engine.register_test_player(PlayerConfig::new(player, format!("Player {player}")));
     }
 
-    let older_target = engine.spawn_test_object(SpawnConfig::new("TARG").with_owner(3));
+    let older_target = spawn_fixture!(engine, "TARG", with_owner: 3);
     for x in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "FILL", with_position: Vector2::new(x, 10));
     }
-    let newer_target = engine.spawn_test_object(SpawnConfig::new("TARG").with_owner(2));
+    let newer_target = spawn_fixture!(engine, "TARG", with_owner: 2);
     for x in 64..128 {
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "FILL", with_position: Vector2::new(x, 10));
     }
-    let searcher = engine.spawn_test_object(SpawnConfig::new("SRCH"));
+    let searcher = spawn_fixture!(engine, "SRCH");
     let searcher_index = engine.test_object_index(searcher);
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -918,12 +885,12 @@ fn legacy_object_count_filters_scalars_without_full_state_materialization() {
         engine.register_test_definition(definition);
     }
     for _ in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("FILL"));
+        spawn_fixture!(engine, "FILL");
     }
     for _ in 0..2 {
-        engine.spawn_test_object(SpawnConfig::new("TARG"));
+        spawn_fixture!(engine, "TARG");
     }
-    let searcher = engine.spawn_test_object(SpawnConfig::new("SRCH"));
+    let searcher = spawn_fixture!(engine, "SRCH");
     let searcher = engine.test_object_index(searcher);
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -954,13 +921,12 @@ fn criterion_object_count_filters_scalars_without_full_state_materialization() {
         engine.register_test_definition(definition);
     }
     for x in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "FILL", with_position: Vector2::new(x, 10));
     }
     for x in [10, 20] {
-        engine.spawn_test_object(SpawnConfig::new("TARG").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "TARG", with_position: Vector2::new(x, 10));
     }
-    let searcher =
-        engine.spawn_test_object(SpawnConfig::new("SRCH").with_position(Vector2::new(0, 10)));
+    let searcher = spawn_fixture!(engine, "SRCH", with_position: Vector2::new(0, 10));
     let searcher = engine.test_object_index(searcher);
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -991,12 +957,10 @@ fn criterion_find_object_filters_scalars_without_full_state_materialization() {
         engine.register_test_definition(definition);
     }
     for x in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "FILL", with_position: Vector2::new(x, 10));
     }
-    let target =
-        engine.spawn_test_object(SpawnConfig::new("TARG").with_position(Vector2::new(20, 10)));
-    let searcher =
-        engine.spawn_test_object(SpawnConfig::new("SRCH").with_position(Vector2::new(0, 10)));
+    let target = spawn_fixture!(engine, "TARG", with_position: Vector2::new(20, 10));
+    let searcher = spawn_fixture!(engine, "SRCH", with_position: Vector2::new(0, 10));
     let searcher = engine.test_object_index(searcher);
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -1028,9 +992,9 @@ fn criterion_callback_tree_rejects_scalar_prefix_without_materialization() {
         engine.register_test_definition(definition);
     }
     for _ in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("TARG").with_owner(0));
+        spawn_fixture!(engine, "TARG", with_owner: 0);
     }
-    let searcher = engine.spawn_test_object(SpawnConfig::new("SRCH").with_owner(0));
+    let searcher = spawn_fixture!(engine, "SRCH", with_owner: 0);
     let searcher = engine.test_object_index(searcher);
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -1060,7 +1024,7 @@ fn contact_callbacks_reuse_the_definition_action_library() {
     definition.set_contact_function_calls(true);
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(definition);
-    let object = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let object = spawn_fixture!(engine, "CALL");
     let index = engine.test_object_index(object);
 
     CONTACT_ACTION_LIBRARY_DEEP_CLONES.with(|count| count.set(0));
@@ -1108,12 +1072,7 @@ fn no_attach_action_reuses_the_definition_action_library() {
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(64, 60));
     engine.register_test_definition(definition);
-    let object = engine.spawn_test_object(
-        SpawnConfig::new("WALK")
-            .with_position(Vector2::new(20, 10))
-            .with_action(ActionState::new("Walk"))
-            .with_mobile(true),
-    );
+    let object = spawn_fixture!(engine, "WALK", with_position: Vector2::new(20, 10), with_action: ActionState::new("Walk"), with_mobile: true);
     let index = engine.test_object_index(object);
     engine.objects[index].frame_t_attach = CNAT_BOTTOM;
     let definition_id = engine.objects[index].definition_id.clone();
@@ -1166,32 +1125,35 @@ fn walking_off_an_attachment_does_not_scan_solid_mask_definitions() {
     landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
     engine.set_landscape(landscape);
 
-    let mut masked = test_definition("MASK", "Masked", "");
-    masked.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-    engine.register_test_definition(masked);
+    register_fixture!(
+        engine,
+        "MASK",
+        "Masked",
+        "",
+        set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)))
+    );
 
-    let mut walker = test_definition("WALK", "Walker", "");
-    walker.set_shape_vertices(vec![ObjectVertex::new(0, 2).with_cnat(CNAT_BOTTOM)]);
-    walker.configure_actions(
-        Some("Walk".to_owned()),
-        HashMap::from([
-            (
-                "Walk".to_owned(),
-                ActionSpec::for_procedure("WALK").with_next("Walk"),
-            ),
-            (
-                "Jump".to_owned(),
-                ActionSpec::for_procedure("FLIGHT").with_next("Jump"),
-            ),
-        ]),
+    register_fixture!(
+        engine,
+        "WALK",
+        "Walker",
+        "",
+        set_shape_vertices(vec![ObjectVertex::new(0, 2).with_cnat(CNAT_BOTTOM)]),
+        configure_actions(
+            Some("Walk".to_owned()),
+            HashMap::from([
+                (
+                    "Walk".to_owned(),
+                    ActionSpec::for_procedure("WALK").with_next("Walk"),
+                ),
+                (
+                    "Jump".to_owned(),
+                    ActionSpec::for_procedure("FLIGHT").with_next("Jump"),
+                ),
+            ]),
+        )
     );
-    engine.register_test_definition(walker);
-    let object = engine.spawn_test_object(
-        SpawnConfig::new("WALK")
-            .with_position(Vector2::new(20, 0))
-            .with_action(ActionState::new("Walk"))
-            .with_mobile(true),
-    );
+    let object = spawn_fixture!(engine, "WALK", with_position: Vector2::new(20, 0), with_action: ActionState::new("Walk"), with_mobile: true);
     let index = engine.test_object_index(object);
     engine.objects[index].frame_t_attach = CNAT_BOTTOM;
     let definition_id = engine.objects[index].definition_id.clone();
@@ -1228,10 +1190,8 @@ fn corner_scale_rechecks_masks_changed_by_an_earlier_contact_callback() {
     engine.set_landscape(landscape);
     engine.register_test_script_definition("MASK", "Mask target", "");
 
-    let first_blocker =
-        engine.spawn_test_object(SpawnConfig::new("MASK").with_position(Vector2::new(27, 13)));
-    let later_blocker =
-        engine.spawn_test_object(SpawnConfig::new("MASK").with_position(Vector2::new(27, 14)));
+    let first_blocker = spawn_fixture!(engine, "MASK", with_position: Vector2::new(27, 13));
+    let later_blocker = spawn_fixture!(engine, "MASK", with_position: Vector2::new(27, 14));
     let first_blocker_index = engine.test_object_index(first_blocker);
     engine.objects[first_blocker_index]
         .state
@@ -1241,7 +1201,8 @@ fn corner_scale_rechecks_masks_changed_by_an_earlier_contact_callback() {
         .state
         .solid_mask_override = Some(DefinitionTargetRect::new(0, 0, 0, 0, 0, 0));
 
-    let mut scaler = test_definition(
+    register_fixture!(
+        engine,
         "SCAL",
         "Scaler",
         r#"
@@ -1258,34 +1219,27 @@ fn corner_scale_rechecks_masks_changed_by_an_earlier_contact_callback() {
             return 0;
         }
     "#,
+        set_c4_callback_convention(true),
+        set_contact_function_calls(true),
+        set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_TOP)]),
+        configure_actions(
+            Some("Scale".to_owned()),
+            HashMap::from([
+                (
+                    "Scale".to_owned(),
+                    ActionSpec::for_procedure("SCALE").with_next("Scale"),
+                ),
+                (
+                    "Walk".to_owned(),
+                    ActionSpec::for_procedure("WALK").with_next("Walk"),
+                ),
+            ]),
+        )
     );
-    scaler.set_c4_callback_convention(true);
-    scaler.set_contact_function_calls(true);
-    scaler.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_TOP)]);
-    scaler.configure_actions(
-        Some("Scale".to_owned()),
-        HashMap::from([
-            (
-                "Scale".to_owned(),
-                ActionSpec::for_procedure("SCALE").with_next("Scale"),
-            ),
-            (
-                "Walk".to_owned(),
-                ActionSpec::for_procedure("WALK").with_next("Walk"),
-            ),
-        ]),
-    );
-    engine.register_test_definition(scaler);
-    let scaler = engine.spawn_test_object(
-        SpawnConfig::new("SCAL")
-            .with_position(Vector2::new(20, 20))
-            .with_direction(Direction::Right)
-            .with_action(ActionState::new("Scale"))
-            .with_local_vars(HashMap::from([(
-                "blocker".to_owned(),
-                Value::Object(later_blocker.as_u64()),
-            )])),
-    );
+    let scaler = spawn_fixture!(engine, "SCAL", with_position: Vector2::new(20, 20), with_direction: Direction::Right, with_action: ActionState::new("Scale"), with_local_vars: HashMap::from([(
+        "blocker".to_owned(),
+        Value::Object(later_blocker.as_u64()),
+    )]));
     let scaler_index = engine.test_object_index(scaler);
     let definition_id = engine.objects[scaler_index].definition_id.clone();
 
@@ -1320,7 +1274,7 @@ fn contact_callbacks_borrow_their_cached_world_object() {
     definition.set_contact_function_calls(true);
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(definition);
-    let object = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let object = spawn_fixture!(engine, "CALL");
     let index = engine.test_object_index(object);
 
     HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(|count| count.set(0));
@@ -1347,10 +1301,7 @@ fn script_callback_snapshots_share_unchanged_local_variables() {
     definition.set_contact_function_calls(true);
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(definition);
-    let object = engine.spawn_test_object(
-        SpawnConfig::new("CALL")
-            .with_local_vars(HashMap::from([("value".to_string(), Value::Int(7))])),
-    );
+    let object = spawn_fixture!(engine, "CALL", with_local_vars: HashMap::from([("value".to_string(), Value::Int(7))]));
     let index = engine.test_object_index(object);
 
     SCRIPT_STATE_LOCAL_VAR_DEEP_CLONES.with(|count| count.set(0));
@@ -1491,8 +1442,7 @@ fn action_transitions_reuse_the_definition_action_library() {
     );
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(definition);
-    let object =
-        engine.spawn_test_object(SpawnConfig::new("CALL").with_action(ActionState::new("Walk")));
+    let object = spawn_fixture!(engine, "CALL", with_action: ActionState::new("Walk"));
     let index = engine.test_object_index(object);
     let definition_id = engine.objects[index].definition_id.clone();
 
@@ -1520,7 +1470,7 @@ fn effect_timers_reuse_the_definition_reflection_table() {
     definition.set_c4_callback_convention(true);
     let mut engine = Engine::with_seed(0);
     engine.register_test_definition(definition);
-    let object = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let object = spawn_fixture!(engine, "CALL");
     let index = engine.test_object_index(object);
     let definition_id = engine.objects[index].definition_id.clone();
     let mut effect = EffectState::new("Load")
@@ -1568,7 +1518,7 @@ fn lazy_host_world_global_effect_without_world_access_copies_nothing() {
     engine.register_test_definition(definition);
     engine.register_test_script_definition("FILL", "Filler", "#strict\n");
     for x in 0..64 {
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "FILL", with_position: Vector2::new(x, 10));
     }
     let mut effect = EffectState::new("Lazy")
         .with_interval(1)
@@ -1608,7 +1558,8 @@ fn lazy_host_world_contact_materialization_is_deferred_until_query() {
     engine.set_landscape(landscape);
 
     engine.register_test_script_definition("FILL", "Filler", "#strict\n");
-    let mut swimmer = test_definition(
+    register_fixture!(
+        engine,
         "SWIM",
         "Contact swimmer",
         r#"#strict
@@ -1621,22 +1572,16 @@ fn lazy_host_world_contact_materialization_is_deferred_until_query() {
         return(0);
     }
     "#,
+        set_c4_callback_convention(true),
+        set_contact_function_calls(true),
+        set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2))),
+        set_shape_vertices(vec![ObjectVertex::new(1, 0).with_cnat(CNAT_RIGHT)])
     );
-    swimmer.set_c4_callback_convention(true);
-    swimmer.set_contact_function_calls(true);
-    swimmer.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
-    swimmer.set_shape_vertices(vec![ObjectVertex::new(1, 0).with_cnat(CNAT_RIGHT)]);
-    engine.register_test_definition(swimmer);
 
     for x in 0..128 {
-        engine.spawn_test_object(SpawnConfig::new("FILL").with_position(Vector2::new(x % 100, 10)));
+        spawn_fixture!(engine, "FILL", with_position: Vector2::new(x % 100, 10));
     }
-    let swimmer = engine.spawn_test_object(
-        SpawnConfig::new("SWIM")
-            .with_position(Vector2::new(50, 50))
-            .with_velocity(Vector2::new(1, 0))
-            .with_mobile(true),
-    );
+    let swimmer = spawn_fixture!(engine, "SWIM", with_position: Vector2::new(50, 50), with_velocity: Vector2::new(1, 0), with_mobile: true);
     let swimmer_index = engine.test_object_index(swimmer);
     let definition_id = engine.objects[swimmer_index].definition_id.clone();
     let action_library = crate::TestValueExt::test_value(engine.definitions.get(&definition_id))
@@ -1755,16 +1700,7 @@ fn rejected_step_latches_contact_for_next_move_to_jump() {
     }]);
     engine.register_test_definition(walker_definition);
 
-    let walker = engine.spawn_test_object(
-        SpawnConfig::new("WALK")
-            .with_position(Vector2::new(100, 100))
-            .with_velocity(Vector2::new(-1, 0))
-            .with_action(ActionState::new("Walk"))
-            .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-            .with_crew_member(true)
-            .with_alive(true)
-            .with_mobile(true),
-    );
+    let walker = spawn_fixture!(engine, "WALK", with_position: Vector2::new(100, 100), with_velocity: Vector2::new(-1, 0), with_action: ActionState::new("Walk"), with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_crew_member: true, with_alive: true, with_mobile: true);
     let walker_index = engine.test_object_index(walker);
     engine.refresh_object_ocf(walker_index);
     assert_ne!(
@@ -1829,7 +1765,7 @@ fn sector_queries_do_not_materialize_the_landscape_shell() {
     engine.register_test_script_definition("SECT", "Sector", "");
     engine.set_landscape(Landscape::flat(100, 100));
     for x in 0..8 {
-        engine.spawn_test_object(SpawnConfig::new("SECT").with_position(Vector2::new(x * 8, 10)));
+        spawn_fixture!(engine, "SECT", with_position: Vector2::new(x * 8, 10));
     }
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -1866,8 +1802,7 @@ fn sector_query_rebuilds_after_callback_local_position_update() {
     let mut engine = Engine::with_seed(0);
     engine.register_test_script_definition("SECT", "Sector", "");
     engine.set_landscape(Landscape::flat(400, 100));
-    let object =
-        engine.spawn_test_object(SpawnConfig::new("SECT").with_position(Vector2::new(10, 10)));
+    let object = spawn_fixture!(engine, "SECT", with_position: Vector2::new(10, 10));
 
     let mut context = engine.host_world_context();
     assert!(
@@ -1918,8 +1853,7 @@ fn set_position_updates_bounded_find_sectors_in_the_same_script_call() {
         }
         "#,
     ));
-    let object =
-        engine.spawn_test_object(SpawnConfig::new("SECT").with_position(Vector2::new(10, 10)));
+    let object = spawn_fixture!(engine, "SECT", with_position: Vector2::new(10, 10));
     let index = engine.test_object_index(object);
 
     assert_eq!(
@@ -1939,7 +1873,8 @@ fn set_rotation_updates_bounded_shape_find_sectors_in_the_same_script_call() {
     // src/C4FindObject.cpp:315-355).
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(400, 200));
-    let mut definition = test_definition(
+    register_fixture!(
+        engine,
         "ROTR",
         "Sector rotator",
         r#"#strict
@@ -1949,12 +1884,10 @@ fn set_rotation_updates_bounded_shape_find_sectors_in_the_same_script_call() {
         return GetLength(FindObjects([C4FO_AtRect, 260, 100, 1, 1]));
     }
     "#,
+        set_rotateable(1),
+        set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)))
     );
-    definition.set_rotateable(1);
-    definition.set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)));
-    engine.register_test_definition(definition);
-    let object =
-        engine.spawn_test_object(SpawnConfig::new("ROTR").with_position(Vector2::new(200, 100)));
+    let object = spawn_fixture!(engine, "ROTR", with_position: Vector2::new(200, 100));
     let index = engine.test_object_index(object);
 
     assert_eq!(
@@ -1975,10 +1908,15 @@ fn change_def_updates_bounded_shape_find_sectors_in_the_same_script_call() {
     // src/C4FindObject.cpp:315-355).
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(400, 200));
-    let mut replacement = test_definition("NEW1", "Wide replacement", "#strict\n");
-    replacement.set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)));
-    engine.register_test_definition(replacement);
-    let mut original = test_definition(
+    register_fixture!(
+        engine,
+        "NEW1",
+        "Wide replacement",
+        "#strict\n",
+        set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)))
+    );
+    register_fixture!(
+        engine,
         "OLD1",
         "Narrow original",
         r#"#strict
@@ -1988,11 +1926,9 @@ fn change_def_updates_bounded_shape_find_sectors_in_the_same_script_call() {
         return GetLength(FindObjects([C4FO_AtRect, 130, 100, 1, 1]));
     }
     "#,
+        set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)))
     );
-    original.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
-    engine.register_test_definition(original);
-    let object =
-        engine.spawn_test_object(SpawnConfig::new("OLD1").with_position(Vector2::new(200, 100)));
+    let object = spawn_fixture!(engine, "OLD1", with_position: Vector2::new(200, 100));
     let index = engine.test_object_index(object);
 
     assert_eq!(
@@ -2012,7 +1948,8 @@ fn do_con_updates_bounded_shape_find_sectors_after_keep_bottom_move() {
     // src/C4FindObject.cpp:315-355).
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(400, 250));
-    let mut definition = test_definition(
+    register_fixture!(
+        engine,
         "GROW",
         "Sector grower",
         r#"#strict
@@ -2027,14 +1964,9 @@ fn do_con_updates_bounded_shape_find_sectors_after_keep_bottom_move() {
         return GetLength(FindObjects([C4FO_AtRect, 200, 30, 1, 1]));
     }
     "#,
+        set_shape_rect(Some(DefinitionRect::new(0, 0, 10, 80)))
     );
-    definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 10, 80)));
-    engine.register_test_definition(definition);
-    let object = engine.spawn_test_object(
-        SpawnConfig::new("GROW")
-            .with_position(Vector2::new(200, 100))
-            .with_construction(FULL_CON / 2),
-    );
+    let object = spawn_fixture!(engine, "GROW", with_position: Vector2::new(200, 100), with_construction: FULL_CON / 2);
     let index = engine.test_object_index(object);
 
     assert_eq!(
@@ -2062,7 +1994,8 @@ fn do_con_refreshes_shape_sectors_before_content_ejection_callback() {
     // src/C4FindObject.cpp:315-355).
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(400, 250));
-    let mut grower = test_definition(
+    register_fixture!(
+        engine,
         "GROW",
         "Callback grower",
         r#"#strict
@@ -2081,17 +2014,12 @@ fn do_con_refreshes_shape_sectors_before_content_ejection_callback() {
         return ejection_count;
     }
     "#,
+        set_c4_callback_convention(true),
+        set_shape_rect(Some(DefinitionRect::new(0, 0, 10, 80)))
     );
-    grower.set_c4_callback_convention(true);
-    grower.set_shape_rect(Some(DefinitionRect::new(0, 0, 10, 80)));
-    engine.register_test_definition(grower);
     engine.register_test_script_definition("ITEM", "Contained item", "#strict\n");
-    let object = engine.spawn_test_object(
-        SpawnConfig::new("GROW")
-            .with_position(Vector2::new(200, 100))
-            .with_construction(FULL_CON / 4),
-    );
-    engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(object));
+    let object = spawn_fixture!(engine, "GROW", with_position: Vector2::new(200, 100), with_construction: FULL_CON / 4);
+    spawn_fixture!(engine, "ITEM", with_container: object);
     let index = engine.test_object_index(object);
 
     assert_eq!(
@@ -2112,7 +2040,8 @@ fn exit_updates_sectors_before_ejection_callback() {
     // src/C4FindObject.cpp:315-355).
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(400, 100));
-    let mut container = test_definition(
+    register_fixture!(
+        engine,
         "CONT",
         "Exit observer",
         r#"#strict
@@ -2125,9 +2054,8 @@ fn exit_updates_sectors_before_ejection_callback() {
     [C4FO_ID, ITEM]));
     }
     "#,
+        set_c4_callback_convention(true)
     );
-    container.set_c4_callback_convention(true);
-    engine.register_test_definition(container);
     engine.register_test_definition(test_definition(
         "ITEM",
         "Exiting item",
@@ -2138,8 +2066,8 @@ fn exit_updates_sectors_before_ejection_callback() {
         }
         "#,
     ));
-    let container = engine.spawn_test_object(SpawnConfig::new("CONT"));
-    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(container));
+    let container = spawn_fixture!(engine, "CONT");
+    let item = spawn_fixture!(engine, "ITEM", with_container: container);
     let item_index = engine.test_object_index(item);
 
     assert_eq!(
@@ -2167,7 +2095,8 @@ fn enter_updates_sectors_before_collection2_callback() {
     // src/C4Object.cpp:1566-1636; src/C4FindObject.cpp:315-355).
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(400, 100));
-    let mut container = test_definition(
+    register_fixture!(
+        engine,
         "CONT",
         "Enter observer",
         r#"#strict
@@ -2180,9 +2109,8 @@ fn enter_updates_sectors_before_collection2_callback() {
     [C4FO_ID, ITEM]));
     }
     "#,
+        set_c4_callback_convention(true)
     );
-    container.set_c4_callback_convention(true);
-    engine.register_test_definition(container);
     engine.register_test_definition(test_definition(
         "ITEM",
         "Entering item",
@@ -2193,10 +2121,8 @@ fn enter_updates_sectors_before_collection2_callback() {
         }
         "#,
     ));
-    let container =
-        engine.spawn_test_object(SpawnConfig::new("CONT").with_position(Vector2::new(10, 10)));
-    let item =
-        engine.spawn_test_object(SpawnConfig::new("ITEM").with_position(Vector2::new(310, 10)));
+    let container = spawn_fixture!(engine, "CONT", with_position: Vector2::new(10, 10));
+    let item = spawn_fixture!(engine, "ITEM", with_position: Vector2::new(310, 10));
     let item_index = engine.test_object_index(item);
 
     assert_eq!(
@@ -2225,7 +2151,8 @@ fn set_vertex_permanent_update_refreshes_shape_sectors() {
     // src/C4Shape.cpp:421-450; src/C4FindObject.cpp:315-355).
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(400, 100));
-    let mut definition = test_definition(
+    register_fixture!(
+        engine,
         "VRTX",
         "Permanent vertex editor",
         r#"#strict
@@ -2236,12 +2163,10 @@ fn set_vertex_permanent_update_refreshes_shape_sectors() {
         return [GetLength(FindObjects([C4FO_AtRect, 130, 5, 1, 1])), GetObjWidth()];
     }
     "#,
+        set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10))),
+        set_shape_vertices(vec![ObjectVertex::new(0, 0)])
     );
-    definition.set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)));
-    definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
-    engine.register_test_definition(definition);
-    let object =
-        engine.spawn_test_object(SpawnConfig::new("VRTX").with_position(Vector2::new(200, 10)));
+    let object = spawn_fixture!(engine, "VRTX", with_position: Vector2::new(200, 10));
     let index = engine.test_object_index(object);
 
     assert_eq!(
@@ -2262,7 +2187,8 @@ fn collect_updates_sectors_after_post_callback_copy_motion() {
     // src/C4FindObject.cpp:315-355).
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(400, 100));
-    let mut collector = test_definition(
+    register_fixture!(
+        engine,
         "COLL",
         "Sector collector",
         r#"#strict
@@ -2274,16 +2200,17 @@ fn collect_updates_sectors_after_post_callback_copy_motion() {
     [C4FO_ID, ITEM]));
     }
     "#,
+        set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)))
     );
-    collector.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
-    engine.register_test_definition(collector);
-    let mut item = test_definition("ITEM", "Collected item", "#strict\n");
-    item.set_collectible(true);
-    engine.register_test_definition(item);
-    let collector =
-        engine.spawn_test_object(SpawnConfig::new("COLL").with_position(Vector2::new(10, 10)));
-    let item =
-        engine.spawn_test_object(SpawnConfig::new("ITEM").with_position(Vector2::new(310, 10)));
+    register_fixture!(
+        engine,
+        "ITEM",
+        "Collected item",
+        "#strict\n",
+        set_collectible(true)
+    );
+    let collector = spawn_fixture!(engine, "COLL", with_position: Vector2::new(10, 10));
+    let item = spawn_fixture!(engine, "ITEM", with_position: Vector2::new(310, 10));
     let collector_index = engine.test_object_index(collector);
 
     assert_eq!(
@@ -2308,7 +2235,8 @@ fn status_activation_refreshes_sectors_after_shape_rebuild() {
     // src/C4FindObject.cpp:315-355).
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(400, 100));
-    let mut definition = test_definition(
+    register_fixture!(
+        engine,
         "ACTV",
         "Sector activator",
         r#"#strict
@@ -2318,15 +2246,9 @@ fn status_activation_refreshes_sectors_after_shape_rebuild() {
         return [GetLength(FindObjects([C4FO_AtRect, 130, 5, 1, 1])), GetObjWidth()];
     }
     "#,
+        set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)))
     );
-    definition.set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)));
-    engine.register_test_definition(definition);
-    let object = engine.spawn_test_object(
-        SpawnConfig::new("ACTV")
-            .with_position(Vector2::new(200, 10))
-            .with_shape_rect(DefinitionRect::new(0, 0, 1, 1))
-            .with_status(ObjectStatus::Inactive),
-    );
+    let object = spawn_fixture!(engine, "ACTV", with_position: Vector2::new(200, 10), with_shape_rect: DefinitionRect::new(0, 0, 1, 1), with_status: ObjectStatus::Inactive);
     let index = engine.test_object_index(object);
 
     assert_eq!(
@@ -2359,15 +2281,12 @@ fn callback_geometry_update_preserves_unrelated_physical_sector_order() {
         }
         "#,
     ));
-    let older =
-        engine.spawn_test_object(SpawnConfig::new("ORDR").with_position(Vector2::new(10, 10)));
-    let newer =
-        engine.spawn_test_object(SpawnConfig::new("ORDR").with_position(Vector2::new(20, 10)));
+    let older = spawn_fixture!(engine, "ORDR", with_position: Vector2::new(10, 10));
+    let newer = spawn_fixture!(engine, "ORDR", with_position: Vector2::new(20, 10));
     for x in 100..116 {
-        engine.spawn_test_object(SpawnConfig::new("ORDR").with_position(Vector2::new(x, 10)));
+        spawn_fixture!(engine, "ORDR", with_position: Vector2::new(x, 10));
     }
-    let mover =
-        engine.spawn_test_object(SpawnConfig::new("MOVR").with_position(Vector2::new(210, 10)));
+    let mover = spawn_fixture!(engine, "MOVR", with_position: Vector2::new(210, 10));
 
     let older_index = engine.test_object_index(older);
     let newer_index = engine.test_object_index(newer);
@@ -2414,7 +2333,8 @@ fn effect_batch_geometry_preview_preserves_callback_entry_sector_order() {
         engine.register_test_script_definition(id, id, "#strict\n");
     }
     engine.register_test_script_definition("DEAD", "Foreign removal target", "#strict\n");
-    let mut observer = test_definition(
+    register_fixture!(
+        engine,
         "FXOR",
         "Effect order observer",
         r#"#strict 3
@@ -2456,23 +2376,15 @@ fn effect_batch_geometry_preview_preserves_callback_entry_sector_order() {
         return 0;
     }
     "#,
+        set_c4_callback_convention(true)
     );
-    observer.set_c4_callback_convention(true);
-    engine.register_test_definition(observer);
-    let older =
-        engine.spawn_test_object(SpawnConfig::new("ORDR").with_position(Vector2::new(10, 10)));
-    let newer =
-        engine.spawn_test_object(SpawnConfig::new("ORDR").with_position(Vector2::new(20, 10)));
-    let mover =
-        engine.spawn_test_object(SpawnConfig::new("MOVR").with_position(Vector2::new(210, 10)));
-    let status_target =
-        engine.spawn_test_object(SpawnConfig::new("STAT").with_position(Vector2::new(260, 10)));
-    let change_target =
-        engine.spawn_test_object(SpawnConfig::new("CHG1").with_position(Vector2::new(270, 10)));
-    let removal_target =
-        engine.spawn_test_object(SpawnConfig::new("DEAD").with_position(Vector2::new(280, 10)));
-    let observer =
-        engine.spawn_test_object(SpawnConfig::new("FXOR").with_position(Vector2::new(210, 20)));
+    let older = spawn_fixture!(engine, "ORDR", with_position: Vector2::new(10, 10));
+    let newer = spawn_fixture!(engine, "ORDR", with_position: Vector2::new(20, 10));
+    let mover = spawn_fixture!(engine, "MOVR", with_position: Vector2::new(210, 10));
+    let status_target = spawn_fixture!(engine, "STAT", with_position: Vector2::new(260, 10));
+    let change_target = spawn_fixture!(engine, "CHG1", with_position: Vector2::new(270, 10));
+    let removal_target = spawn_fixture!(engine, "DEAD", with_position: Vector2::new(280, 10));
+    let observer = spawn_fixture!(engine, "FXOR", with_position: Vector2::new(210, 20));
 
     let older_index = engine.test_object_index(older);
     let newer_index = engine.test_object_index(newer);
@@ -2558,9 +2470,8 @@ fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
     let mut spawned = Vec::new();
     for index in 0..24 {
         let id = if index % 2 == 0 { "SCTA" } else { "SCTB" };
-        let object = engine.spawn_test_object(
-            SpawnConfig::new(id).with_position(Vector2::new(9 + index * 15, 20 + index % 5)),
-        );
+        let object =
+            spawn_fixture!(engine, id, with_position: Vector2::new(9 + index * 15, 20 + index % 5));
         spawned.push(object);
     }
 
@@ -2651,7 +2562,8 @@ fn read_only_terrain_queries_never_clone_the_landscape() {
     engine.set_landscape(landscape);
     crate::TestValueExt::test_value(engine.landscape.as_mut()).grid_write_byte(10, 20, 1);
 
-    let mut prober = test_definition(
+    register_fixture!(
+        engine,
         "PROB",
         "Terrain prober",
         r#"#strict
@@ -2663,11 +2575,9 @@ fn read_only_terrain_queries_never_clone_the_landscape() {
         return(0);
     }
     "#,
+        set_c4_callback_convention(true)
     );
-    prober.set_c4_callback_convention(true);
-    engine.register_test_definition(prober);
-    let prober =
-        engine.spawn_test_object(SpawnConfig::new("PROB").with_position(Vector2::new(50, 50)));
+    let prober = spawn_fixture!(engine, "PROB", with_position: Vector2::new(50, 50));
     let prober_index = engine.test_object_index(prober);
 
     HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));

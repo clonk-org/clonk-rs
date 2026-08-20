@@ -4,23 +4,21 @@
 //! before global constants (C4AulParse.cpp:2836-2839 — "global constants
 //! have lowest priority").
 
-use clonk_script::{Engine, Script, Value};
+use clonk_script::{Engine, Value};
 
 #[test]
 fn statics_share_one_table_across_script_hosts() {
     let table = clonk_script::new_global_variables();
     let mut writer = Engine::new();
     writer.set_global_variables(table.clone());
-    writer.add_script(
-        Script::compile(
-            "static counter;\n\
-             public func Bump() { counter = counter + 1; return counter; }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut writer,
+        "static counter;\n\
+     public func Bump() { counter = counter + 1; return counter; }",
     );
     let mut reader = Engine::new();
     reader.set_global_variables(table.clone());
-    reader.add_script(Script::compile("public func Read() { return counter; }").expect("compiles"));
+    crate::support::load_script(&mut reader, "public func Read() { return counter; }");
 
     assert_eq!(writer.call("Bump", &[]).expect("bump"), Value::Int(1));
     assert_eq!(writer.call("Bump", &[]).expect("bump"), Value::Int(2));
@@ -39,9 +37,9 @@ fn statics_do_not_become_object_locals() {
     let table = clonk_script::new_global_variables();
     let mut engine = Engine::new();
     engine.set_global_variables(table.clone());
-    engine.add_script(
-        Script::compile("static shared;\npublic func Set(v) { shared = v; return shared; }")
-            .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "static shared;\npublic func Set(v) { shared = v; return shared; }",
     );
     let locals = std::collections::HashMap::new();
     let (value, finals) = engine

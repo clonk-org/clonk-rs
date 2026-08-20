@@ -10,13 +10,11 @@ fn registered_constants_resolve_as_identifiers() {
     let mut engine = Engine::new();
     engine.register_constant("DIR_Right", Value::Int(1));
     engine.register_constant("NO_OWNER", Value::Int(-1));
-    engine.add_script(
-        Script::compile(
-            r#"
-            global func Probe() { return DIR_Right + NO_OWNER; }
-            "#,
-        )
-        .expect("script compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+    global func Probe() { return DIR_Right + NO_OWNER; }
+    "#,
     );
     assert_eq!(
         engine.call("Probe", &[]).expect("call succeeds"),
@@ -28,13 +26,11 @@ fn registered_constants_resolve_as_identifiers() {
 fn local_variables_shadow_constants() {
     let mut engine = Engine::new();
     engine.register_constant("DIR_Right", Value::Int(1));
-    engine.add_script(
-        Script::compile(
-            r#"
-            global func Probe() { var DIR_Right = 9; return DIR_Right; }
-            "#,
-        )
-        .expect("script compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+    global func Probe() { var DIR_Right = 9; return DIR_Right; }
+    "#,
     );
     assert_eq!(
         engine.call("Probe", &[]).expect("call succeeds"),
@@ -49,14 +45,12 @@ fn old_style_constant_calls_yield_the_constant_below_strict2() {
     // C4AulParse.cpp:2838-2860) — Objects.c4d grass relies on it.
     let mut engine = Engine::new();
     engine.register_constant("OCF_Chop", Value::Int(256));
-    engine.add_script(
-        Script::compile(
-            r#"
-            #strict
-            global func Probe() { return OCF_Chop(); }
-            "#,
-        )
-        .expect("script compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+    #strict
+    global func Probe() { return OCF_Chop(); }
+    "#,
     );
     assert_eq!(
         engine.call("Probe", &[]).expect("call succeeds"),
@@ -65,14 +59,12 @@ fn old_style_constant_calls_yield_the_constant_below_strict2() {
 
     let mut strict2 = Engine::new();
     strict2.register_constant("OCF_Chop", Value::Int(256));
-    strict2.add_script(
-        Script::compile(
-            r#"
-            #strict 2
-            global func Probe() { return OCF_Chop(); }
-            "#,
-        )
-        .expect("script compiles"),
+    crate::support::load_script(
+        &mut strict2,
+        r#"
+    #strict 2
+    global func Probe() { return OCF_Chop(); }
+    "#,
     );
     assert!(
         strict2.call("Probe", &[]).is_err(),
@@ -83,9 +75,9 @@ fn old_style_constant_calls_yield_the_constant_below_strict2() {
 #[test]
 fn unknown_identifiers_still_error() {
     let mut engine = Engine::new();
-    engine.add_script(
-        Script::compile(r#"global func Probe() { return NoSuchConstant; }"#)
-            .expect("script compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"global func Probe() { return NoSuchConstant; }"#,
     );
     assert!(engine.call("Probe", &[]).is_err());
 }
@@ -106,18 +98,18 @@ fn script_static_consts_are_callable_across_hosts_below_strict2() {
     let mut declarer = Engine::new();
     declarer.set_global_variables(globals.clone());
     declarer.set_global_constants(consts.clone());
-    declarer.add_script(
-        Script::compile("#strict\n\nstatic const MCLK_ComboExtraDataName = \"MCLK_PrefCombo\";\n")
-            .expect("declaring script compiles"),
+    crate::support::load_script(
+        &mut declarer,
+        "#strict\n\nstatic const MCLK_ComboExtraDataName = \"MCLK_PrefCombo\";\n",
     );
     declarer.adopt_statics_into_globals();
 
     let mut caller = Engine::new();
     caller.set_global_variables(globals.clone());
     caller.set_global_constants(consts.clone());
-    caller.add_script(
-        Script::compile("#strict\n\nfunc Probe() { return(MCLK_ComboExtraDataName()); }\n")
-            .expect("calling script compiles"),
+    crate::support::load_script(
+        &mut caller,
+        "#strict\n\nfunc Probe() { return(MCLK_ComboExtraDataName()); }\n",
     );
     caller.adopt_statics_into_globals();
 
@@ -135,13 +127,11 @@ fn prior_static_constants_resolve_in_declaration_order() {
     engine.set_global_variables(globals);
     engine.set_global_constants(consts);
     engine.register_constant("ENGINE_VALUE", Value::Int(9));
-    engine.add_script(
-        Script::compile(
-            "#strict 3\n\
-             static const BASE_VALUE = 41, DERIVED_VALUE = BASE_VALUE, ENGINE_ALIAS = ENGINE_VALUE;\n\
-             func Probe() { return [DERIVED_VALUE, ENGINE_ALIAS]; }",
-        )
-        .expect("ordered static constants compile"),
+    crate::support::load_script(
+        &mut engine,
+        "#strict 3\n\
+     static const BASE_VALUE = 41, DERIVED_VALUE = BASE_VALUE, ENGINE_ALIAS = ENGINE_VALUE;\n\
+     func Probe() { return [DERIVED_VALUE, ENGINE_ALIAS]; }",
     );
     engine.adopt_statics_into_globals();
 
@@ -337,9 +327,9 @@ fn later_static_const_declarations_overwrite_the_shared_value() {
     let mut caller = Engine::new();
     caller.set_global_variables(globals.clone());
     caller.set_global_constants(consts.clone());
-    caller.add_script(
-        Script::compile("#strict\nfunc Probe() { return(SHARED_VALUE()); }\n")
-            .expect("caller compiles"),
+    crate::support::load_script(
+        &mut caller,
+        "#strict\nfunc Probe() { return(SHARED_VALUE()); }\n",
     );
     caller.adopt_statics_into_globals();
 
@@ -347,9 +337,9 @@ fn later_static_const_declarations_overwrite_the_shared_value() {
         let mut declarer = Engine::new();
         declarer.set_global_variables(globals.clone());
         declarer.set_global_constants(consts.clone());
-        declarer.add_script(
-            Script::compile(&format!("#strict\nstatic const SHARED_VALUE = {value};\n"))
-                .expect("declarer compiles"),
+        crate::support::load_script(
+            &mut declarer,
+            &format!("#strict\nstatic const SHARED_VALUE = {value};\n"),
         );
         declarer.adopt_statics_into_globals();
         assert_eq!(
@@ -367,20 +357,16 @@ fn signed_static_consts_are_registered_and_not_assignable() {
     let mut declarer = Engine::new();
     declarer.set_global_variables(globals.clone());
     declarer.set_global_constants(consts.clone());
-    declarer.add_script(
-        Script::compile("#strict\nstatic const FM_Error = -1;\n").expect("declaration compiles"),
-    );
+    crate::support::load_script(&mut declarer, "#strict\nstatic const FM_Error = -1;\n");
     declarer.adopt_statics_into_globals();
 
     let mut caller = Engine::new();
     caller.set_global_variables(globals.clone());
     caller.set_global_constants(consts.clone());
-    caller.add_script(
-        Script::compile(
-            "#strict\nfunc Read() { return FM_Error; }\n\
-             func Rewrite() { FM_Error = 7; }\n",
-        )
-        .expect("caller compiles"),
+    crate::support::load_script(
+        &mut caller,
+        "#strict\nfunc Read() { return FM_Error; }\n\
+     func Rewrite() { FM_Error = 7; }\n",
     );
     caller.adopt_statics_into_globals();
 
@@ -409,9 +395,9 @@ fn plain_static_variables_are_not_callable() {
     let mut engine = Engine::new();
     engine.set_global_variables(globals.clone());
     engine.set_global_constants(consts.clone());
-    engine.add_script(
-        Script::compile("#strict\n\nstatic someVar;\n\nfunc Probe() { return(someVar()); }\n")
-            .expect("script compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "#strict\n\nstatic someVar;\n\nfunc Probe() { return(someVar()); }\n",
     );
     engine.adopt_statics_into_globals();
     assert!(
@@ -426,14 +412,12 @@ fn constant_calls_reject_parameters_like_cpp() {
     // C4AulParse.cpp:2860 requires the immediate ')' after '('.
     let mut engine = Engine::new();
     engine.register_constant("OCF_Chop", Value::Int(256));
-    engine.add_script(
-        Script::compile(
-            r#"
-            #strict
-            global func Probe() { return OCF_Chop(5); }
-            "#,
-        )
-        .expect("script compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+    #strict
+    global func Probe() { return OCF_Chop(5); }
+    "#,
     );
     let error = engine
         .call("Probe", &[])
@@ -499,17 +483,17 @@ fn zero_valued_script_constants_fold_but_runtime_statics_do_not() {
         } else {
             ""
         };
-        engine.add_script(
-            Script::compile(&format!(
+        crate::support::load_script(
+            &mut engine,
+            &format!(
                 "{directive}\n\
-                 static const ZERO_VALUE = 0;\n\
-                 static const FALSE_VALUE = false;\n\
-                 static slot;\n\
-                 func Direct() {{ return ZERO_VALUE; }}\n\
-                 {old_style_call}\
-                 func Probe() {{ slot = 1 - 1; return [ZERO_VALUE, FALSE_VALUE, slot]; }}"
-            ))
-            .expect("script constant strictness probe compiles"),
+             static const ZERO_VALUE = 0;\n\
+             static const FALSE_VALUE = false;\n\
+             static slot;\n\
+             func Direct() {{ return ZERO_VALUE; }}\n\
+             {old_style_call}\
+             func Probe() {{ slot = 1 - 1; return [ZERO_VALUE, FALSE_VALUE, slot]; }}"
+            ),
         );
         engine.adopt_statics_into_globals();
 

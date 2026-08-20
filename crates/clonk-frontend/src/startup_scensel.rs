@@ -229,12 +229,12 @@ impl Aligner {
 
     /// C4Gui.cpp:975-990 (`iWdt < 0` variant only — never used with a width).
     fn get_from_top(&mut self, height: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: self.area.w - self.margin_x * 2,
-            h: height,
-        };
+        let out = IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.margin_y,
+            self.area.w - self.margin_x * 2,
+            height,
+        );
         let d = height + self.margin_y * 2;
         self.area.y += d;
         self.area.h -= d;
@@ -243,24 +243,24 @@ impl Aligner {
 
     /// C4Gui.cpp:1026-1040 (`iWdt < 0` variant).
     fn get_from_bottom(&mut self, height: i32) -> IntRect {
-        let out = IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.area.h - height - self.margin_y,
-            w: self.area.w - self.margin_x * 2,
-            h: height,
-        };
+        let out = IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.area.h - height - self.margin_y,
+            self.area.w - self.margin_x * 2,
+            height,
+        );
         self.area.h -= height + self.margin_y * 2;
         out
     }
 
     /// C4Gui.cpp:992-1008; `height >= 0` centers the rect vertically.
     fn get_from_left(&mut self, width: i32, height: Option<i32>) -> IntRect {
-        let mut out = IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: width,
-            h: self.area.h - self.margin_y * 2,
-        };
+        let mut out = IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.margin_y,
+            width,
+            self.area.h - self.margin_y * 2,
+        );
         let d = width + self.margin_x * 2;
         self.area.x += d;
         self.area.w -= d;
@@ -273,12 +273,12 @@ impl Aligner {
 
     /// C4Gui.cpp:1010-1024.
     fn get_from_right(&mut self, width: i32, height: Option<i32>) -> IntRect {
-        let mut out = IntRect {
-            x: self.area.x + self.area.w - width - self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: width,
-            h: self.area.h - self.margin_y * 2,
-        };
+        let mut out = IntRect::new(
+            self.area.x + self.area.w - width - self.margin_x,
+            self.area.y + self.margin_y,
+            width,
+            self.area.h - self.margin_y * 2,
+        );
         self.area.w -= width + self.margin_x * 2;
         if let Some(height) = height {
             out.y += (out.h - height) / 2;
@@ -289,22 +289,22 @@ impl Aligner {
 
     /// C4Gui.cpp:1041-1047.
     fn get_all(&self) -> IntRect {
-        IntRect {
-            x: self.area.x + self.margin_x,
-            y: self.area.y + self.margin_y,
-            w: self.area.w - self.margin_x * 2,
-            h: self.area.h - self.margin_y * 2,
-        }
+        IntRect::new(
+            self.area.x + self.margin_x,
+            self.area.y + self.margin_y,
+            self.area.w - self.margin_x * 2,
+            self.area.h - self.margin_y * 2,
+        )
     }
 
     /// C4Gui.cpp:1049-1057 (`GetMiddle - size/2`, no consume).
     fn get_centered(&self, width: i32, height: i32) -> IntRect {
-        IntRect {
-            x: self.area.x + self.area.w / 2 - width / 2,
-            y: self.area.y + self.area.h / 2 - height / 2,
-            w: width,
-            h: height,
-        }
+        IntRect::new(
+            self.area.x + self.area.w / 2 - width / 2,
+            self.area.y + self.area.h / 2 - height / 2,
+            width,
+            height,
+        )
     }
 
     /// `ExpandTop` (C4Gui.h aligner): grows the area upward by `by` —
@@ -371,12 +371,7 @@ impl ScenSelLayout {
         let x = self.back_button.x + self.back_button.w + 2 * horizontal_margin;
         let right = self.user_change_checkbox.x - 2 * horizontal_margin;
         let h = self.client.h / 8;
-        IntRect {
-            x,
-            y: self.client.y + self.client.h - h,
-            w: (right - x).max(0),
-            h,
-        }
+        IntRect::new(x, self.client.y + self.client.h - h, (right - x).max(0), h)
     }
 }
 
@@ -389,12 +384,12 @@ pub fn scen_sel_layout(w: i32, h: i32, fonts: &ClonkFontSet) -> ScenSelLayout {
     let margin_x = if w < 500 { 2 } else { w / 50 };
     let margin_y = if h < 320 { 2 } else { h * 2 / 75 };
     let margin_top = h / 7;
-    let client = IntRect {
-        x: margin_x,
-        y: margin_top,
-        w: w - 2 * margin_x,
-        h: h - margin_top - margin_y,
-    };
+    let client = IntRect::new(
+        margin_x,
+        margin_top,
+        w - 2 * margin_x,
+        h - margin_top - margin_y,
+    );
 
     // Title label: created during the FullscreenDialog base ctor when the
     // margin top was still 50 + margin_y; the stored client-relative offsets
@@ -410,16 +405,7 @@ pub fn scen_sel_layout(w: i32, h: i32, fonts: &ClonkFontSet) -> ScenSelLayout {
     let button_width = 3 * fonts.caption.measure("<< BACK", true).0;
 
     // caMain over the zero-origin client (C4StartupScenSelDlg.cpp:1311).
-    let mut ca_main = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: client.w,
-            h: client.h,
-        },
-        0,
-        0,
-    );
+    let mut ca_main = Aligner::new(IntRect::new(0, 0, client.w, client.h), 0, 0);
     let mut ca_button_area = Aligner::new(
         ca_main.get_from_bottom(ca_main.area.h / 8),
         w / if w >= 700 { 128 } else { 256 },
@@ -429,16 +415,7 @@ pub fn scen_sel_layout(w: i32, h: i32, fonts: &ClonkFontSet) -> ScenSelLayout {
     let y_oversize = ca_main.area.h / 10; // overlap of map to top (:1314)
     rc_map.y -= y_oversize;
     rc_map.h += y_oversize;
-    let mut ca_map = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: rc_map.w,
-            h: rc_map.h,
-        },
-        0,
-        0,
-    );
+    let mut ca_map = Aligner::new(IntRect::new(0, 0, rc_map.w, rc_map.h), 0, 0);
     ca_map.expand_top(-y_oversize);
     let mut ca_book = Aligner::new(
         ca_map.get_centered(ca_map.area.w * 11 / 12 - 4 * extra_h_padding, ca_map.area.h),
@@ -453,12 +430,7 @@ pub fn scen_sel_layout(w: i32, h: i32, fonts: &ClonkFontSet) -> ScenSelLayout {
     // (C4StartupScenSelDlg.cpp:1313-1315,1322-1328).
     let sheet_x = client.x + rc_map.x;
     let sheet_y = client.y + rc_map.y;
-    let on_sheet = |r: IntRect| IntRect {
-        x: r.x + sheet_x,
-        y: r.y + sheet_y,
-        w: r.w,
-        h: r.h,
-    };
+    let on_sheet = |r: IntRect| IntRect::new(r.x + sheet_x, r.y + sheet_y, r.w, r.h);
 
     // Left-page caption (C4StartupScenSelDlg.cpp:1331-1334).
     let caption_rect = on_sheet(ca_book_left.get_from_top(fonts.title.line_height));
@@ -475,24 +447,14 @@ pub fn scen_sel_layout(w: i32, h: i32, fonts: &ClonkFontSet) -> ScenSelLayout {
     // (C4GuiListBox.h:120-123), scroll window keeps the right 16px for the
     // scrollbar (C4GuiContainers.cpp:477-491).
     let list = on_sheet(ca_book_left.get_all());
-    let list_scrollbar = IntRect {
-        x: list.x + 3 + (list.w - 6) - 16,
-        y: list.y + 3,
-        w: 16,
-        h: list.h - 6,
-    };
+    let list_scrollbar = IntRect::new(list.x + 3 + (list.w - 6) - 16, list.y + 3, 16, list.h - 6);
 
     // Right page (C4StartupScenSelDlg.cpp:1360-1364).
     let selection_info = on_sheet(ca_book.get_from_right(book_page_width, None));
 
     // Bottom button bar, dialog-client relative (C4StartupScenSelDlg.cpp:
     // 1367-1382); the helper shifts to screen coordinates.
-    let on_client = |r: IntRect| IntRect {
-        x: r.x + client.x,
-        y: r.y + client.y,
-        w: r.w,
-        h: r.h,
-    };
+    let on_client = |r: IntRect| IntRect::new(r.x + client.x, r.y + client.y, r.w, r.h);
     let button_height = 32; // C4GUI_ButtonHgt (C4Gui.h:119)
     let back_button = on_client(ca_button_area.get_from_left(button_width, Some(button_height)));
     let open_button = on_client(ca_button_area.get_from_right(button_width, Some(button_height)));
@@ -504,35 +466,16 @@ pub fn scen_sel_layout(w: i32, h: i32, fonts: &ClonkFontSet) -> ScenSelLayout {
     let options = on_client(ca_button_area.get_all());
     let icon_size = 64.min(options.h); // C4GUI_IconExHgt
     let icon_spacing = options.w / if options.w >= 400 { 64 } else { 128 };
-    let ca_buttons_area = Aligner::new(
-        IntRect {
-            x: 0,
-            y: 0,
-            w: options.w,
-            h: options.h,
-        },
-        0,
-        0,
-    )
-    .get_centered((icon_size + 2 * icon_spacing) * 2, icon_size);
+    let ca_buttons_area = Aligner::new(IntRect::new(0, 0, options.w, options.h), 0, 0)
+        .get_centered((icon_size + 2 * icon_spacing) * 2, icon_size);
     let mut ca_buttons = Aligner::new(ca_buttons_area, icon_spacing, 0);
-    let on_options = |r: IntRect| IntRect {
-        x: r.x + options.x,
-        y: r.y + options.y,
-        w: r.w,
-        h: r.h,
-    };
+    let on_options = |r: IntRect| IntRect::new(r.x + options.x, r.y + options.y, r.w, r.h);
     let fair_crew_button = on_options(ca_buttons.get_from_left(icon_size, Some(icon_size)));
     let record_button = on_options(ca_buttons.get_from_left(icon_size, Some(icon_size)));
 
     ScenSelLayout {
         client,
-        map_sheet: IntRect {
-            x: client.x + rc_map.x,
-            y: client.y + rc_map.y,
-            w: rc_map.w,
-            h: rc_map.h,
-        },
+        map_sheet: IntRect::new(client.x + rc_map.x, client.y + rc_map.y, rc_map.w, rc_map.h),
         title_anchor,
         caption_anchor,
         search_label,
@@ -560,12 +503,12 @@ fn tooltip_rect_contains(rect: IntRect, point: crate::GuiPoint) -> bool {
 fn tooltip_gui_rect_contains(rect: &GuiRect, point: crate::GuiPoint) -> bool {
     // C4Rect(FLOAT_RECT) truncates the origin but sizes to the enclosing
     // floor(left)/ceil(right) span before regular half-open C4Rect hits.
-    let bounds = IntRect {
-        x: rect.origin.x as i32,
-        y: rect.origin.y as i32,
-        w: ((rect.origin.x + rect.size.width).ceil() - rect.origin.x.floor()) as i32,
-        h: ((rect.origin.y + rect.size.height).ceil() - rect.origin.y.floor()) as i32,
-    };
+    let bounds = IntRect::new(
+        rect.origin.x as i32,
+        rect.origin.y as i32,
+        ((rect.origin.x + rect.size.width).ceil() - rect.origin.x.floor()) as i32,
+        ((rect.origin.y + rect.size.height).ceil() - rect.origin.y.floor()) as i32,
+    );
     tooltip_rect_contains(bounds, point)
 }
 
@@ -604,12 +547,12 @@ pub fn scen_sel_book_tooltip_at<'a>(
         return None;
     }
 
-    let viewport = IntRect {
-        x: layout.list.x + 3,
-        y: layout.list.y + 3,
-        w: layout.list.w - 6 - 16,
-        h: layout.list.h - 6,
-    };
+    let viewport = IntRect::new(
+        layout.list.x + 3,
+        layout.list.y + 3,
+        layout.list.w - 6 - 16,
+        layout.list.h - 6,
+    );
     if tooltip_rect_contains(viewport, point) {
         let item_height = item_height.max(1);
         let pitch = item_height + 1;
@@ -1520,18 +1463,13 @@ pub fn draw_search_edit_contents(
         0x7f000000,
         gamma,
     );
-    let client = IntRect {
-        x: edit.x + 4,
-        y: edit.y + 2,
-        w: (edit.w - 8).max(0),
-        h: (edit.h - 4).max(0),
-    };
-    let clip = IntRect {
-        x: client.x - 2,
-        y: client.y,
-        w: client.w + 4,
-        h: client.h + 1,
-    };
+    let client = IntRect::new(
+        edit.x + 4,
+        edit.y + 2,
+        (edit.w - 8).max(0),
+        (edit.h - 4).max(0),
+    );
+    let clip = IntRect::new(client.x - 2, client.y, client.w + 4, client.h + 1);
     let (text_y0, selection_height) = if client.h <= gui_fonts.text.line_height {
         (client.y, client.h)
     } else {
@@ -1634,12 +1572,12 @@ pub fn search_caret_area(
     composition: Option<&crate::ime::ImeComposition>,
 ) -> IntRect {
     let edit = &layout.search_edit;
-    let client = IntRect {
-        x: edit.x + 4,
-        y: edit.y + 2,
-        w: (edit.w - 8).max(0),
-        h: (edit.h - 4).max(0),
-    };
+    let client = IntRect::new(
+        edit.x + 4,
+        edit.y + 2,
+        (edit.w - 8).max(0),
+        (edit.h - 4).max(0),
+    );
     let composed = crate::ime::compose(text, caret, composition);
     let caret_x =
         client.x + font.measure(&composed.text[..composed.caret], false).0 - horizontal_scroll;
@@ -1651,12 +1589,12 @@ pub fn search_caret_area(
             font.line_height - 2,
         )
     };
-    IntRect {
-        x: caret_x.clamp(client.x, client.x + client.w),
-        y: text_y0,
-        w: 1,
-        h: height.max(1),
-    }
+    IntRect::new(
+        caret_x.clamp(client.x, client.x + client.w),
+        text_y0,
+        1,
+        height.max(1),
+    )
 }
 
 /// The enhanced search's field-contained clear target. Its hit area stays at
@@ -1664,12 +1602,7 @@ pub fn search_caret_area(
 pub fn search_clear_button_bounds(layout: &ScenSelLayout) -> IntRect {
     let edit = layout.search_edit;
     let width = edit.h.max(24).min(edit.w.max(0));
-    IntRect {
-        x: edit.x + edit.w - width,
-        y: edit.y,
-        w: width,
-        h: edit.h,
-    }
+    IntRect::new(edit.x + edit.w - width, edit.y, width, edit.h)
 }
 
 /// Draws the enhanced search's trailing clear affordance over the mutable edit
@@ -1980,12 +1913,7 @@ fn selection_info_client(layout: &ScenSelLayout) -> (IntRect, i32) {
     // TextWindow margins: left 10, right 5, top 8, bottom 8 (C4Gui.h:1334-
     // 1337); the ScrollWindow always reserves 16px for its scrollbar.
     let win = &layout.selection_info;
-    let client = IntRect {
-        x: win.x + 10,
-        y: win.y + 8,
-        w: win.w - 15,
-        h: win.h - 16,
-    };
+    let client = IntRect::new(win.x + 10, win.y + 8, win.w - 15, win.h - 16);
     let content_w = client.w - 16;
     (client, content_w)
 }
@@ -1995,12 +1923,7 @@ fn selection_info_client(layout: &ScenSelLayout) -> (IntRect, i32) {
 /// the content exceeds the visible client height.
 pub fn selection_info_scrollbar_rect(layout: &ScenSelLayout) -> IntRect {
     let (client, _) = selection_info_client(layout);
-    IntRect {
-        x: client.x + client.w - 16,
-        y: client.y,
-        w: 16,
-        h: client.h,
-    }
+    IntRect::new(client.x + client.w - 16, client.y, 16, client.h)
 }
 
 fn selection_info_lines<'a>(
@@ -2322,12 +2245,7 @@ mod tests {
                 &fonts.text,
                 10,
                 8,
-                IntRect {
-                    x: 0,
-                    y: 0,
-                    w: 80,
-                    h: 40,
-                },
+                IntRect::new(0, 0, 80, 40),
                 None,
             );
             surface
@@ -2503,15 +2421,7 @@ mod tests {
             (layout.fair_crew_button.w, layout.fair_crew_button.h),
             (64, 64)
         );
-        assert_eq!(
-            layout.game_option_bounds(),
-            IntRect {
-                x: 208,
-                y: 627,
-                w: 691,
-                h: 74,
-            }
-        );
+        assert_eq!(layout.game_option_bounds(), IntRect::new(208, 627, 691, 74));
 
         // Pin the measured font widths so regressions in the font code are
         // caught here: W = 3 * caption("<< BACK") = 3*51, S = text("Search:").

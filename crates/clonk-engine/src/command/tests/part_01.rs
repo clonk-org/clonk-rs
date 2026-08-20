@@ -1,5 +1,5 @@
-// Contiguous slice 1 of 7 of the `command/tests` battery, spliced by
-// `include!` from the parent module so every test id is unchanged.
+    // Contiguous slice 1 of 7 of the `command/tests` battery, spliced by
+    // `include!` from the parent module so every test id is unchanged.
 
     static EMPTY_COMMAND_OBJECTS: Lazy<CommandObjectSnapshots> =
         Lazy::new(CommandObjectSnapshots::default);
@@ -7,6 +7,61 @@
         Lazy::new(HashMap::new);
     static EMPTY_COMMAND_DEFINITIONS: Lazy<HashMap<DefinitionId, CommandDefinitionSnapshot>> =
         Lazy::new(HashMap::new);
+
+    macro_rules! request {
+        ($id:ident $(, $method:ident: $value:expr)* $(,)?) => {{
+            let request = CommandRequest::new(CommandId::$id);
+            $(let request = request.$method($value);)*
+            request
+        }};
+    }
+
+    macro_rules! command_object {
+        ($id:expr; $($field:ident = $value:expr);+ $(;)?) => {{
+            let mut object = snapshot_with_id($id);
+            $(object.$field = $value;)+
+            object
+        }};
+    }
+
+    macro_rules! command_definition {
+        ($($field:ident: $value:expr),* $(,)?) => {
+            CommandDefinitionSnapshot {
+                $($field: $value,)*
+                ..CommandDefinitionSnapshot::default()
+            }
+        };
+    }
+
+    fn active_command_player(wealth: i32) -> CommandPlayerSnapshot {
+        CommandPlayerSnapshot {
+            status: PlayerStatus::Active,
+            surrendered: false,
+            wealth,
+            home_base_material: HashMap::new(),
+            home_base_material_entries: Vec::new(),
+            knowledge: Vec::new(),
+            hostile_to: Vec::new(),
+        }
+    }
+
+    macro_rules! command_player {
+        ($wealth:expr $(, $field:ident: $value:expr)* $(,)?) => {
+            CommandPlayerSnapshot {
+                $($field: $value,)*
+                ..active_command_player($wealth)
+            }
+        };
+    }
+
+    macro_rules! command_context {
+        ($base:expr; $($field:ident: $value:expr),* $(,)?) => {
+            CommandRuntimeContext {
+                $($field: $value,)*
+                ..$base
+            }
+        };
+    }
 
     #[test]
     fn command_experience_gain_matches_every_cpp_bucket() {
@@ -24,9 +79,7 @@
     fn callback_complete_records_native_success_after_command_replacement() {
         let mut acquire = CommandStack::new();
         acquire
-            .push_front(
-                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
-            )
+            .push_front(request!(Acquire, with_data: CommandData::Text("WOOD".into())))
             .expect("Acquire queues");
         let acquire_instance = acquire.entries.front().unwrap().instance_id;
         acquire.clear();
@@ -36,10 +89,7 @@
 
         let mut construct = CommandStack::new();
         construct
-            .push_front(
-                CommandRequest::new(CommandId::Construct)
-                    .with_data(CommandData::Text("HUT1".into())),
-            )
+            .push_front(request!(Construct, with_data: CommandData::Text("HUT1".into())))
             .expect("Construct queues");
         let construct_instance = construct.entries.front().unwrap().instance_id;
         construct.clear();
@@ -90,20 +140,8 @@
         assert_eq!(definition_id_to_c4id(&numeric), Some(1111));
 
         let definitions = HashMap::from([
-            (
-                packed.clone(),
-                CommandDefinitionSnapshot {
-                    value: 41,
-                    ..CommandDefinitionSnapshot::default()
-                },
-            ),
-            (
-                numeric.clone(),
-                CommandDefinitionSnapshot {
-                    value: 42,
-                    ..CommandDefinitionSnapshot::default()
-                },
-            ),
+            (packed.clone(), command_definition! { value: 41 }),
+            (numeric.clone(), command_definition! { value: 42 }),
         ]);
         assert_eq!(
             definitions.get(&packed).map(|definition| definition.value),
@@ -231,12 +269,8 @@
     }
 
     fn walking_jumper(position: Vector2) -> CommandObjectSnapshot {
-        let mut walker = snapshot_with_id(1);
-        walker.position = position;
-        walker.action_name = "Walk".into();
-        walker.action_idle = false;
-        walker.action_procedure = ActionProcedure::Walk;
-        walker.crew_member = true;
+        let mut walker = command_object!(1; position = position; action_name = "Walk".into();
+            action_idle = false; action_procedure = ActionProcedure::Walk; crew_member = true);
         walker.ocf |= ocf::CREW_MEMBER;
         walker.shape_top = -10;
         walker
@@ -254,10 +288,7 @@
         walker: &'a CommandObjectSnapshot,
         landscape: &'a crate::Landscape,
     ) -> CommandRuntimeContext<'a> {
-        CommandRuntimeContext {
-            landscape: Some(landscape),
-            ..empty_command_ctx(walker, 0)
-        }
+        command_context!(empty_command_ctx(walker, 0); landscape: Some(landscape))
     }
 
     /// A MoveTo state past its InitEvaluation Execute with the raw Tx/Ty
@@ -338,11 +369,8 @@
         let mut clonk = walking_jumper(Vector2::new(156, 100));
         clonk.shape = DefinitionRect::new(-4, -9, 8, 18);
         let ctx = empty_command_ctx(&clonk, 1);
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(160))
-                .with_ty(Some(100)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(160), with_ty: Some(100)));
 
         let result = state.step(&ctx);
 
@@ -362,9 +390,7 @@
         let landscape = crate::Landscape::flat(100, 60);
         let ctx = jump_ctx(&actor, &landscape);
         let mut stack = CommandStack::new();
-        stack
-            .push_front(CommandRequest::new(CommandId::MoveTo))
-            .expect("MoveTo queues");
+        stack.push_front(request!(MoveTo)).expect("MoveTo queues");
 
         let result = stack.execute_front(&ctx).expect("MoveTo evaluates");
         assert!(matches!(
@@ -401,19 +427,13 @@
             let mut stack = CommandStack::new();
             stack
                 .push_back(
-                    CommandRequest::new(CommandId::MoveTo)
-                        .with_tx(Some(target.x))
-                        .with_ty(Some(target.y))
-                        .with_evaluated(true),
+                    request!(MoveTo, with_tx: Some(target.x), with_ty: Some(target.y), with_evaluated: true),
                 )
                 .expect("current MoveTo queues");
             if following_move_to {
                 stack
                     .push_back(
-                        CommandRequest::new(CommandId::MoveTo)
-                            .with_tx(Some(200))
-                            .with_ty(Some(100))
-                            .with_evaluated(true),
+                        request!(MoveTo, with_tx: Some(200), with_ty: Some(100), with_evaluated: true),
                     )
                     .expect("following MoveTo queues");
             }
@@ -455,10 +475,7 @@
         let walker = walking_jumper(Vector2::new(10, 50));
         let ctx = jump_ctx(&walker, &landscape);
         let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(90))
-                .with_ty(Some(50))
-                .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET)),
+            &request!(MoveTo, with_tx: Some(90), with_ty: Some(50), with_data: CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET)),
         );
 
         let result = state.step(&ctx);
@@ -544,11 +561,8 @@
         let walker = walking_jumper(start);
         let mut ctx = jump_ctx(&walker, &landscape);
         ctx.frame = 1;
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(target.x))
-                .with_ty(Some(target.y)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(target.x), with_ty: Some(target.y)));
 
         for execution in 1..=2 {
             let result = state.step(&ctx);
@@ -592,13 +606,7 @@
         assert_eq!((x, y), (142, 75));
 
         let ctx = jump_ctx(&walker, &landscape);
-        let request = CommandRequest::new(CommandId::MoveTo)
-            .with_tx(Some(x))
-            .with_ty(Some(y))
-            .with_data(CommandData::Integer(0))
-            .with_update_interval(25)
-            .with_evaluated(true)
-            .with_mode(CommandMode::SilentSub);
+        let request = request!(MoveTo, with_tx: Some(x), with_ty: Some(y), with_data: CommandData::Integer(0), with_update_interval: 25, with_evaluated: true, with_mode: CommandMode::SilentSub);
         let mut state = MoveToState::from_request(&request);
 
         let first = state.step(&ctx);
@@ -628,16 +636,9 @@
                 height: 20,
             },
         );
-        let ctx = CommandRuntimeContext {
-            landscape: Some(&landscape),
-            transfer_zones: &transfer_zones,
-            ..empty_command_ctx(&walker, 1)
-        };
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(160))
-                .with_ty(Some(50)),
-        );
+        let ctx = command_context!(empty_command_ctx(&walker, 1); landscape: Some(&landscape),
+        transfer_zones: &transfer_zones);
+        let mut state = evaluated_move_to(&request!(MoveTo, with_tx: Some(160), with_ty: Some(50)));
 
         let result = state.step(&ctx);
 
@@ -673,10 +674,8 @@
             vec![None, Some("Earth".to_owned())],
             vec![None; 2],
         ));
-        let mut mover = snapshot_with_id(1);
-        mover.position = Vector2::new(10, 50);
-        mover.action_procedure = ActionProcedure::Walk;
-        mover.pathfinder = 27;
+        let mut mover = command_object!(1; position = Vector2::new(10, 50);
+            action_procedure = ActionProcedure::Walk; pathfinder = 27);
         let zone_owner = ObjectId::new(9);
         let mut transfer_zones = TransferZoneTable::default();
         transfer_zones.set(
@@ -690,17 +689,9 @@
         );
 
         let enabled = {
-            let ctx = CommandRuntimeContext {
-                landscape: Some(&landscape),
-                transfer_zones: &transfer_zones,
-                ..empty_command_ctx(&mover, 1)
-            };
-            evaluated_move_to(
-                &CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(90))
-                    .with_ty(Some(50)),
-            )
-            .step(&ctx)
+            let ctx = command_context!(empty_command_ctx(&mover, 1); landscape: Some(&landscape),
+            transfer_zones: &transfer_zones);
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(90), with_ty: Some(50))).step(&ctx)
         };
         assert_eq!(
             enabled.operations,
@@ -728,17 +719,9 @@
 
         mover.no_transfer_zones = 1;
         let disabled = {
-            let ctx = CommandRuntimeContext {
-                landscape: Some(&landscape),
-                transfer_zones: &transfer_zones,
-                ..empty_command_ctx(&mover, 1)
-            };
-            evaluated_move_to(
-                &CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(90))
-                    .with_ty(Some(50)),
-            )
-            .step(&ctx)
+            let ctx = command_context!(empty_command_ctx(&mover, 1); landscape: Some(&landscape),
+            transfer_zones: &transfer_zones);
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(90), with_ty: Some(50))).step(&ctx)
         };
         assert_eq!(disabled.status, CommandStatus::Running);
         assert!(
@@ -752,15 +735,10 @@
         // C4Command::MoveTo replaces the default five-pixel range only when
         // Def->MoveToRange is positive (C4Command.cpp:213-215); signed zero
         // and negative DefCore values retain the default.
-        let mut mover = snapshot_with_id(1);
-        mover.position = Vector2::new(100, 100);
-        mover.fixed_position = FixedVec2::from_ints(100, 100);
-        mover.action_name = "Walk".into();
-        mover.action_procedure = ActionProcedure::Walk;
-        mover.move_to_range = 20;
-        let request = CommandRequest::new(CommandId::MoveTo)
-            .with_tx(Some(115))
-            .with_ty(Some(100));
+        let mut mover = command_object!(1; position = Vector2::new(100, 100);
+            fixed_position = FixedVec2::from_ints(100, 100); action_name = "Walk".into();
+            action_procedure = ActionProcedure::Walk; move_to_range = 20);
+        let request = request!(MoveTo, with_tx: Some(115), with_ty: Some(100));
         let ctx = empty_command_ctx(&mover, 1);
         let mut state = evaluated_move_to(&request);
         assert_eq!(state.step(&ctx).status, CommandStatus::Completed);
@@ -782,16 +760,12 @@
     // steers vertically toward Ty with NO range (cy < Ty -> Down).
     #[test]
     fn move_to_swim_steers_horizontal_on_tick2_and_vertical_otherwise() {
-        let mut swimmer = snapshot_with_id(1);
-        swimmer.position = Vector2::new(100, 100);
-        swimmer.action_procedure = ActionProcedure::Swim;
-        swimmer.crew_member = true;
+        let mut swimmer = command_object!(1; position = Vector2::new(100, 100);
+            action_procedure = ActionProcedure::Swim; crew_member = true);
         swimmer.ocf |= ocf::CREW_MEMBER;
 
         // Target right and below: dx = 60, dy = 40.
-        let request = CommandRequest::new(CommandId::MoveTo)
-            .with_tx(Some(160))
-            .with_ty(Some(140));
+        let request = request!(MoveTo, with_tx: Some(160), with_ty: Some(140));
 
         // Odd frame (iTick2 == 1): horizontal arm -> COMD_Right.
         let ctx = empty_command_ctx(&swimmer, 1);
@@ -822,18 +796,13 @@
         // then steers from the fixed-point difference to current momentum
         // (C4Command.cpp:393-410). A floater already moving upward while its
         // target is due right therefore corrects DownRight, not merely Right.
-        let mut floater = snapshot_with_id(1);
-        floater.position = Vector2::new(100, 100);
-        floater.fixed_position = FixedVec2::from_ints(100, 100);
-        floater.fixed_velocity = FixedVec2::from_ints(0, -1);
-        floater.action_procedure = ActionProcedure::Float;
+        let mut floater = command_object!(1; position = Vector2::new(100, 100);
+            fixed_position = FixedVec2::from_ints(100, 100); fixed_velocity = FixedVec2::from_ints(0, -1);
+            action_procedure = ActionProcedure::Float);
         floater.physical.float = 100;
         let ctx = empty_command_ctx(&floater, 1);
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(200))
-                .with_ty(Some(100)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(200), with_ty: Some(100)));
 
         let result = state.step(&ctx);
 
@@ -849,11 +818,8 @@
         floater.command_direction = CommandDirection::Right;
         floater.fixed_velocity = FixedVec2::from_ints(1, 0);
         let ctx = empty_command_ctx(&floater, 2);
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(200))
-                .with_ty(Some(100)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(200), with_ty: Some(100)));
         let result = state.step(&ctx);
         assert_eq!(
             result.update.and_then(|update| update.command_direction),
@@ -866,18 +832,13 @@
         // The target-reached branch precedes procedure steering and finishes
         // in this Execute (C4Command.cpp:286-307). Besides avoiding a second
         // arrival frame, this keeps DFA_FLOAT from normalizing a zero vector.
-        let mut floater = snapshot_with_id(1);
-        floater.position = Vector2::new(100, 100);
-        floater.fixed_position = FixedVec2::from_ints(100, 100);
-        floater.action_procedure = ActionProcedure::Float;
-        floater.command_direction = CommandDirection::Right;
+        let mut floater = command_object!(1; position = Vector2::new(100, 100);
+            fixed_position = FixedVec2::from_ints(100, 100); action_procedure = ActionProcedure::Float;
+            command_direction = CommandDirection::Right);
         floater.physical.float = 100;
         let ctx = empty_command_ctx(&floater, 1);
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(100))
-                .with_ty(Some(100)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(100), with_ty: Some(100)));
 
         let result = state.step(&ctx);
 
@@ -893,21 +854,15 @@
     // Down (y grows downward).
     #[test]
     fn move_to_scale_steers_vertically() {
-        let mut scaler = snapshot_with_id(1);
-        scaler.position = Vector2::new(100, 100);
-        scaler.action_procedure = ActionProcedure::Scale;
-        scaler.crew_member = true;
+        let mut scaler = command_object!(1; position = Vector2::new(100, 100);
+            action_procedure = ActionProcedure::Scale; crew_member = true);
         scaler.ocf |= ocf::CREW_MEMBER;
         let ctx = empty_command_ctx(&scaler, 1);
 
         // Target above and well to the right: DFA_SCALE ignores Tx for
         // steering (no horizontal branch in the arm) and heads Up. The
         // Dir_Left let-go stays quiet: |cy - Ty| = 60 > LetGoRange2 30.
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(140))
-                .with_ty(Some(40)),
-        );
+        let mut state = evaluated_move_to(&request!(MoveTo, with_tx: Some(140), with_ty: Some(40)));
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(
@@ -923,19 +878,13 @@
     // with xdir +1 (ObjectComLetGo -> ObjectActionJump(itofix(+1), 0)).
     #[test]
     fn move_to_scale_lets_go_toward_target() {
-        let mut scaler = snapshot_with_id(1);
-        scaler.position = Vector2::new(100, 100);
-        scaler.action_procedure = ActionProcedure::Scale;
-        scaler.direction = Direction::Left;
-        scaler.crew_member = true;
+        let mut scaler = command_object!(1; position = Vector2::new(100, 100);
+            action_procedure = ActionProcedure::Scale; direction = Direction::Left; crew_member = true);
         scaler.ocf |= ocf::CREW_MEMBER;
         let ctx = empty_command_ctx(&scaler, 1);
 
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(140))
-                .with_ty(Some(110)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(140), with_ty: Some(110)));
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         let update = result.update.expect("let-go update");
@@ -952,18 +901,13 @@
     // the scale action is 3+ frames old ("not if just started").
     #[test]
     fn move_to_scale_contact_let_go_respects_action_time() {
-        let mut scaler = snapshot_with_id(1);
-        scaler.position = Vector2::new(100, 100);
-        scaler.action_procedure = ActionProcedure::Scale;
-        scaler.direction = Direction::Right;
-        scaler.contact = crate::CNAT_LEFT;
-        scaler.crew_member = true;
+        let mut scaler = command_object!(1; position = Vector2::new(100, 100);
+            action_procedure = ActionProcedure::Scale; direction = Direction::Right;
+            contact = crate::CNAT_LEFT; crew_member = true);
         scaler.ocf |= ocf::CREW_MEMBER;
 
         // Target high above on this side: no target-direction let-go.
-        let request = CommandRequest::new(CommandId::MoveTo)
-            .with_tx(Some(100))
-            .with_ty(Some(20));
+        let request = request!(MoveTo, with_tx: Some(100), with_ty: Some(20));
 
         // Action.Time == 2: too fresh, keep scaling.
         scaler.action_time = 2;
@@ -1004,20 +948,15 @@
     // drops off the ceiling (ObjectComLetGo(0) — Jump with zero xdir).
     #[test]
     fn move_to_hangle_steers_horizontal_and_drops_past_angle() {
-        let mut hangler = snapshot_with_id(1);
-        hangler.position = Vector2::new(100, 100);
-        hangler.action_procedure = ActionProcedure::Hang;
-        hangler.crew_member = true;
+        let mut hangler = command_object!(1; position = Vector2::new(100, 100);
+            action_procedure = ActionProcedure::Hang; crew_member = true);
         hangler.ocf |= ocf::CREW_MEMBER;
 
         // Target right, slightly below: Angle = 99 <= 110 keeps hangling;
         // steer Right. No vertical branch in the arm.
         let ctx = empty_command_ctx(&hangler, 1);
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(160))
-                .with_ty(Some(110)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(160), with_ty: Some(110)));
         let result = state.step(&ctx);
         let update = result.update.expect("steer update");
         assert_eq!(update.command_direction, Some(CommandDirection::Right));
@@ -1025,11 +964,8 @@
 
         // Target straight below: Angle = 180 > 110 -> ObjectComLetGo(0).
         let ctx = empty_command_ctx(&hangler, 1);
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(100))
-                .with_ty(Some(160)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(100), with_ty: Some(160)));
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         let update = result.update.expect("drop update");
@@ -1050,10 +986,8 @@
     #[test]
     fn move_to_noncrew_pathfinder_flight_control_and_disabled_gate() {
         let landscape = crate::Landscape::flat(300, 110);
-        let mut flyer = snapshot_with_id(1);
-        flyer.position = Vector2::new(100, 100);
-        flyer.action_procedure = ActionProcedure::Flight;
-        flyer.pathfinder = 1;
+        let mut flyer = command_object!(1; position = Vector2::new(100, 100);
+            action_procedure = ActionProcedure::Flight; pathfinder = 1);
         flyer.physical.can_fly = 1;
         flyer.shape_top = -10;
         assert_eq!(flyer.ocf & ocf::CREW_MEMBER, 0);
@@ -1062,11 +996,7 @@
 
         // Target up and slightly right (angle 9, distance 70, sky above):
         // FlightControl takes off; the flight arm never assigns ComDir.
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(110))
-                .with_ty(Some(30)),
-        );
+        let mut state = evaluated_move_to(&request!(MoveTo, with_tx: Some(110), with_ty: Some(30)));
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(
@@ -1090,11 +1020,8 @@
         disabled_flyer.action_disabled = true;
         let mut disabled_ctx = empty_command_ctx(&disabled_flyer, 1);
         disabled_ctx.landscape = Some(&landscape);
-        let mut disabled_state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(110))
-                .with_ty(Some(30)),
-        );
+        let mut disabled_state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(110), with_ty: Some(30)));
         let disabled_result = disabled_state.step(&disabled_ctx);
         assert!(
             disabled_result.update.is_none(),
@@ -1121,9 +1048,7 @@
         // Mid-air target straight up: AdjustMoveToTarget drops it to the
         // bottom of free space (109) then lifts it Shape.Hgt/2 -> y 99,
         // one pixel off the walker's center — inside the crew range.
-        let request = CommandRequest::new(CommandId::MoveTo)
-            .with_tx(Some(100))
-            .with_ty(Some(50));
+        let request = request!(MoveTo, with_tx: Some(100), with_ty: Some(50));
         assert!(
             !request.evaluated,
             "ordinary Enter/JumpControl/script MoveTos retain fInitEvaluation=true"
@@ -1171,11 +1096,10 @@
     fn move_to_absorbs_target_position_once() {
         let walker = walking_jumper(Vector2::new(100, 100));
         let target_id = ObjectId::new(9);
-        let mut target = snapshot_with_id(9);
-        target.position = Vector2::new(200, 100);
+        let target = command_object!(9; position = Vector2::new(200, 100));
         let mut objects = command_objects([target]);
 
-        let request = CommandRequest::new(CommandId::MoveTo).with_target(Some(target_id));
+        let request = request!(MoveTo, with_target: Some(target_id));
         let mut state = MoveToState::from_request(&request); // unevaluated
         let ctx = command_ctx(&walker, &objects, 1);
         let _ = state.step(&ctx); // evaluation frame
@@ -1203,10 +1127,8 @@
         // C4Command::Execute decrements UpdateInterval as a lifetime, but
         // still executes MoveTo on every non-expiring frame
         // (C4Command.cpp:1545-1555).
-        let request = CommandRequest::new(CommandId::MoveTo)
-            .with_tx(Some(200))
-            .with_ty(Some(100))
-            .with_update_interval(4);
+        let request =
+            request!(MoveTo, with_tx: Some(200), with_ty: Some(100), with_update_interval: 4);
         let mut stack = CommandStack::new();
         stack.push_front(request).expect("MoveTo queues");
 
@@ -1251,11 +1173,8 @@
         walker.container = Some(container_id);
         let objects = command_objects([snapshot_with_id(9)]);
         let ctx = command_ctx(&walker, &objects, 1);
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(200))
-                .with_ty(Some(100)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(200), with_ty: Some(100)));
 
         let result = state.step(&ctx);
 
@@ -1277,8 +1196,7 @@
     #[test]
     fn move_to_push_without_push_target_flag_ungrabs() {
         let vehicle_id = ObjectId::new(7);
-        let mut vehicle = snapshot_with_id(7);
-        vehicle.position = Vector2::new(95, 100);
+        let vehicle = command_object!(7; position = Vector2::new(95, 100));
         let mut pusher = walking_jumper(Vector2::new(100, 100));
         pusher.action_procedure = ActionProcedure::Push;
         pusher.action_target = Some(vehicle_id);
@@ -1286,22 +1204,16 @@
         let mut definitions = HashMap::new();
         definitions.insert(
             "DEF7".to_string(),
-            CommandDefinitionSnapshot {
-                value: 0,
-                can_chop: false,
-                chop_action: None,
-                constructable: false,
-                grab: 1,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 0,
+            can_chop: false,
+            chop_action: None,
+            constructable: false,
+            grab: 1 },
         );
 
         // Data 0: pushing not desired -> UnGrab, still running.
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(200))
-                .with_ty(Some(100)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(200), with_ty: Some(100)));
         let ctx = command_ctx_with_definitions(&pusher, &objects, &definitions, 1);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1324,8 +1236,7 @@
     #[test]
     fn move_to_push_with_flag_steers_from_vehicle_position() {
         let vehicle_id = ObjectId::new(7);
-        let mut vehicle = snapshot_with_id(7);
-        vehicle.position = Vector2::new(95, 100);
+        let vehicle = command_object!(7; position = Vector2::new(95, 100));
         let mut pusher = walking_jumper(Vector2::new(100, 100));
         pusher.action_procedure = ActionProcedure::Push;
         pusher.action_target = Some(vehicle_id);
@@ -1333,23 +1244,17 @@
         let mut definitions = HashMap::new();
         definitions.insert(
             "DEF7".to_string(),
-            CommandDefinitionSnapshot {
-                value: 0,
-                can_chop: false,
-                chop_action: None,
-                constructable: false,
-                grab: 1,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 0,
+            can_chop: false,
+            chop_action: None,
+            constructable: false,
+            grab: 1 },
         );
 
         // Target far below the vehicle's column: the vehicle position
         // override yields dx 0 and the push arm ignores dy entirely.
         let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(95))
-                .with_ty(Some(160))
-                .with_data(CommandData::Integer(2)),
+            &request!(MoveTo, with_tx: Some(95), with_ty: Some(160), with_data: CommandData::Integer(2)),
         );
         let ctx = command_ctx_with_definitions(&pusher, &objects, &definitions, 1);
         let result = state.step(&ctx);
@@ -1364,10 +1269,7 @@
         // Grab-only target (Grab=2) lets go even with the flag.
         definitions.get_mut("DEF7").expect("def").grab = 2;
         let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(200))
-                .with_ty(Some(100))
-                .with_data(CommandData::Integer(2)),
+            &request!(MoveTo, with_tx: Some(200), with_ty: Some(100), with_data: CommandData::Integer(2)),
         );
         let ctx = command_ctx_with_definitions(&pusher, &objects, &definitions, 1);
         let result = state.step(&ctx);
@@ -1382,41 +1284,29 @@
     #[test]
     fn move_to_push_intermediate_waypoint_steers_from_actor_position() {
         let vehicle_id = ObjectId::new(7);
-        let mut vehicle = snapshot_with_id(7);
-        vehicle.position = Vector2::new(95, 100);
+        let vehicle = command_object!(7; position = Vector2::new(95, 100));
         let mut pusher = walking_jumper(Vector2::new(100, 100));
         pusher.action_procedure = ActionProcedure::Push;
         pusher.action_target = Some(vehicle_id);
         let objects = command_objects([vehicle]);
         let definitions = HashMap::from([(
             "DEF7".to_string(),
-            CommandDefinitionSnapshot {
-                value: 0,
-                can_chop: false,
-                chop_action: None,
-                constructable: false,
-                grab: 1,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 0,
+            can_chop: false,
+            chop_action: None,
+            constructable: false,
+            grab: 1 },
         )]);
         let ctx = command_ctx_with_definitions(&pusher, &objects, &definitions, 1);
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(95))
-                    .with_ty(Some(160))
-                    .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET))
-                    .with_evaluated(true),
+                request!(MoveTo, with_tx: Some(95), with_ty: Some(160), with_data: CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET), with_evaluated: true),
             )
             .expect("intermediate MoveTo queues");
         stack
             .push_back(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(100))
-                    .with_ty(Some(100))
-                    .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET))
-                    .with_evaluated(true),
+                request!(MoveTo, with_tx: Some(100), with_ty: Some(100), with_data: CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET), with_evaluated: true),
             )
             .expect("final MoveTo queues");
 
@@ -1469,11 +1359,7 @@
 
         // Angle(100,100 -> 140,43) = 90 - trunc(atan2(57,40)) = 36 — inside
         // 35±10; distance 70 > 30; sky above.
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(140))
-                .with_ty(Some(43)),
-        );
+        let mut state = evaluated_move_to(&request!(MoveTo, with_tx: Some(140), with_ty: Some(43)));
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(result.operations.len(), 1, "one jump op");
@@ -1492,11 +1378,7 @@
         let mut walker = pathfinder_jumper(Vector2::new(100, 100));
         walker.physical.can_fly = 1;
         let ctx = jump_ctx(&walker, &landscape);
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(140))
-                .with_ty(Some(43)),
-        );
+        let mut state = evaluated_move_to(&request!(MoveTo, with_tx: Some(140), with_ty: Some(43)));
 
         let takeoff = state.step(&ctx);
         assert!(
@@ -1536,10 +1418,7 @@
         let mut stack = CommandStack::new();
         stack
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(140))
-                    .with_ty(Some(43))
-                    .with_evaluated(true),
+                request!(MoveTo, with_tx: Some(140), with_ty: Some(43), with_evaluated: true),
             )
             .expect("MoveTo queues");
 
@@ -1595,11 +1474,7 @@
 
         // Angle(100,100 -> 140,93) = 90 - trunc(atan2(7,40)) = 81; 81-80=1
         // inside ±50.
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(140))
-                .with_ty(Some(93)),
-        );
+        let mut state = evaluated_move_to(&request!(MoveTo, with_tx: Some(140), with_ty: Some(93)));
         let result = state.step(&ctx);
         assert_eq!(
             result.operations.len(),
@@ -1634,11 +1509,7 @@
         // solid at x>=150 -> +1 -> side point x = 140 - 23 = 117 (clear
         // ground), adjust drops it to the 110 surface (|dy|<=20 from 100
         // fails?) — pick ty=75 edge instead for a shallower drop.
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(148))
-                .with_ty(Some(72)),
-        );
+        let mut state = evaluated_move_to(&request!(MoveTo, with_tx: Some(148), with_ty: Some(72)));
         let result = state.step(&ctx);
         assert_eq!(
             result.operations.len(),
@@ -1657,26 +1528,16 @@
 
     #[test]
     fn move_to_idle_fails_after_arrival_check_and_feeds_base_failures() {
-        let mut idle = snapshot_with_id(1);
-        idle.position = Vector2::new(100, 100);
-        idle.action_idle = true;
-        idle.action_procedure = ActionProcedure::Undefined;
+        let idle = command_object!(1; position = Vector2::new(100, 100); action_idle = true;
+            action_procedure = ActionProcedure::Undefined);
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(
-                CommandRequest::new(CommandId::Wait)
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::Base),
-            )
+            .push_back(request!(Wait, with_update_interval: 50, with_mode: CommandMode::Base))
             .expect("base Wait queues");
         stack
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(200))
-                    .with_ty(Some(100))
-                    .with_evaluated(true)
-                    .with_mode(CommandMode::SilentSub),
+                request!(MoveTo, with_tx: Some(200), with_ty: Some(100), with_evaluated: true, with_mode: CommandMode::SilentSub),
             )
             .expect("MoveTo queues");
         let ctx = empty_command_ctx(&idle, 1);
@@ -1690,11 +1551,8 @@
 
         // Native arrival precedes Action.Act<=ActIdle, so the same idle
         // object succeeds when it is already inside the target range.
-        let mut arrived = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(100))
-                .with_ty(Some(100)),
-        );
+        let mut arrived =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(100), with_ty: Some(100)));
         let result = arrived.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
 
@@ -1703,11 +1561,8 @@
         let mut active_idle = idle.clone();
         active_idle.action_idle = false;
         let ctx = empty_command_ctx(&active_idle, 1);
-        let mut moving = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(200))
-                .with_ty(Some(100)),
-        );
+        let mut moving =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(200), with_ty: Some(100)));
         assert_eq!(moving.step(&ctx).status, CommandStatus::Running);
     }
 
@@ -1716,11 +1571,8 @@
         let mut walker = walking_jumper(Vector2::new(100, 100));
         walker.command_direction = CommandDirection::Left;
         let ctx = empty_command_ctx(&walker, 1);
-        let mut state = evaluated_move_to(
-            &CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(100))
-                .with_ty(Some(140)),
-        );
+        let mut state =
+            evaluated_move_to(&request!(MoveTo, with_tx: Some(100), with_ty: Some(140)));
 
         let result = state.step(&ctx);
 
@@ -1773,20 +1625,12 @@
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(160))
-                    .with_ty(Some(90))
-                    .with_mode(CommandMode::Base),
+                request!(MoveTo, with_tx: Some(160), with_ty: Some(90), with_mode: CommandMode::Base),
             )
             .expect("outer MoveTo queues");
         stack
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(80))
-                    .with_ty(Some(99))
-                    .with_update_interval(25)
-                    .with_evaluated(true)
-                    .with_mode(CommandMode::SilentSub),
+                request!(MoveTo, with_tx: Some(80), with_ty: Some(99), with_update_interval: 25, with_evaluated: true, with_mode: CommandMode::SilentSub),
             )
             .expect("pathfinder waypoint queues");
 
@@ -1811,11 +1655,7 @@
         let mut direct = CommandStack::new();
         direct
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(80))
-                    .with_ty(Some(99))
-                    .with_update_interval(25)
-                    .with_evaluated(true),
+                request!(MoveTo, with_tx: Some(80), with_ty: Some(99), with_update_interval: 25, with_evaluated: true),
             )
             .expect("direct MoveTo queues");
         direct.step(&ctx).expect("direct MoveTo executes");
@@ -1828,20 +1668,12 @@
         let mut no_wall_stack = CommandStack::new();
         no_wall_stack
             .push_back(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(160))
-                    .with_ty(Some(90))
-                    .with_mode(CommandMode::Base),
+                request!(MoveTo, with_tx: Some(160), with_ty: Some(90), with_mode: CommandMode::Base),
             )
             .expect("outer MoveTo queues");
         no_wall_stack
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(80))
-                    .with_ty(Some(99))
-                    .with_update_interval(25)
-                    .with_evaluated(true)
-                    .with_mode(CommandMode::SilentSub),
+                request!(MoveTo, with_tx: Some(80), with_ty: Some(99), with_update_interval: 25, with_evaluated: true, with_mode: CommandMode::SilentSub),
             )
             .expect("pathfinder waypoint queues");
         no_wall_stack
@@ -1856,20 +1688,12 @@
         let mut non_scaler_stack = CommandStack::new();
         non_scaler_stack
             .push_back(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(160))
-                    .with_ty(Some(90))
-                    .with_mode(CommandMode::Base),
+                request!(MoveTo, with_tx: Some(160), with_ty: Some(90), with_mode: CommandMode::Base),
             )
             .expect("outer MoveTo queues");
         non_scaler_stack
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(80))
-                    .with_ty(Some(99))
-                    .with_update_interval(25)
-                    .with_evaluated(true)
-                    .with_mode(CommandMode::SilentSub),
+                request!(MoveTo, with_tx: Some(80), with_ty: Some(99), with_update_interval: 25, with_evaluated: true, with_mode: CommandMode::SilentSub),
             )
             .expect("pathfinder waypoint queues");
         non_scaler_stack
@@ -1902,20 +1726,12 @@
         let mut offset_stack = CommandStack::new();
         offset_stack
             .push_back(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(160))
-                    .with_ty(Some(90))
-                    .with_mode(CommandMode::Base),
+                request!(MoveTo, with_tx: Some(160), with_ty: Some(90), with_mode: CommandMode::Base),
             )
             .expect("outer MoveTo queues");
         offset_stack
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(80))
-                    .with_ty(Some(99))
-                    .with_update_interval(25)
-                    .with_evaluated(true)
-                    .with_mode(CommandMode::SilentSub),
+                request!(MoveTo, with_tx: Some(80), with_ty: Some(99), with_update_interval: 25, with_evaluated: true, with_mode: CommandMode::SilentSub),
             )
             .expect("pathfinder waypoint queues");
         let offset_result = offset_stack
@@ -1959,20 +1775,12 @@
         let mut wide_range_stack = CommandStack::new();
         wide_range_stack
             .push_back(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(160))
-                    .with_ty(Some(90))
-                    .with_mode(CommandMode::Base),
+                request!(MoveTo, with_tx: Some(160), with_ty: Some(90), with_mode: CommandMode::Base),
             )
             .expect("outer MoveTo queues");
         wide_range_stack
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(80))
-                    .with_ty(Some(99))
-                    .with_update_interval(25)
-                    .with_evaluated(true)
-                    .with_mode(CommandMode::SilentSub),
+                request!(MoveTo, with_tx: Some(80), with_ty: Some(99), with_update_interval: 25, with_evaluated: true, with_mode: CommandMode::SilentSub),
             )
             .expect("pathfinder waypoint queues");
         wide_range_stack
@@ -1990,20 +1798,12 @@
         let mut deferred_stack = CommandStack::new();
         deferred_stack
             .push_back(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(160))
-                    .with_ty(Some(90))
-                    .with_mode(CommandMode::Base),
+                request!(MoveTo, with_tx: Some(160), with_ty: Some(90), with_mode: CommandMode::Base),
             )
             .expect("outer MoveTo queues");
         deferred_stack
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(80))
-                    .with_ty(Some(99))
-                    .with_update_interval(25)
-                    .with_evaluated(true)
-                    .with_mode(CommandMode::SilentSub),
+                request!(MoveTo, with_tx: Some(80), with_ty: Some(99), with_update_interval: 25, with_evaluated: true, with_mode: CommandMode::SilentSub),
             )
             .expect("pathfinder waypoint queues");
         let deferred = deferred_stack
@@ -2070,28 +1870,17 @@
         assert!(command_path_free(&landscape, 80, 166, 80, 99));
         let mut stack = CommandStack::new();
         stack
-            .push_back(
-                CommandRequest::new(CommandId::Wait)
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::Base),
-            )
+            .push_back(request!(Wait, with_update_interval: 50, with_mode: CommandMode::Base))
             .expect("base command queues");
         stack
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(80))
-                    .with_ty(Some(99))
-                    .with_update_interval(25)
-                    .with_evaluated(true)
-                    .with_mode(CommandMode::SilentSub),
+                request!(MoveTo, with_tx: Some(80), with_ty: Some(99), with_update_interval: 25, with_evaluated: true, with_mode: CommandMode::SilentSub),
             )
             .expect("pathfinder waypoint queues");
 
         for frame in 1..25 {
-            let ctx = CommandRuntimeContext {
-                landscape: Some(&landscape),
-                ..empty_command_ctx(&walker, frame)
-            };
+            let ctx =
+                command_context!(empty_command_ctx(&walker, frame); landscape: Some(&landscape));
             let result = stack.step(&ctx).expect("MoveTo executes");
             assert_eq!(result.status, CommandStatus::Running);
             assert!(result.update.is_none(), "WALK does not steer vertically");
@@ -2101,10 +1890,8 @@
             );
         }
 
-        let expiry_ctx = CommandRuntimeContext {
-            landscape: Some(&landscape),
-            ..empty_command_ctx(&walker, 25)
-        };
+        let expiry_ctx =
+            command_context!(empty_command_ctx(&walker, 25); landscape: Some(&landscape));
         assert_eq!(
             stack.step(&expiry_ctx).expect("waypoint expires").status,
             CommandStatus::Completed
@@ -2120,30 +1907,22 @@
         let follower_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
-        let mut follower = snapshot_with_id(follower_id.as_u64());
-        follower.crew_member = true;
-        follower.owner = 42;
-        follower.selected = false;
+        let follower = command_object!(follower_id.as_u64(); crew_member = true; owner = 42;
+            selected = false);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(20, 0);
-        target.crew_member = true;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(20, 0);
+            crew_member = true);
 
         let objects = command_objects([follower.clone(), target]);
 
-        let ctx = CommandRuntimeContext {
-            position: follower.position,
-            ..command_ctx(
-                objects.get(&follower_id).expect("follower present"),
-                &objects,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx(
+            objects.get(&follower_id).expect("follower present"),
+            &objects,
+            0,
+        ); position: follower.position);
 
-        let mut state = FollowState::from_request(
-            &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = FollowState::from_request(&request!(Follow, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -2152,12 +1931,9 @@
     #[test]
     fn follow_self_remains_running_and_preserves_cpp_command_lifetime() {
         let follower_id = ObjectId::new(2);
-        let mut follower = snapshot_with_id(follower_id.as_u64());
-        follower.crew_member = true;
-        follower.owner = 42;
-        follower.selected = true;
-        follower.action_procedure = ActionProcedure::Walk;
-        follower.command_direction = CommandDirection::DownRight;
+        let follower = command_object!(follower_id.as_u64(); crew_member = true; owner = 42;
+            selected = true; action_procedure = ActionProcedure::Walk;
+            command_direction = CommandDirection::DownRight);
 
         let objects = command_objects([follower]);
         let follower = objects.get(&follower_id).expect("follower present");
@@ -2165,10 +1941,10 @@
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(follower_id)))
+            .push_back(request!(Follow, with_target: Some(follower_id)))
             .expect("self-Follow queues");
         stack
-            .push_back(CommandRequest::new(CommandId::Wait))
+            .push_back(request!(Wait))
             .expect("trailing command queues");
 
         for _ in 0..2 {
@@ -2190,19 +1966,13 @@
         let target_id = ObjectId::new(4);
         let hut_id = ObjectId::new(5);
 
-        let mut follower = snapshot_with_id(follower_id.as_u64());
-        follower.position = Vector2::new(10, 10);
-        follower.crew_member = true;
-        follower.owner = 1;
-        follower.selected = true;
-        follower.command_direction = CommandDirection::Left;
+        let follower = command_object!(follower_id.as_u64(); position = Vector2::new(10, 10);
+            crew_member = true; owner = 1; selected = true; command_direction = CommandDirection::Left);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.container = Some(hut_id);
+        let target = command_object!(target_id.as_u64(); container = Some(hut_id));
 
-        let mut hut = snapshot_with_id(hut_id.as_u64());
-        hut.position = Vector2::new(10, 10);
-        hut.shape = DefinitionRect::new(0, 0, 20, 20);
+        let mut hut = command_object!(hut_id.as_u64(); position = Vector2::new(10, 10);
+            shape = DefinitionRect::new(0, 0, 20, 20));
         hut.entrance = Some(hut.shape);
         hut.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
         hut.entrance_status = true;
@@ -2211,10 +1981,8 @@
         let objects = command_objects([follower, target, hut]);
         let follower = objects.get(&follower_id).expect("follower present");
         let ctx = command_ctx(follower, &objects, 0);
-        let mut follow = FollowState::from_request(
-            &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
-        )
-        .expect("Follow state");
+        let mut follow = FollowState::from_request(&request!(Follow, with_target: Some(target_id)))
+            .expect("Follow state");
 
         let result = follow.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -2260,23 +2028,16 @@
         let target_id = ObjectId::new(7);
         let lorry_id = ObjectId::new(8);
 
-        let mut follower = snapshot_with_id(follower_id.as_u64());
-        follower.crew_member = true;
-        follower.owner = 1;
-        follower.selected = true;
-        follower.command_direction = CommandDirection::Left;
+        let follower = command_object!(follower_id.as_u64(); crew_member = true; owner = 1;
+            selected = true; command_direction = CommandDirection::Left);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.action_procedure = ActionProcedure::Push;
-        target.action_target = Some(lorry_id);
-        target.command_direction = CommandDirection::Right;
+        let target = command_object!(target_id.as_u64(); action_procedure = ActionProcedure::Push;
+            action_target = Some(lorry_id); command_direction = CommandDirection::Right);
 
         let lorry = snapshot_with_id(lorry_id.as_u64());
         let mut objects = command_objects([follower, target, lorry]);
-        let mut follow = FollowState::from_request(
-            &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
-        )
-        .expect("Follow state");
+        let mut follow = FollowState::from_request(&request!(Follow, with_target: Some(target_id)))
+            .expect("Follow state");
 
         let follower = objects.get(&follower_id).expect("follower present");
         let ctx = command_ctx(follower, &objects, 0);
@@ -2340,32 +2101,22 @@
         let follower_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
 
-        let mut follower = snapshot_with_id(follower_id.as_u64());
-        follower.crew_member = true;
-        follower.owner = 1;
-        follower.selected = true;
-        follower.command_direction = CommandDirection::Left;
+        let follower = command_object!(follower_id.as_u64(); crew_member = true; owner = 1;
+            selected = true; command_direction = CommandDirection::Left);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 20);
-        target.crew_member = true;
-        target.alive = false;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(100, 20);
+            crew_member = true; alive = false);
 
         let mut objects = command_objects([follower.clone(), target]);
 
-        let ctx = CommandRuntimeContext {
-            position: follower.position,
-            ..command_ctx(
-                objects.get(&follower_id).expect("follower present"),
-                &objects,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx(
+            objects.get(&follower_id).expect("follower present"),
+            &objects,
+            0,
+        ); position: follower.position);
 
-        let mut state = FollowState::from_request(
-            &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = FollowState::from_request(&request!(Follow, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -2406,7 +2157,7 @@
 
         let mut cleared = CommandStack::new();
         cleared
-            .push_front(CommandRequest::new(CommandId::Follow).with_target(Some(target_id)))
+            .push_front(request!(Follow, with_target: Some(target_id)))
             .expect("Follow queues");
         assert!(cleared.clear_object_reference(target_id));
         assert_eq!(
@@ -2425,10 +2176,7 @@
         let mut stack = CommandStack::new();
         stack
             .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(140))
-                    .with_ty(Some(90))
-                    .with_data(CommandData::Integer(1)),
+                request!(MoveTo, with_tx: Some(140), with_ty: Some(90), with_data: CommandData::Integer(1)),
             )
             .expect("push");
 
@@ -2460,13 +2208,12 @@
     fn command_views_follow_move_to_target_absorption() {
         let walker = walking_jumper(Vector2::new(100, 100));
         let target_id = ObjectId::new(9);
-        let mut target = snapshot_with_id(9);
-        target.position = Vector2::new(200, 100);
+        let target = command_object!(9; position = Vector2::new(200, 100));
         let objects = command_objects([target]);
 
         let mut stack = CommandStack::new();
         stack
-            .push_front(CommandRequest::new(CommandId::MoveTo).with_target(Some(target_id)))
+            .push_front(request!(MoveTo, with_target: Some(target_id)))
             .expect("push");
 
         let ctx = command_ctx(&walker, &objects, 1);
@@ -2492,9 +2239,7 @@
     fn acquire_init_evaluation_consumes_first_execute_and_defaults_ranges() {
         let mut stack = CommandStack::new();
         stack
-            .push_front(
-                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
-            )
+            .push_front(request!(Acquire, with_data: CommandData::Text("WOOD".into())))
             .expect("push");
 
         let views = stack.command_views();
@@ -2532,38 +2277,36 @@
         // Data overrides the update interval, else a nonzero Tx does. The
         // dragon waits via SetCommand(this(), "Wait", 0,0,0,0, 10) — data
         // slot 10, no interval (Fantasy.c4d Dragon.c4d Script.c:1649).
-        let from_data = CommandRequest::new(CommandId::Wait).with_data(CommandData::Integer(10));
+        let from_data = request!(Wait, with_data: CommandData::Integer(10));
         assert_eq!(
             WaitState::from_request(&from_data).remaining,
             Some(10),
             "Data overrides the interval"
         );
 
-        let from_tx = CommandRequest::new(CommandId::Wait).with_tx(Some(7));
+        let from_tx = request!(Wait, with_tx: Some(7));
         assert_eq!(
             WaitState::from_request(&from_tx).remaining,
             Some(7),
             "Tx is the fallback duration"
         );
 
-        let from_interval = CommandRequest::new(CommandId::Wait)
-            .with_update_interval(3)
-            .with_data(CommandData::Integer(10));
+        let from_interval =
+            request!(Wait, with_update_interval: 3, with_data: CommandData::Integer(10));
         assert_eq!(
             WaitState::from_request(&from_interval).remaining,
             Some(10),
             "Data wins even when an interval is present"
         );
 
-        let negative_data =
-            CommandRequest::new(CommandId::Wait).with_data(CommandData::Integer(-7));
+        let negative_data = request!(Wait, with_data: CommandData::Integer(-7));
         assert_eq!(
             WaitState::from_request(&negative_data).remaining,
             Some(-7),
             "native Wait installs signed nonzero Data verbatim"
         );
 
-        let negative_tx = CommandRequest::new(CommandId::Wait).with_tx(Some(-9));
+        let negative_tx = request!(Wait, with_tx: Some(-9));
         assert_eq!(
             WaitState::from_request(&negative_tx).remaining,
             Some(-9),
@@ -2578,7 +2321,7 @@
 
         let mut direct = CommandStack::new();
         direct
-            .push_front(CommandRequest::new(CommandId::Wait).with_update_interval(-4))
+            .push_front(request!(Wait, with_update_interval: -4))
             .expect("Wait queues");
         assert_eq!(
             direct.step(&ctx).expect("direct Wait evaluates").status,
@@ -2594,9 +2337,7 @@
         let mut stack = CommandStack::new();
         stack
             .push_front(
-                CommandRequest::new(CommandId::Wait)
-                    .with_update_interval(-4)
-                    .with_data(CommandData::Integer(-7)),
+                request!(Wait, with_update_interval: -4, with_data: CommandData::Integer(-7)),
             )
             .expect("Wait queues");
 
@@ -2630,21 +2371,17 @@
     #[test]
     fn wait_stops_dig_and_completes_after_interval() {
         let actor_id = ObjectId::new(50);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.action_procedure = ActionProcedure::Dig;
-        actor.command_direction = CommandDirection::Left;
+        let actor = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Dig;
+            command_direction = CommandDirection::Left);
 
         let objects = command_objects([actor.clone()]);
 
         let mut stack = CommandStack::new();
         stack
-            .push_front(CommandRequest::new(CommandId::Wait).with_update_interval(3))
+            .push_front(request!(Wait, with_update_interval: 3))
             .expect("Wait queues");
 
-        let ctx0 = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0)
-        };
+        let ctx0 = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 0); position: actor.position);
 
         let result0 = stack.step(&ctx0).expect("Wait executes");
         assert_eq!(result0.status, CommandStatus::Running);
@@ -2653,10 +2390,7 @@
             "InitEvaluation consumes the first Execute before Wait stops Dig"
         );
 
-        let ctx1 = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 1)
-        };
+        let ctx1 = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 1); position: actor.position);
 
         let result1 = stack.step(&ctx1).expect("Wait executes again");
         assert_eq!(result1.status, CommandStatus::Running);
@@ -2667,10 +2401,7 @@
         let action_update = update1.action.expect("wait should reset the action");
         assert_eq!(action_update.name.as_deref(), Some("Idle"));
 
-        let ctx2 = CommandRuntimeContext {
-            position: actor.position,
-            ..command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 2)
-        };
+        let ctx2 = command_context!(command_ctx(objects.get(&actor_id).expect("actor present"), &objects, 2); position: actor.position);
 
         let result2 = stack.step(&ctx2).expect("Wait interval expires");
         assert_eq!(result2.status, CommandStatus::Completed);

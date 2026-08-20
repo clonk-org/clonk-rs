@@ -1408,19 +1408,9 @@ public func UseDefault()
         assert_eq!(spec.player, Some(-2));
 
         let mut messages = crate::message::MessageManager::new();
-        messages.apply_command(MessageCommand::Add(MessageSpec {
-            kind: MessageKind::Global,
-            text: "ownerless".into(),
-            target: None,
-            player: None,
-            offset: Vector2::ZERO,
-            color: 0,
-            flags: 0,
-            width: None,
-            decoration: None,
-            frame_decoration: None,
-            portrait: None,
-        }));
+        messages.apply_command(MessageCommand::Add(
+            MessageSpec::global("ownerless").with_color(0),
+        ));
         messages.apply_command(MessageCommand::Append {
             spec: spec.clone(),
             no_duplicates: false,

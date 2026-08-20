@@ -256,6 +256,17 @@ pub struct ClientUpdateControlData {
     pub by_client: i32,
 }
 
+impl ClientUpdateControlData {
+    pub const fn new(update_type: u8, client_id: i32, data: i32, by_client: i32) -> Self {
+        Self {
+            update_type,
+            client_id,
+            data,
+            by_client,
+        }
+    }
+}
+
 /// Body of `C4ControlClientRemove` (`src/C4Control.cpp:682-687`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientRemoveControlData {
@@ -402,6 +413,17 @@ pub struct PlayerControlData {
     pub command: i32,
     pub data: i32,
     pub by_client: i32,
+}
+
+impl PlayerControlData {
+    pub const fn new(player: i32, command: i32, data: i32, by_client: i32) -> Self {
+        Self {
+            player,
+            command,
+            data,
+            by_client,
+        }
+    }
 }
 
 /// Body of `C4ControlPlayerCommand` (`CID_PlrCommand`).
@@ -938,6 +960,16 @@ pub struct PlayerInfoUpdateRequest {
     pub players: Vec<ControlPlayerInfoEntry>,
 }
 
+impl PlayerInfoUpdateRequest {
+    pub fn new(client_id: i32, flags: u32, players: Vec<ControlPlayerInfoEntry>) -> Self {
+        Self {
+            client_id,
+            flags,
+            players,
+        }
+    }
+}
+
 /// `C4ControlPlayerInfo` body (C4ClientPlayerInfos,
 /// C4PlayerInfo.cpp:601-633).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -946,6 +978,22 @@ pub struct PlayerInfoControlData {
     pub flags: u32,
     pub players: Vec<ControlPlayerInfoEntry>,
     pub by_client: i32,
+}
+
+impl PlayerInfoControlData {
+    pub fn new(
+        client_id: i32,
+        flags: u32,
+        players: Vec<ControlPlayerInfoEntry>,
+        by_client: i32,
+    ) -> Self {
+        Self {
+            client_id,
+            flags,
+            players,
+            by_client,
+        }
+    }
 }
 
 impl Default for PlayerInfoControlData {
@@ -1338,12 +1386,14 @@ impl RawPacket {
             } else {
                 0
             };
-            return Ok(Some(ControlPacket::ClientUpdate(ClientUpdateControlData {
-                update_type,
-                client_id: parse_int_field_or(&self.fields, "ClientID", -1)?,
-                data,
-                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
-            })));
+            return Ok(Some(ControlPacket::ClientUpdate(
+                ClientUpdateControlData::new(
+                    update_type,
+                    parse_int_field_or(&self.fields, "ClientID", -1)?,
+                    data,
+                    parse_int_field_or(&self.fields, "ByClient", -1)?,
+                ),
+            )));
         }
 
         if id == CID_CLIENT_REMOVE {
@@ -1866,12 +1916,9 @@ impl RawPacket {
             let command = parse_int_field_or(&self.fields, "Com", 0)?;
             let data = parse_int_field_or(&self.fields, "Data", 0)?;
             let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
-            return Ok(Some(ControlPacket::PlayerControl(PlayerControlData {
-                player,
-                command,
-                data,
-                by_client,
-            })));
+            return Ok(Some(ControlPacket::PlayerControl(PlayerControlData::new(
+                player, command, data, by_client,
+            ))));
         }
 
         if id == CID_PLR_COMMAND {
@@ -5274,12 +5321,7 @@ LastPlayerID=12
         let mut list = b"[Rec]\r\nFrame=10\r\nType=0\r\n".to_vec();
         append_control_packet_ini(
             &mut list,
-            &ControlPacket::PlayerControl(PlayerControlData {
-                player: 1,
-                command: 2,
-                data: 0,
-                by_client: -1,
-            }),
+            &ControlPacket::PlayerControl(PlayerControlData::new(1, 2, 0, -1)),
             2,
             ControlIniPacketMode::IdPacketSection,
         )
@@ -5315,12 +5357,7 @@ LastPlayerID=12
         );
 
         for packet in [
-            ControlPacket::ClientUpdate(ClientUpdateControlData {
-                update_type: u8::MAX,
-                client_id: -1,
-                data: 0,
-                by_client: -1,
-            }),
+            ControlPacket::ClientUpdate(ClientUpdateControlData::new(u8::MAX, -1, 0, -1)),
             ControlPacket::Vote(VoteControlData {
                 vote_type: VOTE_TYPE_NONE,
                 approve: true,

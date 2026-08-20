@@ -1,6 +1,63 @@
 // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
+macro_rules! input_fixture {
+    (mouse_help: $text:expr, $keep_moves:expr $(,)?) => {
+        IngameMouseHelpCaption {
+            text: $text,
+            keep_moves: $keep_moves,
+        }
+    };
+    (player_command: $player:expr, $command:expr, $x:expr, $y:expr, $target:expr, $data:expr, $add_mode:expr $(,)?) => {
+        PlayerCommandControlData {
+            player: $player,
+            command: $command,
+            x: $x,
+            y: $y,
+            target: $target,
+            target2: 0,
+            data: $data,
+            add_mode: $add_mode,
+            by_client: 7,
+        }
+    };
+    (menu_item: $caption:expr, $item_id:expr, $picture_object:expr $(,)?) => {
+        clonk_engine::ObjectMenuItem {
+            caption: $caption,
+            info_caption: String::new(),
+            command: String::new(),
+            command2: String::new(),
+            count: 1,
+            item_id: $item_id,
+            symbol: clonk_engine::ObjectMenuSymbol::Definition,
+            image: clonk_engine::ObjectMenuImage::default(),
+            presentation_definition_id: None,
+            picture_snapshot: None,
+            picture_object: $picture_object,
+            components: Vec::new(),
+            selectable: true,
+            value: None,
+            text_display_progress: -1,
+        }
+    };
+    (player_info: $name:expr $(,)?) => {
+        clonk_engine::ControlPlayerInfoEntry {
+            id: 9,
+            team: 1,
+            player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+            name: $name,
+            ..Default::default()
+        }
+    };
+    (capture_target: $device:expr, $set:expr, $control:expr $(,)?) => {
+        ControlCaptureTarget {
+            device: $device,
+            set: $set,
+            control: $control,
+        }
+    };
+}
+
 use clonk_frontend::startup_plrproperties::PlayerPropertiesController;
 use clonk_frontend::startup_portraitsel::{
     PortraitFileEntry, PortraitLocation, PortraitSelController,
@@ -18,9 +75,9 @@ fn mouse_drag_starts_only_after_cpp_five_pixel_sensitivity() {
     };
     let mut state = IngameMouseState::new(pointer(10.0), true);
     state.update(pointer(15.0));
-    assert!(!state.moved, "five pixels is still below the strict > gate");
+    main_assert!(!state.moved, "five pixels is still below the strict > gate");
     state.update(pointer(16.0));
-    assert!(state.moved, "six pixels enters C4MC_Drag_Moving");
+    main_assert!(state.moved, "six pixels enters C4MC_Drag_Moving");
 }
 
 #[test]
@@ -29,22 +86,10 @@ fn mouse_test_drop_geometry_fast_path_keeps_the_exact_cpp_ground_band() {
     // sixth pixel and solid ground itself do not qualify
     // (C4MouseControl.cpp:833-846).
     let landscape = Landscape::flat(8, 12);
-    assert!(!mouse_test_drop_geometry_candidate(
-        &landscape,
-        Vector2::new(3, 6)
-    ));
-    assert!(mouse_test_drop_geometry_candidate(
-        &landscape,
-        Vector2::new(3, 7)
-    ));
-    assert!(mouse_test_drop_geometry_candidate(
-        &landscape,
-        Vector2::new(3, 11)
-    ));
-    assert!(!mouse_test_drop_geometry_candidate(
-        &landscape,
-        Vector2::new(3, 12)
-    ));
+    main_assert!(!mouse_test_drop_geometry_candidate(&landscape, Vector2::new(3, 6)));
+    main_assert!(mouse_test_drop_geometry_candidate(&landscape, Vector2::new(3, 7)));
+    main_assert!(mouse_test_drop_geometry_candidate(&landscape, Vector2::new(3, 11)));
+    main_assert!(!mouse_test_drop_geometry_candidate(&landscape, Vector2::new(3, 12)));
 }
 
 fn move_cursor(app: &mut GameApp, point: GuiPoint, _expectation: &str) {
@@ -59,11 +104,7 @@ fn move_cursor_to(app: &mut GameApp, position: PhysicalPosition<f64>, _expectati
 }
 
 fn pressed_direction(slot: GamepadSlot, button: ControlButton) -> GamepadEvent {
-    GamepadEvent::Direction {
-        slot,
-        button,
-        state: ElementState::Pressed,
-    }
+    gamepad_direction_event(slot, button, ElementState::Pressed)
 }
 
 fn process_primary_direction(app: &mut GameApp, button: ControlButton, _expectation: &str) {
@@ -71,27 +112,15 @@ fn process_primary_direction(app: &mut GameApp, button: ControlButton, _expectat
 }
 
 fn pressed_gui_button(slot: GamepadSlot, class: GuiButtonClass) -> GamepadEvent {
-    GamepadEvent::GuiButton {
-        slot,
-        class,
-        state: ElementState::Pressed,
-    }
+    gamepad_gui_button_event(slot, class, ElementState::Pressed)
 }
 
 fn pressed_gamepad_action(slot: GamepadSlot, action: GamepadActionType) -> GamepadEvent {
-    GamepadEvent::Action {
-        slot,
-        action,
-        state: ElementState::Pressed,
-    }
+    gamepad_action_event(slot, action, ElementState::Pressed)
 }
 
 fn pressed_gamepad_button(slot: GamepadSlot, button: LegacyGamepadButton) -> GamepadEvent {
-    GamepadEvent::Button {
-        slot,
-        button,
-        state: ElementState::Pressed,
-    }
+    gamepad_button_event(slot, button, ElementState::Pressed)
 }
 
 fn sourced_gamepad_event(gamepad: usize, cluster: u64, event: GamepadEvent) -> SourcedGamepadEvent {
@@ -225,15 +254,9 @@ fn install_l067_context_stack(
     render_mouse_test_app(app);
     let front = *objects.last().test_value();
     let point = mouse_test_object_point(app, owner, front);
-    assert_eq!(
-        app.ingame_primary_mouse_target(owner, point),
-        selectable_windwing.then_some(front)
-    );
-    assert_eq!(
-        app.graphics.object_at_point(&app.snapshot, owner, point),
-        Some(front)
-    );
-    assert_eq!(app.ingame_viewport_region(owner, point), None);
+    main_assert_eq!(app.ingame_primary_mouse_target(owner, point) => selectable_windwing.then_some(front));
+    main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, point) => Some(front));
+    main_assert_eq!(app.ingame_viewport_region(owner, point) => None);
     (objects, point)
 }
 
@@ -250,16 +273,16 @@ fn right_click_wwng_targets_the_closed_container_behind_it() {
     physical_right_click(&mut app, point);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
     let [(_, context)] = player_commands.as_slice() else {
         panic!("expected one Context command, got {player_commands:?}");
     };
-    assert_eq!(context.player, owner);
-    assert_eq!(context.command, CommandId::Context as i32);
-    assert_eq!(context.target, 0);
-    assert_eq!(context.target2, container.as_u64() as i32);
-    assert_eq!(context.add_mode, 2);
+    main_assert_eq!(context.player => owner);
+    main_assert_eq!(context.command => CommandId::Context as i32);
+    main_assert_eq!(context.target => 0);
+    main_assert_eq!(context.target2 => container.as_u64() as i32);
+    main_assert_eq!(context.add_mode => 2);
 }
 
 #[test]
@@ -276,16 +299,13 @@ fn right_click_lone_wwng_falls_through_to_select_next() {
     physical_right_click(&mut app, point);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(
-        player_commands.is_empty(),
-        "a lone WWNG must not receive Context: {player_commands:?}"
-    );
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty(), "a lone WWNG must not receive Context: {player_commands:?}");
     let [(_, selection)] = selections.as_slice() else {
         panic!("expected one select-next packet, got {selections:?}");
     };
-    assert_eq!(selection.player, owner);
-    assert_eq!(selection.objects, vec![expected_next.as_u64() as i32]);
+    main_assert_eq!(selection.player => owner);
+    main_assert_eq!(selection.objects => vec![expected_next.as_u64() as i32]);
 }
 
 #[test]
@@ -301,14 +321,14 @@ fn right_click_excludes_only_the_front_wwng() {
     physical_right_click(&mut app, point);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
     let [(_, context)] = player_commands.as_slice() else {
         panic!("expected one Context command, got {player_commands:?}");
     };
-    assert_eq!(context.player, owner);
-    assert_eq!(context.command, CommandId::Context as i32);
-    assert_eq!(context.target2, rear_windwing.as_u64() as i32);
+    main_assert_eq!(context.player => owner);
+    main_assert_eq!(context.command => CommandId::Context as i32);
+    main_assert_eq!(context.target2 => rear_windwing.as_u64() as i32);
 }
 
 #[test]
@@ -328,13 +348,13 @@ fn selectable_wwng_selects_before_falling_through_to_select_next() {
     physical_right_click(&mut app, point);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(player_commands.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty());
     let [(_, selected), (_, cycled)] = selections.as_slice() else {
         panic!("expected Select followed by select-next, got {selections:?}");
     };
-    assert_eq!(selected.objects, vec![windwing.as_u64() as i32]);
-    assert_eq!(cycled.objects, vec![expected_next.as_u64() as i32]);
+    main_assert_eq!(selected.objects => vec![windwing.as_u64() as i32]);
+    main_assert_eq!(cycled.objects => vec![expected_next.as_u64() as i32]);
 }
 
 #[test]
@@ -346,18 +366,8 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
     let (empty, _) = mouse_test_empty_point(&mut app, owner, point, None);
     let help = viewport_button_point(&app, owner, clonk_frontend::hud::ViewportButton::Help);
     let menu = viewport_button_point(&app, owner, clonk_frontend::hud::ViewportButton::PlayerMenu);
-    assert_eq!(
-        app.ingame_viewport_region(owner, help),
-        Some(IngameViewportRegion::ViewportButton(
-            clonk_frontend::hud::ViewportButton::Help,
-        ))
-    );
-    assert_eq!(
-        app.ingame_viewport_region(owner, menu),
-        Some(IngameViewportRegion::ViewportButton(
-            clonk_frontend::hud::ViewportButton::PlayerMenu,
-        ))
-    );
+    main_assert_eq!(app.ingame_viewport_region(owner, help) => Some(IngameViewportRegion::ViewportButton(clonk_frontend::hud::ViewportButton::Help,)));
+    main_assert_eq!(app.ingame_viewport_region(owner, menu) => Some(IngameViewportRegion::ViewportButton(clonk_frontend::hud::ViewportButton::PlayerMenu,)));
     let mut commands = install_mouse_network_capture(&mut app);
 
     physical_left_click_with_modifiers(
@@ -366,15 +376,8 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
         ModifiersState::empty(),
         ModifiersState::empty(),
     );
-    assert!(
-        app.ingame_mouse_help,
-        "the HUD Help button enters Help mode"
-    );
-    assert_eq!(
-        commands.take_submitted_mouse_controls(),
-        (Vec::new(), Vec::new(), Vec::new()),
-        "COM_Help remains process-local"
-    );
+    main_assert!(app.ingame_mouse_help, "the HUD Help button enters Help mode");
+    main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "COM_Help remains process-local");
 
     physical_left_click_with_modifiers(
         &mut app,
@@ -382,16 +385,9 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
         ModifiersState::empty(),
         ModifiersState::empty(),
     );
-    assert!(app.ingame_mouse_help, "region clicks keep Help active");
-    assert!(
-        !app.ingame_menu_belongs_to(owner),
-        "Help suppresses the PlayerMenu region's local side effect"
-    );
-    assert_eq!(
-        commands.take_submitted_mouse_controls(),
-        (Vec::new(), Vec::new(), Vec::new()),
-        "Help suppresses synchronized region controls too"
-    );
+    main_assert!(app.ingame_mouse_help, "region clicks keep Help active");
+    main_assert!(!app.ingame_menu_belongs_to(owner), "Help suppresses the PlayerMenu region's local side effect");
+    main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "Help suppresses synchronized region controls too");
 
     physical_left_click_with_modifiers(
         &mut app,
@@ -399,21 +395,11 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
         ModifiersState::empty(),
         ModifiersState::empty(),
     );
-    assert!(app.ingame_mouse_help, "left-up keeps Help active");
+    main_assert!(app.ingame_mouse_help, "left-up keeps Help active");
     let expected = "Named target: Helpful details.";
-    assert_eq!(
-        app.ingame_mouse_help_caption,
-        Some(IngameMouseHelpCaption {
-            text: expected.to_string(),
-            keep_moves: clonk_script::c4_string_bytes(expected).len() / 2,
-        })
-    );
-    assert!(app.ingame_help_cursor_active());
-    assert_eq!(
-        commands.take_submitted_mouse_controls(),
-        (Vec::new(), Vec::new(), Vec::new()),
-        "a Help click never enters any synchronized mouse queue"
-    );
+    main_assert_eq!(app.ingame_mouse_help_caption => Some(input_fixture!(mouse_help: expected.to_string(), clonk_script::c4_string_bytes(expected).len() / 2,)));
+    main_assert!(app.ingame_help_cursor_active());
+    main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "a Help click never enters any synchronized mouse queue");
 
     install_native_test_fonts(&mut app, 3.0);
     let (_, _, plan) = render_ordered_test_frame(&mut app, 3.0, 960, 600);
@@ -423,39 +409,22 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
         .flat_map(|batch| &batch.text)
         .find(|command| command.text == expected)
         .test_value();
-    assert_eq!(
-        caption.role,
-        clonk_graphics::clonk_font::ClonkFontRole::GuiTooltip,
-        "Help captions use the global tooltip font"
-    );
+    main_assert_eq!(caption.role => clonk_graphics::clonk_font::ClonkFontRole::GuiTooltip, "Help captions use the global tooltip font");
 
     app.ingame_last_left_down = None;
     move_cursor(&mut app, point, "move back onto help target");
     app.test_left_button(ElementState::Pressed);
     move_cursor(&mut app, empty, "move beyond drag sensitivity in Help");
     let state = app.mouse_state.test_value();
-    assert!(state.down_cursor_help);
-    assert!(state.motion.moved);
-    assert!(!state.motion.world_drag_started);
-    assert!(!state.motion.region_drag_started);
-    assert!(!state.motion.selection_frame);
+    main_assert!(state.down_cursor_help);
+    main_assert!(state.motion.moved);
+    main_assert!(!state.motion.world_drag_started);
+    main_assert!(!state.motion.region_drag_started);
+    main_assert!(!state.motion.selection_frame);
     app.test_left_button(ElementState::Released);
-    assert_eq!(
-        commands.take_submitted_mouse_controls(),
-        (Vec::new(), Vec::new(), Vec::new()),
-        "crossing the drag threshold in Help still emits nothing"
-    );
-    assert_eq!(
-        app.ingame_mouse_help_caption
-            .as_ref()
-            .map(|caption| caption.text.as_str()),
-        Some(expected),
-        "Help reports the object captured on left-down"
-    );
-    assert_eq!(
-        app.engine.object_help_caption(target).as_deref(),
-        Some(expected)
-    );
+    main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "crossing the drag threshold in Help still emits nothing");
+    main_assert_eq!(app.ingame_mouse_help_caption.as_ref().map(|caption| caption.text.as_str()) => Some(expected), "Help reports the object captured on left-down");
+    main_assert_eq!(app.engine.object_help_caption(target).as_deref() => Some(expected));
 }
 
 #[test]
@@ -472,66 +441,36 @@ fn help_caption_uses_name_only_and_cpp_move_lifetime() {
     );
 
     let keep = clonk_script::c4_string_bytes(&raw_name).len() / 2;
-    assert_ne!(keep, raw_name.len() / 2, "KeepCaption counts C4 bytes");
-    assert_eq!(
-        app.ingame_mouse_help_caption,
-        Some(IngameMouseHelpCaption {
-            text: raw_name,
-            keep_moves: keep,
-        })
-    );
+    main_assert_ne!(keep => raw_name.len() / 2, "KeepCaption counts C4 bytes");
+    main_assert_eq!(app.ingame_mouse_help_caption => Some(input_fixture!(mouse_help: raw_name, keep)));
     for remaining in (0..keep).rev() {
         app.update_ingame_pointer(point).test_value();
-        assert_eq!(
+        main_assert_eq!(
             app.ingame_mouse_help_caption
                 .as_ref()
-                .map(|caption| caption.keep_moves),
+                .map(|caption| caption.keep_moves) =>
             Some(remaining),
             "caption survives the move that decrements KeepCaption to zero"
         );
     }
     app.update_ingame_pointer(point).test_value();
-    assert!(app.ingame_mouse_help_caption.is_none());
+    main_assert!(app.ingame_mouse_help_caption.is_none());
 
-    app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
-        text: "wheel".to_string(),
-        keep_moves: 2,
-    });
+    app.ingame_mouse_help_caption = Some(input_fixture!(mouse_help: "wheel".to_string(), 2));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
-    assert_eq!(
-        app.ingame_mouse_help_caption
-            .as_ref()
-            .map(|caption| caption.keep_moves),
-        Some(1)
-    );
+    main_assert_eq!(app.ingame_mouse_help_caption.as_ref().map(|caption| caption.keep_moves) => Some(1));
 
-    app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
-        text: "ignored up".to_string(),
-        keep_moves: 2,
-    });
+    app.ingame_mouse_help_caption = Some(input_fixture!(mouse_help: "ignored up".to_string(), 2));
     app.ingame_ignore_left_up = true;
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
-    assert!(!app.ingame_ignore_left_up);
-    assert_eq!(
-        app.ingame_mouse_help_caption
-            .as_ref()
-            .map(|caption| caption.keep_moves),
-        Some(1)
-    );
+    main_assert!(!app.ingame_ignore_left_up);
+    main_assert_eq!(app.ingame_mouse_help_caption.as_ref().map(|caption| caption.keep_moves) => Some(1));
 
-    app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
-        text: "middle".to_string(),
-        keep_moves: 2,
-    });
+    app.ingame_mouse_help_caption = Some(input_fixture!(mouse_help: "middle".to_string(), 2));
     app.handle_other_mouse_button(ElementState::Pressed)
         .test_value();
-    assert_eq!(
-        app.ingame_mouse_help_caption
-            .as_ref()
-            .map(|caption| caption.keep_moves),
-        Some(1)
-    );
+    main_assert_eq!(app.ingame_mouse_help_caption.as_ref().map(|caption| caption.keep_moves) => Some(1));
 }
 
 #[test]
@@ -592,18 +531,12 @@ fn shift_left_clicks_append_and_sample_release_modifiers() {
         .test_object_snapshot(cursor)
         .command_stack
         .command_views();
-    assert_eq!(
-        appended
-            .iter()
-            .map(|command| command.name.as_str())
-            .collect::<Vec<_>>(),
-        ["MoveTo", "MoveTo"]
-    );
-    assert_eq!(
+    main_assert_eq!(appended.iter().map(|command| command.name.as_str()).collect::<Vec<_>>() => ["MoveTo", "MoveTo"]);
+    main_assert_eq!(
         appended
             .iter()
             .map(|command| (command.tx, command.ty))
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         [
             (Some(first_world.x), Some(first_world.y)),
             (Some(second_world.x), Some(second_world.y)),
@@ -623,12 +556,9 @@ fn shift_left_clicks_append_and_sample_release_modifiers() {
         .test_object_snapshot(cursor)
         .command_stack
         .command_views();
-    assert_eq!(replaced.len(), 1);
-    assert_eq!(replaced[0].name, "MoveTo");
-    assert_eq!(
-        (replaced[0].tx, replaced[0].ty),
-        (Some(third_world.x), Some(third_world.y))
-    );
+    main_assert_eq!(replaced.len() => 1);
+    main_assert_eq!(replaced[0].name => "MoveTo");
+    main_assert_eq!((replaced[0].tx, replaced[0].ty) => (Some(third_world.x), Some(third_world.y)));
 }
 
 #[test]
@@ -652,10 +582,7 @@ fn shift_double_get_samples_the_second_press_event() {
     let target = app.engine.spawn_test_object(spawn);
     render_mouse_test_app(&mut app);
     let target_point = mouse_test_object_point(&app, owner, target);
-    assert_eq!(
-        app.ingame_primary_mouse_target(owner, target_point),
-        Some(target)
-    );
+    main_assert_eq!(app.ingame_primary_mouse_target(owner, target_point) => Some(target));
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
@@ -670,19 +597,13 @@ fn shift_double_get_samples_the_second_press_event() {
     app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
     let [(_, first), (_, second)] = player_commands.as_slice() else {
         panic!("expected MoveTo then Get, got {player_commands:?}");
     };
-    assert_eq!(
-        (first.command, first.add_mode),
-        (CommandId::MoveTo as i32, 1)
-    );
-    assert_eq!(
-        (second.command, second.target, second.add_mode),
-        (CommandId::Get as i32, target.as_u64() as i32, 1 | 4)
-    );
+    main_assert_eq!((first.command, first.add_mode) => (CommandId::MoveTo as i32, 1));
+    main_assert_eq!((second.command, second.target, second.add_mode) => (CommandId::Get as i32, target.as_u64() as i32, 1 | 4));
 }
 
 fn configure_mouse_fog(
@@ -758,13 +679,13 @@ fn mouse_fog_blocks_hidden_left_click_and_cycles_hidden_right_target() {
         .graphics
         .viewport_point_at(GuiPoint::new(target_point.x.ceil(), target_point.y.ceil()))
         .test_value();
-    assert!(app.ingame_pointer_fog_blocked(target_pointer));
-    assert_eq!(app.ingame_primary_mouse_target(owner, target_point), None);
+    main_assert!(app.ingame_pointer_fog_blocked(target_pointer));
+    main_assert_eq!(app.ingame_primary_mouse_target(owner, target_point) => None);
     let expected_next = app
         .engine
         .player_mouse_select_next_object(owner)
         .test_value();
-    assert_eq!(expected_next, cursor);
+    main_assert_eq!(expected_next => cursor);
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
@@ -777,16 +698,13 @@ fn mouse_fog_blocks_hidden_left_click_and_cycles_hidden_right_target() {
     app.test_right_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(
-        player_commands.is_empty(),
-        "fog must suppress both MoveTo and hidden Context: {player_commands:?}"
-    );
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty(), "fog must suppress both MoveTo and hidden Context: {player_commands:?}");
     let [(_, selection)] = selections.as_slice() else {
         panic!("hidden right click must cycle exactly once, got {selections:?}");
     };
-    assert_eq!(selection.player, owner);
-    assert_eq!(selection.objects, vec![expected_next.as_u64() as i32]);
+    main_assert_eq!(selection.player => owner);
+    main_assert_eq!(selection.objects => vec![expected_next.as_u64() as i32]);
 }
 
 #[test]
@@ -806,11 +724,8 @@ fn mouse_fog_keeps_ignore_fow_target_clickable() {
         .graphics
         .viewport_point_at(GuiPoint::new(target_point.x.ceil(), target_point.y.ceil()))
         .test_value();
-    assert!(app.ingame_pointer_fog_blocked(target_pointer));
-    assert_eq!(
-        app.ingame_mouse_select_target(owner, target_point),
-        Some(target)
-    );
+    main_assert!(app.ingame_pointer_fog_blocked(target_pointer));
+    main_assert_eq!(app.ingame_mouse_select_target(owner, target_point) => Some(target));
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
@@ -819,12 +734,12 @@ fn mouse_fog_keeps_ignore_fow_target_clickable() {
     app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(player_commands.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty());
     let [(_, selection)] = selections.as_slice() else {
         panic!("IgnoreFoW target must remain clickable, got {selections:?}");
     };
-    assert_eq!(selection.objects, vec![target.as_u64() as i32]);
+    main_assert_eq!(selection.objects => vec![target.as_u64() as i32]);
 }
 
 #[test]
@@ -843,18 +758,15 @@ fn fog_keeps_ignore_fow_target_and_jump_captions() {
     let target_point = mouse_test_object_point(&app, owner, target);
     let target_point = GuiPoint::new(target_point.x.ceil(), target_point.y.ceil());
     let target_pointer = app.graphics.viewport_point_at(target_point).test_value();
-    assert!(app.ingame_pointer_fog_blocked(target_pointer));
-    assert_eq!(
-        app.ingame_primary_mouse_target(owner, target_point),
-        Some(target)
-    );
+    main_assert!(app.ingame_pointer_fog_blocked(target_pointer));
+    main_assert_eq!(app.ingame_primary_mouse_target(owner, target_point) => Some(target));
     let target_cursor = app.engine.mouse_world_cursor(
         owner,
         Some(target),
         ingame_pointer_world_pixel(target_pointer),
         false,
     );
-    assert_eq!(target_cursor, MouseWorldCursor::Select(target));
+    main_assert_eq!(target_cursor => MouseWorldCursor::Select(target));
 
     let move_stably = |app: &mut GameApp, point: GuiPoint| {
         for _ in 0..=INGAME_MOUSE_CAPTION_DELAY {
@@ -865,11 +777,11 @@ fn fog_keeps_ignore_fow_target_and_jump_captions() {
         .ingame_world_cursor_caption(target_cursor, ingame_pointer_world_pixel(target_pointer))
         .test_value();
     move_stably(&mut app, target_point);
-    assert_eq!(
+    main_assert_eq!(
         app.ingame_mouse_caption
             .caption
             .as_ref()
-            .map(|caption| &caption.text),
+            .map(|caption| &caption.text) =>
         Some(&expected),
         "C4D_IgnoreFoW keeps its world cursor caption in fog"
     );
@@ -879,24 +791,24 @@ fn fog_keeps_ignore_fow_target_and_jump_captions() {
     let jump_point = GuiPoint::new(jump_x.ceil(), jump_y.ceil());
     let jump_pointer = app.graphics.viewport_point_at(jump_point).test_value();
     let jump = ingame_pointer_world_pixel(jump_pointer);
-    assert!(app.ingame_pointer_fog_blocked(jump_pointer));
+    main_assert!(app.ingame_pointer_fog_blocked(jump_pointer));
     let jump_cursor = app.engine.mouse_world_cursor(
         owner,
         app.ingame_primary_mouse_target(owner, jump_point),
         jump,
         false,
     );
-    assert_eq!(jump_cursor, MouseWorldCursor::JumpRight);
+    main_assert_eq!(jump_cursor => MouseWorldCursor::JumpRight);
 
     let expected = app
         .ingame_world_cursor_caption(jump_cursor, jump)
         .test_value();
     move_stably(&mut app, jump_point);
-    assert_eq!(
+    main_assert_eq!(
         app.ingame_mouse_caption
             .caption
             .as_ref()
-            .map(|caption| &caption.text),
+            .map(|caption| &caption.text) =>
         Some(&expected),
         "jump captions remain available when the endpoint is fog-covered"
     );
@@ -916,12 +828,8 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
     render_mouse_test_app(&mut app);
     let target_point = mouse_test_object_point(&app, owner, target);
     let start = app.graphics.viewport_point_at(target_point).test_value();
-    assert!(!app.ingame_pointer_fog_blocked(start));
-    assert_eq!(
-        app.engine
-            .mouse_world_drag_source(owner, target, ingame_pointer_world_pixel(start)),
-        Some(MouseDragSource::Carryable)
-    );
+    main_assert!(!app.ingame_pointer_fog_blocked(start));
+    main_assert_eq!(app.engine.mouse_world_drag_source(owner, target, ingame_pointer_world_pixel(start)) => Some(MouseDragSource::Carryable));
 
     let landscape = app.snapshot.landscape.test_ref();
     let width = i32::try_from(landscape.width()).test_value();
@@ -981,21 +889,21 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
         visible_drag_point,
         "begin DragMoving in visible terrain",
     );
-    assert!(app.mouse_state.is_some_and(|state| state.motion.moved));
+    main_assert!(app.mouse_state.is_some_and(|state| state.motion.moved));
     move_cursor(&mut app, hidden_point, "continue DragMoving into fog");
     app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
     let [(_, command)] = player_commands.as_slice() else {
         panic!("fog-covered object release must send one no-op, got {player_commands:?}");
     };
-    assert_eq!(command.player, owner);
-    assert_eq!(command.command, 0);
-    assert_eq!((command.x, command.y), (hidden.x, hidden.y));
-    assert_eq!((command.target, command.target2), (0, 0));
-    assert_eq!(command.add_mode, 1);
+    main_assert_eq!(command.player => owner);
+    main_assert_eq!(command.command => 0);
+    main_assert_eq!((command.x, command.y) => (hidden.x, hidden.y));
+    main_assert_eq!((command.target, command.target2) => (0, 0));
+    main_assert_eq!(command.add_mode => 1);
 }
 
 #[test]
@@ -1034,40 +942,24 @@ fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
         Vector2::new(cursor_position.x + 110, cursor_position.y + 10),
     );
     for point in [start, visible_end, hidden_end] {
-        assert!(app
-            .graphics
-            .object_at_point(&app.snapshot, owner, point)
-            .is_none());
-        assert!(app.ingame_viewport_region(owner, point).is_none());
+        main_assert!(app.graphics.object_at_point(&app.snapshot, owner, point).is_none());
+        main_assert!(app.ingame_viewport_region(owner, point).is_none());
     }
-    assert!(app
-        .graphics
-        .viewport_point_at(visible_end)
-        .is_some_and(|pointer| !app.ingame_pointer_fog_blocked(pointer)));
-    assert!(app
-        .graphics
-        .viewport_point_at(hidden_end)
-        .is_some_and(|pointer| app.ingame_pointer_fog_blocked(pointer)));
+    main_assert!(app.graphics.viewport_point_at(visible_end).is_some_and(|pointer| !app.ingame_pointer_fog_blocked(pointer)));
+    main_assert!(app.graphics.viewport_point_at(hidden_end).is_some_and(|pointer| app.ingame_pointer_fog_blocked(pointer)));
 
     move_cursor(&mut app, start, "move to selection start");
     app.test_right_button(ElementState::Pressed);
     move_cursor(&mut app, visible_end, "move to visible selection endpoint");
     let visible_motion = app.ingame_right_mouse_state.test_value().motion;
-    assert_eq!(
-        visible_motion.selection_kind,
-        IngameDragSelectionKind::Objects
-    );
-    assert_eq!(app.ingame_selection_candidates(visible_motion), vec![first]);
+    main_assert_eq!(visible_motion.selection_kind => IngameDragSelectionKind::Objects);
+    main_assert_eq!(app.ingame_selection_candidates(visible_motion) => vec![first]);
 
     move_cursor(&mut app, hidden_end, "move selection endpoint into fog");
     let hidden_motion = app.ingame_right_mouse_state.test_value().motion;
-    assert_eq!(hidden_motion.last.screen, hidden_end);
-    assert_eq!(app.ingame_selection_candidates(hidden_motion), vec![first]);
-    assert_ne!(
-        app.ingame_selection_candidates(hidden_motion),
-        vec![first, second],
-        "fogged endpoint must not add the hidden member"
-    );
+    main_assert_eq!(hidden_motion.last.screen => hidden_end);
+    main_assert_eq!(app.ingame_selection_candidates(hidden_motion) => vec![first]);
+    main_assert_ne!(app.ingame_selection_candidates(hidden_motion) => vec![first, second], "fogged endpoint must not add the hidden member");
 
     app.engine
         .apply_object_update(
@@ -1084,22 +976,18 @@ fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
         )
         .test_value();
     app.snapshot = app.engine.snapshot();
-    assert_eq!(
+    main_assert_eq!(
         app.engine.mouse_drag_carryables_in_rect(
             ingame_pointer_world_pixel(hidden_motion.start),
             ingame_pointer_world_pixel(hidden_motion.selection_last),
-        ),
+        ) =>
         vec![second],
         "a live rectangle query now disagrees with native's cached Selection"
     );
-    assert_eq!(
-        app.ingame_selection_candidates(hidden_motion),
-        vec![first],
-        "fog must freeze object identity, not only rectangle coordinates"
-    );
+    main_assert_eq!(app.ingame_selection_candidates(hidden_motion) => vec![first], "fog must freeze object identity, not only rectangle coordinates");
 
     app.test_right_button(ElementState::Released);
-    assert_eq!(app.ingame_dragged_objects, vec![first]);
+    main_assert_eq!(app.ingame_dragged_objects => vec![first]);
 }
 
 #[test]
@@ -1151,26 +1039,22 @@ fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
     app.ingame_last_left_down = None;
     move_cursor(&mut app, hidden, "move to fog-covered press point");
     app.test_left_button(ElementState::Pressed);
-    assert!(app
-        .mouse_state
-        .is_some_and(|state| state.down_cursor_nothing));
+    main_assert!(app.mouse_state.is_some_and(|state| state.down_cursor_nothing));
     move_cursor(&mut app, visible, "move held pointer into visible terrain");
     let release = app.ingame_pointer.test_value();
-    assert!(app.mouse_state.is_some_and(|state| {
-        !state.motion.moved && state.motion.last.screen == release.screen
-    }));
+    main_assert!(app.mouse_state.is_some_and(|state| {!state.motion.moved && state.motion.last.screen == release.screen}));
     app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
     let [(_, command)] = player_commands.as_slice() else {
         panic!("visible release must queue one MoveTo, got {player_commands:?}");
     };
     let release_world = ingame_pointer_world_pixel(release);
-    assert_eq!(command.command, CommandId::MoveTo as i32);
-    assert_eq!((command.x, command.y), (release_world.x, release_world.y));
-    assert_eq!((command.target, command.target2), (0, 0));
+    main_assert_eq!(command.command => CommandId::MoveTo as i32);
+    main_assert_eq!((command.x, command.y) => (release_world.x, release_world.y));
+    main_assert_eq!((command.target, command.target2) => (0, 0));
 }
 
 #[test]
@@ -1196,9 +1080,7 @@ fn mouse_fog_blocks_all_four_landscape_boundaries_even_when_disabled() {
         world: FloatVector2::new(world.x as f32, world.y as f32),
         screen: GuiPoint::new(-100.0, -100.0),
     });
-    assert!(pointers
-        .iter()
-        .all(|pointer| app.ingame_pointer_fog_blocked(*pointer)));
+    main_assert!(pointers.iter().all(|pointer| app.ingame_pointer_fog_blocked(*pointer)));
     let mut commands = install_mouse_network_capture(&mut app);
 
     for pointer in pointers {
@@ -1206,9 +1088,9 @@ fn mouse_fog_blocks_all_four_landscape_boundaries_even_when_disabled() {
     }
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(player_commands.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty());
+    main_assert!(selections.is_empty());
 }
 
 #[test]
@@ -1253,24 +1135,21 @@ fn physical_left_drag_carryable_queues_object_drop_without_direct_controls() {
     physical_left_drag(&mut app, target_point, drop_point);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(
-        direct.is_empty(),
-        "a left object drag must not emit direction/COM_Throw controls: {direct:?}"
-    );
-    assert!(selections.is_empty());
+    main_assert!(direct.is_empty(), "a left object drag must not emit direction/COM_Throw controls: {direct:?}");
+    main_assert!(selections.is_empty());
     let [(_, command)] = player_commands.as_slice() else {
         panic!("expected one C4CMD_Drop packet, got {player_commands:?}");
     };
-    assert_eq!(command.player, owner);
-    assert_eq!(command.command, CommandId::Drop as i32);
-    assert_eq!(command.x, drop_world.x);
-    assert_eq!(command.y, drop_world.y);
-    assert_eq!(command.target, target.as_u64() as i32);
-    assert_eq!(command.target2, 0);
-    assert_eq!(command.data, 0);
-    assert_eq!(command.add_mode, 1);
-    assert_eq!(command.by_client, 0);
-    assert!(app.ingame_dragged_objects.is_empty());
+    main_assert_eq!(command.player => owner);
+    main_assert_eq!(command.command => CommandId::Drop as i32);
+    main_assert_eq!(command.x => drop_world.x);
+    main_assert_eq!(command.y => drop_world.y);
+    main_assert_eq!(command.target => target.as_u64() as i32);
+    main_assert_eq!(command.target2 => 0);
+    main_assert_eq!(command.data => 0);
+    main_assert_eq!(command.add_mode => 1);
+    main_assert_eq!(command.by_client => 0);
+    main_assert!(app.ingame_dragged_objects.is_empty());
 }
 
 #[test]
@@ -1320,42 +1199,30 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
         .viewport_point_at(vehicle_point)
         .map(ingame_pointer_world_pixel)
         .test_value();
-    assert_eq!(
-        app.engine
-            .mouse_world_drag_source(owner, vehicle, start_world),
-        Some(MouseDragSource::Vehicle)
-    );
-    assert_eq!(
-        app.graphics.object_at_point_with_ocf(
-            &app.snapshot,
-            owner,
-            container_point,
-            clonk_engine::ocf::CONTAINER,
-        ),
-        Some(container)
-    );
+    main_assert_eq!(app.engine.mouse_world_drag_source(owner, vehicle, start_world) => Some(MouseDragSource::Vehicle));
+    main_assert_eq!(app.graphics.object_at_point_with_ocf(&app.snapshot, owner, container_point, clonk_engine::ocf::CONTAINER,) => Some(container));
     let (open_point, open_world) = mouse_test_empty_point(&mut app, owner, vehicle_point, None);
     let mut commands = install_mouse_network_capture(&mut app);
 
     physical_left_drag(&mut app, vehicle_point, open_point);
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
     let [(_, open)] = player_commands.as_slice() else {
         panic!("expected one open-ground PushTo, got {player_commands:?}");
     };
-    assert_eq!(open.command, CommandId::PushTo as i32);
-    assert_eq!(open.target, vehicle.as_u64() as i32);
-    assert_eq!(open.target2, 0);
-    assert_eq!((open.x, open.y), (open_world.x, open_world.y));
-    assert_eq!(open.add_mode, 1);
+    main_assert_eq!(open.command => CommandId::PushTo as i32);
+    main_assert_eq!(open.target => vehicle.as_u64() as i32);
+    main_assert_eq!(open.target2 => 0);
+    main_assert_eq!((open.x, open.y) => (open_world.x, open_world.y));
+    main_assert_eq!(open.add_mode => 1);
 
     app.test_modifiers(ModifiersState::CONTROL);
     physical_left_drag(&mut app, vehicle_point, container_point);
     app.test_modifiers(ModifiersState::empty());
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
     let [(_, put)] = player_commands.as_slice() else {
         panic!("expected one Control-PushTo, got {player_commands:?}");
     };
@@ -1367,11 +1234,11 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
         ))
         .map(ingame_pointer_world_pixel)
         .test_value();
-    assert_eq!(put.command, CommandId::PushTo as i32);
-    assert_eq!(put.target, vehicle.as_u64() as i32);
-    assert_eq!(put.target2, container.as_u64() as i32);
-    assert_eq!((put.x, put.y), (put_world.x, put_world.y));
-    assert_eq!(put.add_mode, 1);
+    main_assert_eq!(put.command => CommandId::PushTo as i32);
+    main_assert_eq!(put.target => vehicle.as_u64() as i32);
+    main_assert_eq!(put.target2 => container.as_u64() as i32);
+    main_assert_eq!((put.x, put.y) => (put_world.x, put_world.y));
+    main_assert_eq!(put.add_mode => 1);
 }
 
 #[test]
@@ -1418,15 +1285,8 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
         first_point.y.max(second_point.y) + 8.0,
     );
     for point in [frame_start, frame_end] {
-        assert!(app
-            .graphics
-            .viewport_point_at(point)
-            .is_some_and(|pointer| pointer.owner == owner));
-        assert_eq!(
-            app.graphics.object_at_point(&app.snapshot, owner, point),
-            None,
-            "selection frame endpoints remain on landscape"
-        );
+        main_assert!(app.graphics.viewport_point_at(point).is_some_and(|pointer| pointer.owner == owner));
+        main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, point) => None, "selection frame endpoints remain on landscape");
     }
     let first_world = app
         .graphics
@@ -1441,30 +1301,21 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
     let expected_selection = app
         .engine
         .mouse_drag_carryables_in_rect(first_world, second_world);
-    assert_eq!(expected_selection.len(), 2);
+    main_assert_eq!(expected_selection.len() => 2);
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
     move_cursor(&mut app, frame_start, "move to object-frame start");
     app.test_left_button(ElementState::Pressed);
     move_cursor(&mut app, frame_end, "drag frame over both carryables");
-    assert_eq!(
-        app.mouse_state
-            .expect("left object frame remains live")
-            .motion
-            .selection_kind,
-        IngameDragSelectionKind::Objects
-    );
+    main_assert_eq!(app.mouse_state.expect("left object frame remains live").motion.selection_kind => IngameDragSelectionKind::Objects);
     app.test_left_button(ElementState::Released);
-    assert_eq!(app.ingame_dragged_objects, expected_selection);
-    assert!(
-        app.ingame_last_left_down.is_none(),
-        "a moved gesture cannot arm an immediate false LeftDouble"
-    );
+    main_assert_eq!(app.ingame_dragged_objects => expected_selection);
+    main_assert!(app.ingame_last_left_down.is_none(), "a moved gesture cannot arm an immediate false LeftDouble");
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(player_commands.is_empty());
-    assert!(selections.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty());
+    main_assert!(selections.is_empty());
 
     let member_point = mouse_test_object_point(&app, owner, first);
     let (drop_point, drop_world) =
@@ -1475,32 +1326,22 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
     app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(selections.is_empty());
-    assert_eq!(player_commands.len(), 2);
-    assert_eq!(
+    main_assert!(direct.is_empty());
+    main_assert!(selections.is_empty());
+    main_assert_eq!(player_commands.len() => 2);
+    main_assert_eq!(
         player_commands
             .iter()
             .map(|(_, command)| command.target)
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         expected_selection
             .iter()
             .map(|object| object.as_u64() as i32)
             .collect::<Vec<_>>()
     );
-    assert_eq!(
-        player_commands
-            .iter()
-            .map(|(_, command)| command.add_mode)
-            .collect::<Vec<_>>(),
-        vec![1, 4]
-    );
-    assert!(player_commands.iter().all(|(_, command)| {
-        command.command == CommandId::Drop as i32
-            && command.x == drop_world.x
-            && command.y == drop_world.y
-    }));
-    assert!(app.ingame_dragged_objects.is_empty());
+    main_assert_eq!(player_commands.iter().map(|(_, command)| command.add_mode).collect::<Vec<_>>() => vec![1, 4]);
+    main_assert!(player_commands.iter().all(|(_, command)| {command.command == CommandId::Drop as i32 && command.x == drop_world.x && command.y == drop_world.y}));
+    main_assert!(app.ingame_dragged_objects.is_empty());
 }
 
 #[test]
@@ -1588,19 +1429,13 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
     move_cursor(&mut app, empty_start, "move to empty frame start");
     app.test_left_button(ElementState::Pressed);
     move_cursor(&mut app, empty_end, "move empty frame");
-    assert_eq!(
-        app.mouse_state
-            .expect("empty frame remains live")
-            .motion
-            .selection_kind,
-        IngameDragSelectionKind::Unknown
-    );
+    main_assert_eq!(app.mouse_state.expect("empty frame remains live").motion.selection_kind => IngameDragSelectionKind::Unknown);
     app.test_left_button(ElementState::Released);
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(player_commands.is_empty());
-    assert!(selections.is_empty());
-    assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty());
+    main_assert!(selections.is_empty());
+    main_assert!(app.ingame_dragged_objects.is_empty());
 
     let entrance_point = mouse_test_object_point(&app, owner, entrance);
     let entrance_world = app
@@ -1608,23 +1443,15 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
         .viewport_point_at(entrance_point)
         .map(ingame_pointer_world_pixel)
         .test_value();
-    assert_eq!(
-        app.ingame_primary_mouse_target(owner, entrance_point),
-        Some(entrance)
-    );
-    assert_eq!(
-        app.engine
-            .mouse_world_drag_source(owner, entrance, entrance_world),
-        None,
-        "Entrance overrides the otherwise Carryable cursor"
-    );
+    main_assert_eq!(app.ingame_primary_mouse_target(owner, entrance_point) => Some(entrance));
+    main_assert_eq!(app.engine.mouse_world_drag_source(owner, entrance, entrance_world) => None, "Entrance overrides the otherwise Carryable cursor");
     let (release_point, _) = mouse_test_empty_point(&mut app, owner, entrance_point, None);
     physical_left_drag(&mut app, entrance_point, release_point);
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
-    assert!(direct.is_empty());
-    assert!(player_commands.is_empty());
-    assert!(selections.is_empty());
-    assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(direct.is_empty());
+    main_assert!(player_commands.is_empty());
+    main_assert!(selections.is_empty());
+    main_assert!(app.ingame_dragged_objects.is_empty());
 }
 
 #[test]
@@ -1652,15 +1479,7 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
     }
     let vehicle = app.engine.spawn_test_object(vehicle_spawn);
     app.snapshot = app.engine.snapshot();
-    assert_ne!(
-        app.engine
-            .object_snapshot(vehicle)
-            .expect("vehicle remains live")
-            .ocf
-            & clonk_engine::ocf::GRAB,
-        0,
-        "Grab=1 vehicle exposes OCF_Grab"
-    );
+    main_assert_ne!(app.engine.object_snapshot(vehicle).expect("vehicle remains live").ocf & clonk_engine::ocf::GRAB => 0, "Grab=1 vehicle exposes OCF_Grab");
     app.test_render(&mut frame);
     let vehicle_snapshot = app.snapshot.object(vehicle).cloned().test_value();
     let (vehicle_x, vehicle_y) = app
@@ -1673,8 +1492,8 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
         GuiPoint::new(vehicle_x, vehicle_y),
         clonk_engine::ocf::GRAB,
     );
-    assert_eq!(
-            direct_pick,
+    main_assert_eq!(
+            direct_pick =>
             Some(vehicle),
             "vehicle center pick; object={vehicle_snapshot:?}; cursor={:?}; center=({vehicle_x},{vehicle_y})",
             app.snapshot
@@ -1710,12 +1529,12 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
         .test_object_snapshot(crew)
         .command_stack
         .command_views();
-    assert_eq!(commands.len(), 1, "Set replaces the previous command stack");
-    assert_eq!(commands[0].name, "PushTo");
-    assert_eq!(commands[0].target, Some(vehicle));
-    assert_eq!(commands[0].target2, None);
-    assert_eq!(commands[0].tx, Some(release_world.x));
-    assert_eq!(commands[0].ty, Some(release_world.y));
+    main_assert_eq!(commands.len() => 1, "Set replaces the previous command stack");
+    main_assert_eq!(commands[0].name => "PushTo");
+    main_assert_eq!(commands[0].target => Some(vehicle));
+    main_assert_eq!(commands[0].target2 => None);
+    main_assert_eq!(commands[0].tx => Some(release_world.x));
+    main_assert_eq!(commands[0].ty => Some(release_world.y));
 }
 
 #[test]
@@ -1739,42 +1558,32 @@ fn mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
     let target_point = mouse_test_object_point(&app, owner, target);
     let pointer = app.graphics.viewport_point_at(target_point).test_value();
     let world = ingame_pointer_world_pixel(pointer);
-    assert_eq!(
-        app.engine
-            .mouse_world_cursor(owner, Some(target), world, false),
-        MouseWorldCursor::Grab(target)
-    );
+    main_assert_eq!(app.engine.mouse_world_cursor(owner, Some(target), world, false) => MouseWorldCursor::Grab(target));
 
     let move_to = |app: &mut GameApp, point: GuiPoint| {
         move_cursor(app, point, "route physical hover move");
     };
     move_to(&mut app, target_point);
-    assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Grab);
-    assert_eq!(app.ingame_mouse_caption.time_on_target, 0);
-    assert!(app.ingame_mouse_caption.caption.is_none());
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Grab);
+    main_assert_eq!(app.ingame_mouse_caption.time_on_target => 0);
+    main_assert!(app.ingame_mouse_caption.caption.is_none());
     for _ in 1..INGAME_MOUSE_CAPTION_DELAY {
         move_to(&mut app, target_point);
     }
-    assert_eq!(
-        app.ingame_mouse_caption.time_on_target,
-        INGAME_MOUSE_CAPTION_DELAY - 1
-    );
-    assert!(app.ingame_mouse_caption.caption.is_none());
+    main_assert_eq!(app.ingame_mouse_caption.time_on_target => INGAME_MOUSE_CAPTION_DELAY - 1);
+    main_assert!(app.ingame_mouse_caption.caption.is_none());
 
     move_to(&mut app, target_point);
     let expected = app
         .ingame_world_cursor_caption(MouseWorldCursor::Grab(target), world)
         .test_value();
     let caption = app.ingame_mouse_caption.caption.test_ref();
-    assert_eq!(caption.text, expected);
-    assert!(caption.text.contains('|'));
+    main_assert_eq!(caption.text => expected);
+    main_assert!(caption.text.contains('|'));
 
     let (miss, _) = mouse_test_empty_point(&mut app, owner, target_point, None);
     move_to(&mut app, miss);
-    assert!(
-        app.ingame_mouse_caption.caption.is_none(),
-        "the next unmatched native Move clears a non-kept caption"
-    );
+    main_assert!(app.ingame_mouse_caption.caption.is_none(), "the next unmatched native Move clears a non-kept caption");
 }
 
 #[test]
@@ -1787,19 +1596,13 @@ fn inventory_hover_caption_is_immediate_and_anchored_to_region_top() {
 
     move_cursor(&mut app, region_point, "move over inventory region");
     let caption = app.ingame_mouse_caption.caption.test_ref();
-    assert_eq!(
-        caption.text,
-        app.ingame_object_caption_name(target).unwrap()
-    );
-    assert_eq!(caption.caption_bottom_y, Some(region.y - viewport.y));
-    assert_eq!(
-        app.ingame_mouse_caption.cursor,
-        IngameMouseCursorKind::Region
-    );
+    main_assert_eq!(caption.text => app.ingame_object_caption_name(target).unwrap());
+    main_assert_eq!(caption.caption_bottom_y => Some(region.y - viewport.y));
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
 
     let (miss, _) = mouse_test_empty_point(&mut app, owner, region_point, None);
     move_cursor(&mut app, miss, "move away from inventory region");
-    assert!(app.ingame_mouse_caption.caption.is_none());
+    main_assert!(app.ingame_mouse_caption.caption.is_none());
 }
 
 #[test]
@@ -1856,20 +1659,9 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
                 - clonk_frontend::hud::SYMBOL_BORDER
                 - clonk_frontend::hud::SYMBOL_SIZE / 2) as f32,
         );
-        assert_eq!(
-            app.ingame_inventory_region_target(owner, inventory_point),
-            Some(dragged)
-        );
+        main_assert_eq!(app.ingame_inventory_region_target(owner, inventory_point) => Some(dragged));
         let container_point = mouse_test_object_point(&app, owner, container);
-        assert_eq!(
-            app.graphics.object_at_point_with_ocf(
-                &app.snapshot,
-                owner,
-                container_point,
-                clonk_engine::ocf::CONTAINER,
-            ),
-            Some(container)
-        );
+        main_assert_eq!(app.graphics.object_at_point_with_ocf(&app.snapshot, owner, container_point, clonk_engine::ocf::CONTAINER,) => Some(container));
 
         let (key, template, expected_kind, expected_cursor) = if vehicle_drag {
             (
@@ -1901,31 +1693,19 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
             container_point,
             "cross moving-drag threshold over container",
         );
-        assert!(
-            app.ingame_mouse_caption.caption.is_none(),
-            "DragNone starts the moving drag but does not run DragMoving yet"
-        );
+        main_assert!(app.ingame_mouse_caption.caption.is_none(), "DragNone starts the moving drag but does not run DragMoving yet");
         app.test_update();
 
-        assert_eq!(app.ingame_mouse_caption.cursor, expected_kind);
-        assert_eq!(
-            app.mouse_state
-                .and_then(|state| state.motion.region_drag_cursor),
-            Some(expected_cursor)
-        );
+        main_assert_eq!(app.ingame_mouse_caption.cursor => expected_kind);
+        main_assert_eq!(app.mouse_state.and_then(|state| state.motion.region_drag_cursor) => Some(expected_cursor));
         let caption = app.ingame_mouse_caption.caption.test_ref();
         let expected_subject = if vehicle_drag {
             "Caption wagon"
         } else {
             "Caption item"
         };
-        assert_eq!(
-            caption.text,
-            template
-                .replacen("%s", expected_subject, 1)
-                .replacen("%s", "Caption container", 1)
-        );
-        assert_eq!(caption.caption_bottom_y, None);
+        main_assert_eq!(caption.text => template.replacen("%s", expected_subject, 1).replacen("%s", "Caption container", 1));
+        main_assert_eq!(caption.caption_bottom_y => None);
     }
 }
 
@@ -1950,10 +1730,7 @@ fn group_put_caption_uses_remaining_live_selection() {
     }
     let target = app.engine.spawn_test_object(spawn);
     render_mouse_test_app(&mut app);
-    assert_eq!(
-        app.ingame_inventory_region_target(owner, region_point),
-        Some(newest)
-    );
+    main_assert_eq!(app.ingame_inventory_region_target(owner, region_point) => Some(newest));
     let target_point = mouse_test_object_point(&app, owner, target);
     app.startup_tooltip_resources
         .insert("IDS_CON_ITEMS".to_owned(), "widgets".to_owned());
@@ -1968,7 +1745,7 @@ fn group_put_caption_uses_remaining_live_selection() {
         target_point,
         "cross grouped moving-drag threshold",
     );
-    assert_eq!(app.ingame_dragged_objects.len(), 3);
+    main_assert_eq!(app.ingame_dragged_objects.len() => 3);
 
     app.engine
         .apply_object_update(
@@ -1979,15 +1756,8 @@ fn group_put_caption_uses_remaining_live_selection() {
     app.snapshot = app.engine.snapshot();
     move_cursor(&mut app, target_point, "refresh DragMoving after deletion");
 
-    assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Put);
-    assert_eq!(
-        app.ingame_mouse_caption
-            .caption
-            .as_ref()
-            .expect("remaining grouped selection has a caption")
-            .text,
-        "PUT <2 widgets> INTO <Group container>"
-    );
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Put);
+    main_assert_eq!(app.ingame_mouse_caption.caption.as_ref().expect("remaining grouped selection has a caption").text => "PUT <2 widgets> INTO <Group container>");
 }
 
 #[test]
@@ -2034,21 +1804,11 @@ fn world_origin_put_caption_uses_dragged_object_name() {
         .test_value();
     app.test_modifiers(ModifiersState::CONTROL);
     move_cursor(&mut app, target_point, "cross world moving-drag threshold");
-    assert!(
-        app.ingame_mouse_caption.caption.is_none(),
-        "the threshold move only enters DragMoving"
-    );
+    main_assert!(app.ingame_mouse_caption.caption.is_none(), "the threshold move only enters DragMoving");
     move_cursor(&mut app, target_point, "run DragMoving over world bin");
 
-    assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Put);
-    assert_eq!(
-        app.ingame_mouse_caption
-            .caption
-            .as_ref()
-            .expect("world-origin put has a caption")
-            .text,
-        "PUT <World parcel> INTO <World bin>"
-    );
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Put);
+    main_assert_eq!(app.ingame_mouse_caption.caption.as_ref().expect("world-origin put has a caption").text => "PUT <World parcel> INTO <World bin>");
 }
 
 #[test]
@@ -2063,10 +1823,7 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
     let drop_world = Vector2::new(drop_x, ground_y - 1);
     let (drop_x, drop_y) = app.graphics.world_to_screen(owner, drop_world).test_value();
     let drop_point = GuiPoint::new(drop_x, drop_y);
-    assert_eq!(
-        app.engine.mouse_drag_carryable_command(owner, drop_world),
-        Some(CommandId::Drop)
-    );
+    main_assert_eq!(app.engine.mouse_drag_carryable_command(owner, drop_world) => Some(CommandId::Drop));
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
@@ -2076,32 +1833,20 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
     app.handle_ingame_mouse_button(ElementState::Pressed)
         .test_value();
     move_cursor(&mut app, drop_point, "cross drag threshold");
-    assert!(app.mouse_state.is_some_and(|state| {
-        state.motion.region_drag_started && state.motion.region_drag_cursor.is_none()
-    }));
+    main_assert!(app.mouse_state.is_some_and(|state| {state.motion.region_drag_started && state.motion.region_drag_cursor.is_none()}));
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
-    assert!(controls.is_empty());
-    assert_eq!(
-        commands,
+    main_assert!(controls.is_empty());
+    main_assert_eq!(
+        commands =>
         vec![(
             tick,
-            PlayerCommandControlData {
-                player: owner,
-                command: 0,
-                x: drop_world.x,
-                y: drop_world.y,
-                target: 0,
-                target2: 0,
-                data: 0,
-                add_mode: 1,
-                by_client: 7,
-            },
+            input_fixture!(player_command: owner, 0, drop_world.x, drop_world.y, 0, 0, 1),
         )],
         "the threshold event itself still runs DragNone, not DragMoving"
     );
-    assert!(selections.is_empty());
+    main_assert!(selections.is_empty());
     app.network = None;
     app.ingame_last_left_down = None;
 
@@ -2109,16 +1854,14 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
     app.handle_ingame_mouse_button(ElementState::Pressed)
         .test_value();
     move_cursor(&mut app, drop_point, "cross drag threshold");
-    assert!(app
-        .mouse_state
-        .is_some_and(|state| state.motion.region_drag_started));
-    assert_eq!(app.ingame_dragged_objects, vec![target]);
+    main_assert!(app.mouse_state.is_some_and(|state| state.motion.region_drag_started));
+    main_assert_eq!(app.ingame_dragged_objects => vec![target]);
     for _ in 0..5 {
         app.test_update();
     }
-    assert_eq!(
+    main_assert_eq!(
         app.mouse_state
-            .and_then(|state| state.motion.region_drag_cursor),
+            .and_then(|state| state.motion.region_drag_cursor) =>
         Some(IngameRegionDragCursor::Drop),
         "the Tick5 C4MouseControl::Execute equivalent refreshes a stationary drag"
     );
@@ -2135,7 +1878,7 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
             },
         )
         .test_value();
-    assert_eq!(app.engine.mouse_region_drag_source(target), None);
+    main_assert_eq!(app.engine.mouse_region_drag_source(target) => None);
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
@@ -2144,25 +1887,24 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
         .test_value();
 
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
-    assert!(controls.is_empty());
-    assert_eq!(
-        commands,
+    main_assert!(controls.is_empty());
+    main_assert_eq!(
+        commands =>
         vec![(
             tick,
-            PlayerCommandControlData {
-                player: owner,
-                command: CommandId::Drop as i32,
-                x: drop_world.x,
-                y: drop_world.y,
-                target: target.as_u64() as i32,
-                target2: 0,
-                data: 0,
-                add_mode: 1,
-                by_client: 7,
-            },
+            input_fixture!(
+                player_command:
+                    owner,
+                    CommandId::Drop as i32,
+                    drop_world.x,
+                    drop_world.y,
+                    target.as_u64() as i32,
+                    0,
+                    1,
+            ),
         )]
     );
-    assert!(selections.is_empty());
+    main_assert!(selections.is_empty());
 }
 
 #[test]
@@ -2197,14 +1939,8 @@ fn inventory_region_left_drag_vehicle_queues_single_push_to() {
             - clonk_frontend::hud::SYMBOL_BORDER
             - clonk_frontend::hud::SYMBOL_SIZE / 2) as f32,
     );
-    assert_eq!(
-        app.ingame_inventory_region_target(owner, region_point),
-        Some(vehicle)
-    );
-    assert_eq!(
-        app.engine.mouse_region_drag_source(vehicle),
-        Some(MouseDragSource::Vehicle)
-    );
+    main_assert_eq!(app.ingame_inventory_region_target(owner, region_point) => Some(vehicle));
+    main_assert_eq!(app.engine.mouse_region_drag_source(vehicle) => Some(MouseDragSource::Vehicle));
 
     let (x, y) = app
         .graphics
@@ -2225,13 +1961,9 @@ fn inventory_region_left_drag_vehicle_queues_single_push_to() {
     app.handle_ingame_mouse_button(ElementState::Pressed)
         .test_value();
     move_cursor(&mut app, destination_point, "cross vehicle drag threshold");
-    assert_eq!(app.ingame_dragged_objects, vec![vehicle]);
+    main_assert_eq!(app.ingame_dragged_objects => vec![vehicle]);
     move_cursor(&mut app, destination_point, "resolve vehicle moving cursor");
-    assert_eq!(
-        app.mouse_state
-            .and_then(|state| state.motion.region_drag_cursor),
-        Some(IngameRegionDragCursor::Vehicle)
-    );
+    main_assert_eq!(app.mouse_state.and_then(|state| state.motion.region_drag_cursor) => Some(IngameRegionDragCursor::Vehicle));
     // Model the last DragMoving update having resolved Ctrl+container;
     // ClearPointers may delete that stored target before button-up.
     app.mouse_state.test_mut().motion.region_drag_cursor =
@@ -2246,25 +1978,24 @@ fn inventory_region_left_drag_vehicle_queues_single_push_to() {
         .test_value();
 
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
-    assert!(controls.is_empty());
-    assert_eq!(
-        commands,
+    main_assert!(controls.is_empty());
+    main_assert_eq!(
+        commands =>
         vec![(
             tick,
-            PlayerCommandControlData {
-                player: owner,
-                command: CommandId::PushTo as i32,
-                x: destination.x,
-                y: destination.y,
-                target: vehicle.as_u64() as i32,
-                target2: 0,
-                data: 0,
-                add_mode: 1,
-                by_client: 7,
-            },
+            input_fixture!(
+                player_command:
+                    owner,
+                    CommandId::PushTo as i32,
+                    destination.x,
+                    destination.y,
+                    vehicle.as_u64() as i32,
+                    0,
+                    1,
+            ),
         )]
     );
-    assert!(selections.is_empty());
+    main_assert!(selections.is_empty());
 }
 
 #[test]
@@ -2280,13 +2011,10 @@ fn command_region_caption_is_immediate_and_anchored_to_region_top() {
 
     let caption = app.ingame_mouse_caption.caption.test_ref();
     let viewport = app.graphics.viewport_rect(owner).test_value();
-    assert_eq!(caption.text, expected_caption);
-    assert_eq!(caption.text, "Sell");
-    assert_eq!(caption.caption_bottom_y, Some(region.y - viewport.y));
-    assert_eq!(
-        app.ingame_mouse_caption.cursor,
-        IngameMouseCursorKind::Region
-    );
+    main_assert_eq!(caption.text => expected_caption);
+    main_assert_eq!(caption.text => "Sell");
+    main_assert_eq!(caption.caption_bottom_y => Some(region.y - viewport.y));
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
 }
 
 #[test]
@@ -2299,23 +2027,17 @@ fn help_cursor_gets_the_delayed_red_help_caption() {
     };
 
     move_to_target(&mut app);
-    assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Help);
-    assert_eq!(app.ingame_mouse_caption.time_on_target, 0);
+    main_assert_eq!(app.ingame_mouse_caption.cursor => IngameMouseCursorKind::Help);
+    main_assert_eq!(app.ingame_mouse_caption.time_on_target => 0);
     for _ in 1..INGAME_MOUSE_CAPTION_DELAY {
         move_to_target(&mut app);
     }
-    assert!(app.ingame_mouse_caption.caption.is_none());
+    main_assert!(app.ingame_mouse_caption.caption.is_none());
 
     move_to_target(&mut app);
-    assert!(app.ingame_mouse_help_caption.is_none());
+    main_assert!(app.ingame_mouse_help_caption.is_none());
     let expected = app.localized_ingame_mouse_caption("IDS_CON_HELP", "Help", &[], false);
-    assert_eq!(
-        app.ingame_mouse_caption
-            .caption
-            .as_ref()
-            .map(|caption| caption.text.as_str()),
-        Some(expected.as_str())
-    );
+    main_assert_eq!(app.ingame_mouse_caption.caption.as_ref().map(|caption| caption.text.as_str()) => Some(expected.as_str()));
 }
 
 #[test]
@@ -2351,21 +2073,15 @@ fn threshold_region_entry_waits_to_cancel_and_focus_loss_clears_drag() {
         region_point,
         "cross threshold directly into region",
     );
-    assert!(app.mouse_state.is_some_and(|state| {
-        state.motion.moved
-            && state.motion.selection_frame
-            && !state.motion.selection_cancelled_by_region
-    }));
+    main_assert!(app.mouse_state.is_some_and(|state| {state.motion.moved && state.motion.selection_frame && !state.motion.selection_cancelled_by_region}));
     move_cursor(&mut app, start, "leave region before a second region event");
-    assert!(app.mouse_state.is_some_and(|state| {
-        state.motion.selection_frame && !state.motion.selection_cancelled_by_region
-    }));
+    main_assert!(app.mouse_state.is_some_and(|state| {state.motion.selection_frame && !state.motion.selection_cancelled_by_region}));
 
     app.handle_focus_lost().test_value();
-    assert!(app.mouse_state.is_none());
-    assert!(app.ingame_right_mouse_state.is_none());
-    assert!(app.ingame_dragged_objects.is_empty());
-    assert!(!app.ingame_moving_drag_active());
+    main_assert!(app.mouse_state.is_none());
+    main_assert!(app.ingame_right_mouse_state.is_none());
+    main_assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(!app.ingame_moving_drag_active());
 }
 
 #[test]
@@ -2389,7 +2105,7 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
         .test_player_mut(owner)
         .set_view_cursor(Some(hidden_cursor));
     app.snapshot = app.engine.snapshot();
-    assert!(
+    main_assert!(
         !collect_crew_inventory(
             &app.engine,
             &app.snapshot,
@@ -2399,11 +2115,7 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
         .is_empty(),
         "the hidden cursor would expose an inventory region without its mask"
     );
-    assert_eq!(
-        app.ingame_inventory_region_target(owner, region_point),
-        None,
-        "HH_Inventory creates no invisible clickable region for ViewCursor"
-    );
+    main_assert_eq!(app.ingame_inventory_region_target(owner, region_point) => None, "HH_Inventory creates no invisible clickable region for ViewCursor");
     app.engine.test_player_mut(owner).set_view_cursor(None);
     app.snapshot = app.engine.snapshot();
 
@@ -2420,7 +2132,7 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
     app.test_right_button(ElementState::Pressed);
     move_cursor(&mut app, region_right, "drag within the same region");
     app.test_right_button(ElementState::Released);
-    assert!(
+    main_assert!(
         app.engine
             .object_snapshot(crew)
             .expect("crew remains live")
@@ -2438,16 +2150,8 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
     let drop_world = Vector2::new(drop_x, ground_y - 1);
     let (drop_x, drop_y) = app.graphics.world_to_screen(owner, drop_world).test_value();
     let drop_pointer = (GuiPoint::new(drop_x, drop_y), drop_world, CommandId::Drop);
-    assert!(
-        app.graphics
-            .viewport_point_at(drop_pointer.0)
-            .is_some_and(|pointer| pointer.owner == owner),
-        "ground drop point remains in the local viewport"
-    );
-    assert_eq!(
-        app.engine.mouse_drag_carryable_command(owner, drop_world),
-        Some(CommandId::Drop)
-    );
+    main_assert!(app.graphics.viewport_point_at(drop_pointer.0).is_some_and(|pointer| pointer.owner == owner), "ground drop point remains in the local viewport");
+    main_assert_eq!(app.engine.mouse_drag_carryable_command(owner, drop_world) => Some(CommandId::Drop));
 
     move_cursor(
         &mut app,
@@ -2469,11 +2173,11 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
         .test_object_snapshot(crew)
         .command_stack
         .command_views();
-    assert_eq!(left_commands.len(), 1);
-    assert_eq!(left_commands[0].name, "Drop");
-    assert_eq!(left_commands[0].target, Some(second));
-    assert_eq!(left_commands[0].tx, Some(drop_pointer.1.x));
-    assert_eq!(left_commands[0].ty, Some(drop_pointer.1.y));
+    main_assert_eq!(left_commands.len() => 1);
+    main_assert_eq!(left_commands[0].name => "Drop");
+    main_assert_eq!(left_commands[0].target => Some(second));
+    main_assert_eq!(left_commands[0].tx => Some(drop_pointer.1.x));
+    main_assert_eq!(left_commands[0].ty => Some(drop_pointer.1.y));
 
     move_cursor(&mut app, region_point, "move onto inventory region");
     app.test_right_button(ElementState::Pressed);
@@ -2490,23 +2194,15 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
         .test_object_snapshot(crew)
         .command_stack
         .command_views();
-    assert_eq!(commands.len(), 2);
+    main_assert_eq!(commands.len() => 2);
     let expected_name = match drop_pointer.2 {
         CommandId::Drop => "Drop",
         CommandId::Throw => "Throw",
         other => panic!("unexpected carryable drag command {other:?}"),
     };
-    assert!(commands.iter().all(|command| command.name == expected_name));
-    assert_eq!(
-        commands
-            .iter()
-            .map(|command| command.target)
-            .collect::<Vec<_>>(),
-        vec![Some(second), Some(first)]
-    );
-    assert!(commands.iter().all(|command| {
-        command.tx == Some(drop_pointer.1.x) && command.ty == Some(drop_pointer.1.y)
-    }));
+    main_assert!(commands.iter().all(|command| command.name == expected_name));
+    main_assert_eq!(commands.iter().map(|command| command.target).collect::<Vec<_>>() => vec![Some(second), Some(first)]);
+    main_assert!(commands.iter().all(|command| {command.tx == Some(drop_pointer.1.x) && command.ty == Some(drop_pointer.1.y)}));
 }
 
 #[test]
@@ -2534,21 +2230,12 @@ fn every_target_reports_the_repeated_key_flag() {
     // stream of Control*Double callbacks at the host's repeat rate
     // (C4Player.cpp:1532-1533).
     use crate::game_app_input::{engine_key_repeated, BACKEND_SYNTHESIZES_KEY_REPEAT};
-    assert!(
-        engine_key_repeated(true, BACKEND_SYNTHESIZES_KEY_REPEAT),
-        "no supported target hides a held key's repeat from the engine"
-    );
-    assert!(
-        engine_key_repeated(true, true),
-        "a keydown for a key that is already down is a repeat"
-    );
-    assert!(
-        !engine_key_repeated(true, false),
-        "a backend that cannot report repeats still yields a fresh press"
-    );
+    main_assert!(engine_key_repeated(true, BACKEND_SYNTHESIZES_KEY_REPEAT), "no supported target hides a held key's repeat from the engine");
+    main_assert!(engine_key_repeated(true, true), "a keydown for a key that is already down is a repeat");
+    main_assert!(!engine_key_repeated(true, false), "a backend that cannot report repeats still yields a fresh press");
     // A first press is never a repeat on any backend.
-    assert!(!engine_key_repeated(false, true));
-    assert!(!engine_key_repeated(false, false));
+    main_assert!(!engine_key_repeated(false, true));
+    main_assert!(!engine_key_repeated(false, false));
 }
 
 #[test]
@@ -2564,12 +2251,7 @@ fn autostop_ignores_repeated_physical_keydown_until_release() {
         200,
         AudioOptions::default(),
         None,
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Repeat tester".to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with("Repeat tester".to_string(), false),
     )
     .test_value();
     install_classic_test_assets(&mut app);
@@ -2599,16 +2281,10 @@ fn autostop_ignores_repeated_physical_keydown_until_release() {
     keyboard.press(VirtualKeyCode::KeyX);
     let repeated_press = keyboard.player_control();
 
-    assert_eq!(
-        repeated_press.last_com, first_press.last_com,
-        "OS key-repeat must not synthesize a gameplay COM_Down_D"
-    );
-    assert_eq!(
-        repeated_press.last_com_down_double, first_press.last_com_down_double,
-        "OS key-repeat must not arm the drop/double-down window"
-    );
+    main_assert_eq!(repeated_press.last_com => first_press.last_com, "OS key-repeat must not synthesize a gameplay COM_Down_D");
+    main_assert_eq!(repeated_press.last_com_down_double => first_press.last_com_down_double, "OS key-repeat must not arm the drop/double-down window");
     keyboard.release(VirtualKeyCode::KeyX);
-    assert_eq!(keyboard.player_control().pressed_coms, 0);
+    main_assert_eq!(keyboard.player_control().pressed_coms => 0);
 }
 
 #[test]
@@ -2685,11 +2361,8 @@ fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
         .find(|player| player.id == viewed_owner)
         .test_value()
         .color = None;
-    assert_eq!(
-        cursor_portrait_owner_color(&color_defaults, viewed_owner),
-        0xff
-    );
-    assert_eq!(cursor_portrait_owner_color(&color_defaults, 99), u32::MAX);
+    main_assert_eq!(cursor_portrait_owner_color(&color_defaults, viewed_owner) => 0xff);
+    main_assert_eq!(cursor_portrait_owner_color(&color_defaults, 99) => u32::MAX);
 
     let mut players = collect_player_overlays(
         &mut app.engine,
@@ -2717,24 +2390,21 @@ fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
                 .find(|crew| crew.object_id == viewed_object)
         })
         .test_value();
-    assert_eq!(
-        portrait.portrait.as_ref().expect("base").pixels(),
+    main_assert_eq!(
+        portrait.portrait.as_ref().expect("base").pixels() =>
         &[10, 20, 30, 255, 40, 50, 60, 255],
         "explicit OverlayN pixels stay in the second C++ surface and do not pre-darken the base"
     );
-    assert_eq!(
+    main_assert_eq!(
         portrait
             .portrait_owner_overlay
             .as_ref()
             .expect("owner overlay")
-            .pixels(),
+            .pixels() =>
         &[136, 136, 136, 255, 64, 128, 192, 128],
         "colored and partial-alpha OverlayN pixels must reach DrawClr intact"
     );
-    assert_eq!(
-        portrait.portrait_owner_color, 0x00ff_0000,
-        "viewport owner differs, so red proves the viewed object's owner won"
-    );
+    main_assert_eq!(portrait.portrait_owner_color => 0x00ff_0000, "viewport owner differs, so red proves the viewed object's owner won");
 }
 
 #[test]
@@ -2787,19 +2457,15 @@ fn tutorial_portrait_spec_resolves_the_colorized_definition_image() {
     engine.register_test_definition(definition);
 
     let portrait = resolve_message_portrait(&engine, "Portrait:SCLK::0000ff::1").test_value();
-    assert_eq!((portrait.width(), portrait.height()), (1, 1));
-    assert_eq!(portrait.pixels(), &[0, 0, 136, 255]);
+    main_assert_eq!((portrait.width(), portrait.height()) => (1, 1));
+    main_assert_eq!(portrait.pixels() => &[0, 0, 136, 255]);
     let fallback_tint =
         resolve_message_portrait_with_color(&engine, "Portrait:SCLK::1", 0xff0000).test_value();
-    assert_eq!(fallback_tint.pixels(), &[136, 0, 0, 255]);
+    main_assert_eq!(fallback_tint.pixels() => &[136, 0, 0, 255]);
     let captain = resolve_message_portrait(&engine, "Portrait:SCLK::ff0000::Captain1").test_value();
-    assert_eq!((captain.width(), captain.height()), (2, 1));
-    assert_eq!(
-        captain.pixels(),
-        &[255, 225, 225, 255, 40, 50, 60, 255],
-        "missing OverlayCaptain1.png auto-generates an owner mask for its blue shade"
-    );
-    assert!(
+    main_assert_eq!((captain.width(), captain.height()) => (2, 1));
+    main_assert_eq!(captain.pixels() => &[255, 225, 225, 255, 40, 50, 60, 255], "missing OverlayCaptain1.png auto-generates an owner mask for its blue shade");
+    main_assert!(
         resolve_message_portrait(&engine, "Portrait:SCLK::0000ff::Missing").is_none(),
         "C++ requires the requested named bitmap; it does not fall back to portrait 1"
     );
@@ -2811,11 +2477,7 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
     // (src/C4Viewport.cpp:911-917). C4ObjectListIterator groups pictures
     // only inside each contiguous same-ID chunk, so FLAG/ROCK/FLAG stays
     // three ordered rows (src/C4ObjectList.cpp:343-372,849-903).
-    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value()
-        .to_path_buf();
+    let repository = test_repository_root().to_path_buf();
     let flag_group =
         Group::open(repository.join("content/Objects.c4d/Items.c4d/Equipment.c4d/Flag.c4d"))
             .test_value();
@@ -2883,25 +2545,25 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
     );
 
     let inventory = &overlays[0].crew[0].inventory;
-    assert_eq!(inventory.len(), 3, "noncontiguous ID chunks stay separate");
-    assert_eq!(inventory[0].object_id, flag_a);
-    assert_eq!(inventory[0].definition_id, "FLAG");
-    assert_eq!(inventory[0].count, 1);
-    assert_eq!(inventory[1].object_id, rock);
-    assert_eq!(inventory[1].definition_id, "ROCK");
-    assert_eq!(inventory[1].count, 1);
-    assert_eq!(inventory[2].object_id, flag_b);
-    assert_eq!(inventory[2].definition_id, "FLAG");
-    assert_eq!(inventory[2].count, 1);
+    main_assert_eq!(inventory.len() => 3, "noncontiguous ID chunks stay separate");
+    main_assert_eq!(inventory[0].object_id => flag_a);
+    main_assert_eq!(inventory[0].definition_id => "FLAG");
+    main_assert_eq!(inventory[0].count => 1);
+    main_assert_eq!(inventory[1].object_id => rock);
+    main_assert_eq!(inventory[1].definition_id => "ROCK");
+    main_assert_eq!(inventory[1].count => 1);
+    main_assert_eq!(inventory[2].object_id => flag_b);
+    main_assert_eq!(inventory[2].definition_id => "FLAG");
+    main_assert_eq!(inventory[2].count => 1);
 
     let source = engine.definition_picture_image("FLAG").test_value();
     let picture = inventory[0].picture.test_ref();
-    assert_eq!((picture.width(), picture.height()), (64, 64));
+    main_assert_eq!((picture.width(), picture.height()) => (64, 64));
     let source_pixels = source.pixels();
     let mask = source.color_mask().test_value();
     if mask.len() == source_pixels.len() {
-        assert_eq!(picture.pixels(), source_pixels.as_ref());
-        assert_eq!(inventory[0].picture_overlays.len(), 1);
+        main_assert_eq!(picture.pixels() => source_pixels.as_ref());
+        main_assert_eq!(inventory[0].picture_overlays.len() => 1);
         let owner_picture = &inventory[0].picture_overlays[0].picture;
         let sample = mask
             .chunks_exact(4)
@@ -2912,13 +2574,9 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
         let tint = [owner_color.r, owner_color.g, owner_color.b];
         for (channel, owner) in tint.into_iter().enumerate() {
             let expected = u16::from(overlay[channel]) * u16::from(owner) / 255;
-            assert_eq!(owner_picture.pixels()[offset + channel], expected as u8);
+            main_assert_eq!(owner_picture.pixels()[offset + channel] => expected as u8);
         }
-        assert_eq!(
-            owner_picture.pixels()[offset + 3],
-            overlay[3],
-            "owner coverage remains on the second HUD pass",
-        );
+        main_assert_eq!(owner_picture.pixels()[offset + 3] => overlay[3], "owner coverage remains on the second HUD pass",);
     } else {
         let sample = mask.iter().position(|value| *value != 0).test_value();
         let offset = sample * 4;
@@ -2928,33 +2586,17 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
         for (channel, owner) in tint.into_iter().enumerate() {
             let expected = (u16::from(source_pixels[offset + channel]) * inverse / 255
                 + u16::from(owner) * amount / 255) as u8;
-            assert_eq!(picture.pixels()[offset + channel], expected);
+            main_assert_eq!(picture.pixels()[offset + channel] => expected);
         }
-        assert_eq!(picture.pixels()[offset + 3], source_pixels[offset + 3]);
+        main_assert_eq!(picture.pixels()[offset + 3] => source_pixels[offset + 3]);
     }
 
     // Buy row definition pictures use the buying player attached to the
     // menu command object, not the base/title owner and not default blue
     // (src/C4ObjectMenu.cpp:217-226; src/C4Def.cpp:1374-1378).
-    let buy_item = clonk_engine::ObjectMenuItem {
-        caption: "Buy Flag".to_string(),
-        info_caption: String::new(),
-        command: String::new(),
-        command2: String::new(),
-        count: 1,
-        item_id: "FLAG".to_string(),
-        symbol: clonk_engine::ObjectMenuSymbol::Definition,
-        image: clonk_engine::ObjectMenuImage::default(),
-        presentation_definition_id: None,
-        picture_snapshot: None,
-        picture_object: None,
-        components: Vec::new(),
-        selectable: true,
-        value: None,
-        text_display_progress: -1,
-    };
+    let buy_item = input_fixture!(menu_item: "Buy Flag".to_string(), "FLAG".to_string(), None);
     let buy_color = object_menu_buying_player_color(&snapshot, Some(crew_id));
-    assert_eq!(buy_color, 0x00c0_2040);
+    main_assert_eq!(buy_color => 0x00c0_2040);
     let buy_picture = object_menu_item_picture(
         &engine,
         &snapshot,
@@ -2968,10 +2610,7 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
         .definition_picture_phase_image("FLAG", 0)
         .or_else(|| engine.definition_picture_image("FLAG"))
         .test_value();
-    assert_eq!(
-        buy_picture.pixels(),
-        inventory_picture_pixels(&buy_source, buy_color),
-    );
+    main_assert_eq!(buy_picture.pixels() => inventory_picture_pixels(&buy_source, buy_color),);
 }
 
 #[test]
@@ -3017,27 +2656,12 @@ fn cursor_inventory_composes_picture_overlay_phase() {
     picture_overlay.phase = 1;
     object.graphics_overlays.push(picture_overlay);
     let picture = inventory_object_picture(&engine, &object).test_value();
-    assert_eq!(picture.pixels(), &[0, 0, 0xff, 0xff]);
+    main_assert_eq!(picture.pixels() => &[0, 0, 0xff, 0xff]);
 
     let object_id = object.id;
     let snapshot = make_snapshot(vec![object], Vec::new());
-    let menu_item = clonk_engine::ObjectMenuItem {
-        caption: "Overlay".to_string(),
-        info_caption: String::new(),
-        command: String::new(),
-        command2: String::new(),
-        count: 1,
-        item_id: "BASE".to_string(),
-        symbol: clonk_engine::ObjectMenuSymbol::Definition,
-        image: clonk_engine::ObjectMenuImage::default(),
-        presentation_definition_id: None,
-        picture_snapshot: None,
-        picture_object: Some(object_id),
-        components: Vec::new(),
-        selectable: true,
-        value: None,
-        text_display_progress: -1,
-    };
+    let menu_item =
+        input_fixture!(menu_item: "Overlay".to_string(), "BASE".to_string(), Some(object_id));
     let menu_picture = object_menu_item_picture(
         &engine,
         &snapshot,
@@ -3047,28 +2671,22 @@ fn cursor_inventory_composes_picture_overlay_phase() {
         0,
     )
     .test_value();
-    assert_eq!(menu_picture.pixels(), picture.pixels());
+    main_assert_eq!(menu_picture.pixels() => picture.pixels());
 }
 
 #[test]
 fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
     let mut app = new_menu_app(640, 480);
     let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
-    let script = clonk_engine::ControlPlayerInfoEntry {
-        id: 9,
-        team: 1,
-        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
-        name: LegacyCString::from_bytes(b"Script player".to_vec()).test_value(),
-        ..Default::default()
-    };
+    let script = input_fixture!(player_info: LegacyCString::from_bytes(b"Script player".to_vec()).test_value());
     app.control_player_infos.replace_snapshot(
         8,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![chooser.clone(), companion.clone(), script.clone()],
-            by_client: 0,
-        }],
+        [clonk_engine::PlayerInfoControlData::new(
+            0,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![chooser.clone(), companion.clone(), script.clone()],
+            0,
+        )],
     );
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
     app.network = Some(network);
@@ -3094,7 +2712,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
             .max_players = 0;
     }
 
-    assert!(app.select_classic_lobby_sheet(LobbySheet::Teams));
+    main_assert!(app.select_classic_lobby_sheet(LobbySheet::Teams));
     let (_, roster) = app.classic_host_lobby_layouts().test_value();
     let point_for_team = |team_id| {
         let header = roster
@@ -3131,10 +2749,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         .test_value();
     app.handle_classic_lobby_pointer_button(ElementState::Released, false)
         .test_value();
-    assert!(
-        commands.take_player_info_updates().is_empty(),
-        "a drag release must not seed a later single click as a double click"
-    );
+    main_assert!(commands.take_player_info_updates().is_empty(), "a drag release must not seed a later single click as a double click");
     app.handle_classic_lobby_pointer_button(ElementState::Pressed, false)
         .test_value();
     app.handle_classic_lobby_pointer_button(ElementState::Released, false)
@@ -3144,30 +2759,24 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
     moved_chooser.team = 2;
     let mut moved_companion = companion.clone();
     moved_companion.team = 2;
-    assert_eq!(
-        commands.take_player_info_updates(),
-        vec![clonk_network::PlayerInfoUpdateRequest {
-            client_id: 0,
-            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![moved_chooser, moved_companion, script],
-        }],
+    main_assert_eq!(
+        commands.take_player_info_updates() =>
+        vec![clonk_network::PlayerInfoUpdateRequest::new(
+            0,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![moved_chooser, moved_companion, script]
+        )],
         "the physical double click clones one full packet and mutates every local User"
     );
-    assert_eq!(
+    main_assert_eq!(
         app.control_player_infos
             .client_update_request(0)
             .expect("authoritative packet")
-            .players,
+            .players =>
         vec![
             chooser,
             companion,
-            clonk_engine::ControlPlayerInfoEntry {
-                id: 9,
-                team: 1,
-                player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
-                name: LegacyCString::from_bytes(b"Script player".to_vec()).unwrap(),
-                ..Default::default()
-            }
+            input_fixture!(player_info: LegacyCString::from_bytes(b"Script player".to_vec()).unwrap())
         ],
         "the roster waits for the authoritative player-info echo"
     );
@@ -3182,11 +2791,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 2 },
     ])
     .test_value();
-    assert_eq!(
-        commands.take_player_info_updates().len(),
-        1,
-        "only the final countdown phase locks team selection"
-    );
+    main_assert_eq!(commands.take_player_info_updates().len() => 1, "only the final countdown phase locks team selection");
 
     app.classic_host_lobby
         .test_mut()
@@ -3204,10 +2809,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 2 },
     ])
     .test_value();
-    assert!(
-        commands.take_player_info_updates().is_empty(),
-        "bulk selection is unavailable when every team is full"
-    );
+    main_assert!(commands.take_player_info_updates().is_empty(), "bulk selection is unavailable when every team is full");
 
     app.network_team_assignment
         .test_mut()
@@ -3217,7 +2819,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 2 },
     ])
     .test_value();
-    assert!(commands.take_player_info_updates().is_empty());
+    main_assert!(commands.take_player_info_updates().is_empty());
 }
 
 #[test]
@@ -3228,16 +2830,16 @@ fn scenario_scroll_wheel_clears_hover_ownership_until_pointer_moves() {
     let layout = clonk_frontend::startup_scensel::scen_sel_layout(640, 480, fonts);
     let point = GuiPoint::new((layout.list.x + 5) as f32, (layout.list.y + 5) as f32);
     move_cursor(&mut app, point, "hover scenario list");
-    assert!(app.startup_element_tooltip_pending());
+    main_assert!(app.startup_element_tooltip_pending());
 
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    assert_eq!(app.startup_tooltip.pointer_position(), None);
-    assert!(!app.startup_element_tooltip_pending());
+    main_assert_eq!(app.startup_tooltip.pointer_position() => None);
+    main_assert!(!app.startup_element_tooltip_pending());
 
     move_cursor(&mut app, point, "re-arm scenario hover");
     app.menu_state.set_search_text("unmatched search");
     app.submit_scenario_search().test_value();
-    assert_eq!(app.startup_tooltip.pointer_position(), None);
+    main_assert_eq!(app.startup_tooltip.pointer_position() => None);
 }
 
 #[test]
@@ -3260,7 +2862,7 @@ fn missing_scenario_bootstrap_asset_precedes_generic_fallback() {
             "StartupScenSelIcons.png",
         )],
     );
-    assert!(frame.iter().all(|byte| *byte == 0x5a));
+    main_assert!(frame.iter().all(|byte| *byte == 0x5a));
 }
 
 #[test]
@@ -3269,10 +2871,10 @@ fn production_bootstrap_rejects_a_partial_cursor_resolution_set() {
     let assets = Arc::get_mut(&mut app.assets).test_value();
     assets.classic_hud_resources_required = true;
     assets.cursor_atlas = drag_cursor_atlas();
-    assert_eq!(
+    main_assert_eq!(
         assets
             .require_classic_global_gui_bootstrap_resources(&HashMap::new())
-            .expect_err("C++ PreInit requires all eight sized cursor sheets"),
+            .expect_err("C++ PreInit requires all eight sized cursor sheets") =>
         ClassicParityBoundary::GlobalGuiBootstrapResources {
             issues: vec![ClassicGuiBootstrapIssue::missing(
                 "CursorSmall..CursorXXXXXLarge",
@@ -3339,17 +2941,11 @@ fn ingame_cursor_kinds_map_to_cpp_phases_and_add_rules() {
         (IngameMouseCursorKind::Nothing, MouseCursorPhase::Nothing),
     ];
     for (kind, phase) in cases {
-        assert_eq!(kind.phase(), phase, "{kind:?}");
+        main_assert_eq!(kind.phase() => phase, "{kind:?}");
     }
-    assert_eq!(
-        IngameMouseCursorKind::ThrowLeft(landing).throw_landing(),
-        Some(landing)
-    );
-    assert_eq!(
-        IngameMouseCursorKind::ThrowRight(landing).throw_landing(),
-        Some(landing)
-    );
-    assert_eq!(IngameMouseCursorKind::Drop.throw_landing(), None);
+    main_assert_eq!(IngameMouseCursorKind::ThrowLeft(landing).throw_landing() => Some(landing));
+    main_assert_eq!(IngameMouseCursorKind::ThrowRight(landing).throw_landing() => Some(landing));
+    main_assert_eq!(IngameMouseCursorKind::Drop.throw_landing() => None);
 
     for kind in [
         IngameMouseCursorKind::Region,
@@ -3357,7 +2953,7 @@ fn ingame_cursor_kinds_map_to_cpp_phases_and_add_rules() {
         IngameMouseCursorKind::JumpLeft,
         IngameMouseCursorKind::JumpRight,
     ] {
-        assert!(!kind.allows_add_marker(), "{kind:?}");
+        main_assert!(!kind.allows_add_marker(), "{kind:?}");
     }
     for kind in [
         IngameMouseCursorKind::Help,
@@ -3365,7 +2961,7 @@ fn ingame_cursor_kinds_map_to_cpp_phases_and_add_rules() {
         IngameMouseCursorKind::ThrowRight(landing),
         IngameMouseCursorKind::Nothing,
     ] {
-        assert!(kind.allows_add_marker(), "{kind:?}");
+        main_assert!(kind.allows_add_marker(), "{kind:?}");
     }
 }
 
@@ -3415,13 +3011,13 @@ fn scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
         let parent_batch = text_batch("New player");
         let selector_batch = text_batch("Location:");
         let popup_batch = text_batch("Home");
-        assert!(
+        main_assert!(
             parent_batch < selector_batch,
             "parent native text must be committed before selector chrome \
                  (retained GPU: {retained_gpu}): parent={parent_batch}, \
                  selector={selector_batch}"
         );
-        assert!(
+        main_assert!(
             selector_batch < popup_batch,
             "selector text must be committed before context-menu chrome \
                  (retained GPU: {retained_gpu}): selector={selector_batch}, \
@@ -3430,16 +3026,16 @@ fn scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
         let selector_batch = &plan.batches[selector_batch];
         let popup_batch = &plan.batches[popup_batch];
         if retained_gpu {
-            assert!(selector_batch.logical_layer.is_none());
-            assert!(
+            main_assert!(selector_batch.logical_layer.is_none());
+            main_assert!(
                 selector_batch
                     .gpu_recorder
                     .as_ref()
                     .is_some_and(|recorder| !recorder.is_empty()),
                 "the retained selector batch must record chrome after parent native text"
             );
-            assert!(popup_batch.logical_layer.is_none());
-            assert!(
+            main_assert!(popup_batch.logical_layer.is_none());
+            main_assert!(
                 popup_batch
                     .gpu_recorder
                     .as_ref()
@@ -3447,16 +3043,10 @@ fn scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
                 "the retained popup batch must record chrome after selector native text"
             );
         } else {
-            assert!(selector_batch.gpu_recorder.is_none());
-            assert!(
-                selector_batch.logical_layer.is_some(),
-                "the CPU selector batch must composite chrome after parent native text"
-            );
-            assert!(popup_batch.gpu_recorder.is_none());
-            assert!(
-                popup_batch.logical_layer.is_some(),
-                "the CPU popup batch must composite chrome after selector native text"
-            );
+            main_assert!(selector_batch.gpu_recorder.is_none());
+            main_assert!(selector_batch.logical_layer.is_some(), "the CPU selector batch must composite chrome after parent native text");
+            main_assert!(popup_batch.gpu_recorder.is_none());
+            main_assert!(popup_batch.logical_layer.is_some(), "the CPU popup batch must composite chrome after selector native text");
         }
     }
 }
@@ -3524,8 +3114,8 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         home.path().join("Desktop"),
     ));
     #[cfg(not(target_os = "windows"))]
-    assert_eq!(selector.locations(), expected_locations);
-    assert!(
+    main_assert_eq!(selector.locations() => expected_locations);
+    main_assert!(
         selector.locations()[1]
             .path
             .to_string_lossy()
@@ -3535,20 +3125,14 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
     );
     #[cfg(target_os = "windows")]
     {
-        assert_eq!(
-            &selector.locations()[..expected_locations.len()],
-            expected_locations.as_slice()
-        );
-        assert_eq!(
-            selector.locations().last(),
-            Some(&PortraitLocation::new("Home Folder", home.path(),))
-        );
+        main_assert_eq!(&selector.locations()[..expected_locations.len()] => expected_locations.as_slice());
+        main_assert_eq!(selector.locations().last() => Some(&PortraitLocation::new("Home Folder", home.path(),)));
         let shell_labels = selector.locations()
             [expected_locations.len()..selector.locations().len() - 1]
             .iter()
             .map(|location| location.label.as_str())
             .collect::<Vec<_>>();
-        assert!(
+        main_assert!(
             ["My Documents", "My Pictures", "Desktop"]
                 .into_iter()
                 .filter(|label| shell_labels.contains(label))
@@ -3556,28 +3140,22 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
             "existing Windows shell folders retain the pinned C++ order"
         );
     }
-    assert_eq!(
-        selector.items()[1].choice(),
-        &clonk_frontend::startup_portraitsel::PortraitChoice::None
-    );
-    assert_eq!(selector.items().len(), 2);
-    assert_eq!(selector.items()[0].filename(), Some("Custom.PNG"));
-    assert!(matches!(
-        selector.items()[0].thumbnail(),
-        clonk_frontend::startup_portraitsel::PortraitThumbnail::Pending
-    ));
-    assert_eq!(
+    main_assert_eq!(selector.items()[1].choice() => &clonk_frontend::startup_portraitsel::PortraitChoice::None);
+    main_assert_eq!(selector.items().len() => 2);
+    main_assert_eq!(selector.items()[0].filename() => Some("Custom.PNG"));
+    main_assert!(matches!(selector.items()[0].thumbnail(), clonk_frontend::startup_portraitsel::PortraitThumbnail::Pending));
+    main_assert_eq!(
         app.startup_player_properties_dialog
             .as_ref()
             .expect("properties remain open")
             .controller
-            .big_icon_update(),
+            .big_icon_update() =>
         &old_icon_update,
         "opening the selector does not mutate either image intent"
     );
 
     app.advance_startup_player_portrait_thumbnail();
-    assert!(matches!(
+    main_assert!(matches!(
         portrait_selector(&app, "selector remains open").items()[0].thumbnail(),
         clonk_frontend::startup_portraitsel::PortraitThumbnail::Ready(_)
     ));
@@ -3588,7 +3166,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
             .test_mut()
             .controller
             .handle_key_down(KeyCode::Tab);
-        assert!(actions.is_empty());
+        main_assert!(actions.is_empty());
     }
     // C4GuiDialogs.cpp:386-421 and C4FileSelDlg.cpp:162-169,564-572
     // place Location after the wrapped dialog controls. ComboBox Down
@@ -3599,7 +3177,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
             .test_mut()
             .controller
             .handle_key_down(key);
-        assert!(actions.is_empty());
+        main_assert!(actions.is_empty());
     }
     let actions = app
         .startup_player_properties_dialog
@@ -3608,13 +3186,10 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         .handle_key_down(KeyCode::Enter);
     app.process_startup_player_properties_actions(actions);
     let selector = portrait_selector(&app, "selector remains open after changing location");
-    assert_eq!(selector.current_location_index(), 1);
-    assert_eq!(selector.items().len(), 2);
-    assert_eq!(selector.items()[0].filename(), Some("Program.BMP"));
-    assert_eq!(
-        selector.items()[1].choice(),
-        &clonk_frontend::startup_portraitsel::PortraitChoice::None
-    );
+    main_assert_eq!(selector.current_location_index() => 1);
+    main_assert_eq!(selector.items().len() => 2);
+    main_assert_eq!(selector.items()[0].filename() => Some("Program.BMP"));
+    main_assert_eq!(selector.items()[1].choice() => &clonk_frontend::startup_portraitsel::PortraitChoice::None);
 
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::PortraitSelectorClosed {
@@ -3629,13 +3204,10 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         ),
     ]);
     let controller = &app.startup_player_properties_dialog.test_ref().controller;
-    assert!(controller.portrait_selector().is_none());
-    assert_eq!(
-        controller.portrait_update(),
-        &clonk_frontend::startup_plrproperties::PlayerImageUpdate::Clear
-    );
-    assert_eq!(controller.big_icon_update(), &old_icon_update);
-    assert_eq!(controller.big_icon_preview(), Some(&old_icon));
+    main_assert!(controller.portrait_selector().is_none());
+    main_assert_eq!(controller.portrait_update() => &clonk_frontend::startup_plrproperties::PlayerImageUpdate::Clear);
+    main_assert_eq!(controller.big_icon_update() => &old_icon_update);
+    main_assert_eq!(controller.big_icon_preview() => Some(&old_icon));
 
     let before_portrait = controller.portrait_update().clone();
     let before_icon = controller.big_icon_update().clone();
@@ -3647,8 +3219,8 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         .test_mut()
         .controller
         .handle_key_down(KeyCode::Escape);
-    assert_eq!(
-        actions,
+    main_assert_eq!(
+        actions =>
         vec![
             clonk_frontend::startup_plrproperties::PlayerPropertiesAction::PortraitSelectorClosed {
                 location_index: 1
@@ -3658,25 +3230,17 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
     );
     app.process_startup_player_properties_actions(actions);
     let controller = &app.startup_player_properties_dialog.test_ref().controller;
-    assert!(controller.portrait_selector().is_none());
-    assert_eq!(controller.portrait_update(), &before_portrait);
-    assert_eq!(controller.big_icon_update(), &before_icon);
+    main_assert!(controller.portrait_selector().is_none());
+    main_assert_eq!(controller.portrait_update() => &before_portrait);
+    main_assert_eq!(controller.big_icon_update() => &before_icon);
     reset_cached_app_paths();
 }
 
 #[test]
 fn first_portrait_selector_open_extracts_stock_portraits_once() {
     let _lock = env_lock().lock();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .test_value();
     let user_data = tempdir();
-    let _guard = EnvGuard::set(&[
-        ("LC_INSTALL_ROOT", Some(repository)),
-        ("LC_USER_DATA_DIR", Some(user_data.path())),
-    ]);
-    let paths = test_app_paths();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     paths.ensure_user_dirs().test_value();
     let graphics = main_graphics_group(&paths).test_value();
 
@@ -3688,18 +3252,16 @@ fn first_portrait_selector_open_extracts_stock_portraits_once() {
     ]);
 
     for (source, destination) in DEFAULT_USER_PORTRAITS {
-        assert_eq!(
+        main_assert_eq!(
             fs::read(paths.user_data_dir().join(destination))
-                .expect("read extracted stock portrait"),
+                .expect("read extracted stock portrait") =>
             graphics
                 .read_file(source)
                 .expect("read source stock portrait")
         );
     }
     let config = Config::load(paths.config_file()).test_value();
-    assert!(config
-        .get_in(Some("General"), "UserPortraitsWritten")
-        .is_some_and(parse_config_bool));
+    main_assert!(config.get_in(Some("General"), "UserPortraitsWritten").is_some_and(parse_config_bool));
 
     let clonk_path = paths.user_data_dir().join("Clonk.png");
     fs::write(&clonk_path, b"user replacement").test_value();
@@ -3708,21 +3270,14 @@ fn first_portrait_selector_open_extracts_stock_portraits_once() {
         .test_mut()
         .controller
         .handle_key_down(KeyCode::Escape);
-    assert_eq!(
-        actions,
-        vec![
-            clonk_frontend::startup_plrproperties::PlayerPropertiesAction::PortraitSelectorClosed {
-                location_index: 0
-            }
-        ]
-    );
+    main_assert_eq!(actions => vec![clonk_frontend::startup_plrproperties::PlayerPropertiesAction::PortraitSelectorClosed {location_index: 0}]);
     app.process_startup_player_properties_actions(actions);
     fs::remove_file(paths.config_file()).test_value();
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
     ]);
-    assert_eq!(
-        fs::read(clonk_path).expect("read retained replacement"),
+    main_assert_eq!(
+        fs::read(clonk_path).expect("read retained replacement") =>
         b"user replacement",
         "C++ keeps UserPortraitsWritten true in process even when its disk state is lost \
              (`C4FileSelDlg.cpp:605-626`)"
@@ -3739,13 +3294,8 @@ fn portrait_selector_consumes_the_gamepad_select_alias_cluster() {
         ImageData::new(1, 1, vec![4, 5, 6, 255]),
     );
     open_default_portrait_selector_on(pending);
-    assert!(pending.handle_key_down(KeyCode::Down).is_empty());
-    assert_eq!(
-        pending
-            .portrait_selector()
-            .and_then(|selector| selector.selected_index()),
-        Some(0)
-    );
+    main_assert!(pending.handle_key_down(KeyCode::Down).is_empty());
+    main_assert_eq!(pending.portrait_selector().and_then(|selector| selector.selected_index()) => Some(0));
 
     let slot = GamepadSlot::new(0);
     app.test_gamepad_events([
@@ -3754,17 +3304,11 @@ fn portrait_selector_consumes_the_gamepad_select_alias_cluster() {
     ]);
 
     let controller = &app.startup_player_properties_dialog.test_ref().controller;
-    assert!(controller.portrait_selector().is_none());
-    assert!(controller.validation_error().is_none());
-    assert_eq!(
-        controller.portrait_update(),
-        &clonk_frontend::startup_plrproperties::PlayerImageUpdate::Clear
-    );
-    assert_eq!(
-        controller.big_icon_update(),
-        &clonk_frontend::startup_plrproperties::PlayerImageUpdate::Clear
-    );
-    assert!(app.status_text.is_empty());
+    main_assert!(controller.portrait_selector().is_none());
+    main_assert!(controller.validation_error().is_none());
+    main_assert_eq!(controller.portrait_update() => &clonk_frontend::startup_plrproperties::PlayerImageUpdate::Clear);
+    main_assert_eq!(controller.big_icon_update() => &clonk_frontend::startup_plrproperties::PlayerImageUpdate::Clear);
+    main_assert!(app.status_text.is_empty());
 
     open_default_portrait_selector_on(
         &mut app.startup_player_properties_dialog.test_mut().controller,
@@ -3774,9 +3318,9 @@ fn portrait_selector_consumes_the_gamepad_select_alias_cluster() {
         pressed_gamepad_action(slot, GamepadActionType::Cancel),
     ]);
     let controller = &app.startup_player_properties_dialog.test_ref().controller;
-    assert!(controller.portrait_selector().is_none());
-    assert!(controller.validation_error().is_none());
-    assert!(app.status_text.is_empty());
+    main_assert!(controller.portrait_selector().is_none());
+    main_assert!(controller.validation_error().is_none());
+    main_assert!(app.status_text.is_empty());
 }
 
 #[test]
@@ -3794,10 +3338,10 @@ fn properties_high_cluster_does_not_cancel_the_parent_screen() {
         pressed_gamepad_action(slot, GamepadActionType::MenuToggle),
     ]);
 
-    assert!(app.startup_player_properties_dialog.is_none());
-    assert_eq!(app.startup_view, StartupView::PlayerSelection);
-    assert!(app.startup_player_dialog.is_some());
-    assert!(!app.exit_requested);
+    main_assert!(app.startup_player_properties_dialog.is_none());
+    main_assert_eq!(app.startup_view => StartupView::PlayerSelection);
+    main_assert!(app.startup_player_dialog.is_some());
+    main_assert!(!app.exit_requested);
 }
 
 #[test]
@@ -3816,19 +3360,12 @@ fn portrait_selector_honors_exact_keyboard_modifiers() {
     // `C4FileSelDlg.cpp:118-123`).
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    assert!(app
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .is_some());
-    assert!(app.message_dialogs.is_empty());
+    main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
+    main_assert!(app.message_dialogs.is_empty());
 
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    assert_eq!(
-        portrait_selector(&app, "selector remains open").focus(),
-        clonk_frontend::startup_portraitsel::PortraitSelControl::Location
-    );
+    main_assert_eq!(portrait_selector(&app, "selector remains open").focus() => clonk_frontend::startup_portraitsel::PortraitSelControl::Location);
 
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
@@ -3837,8 +3374,8 @@ fn portrait_selector_honors_exact_keyboard_modifiers() {
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
 
     let selector = portrait_selector(&app, "Ctrl+Enter must not confirm the portrait selector");
-    assert_eq!(selector.selected_index(), Some(0));
-    assert!(app.status_text.is_empty());
+    main_assert_eq!(selector.selected_index() => Some(0));
+    main_assert!(app.status_text.is_empty());
 }
 
 #[test]
@@ -3853,12 +3390,8 @@ fn portrait_selector_alt_o_activates_the_native_ok_hotkey() {
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyO, ElementState::Pressed);
 
-    assert_eq!(app.message_dialogs.len(), 1);
-    assert!(app
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .is_some());
+    main_assert_eq!(app.message_dialogs.len() => 1);
+    main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
 }
 
 #[test]
@@ -3873,12 +3406,8 @@ fn portrait_selector_does_not_bind_keypad_enter_as_return() {
 
     app.test_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed);
 
-    assert!(app
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .is_some());
-    assert!(app.message_dialogs.is_empty());
+    main_assert!(app.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
+    main_assert!(app.message_dialogs.is_empty());
 }
 
 #[test]
@@ -3897,10 +3426,7 @@ fn portrait_selector_outside_right_down_aborts_the_location_popup() {
     );
     controller.handle_key_down_with_tab_direction(KeyCode::Tab, true);
     controller.handle_key_down(KeyCode::Down);
-    assert!(controller
-        .portrait_selector()
-        .expect("selector remains open")
-        .is_location_popup_open());
+    main_assert!(controller.portrait_selector().expect("selector remains open").is_location_popup_open());
 
     move_cursor_to(
         &mut app,
@@ -3909,7 +3435,7 @@ fn portrait_selector_outside_right_down_aborts_the_location_popup() {
     );
     app.test_right_button(ElementState::Pressed);
 
-    assert!(!app
+    main_assert!(!app
         .startup_player_properties_dialog
         .as_ref()
         .and_then(|pending| pending.controller.portrait_selector())
@@ -3949,30 +3475,21 @@ fn portrait_selector_f5_requires_dialog_keyboard_activation() {
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     let selector = portrait_selector(&app, "selector remains open");
-    assert!(!selector
-        .items()
-        .iter()
-        .any(|item| item.filename() == Some("New.bmp")));
-    assert!(selector.is_location_popup_open());
+    main_assert!(!selector.items().iter().any(|item| item.filename() == Some("New.bmp")));
+    main_assert!(selector.is_location_popup_open());
 
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     let selector = portrait_selector(&app, "selector remains open");
-    assert!(!selector
-        .items()
-        .iter()
-        .any(|item| item.filename() == Some("New.bmp")));
-    assert!(selector.is_location_popup_open());
+    main_assert!(!selector.items().iter().any(|item| item.filename() == Some("New.bmp")));
+    main_assert!(selector.is_location_popup_open());
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     let selector = portrait_selector(&app, "selector remains open after refresh");
-    assert!(selector
-        .items()
-        .iter()
-        .any(|item| item.filename() == Some("New.bmp")));
-    assert_eq!(selector.selected_index(), None);
-    assert!(!selector.is_location_popup_open());
+    main_assert!(selector.items().iter().any(|item| item.filename() == Some("New.bmp")));
+    main_assert_eq!(selector.selected_index() => None);
+    main_assert!(!selector.is_location_popup_open());
 }
 
 #[test]
@@ -3981,16 +3498,9 @@ fn portrait_selector_errors_use_screen_owned_modals() {
     open_default_portrait_selector(&mut missing, "new player properties");
 
     missing.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    assert!(missing
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .is_some());
-    assert_eq!(missing.message_dialogs.len(), 1);
-    assert_eq!(
-        missing.message_dialogs[0].state.message(),
-        "Please select a file first!"
-    );
+    main_assert!(missing.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_some());
+    main_assert_eq!(missing.message_dialogs.len() => 1);
+    main_assert_eq!(missing.message_dialogs[0].state.message() => "Please select a file first!");
 
     let temp = tempdir();
     let corrupt = temp.path().join("Broken.png");
@@ -4006,13 +3516,9 @@ fn portrait_selector_errors_use_screen_owned_modals() {
     controller.handle_key_down(KeyCode::Down);
 
     broken.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    assert!(broken
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .is_none());
-    assert_eq!(broken.message_dialogs.len(), 1);
-    assert!(
+    main_assert!(broken.startup_player_properties_dialog.as_ref().and_then(|pending| pending.controller.portrait_selector()).is_none());
+    main_assert_eq!(broken.message_dialogs.len() => 1);
+    main_assert!(
         broken.message_dialogs[0]
             .state
             .message()
@@ -4049,12 +3555,9 @@ fn initial_portrait_location_scan_failure_is_silent() {
 
     let pending = app.startup_player_properties_dialog.test_ref();
     let selector = pending.controller.portrait_selector().test_value();
-    assert_eq!(selector.items().len(), 1);
-    assert_eq!(
-        selector.items()[0].choice(),
-        &clonk_frontend::startup_portraitsel::PortraitChoice::None
-    );
-    assert_eq!(selector.validation_error(), None);
+    main_assert_eq!(selector.items().len() => 1);
+    main_assert_eq!(selector.items()[0].choice() => &clonk_frontend::startup_portraitsel::PortraitChoice::None);
+    main_assert_eq!(selector.validation_error() => None);
 }
 
 #[test]
@@ -4071,12 +3574,9 @@ fn portrait_selector_gamepad_low_toggles_the_focused_checkbox_once() {
     ]);
 
     let selector = portrait_selector(&app, "checkbox activation must not accept the selector");
-    assert_eq!(selector.set_picture(), !before);
-    assert_eq!(
-        selector.focus(),
-        clonk_frontend::startup_portraitsel::PortraitSelControl::SetPicture
-    );
-    assert!(app.status_text.is_empty());
+    main_assert_eq!(selector.set_picture() => !before);
+    main_assert_eq!(selector.focus() => clonk_frontend::startup_portraitsel::PortraitSelControl::SetPicture);
+    main_assert!(app.status_text.is_empty());
 }
 
 /// Escape on the main menu ends the process with no confirmation and, until
@@ -4086,13 +3586,13 @@ fn portrait_selector_gamepad_low_toggles_the_focused_checkbox_once() {
 #[test]
 fn quitting_from_the_main_menu_records_why_the_session_ended() {
     let mut app = new_classic_menu_app(640, 480);
-    assert_eq!(app.startup_view, StartupView::MainMenu);
-    assert_eq!(app.exit_reason, None);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.exit_reason => None);
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
-    assert!(app.exit_requested);
-    assert_eq!(app.exit_reason, Some("the main menu was closed"));
+    main_assert!(app.exit_requested);
+    main_assert_eq!(app.exit_reason => Some("the main menu was closed"));
 }
 
 #[test]
@@ -4105,9 +3605,9 @@ fn keyboard_subscreen_back_reconstructs_main() {
         ),
     );
 
-    assert!(app.status_text.is_empty());
+    main_assert!(app.status_text.is_empty());
     app.test_key(VirtualKeyCode::Backspace, ElementState::Pressed);
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
 }
 
 #[test]
@@ -4123,13 +3623,10 @@ fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
     app.test_cursor(about_back);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert_eq!(app.startup_view, StartupView::About);
-    assert_eq!(
-        app.startup_about_dialog.as_ref().unwrap().current_page(),
-        clonk_frontend::startup_about_dlg::AboutPage::Credits
-    );
+    main_assert_eq!(app.startup_view => StartupView::About);
+    main_assert_eq!(app.startup_about_dialog.as_ref().unwrap().current_page() => clonk_frontend::startup_about_dlg::AboutPage::Credits);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
 
     app.open_network_game_dialog();
     activate_startup_network_chat(&mut app);
@@ -4148,15 +3645,12 @@ fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
     app.test_cursor(games);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    assert_eq!(
-        app.startup_network_dialog.as_ref().unwrap().mode(),
-        clonk_frontend::startup_netdlg::NetDlgMode::GameList
-    );
+    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().mode() => clonk_frontend::startup_netdlg::NetDlgMode::GameList);
 
     app.open_network_game_dialog();
     activate_startup_network_chat(&mut app);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert_eq!(app.startup_view, StartupView::MainMenu);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
 }
 
 #[test]
@@ -4171,10 +3665,7 @@ fn production_gamepad_batch_navigates_main_menu_then_options_sheet() {
     );
     let mut navigated = vec![0_u8; 640 * 480 * 4];
     app.test_render(&mut navigated);
-    assert_ne!(
-        main_menu, navigated,
-        "the D-pad must move the main-menu selection"
-    );
+    main_assert_ne!(main_menu => navigated, "the D-pad must move the main-menu selection");
 
     app.open_options_menu();
     let mut program_sheet = vec![0xa9; 640 * 480 * 4];
@@ -4182,11 +3673,8 @@ fn production_gamepad_batch_navigates_main_menu_then_options_sheet() {
     process_primary_direction(&mut app, ControlButton::Down, "D-pad enters Graphics sheet");
     let mut graphics_sheet = vec![0xa9; 640 * 480 * 4];
     app.test_render(&mut graphics_sheet);
-    assert!(graphics_sheet.iter().any(|byte| *byte != 0xa9));
-    assert_ne!(
-        program_sheet, graphics_sheet,
-        "the D-pad must leave the Program sheet for the Graphics sheet"
-    );
+    main_assert!(graphics_sheet.iter().any(|byte| *byte != 0xa9));
+    main_assert_ne!(program_sheet => graphics_sheet, "the D-pad must leave the Program sheet for the Graphics sheet");
 }
 
 #[test]
@@ -4196,10 +3684,7 @@ fn gamepad_enabled_defaults_true_and_captures_false_before_config_writes() {
     let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
 
-    assert!(
-        load_gamepads_enabled(Some(&paths)),
-        "the omitted native key retains C4ConfigGeneral's true default"
-    );
+    main_assert!(load_gamepads_enabled(Some(&paths)), "the omitted native key retains C4ConfigGeneral's true default");
     persist_native_config_values(
         &paths,
         "General",
@@ -4212,28 +3697,14 @@ fn gamepad_enabled_defaults_true_and_captures_false_before_config_writes() {
     let app = GameApp::new_with_frontend_scenarios(
         320,
         200,
-        AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        },
+        disabled_audio_options(),
         Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Player".to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with("Player".to_string(), false),
         Some(Vec::new()),
     )
     .test_value();
-    assert!(
-        !app.gamepads_enabled,
-        "startup config writes must not change the process snapshot"
-    );
-    assert!(!app.gamepad_input_enabled);
+    main_assert!(!app.gamepads_enabled, "startup config writes must not change the process snapshot");
+    main_assert!(!app.gamepad_input_enabled);
     drop(app);
     reset_cached_app_paths();
 }
@@ -4252,10 +3723,7 @@ fn global_gamepad_disable_drops_events_before_dispatch() {
     );
     let mut discarded = vec![0_u8; 640 * 480 * 4];
     app.test_render(&mut discarded);
-    assert_eq!(
-        discarded, initial,
-        "disabled events must not reach startup input dispatch"
-    );
+    main_assert_eq!(discarded => initial, "disabled events must not reach startup input dispatch");
 
     app.gamepads_enabled = true;
     app.gamepad_input_enabled = true;
@@ -4266,10 +3734,7 @@ fn global_gamepad_disable_drops_events_before_dispatch() {
     );
     let mut dispatched = vec![0_u8; 640 * 480 * 4];
     app.test_render(&mut dispatched);
-    assert_ne!(
-        dispatched, initial,
-        "enabled events must move the main-menu selection"
-    );
+    main_assert_ne!(dispatched => initial, "enabled events must move the main-menu selection");
 }
 
 #[test]
@@ -4298,22 +3763,22 @@ fn about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
 
     let mut disabled = open_about(false);
     send_direction(&mut disabled, 0, ControlButton::Right).test_value();
-    assert_eq!(focus(&disabled), None);
+    main_assert_eq!(focus(&disabled) => None);
 
     let mut secondary = open_about(true);
     send_direction(&mut secondary, 1, ControlButton::Right).test_value();
-    assert_eq!(focus(&secondary), None);
+    main_assert_eq!(focus(&secondary) => None);
 
     let mut app = open_about(true);
     send_direction(&mut app, 0, ControlButton::Right).test_value();
-    assert_eq!(focus(&app), Some(AboutFocusTarget::Back));
+    main_assert_eq!(focus(&app) => Some(AboutFocusTarget::Back));
     send_direction(&mut app, 0, ControlButton::Right).test_value();
-    assert_eq!(focus(&app), Some(AboutFocusTarget::Update));
+    main_assert_eq!(focus(&app) => Some(AboutFocusTarget::Update));
     send_direction(&mut app, 0, ControlButton::Left).test_value();
-    assert_eq!(focus(&app), Some(AboutFocusTarget::Back));
+    main_assert_eq!(focus(&app) => Some(AboutFocusTarget::Back));
     send_direction(&mut app, 0, ControlButton::Right).test_value();
     send_direction(&mut app, 0, ControlButton::Right).test_value();
-    assert_eq!(focus(&app), Some(AboutFocusTarget::Licenses));
+    main_assert_eq!(focus(&app) => Some(AboutFocusTarget::Licenses));
 
     app.handle_gamepad_action(
         GamepadSlot::new(0),
@@ -4327,18 +3792,12 @@ fn about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
         ElementState::Released,
     )
     .test_value();
-    assert_eq!(
-        app.startup_about_dialog
-            .as_ref()
-            .expect("About dialog")
-            .current_page(),
-        AboutPage::Licenses
-    );
+    main_assert_eq!(app.startup_about_dialog.as_ref().expect("About dialog").current_page() => AboutPage::Licenses);
 
     send_direction(&mut app, 0, ControlButton::Right).test_value();
-    assert_eq!(focus(&app), Some(AboutFocusTarget::LicenseTabs));
+    main_assert_eq!(focus(&app) => Some(AboutFocusTarget::LicenseTabs));
     send_direction(&mut app, 0, ControlButton::Left).test_value();
-    assert_eq!(focus(&app), Some(AboutFocusTarget::Update));
+    main_assert_eq!(focus(&app) => Some(AboutFocusTarget::Update));
 }
 
 #[test]
@@ -4351,7 +3810,7 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
         ControlButton::Left,
         "Options D-left traverses focus",
     );
-    assert_eq!(app.startup_view, StartupView::Options);
+    main_assert_eq!(app.startup_view => StartupView::Options);
 
     app.open_network_game_dialog();
     process_primary_direction(
@@ -4359,14 +3818,8 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
         ControlButton::Left,
         "Network D-left traverses focus",
     );
-    assert_eq!(app.startup_view, StartupView::NetworkGame);
-    assert_eq!(
-        app.startup_network_dialog
-            .as_ref()
-            .unwrap()
-            .focused_control(),
-        clonk_frontend::startup_netdlg::NetDlgControl::ChatButton
-    );
+    main_assert_eq!(app.startup_view => StartupView::NetworkGame);
+    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().focused_control() => clonk_frontend::startup_netdlg::NetDlgControl::ChatButton);
 
     app.startup_player_models
         .push(clonk_frontend::startup_plrsel::PlrSelPlayer {
@@ -4388,27 +3841,15 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
         ControlButton::Right,
         "Player D-right traverses focus without Crew",
     );
-    assert_eq!(app.startup_view, StartupView::PlayerSelection);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .unwrap()
-            .focused_control(),
-        clonk_frontend::startup_plrsel::PlrSelControl::Back
-    );
+    main_assert_eq!(app.startup_view => StartupView::PlayerSelection);
+    main_assert_eq!(app.startup_player_dialog.as_ref().unwrap().focused_control() => clonk_frontend::startup_plrsel::PlrSelControl::Back);
     process_primary_direction(
         &mut app,
         ControlButton::Left,
         "Player D-left traverses focus without Back",
     );
-    assert_eq!(app.startup_view, StartupView::PlayerSelection);
-    assert_eq!(
-        app.startup_player_dialog
-            .as_ref()
-            .unwrap()
-            .focused_control(),
-        clonk_frontend::startup_plrsel::PlrSelControl::PlayerList
-    );
+    main_assert_eq!(app.startup_view => StartupView::PlayerSelection);
+    main_assert_eq!(app.startup_player_dialog.as_ref().unwrap().focused_control() => clonk_frontend::startup_plrsel::PlrSelControl::PlayerList);
 }
 
 #[test]
@@ -4418,7 +3859,7 @@ fn options_gamepad_device_claim_switches_and_releases() {
 
     let mut app = new_classic_menu_app(640, 480);
     app.open_options_menu();
-    assert_eq!(app.gamepads.options_open_slot(), None);
+    main_assert_eq!(app.gamepads.options_open_slot() => None);
     let controls = load_options_control_state(
         &app.bindings,
         &app.gamepad_bindings,
@@ -4433,36 +3874,24 @@ fn options_gamepad_device_claim_switches_and_releases() {
         .restore_sheet(OptionsSheet::Gamepad);
     app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(OptionsSheet::Gamepad)])
         .test_value();
-    assert!(app.gamepads.is_options_slot_live(GamepadSlot::new(0)));
+    main_assert!(app.gamepads.is_options_slot_live(GamepadSlot::new(0)));
 
     for set in [2, 1] {
-        assert!(app
-            .startup_options_dialog
-            .as_mut()
-            .unwrap()
-            .controls_mut()
-            .select_set(ControlDevice::Gamepad, set));
+        main_assert!(app.startup_options_dialog.as_mut().unwrap().controls_mut().select_set(ControlDevice::Gamepad, set));
         app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(set)])
             .test_value();
-        assert_eq!(
-            app.gamepads.options_open_slot(),
-            GamepadSlot::from_index(set)
-        );
+        main_assert_eq!(app.gamepads.options_open_slot() => GamepadSlot::from_index(set));
         for other in 0..3 {
-            assert_eq!(
-                app.gamepads
-                    .is_options_slot_live(GamepadSlot::new(other as u8)),
-                other == set
-            );
+            main_assert_eq!(app.gamepads.is_options_slot_live(GamepadSlot::new(other as u8)) => other == set);
         }
     }
 
     app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(1)])
         .test_value();
-    assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+    main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
     app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(3)])
         .test_value();
-    assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+    main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
 
     app.startup_options_dialog
         .as_mut()
@@ -4473,7 +3902,7 @@ fn options_gamepad_device_claim_switches_and_releases() {
     // Leaving the sheet does not drop the claim: only `~ControlConfigArea`
     // deletes `C4GamePadOpener`, and that area lives as long as the dialog
     // (`C4StartupOptionsDlg.cpp:344-352,988-991`).
-    assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+    main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
 
     app.startup_options_dialog
         .as_mut()
@@ -4481,7 +3910,7 @@ fn options_gamepad_device_claim_switches_and_releases() {
         .restore_sheet(OptionsSheet::Gamepad);
     app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(OptionsSheet::Gamepad)])
         .test_value();
-    assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+    main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
 
     let high = |gamepad, slot| {
         sourced_gamepad_event(
@@ -4492,21 +3921,21 @@ fn options_gamepad_device_claim_switches_and_releases() {
     };
     app.process_sourced_gamepad_event_batch([high(2, GamepadSlot::new(2))], false)
         .test_value();
-    assert_eq!(app.startup_view, StartupView::Options);
-    assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
     app.process_sourced_gamepad_event_batch([high(1, GamepadSlot::new(1))], false)
         .test_value();
-    assert_eq!(app.startup_view, StartupView::Options);
-    assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+    main_assert_eq!(app.startup_view => StartupView::Options);
+    main_assert_eq!(app.gamepads.options_open_slot() => Some(GamepadSlot::new(1)));
 
     app.gamepad_gui_control = true;
     app.process_sourced_gamepad_event_batch([high(0, GamepadSlot::new(0))], true)
         .test_value();
-    assert_eq!(app.startup_view, StartupView::MainMenu);
-    assert_eq!(app.gamepads.options_open_slot(), None);
+    main_assert_eq!(app.startup_view => StartupView::MainMenu);
+    main_assert_eq!(app.gamepads.options_open_slot() => None);
     app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(1)])
         .test_value();
-    assert_eq!(app.gamepads.options_open_slot(), None);
+    main_assert_eq!(app.gamepads.options_open_slot() => None);
 }
 
 // `OnGUIGamepadCheckChange` ends in `RecreateDialog(false)`
@@ -4524,27 +3953,16 @@ fn toggling_gamepad_gui_control_recreates_the_options_dialog() {
     {
         let dialog = app.startup_options_dialog.test_mut();
         dialog.restore_sheet(OptionsSheet::Gamepad);
-        assert!(dialog.controls_mut().select_set(ControlDevice::Keyboard, 2));
+        main_assert!(dialog.controls_mut().select_set(ControlDevice::Keyboard, 2));
     }
     app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadGuiControlChanged(true)])
         .test_value();
 
     let dialog = app.startup_options_dialog.test_ref();
-    assert_eq!(
-        dialog.active_sheet(),
-        OptionsSheet::Gamepad,
-        "SelectSheet(iPage, false) restores the page",
-    );
-    assert_eq!(
-        dialog.controls().selected_set(ControlDevice::Keyboard),
-        0,
-        "the rebuilt ControlConfigArea starts on set 0",
-    );
-    assert_eq!(dialog.controls().selected_set(ControlDevice::Gamepad), 0);
-    assert!(
-        dialog.controls().gamepad_gui_control(),
-        "the new dialog reads the flag it was rebuilt for",
-    );
+    main_assert_eq!(dialog.active_sheet() => OptionsSheet::Gamepad, "SelectSheet(iPage, false) restores the page",);
+    main_assert_eq!(dialog.controls().selected_set(ControlDevice::Keyboard) => 0, "the rebuilt ControlConfigArea starts on set 0",);
+    main_assert_eq!(dialog.controls().selected_set(ControlDevice::Gamepad) => 0);
+    main_assert!(dialog.controls().gamepad_gui_control(), "the new dialog reads the flag it was rebuilt for",);
 }
 
 // `KeySelButton::DrawElement` prints `KeyCode2String(key, true, false)` verbatim
@@ -4563,24 +3981,18 @@ fn factory_default_control_sheets_show_empty_captions_for_unbound_slots() {
     let dialog = app.startup_options_dialog.test_ref();
     for set in 0..CONTROL_SET_COUNT {
         for control in 0..CONTROL_KEY_COUNT {
-            assert_eq!(
-                dialog.controls().label(ControlCaptureTarget {
-                    device: ControlDevice::Gamepad,
-                    set,
-                    control,
-                }),
+            main_assert_eq!(
+                dialog
+                    .controls()
+                    .label(input_fixture!(capture_target: ControlDevice::Gamepad, set, control)) =>
                 Some(""),
                 "gamepad {set} control {control} has no default binding",
             );
             // The four keyboard blocks ship fully bound, so those stay named.
-            assert!(
+            main_assert!(
                 dialog
                     .controls()
-                    .label(ControlCaptureTarget {
-                        device: ControlDevice::Keyboard,
-                        set,
-                        control,
-                    })
+                    .label(input_fixture!(capture_target: ControlDevice::Keyboard, set, control))
                     .is_some_and(|label| !label.is_empty() && label != "Undefined"),
                 "keyboard {set} control {control} keeps its scancode name",
             );
@@ -4604,11 +4016,8 @@ fn control_capture_accepts_every_key_including_ones_the_codec_cannot_encode() {
 
     let mut app = new_classic_menu_app(640, 480);
     app.open_options_menu();
-    let target = ControlCaptureTarget {
-        device: ControlDevice::Keyboard,
-        set: 1,
-        control: ControlBindingId::Dig as usize,
-    };
+    let target =
+        input_fixture!(capture_target: ControlDevice::Keyboard, 1, ControlBindingId::Dig as usize);
 
     // Codec coverage is per-platform, so the list is filtered at runtime rather
     // than asserting which of these any one target rejects.
@@ -4621,23 +4030,16 @@ fn control_capture_accepts_every_key_including_ones_the_codec_cannot_encode() {
     ] {
         app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
             .test_value();
-        assert!(
-            app.message_dialogs.last().is_some(),
-            "capture modal is up for {key:?}"
-        );
+        main_assert!(app.message_dialogs.last().is_some(), "capture modal is up for {key:?}");
         app.test_key(key, ElementState::Pressed);
-        assert!(
+        main_assert!(
             !app.message_dialogs.last().is_some_and(|dialog| matches!(
                 dialog.continuation,
                 MessageDialogContinuation::OptionsControlCapture(open) if open == target
             )),
             "{key:?} must close the capture modal whether or not it persists"
         );
-        assert_eq!(
-            app.bindings.key_for_set(1, ControlBindingId::Dig),
-            Some(key),
-            "{key:?} binds for the session"
-        );
+        main_assert_eq!(app.bindings.key_for_set(1, ControlBindingId::Dig) => Some(key), "{key:?} binds for the session");
         app.test_key(key, ElementState::Released);
     }
 }
@@ -4659,26 +4061,18 @@ fn control_capture_prompt_quotes_the_sheet_label_for_every_control() {
         .clone();
 
     for (control, label) in labels.iter().enumerate().take(CONTROL_KEY_COUNT) {
-        let target = ControlCaptureTarget {
-            device: ControlDevice::Gamepad,
-            set: 0,
-            control,
-        };
+        let target = input_fixture!(capture_target: ControlDevice::Gamepad, 0, control);
         app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
             .test_value();
         let modal = app.message_dialogs.pop().test_value();
-        assert_eq!(
-            modal.state.message(),
-            format!("Press the button for \"{label}\" on gamepad 1."),
-            "control {control} quotes its own sheet label",
-        );
+        main_assert_eq!(modal.state.message() => format!("Press the button for \"{label}\" on gamepad 1."), "control {control} quotes its own sheet label",);
     }
     // The three that used to coincide are not the interesting ones; these are
     // the labels the hand-written table got wrong.
-    assert_eq!(labels[0], "Select left");
-    assert_eq!(labels[4], "Up / Jump");
-    assert_eq!(labels[6], "Left");
-    assert_eq!(labels[10], "Special 1");
+    main_assert_eq!(labels[0] => "Select left");
+    main_assert_eq!(labels[4] => "Up / Jump");
+    main_assert_eq!(labels[6] => "Left");
+    main_assert_eq!(labels[10] => "Special 1");
 }
 
 /// The port-only push-to-talk rebind reuses the classic `IDS_MSG_DEFINEKEY`
@@ -4696,44 +4090,22 @@ fn options_voice_key_capture_reuses_the_classic_modal_and_rejects_chords() {
         .test_value();
 
     let modal = app.message_dialogs.last().test_value();
-    assert_eq!(modal.state.caption(), "Assign key");
-    assert_eq!(
-        modal.state.message(),
-        "Press the key to hold down while speaking."
-    );
-    assert_eq!(modal.state.icon(), MessageDialogIcon::Standard(24));
+    main_assert_eq!(modal.state.caption() => "Assign key");
+    main_assert_eq!(modal.state.message() => "Press the key to hold down while speaking.");
+    main_assert_eq!(modal.state.icon() => MessageDialogIcon::Standard(24));
 
     // A modified chord is consumed and rejected, exactly like a crew binding.
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::KeyV, ElementState::Pressed);
-    assert_eq!(
-        app.audio.test_ref().options.voice_push_to_talk,
-        VirtualKeyCode::Backquote
-    );
-    assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
-        dialog.continuation,
-        MessageDialogContinuation::OptionsVoicePushToTalkCapture
-    )));
+    main_assert_eq!(app.audio.test_ref().options.voice_push_to_talk => VirtualKeyCode::Backquote);
+    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::OptionsVoicePushToTalkCapture)));
     app.test_key(VirtualKeyCode::KeyV, ElementState::Released);
 
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::KeyV, ElementState::Pressed);
-    assert_eq!(
-        app.audio.test_ref().options.voice_push_to_talk,
-        VirtualKeyCode::KeyV
-    );
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .expect("options dialog")
-            .sound()
-            .push_to_talk_key,
-        "V"
-    );
-    assert!(
-        app.message_dialogs.is_empty(),
-        "the modal closes on capture"
-    );
+    main_assert_eq!(app.audio.test_ref().options.voice_push_to_talk => VirtualKeyCode::KeyV);
+    main_assert_eq!(app.startup_options_dialog.as_ref().expect("options dialog").sound().push_to_talk_key => "V");
+    main_assert!(app.message_dialogs.is_empty(), "the modal closes on capture");
     app.test_key(VirtualKeyCode::KeyV, ElementState::Released);
 }
 
@@ -4745,22 +4117,16 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
 
     let mut app = new_classic_menu_app(640, 480);
     app.open_options_menu();
-    let keyboard_target = ControlCaptureTarget {
-        device: ControlDevice::Keyboard,
-        set: 2,
-        control: ControlBindingId::Dig as usize,
-    };
+    let keyboard_target =
+        input_fixture!(capture_target: ControlDevice::Keyboard, 2, ControlBindingId::Dig as usize);
     app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(
         keyboard_target,
     )])
     .test_value();
     let keyboard_modal = app.message_dialogs.last().test_value();
-    assert_eq!(keyboard_modal.state.caption(), "Assign key");
-    assert_eq!(
-        keyboard_modal.state.message(),
-        "Press the key for \"Dig\" on keyboard block 3."
-    );
-    assert_eq!(keyboard_modal.state.icon(), MessageDialogIcon::Standard(24));
+    main_assert_eq!(keyboard_modal.state.caption() => "Assign key");
+    main_assert_eq!(keyboard_modal.state.message() => "Press the key for \"Dig\" on keyboard block 3.");
+    main_assert_eq!(keyboard_modal.state.icon() => MessageDialogIcon::Standard(24));
 
     let previous_key = app
         .bindings
@@ -4768,48 +4134,29 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
         .test_value();
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert_eq!(
-        app.bindings.key_for_set(2, ControlBindingId::Dig),
-        Some(previous_key)
-    );
-    assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+    main_assert_eq!(app.bindings.key_for_set(2, ControlBindingId::Dig) => Some(previous_key));
+    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::OptionsControlCapture(target) if target == keyboard_target
     )));
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert_eq!(
-        app.bindings.key_for_set(2, ControlBindingId::Dig),
-        Some(VirtualKeyCode::Escape)
-    );
-    assert_eq!(
-        app.startup_options_dialog
-            .as_ref()
-            .unwrap()
-            .controls()
-            .label(keyboard_target),
-        Some("Escape")
-    );
+    main_assert_eq!(app.bindings.key_for_set(2, ControlBindingId::Dig) => Some(VirtualKeyCode::Escape));
+    main_assert_eq!(app.startup_options_dialog.as_ref().unwrap().controls().label(keyboard_target) => Some("Escape"));
     let mut config = Config::new();
     app.bindings.write_to_config(&mut config);
-    assert!(config.get_in(Some("Controls"), "Kbd3Key6").is_some());
+    main_assert!(config.get_in(Some("Controls"), "Kbd3Key6").is_some());
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 
-    let gamepad_target = ControlCaptureTarget {
-        device: ControlDevice::Gamepad,
-        set: 2,
-        control: ControlBindingId::Dig as usize,
-    };
+    let gamepad_target =
+        input_fixture!(capture_target: ControlDevice::Gamepad, 2, ControlBindingId::Dig as usize);
     app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(gamepad_target)])
         .test_value();
     let gamepad_modal = app.message_dialogs.last().test_value();
-    assert_eq!(gamepad_modal.state.caption(), "Assign key");
-    assert_eq!(
-        gamepad_modal.state.message(),
-        "Press the button for \"Dig\" on gamepad 3."
-    );
-    assert_eq!(gamepad_modal.state.icon(), MessageDialogIcon::Standard(25));
+    main_assert_eq!(gamepad_modal.state.caption() => "Assign key");
+    main_assert_eq!(gamepad_modal.state.message() => "Press the button for \"Dig\" on gamepad 3.");
+    main_assert_eq!(gamepad_modal.state.icon() => MessageDialogIcon::Standard(25));
 
     let source = sourced_gamepad_event;
     let wrong_slot = GamepadSlot::new(1);
@@ -4830,15 +4177,11 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
         true,
     )
     .test_value();
-    assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+    main_assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::OptionsControlCapture(target) if target == gamepad_target
     )));
-    assert_eq!(
-        app.gamepad_bindings
-            .raw_key_for_set(2, ControlBindingId::Dig),
-        None
-    );
+    main_assert_eq!(app.gamepad_bindings.raw_key_for_set(2, ControlBindingId::Dig) => None);
     let selected_slot = GamepadSlot::new(2);
     app.process_sourced_gamepad_event_batch(
         [
@@ -4862,12 +4205,8 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
         false,
     )
     .test_value();
-    assert!(app.message_dialogs.is_empty());
-    assert_eq!(
-        app.gamepad_bindings
-            .raw_key_for_set(2, ControlBindingId::Dig),
-        input::legacy_gamepad_button_key(2, 5)
-    );
+    main_assert!(app.message_dialogs.is_empty());
+    main_assert_eq!(app.gamepad_bindings.raw_key_for_set(2, ControlBindingId::Dig) => input::legacy_gamepad_button_key(2, 5));
 }
 
 #[test]
@@ -4889,32 +4228,21 @@ fn false_startup_config_never_polls_gamepad_manager() {
     let mut app = GameApp::new_with_frontend_scenarios(
         320,
         200,
-        AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        },
+        disabled_audio_options(),
         Some(&paths),
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Player".to_string(),
-            network: None,
-            record_enabled: false,
-        },
+        test_runtime_config_with("Player".to_string(), false),
         Some(Vec::new()),
     )
     .test_value();
 
-    assert!(!app.gamepads_enabled);
-    assert!(!app.gamepad_input_enabled);
-    assert!(!load_gamepads_enabled(Some(&paths)));
+    main_assert!(!app.gamepads_enabled);
+    main_assert!(!app.gamepad_input_enabled);
+    main_assert!(!load_gamepads_enabled(Some(&paths)));
     persist_config_value(&paths, "Network", "Comment", "resaved").test_value();
-    assert!(!load_gamepads_enabled(Some(&paths)));
-    assert_eq!(app.gamepad_poll_count, 0);
+    main_assert!(!load_gamepads_enabled(Some(&paths)));
+    main_assert_eq!(app.gamepad_poll_count => 0);
     app.process_gamepad_events().test_value();
-    assert_eq!(app.gamepad_poll_count, 0);
+    main_assert_eq!(app.gamepad_poll_count => 0);
 }
 
 #[test]
@@ -4922,14 +4250,12 @@ fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
     let mut app = new_running_sandbox_app();
     let original_owner = app.local_owner;
     app.local_controls = LocalControlRegistry::default();
-    app.local_controls.initialize(LocalControlInit {
-        owner: original_owner,
-        preferred_set: GamepadSlot::new(0).control_set(),
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
+    app.local_controls.initialize(test_local_control_init(
+        original_owner,
+        GamepadSlot::new(0).control_set(),
+        false,
+        false,
+    ));
     app.gamepad_input_enabled = false;
     let pressed_coms = |app: &GameApp, owner| {
         app.engine
@@ -4949,7 +4275,7 @@ fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
         "disabled gamepad input is inert",
     );
 
-    assert_eq!(pressed_coms(&app, original_owner), pressed_before);
+    main_assert_eq!(pressed_coms(&app, original_owner) => pressed_before);
 
     app.engine.remove_player(original_owner).test_value();
     app.local_controls.remove(original_owner);
@@ -4963,9 +4289,9 @@ fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
 
     app.join_local_player().test_value();
     let player = app.engine.test_player(app.local_owner);
-    assert_eq!(player.control_set(), 0);
-    assert_eq!(player.control_preferences(), (4, false));
-    assert_eq!(app.local_controls.owner_for_set(4), None);
+    main_assert_eq!(player.control_set() => 0);
+    main_assert_eq!(player.control_preferences() => (4, false));
+    main_assert_eq!(app.local_controls.owner_for_set(4) => None);
 }
 
 #[test]
@@ -4976,25 +4302,16 @@ fn unconfigured_gamepad_button_emits_no_gameplay_control() {
     // src/C4Game.cpp:3439-3452).
     let mut app = new_running_sandbox_app();
     app.local_controls = LocalControlRegistry::default();
-    app.local_controls.initialize(LocalControlInit {
-        owner: app.local_owner,
-        preferred_set: 5,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
-    assert!(app.ingame_menu.is_none());
+    app.local_controls
+        .initialize(test_local_control_init(app.local_owner, 5, false, false));
+    main_assert!(app.ingame_menu.is_none());
 
     app.test_gamepad_events([pressed_gamepad_button(
         GamepadSlot::new(1),
         LegacyGamepadButton::new(0),
     )]);
 
-    assert!(
-        app.ingame_menu.is_none(),
-        "an absent Button10 mapping must not retain Start => PlayerMenu"
-    );
+    main_assert!(app.ingame_menu.is_none(), "an absent Button10 mapping must not retain Start => PlayerMenu");
 }
 
 #[test]
@@ -5040,15 +4357,12 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
         .render_message_dialogs(Some(startup_gamma()))
         .test_value();
     let expected = expected_app.graphics.surface().pixels().to_vec();
-    assert_eq!(
-        actual, expected,
-        "modal pixels must be composed after the fade"
-    );
+    main_assert_eq!(actual => expected, "modal pixels must be composed after the fade");
 
     actual_app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(actual_app.message_dialogs.is_empty());
-    assert_eq!(actual_app.startup_view, StartupView::About);
-    assert_eq!(actual_app.startup_dialog_fade.as_ref().unwrap().step, 1);
+    main_assert!(actual_app.message_dialogs.is_empty());
+    main_assert_eq!(actual_app.startup_view => StartupView::About);
+    main_assert_eq!(actual_app.startup_dialog_fade.as_ref().unwrap().step => 1);
 
     let mut options = new_real_classic_menu_app(320, 200);
     options.open_options_menu();
@@ -5072,30 +4386,27 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
         ])
         .test_value();
     let recreate = options.startup_dialog_fade.test_ref();
-    assert_eq!(recreate.outgoing, Some(StartupDialog::Options));
-    assert_eq!(recreate.incoming, StartupDialog::Options);
+    main_assert_eq!(recreate.outgoing => Some(StartupDialog::Options));
+    main_assert_eq!(recreate.incoming => StartupDialog::Options);
     // `OnGUIGamepadCheckChange` calls `RecreateDialog(false)`
     // (C4StartupOptionsDlg.cpp:437), which constructs a *new* dialog through
     // `SwitchDialog` (:1331) and so re-reads Config — an unsaved dialog-local
     // edit does not survive (:1325-1334).
-    assert_eq!(
+    main_assert_eq!(
         options
             .startup_options_dialog
             .as_ref()
             .expect("recreated Options dialog")
             .program()
-            .preloading,
+            .preloading =>
         config_preloading,
         "the rebuilt dialog re-reads Config instead of keeping dialog-local state",
     );
     options.resize(400, 300).test_value();
     let resized = options.startup_dialog_fade.test_ref();
-    assert_eq!((resized.width, resized.height, resized.step), (400, 300, 0));
+    main_assert_eq!((resized.width, resized.height, resized.step) => (400, 300, 0));
     options.open_network_lobby();
-    assert!(
-        options.startup_dialog_fade.is_none(),
-        "C4GameLobby is not a fading startup dialog"
-    );
+    main_assert!(options.startup_dialog_fade.is_none(), "C4GameLobby is not a fading startup dialog");
 }
 
 #[test]
@@ -5107,52 +4418,33 @@ fn chart_gamepad_high_close_respects_player_control_priority() {
         pressed_gui_button(slot, GuiButtonClass::High),
         pressed_gamepad_action(slot, GamepadActionType::Cancel),
     ]);
-    assert!(chart.network_chart_dialog.is_none());
-    assert!(chart.message_dialogs.is_empty());
+    main_assert!(chart.network_chart_dialog.is_none());
+    main_assert!(chart.message_dialogs.is_empty());
 
     let mut player = new_running_sandbox_app();
     player.local_controls = LocalControlRegistry::default();
-    player.local_controls.initialize(LocalControlInit {
-        owner: player.local_owner,
-        preferred_set: slot.control_set(),
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
-    let physical = LegacyGamepadButton::new(3);
-    assert!(player.gamepad_bindings.rebind_button(
-        0,
-        ControlBindingId::Left,
-        slot.index(),
-        physical.index(),
+    player.local_controls.initialize(test_local_control_init(
+        player.local_owner,
+        slot.control_set(),
+        false,
+        false,
     ));
+    let physical = LegacyGamepadButton::new(3);
+    main_assert!(player.gamepad_bindings.rebind_button(0, ControlBindingId::Left, slot.index(), physical.index(),));
     player.toggle_network_chart();
     player.test_gamepad_events([
         pressed_gui_button(slot, GuiButtonClass::High),
         pressed_gamepad_button(slot, physical),
         pressed_gamepad_action(slot, GamepadActionType::Cancel),
     ]);
-    assert!(player.network_chart_dialog.is_some());
-    assert_ne!(
-        player
-            .engine
-            .player(player.local_owner)
-            .expect("local sandbox player")
-            .control
-            .pressed_coms
-            & (1 << clonk_engine::COM_LEFT),
-        0
-    );
+    main_assert!(player.network_chart_dialog.is_some());
+    main_assert_ne!(player.engine.player(player.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
 }
 
 #[test]
 fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
     let mut app = new_classic_running_sandbox_app();
-    assert!(
-        app.graphics.hud_graphics().crew.is_some(),
-        "fixture must carry Crew.png so the forbidden fallback is observable"
-    );
+    main_assert!(app.graphics.hud_graphics().crew.is_some(), "fixture must carry Crew.png so the forbidden fallback is observable");
 
     let temp = tempdir();
     let def_dir = temp.path().join("NoPortrait.c4d");
@@ -5167,10 +4459,7 @@ fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
     let resource = ResourceDefinitionData::load(&group).test_value();
     app.engine
         .register_test_definition(Definition::from_resource(&resource).test_value());
-    assert!(
-        app.engine.definition_picture_image("NPOR").is_some(),
-        "fixture must carry a definition picture"
-    );
+    main_assert!(app.engine.definition_picture_image("NPOR").is_some(), "fixture must carry a definition picture");
     let object = app
         .engine
         .spawn_test_object(SpawnConfig::new("NPOR").with_owner(app.local_owner));
@@ -5200,10 +4489,7 @@ fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
         .flat_map(|player| &player.crew)
         .find(|crew| crew.object_id == object)
         .test_value();
-    assert!(
-        overlay.portrait.is_none() && overlay.portrait_owner_overlay.is_none(),
-        "neither the definition picture nor Crew.png is a portrait"
-    );
+    main_assert!(overlay.portrait.is_none() && overlay.portrait_owner_overlay.is_none(), "neither the definition picture nor Crew.png is a portrait");
 }
 
 #[test]
@@ -5220,7 +4506,7 @@ fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
             .view_mode
     };
     let player = app.engine.test_player(owner);
-    assert_eq!((player.control_set(), player.mouse_control()), (0, 1));
+    main_assert_eq!((player.control_set(), player.mouse_control()) => (0, 1));
     let scrolled_center = Vector2::new(240, 180);
     app.engine
         .replace_player_viewports(
@@ -5240,34 +4526,30 @@ fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
         ),
         "retain a pre-toggle gameplay pointer",
     );
-    assert!(app.ingame_pointer.is_some());
+    main_assert!(app.ingame_pointer.is_some());
     app.engine
         .scroll_player_view(owner, Vector2::ZERO, 320, 200, true)
         .test_value();
-    assert_eq!(view_mode(&app), PLAYER_VIEW_MODE_SCROLLING);
+    main_assert_eq!(view_mode(&app) => PLAYER_VIEW_MODE_SCROLLING);
 
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleMouseControl)
         .test_value();
     let player = app.engine.test_player(owner);
-    assert_eq!((player.control_set(), player.mouse_control()), (0, 0));
-    assert_eq!(view_mode(&app), clonk_engine::PLAYER_VIEW_MODE_CURSOR);
-    assert_eq!(
-        player.viewports()[0].center,
-        scrolled_center,
-        "disabling mouse control changes only the camera mode"
-    );
-    assert!(!app.ingame_mouse_init_centered);
-    assert!(app.ingame_pointer.is_none());
-    assert!(app.ingame_edge_scroll.is_none());
-    assert_eq!(app.local_controls.mouse_owner(), None);
-    assert!(!app.mouse_control);
+    main_assert_eq!((player.control_set(), player.mouse_control()) => (0, 0));
+    main_assert_eq!(view_mode(&app) => clonk_engine::PLAYER_VIEW_MODE_CURSOR);
+    main_assert_eq!(player.viewports()[0].center => scrolled_center, "disabling mouse control changes only the camera mode");
+    main_assert!(!app.ingame_mouse_init_centered);
+    main_assert!(app.ingame_pointer.is_none());
+    main_assert!(app.ingame_edge_scroll.is_none());
+    main_assert_eq!(app.local_controls.mouse_owner() => None);
+    main_assert!(!app.mouse_control);
 
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleMouseControl)
         .test_value();
     let player = app.engine.test_player(owner);
-    assert_eq!((player.control_set(), player.mouse_control()), (0, 1));
-    assert_eq!(app.local_controls.mouse_owner(), Some(owner));
-    assert!(app.mouse_control);
+    main_assert_eq!((player.control_set(), player.mouse_control()) => (0, 1));
+    main_assert_eq!(app.local_controls.mouse_owner() => Some(owner));
+    main_assert!(app.mouse_control);
 }
 
 fn mouse_option_phase(app: &GameApp, player: i32) -> Option<u8> {
@@ -5288,19 +4570,12 @@ fn options_mouse_entry_is_on_for_requesting_holder() {
     let holder = app.local_owner;
 
     let flags = app.option_flags(holder);
-    assert_eq!(
-        (flags.mouse_shown, flags.mouse),
-        (true, true),
-        "holder sees the on entry"
-    );
-    assert!(
-        !app.option_flags(OWNER_NONE).mouse_shown,
-        "a playerless observer never gets the mouse entry"
-    );
+    main_assert_eq!((flags.mouse_shown, flags.mouse) => (true, true), "holder sees the on entry");
+    main_assert!(!app.option_flags(OWNER_NONE).mouse_shown, "a playerless observer never gets the mouse entry");
 
     app.apply_ingame_menu_action_for_player(holder, MenuAction::ActivateOptions)
         .test_value();
-    assert_eq!(mouse_option_phase(&app, holder), Some(12));
+    main_assert_eq!(mouse_option_phase(&app, holder) => Some(12));
 }
 
 #[test]
@@ -5308,13 +4583,13 @@ fn options_mouse_entry_is_hidden_for_non_holder_while_taken() {
     let mut app = new_running_sandbox_app();
     let holder = app.local_owner;
     let other = add_secondary_local_player_for_mouse_option_test(&mut app);
-    assert_eq!(app.local_controls.mouse_owner(), Some(holder));
+    main_assert_eq!(app.local_controls.mouse_owner() => Some(holder));
 
     let flags = app.option_flags(other);
-    assert_eq!((flags.mouse_shown, flags.mouse), (false, false));
+    main_assert_eq!((flags.mouse_shown, flags.mouse) => (false, false));
     app.apply_ingame_menu_action_for_player(other, MenuAction::ActivateOptions)
         .test_value();
-    assert_eq!(mouse_option_phase(&app, other), None);
+    main_assert_eq!(mouse_option_phase(&app, other) => None);
 
     for action in [
         MenuAction::ToggleSound,
@@ -5323,11 +4598,7 @@ fn options_mouse_entry_is_hidden_for_non_holder_while_taken() {
     ] {
         app.apply_ingame_menu_action_for_player(other, action)
             .test_value();
-        assert_eq!(
-            mouse_option_phase(&app, other),
-            None,
-            "every Options reopen remains scoped to the requesting player"
-        );
+        main_assert_eq!(mouse_option_phase(&app, other) => None, "every Options reopen remains scoped to the requesting player");
     }
 }
 
@@ -5339,14 +4610,14 @@ fn unclaimed_mouse_entry_is_off_for_each_local_player() {
 
     app.apply_ingame_menu_action_for_player(primary, MenuAction::ToggleMouseControl)
         .test_value();
-    assert_eq!(app.local_controls.mouse_owner(), None);
+    main_assert_eq!(app.local_controls.mouse_owner() => None);
 
     for player in [primary, secondary] {
         let flags = app.option_flags(player);
-        assert_eq!((flags.mouse_shown, flags.mouse), (true, false));
+        main_assert_eq!((flags.mouse_shown, flags.mouse) => (true, false));
         app.apply_ingame_menu_action_for_player(player, MenuAction::ActivateOptions)
             .test_value();
-        assert_eq!(mouse_option_phase(&app, player), Some(11));
+        main_assert_eq!(mouse_option_phase(&app, player) => Some(11));
     }
 }
 
@@ -5374,14 +4645,7 @@ fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
     app.local_controls = LocalControlRegistry::default();
     for (owner, preferred_set) in [(secondary, 1), (primary, 0)] {
         app.local_controls.initialize_after_restore(
-            LocalControlInit {
-                owner,
-                preferred_set,
-                prefers_mouse: false,
-                gamepads_enabled: true,
-                replay: false,
-                disable_mouse: false,
-            },
+            test_local_control_init(owner, preferred_set, false, false),
             true,
         );
     }
@@ -5390,36 +4654,20 @@ fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
         (secondary, PlayerStatus::Active),
     ]);
     app.mouse_control = app.local_controls.mouse_owner().is_some();
-    assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+    main_assert_eq!(app.local_controls.mouse_owner() => Some(secondary));
 
     app.apply_ingame_menu_action_for_player(secondary, MenuAction::ToggleMouseControl)
         .test_value();
 
-    assert_eq!(
-        app.engine
-            .player(primary)
-            .expect("primary player")
-            .mouse_control(),
-        1,
-        "the other raw per-player flag survives"
-    );
-    assert_eq!(
-        app.engine
-            .player(secondary)
-            .expect("secondary player")
-            .mouse_control(),
-        0
-    );
-    assert_eq!(app.local_controls.mouse_owner(), None);
-    assert!(!app.mouse_control);
+    main_assert_eq!(app.engine.player(primary).expect("primary player").mouse_control() => 1, "the other raw per-player flag survives");
+    main_assert_eq!(app.engine.player(secondary).expect("secondary player").mouse_control() => 0);
+    main_assert_eq!(app.local_controls.mouse_owner() => None);
+    main_assert!(!app.mouse_control);
     let primary_flags = app.option_flags(primary);
-    assert_eq!(
-        (primary_flags.mouse_shown, primary_flags.mouse),
-        (true, true)
-    );
+    main_assert_eq!((primary_flags.mouse_shown, primary_flags.mouse) => (true, true));
     let secondary_flags = app.option_flags(secondary);
-    assert_eq!(
-        (secondary_flags.mouse_shown, secondary_flags.mouse),
+    main_assert_eq!(
+        (secondary_flags.mouse_shown, secondary_flags.mouse) =>
         (false, false),
         "a surviving raw local flag remains taken after the global owner clears"
     );
@@ -5471,16 +4719,14 @@ fn assigned_secondary_mouse_uses_its_own_command_region_to_suppress_edge_pan() {
 
     app.local_controls = LocalControlRegistry::default();
     for (owner, preferred_set, prefers_mouse) in [(primary, 0, false), (secondary, 1, true)] {
-        app.local_controls.initialize(LocalControlInit {
+        app.local_controls.initialize(test_local_control_init(
             owner,
             preferred_set,
             prefers_mouse,
-            gamepads_enabled: true,
-            replay: false,
-            disable_mouse: false,
-        });
+            false,
+        ));
     }
-    assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+    main_assert_eq!(app.local_controls.mouse_owner() => Some(secondary));
 
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -5490,12 +4736,8 @@ fn assigned_secondary_mouse_uses_its_own_command_region_to_suppress_edge_pan() {
         (viewport.x + viewport.width as i32 - 1) as f32,
         (viewport.y + viewport.height as i32 - 1) as f32,
     );
-    assert_eq!(
-        app.ingame_viewport_region(primary, corner),
-        None,
-        "the app-local owner does not own the assigned viewport's region"
-    );
-    assert!(
+    main_assert_eq!(app.ingame_viewport_region(primary, corner) => None, "the app-local owner does not own the assigned viewport's region");
+    main_assert!(
         matches!(
             app.ingame_viewport_region(secondary, corner),
             Some(IngameViewportRegion::Command(_))
@@ -5510,16 +4752,9 @@ fn assigned_secondary_mouse_uses_its_own_command_region_to_suppress_edge_pan() {
         "move assigned secondary pointer onto its command region",
     );
 
-    assert_eq!(
-        app.ingame_pointer.map(|pointer| pointer.owner),
-        Some(secondary)
-    );
-    assert!(app.ingame_edge_scroll.is_none());
-    assert_eq!(
-        app.engine.player(secondary).unwrap().viewports()[0].center,
-        before,
-        "the assigned viewport's own region suppresses its edge pan"
-    );
+    main_assert_eq!(app.ingame_pointer.map(|pointer| pointer.owner) => Some(secondary));
+    main_assert!(app.ingame_edge_scroll.is_none());
+    main_assert_eq!(app.engine.player(secondary).unwrap().viewports()[0].center => before, "the assigned viewport's own region suppresses its edge pan");
 }
 
 fn establish_free_scroll_test_viewport(
@@ -5559,18 +4794,10 @@ fn first_mouse_move_after_init_centers_before_edge_scroll() {
         "first move is evaluated at the viewport center",
     );
 
-    assert!(app.ingame_mouse_init_centered);
-    assert_eq!(
-        app.ingame_viewport_mouse
-            .expect("centered gameplay point is retained")
-            .position,
-        retained_center
-    );
-    assert!(app.ingame_edge_scroll.is_none());
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
-        before
-    );
+    main_assert!(app.ingame_mouse_init_centered);
+    main_assert_eq!(app.ingame_viewport_mouse.expect("centered gameplay point is retained").position => retained_center);
+    main_assert!(app.ingame_edge_scroll.is_none());
+    main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => before);
 
     move_cursor(
         &mut app,
@@ -5578,17 +4805,8 @@ fn first_mouse_move_after_init_centers_before_edge_scroll() {
         "later edge move uses its physical viewport position",
     );
 
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
-        Vector2::new(before.x - 10, before.y)
-    );
-    assert_eq!(
-        app.ingame_edge_scroll
-            .expect("second edge move arms scrolling")
-            .edge
-            .cursor,
-        clonk_frontend::MouseCursorPhase::Left
-    );
+    main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(before.x - 10, before.y));
+    main_assert_eq!(app.ingame_edge_scroll.expect("second edge move arms scrolling").edge.cursor => clonk_frontend::MouseCursorPhase::Left);
 }
 
 #[test]
@@ -5602,15 +4820,10 @@ fn tick5_initializes_mouse_before_a_later_edge_move() {
 
     app.test_update();
 
-    assert_eq!(app.engine.frame() % 5, 0);
-    assert!(app.ingame_mouse_init_centered);
-    assert_eq!(
-        app.ingame_viewport_mouse
-            .expect("Tick5 retains the centered mouse coordinate")
-            .position,
-        retained_center
-    );
-    assert!(app.ingame_edge_scroll.is_none());
+    main_assert_eq!(app.engine.frame() % 5 => 0);
+    main_assert!(app.ingame_mouse_init_centered);
+    main_assert_eq!(app.ingame_viewport_mouse.expect("Tick5 retains the centered mouse coordinate").position => retained_center);
+    main_assert!(app.ingame_edge_scroll.is_none());
     let before = app.engine.player(owner).test_value().viewports()[0].center;
 
     move_cursor(
@@ -5619,10 +4832,7 @@ fn tick5_initializes_mouse_before_a_later_edge_move() {
         "post-Tick5 edge move is no longer swallowed by InitCentered",
     );
 
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
-        Vector2::new(before.x - 10, before.y)
-    );
+    main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(before.x - 10, before.y));
 }
 
 #[test]
@@ -5633,30 +4843,22 @@ fn button_and_wheel_moves_consume_mouse_init_centering() {
 
     app.test_left_button(ElementState::Pressed);
 
-    assert!(app.ingame_mouse_init_centered);
-    assert_eq!(
-        app.ingame_viewport_mouse
-            .expect("button Move retains the centered coordinate")
-            .position,
-        retained_center
-    );
-    assert!(app.mouse_state.is_some());
+    main_assert!(app.ingame_mouse_init_centered);
+    main_assert_eq!(app.ingame_viewport_mouse.expect("button Move retains the centered coordinate").position => retained_center);
+    main_assert!(app.mouse_state.is_some());
 
     app.reset_ingame_mouse_control();
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
 
-    assert!(app.ingame_mouse_init_centered);
-    assert!(app.ingame_viewport_mouse.is_none());
+    main_assert!(app.ingame_mouse_init_centered);
+    main_assert!(app.ingame_viewport_mouse.is_none());
     let before = app.engine.player(owner).test_value().viewports()[0].center;
     move_cursor(
         &mut app,
         left,
         "edge motion after wheel uses the physical viewport point",
     );
-    assert_eq!(
-        app.engine.player(owner).unwrap().viewports()[0].center,
-        Vector2::new(before.x - 10, before.y)
-    );
+    main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => Vector2::new(before.x - 10, before.y));
 }
 
 #[test]
@@ -5687,22 +4889,10 @@ fn gameplay_wheel_routes_to_assigned_secondary_mouse_owner() {
         .test_value();
     app.engine.set_local_players([primary, secondary]);
     app.local_controls = LocalControlRegistry::default();
-    app.local_controls.initialize(LocalControlInit {
-        owner: primary,
-        preferred_set: 0,
-        prefers_mouse: false,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
-    app.local_controls.initialize(LocalControlInit {
-        owner: secondary,
-        preferred_set: 1,
-        prefers_mouse: true,
-        gamepads_enabled: true,
-        replay: false,
-        disable_mouse: false,
-    });
+    app.local_controls
+        .initialize(test_local_control_init(primary, 0, false, false));
+    app.local_controls
+        .initialize(test_local_control_init(secondary, 1, true, false));
 
     for id in ["MWA1", "MWA2", "MWA3"] {
         app.engine
@@ -5723,23 +4913,23 @@ fn gameplay_wheel_routes_to_assigned_secondary_mouse_owner() {
 
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
 
-    assert_eq!(contents(&app, primary_crew), primary_before);
-    assert_eq!(contents(&app, secondary_crew), expected_secondary);
+    main_assert_eq!(contents(&app, primary_crew) => primary_before);
+    main_assert_eq!(contents(&app, secondary_crew) => expected_secondary);
 
     app.test_mouse_wheel(
         MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -1.0)),
         2.0,
     );
-    assert_eq!(contents(&app, primary_crew), primary_before);
-    assert_eq!(contents(&app, secondary_crew), secondary_before);
+    main_assert_eq!(contents(&app, primary_crew) => primary_before);
+    main_assert_eq!(contents(&app, secondary_crew) => secondary_before);
 }
 
 #[test]
 fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     let parsed = parse_runtime_key_config(b"[Keys]\nNetObsNextPlayer=Alt+N,Right,F5,F6,F7,None\n")
         .test_value();
-    assert_eq!(
-        parsed.net_observer_next_player,
+    main_assert_eq!(
+        parsed.net_observer_next_player =>
         vec![
             RuntimeKeyChord::keyboard(VirtualKeyCode::KeyN, ModifiersState::ALT),
             RuntimeKeyChord::keyboard(VirtualKeyCode::ArrowRight, ModifiersState::empty()),
@@ -5763,40 +4953,40 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     let observer = app.ownerless_physical_viewport_state();
     app.physical_viewports.push(observer);
     app.physical_viewports_authoritative = true;
-    assert!(app.set_physical_film_view(OWNER_NONE));
+    main_assert!(app.set_physical_film_view(OWNER_NONE));
     app.runtime_key_config_cache = OnceLock::new();
     app.runtime_key_config_cache
         .set(Ok(parsed.clone()))
         .test_value();
 
     app.test_key(VirtualKeyCode::ArrowRight, ElementState::Pressed);
-    assert_eq!(app.film_view_player, Some(OWNER_NONE));
+    main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
 
     for key in [VirtualKeyCode::F5, VirtualKeyCode::F6, VirtualKeyCode::F7] {
-        assert!(app.set_physical_film_view(OWNER_NONE));
+        main_assert!(app.set_physical_film_view(OWNER_NONE));
         app.test_key(key, ElementState::Pressed);
-        assert_eq!(app.film_view_player, Some(first));
+        main_assert_eq!(app.film_view_player => Some(first));
 
-        assert!(app.set_physical_film_view(OWNER_NONE));
+        main_assert!(app.set_physical_film_view(OWNER_NONE));
         app.keyboard_modifiers = ModifiersState::CONTROL;
         app.test_key(key, ElementState::Pressed);
-        assert_eq!(app.film_view_player, Some(OWNER_NONE));
+        main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
         app.keyboard_modifiers = ModifiersState::empty();
     }
-    assert_eq!(runtime_flash_text(&app), Some("Actions"));
-    assert!(app.set_physical_film_view(OWNER_NONE));
+    main_assert_eq!(runtime_flash_text(&app) => Some("Actions"));
+    main_assert!(app.set_physical_film_view(OWNER_NONE));
 
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
-    assert_eq!(app.film_view_player, Some(OWNER_NONE));
+    main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
     app.keyboard_modifiers = ModifiersState::ALT;
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
-    assert_eq!(app.film_view_player, Some(first));
+    main_assert_eq!(app.film_view_player => Some(first));
     app.test_key(VirtualKeyCode::KeyN, ElementState::Released);
-    assert_eq!(app.film_view_player, Some(first));
+    main_assert_eq!(app.film_view_player => Some(first));
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
-    assert_eq!(app.film_view_player, Some(second));
+    main_assert_eq!(app.film_view_player => Some(second));
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
-    assert_eq!(app.film_view_player, Some(OWNER_NONE));
+    main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
 
     app.ingame_menu.replace(
         app.local_owner,
@@ -5810,31 +5000,28 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
         ),
     );
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
-    assert_eq!(app.film_view_player, Some(OWNER_NONE));
+    main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
     app.ingame_menu.clear();
 
     app.start_running_chat(RunningChatMode::All);
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
-    assert_eq!(app.film_view_player, Some(OWNER_NONE));
+    main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
     app.close_running_chat().test_value();
 
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
-    assert_eq!(app.film_view_player, Some(first));
-    assert!(app.physical_viewports[0].is_no_owner_viewport);
-    assert!(app.create_physical_viewport(first, true, true, true));
+    main_assert_eq!(app.film_view_player => Some(first));
+    main_assert!(app.physical_viewports[0].is_no_owner_viewport);
+    main_assert!(app.create_physical_viewport(first, true, true, true));
     app.check_fullscreen_physical_viewports(true);
-    assert_eq!(
-        app.film_view_player, None,
-        "replacing the physical observer viewport drops its temporary target"
-    );
-    assert!(!app.primary_physical_viewport_is_no_owner());
+    main_assert_eq!(app.film_view_player => None, "replacing the physical observer viewport drops its temporary target");
+    main_assert!(!app.primary_physical_viewport_is_no_owner());
 
     let mut owned = new_running_sandbox_app();
     owned.runtime_key_config_cache = OnceLock::new();
     owned.runtime_key_config_cache.set(Ok(parsed)).test_value();
     owned.keyboard_modifiers = ModifiersState::ALT;
     owned.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
-    assert_eq!(owned.film_view_player, None);
+    main_assert_eq!(owned.film_view_player => None);
 }
 
 #[test]
@@ -5846,23 +5033,23 @@ fn reused_player_number_gets_a_distinct_physical_camera_identity() {
         .register_player(PlayerConfig::new(film_target, "Film target"))
         .test_value();
     let original_identity = app.physical_viewports[0].physical_identity;
-    assert!(app.set_physical_film_view(film_target));
+    main_assert!(app.set_physical_film_view(film_target));
 
     app.remove_runtime_player_with_viewport_feedback(original)
         .test_value();
     app.engine
         .register_player(PlayerConfig::new(original, "Reused player number"))
         .test_value();
-    assert!(app.create_physical_viewport(original, true, true, false));
+    main_assert!(app.create_physical_viewport(original, true, true, false));
     let new_identity = app
         .physical_viewports
         .iter()
         .find(|viewport| viewport.uses_live_player_presentation)
         .test_value()
         .physical_identity;
-    assert_ne!(original_identity, new_identity);
+    main_assert_ne!(original_identity => new_identity);
 
-    assert!(app.set_physical_film_view(original));
+    main_assert!(app.set_physical_film_view(original));
     let old = app
         .physical_viewports
         .iter()
@@ -5873,10 +5060,10 @@ fn reused_player_number_gets_a_distinct_physical_camera_identity() {
         .iter()
         .find(|viewport| viewport.physical_identity == new_identity)
         .test_value();
-    assert!(!old.uses_live_player_presentation);
-    assert!(new.uses_live_player_presentation);
-    assert_eq!(old.displayed_player, original);
-    assert_eq!(new.displayed_player, original);
+    main_assert!(!old.uses_live_player_presentation);
+    main_assert!(new.uses_live_player_presentation);
+    main_assert_eq!(old.displayed_player => original);
+    main_assert_eq!(new.displayed_player => original);
 }
 
 fn sandbox_pointer_at_world(app: &mut GameApp, owner: i32, world: Vector2) -> ViewportPointer {
@@ -5888,8 +5075,8 @@ fn sandbox_pointer_at_world(app: &mut GameApp, owner: i32, world: Vector2) -> Vi
     let (screen_x, screen_y) = app.graphics.world_to_screen(owner, world).test_value();
     let screen = GuiPoint::new(screen_x, screen_y);
     let projected = app.graphics.viewport_point_at(screen).test_value();
-    assert_eq!(projected.owner, owner);
-    assert_eq!(ingame_pointer_world_pixel(projected), world);
+    main_assert_eq!(projected.owner => owner);
+    main_assert_eq!(ingame_pointer_world_pixel(projected) => world);
     ViewportPointer {
         owner,
         world: FloatVector2::new(world.x as f32, world.y as f32),
@@ -5938,41 +5125,21 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
     app.network = Some(manager);
     let tick = app.local_control_submission_tick();
     app.on_ingame_mouse_double().test_value();
-    assert_eq!(
-        commands.take_submitted_player_commands(),
+    main_assert_eq!(
+        commands.take_submitted_player_commands() =>
         vec![(
             tick,
-            PlayerCommandControlData {
-                player: owner,
-                command: CommandId::Dig as i32,
-                x: point.x,
-                y: point.y,
-                target: 0,
-                target2: 0,
-                data: 0,
-                add_mode: 1,
-                by_client: 7,
-            },
+            input_fixture!(player_command: owner, CommandId::Dig as i32, point.x, point.y, 0, 0, 1),
         )],
     );
 
     app.test_modifiers(ModifiersState::CONTROL);
     app.on_ingame_mouse_double().test_value();
-    assert_eq!(
-        commands.take_submitted_player_commands(),
+    main_assert_eq!(
+        commands.take_submitted_player_commands() =>
         vec![(
             tick,
-            PlayerCommandControlData {
-                player: owner,
-                command: CommandId::Dig as i32,
-                x: point.x,
-                y: point.y,
-                target: 0,
-                target2: 0,
-                data: 1,
-                add_mode: 1,
-                by_client: 7,
-            },
+            input_fixture!(player_command: owner, CommandId::Dig as i32, point.x, point.y, 0, 1, 1),
         )],
     );
 }
@@ -5985,7 +5152,7 @@ fn mouse_jump_zone_click_queues_exact_jump_control() {
     let position = app.engine.test_object_snapshot(cursor).position;
     let click = Vector2::new(position.x + 8, position.y - 15);
     let pointer = sandbox_pointer_at_world(&mut app, owner, click);
-    assert!(app.engine.mouse_jump_zone(owner, click));
+    main_assert!(app.engine.mouse_jump_zone(owner, click));
 
     let (manager, _event_tx, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
@@ -5993,41 +5160,21 @@ fn mouse_jump_zone_click_queues_exact_jump_control() {
     let tick = app.local_control_submission_tick();
     app.handle_ingame_mouse_click(pointer).test_value();
 
-    assert_eq!(
-        commands.take_submitted_player_commands(),
+    main_assert_eq!(
+        commands.take_submitted_player_commands() =>
         vec![(
             tick,
-            PlayerCommandControlData {
-                player: owner,
-                command: CommandId::Jump as i32,
-                x: click.x,
-                y: click.y,
-                target: 0,
-                target2: 0,
-                data: 0,
-                add_mode: 1,
-                by_client: 7,
-            },
+            input_fixture!(player_command: owner, CommandId::Jump as i32, click.x, click.y, 0, 0, 1),
         )]
     );
 
     app.test_modifiers(ModifiersState::SHIFT);
     app.handle_ingame_mouse_click(pointer).test_value();
-    assert_eq!(
-        commands.take_submitted_player_commands(),
+    main_assert_eq!(
+        commands.take_submitted_player_commands() =>
         vec![(
             tick,
-            PlayerCommandControlData {
-                player: owner,
-                command: CommandId::Jump as i32,
-                x: click.x,
-                y: click.y,
-                target: 0,
-                target2: 0,
-                data: 0,
-                add_mode: 1 | 4,
-                by_client: 7,
-            },
+            input_fixture!(player_command: owner, CommandId::Jump as i32, click.x, click.y, 0, 0, 1 | 4),
         )]
     );
 }
@@ -6054,37 +5201,20 @@ fn mouse_jump_zone_contained_or_non_walk_falls_back_to_move_to() {
                 .apply_object_update(cursor, ObjectUpdate::new().with_action("Jump"))
                 .test_value();
         }
-        assert!(
-            !app.engine.mouse_jump_zone(owner, click),
-            "contained={contained} must disable the jump cursor"
-        );
+        main_assert!(!app.engine.mouse_jump_zone(owner, click), "contained={contained} must disable the jump cursor");
         let pointer = sandbox_pointer_at_world(&mut app, owner, click);
-        assert_eq!(
-            app.ingame_mouse_select_target(owner, pointer.screen),
-            None,
-            "fallback point must remain a plain movement click"
-        );
+        main_assert_eq!(app.ingame_mouse_select_target(owner, pointer.screen) => None, "fallback point must remain a plain movement click");
 
         let (manager, _event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
         let tick = app.local_control_submission_tick();
         app.handle_ingame_mouse_click(pointer).test_value();
-        assert_eq!(
-            commands.take_submitted_player_commands(),
+        main_assert_eq!(
+            commands.take_submitted_player_commands() =>
             vec![(
                 tick,
-                PlayerCommandControlData {
-                    player: owner,
-                    command: CommandId::MoveTo as i32,
-                    x: click.x,
-                    y: click.y,
-                    target: 0,
-                    target2: 0,
-                    data: 0,
-                    add_mode: 1,
-                    by_client: 7,
-                },
+                input_fixture!(player_command: owner, CommandId::MoveTo as i32, click.x, click.y, 0, 0, 1),
             )],
             "contained={contained}"
         );
@@ -6116,27 +5246,23 @@ fn mouse_jump_zone_overrides_overlapping_crew_selection() {
     app.engine.select_crew(owner, [cursor]).test_value();
     app.engine.set_crew_cursor(owner, Some(cursor)).test_value();
     let pointer = sandbox_pointer_at_world(&mut app, owner, click);
-    assert_eq!(
-        app.ingame_mouse_select_target(owner, pointer.screen),
-        Some(overlap),
-        "the regression point must overlap another selectable crew member"
-    );
-    assert!(app.engine.mouse_jump_zone(owner, click));
+    main_assert_eq!(app.ingame_mouse_select_target(owner, pointer.screen) => Some(overlap), "the regression point must overlap another selectable crew member");
+    main_assert!(app.engine.mouse_jump_zone(owner, click));
 
     app.handle_ingame_mouse_click(pointer).test_value();
 
-    assert_eq!(app.engine.crew_cursor(owner), Some(cursor));
+    main_assert_eq!(app.engine.crew_cursor(owner) => Some(cursor));
     let commands = app
         .engine
         .test_object_snapshot(cursor)
         .command_stack
         .command_views();
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].name, "Jump");
-    assert_eq!(commands[0].tx, Some(click.x));
-    assert_eq!(commands[0].ty, Some(click.y));
-    assert_eq!(commands[0].target, None);
-    assert!(
+    main_assert_eq!(commands.len() => 1);
+    main_assert_eq!(commands[0].name => "Jump");
+    main_assert_eq!(commands[0].tx => Some(click.x));
+    main_assert_eq!(commands[0].ty => Some(click.y));
+    main_assert_eq!(commands[0].target => None);
+    main_assert!(
         app.engine
             .object_snapshot(overlap)
             .expect("overlapping crew survives")
@@ -6159,13 +5285,7 @@ fn constructable_raw_item_id_drags_even_when_row_is_not_selectable() {
 
     move_cursor(&mut app, menu_point, "hover disabled constructable row");
     app.test_left_button(ElementState::Pressed);
-    assert!(matches!(
-        app.construction_menu_drag.as_ref(),
-        Some(ConstructionMenuDrag::Candidate {
-            definition_id,
-            ..
-        }) if definition_id == "BLD1"
-    ));
+    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Candidate {definition_id,..}) if definition_id == "BLD1"));
 }
 
 #[test]
@@ -6180,28 +5300,28 @@ fn construction_drop_requires_the_original_live_mouse_assignment() {
 
         if remove_assignment {
             app.local_controls.remove(owner);
-            assert_eq!(app.local_controls.mouse_owner(), None);
+            main_assert_eq!(app.local_controls.mouse_owner() => None);
         } else {
             app.mouse_control = false;
         }
         app.test_left_button(ElementState::Released);
 
         let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
-        assert!(controls.is_empty());
-        assert!(commands.is_empty());
-        assert!(selections.is_empty());
-        assert!(app.construction_menu_drag.is_none());
+        main_assert!(controls.is_empty());
+        main_assert!(commands.is_empty());
+        main_assert!(selections.is_empty());
+        main_assert!(app.construction_menu_drag.is_none());
     }
 }
 
 #[test]
 fn gamepad_gui_control_uses_cpp_signed_integer_truthiness() {
-    assert!(!parse_gamepad_gui_control("0"));
-    assert!(parse_gamepad_gui_control("1"));
-    assert!(parse_gamepad_gui_control("-1"));
-    assert!(parse_gamepad_gui_control("2147483647"));
-    assert!(!parse_gamepad_gui_control("true"));
-    assert!(!parse_gamepad_gui_control("2147483648"));
+    main_assert!(!parse_gamepad_gui_control("0"));
+    main_assert!(parse_gamepad_gui_control("1"));
+    main_assert!(parse_gamepad_gui_control("-1"));
+    main_assert!(parse_gamepad_gui_control("2147483647"));
+    main_assert!(!parse_gamepad_gui_control("true"));
+    main_assert!(!parse_gamepad_gui_control("2147483648"));
 }
 
 #[test]
@@ -6214,10 +5334,10 @@ fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
         .control
         .control_style = false;
     app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
+    main_assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
     app.test_key(VirtualKeyCode::F1, ElementState::Released);
-    assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
-    assert!(!app.runtime_help_visible);
+    main_assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
+    main_assert!(!app.runtime_help_visible);
 
     let mut release_only = new_running_sandbox_app();
     release_only
@@ -6228,10 +5348,10 @@ fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
         .test_player_mut(release_only.local_owner)
         .control
         .control_style = false;
-    assert!(release_only.show_startup_hint);
+    main_assert!(release_only.show_startup_hint);
     release_only.test_key(VirtualKeyCode::F1, ElementState::Released);
-    assert!(release_only.show_startup_hint);
-    assert!(!release_only.runtime_help_visible);
+    main_assert!(release_only.show_startup_hint);
+    main_assert!(!release_only.runtime_help_visible);
 }
 
 #[test]
@@ -6244,14 +5364,11 @@ fn running_f4_only_stronger_escape_owns_keyboard_input() {
 
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    assert!(app.runtime_client_list.is_some());
-    assert!(
-        app.running_chat_text().is_some(),
-        "the lower-priority fullscreen Return binding remains reachable"
-    );
+    main_assert!(app.runtime_client_list.is_some());
+    main_assert!(app.running_chat_text().is_some(), "the lower-priority fullscreen Return binding remains reachable");
     app.close_running_chat().test_value();
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    assert!(app.runtime_client_list.is_none());
+    main_assert!(app.runtime_client_list.is_none());
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 }
 
@@ -6267,16 +5384,16 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
     let view = app.startup_view;
     app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F11, ElementState::Released);
-    assert!(!app.display_flags.is_fullscreen);
-    assert_eq!(app.startup_view, view);
+    main_assert!(!app.display_flags.is_fullscreen);
+    main_assert_eq!(app.startup_view => view);
 
     // ... and while running.
     let mut app = new_classic_running_sandbox_app();
     app.set_display_mode(DisplayMode::Window);
     app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F11, ElementState::Released);
-    assert!(!app.display_flags.is_fullscreen);
-    assert!(app.pending_screenshots.is_empty());
+    main_assert!(!app.display_flags.is_fullscreen);
+    main_assert!(app.pending_screenshots.is_empty());
 
     // A KeyConfig action bound to F11 reaches ordinary classic dispatch.
     app.runtime_key_config_cache = OnceLock::new();
@@ -6286,16 +5403,10 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
         )
         .expect("parse an F11 scoreboard binding")))
         .test_value();
-    assert!(!app.runtime_help_visible);
+    main_assert!(!app.runtime_help_visible);
     app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
-    assert!(
-        app.runtime_help_visible,
-        "a KeyConfig action bound to F11 must reach classic dispatch"
-    );
-    assert!(
-        !app.display_flags.is_fullscreen,
-        "dispatching the bound action must not change the display mode"
-    );
+    main_assert!(app.runtime_help_visible, "a KeyConfig action bound to F11 must reach classic dispatch");
+    main_assert!(!app.display_flags.is_fullscreen, "dispatching the bound action must not change the display mode");
 }
 
 /// On the SDL backend `C4KeyCodeEx::String2KeyCode` delegates every physical
@@ -6317,46 +5428,19 @@ fn keyconfig_accepts_extended_sdl_scancode_names() {
             .unwrap_or_else(|| panic!("{name} has no override"))
     };
     // Media and volume keys.
-    assert_eq!(
-        physical("MusicToggle"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::AudioVolumeMute)
-    );
-    assert_eq!(
-        physical("SoundToggle"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::AudioVolumeDown)
-    );
-    assert_eq!(
-        physical("MsgBoardScrollUp"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::MediaTrackNext)
-    );
+    main_assert_eq!(physical("MusicToggle") => RuntimePhysicalKey::Keyboard(VirtualKeyCode::AudioVolumeMute));
+    main_assert_eq!(physical("SoundToggle") => RuntimePhysicalKey::Keyboard(VirtualKeyCode::AudioVolumeDown));
+    main_assert_eq!(physical("MsgBoardScrollUp") => RuntimePhysicalKey::Keyboard(VirtualKeyCode::MediaTrackNext));
     // The extra ISO key next to left Shift, which winit reports as OEM102.
-    assert_eq!(
-        physical("ToggleChat"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::IntlBackslash)
-    );
+    main_assert_eq!(physical("ToggleChat") => RuntimePhysicalKey::Keyboard(VirtualKeyCode::IntlBackslash));
     // Application-control, modifier, international and editing keys.
-    assert_eq!(
-        physical("Screenshot"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::BrowserHome)
-    );
-    assert_eq!(
-        physical("ScreenshotEx"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::SuperLeft)
-    );
-    assert_eq!(
-        physical("ScoreboardToggle"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::IntlYen)
-    );
-    assert_eq!(
-        physical("ToggleShowHelp"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::Paste)
-    );
-    assert_eq!(
-        physical("NetClientListDlgToggle"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::LaunchApp2)
-    );
+    main_assert_eq!(physical("Screenshot") => RuntimePhysicalKey::Keyboard(VirtualKeyCode::BrowserHome));
+    main_assert_eq!(physical("ScreenshotEx") => RuntimePhysicalKey::Keyboard(VirtualKeyCode::SuperLeft));
+    main_assert_eq!(physical("ScoreboardToggle") => RuntimePhysicalKey::Keyboard(VirtualKeyCode::IntlYen));
+    main_assert_eq!(physical("ToggleShowHelp") => RuntimePhysicalKey::Keyboard(VirtualKeyCode::Paste));
+    main_assert_eq!(physical("NetClientListDlgToggle") => RuntimePhysicalKey::Keyboard(VirtualKeyCode::LaunchApp2));
     // A name SDL does not know keeps the disabled outcome.
-    assert_eq!(physical("MsgBoardScrollDown"), RuntimePhysicalKey::Disabled);
+    main_assert_eq!(physical("MsgBoardScrollDown") => RuntimePhysicalKey::Disabled);
 
     // A bound extended key dispatches like any other physical key.
     let mut app = new_classic_running_sandbox_app();
@@ -6367,12 +5451,9 @@ fn keyconfig_accepts_extended_sdl_scancode_names() {
         )
         .expect("parse the Mute help binding")))
         .test_value();
-    assert!(!app.runtime_help_visible);
+    main_assert!(!app.runtime_help_visible);
     app.test_key(VirtualKeyCode::AudioVolumeMute, ElementState::Pressed);
-    assert!(
-        app.runtime_help_visible,
-        "a KeyConfig action bound to an extended SDL scancode must execute"
-    );
+    main_assert!(app.runtime_help_visible, "a KeyConfig action bound to an extended SDL scancode must execute");
 }
 
 fn platform_ime_test_app() -> GameApp {
@@ -6384,7 +5465,7 @@ fn platform_ime_test_app() -> GameApp {
 fn open_platform_ime_test_context(app: &mut GameApp) {
     app.open_context_menu_at(Vec::new(), GuiPoint::new(10.0, 10.0))
         .test_value();
-    assert!(app.context_menu.is_some());
+    main_assert!(app.context_menu.is_some());
 }
 
 #[test]
@@ -6393,11 +5474,11 @@ fn platform_ime_follows_the_shell_mode_and_console_ownership() {
     app.console_mode = false;
 
     app.mode = AppMode::Loading;
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
     app.mode = AppMode::Menu;
-    assert!(app.platform_ime_allowed());
+    main_assert!(app.platform_ime_allowed());
     app.window_active = false;
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
     app.window_active = true;
 
     let (_startup_sender, startup_receiver) = mpsc::channel();
@@ -6406,7 +5487,7 @@ fn platform_ime_follows_the_shell_mode_and_console_ownership() {
         None,
         StartupNetworkPurpose::StagedHost,
     ));
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
     app.startup_network_connection = None;
 
     app.push_message_dialog(
@@ -6418,15 +5499,15 @@ fn platform_ime_follows_the_shell_mode_and_console_ownership() {
         MessageDialogContinuation::None,
     )
     .test_value();
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
 
     app.mode = AppMode::Running;
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
 
     app.console_mode = true;
-    assert!(app.platform_ime_allowed());
+    main_assert!(app.platform_ime_allowed());
 }
 
 #[test]
@@ -6441,19 +5522,19 @@ fn platform_ime_tracks_game_option_and_running_chat_keyboard_focus() {
             InputDialogIcon::LOCKED_FRONTAL,
         ),
     });
-    assert!(app.platform_ime_allowed());
+    main_assert!(app.platform_ime_allowed());
     open_platform_ime_test_context(&mut app);
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
     app.close_context_menu_silently();
     app.game_option_input_dialog = None;
 
     app.start_running_chat(RunningChatMode::All);
     app.set_running_chat_active(false);
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
     app.set_running_chat_active(true);
-    assert!(app.platform_ime_allowed());
+    main_assert!(app.platform_ime_allowed());
     open_platform_ime_test_context(&mut app);
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
 }
 
 #[test]
@@ -6471,18 +5552,14 @@ fn platform_ime_tracks_league_signup_and_its_context_menu() {
         ),
         auth: clonk_network::LeagueAuthRequestHead::default(),
         continuation: LeaguePlayerAuthContinuation::InitialClient {
-            request: clonk_network::PlayerInfoUpdateRequest {
-                client_id: 7,
-                flags: 0,
-                players: Vec::new(),
-            },
+            request: clonk_network::PlayerInfoUpdateRequest::new(7, 0, Vec::new()),
             index: 0,
             server_name: "league.example".to_string(),
         },
     });
-    assert!(app.platform_ime_allowed());
+    main_assert!(app.platform_ime_allowed());
     open_platform_ime_test_context(&mut app);
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
 }
 
 #[test]
@@ -6502,15 +5579,15 @@ fn platform_ime_tracks_external_irc_z_order_and_menu_mode() {
         RuntimeDefaultDialog::ExternalIrc,
         RuntimeDefaultDialog::Scoreboard,
     ];
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
 
     app.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
-    assert!(app.platform_ime_allowed());
+    main_assert!(app.platform_ime_allowed());
     open_platform_ime_test_context(&mut app);
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
 
     app.mode = AppMode::Menu;
-    assert!(!app.platform_ime_allowed());
+    main_assert!(!app.platform_ime_allowed());
     app.close_context_menu_silently();
-    assert!(app.platform_ime_allowed());
+    main_assert!(app.platform_ime_allowed());
 }

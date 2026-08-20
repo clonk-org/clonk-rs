@@ -23,7 +23,7 @@ pub struct JoinTeamSnapshot {
 ///
 /// C++ binary-compiles each `bool` as one raw byte. Keeping those fields as
 /// `u8` avoids silently canonicalizing their wire representation in the codec.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JoinTeamListSnapshot {
     pub active: u8,
     pub custom: u8,

@@ -1,5 +1,5 @@
-// Contiguous slice 7 of 7 of the `command/tests` battery, spliced by
-// `include!` from the parent module so every test id is unchanged.
+    // Contiguous slice 7 of 7 of the `command/tests` battery, spliced by
+    // `include!` from the parent module so every test id is unchanged.
 
     #[test]
     fn command_request_defaults_to_cpp_add_command_silent_sub_mode() {
@@ -15,7 +15,7 @@
     fn grab_lost_clears_only_to_a_push_to_with_a_predecessor() {
         let target = ObjectId::new(7);
         let request = |id| match id {
-            CommandId::PushTo => CommandRequest::new(CommandId::PushTo).with_target(Some(target)),
+            CommandId::PushTo => request!(PushTo, with_target: Some(target)),
             other => CommandRequest::new(other),
         };
 
@@ -53,17 +53,12 @@
         let builder_id = ObjectId::new(10);
         let item_id = ObjectId::new(11);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        builder.collectible = false;
-        builder.position = Vector2::new(0, 0);
+        let builder = command_object!(builder_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false; position = Vector2::new(0, 0));
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.position = Vector2::new(50, 0);
-        item.collectible = true;
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.construction = FULL_CON;
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into();
+            position = Vector2::new(50, 0); collectible = true; ocf = ocf::AVAILABLE | ocf::FULL_CON;
+            construction = FULL_CON);
 
         let objects = command_objects([builder, item]);
 
@@ -72,9 +67,7 @@
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::Acquire)
-                    .with_data(CommandData::Text("WOOD".into()))
-                    .with_mode(CommandMode::Base),
+                request!(Acquire, with_data: CommandData::Text("WOOD".into()), with_mode: CommandMode::Base),
             )
             .expect("command enqueued");
 
@@ -168,11 +161,7 @@
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::Buy)
-                    .with_target(Some(base_id))
-                    .with_tx(Some(3))
-                    .with_data(CommandData::Text("WOOD".into()))
-                    .with_update_interval(25),
+                request!(Buy, with_target: Some(base_id), with_tx: Some(3), with_data: CommandData::Text("WOOD".into()), with_update_interval: 25),
             )
             .expect("buy command queued");
 
@@ -202,15 +191,11 @@
             let mut stack = CommandStack::new();
             if let Some(retries) = base_retries {
                 stack
-                    .push_back(
-                        CommandRequest::new(CommandId::Wait)
-                            .with_retries(retries)
-                            .with_mode(CommandMode::Base),
-                    )
+                    .push_back(request!(Wait, with_retries: retries, with_mode: CommandMode::Base))
                     .expect("base queues");
             }
             stack
-                .push_front(CommandRequest::new(CommandId::Wait).with_mode(mode))
+                .push_front(request!(Wait, with_mode: mode))
                 .expect("failed command queues");
             stack.entries[0].finished = Some(CommandStatus::Failed);
 
@@ -239,21 +224,14 @@
         let actor_id = ObjectId::new(1);
         let missing_target = ObjectId::new(2);
         let target2 = ObjectId::new(3);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); command_direction = CommandDirection::Right);
         let objects = command_objects([actor.clone()]);
         let ctx = command_ctx(&actor, &objects, 0);
 
         let mut stack = CommandStack::new();
         stack
             .push_front(
-                CommandRequest::new(CommandId::Call)
-                    .with_target(Some(missing_target))
-                    .with_target2(Some(target2))
-                    .with_tx_definition("WOOD".into())
-                    .with_ty(Some(17))
-                    .with_data(CommandData::Text("Work".into()))
-                    .with_mode(CommandMode::Base),
+                request!(Call, with_target: Some(missing_target), with_target2: Some(target2), with_tx_definition: "WOOD".into(), with_ty: Some(17), with_data: CommandData::Text("Work".into()), with_mode: CommandMode::Base),
             )
             .expect("Call queues");
 
@@ -296,9 +274,7 @@
         let mut stack = CommandStack::new();
         stack
             .push_front(
-                CommandRequest::new(CommandId::Build)
-                    .with_target(Some(ObjectId::new(99)))
-                    .with_mode(CommandMode::SilentBase),
+                request!(Build, with_target: Some(ObjectId::new(99)), with_mode: CommandMode::SilentBase),
             )
             .expect("Build queues");
         let result = stack.execute_front(&ctx).expect("Build fails");
@@ -326,9 +302,7 @@
         let mut enter = CommandStack::new();
         enter
             .push_front(
-                CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(target_id))
-                    .with_mode(CommandMode::SilentBase),
+                request!(Enter, with_target: Some(target_id), with_mode: CommandMode::SilentBase),
             )
             .expect("Enter queues");
         let result = enter.execute_front(&ctx).expect("Enter fails");
@@ -337,15 +311,12 @@
         assert!(result.events.is_empty());
         assert!(result.operations.is_empty());
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.collectible = false;
+        let target = command_object!(target_id.as_u64(); collectible = false);
         let objects = command_objects([actor.clone(), target]);
         let ctx = command_ctx(&actor, &objects, 0);
         let mut get = CommandStack::new();
         get.push_front(
-            CommandRequest::new(CommandId::Get)
-                .with_target(Some(target_id))
-                .with_mode(CommandMode::SilentBase),
+            request!(Get, with_target: Some(target_id), with_mode: CommandMode::SilentBase),
         )
         .expect("Get queues");
         let result = get.execute_front(&ctx).expect("Get fails");
@@ -363,7 +334,7 @@
 
         let mut attached = CommandStack::new();
         attached
-            .push_front(CommandRequest::new(CommandId::Get).with_target(Some(target)))
+            .push_front(request!(Get, with_target: Some(target)))
             .expect("Get queues");
         let attached_id = attached.entries.front().expect("Get remains").instance_id;
         let CommandState::Get(state) = &mut attached.entries.front_mut().unwrap().state else {
@@ -379,7 +350,7 @@
 
         let mut detached = CommandStack::new();
         detached
-            .push_front(CommandRequest::new(CommandId::Get).with_target(Some(target)))
+            .push_front(request!(Get, with_target: Some(target)))
             .expect("Get queues");
         let detached_id = detached.entries.front().expect("Get remains").instance_id;
         let CommandState::Get(state) = &mut detached.entries.front_mut().unwrap().state else {
@@ -388,7 +359,7 @@
         state.enter_pending = true;
         detached.clear();
         detached
-            .push_front(CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(99))))
+            .push_front(request!(Get, with_target: Some(ObjectId::new(99))))
             .expect("replacement Get queues");
         let CommandState::Get(state) = &mut detached.entries.front_mut().unwrap().state else {
             panic!("replacement command should be Get");
@@ -416,7 +387,7 @@
 
         let mut cleared_then_detached = CommandStack::new();
         cleared_then_detached
-            .push_front(CommandRequest::new(CommandId::Get).with_target(Some(target)))
+            .push_front(request!(Get, with_target: Some(target)))
             .expect("Get queues");
         let cleared_id = cleared_then_detached
             .entries
@@ -454,11 +425,7 @@
 
         let mut get_stack = CommandStack::new();
         get_stack
-            .push_front(
-                CommandRequest::new(CommandId::Get)
-                    .with_target(Some(target))
-                    .with_mode(CommandMode::Base),
-            )
+            .push_front(request!(Get, with_target: Some(target), with_mode: CommandMode::Base))
             .expect("Get queues");
         let get_instance_id = get_stack.entries[0].instance_id;
         let CommandState::Get(get) = &mut get_stack.entries[0].state else {
@@ -478,11 +445,7 @@
 
         let mut grab_stack = CommandStack::new();
         grab_stack
-            .push_front(
-                CommandRequest::new(CommandId::Grab)
-                    .with_target(Some(target))
-                    .with_mode(CommandMode::Base),
-            )
+            .push_front(request!(Grab, with_target: Some(target), with_mode: CommandMode::Base))
             .expect("Grab queues");
         let CommandState::Grab(grab) = &mut grab_stack.entries[0].state else {
             panic!("Grab is front");
@@ -507,10 +470,10 @@
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .push_back(request!(Wait, with_mode: CommandMode::Base))
             .expect("base queues");
         stack
-            .push_front(CommandRequest::new(CommandId::Enter).with_mode(CommandMode::SilentSub))
+            .push_front(request!(Enter, with_mode: CommandMode::SilentSub))
             .expect("C++ links a targetless Enter");
         assert_eq!(stack.command_names(), vec!["Enter", "Wait"]);
 
@@ -529,11 +492,9 @@
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .push_back(request!(Wait, with_mode: CommandMode::Base))
             .expect("parent queues");
-        let call = CommandRequest::new(CommandId::Call)
-            .with_data(CommandData::Text("Work".into()))
-            .with_mode(CommandMode::SilentSub);
+        let call = request!(Call, with_data: CommandData::Text("Work".into()), with_mode: CommandMode::SilentSub);
         let mut parent_result = CommandStepResult::running(None)
             .with_operations(vec![CommandOperation::PushFront(call.clone())]);
         stack.apply_result_operations(&mut parent_result);
@@ -562,9 +523,8 @@
     fn failed_full_stack_push_does_not_permanently_latch_its_parent() {
         let actor_id = ObjectId::new(3);
         let pushed_id = ObjectId::new(4);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.action_procedure = ActionProcedure::Push;
-        actor.action_target = Some(pushed_id);
+        let actor = command_object!(actor_id.as_u64(); action_procedure = ActionProcedure::Push;
+            action_target = Some(pushed_id));
         let pushed = snapshot_with_id(pushed_id.as_u64());
         let objects = command_objects([actor.clone(), pushed]);
         let ctx = command_ctx(&actor, &objects, 0);
@@ -572,15 +532,12 @@
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::Dig)
-                    .with_tx(Some(0))
-                    .with_ty(Some(0))
-                    .with_mode(CommandMode::Base),
+                request!(Dig, with_tx: Some(0), with_ty: Some(0), with_mode: CommandMode::Base),
             )
             .expect("Dig queues");
         for _ in 1..MAX_COMMAND_STACK {
             stack
-                .push_back(CommandRequest::new(CommandId::Wait))
+                .push_back(request!(Wait))
                 .expect("tail fills command stack");
         }
 
@@ -603,7 +560,7 @@
         let objects = command_objects([actor.clone()]);
         let ctx = command_ctx(&actor, &objects, 0);
 
-        let dig = DigState::from_request(&CommandRequest::new(CommandId::Dig))
+        let dig = DigState::from_request(&request!(Dig))
             .expect("missing Dig coordinates are numeric zero");
         assert_eq!(dig.target, Vector2::ZERO);
 
@@ -612,8 +569,8 @@
         unselected.owner = 7;
         unselected.selected = false;
         let unselected_ctx = command_ctx(&unselected, &objects, 0);
-        let mut follow = FollowState::from_request(&CommandRequest::new(CommandId::Follow))
-            .expect("targetless Follow still links");
+        let mut follow =
+            FollowState::from_request(&request!(Follow)).expect("targetless Follow still links");
         assert_eq!(
             follow.step(&unselected_ctx).status,
             CommandStatus::Completed
@@ -621,7 +578,7 @@
 
         let mut push_to = CommandStack::new();
         push_to
-            .push_front(CommandRequest::new(CommandId::PushTo))
+            .push_front(request!(PushTo))
             .expect("targetless PushTo links");
         let evaluation = push_to.step(&ctx).expect("PushTo evaluates");
         assert_eq!(evaluation.status, CommandStatus::Running);
@@ -636,7 +593,7 @@
 
         let mut acquire = CommandStack::new();
         acquire
-            .push_front(CommandRequest::new(CommandId::Acquire))
+            .push_front(request!(Acquire))
             .expect("Data=0 Acquire links");
         assert_eq!(
             acquire.step(&ctx).expect("Acquire evaluates").status,
@@ -651,27 +608,21 @@
     #[test]
     fn failing_subcommand_increments_base_failures_and_schedules_retry() {
         let actor_id = ObjectId::new(1);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        actor.collectible = false;
-        actor.position = Vector2::new(0, 0);
-        actor.command_direction = CommandDirection::Right;
+        let actor = command_object!(actor_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false; position = Vector2::new(0, 0);
+            command_direction = CommandDirection::Right);
 
         let objects = command_objects([actor.clone()]);
 
         let ctx = command_ctx(&actor, &objects, 0);
 
         let mut stack = CommandStack::new();
-        let wait_request = CommandRequest::new(CommandId::Wait)
-            .with_update_interval(1)
-            .with_retries(1)
-            .with_mode(CommandMode::Base);
+        let wait_request =
+            request!(Wait, with_update_interval: 1, with_retries: 1, with_mode: CommandMode::Base);
         stack.push_back(wait_request).expect("wait command queued");
         stack
             .push_front(
-                CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(ObjectId::new(999)))
-                    .with_mode(CommandMode::SilentSub),
+                request!(Enter, with_target: Some(ObjectId::new(999)), with_mode: CommandMode::SilentSub),
             )
             .expect("enter command queued");
 
@@ -719,30 +670,24 @@
         // C4Command::GetBaseCommand returns the next unfinished command,
         // regardless of mode (C4Command.cpp:2498-2508).
         let actor_id = ObjectId::new(1);
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        actor.collectible = false;
+        let actor = command_object!(actor_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false);
 
         let objects = command_objects([actor.clone()]);
         let ctx = command_ctx(&actor, &objects, 0);
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .push_back(request!(Wait, with_mode: CommandMode::Base))
             .expect("base command queued");
         stack
             .push_front(
-                CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(ObjectId::new(998)))
-                    .with_retries(1)
-                    .with_mode(CommandMode::Sub),
+                request!(Enter, with_target: Some(ObjectId::new(998)), with_retries: 1, with_mode: CommandMode::Sub),
             )
             .expect("middle command queued");
         stack
             .push_front(
-                CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(ObjectId::new(999)))
-                    .with_mode(CommandMode::SilentSub),
+                request!(Enter, with_target: Some(ObjectId::new(999)), with_mode: CommandMode::SilentSub),
             )
             .expect("leaf command queued");
 
@@ -788,16 +733,14 @@
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::SilentSub))
+            .push_back(request!(Wait, with_mode: CommandMode::SilentSub))
             .expect("live tail queued");
         stack
-            .push_front(CommandRequest::new(CommandId::Wait))
+            .push_front(request!(Wait))
             .expect("finished middle queued");
         stack
             .push_front(
-                CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(ObjectId::new(999)))
-                    .with_mode(CommandMode::SilentSub),
+                request!(Enter, with_target: Some(ObjectId::new(999)), with_mode: CommandMode::SilentSub),
             )
             .expect("failing leaf queued");
         stack.finish_entry_public(1, true);
@@ -816,36 +759,22 @@
         let item_id = ObjectId::new(21);
         let container_id = ObjectId::new(22);
 
-        let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
-        actor.collectible = false;
-        actor.position = Vector2::new(0, 0);
-        actor.container = Some(container_id);
+        let mut actor = command_object!(actor_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+            collectible = false; position = Vector2::new(0, 0); container = Some(container_id));
         actor.contents.push(item_id);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.position = actor.position;
-        item.collectible = true;
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.construction = FULL_CON;
-        item.container = Some(actor_id);
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into();
+            position = actor.position; collectible = true; ocf = ocf::AVAILABLE | ocf::FULL_CON;
+            construction = FULL_CON; container = Some(actor_id));
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(10, 0);
-        container.collectible = false;
-        container.category = CATEGORY_STRUCTURE;
-        container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+        let container = command_object!(container_id.as_u64(); position = Vector2::new(10, 0);
+            collectible = false; category = CATEGORY_STRUCTURE; ocf = ocf::AVAILABLE | ocf::ENTRANCE);
 
         let mut objects = command_objects([actor.clone(), item.clone(), container.clone()]);
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(
-                CommandRequest::new(CommandId::Put)
-                    .with_target(Some(container_id))
-                    .with_target2(Some(item_id)),
-            )
+            .push_back(request!(Put, with_target: Some(container_id), with_target2: Some(item_id)))
             .expect("put enqueued");
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
@@ -890,10 +819,7 @@
         let mut engine_stack = CommandStack::new();
         engine_stack
             .push_front(
-                CommandRequest::new(CommandId::Put)
-                    .with_target(Some(target_id))
-                    .with_target2(Some(item_id))
-                    .with_mode(CommandMode::Base),
+                request!(Put, with_target: Some(target_id), with_target2: Some(item_id), with_mode: CommandMode::Base),
             )
             .expect("outer Put queues");
         let outer_id = engine_stack.entries.front().unwrap().instance_id;
@@ -908,11 +834,7 @@
         let mut callback_stack = engine_stack.clone();
         callback_stack.clear();
         callback_stack
-            .push_front(
-                CommandRequest::new(CommandId::Put)
-                    .with_target(Some(target_id))
-                    .with_target2(Some(item_id)),
-            )
+            .push_front(request!(Put, with_target: Some(target_id), with_target2: Some(item_id)))
             .expect("replacement Put queues");
         let replacement_id = callback_stack.entries.front().unwrap().instance_id;
         let CommandState::Put(replacement_state) =
@@ -963,7 +885,7 @@
         for clear_before_detach in [false, true] {
             let mut engine_stack = CommandStack::new();
             engine_stack
-                .push_front(CommandRequest::new(CommandId::Get).with_target(Some(target)))
+                .push_front(request!(Get, with_target: Some(target)))
                 .expect("outer Get queues");
             let outer_id = engine_stack.entries.front().unwrap().instance_id;
             let CommandState::Get(outer_state) =
@@ -979,9 +901,7 @@
             let mut callback_stack = engine_stack.clone();
             callback_stack.clear();
             callback_stack
-                .push_front(
-                    CommandRequest::new(CommandId::Get).with_target(Some(replacement_target)),
-                )
+                .push_front(request!(Get, with_target: Some(replacement_target)))
                 .expect("replacement Get queues");
             let replacement_id = callback_stack.entries.front().unwrap().instance_id;
             let CommandState::Get(replacement_state) =
@@ -1041,18 +961,12 @@
         let builder_id = ObjectId::new(1);
         let base_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 42;
-        builder.position = Vector2::new(10, 5);
-        builder.command_direction = CommandDirection::Right;
+        let builder = command_object!(builder_id.as_u64(); owner = 42; position = Vector2::new(10, 5);
+            command_direction = CommandDirection::Right);
 
-        let mut base = snapshot_with_id(base_id.as_u64());
-        base.owner = 42;
-        base.base = 42;
-        base.position = Vector2::new(20, 10);
-        base.category = CATEGORY_STRUCTURE;
-        base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
-        base.collectible = false;
+        let base = command_object!(base_id.as_u64(); owner = 42; base = 42;
+            position = Vector2::new(20, 10); category = CATEGORY_STRUCTURE;
+            ocf = ocf::AVAILABLE | ocf::ENTRANCE; collectible = false);
 
         let objects = command_objects([builder.clone(), base.clone()]);
 
@@ -1060,47 +974,29 @@
         home_base.insert("WOOD".to_string(), 2);
 
         let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
-        players.insert(
-            42,
-            CommandPlayerSnapshot {
-                status: PlayerStatus::Active,
-                surrendered: false,
-                wealth: 100,
-                home_base_material: home_base,
-                home_base_material_entries: Vec::new(),
-                knowledge: Vec::new(),
-                hostile_to: Vec::new(),
-            },
-        );
+        players.insert(42, command_player!(100, home_base_material: home_base));
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             "WOOD".to_string(),
-            CommandDefinitionSnapshot {
-                value: 25,
-                can_chop: false,
-                chop_action: None,
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 25,
+            can_chop: false,
+            chop_action: None,
+            constructable: false,
+            grab: 0 },
         );
 
-        let ctx = CommandRuntimeContext {
-            position: builder.position,
-            ..command_ctx_at_frame(
-                objects.get(&builder_id).expect("builder present"),
-                &objects,
-                &players,
-                &definitions,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx_at_frame(
+            objects.get(&builder_id).expect("builder present"),
+            &objects,
+            &players,
+            &definitions,
+            0,
+        ); position: builder.position);
 
-        let mut state = BuyState::from_request(
-            &CommandRequest::new(CommandId::Buy).with_data(CommandData::Text("WOOD".into())),
-        )
-        .expect("state created");
+        let mut state =
+            BuyState::from_request(&request!(Buy, with_data: CommandData::Text("WOOD".into())))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1126,70 +1022,41 @@
         let target_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 42;
-        builder.position = Vector2::new(0, 0);
-        builder.command_direction = CommandDirection::Right;
+        let builder = command_object!(builder_id.as_u64(); owner = 42; position = Vector2::new(0, 0);
+            command_direction = CommandDirection::Right);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.base = 42;
-        target.position = Vector2::new(100, 0);
-        target.category = CATEGORY_STRUCTURE;
-        target.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
-        target.collectible = false;
+        let mut target = command_object!(target_id.as_u64(); base = 42; position = Vector2::new(100, 0);
+            category = CATEGORY_STRUCTURE; ocf = ocf::AVAILABLE | ocf::ENTRANCE; collectible = false);
         target.contents.push(item_id);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.collectible = true;
-        item.construction = FULL_CON;
-        item.container = Some(target_id);
-        item.position = target.position;
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into(); collectible = true;
+            construction = FULL_CON; container = Some(target_id); position = target.position);
 
         let objects = command_objects([builder.clone(), target, item]);
 
         let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
-        players.insert(
-            42,
-            CommandPlayerSnapshot {
-                status: PlayerStatus::Active,
-                surrendered: false,
-                wealth: 100,
-                home_base_material: HashMap::new(),
-                home_base_material_entries: Vec::new(),
-                knowledge: Vec::new(),
-                hostile_to: Vec::new(),
-            },
-        );
+        players.insert(42, command_player!(100));
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             "WOOD".to_string(),
-            CommandDefinitionSnapshot {
-                value: 25,
-                can_chop: false,
-                chop_action: None,
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 25,
+            can_chop: false,
+            chop_action: None,
+            constructable: false,
+            grab: 0 },
         );
 
-        let ctx = CommandRuntimeContext {
-            position: builder.position,
-            base_buy_enabled: false,
-            ..command_ctx_at_frame(
-                objects.get(&builder_id).expect("builder present"),
-                &objects,
-                &players,
-                &definitions,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx_at_frame(
+            objects.get(&builder_id).expect("builder present"),
+            &objects,
+            &players,
+            &definitions,
+            0,
+        ); position: builder.position,
+        base_buy_enabled: false);
 
-        let parent_request = CommandRequest::new(CommandId::Buy)
-            .with_target(Some(target_id))
-            .with_data(CommandData::Text("WOOD".into()));
+        let parent_request = request!(Buy, with_target: Some(target_id), with_data: CommandData::Text("WOOD".into()));
         let mut state = BuyState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
@@ -1203,7 +1070,7 @@
     fn sell_without_definition_is_the_internal_menu_command() {
         // C4Command::Sell treats Data=0 as "open C4MN_Sell" rather than
         // rejecting the command (C4Command.cpp:2052-2057).
-        let request = CommandRequest::new(CommandId::Sell);
+        let request = request!(Sell);
         let state = SellState::from_request(&request).expect("menu command is valid");
         assert!(state.definition_id.is_empty());
     }
@@ -1214,70 +1081,41 @@
         let base_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 7;
-        builder.position = Vector2::new(-50, 0);
-        builder.command_direction = CommandDirection::Left;
+        let builder = command_object!(builder_id.as_u64(); owner = 7; position = Vector2::new(-50, 0);
+            command_direction = CommandDirection::Left);
 
-        let mut base = snapshot_with_id(base_id.as_u64());
-        base.owner = 7;
-        base.base = 7;
-        base.position = Vector2::new(0, 0);
-        base.category = CATEGORY_STRUCTURE;
-        base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
-        base.collectible = false;
+        let mut base = command_object!(base_id.as_u64(); owner = 7; base = 7; position = Vector2::new(0, 0);
+            category = CATEGORY_STRUCTURE; ocf = ocf::AVAILABLE | ocf::ENTRANCE; collectible = false);
         base.contents.push(item_id);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "ORE1".into();
-        item.collectible = true;
-        item.container = Some(base_id);
-        item.position = base.position;
+        let item = command_object!(item_id.as_u64(); definition_id = "ORE1".into(); collectible = true;
+            container = Some(base_id); position = base.position);
 
         let objects = command_objects([builder.clone(), base.clone(), item]);
 
         let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
-        players.insert(
-            7,
-            CommandPlayerSnapshot {
-                status: PlayerStatus::Active,
-                surrendered: false,
-                wealth: 100,
-                home_base_material: HashMap::new(),
-                home_base_material_entries: Vec::new(),
-                knowledge: Vec::new(),
-                hostile_to: Vec::new(),
-            },
-        );
+        players.insert(7, command_player!(100));
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             "ORE1".to_string(),
-            CommandDefinitionSnapshot {
-                value: 30,
-                can_chop: false,
-                chop_action: None,
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 30,
+            can_chop: false,
+            chop_action: None,
+            constructable: false,
+            grab: 0 },
         );
 
-        let ctx = CommandRuntimeContext {
-            position: builder.position,
-            ..command_ctx_at_frame(
-                objects.get(&builder_id).expect("builder present"),
-                &objects,
-                &players,
-                &definitions,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx_at_frame(
+            objects.get(&builder_id).expect("builder present"),
+            &objects,
+            &players,
+            &definitions,
+            0,
+        ); position: builder.position);
 
         let mut state = SellState::from_request(
-            &CommandRequest::new(CommandId::Sell)
-                .with_target(Some(base_id))
-                .with_data(CommandData::Text("ORE1".into())),
+            &request!(Sell, with_target: Some(base_id), with_data: CommandData::Text("ORE1".into())),
         )
         .expect("state created");
 
@@ -1302,73 +1140,43 @@
         let base_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 11;
-        builder.container = Some(base_id);
-        builder.position = Vector2::new(0, 0);
-        builder.command_direction = CommandDirection::Right;
+        let builder = command_object!(builder_id.as_u64(); owner = 11; container = Some(base_id);
+            position = Vector2::new(0, 0); command_direction = CommandDirection::Right);
 
-        let mut base = snapshot_with_id(base_id.as_u64());
-        base.owner = 11;
-        base.base = 11;
-        base.position = Vector2::new(0, 0);
-        base.category = CATEGORY_STRUCTURE;
-        base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
-        base.collectible = false;
+        let mut base = command_object!(base_id.as_u64(); owner = 11; base = 11;
+            position = Vector2::new(0, 0); category = CATEGORY_STRUCTURE;
+            ocf = ocf::AVAILABLE | ocf::ENTRANCE; collectible = false);
         base.contents.push(item_id);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "ORE1".into();
-        item.collectible = true;
-        item.container = Some(base_id);
-        item.position = base.position;
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
-        item.construction = FULL_CON;
+        let item = command_object!(item_id.as_u64(); definition_id = "ORE1".into(); collectible = true;
+            container = Some(base_id); position = base.position; ocf = ocf::AVAILABLE | ocf::FULL_CON;
+            construction = FULL_CON);
 
         let objects = command_objects([builder.clone(), base.clone(), item.clone()]);
 
         let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
-        players.insert(
-            11,
-            CommandPlayerSnapshot {
-                status: PlayerStatus::Active,
-                surrendered: false,
-                wealth: 10,
-                home_base_material: HashMap::new(),
-                home_base_material_entries: Vec::new(),
-                knowledge: Vec::new(),
-                hostile_to: Vec::new(),
-            },
-        );
+        players.insert(11, command_player!(10));
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             "ORE1".to_string(),
-            CommandDefinitionSnapshot {
-                value: 15,
-                can_chop: false,
-                chop_action: None,
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 15,
+            can_chop: false,
+            chop_action: None,
+            constructable: false,
+            grab: 0 },
         );
 
-        let ctx = CommandRuntimeContext {
-            position: builder.position,
-            ..command_ctx_at_frame(
-                objects.get(&builder_id).expect("builder present"),
-                &objects,
-                &players,
-                &definitions,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx_at_frame(
+            objects.get(&builder_id).expect("builder present"),
+            &objects,
+            &players,
+            &definitions,
+            0,
+        ); position: builder.position);
 
         let mut state = SellState::from_request(
-            &CommandRequest::new(CommandId::Sell)
-                .with_target(Some(base_id))
-                .with_data(CommandData::Text("ORE1".into())),
+            &request!(Sell, with_target: Some(base_id), with_data: CommandData::Text("ORE1".into())),
         )
         .expect("state created");
 
@@ -1398,50 +1206,27 @@
         let builder_id = ObjectId::new(1);
         let base_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 5;
-        builder.container = Some(base_id);
-        builder.position = Vector2::new(0, 0);
+        let builder = command_object!(builder_id.as_u64(); owner = 5; container = Some(base_id);
+            position = Vector2::new(0, 0));
 
-        let mut base = snapshot_with_id(base_id.as_u64());
-        base.owner = 5;
-        base.base = 5;
-        base.position = Vector2::new(0, 0);
-        base.category = CATEGORY_STRUCTURE;
-        base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
-        base.collectible = false;
+        let base = command_object!(base_id.as_u64(); owner = 5; base = 5; position = Vector2::new(0, 0);
+            category = CATEGORY_STRUCTURE; ocf = ocf::AVAILABLE | ocf::ENTRANCE; collectible = false);
 
         let objects = command_objects([builder.clone(), base.clone()]);
 
         let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
-        players.insert(
-            5,
-            CommandPlayerSnapshot {
-                status: PlayerStatus::Active,
-                surrendered: false,
-                wealth: 0,
-                home_base_material: HashMap::new(),
-                home_base_material_entries: Vec::new(),
-                knowledge: Vec::new(),
-                hostile_to: Vec::new(),
-            },
-        );
+        players.insert(5, command_player!(0));
 
-        let ctx = CommandRuntimeContext {
-            position: builder.position,
-            base_sell_enabled: false,
-            ..command_ctx_with_players(
-                objects.get(&builder_id).expect("builder present"),
-                &objects,
-                &players,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx_with_players(
+            objects.get(&builder_id).expect("builder present"),
+            &objects,
+            &players,
+            0,
+        ); position: builder.position,
+        base_sell_enabled: false);
 
         let mut state = SellState::from_request(
-            &CommandRequest::new(CommandId::Sell)
-                .with_target(Some(base_id))
-                .with_data(CommandData::Text("ORE1".into())),
+            &request!(Sell, with_target: Some(base_id), with_data: CommandData::Text("ORE1".into())),
         )
         .expect("state created");
 
@@ -1455,70 +1240,41 @@
         let target_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 7;
-        builder.position = Vector2::new(8, 0);
-        builder.command_direction = CommandDirection::Left;
+        let builder = command_object!(builder_id.as_u64(); owner = 7; position = Vector2::new(8, 0);
+            command_direction = CommandDirection::Left);
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.base = 7;
-        target.position = Vector2::new(0, 0);
-        target.category = CATEGORY_STRUCTURE;
-        target.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
-        target.collectible = false;
+        let mut target = command_object!(target_id.as_u64(); base = 7; position = Vector2::new(0, 0);
+            category = CATEGORY_STRUCTURE; ocf = ocf::AVAILABLE | ocf::ENTRANCE; collectible = false);
         target.contents.push(item_id);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.collectible = true;
-        item.construction = FULL_CON;
-        item.container = Some(target_id);
-        item.position = target.position;
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into(); collectible = true;
+            construction = FULL_CON; container = Some(target_id); position = target.position);
 
         let objects = command_objects([builder.clone(), target, item]);
 
         let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
-        players.insert(
-            7,
-            CommandPlayerSnapshot {
-                status: PlayerStatus::Active,
-                surrendered: false,
-                wealth: 50,
-                home_base_material: HashMap::new(),
-                home_base_material_entries: Vec::new(),
-                knowledge: Vec::new(),
-                hostile_to: Vec::new(),
-            },
-        );
+        players.insert(7, command_player!(50));
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             "WOOD".to_string(),
-            CommandDefinitionSnapshot {
-                value: 5,
-                can_chop: false,
-                chop_action: None,
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 5,
+            can_chop: false,
+            chop_action: None,
+            constructable: false,
+            grab: 0 },
         );
 
-        let ctx = CommandRuntimeContext {
-            position: builder.position,
-            ..command_ctx_at_frame(
-                objects.get(&builder_id).expect("builder present"),
-                &objects,
-                &players,
-                &definitions,
-                0,
-            )
-        };
+        let ctx = command_context!(command_ctx_at_frame(
+            objects.get(&builder_id).expect("builder present"),
+            &objects,
+            &players,
+            &definitions,
+            0,
+        ); position: builder.position);
 
         let mut state = BuyState::from_request(
-            &CommandRequest::new(CommandId::Buy)
-                .with_target(Some(target_id))
-                .with_data(CommandData::Text("WOOD".into())),
+            &request!(Buy, with_target: Some(target_id), with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -1535,71 +1291,41 @@
         let target_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.owner = 5;
-        builder.position = Vector2::new(0, 0);
-        builder.command_direction = CommandDirection::Stop;
-        builder.container = Some(target_id);
+        let builder = command_object!(builder_id.as_u64(); owner = 5; position = Vector2::new(0, 0);
+            command_direction = CommandDirection::Stop; container = Some(target_id));
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.base = 5;
-        target.position = Vector2::new(0, 0);
-        target.category = CATEGORY_STRUCTURE;
-        target.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
-        target.collectible = false;
+        let mut target = command_object!(target_id.as_u64(); base = 5; position = Vector2::new(0, 0);
+            category = CATEGORY_STRUCTURE; ocf = ocf::AVAILABLE | ocf::ENTRANCE; collectible = false);
         target.contents.push(item_id);
 
-        let mut item = snapshot_with_id(item_id.as_u64());
-        item.definition_id = "WOOD".into();
-        item.collectible = true;
-        item.construction = FULL_CON;
-        item.container = Some(target_id);
-        item.position = target.position;
+        let item = command_object!(item_id.as_u64(); definition_id = "WOOD".into(); collectible = true;
+            construction = FULL_CON; container = Some(target_id); position = target.position);
 
         let objects = command_objects([builder.clone(), target, item]);
 
         let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
-        players.insert(
-            5,
-            CommandPlayerSnapshot {
-                status: PlayerStatus::Active,
-                surrendered: false,
-                wealth: 40,
-                home_base_material: HashMap::new(),
-                home_base_material_entries: Vec::new(),
-                knowledge: Vec::new(),
-                hostile_to: Vec::new(),
-            },
-        );
+        players.insert(5, command_player!(40));
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             "WOOD".to_string(),
-            CommandDefinitionSnapshot {
-                value: 15,
-                can_chop: false,
-                chop_action: None,
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 15,
+            can_chop: false,
+            chop_action: None,
+            constructable: false,
+            grab: 0 },
         );
 
-        let ctx = CommandRuntimeContext {
-            position: builder.position,
-            ..command_ctx_at_frame(
-                objects.get(&builder_id).expect("builder present"),
-                &objects,
-                &players,
-                &definitions,
-                10,
-            )
-        };
+        let ctx = command_context!(command_ctx_at_frame(
+            objects.get(&builder_id).expect("builder present"),
+            &objects,
+            &players,
+            &definitions,
+            10,
+        ); position: builder.position);
 
         let mut state = BuyState::from_request(
-            &CommandRequest::new(CommandId::Buy)
-                .with_target(Some(target_id))
-                .with_data(CommandData::Text("WOOD".into())),
+            &request!(Buy, with_target: Some(target_id), with_data: CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
@@ -1620,8 +1346,7 @@
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.position = Vector2::new(6, 14);
+        let mut builder = command_object!(builder_id.as_u64(); position = Vector2::new(6, 14));
         builder.physical.can_chop = 1;
         builder.action_name = "Swim".into();
         builder.action_procedure = ActionProcedure::Swim;
@@ -1629,31 +1354,23 @@
         builder.fixed_velocity = FixedVec2::from_ints(3, -2);
         let builder_definition = builder.definition_id.clone();
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(0, 0);
-        target.shape = DefinitionRect::new(-20, -28, 40, 56);
-        target.ocf = ocf::CHOP | ocf::AVAILABLE;
-        target.alive = false;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(0, 0);
+            shape = DefinitionRect::new(-20, -28, 40, 56); ocf = ocf::CHOP | ocf::AVAILABLE; alive = false);
 
         let mut objects = command_objects([builder, target]);
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             builder_definition.clone(),
-            CommandDefinitionSnapshot {
-                value: 0,
-                can_chop: true,
-                chop_action: Some("Chop".into()),
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 0,
+            can_chop: true,
+            chop_action: Some("Chop".into()),
+            constructable: false,
+            grab: 0 },
         );
 
-        let mut state = ChopState::from_request(
-            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = ChopState::from_request(&request!(Chop, with_target: Some(target_id)))
+            .expect("state created");
 
         {
             let builder_entry = objects.get(&builder_id).expect("builder present");
@@ -1701,37 +1418,30 @@
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.position = Vector2::new(30, 0);
+        let mut builder = command_object!(builder_id.as_u64(); position = Vector2::new(30, 0));
         builder.physical.can_chop = 1;
         let builder_definition = builder.definition_id.clone();
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(0, 0);
-        target.ocf = ocf::CHOP | ocf::AVAILABLE;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(0, 0);
+            ocf = ocf::CHOP | ocf::AVAILABLE);
 
         let objects = command_objects([builder, target]);
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             builder_definition,
-            CommandDefinitionSnapshot {
-                value: 0,
-                can_chop: true,
-                chop_action: Some("Chop".into()),
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 0,
+            can_chop: true,
+            chop_action: Some("Chop".into()),
+            constructable: false,
+            grab: 0 },
         );
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
         let ctx = command_ctx_with_definitions(builder_entry, &objects, &definitions, 0);
 
-        let mut state = ChopState::from_request(
-            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = ChopState::from_request(&request!(Chop, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1759,31 +1469,23 @@
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.position = Vector2::new(4, 0);
+        let mut builder = command_object!(builder_id.as_u64(); position = Vector2::new(4, 0));
         builder.physical.can_chop = 1;
         let builder_definition = builder.definition_id.clone();
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::ZERO;
-        target.shape = DefinitionRect::new(-3, -3, 6, 6);
-        target.ocf = ocf::CHOP | ocf::AVAILABLE;
+        let target = command_object!(target_id.as_u64(); position = Vector2::ZERO;
+            shape = DefinitionRect::new(-3, -3, 6, 6); ocf = ocf::CHOP | ocf::AVAILABLE);
 
         let objects = command_objects([builder, target]);
         let definitions = HashMap::from([(
             builder_definition,
-            CommandDefinitionSnapshot {
-                can_chop: false,
-                chop_action: None,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { can_chop: false,
+            chop_action: None },
         )]);
         let builder = objects.get(&builder_id).expect("builder present");
         let ctx = command_ctx_with_definitions(builder, &objects, &definitions, 0);
-        let mut state = ChopState::from_request(
-            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = ChopState::from_request(&request!(Chop, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1806,39 +1508,32 @@
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.position = Vector2::new(30, 0);
+        let mut builder = command_object!(builder_id.as_u64(); position = Vector2::new(30, 0));
         builder.physical.can_chop = 1;
         builder.action_procedure = ActionProcedure::Push;
         builder.action_target = Some(ObjectId::new(99));
         let builder_definition = builder.definition_id.clone();
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(0, 0);
-        target.ocf = ocf::CHOP | ocf::AVAILABLE;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(0, 0);
+            ocf = ocf::CHOP | ocf::AVAILABLE);
 
         let objects = command_objects([builder, target]);
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             builder_definition,
-            CommandDefinitionSnapshot {
-                value: 0,
-                can_chop: true,
-                chop_action: Some("Chop".into()),
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 0,
+            can_chop: true,
+            chop_action: Some("Chop".into()),
+            constructable: false,
+            grab: 0 },
         );
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
         let ctx = command_ctx_with_definitions(builder_entry, &objects, &definitions, 0);
 
-        let mut state = ChopState::from_request(
-            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = ChopState::from_request(&request!(Chop, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1855,37 +1550,30 @@
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.position = Vector2::new(6, 0);
+        let mut builder = command_object!(builder_id.as_u64(); position = Vector2::new(6, 0));
         builder.physical.can_chop = 1;
         let builder_definition = builder.definition_id.clone();
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(0, 0);
-        target.ocf = ocf::AVAILABLE;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(0, 0);
+            ocf = ocf::AVAILABLE);
 
         let objects = command_objects([builder, target]);
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             builder_definition,
-            CommandDefinitionSnapshot {
-                value: 0,
-                can_chop: true,
-                chop_action: Some("Chop".into()),
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 0,
+            can_chop: true,
+            chop_action: Some("Chop".into()),
+            constructable: false,
+            grab: 0 },
         );
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
         let ctx = command_ctx_with_definitions(builder_entry, &objects, &definitions, 0);
 
-        let mut state = ChopState::from_request(
-            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = ChopState::from_request(&request!(Chop, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1900,37 +1588,30 @@
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
-        let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.position = Vector2::new(10, 0);
+        let mut builder = command_object!(builder_id.as_u64(); position = Vector2::new(10, 0));
         builder.physical.can_chop = 0;
         let builder_definition = builder.definition_id.clone();
 
-        let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(0, 0);
-        target.ocf = ocf::CHOP | ocf::AVAILABLE;
+        let target = command_object!(target_id.as_u64(); position = Vector2::new(0, 0);
+            ocf = ocf::CHOP | ocf::AVAILABLE);
 
         let objects = command_objects([builder, target]);
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         definitions.insert(
             builder_definition,
-            CommandDefinitionSnapshot {
-                value: 0,
-                can_chop: true,
-                chop_action: Some("Chop".into()),
-                constructable: false,
-                grab: 0,
-                ..CommandDefinitionSnapshot::default()
-            },
+            command_definition! { value: 0,
+            can_chop: true,
+            chop_action: Some("Chop".into()),
+            constructable: false,
+            grab: 0 },
         );
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
         let ctx = command_ctx_with_definitions(builder_entry, &objects, &definitions, 0);
 
-        let mut state = ChopState::from_request(
-            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let mut state = ChopState::from_request(&request!(Chop, with_target: Some(target_id)))
+            .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Failed);
@@ -1968,8 +1649,7 @@
 
         let mut stack = CommandStack::new();
         stack.restore_from_snapshot(&snapshot);
-        let mut actor = snapshot_with_id(1);
-        actor.position = Vector2::new(100, 100);
+        let actor = command_object!(1; position = Vector2::new(100, 100));
         let ctx = empty_command_ctx(&actor, 1);
         let result = stack.execute_front(&ctx).expect("restored MoveTo executes");
         assert_eq!(result.status, CommandStatus::Completed);

@@ -455,19 +455,8 @@ impl Engine {
             (raw_message, player_color)
         };
 
-        self.messages.add_message(MessageSpec {
-            kind: message::MessageKind::Target,
-            text,
-            target: Some(view_object),
-            player: None,
-            offset: Vector2::ZERO,
-            color: color | 0xff00_0000,
-            flags: 0,
-            width: None,
-            decoration: None,
-            frame_decoration: None,
-            portrait: None,
-        });
+        self.messages
+            .add_message(MessageSpec::target(text, view_object).with_color(color | 0xff00_0000));
         true
     }
 

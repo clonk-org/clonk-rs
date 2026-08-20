@@ -24,13 +24,9 @@ fn this_returns_the_provided_object_context() {
     assert_eq!(result, this);
 }
 
-#[test]
-fn this_defaults_to_nil_without_context() {
-    let mut engine = Engine::new();
-    engine
-        .load_script("func Test() { return this; }")
-        .expect("loads");
-    assert_eq!(engine.call("Test", &[]).expect("call"), Value::Nil);
+run_cases! {
+    this_defaults_to_nil_without_context:
+        "func Test() { return this; }", "Test", &[] => Value::Nil;
 }
 
 #[test]

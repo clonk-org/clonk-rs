@@ -5,9 +5,7 @@
 use clonk_script::{clear_active_object_references, Engine, Value, ValueMap};
 
 fn run(source: &str, args: &[Value]) -> Value {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("script should load");
-    engine.call("Test", args).expect("script should run")
+    crate::support::run(source, "Test", args)
 }
 
 #[test]

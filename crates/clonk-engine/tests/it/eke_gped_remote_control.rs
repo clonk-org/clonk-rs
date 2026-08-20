@@ -11,21 +11,8 @@ const APPEND: &str = "EkeGpedRemoteControl.c";
 fn join_pilot(engine: &mut Engine, auto_stop: bool) -> i32 {
     crate::support::TestValueExt::test_value(
         crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-            name: "Eke remote control".into(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
             control_style: auto_stop,
-            auto_context_menu: false,
-            startup_player_count: 1,
+            ..crate::support::join_player_config("Eke remote control")
         }))
         .initialized(),
     )

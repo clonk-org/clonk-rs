@@ -1812,6 +1812,33 @@ mod tests {
         encode_reliable_udp_check, ReliableUdpCheck,
     };
 
+    macro_rules! udp_assert_eq {
+        ($actual:expr => $expected:expr, $($message:tt)+) => {
+            assert_eq!($actual, $expected, $($message)+);
+        };
+        ($actual:expr => $expected:expr $(,)?) => {
+            assert_eq!($actual, $expected);
+        };
+    }
+
+    macro_rules! udp_assert {
+        ($condition:expr, $($message:tt)+) => {
+            assert!($condition, $($message)+);
+        };
+        ($condition:expr $(,)?) => {
+            assert!($condition);
+        };
+    }
+
+    macro_rules! udp_assert_ne {
+        ($actual:expr => $unexpected:expr, $($message:tt)+) => {
+            assert_ne!($actual, $unexpected, $($message)+);
+        };
+        ($actual:expr => $unexpected:expr $(,)?) => {
+            assert_ne!($actual, $unexpected);
+        };
+    }
+
     fn address(last: u8, port: u16) -> SocketAddr {
         SocketAddr::new(Ipv4Addr::new(192, 0, 2, last).into(), port)
     }
@@ -1847,7 +1874,7 @@ mod tests {
     async fn poll_driver_ready_once(driver: &mut ReliableUdpSocketDriver) {
         let mut ready = Box::pin(driver.wait_ready());
         std::future::poll_fn(|context| {
-            assert!(std::future::Future::poll(ready.as_mut(), context).is_pending());
+            udp_assert!(std::future::Future::poll(ready.as_mut(), context).is_pending());
             std::task::Poll::Ready(())
         })
         .await;
@@ -1872,7 +1899,7 @@ mod tests {
 
     async fn connect_spy(driver: &mut ReliableUdpSocketDriver, spy: &UdpSocket) -> SocketAddr {
         let spy_address = spy.local_addr().unwrap();
-        assert!(driver.connect(spy_address).await.unwrap().is_empty());
+        udp_assert!(driver.connect(spy_address).await.unwrap().is_empty());
         let mut buffer = [0_u8; 512];
         let (_, driver_address) =
             recv_spy_kind(spy, &mut buffer, ReliableUdpPacketKind::Connect).await;
@@ -1882,10 +1909,9 @@ mod tests {
             observed_address: canonical_reliable_udp_peer_address(driver_address),
         });
         spy.send_to(&connect_ok, driver_address).await.unwrap();
-        assert!(matches!(
-            next_driver_events(driver).await.as_slice(),
-            [ReliableUdpEvent::Connected { peer, .. }] if *peer == spy_address
-        ));
+        udp_assert!(
+            matches!(next_driver_events(driver).await.as_slice(), [ReliableUdpEvent::Connected { peer, .. }] if *peer == spy_address )
+        );
         canonical_reliable_udp_peer_address(driver_address)
     }
 
@@ -1903,20 +1929,11 @@ mod tests {
         routes.set(NetpuncherAddressFamily::Ipv4, ipv4);
         routes.set(NetpuncherAddressFamily::Ipv6, ipv6);
 
-        assert_eq!(
-            routes.route(NetpuncherAddressFamily::Ipv4).unwrap().address,
-            ipv4.address
-        );
-        assert_eq!(
-            routes.route(NetpuncherAddressFamily::Ipv6).unwrap().address,
-            ipv6.address
-        );
+        udp_assert_eq!(routes.route(NetpuncherAddressFamily::Ipv4).unwrap().address => ipv4.address);
+        udp_assert_eq!(routes.route(NetpuncherAddressFamily::Ipv6).unwrap().address => ipv6.address);
         routes.clear_if(NetpuncherAddressFamily::Ipv4, ipv4.address);
-        assert!(routes.route(NetpuncherAddressFamily::Ipv4).is_none());
-        assert_eq!(
-            routes.route(NetpuncherAddressFamily::Ipv6).unwrap().address,
-            ipv6.address
-        );
+        udp_assert!(routes.route(NetpuncherAddressFamily::Ipv4).is_none());
+        udp_assert_eq!(routes.route(NetpuncherAddressFamily::Ipv6).unwrap().address => ipv6.address);
     }
 
     #[tokio::test]
@@ -1952,12 +1969,9 @@ mod tests {
             ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
         let peer = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 11_112);
 
-        assert_eq!(driver.family, crate::dual_stack::SocketFamily::MappedIpv4);
-        assert_eq!(
-            driver.socket_destination(peer).unwrap(),
-            reliable_udp_send_address(peer)
-        );
-        assert_eq!(
+        udp_assert_eq!(driver.family => crate::dual_stack::SocketFamily::MappedIpv4);
+        udp_assert_eq!(driver.socket_destination(peer).unwrap() => reliable_udp_send_address(peer));
+        udp_assert_eq!(
             driver
                 .socket_destination(SocketAddr::V6(SocketAddrV6::new(
                     Ipv6Addr::LOCALHOST,
@@ -1966,7 +1980,7 @@ mod tests {
                     0,
                 )))
                 .unwrap_err()
-                .kind(),
+                .kind() =>
             io::ErrorKind::NetworkUnreachable
         );
     }
@@ -1980,10 +1994,10 @@ mod tests {
         tokio::time::advance(RELIABLE_UDP_CHECK_INTERVAL / 2).await;
         poll_driver_ready_once(&mut driver).await;
 
-        assert_eq!(driver.protocol_timer_arms(), 1);
+        udp_assert_eq!(driver.protocol_timer_arms() => 1);
 
         tokio::time::advance(RELIABLE_UDP_CHECK_INTERVAL / 2).await;
-        assert!(matches!(
+        udp_assert!(matches!(
             driver.wait_ready().await,
             ReliableUdpPollReady::Timer
         ));
@@ -2006,10 +2020,7 @@ mod tests {
                 destination,
                 payload: payload.to_vec(),
             };
-            assert_eq!(
-                driver.send_planned_datagram(&datagram).await.2.unwrap(),
-                payload.len()
-            );
+            udp_assert_eq!(driver.send_planned_datagram(&datagram).await.2.unwrap() => payload.len());
         }
 
         let mut buffer = [0; 16];
@@ -2019,9 +2030,9 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-            assert_eq!(&buffer[..length], payload);
+            udp_assert_eq!(&buffer[..length] => payload);
         }
-        assert_eq!(driver.socket_writability_establishments(), 1);
+        udp_assert_eq!(driver.socket_writability_establishments() => 1);
     }
 
     #[tokio::test]
@@ -2040,22 +2051,13 @@ mod tests {
         };
 
         let before = datagram(b"before");
-        assert_eq!(
-            driver.send_planned_datagram(&before).await.2.unwrap(),
-            before.payload.len()
-        );
+        udp_assert_eq!(driver.send_planned_datagram(&before).await.2.unwrap() => before.payload.len());
         driver.force_next_planned_send_would_block();
         let dropped = datagram(b"dropped");
-        assert_eq!(
-            driver.send_planned_datagram(&dropped).await.2.unwrap(),
-            dropped.payload.len()
-        );
+        udp_assert_eq!(driver.send_planned_datagram(&dropped).await.2.unwrap() => dropped.payload.len());
         for payload in [b"after-one".as_slice(), b"after-two".as_slice()] {
             let later = datagram(payload);
-            assert_eq!(
-                driver.send_planned_datagram(&later).await.2.unwrap(),
-                later.payload.len()
-            );
+            udp_assert_eq!(driver.send_planned_datagram(&later).await.2.unwrap() => later.payload.len());
         }
 
         let mut buffer = [0; 16];
@@ -2069,14 +2071,14 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-            assert_eq!(&buffer[..length], payload);
+            udp_assert_eq!(&buffer[..length] => payload);
         }
-        assert!(
+        udp_assert!(
             tokio::time::timeout(Duration::from_millis(50), spy.recv_from(&mut buffer))
                 .await
                 .is_err()
         );
-        assert_eq!(driver.socket_writability_establishments(), 1);
+        udp_assert_eq!(driver.socket_writability_establishments() => 1);
     }
 
     #[tokio::test]
@@ -2117,11 +2119,8 @@ mod tests {
             ],
             events: Vec::new(),
         };
-        assert!(driver.flush_step(step).await.unwrap().is_empty());
-        assert_eq!(
-            attempts.lock().unwrap().as_slice(),
-            &[(congested, vec![0x41]), (healthy, vec![0x42])]
-        );
+        udp_assert!(driver.flush_step(step).await.unwrap().is_empty());
+        udp_assert_eq!(attempts.lock().unwrap().as_slice() => &[(congested, vec![0x41]), (healthy, vec![0x42])]);
     }
 
     #[tokio::test]
@@ -2138,12 +2137,9 @@ mod tests {
             &without_ipv6,
         )
         .unwrap();
-        assert_eq!(
-            driver.local_addr().unwrap().ip(),
-            std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)
-        );
+        udp_assert_eq!(driver.local_addr().unwrap().ip() => std::net::IpAddr::V4(Ipv4Addr::LOCALHOST));
         let ipv4_peer = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 11_115);
-        assert_eq!(driver.socket_destination(ipv4_peer).unwrap(), ipv4_peer);
+        udp_assert_eq!(driver.socket_destination(ipv4_peer).unwrap() => ipv4_peer);
 
         // Nothing may be sent to the IPv6 puncher afterwards: trading the bind
         // failure for an EAFNOSUPPORT on the first datagram would only move the
@@ -2155,8 +2151,8 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert!(driver
+        udp_assert_eq!(error.kind() => io::ErrorKind::Unsupported);
+        udp_assert!(driver
             .puncher_address(NetpuncherAddressFamily::Ipv6)
             .is_none());
 
@@ -2168,10 +2164,7 @@ mod tests {
             .init_puncher(ipv4_address, NetpuncherRole::Host)
             .await
             .unwrap();
-        assert_eq!(
-            driver.puncher_address(NetpuncherAddressFamily::Ipv4),
-            Some(ipv4_address)
-        );
+        udp_assert_eq!(driver.puncher_address(NetpuncherAddressFamily::Ipv4) => Some(ipv4_address));
     }
 
     fn handshake_pair() -> (
@@ -2186,37 +2179,29 @@ mod tests {
         let mut b = ReliableUdpEndpointCore::new_at(Duration::ZERO);
 
         let a_conn = a.connect_at(b_address, Duration::ZERO);
-        assert_eq!(a_conn.datagrams.len(), 1);
+        udp_assert_eq!(a_conn.datagrams.len() => 1);
         let b_conn = b.receive_at(a_address, &a_conn.datagrams[0].payload, Duration::ZERO);
-        assert_eq!(
-            b_conn.datagrams.len(),
+        udp_assert_eq!(
+            b_conn.datagrams.len() =>
             1,
             "unknown Conn sends reciprocal Conn only"
         );
-        assert!(b_conn.events.is_empty());
+        udp_assert!(b_conn.events.is_empty());
 
         let a_connected = a.receive_at(b_address, &b_conn.datagrams[0].payload, Duration::ZERO);
-        assert_eq!(a_connected.datagrams.len(), 1, "known Conn sends ConnOK");
-        assert!(matches!(
-            a_connected.events.as_slice(),
-            [ReliableUdpEvent::Connected { peer, .. }] if *peer == b_address
-        ));
+        udp_assert_eq!(a_connected.datagrams.len() => 1, "known Conn sends ConnOK");
+        udp_assert!(
+            matches!(a_connected.events.as_slice(), [ReliableUdpEvent::Connected { peer, .. }] if *peer == b_address )
+        );
 
         let b_connected =
             b.receive_at(a_address, &a_connected.datagrams[0].payload, Duration::ZERO);
-        assert!(b_connected.datagrams.is_empty());
-        assert!(matches!(
-            b_connected.events.as_slice(),
-            [ReliableUdpEvent::Connected { peer, .. }] if *peer == a_address
-        ));
-        assert_eq!(
-            a.peer_status(b_address),
-            Some(ReliableUdpPeerStatus::Working)
+        udp_assert!(b_connected.datagrams.is_empty());
+        udp_assert!(
+            matches!(b_connected.events.as_slice(), [ReliableUdpEvent::Connected { peer, .. }] if *peer == a_address )
         );
-        assert_eq!(
-            b.peer_status(a_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
+        udp_assert_eq!(a.peer_status(b_address) => Some(ReliableUdpPeerStatus::Working));
+        udp_assert_eq!(b.peer_status(a_address) => Some(ReliableUdpPeerStatus::Working));
         (a_address, b_address, a, b)
     }
 
@@ -2240,8 +2225,8 @@ mod tests {
 
         let drained = a.drain_peer_packets(b_address, 2);
 
-        assert_eq!(
-            drained.events,
+        udp_assert_eq!(
+            drained.events =>
             vec![
                 ReliableUdpEvent::Packet {
                     peer: b_address,
@@ -2266,20 +2251,20 @@ mod tests {
             received.append(a.receive_at(b_address, &datagram.payload, Duration::ZERO));
         }
 
-        assert!(
+        udp_assert!(
             received.events.is_empty(),
             "a full consumer mailbox must retain, not publish, the packet"
         );
         let blocked_check = a.timer_at(Duration::from_secs(1));
         let blocked_ack = decode_reliable_udp_check(&blocked_check.datagrams[0].payload).unwrap();
-        assert_eq!(
-            blocked_ack.next_expected_packet_number, 0,
+        udp_assert_eq!(
+            blocked_ack.next_expected_packet_number => 0,
             "retained data must not be acknowledged before the consumer owns it"
         );
 
         let resumed = a.drain_peer_packets(b_address, 1);
-        assert_eq!(
-            resumed.events,
+        udp_assert_eq!(
+            resumed.events =>
             vec![ReliableUdpEvent::Packet {
                 peer: b_address,
                 payload: b"retained".to_vec(),
@@ -2287,7 +2272,7 @@ mod tests {
         );
         let resumed_check = a.timer_at(Duration::from_secs(2));
         let resumed_ack = decode_reliable_udp_check(&resumed_check.datagrams[0].payload).unwrap();
-        assert_eq!(resumed_ack.next_expected_packet_number, 1);
+        udp_assert_eq!(resumed_ack.next_expected_packet_number => 1);
     }
 
     #[test]
@@ -2295,30 +2280,19 @@ mod tests {
         let (a_address, b_address, _, _) = handshake_pair();
         let connection = ReliableUdpConnect::unicast(17, b_address);
         let wire = encode_reliable_udp_connect(&connection);
-        assert_eq!(decode_reliable_udp_connect(&wire), Ok(Some(connection)));
+        udp_assert_eq!(decode_reliable_udp_connect(&wire) => Ok(Some(connection)));
 
         let mut cpp_no_multicast_wire = wire.clone();
         cpp_no_multicast_wire[30] = 0xcd;
-        assert_eq!(
+        udp_assert_eq!(
             decode_reliable_udp_connect(&cpp_no_multicast_wire)
                 .unwrap()
                 .expect("valid Conn is not ignored")
-                .multicast_address,
+                .multicast_address =>
             None
         );
-        assert_eq!(
-            reliable_udp_send_address(b_address),
-            SocketAddr::V6(SocketAddrV6::new(
-                Ipv4Addr::new(192, 0, 2, 2).to_ipv6_mapped(),
-                22_222,
-                0,
-                0,
-            ))
-        );
-        assert_eq!(
-            canonical_reliable_udp_peer_address(reliable_udp_send_address(a_address)),
-            a_address
-        );
+        udp_assert_eq!(reliable_udp_send_address(b_address) => SocketAddr::V6(SocketAddrV6::new( Ipv4Addr::new(192, 0, 2, 2).to_ipv6_mapped(), 22_222, 0, 0, )));
+        udp_assert_eq!(canonical_reliable_udp_peer_address(reliable_udp_send_address(a_address)) => a_address);
     }
 
     #[test]
@@ -2328,12 +2302,12 @@ mod tests {
         let mut endpoint = ReliableUdpEndpointCore::new_at(Duration::ZERO);
 
         let initial = endpoint.connect_at(peer_address, Duration::ZERO);
-        assert_eq!(initial.datagrams.len(), 1);
-        assert_eq!(
+        udp_assert_eq!(initial.datagrams.len() => 1);
+        udp_assert_eq!(
             decode_reliable_udp_connect(&initial.datagrams[0].payload)
                 .unwrap()
                 .expect("outbound Conn is valid")
-                .multicast_address,
+                .multicast_address =>
             None
         );
 
@@ -2350,22 +2324,13 @@ mod tests {
             Duration::ZERO,
         );
 
-        assert_eq!(response.datagrams.len(), 1);
-        assert_eq!(response.datagrams[0].payload[0], 0x03);
-        assert_eq!(
-            decode_reliable_udp_connect_ok(&response.datagrams[0].payload)
-                .unwrap()
-                .multicast_mode,
-            ReliableUdpMulticastMode::NoMulticast
+        udp_assert_eq!(response.datagrams.len() => 1);
+        udp_assert_eq!(response.datagrams[0].payload[0] => 0x03);
+        udp_assert_eq!(decode_reliable_udp_connect_ok(&response.datagrams[0].payload).unwrap().multicast_mode => ReliableUdpMulticastMode::NoMulticast);
+        udp_assert!(
+            matches!(response.events.as_slice(), [ReliableUdpEvent::Connected { peer, .. }] if *peer == peer_address )
         );
-        assert!(matches!(
-            response.events.as_slice(),
-            [ReliableUdpEvent::Connected { peer, .. }] if *peer == peer_address
-        ));
-        assert_eq!(
-            endpoint.peer_status(peer_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
+        udp_assert_eq!(endpoint.peer_status(peer_address) => Some(ReliableUdpPeerStatus::Working));
     }
 
     #[test]
@@ -2374,16 +2339,13 @@ mod tests {
         endpoint
             .send_packet(peer_address, b"queued direct packet")
             .unwrap();
-        assert_eq!(endpoint.outgoing_packet_count(peer_address), Some(1));
+        udp_assert_eq!(endpoint.outgoing_packet_count(peer_address) => Some(1));
 
         let mut flagged_data = encode_reliable_udp_data_fragments(0, b"stray multicast packet")
             .unwrap()
             .remove(0);
         flagged_data[0] |= 0x80;
-        assert_eq!(
-            endpoint.receive_at(peer_address, &flagged_data, Duration::ZERO),
-            ReliableUdpStep::default()
-        );
+        udp_assert_eq!(endpoint.receive_at(peer_address, &flagged_data, Duration::ZERO) => ReliableUdpStep::default());
 
         let mut flagged_check = encode_reliable_udp_check(&ReliableUdpCheck {
             packet_number: 7,
@@ -2394,21 +2356,15 @@ mod tests {
         })
         .unwrap();
         flagged_check[0] |= 0x80;
-        assert_eq!(
-            endpoint.receive_at(peer_address, &flagged_check, Duration::ZERO),
-            ReliableUdpStep::default()
-        );
-        assert_eq!(endpoint.outgoing_packet_count(peer_address), Some(1));
-        assert_eq!(
-            endpoint.peer_status(peer_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
+        udp_assert_eq!(endpoint.receive_at(peer_address, &flagged_check, Duration::ZERO) => ReliableUdpStep::default());
+        udp_assert_eq!(endpoint.outgoing_packet_count(peer_address) => Some(1));
+        udp_assert_eq!(endpoint.peer_status(peer_address) => Some(ReliableUdpPeerStatus::Working));
 
         let direct_data = encode_reliable_udp_data_fragments(0, b"direct still starts at zero")
             .unwrap()
             .remove(0);
-        assert_eq!(
-            endpoint.receive_at(peer_address, &direct_data, Duration::ZERO),
+        udp_assert_eq!(
+            endpoint.receive_at(peer_address, &direct_data, Duration::ZERO) =>
             ReliableUdpStep {
                 datagrams: Vec::new(),
                 events: vec![ReliableUdpEvent::Packet {
@@ -2428,53 +2384,38 @@ mod tests {
             for length in [1, 5, 37] {
                 let mut wire = vec![0xaa; length];
                 wire[0] = status;
-                assert_eq!(
-                    endpoint.receive_at(source, &wire, Duration::ZERO),
+                udp_assert_eq!(
+                    endpoint.receive_at(source, &wire, Duration::ZERO) =>
                     ReliableUdpStep::default(),
                     "test status 0x{status:02x}, length {length}"
                 );
             }
         }
-        assert_eq!(endpoint.peer_status(source), None);
+        udp_assert_eq!(endpoint.peer_status(source) => None);
 
         for status in [0x00, 0x80] {
             let step = endpoint.receive_at(source, &[status], Duration::ZERO);
-            assert!(step.events.is_empty());
-            assert_eq!(
-                step.datagrams,
-                vec![ReliableUdpDatagram {
-                    destination: reliable_udp_send_address(source),
-                    payload: vec![status, 0, 0, 0, 0],
-                }]
-            );
-            assert_eq!(endpoint.peer_status(source), None);
+            udp_assert!(step.events.is_empty());
+            udp_assert_eq!(step.datagrams => vec![ReliableUdpDatagram { destination: reliable_udp_send_address(source), payload: vec![status, 0, 0, 0, 0], }]);
+            udp_assert_eq!(endpoint.peer_status(source) => None);
         }
 
         let (_, known_peer, mut connected, _) = handshake_pair();
         for status in [0x00, 0x80, 0x01, 0x81] {
-            assert_eq!(
-                connected.receive_at(known_peer, &[status], Duration::ZERO),
-                ReliableUdpStep::default()
-            );
+            udp_assert_eq!(connected.receive_at(known_peer, &[status], Duration::ZERO) => ReliableUdpStep::default());
         }
         for status in [0x01, 0x81] {
             let mut wire = vec![status];
             wire.extend_from_slice(&99_u32.to_ne_bytes());
             wire.extend_from_slice(&[0xaa; 13]);
-            assert_eq!(
-                connected.receive_at(known_peer, &wire, Duration::ZERO),
-                ReliableUdpStep::default()
-            );
+            udp_assert_eq!(connected.receive_at(known_peer, &wire, Duration::ZERO) => ReliableUdpStep::default());
         }
         let check = connected.timer_at(Duration::from_secs(1));
-        assert_eq!(check.datagrams.len(), 1);
+        udp_assert_eq!(check.datagrams.len() => 1);
         let check = decode_reliable_udp_check(&check.datagrams[0].payload).unwrap();
-        assert_eq!(check.next_expected_packet_number, 0);
-        assert!(check.missing_packet_numbers.is_empty());
-        assert_eq!(
-            connected.peer_status(known_peer),
-            Some(ReliableUdpPeerStatus::Working)
-        );
+        udp_assert_eq!(check.next_expected_packet_number => 0);
+        udp_assert!(check.missing_packet_numbers.is_empty());
+        udp_assert_eq!(connected.peer_status(known_peer) => Some(ReliableUdpPeerStatus::Working));
     }
 
     #[test]
@@ -2487,36 +2428,21 @@ mod tests {
         };
 
         let first = endpoint.receive_at(known_peer, &header(3), Duration::ZERO);
-        assert_eq!(first.datagrams.len(), 1);
-        assert_eq!(
-            decode_reliable_udp_check(&first.datagrams[0].payload)
-                .unwrap()
-                .missing_packet_numbers,
-            vec![0, 1, 2]
-        );
-        assert!(endpoint
+        udp_assert_eq!(first.datagrams.len() => 1);
+        udp_assert_eq!(decode_reliable_udp_check(&first.datagrams[0].payload).unwrap().missing_packet_numbers => vec![0, 1, 2]);
+        udp_assert!(endpoint
             .receive_at(known_peer, &header(3), Duration::from_millis(125))
             .datagrams
             .is_empty());
 
         let continuation = endpoint.receive_at(known_peer, &header(5), Duration::from_millis(188));
-        assert_eq!(continuation.datagrams.len(), 1);
-        assert_eq!(
-            decode_reliable_udp_check(&continuation.datagrams[0].payload)
-                .unwrap()
-                .missing_packet_numbers,
-            vec![3, 4]
-        );
+        udp_assert_eq!(continuation.datagrams.len() => 1);
+        udp_assert_eq!(decode_reliable_udp_check(&continuation.datagrams[0].payload).unwrap().missing_packet_numbers => vec![3, 4]);
 
         let expired =
             endpoint.receive_at(known_peer, &header(5), crate::RELIABLE_UDP_RECHECK_INTERVAL);
-        assert_eq!(expired.datagrams.len(), 1);
-        assert_eq!(
-            decode_reliable_udp_check(&expired.datagrams[0].payload)
-                .unwrap()
-                .missing_packet_numbers,
-            vec![0, 1, 2, 3, 4]
-        );
+        udp_assert_eq!(expired.datagrams.len() => 1);
+        udp_assert_eq!(decode_reliable_udp_check(&expired.datagrams[0].payload).unwrap().missing_packet_numbers => vec![0, 1, 2, 3, 4]);
     }
 
     #[test]
@@ -2528,44 +2454,38 @@ mod tests {
 
         let mut multicast_conn = changed_conn.clone();
         multicast_conn[0] |= 0x80;
-        assert_eq!(
-            endpoint.receive_at(peer_address, &multicast_conn, Duration::ZERO),
+        udp_assert_eq!(
+            endpoint.receive_at(peer_address, &multicast_conn, Duration::ZERO) =>
             ReliableUdpStep::default(),
             "only a changed unicast Conn emits AddAddr"
         );
 
         let step = endpoint.receive_at(peer_address, &changed_conn, Duration::ZERO);
 
-        assert!(step.events.is_empty());
-        assert_eq!(step.datagrams.len(), 1);
-        assert_eq!(
-            step.datagrams[0].destination,
-            reliable_udp_send_address(peer_address)
-        );
-        assert_eq!(
-            decode_reliable_udp_add_address(&step.datagrams[0].payload),
+        udp_assert!(step.events.is_empty());
+        udp_assert_eq!(step.datagrams.len() => 1);
+        udp_assert_eq!(step.datagrams[0].destination => reliable_udp_send_address(peer_address));
+        udp_assert_eq!(
+            decode_reliable_udp_add_address(&step.datagrams[0].payload) =>
             Ok(ReliableUdpAddAddress {
                 packet_number: 0,
                 address: local_address,
                 new_address: new_local_address,
             })
         );
-        assert_eq!(
-            endpoint.peer_status(peer_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
+        udp_assert_eq!(endpoint.peer_status(peer_address) => Some(ReliableUdpPeerStatus::Working));
     }
 
     #[test]
     fn add_address_rejects_spoof_then_merges_duplicate_and_routes_the_alias() {
         fn establish(endpoint: &mut ReliableUdpEndpointCore, peer: SocketAddr) {
-            assert_eq!(endpoint.connect_at(peer, Duration::ZERO).datagrams.len(), 1);
+            udp_assert_eq!(endpoint.connect_at(peer, Duration::ZERO).datagrams.len() => 1);
             let connect_ok = encode_reliable_udp_connect_ok(&ReliableUdpConnectOk {
                 packet_number: 0,
                 multicast_mode: ReliableUdpMulticastMode::NoMulticast,
                 observed_address: peer,
             });
-            assert!(matches!(
+            udp_assert!(matches!(
                 endpoint
                     .receive_at(peer, &connect_ok, Duration::ZERO)
                     .events
@@ -2588,53 +2508,38 @@ mod tests {
         };
         let wire = encode_reliable_udp_add_address(&packet);
 
-        assert_eq!(
-            endpoint.receive_at(attacker, &wire, Duration::ZERO),
+        udp_assert_eq!(
+            endpoint.receive_at(attacker, &wire, Duration::ZERO) =>
             ReliableUdpStep::default(),
             "a known third peer may not merge two carried addresses"
         );
         let mut multicast_flagged = wire.clone();
         multicast_flagged[0] |= 0x80;
         let flagged = endpoint.receive_at(new_address, &multicast_flagged, Duration::ZERO);
-        assert!(flagged.events.is_empty());
-        assert_eq!(flagged.datagrams.len(), 1);
-        assert_eq!(
+        udp_assert!(flagged.events.is_empty());
+        udp_assert_eq!(flagged.datagrams.len() => 1);
+        udp_assert_eq!(
             decode_reliable_udp_check(&flagged.datagrams[0].payload)
                 .unwrap()
-                .missing_multicast_packet_numbers,
+                .missing_multicast_packet_numbers =>
             (0..7).collect::<Vec<_>>(),
             "C++ checks the generic flagged header before ignoring its AddAddr body"
         );
 
         let merged = endpoint.receive_at(new_address, &wire, Duration::ZERO);
-        assert_eq!(merged.datagrams.len(), 1);
-        assert!(reliable_udp_send_is_best_effort(
+        udp_assert_eq!(merged.datagrams.len() => 1);
+        udp_assert!(reliable_udp_send_is_best_effort(
             &merged.datagrams[0].payload
         ));
-        assert_eq!(
-            decode_reliable_udp_close(&merged.datagrams[0].payload),
-            Ok(ReliableUdpClose {
-                packet_number: 0,
-                address: new_address,
-            })
-        );
-        assert_eq!(
-            merged.events,
-            vec![ReliableUdpEvent::Disconnected {
-                peer: new_address,
-                reason: ReliableUdpDisconnectReason::Closed,
-            }]
-        );
-        assert_eq!(
-            endpoint.peer_status(old_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
-        assert_eq!(
-            endpoint.peer_status(new_address),
+        udp_assert_eq!(decode_reliable_udp_close(&merged.datagrams[0].payload) => Ok(ReliableUdpClose { packet_number: 0, address: new_address, }));
+        udp_assert_eq!(merged.events => vec![ReliableUdpEvent::Disconnected { peer: new_address, reason: ReliableUdpDisconnectReason::Closed, }]);
+        udp_assert_eq!(endpoint.peer_status(old_address) => Some(ReliableUdpPeerStatus::Working));
+        udp_assert_eq!(
+            endpoint.peer_status(new_address) =>
             Some(ReliableUdpPeerStatus::Working),
             "the duplicate address now resolves to the surviving peer"
         );
-        assert!(endpoint
+        udp_assert!(endpoint
             .connect_at(new_address, Duration::ZERO)
             .datagrams
             .is_empty());
@@ -2642,8 +2547,8 @@ mod tests {
         let data = encode_reliable_udp_data_fragments(0, b"via alternate")
             .unwrap()
             .remove(0);
-        assert_eq!(
-            endpoint.receive_at(new_address, &data, Duration::ZERO),
+        udp_assert_eq!(
+            endpoint.receive_at(new_address, &data, Duration::ZERO) =>
             ReliableUdpStep {
                 datagrams: Vec::new(),
                 events: vec![ReliableUdpEvent::Packet {
@@ -2653,14 +2558,11 @@ mod tests {
             }
         );
         let outbound = endpoint.send_packet(new_address, b"same peer").unwrap();
-        assert_eq!(outbound.datagrams.len(), 1);
-        assert!(!reliable_udp_send_is_best_effort(
+        udp_assert_eq!(outbound.datagrams.len() => 1);
+        udp_assert!(!reliable_udp_send_is_best_effort(
             &outbound.datagrams[0].payload
         ));
-        assert_eq!(
-            outbound.datagrams[0].destination,
-            reliable_udp_send_address(old_address)
-        );
+        udp_assert_eq!(outbound.datagrams[0].destination => reliable_udp_send_address(old_address));
     }
 
     #[test]
@@ -2670,27 +2572,13 @@ mod tests {
             encode_reliable_udp_connect(&ReliableUdpConnect::unicast(7, a_address));
 
         let step = a.receive_at(b_address, &restarted_conn, Duration::ZERO);
-        assert_eq!(step.datagrams.len(), 3);
-        assert_eq!(
-            reliable_udp_packet_kind(&step.datagrams[0].payload),
-            Some(ReliableUdpPacketKind::Check)
-        );
-        assert_eq!(
-            decode_reliable_udp_check(&step.datagrams[0].payload)
-                .unwrap()
-                .missing_packet_numbers,
-            (0..7).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            reliable_udp_packet_kind(&step.datagrams[1].payload),
-            Some(ReliableUdpPacketKind::Connect)
-        );
-        assert_eq!(
-            reliable_udp_packet_kind(&step.datagrams[2].payload),
-            Some(ReliableUdpPacketKind::ConnectOk)
-        );
-        assert_eq!(
-            step.events,
+        udp_assert_eq!(step.datagrams.len() => 3);
+        udp_assert_eq!(reliable_udp_packet_kind(&step.datagrams[0].payload) => Some(ReliableUdpPacketKind::Check));
+        udp_assert_eq!(decode_reliable_udp_check(&step.datagrams[0].payload).unwrap().missing_packet_numbers => (0..7).collect::<Vec<_>>());
+        udp_assert_eq!(reliable_udp_packet_kind(&step.datagrams[1].payload) => Some(ReliableUdpPacketKind::Connect));
+        udp_assert_eq!(reliable_udp_packet_kind(&step.datagrams[2].payload) => Some(ReliableUdpPacketKind::ConnectOk));
+        udp_assert_eq!(
+            step.events =>
             vec![
                 ReliableUdpEvent::Disconnected {
                     peer: b_address,
@@ -2702,16 +2590,10 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(
-            a.peer_status(b_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
+        udp_assert_eq!(a.peer_status(b_address) => Some(ReliableUdpPeerStatus::Working));
         let control = a.send_packet(b_address, b"after reconnect").unwrap();
-        assert_eq!(control.datagrams.len(), 1);
-        assert_eq!(
-            a.redundant_copies_for(b_address, &control.datagrams[0].payload),
-            0
-        );
+        udp_assert_eq!(control.datagrams.len() => 1);
+        udp_assert_eq!(a.redundant_copies_for(b_address, &control.datagrams[0].payload) => 0);
     }
 
     #[test]
@@ -2719,34 +2601,19 @@ mod tests {
         let peer = address(2, 22_222);
         let mut endpoint = ReliableUdpEndpointCore::new_at(Duration::ZERO);
         let initial = endpoint.connect_at(peer, Duration::ZERO);
-        assert_eq!(initial.datagrams.len(), 1);
-        assert_eq!(
-            reliable_udp_packet_kind(&initial.datagrams[0].payload),
-            Some(ReliableUdpPacketKind::Connect)
-        );
+        udp_assert_eq!(initial.datagrams.len() => 1);
+        udp_assert_eq!(reliable_udp_packet_kind(&initial.datagrams[0].payload) => Some(ReliableUdpPacketKind::Connect));
 
         for second in 1..=5 {
             let retry = endpoint.timer_at(Duration::from_secs(second));
-            assert_eq!(retry.datagrams.len(), 1, "retry {second}");
-            assert_eq!(
-                reliable_udp_packet_kind(&retry.datagrams[0].payload),
-                Some(ReliableUdpPacketKind::Connect)
-            );
-            assert!(retry.events.is_empty());
+            udp_assert_eq!(retry.datagrams.len() => 1, "retry {second}");
+            udp_assert_eq!(reliable_udp_packet_kind(&retry.datagrams[0].payload) => Some(ReliableUdpPacketKind::Connect));
+            udp_assert!(retry.events.is_empty());
         }
         let timeout = endpoint.timer_at(Duration::from_secs(6));
-        assert_eq!(
-            reliable_udp_packet_kind(&timeout.datagrams[0].payload),
-            Some(ReliableUdpPacketKind::Close)
-        );
-        assert_eq!(
-            timeout.events,
-            vec![ReliableUdpEvent::Disconnected {
-                peer,
-                reason: ReliableUdpDisconnectReason::ConnectionTimeout,
-            }]
-        );
-        assert_eq!(endpoint.peer_status(peer), None);
+        udp_assert_eq!(reliable_udp_packet_kind(&timeout.datagrams[0].payload) => Some(ReliableUdpPacketKind::Close));
+        udp_assert_eq!(timeout.events => vec![ReliableUdpEvent::Disconnected { peer, reason: ReliableUdpDisconnectReason::ConnectionTimeout, }]);
+        udp_assert_eq!(endpoint.peer_status(peer) => None);
     }
 
     #[test]
@@ -2757,10 +2624,10 @@ mod tests {
         }
         reset_next_deadline_peer_visits();
 
-        assert_eq!(endpoint.next_deadline(), Duration::from_secs(1));
-        assert_eq!(endpoint.next_deadline(), Duration::from_secs(1));
+        udp_assert_eq!(endpoint.next_deadline() => Duration::from_secs(1));
+        udp_assert_eq!(endpoint.next_deadline() => Duration::from_secs(1));
 
-        assert_eq!(next_deadline_peer_visits(), 0);
+        udp_assert_eq!(next_deadline_peer_visits() => 0);
     }
 
     #[test]
@@ -2770,50 +2637,32 @@ mod tests {
         let mut endpoint = ReliableUdpEndpointCore::new_at(Duration::ZERO);
         let wire = encode_reliable_udp_connect(&ReliableUdpConnect::unicast(0, local));
 
-        assert_eq!(
-            endpoint
-                .receive_at(peer, &wire, Duration::ZERO)
-                .datagrams
-                .len(),
-            1
-        );
+        udp_assert_eq!(endpoint.receive_at(peer, &wire, Duration::ZERO).datagrams.len() => 1);
         for second in 1..=5 {
-            assert_eq!(
-                endpoint
-                    .timer_at(Duration::from_secs(second))
-                    .datagrams
-                    .len(),
-                1
-            );
+            udp_assert_eq!(endpoint.timer_at(Duration::from_secs(second)).datagrams.len() => 1);
         }
         let timeout = endpoint.timer_at(Duration::from_secs(6));
-        assert_eq!(timeout.datagrams.len(), 1);
-        assert!(timeout.events.is_empty());
-        assert_eq!(endpoint.peer_status(peer), None);
+        udp_assert_eq!(timeout.datagrams.len() => 1);
+        udp_assert!(timeout.events.is_empty());
+        udp_assert_eq!(endpoint.peer_status(peer) => None);
 
         let reconnect = endpoint.connect_at(peer, Duration::from_secs(7));
-        assert_eq!(reconnect.datagrams.len(), 1);
-        assert_eq!(
-            endpoint.peer_status(peer),
-            Some(ReliableUdpPeerStatus::Connecting)
-        );
+        udp_assert_eq!(reconnect.datagrams.len() => 1);
+        udp_assert_eq!(endpoint.peer_status(peer) => Some(ReliableUdpPeerStatus::Connecting));
     }
 
     #[test]
     fn working_peer_forces_one_empty_check_per_second() {
         let (_, b_address, mut a, _) = handshake_pair();
-        assert!(a.timer_at(Duration::from_millis(999)).datagrams.is_empty());
+        udp_assert!(a.timer_at(Duration::from_millis(999)).datagrams.is_empty());
         let first = a.timer_at(Duration::from_secs(1));
-        assert_eq!(first.datagrams.len(), 1);
+        udp_assert_eq!(first.datagrams.len() => 1);
         let check = decode_reliable_udp_check(&first.datagrams[0].payload).unwrap();
-        assert!(check.missing_packet_numbers.is_empty());
-        assert_eq!(check.next_expected_packet_number, 0);
-        assert!(a.timer_at(Duration::from_secs(1)).datagrams.is_empty());
-        assert_eq!(a.timer_at(Duration::from_secs(2)).datagrams.len(), 1);
-        assert_eq!(
-            a.peer_status(b_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
+        udp_assert!(check.missing_packet_numbers.is_empty());
+        udp_assert_eq!(check.next_expected_packet_number => 0);
+        udp_assert!(a.timer_at(Duration::from_secs(1)).datagrams.is_empty());
+        udp_assert_eq!(a.timer_at(Duration::from_secs(2)).datagrams.len() => 1);
+        udp_assert_eq!(a.peer_status(b_address) => Some(ReliableUdpPeerStatus::Working));
     }
 
     #[test]
@@ -2822,7 +2671,7 @@ mod tests {
         for byte in 0..3_u8 {
             a.send_packet(b_address, &[byte]).unwrap();
         }
-        assert_eq!(a.outgoing_packet_count(b_address), Some(3));
+        udp_assert_eq!(a.outgoing_packet_count(b_address) => Some(3));
         let ask_two = encode_reliable_udp_check(&ReliableUdpCheck {
             packet_number: 0,
             next_expected_packet_number: 2,
@@ -2832,14 +2681,9 @@ mod tests {
         })
         .unwrap();
         let resend = a.receive_at(b_address, &ask_two, Duration::ZERO);
-        assert_eq!(a.outgoing_packet_count(b_address), Some(1));
-        assert_eq!(resend.datagrams.len(), 1);
-        assert_eq!(
-            decode_reliable_udp_data_fragment(&resend.datagrams[0].payload)
-                .unwrap()
-                .packet_number,
-            2
-        );
+        udp_assert_eq!(a.outgoing_packet_count(b_address) => Some(1));
+        udp_assert_eq!(resend.datagrams.len() => 1);
+        udp_assert_eq!(decode_reliable_udp_data_fragment(&resend.datagrams[0].payload).unwrap().packet_number => 2);
 
         let ask_cleared = encode_reliable_udp_check(&ReliableUdpCheck {
             packet_number: 0,
@@ -2850,21 +2694,9 @@ mod tests {
         })
         .unwrap();
         let starvation = a.receive_at(b_address, &ask_cleared, Duration::ZERO);
-        assert_eq!(
-            reliable_udp_packet_kind(&starvation.datagrams[0].payload),
-            Some(ReliableUdpPacketKind::Close)
-        );
-        assert_eq!(
-            starvation.events,
-            vec![ReliableUdpEvent::Disconnected {
-                peer: b_address,
-                reason: ReliableUdpDisconnectReason::Starvation,
-            }]
-        );
-        assert_eq!(
-            canonical_reliable_udp_peer_address(reliable_udp_send_address(a_address)),
-            a_address
-        );
+        udp_assert_eq!(reliable_udp_packet_kind(&starvation.datagrams[0].payload) => Some(ReliableUdpPacketKind::Close));
+        udp_assert_eq!(starvation.events => vec![ReliableUdpEvent::Disconnected { peer: b_address, reason: ReliableUdpDisconnectReason::Starvation, }]);
+        udp_assert_eq!(canonical_reliable_udp_peer_address(reliable_udp_send_address(a_address)) => a_address);
     }
 
     #[test]
@@ -2874,11 +2706,8 @@ mod tests {
         // src/C4NetIO.cpp:2789-2809,2973-3031,3124-3144,3261-3285).
         let (_, b_address, mut a, _) = handshake_pair();
         let original = a.send_packet(b_address, b"control").unwrap();
-        assert_eq!(original.datagrams.len(), 1);
-        assert_eq!(
-            a.redundant_copies_for(b_address, &original.datagrams[0].payload),
-            0
-        );
+        udp_assert_eq!(original.datagrams.len() => 1);
+        udp_assert_eq!(a.redundant_copies_for(b_address, &original.datagrams[0].payload) => 0);
         let check = encode_reliable_udp_check(&ReliableUdpCheck {
             packet_number: 0,
             next_expected_packet_number: 0,
@@ -2890,14 +2719,11 @@ mod tests {
 
         let repair = a.receive_at(b_address, &check, Duration::ZERO);
 
-        assert_eq!(repair.datagrams.len(), 1);
-        assert_eq!(repair.datagrams[0].payload, original.datagrams[0].payload);
+        udp_assert_eq!(repair.datagrams.len() => 1);
+        udp_assert_eq!(repair.datagrams[0].payload => original.datagrams[0].payload);
         let next = a.send_packet(b_address, b"next control").unwrap();
-        assert_eq!(next.datagrams.len(), 1);
-        assert_eq!(
-            a.redundant_copies_for(b_address, &next.datagrams[0].payload),
-            0
-        );
+        udp_assert_eq!(next.datagrams.len() => 1);
+        udp_assert_eq!(a.redundant_copies_for(b_address, &next.datagrams[0].payload) => 0);
     }
 
     #[test]
@@ -2907,34 +2733,14 @@ mod tests {
             packet_number: 0,
             address: address(3, 33_333),
         });
-        assert_eq!(
-            a.receive_at(b_address, &mismatched_close, Duration::ZERO),
-            ReliableUdpStep::default()
-        );
-        assert_eq!(
-            a.peer_status(b_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
+        udp_assert_eq!(a.receive_at(b_address, &mismatched_close, Duration::ZERO) => ReliableUdpStep::default());
+        udp_assert_eq!(a.peer_status(b_address) => Some(ReliableUdpPeerStatus::Working));
 
         let disconnected = a.report_unreachable(b_address);
-        assert_eq!(disconnected.datagrams.len(), 1);
-        assert_eq!(
-            disconnected.events,
-            vec![ReliableUdpEvent::Disconnected {
-                peer: b_address,
-                reason: ReliableUdpDisconnectReason::ConnectionReset,
-            }]
-        );
-        assert_eq!(
-            decode_reliable_udp_close(&disconnected.datagrams[0].payload)
-                .unwrap()
-                .address,
-            b_address
-        );
-        assert_eq!(
-            canonical_reliable_udp_peer_address(reliable_udp_send_address(a_address)),
-            a_address
-        );
+        udp_assert_eq!(disconnected.datagrams.len() => 1);
+        udp_assert_eq!(disconnected.events => vec![ReliableUdpEvent::Disconnected { peer: b_address, reason: ReliableUdpDisconnectReason::ConnectionReset, }]);
+        udp_assert_eq!(decode_reliable_udp_close(&disconnected.datagrams[0].payload).unwrap().address => b_address);
+        udp_assert_eq!(canonical_reliable_udp_peer_address(reliable_udp_send_address(a_address)) => a_address);
     }
 
     #[test]
@@ -2945,49 +2751,28 @@ mod tests {
             address: a_address,
         });
         for length in 0..incoming_close.len() {
-            assert_eq!(
-                a.receive_at(b_address, &incoming_close[..length], Duration::ZERO),
+            udp_assert_eq!(
+                a.receive_at(b_address, &incoming_close[..length], Duration::ZERO) =>
                 ReliableUdpStep::default(),
                 "short Close length {length}"
             );
         }
-        assert_eq!(
-            a.peer_status(b_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
+        udp_assert_eq!(a.peer_status(b_address) => Some(ReliableUdpPeerStatus::Working));
 
         let local_close = a.close_peer(b_address);
-        assert_eq!(local_close.datagrams.len(), 1);
-        assert_eq!(
-            local_close.events,
-            vec![ReliableUdpEvent::Disconnected {
-                peer: b_address,
-                reason: ReliableUdpDisconnectReason::Closed,
-            }]
-        );
-        assert_eq!(a.peer_status(b_address), None);
-        assert_eq!(
-            decode_reliable_udp_close(&local_close.datagrams[0].payload).unwrap(),
-            ReliableUdpClose {
-                packet_number: 0,
-                address: b_address,
-            }
-        );
-        assert_eq!(a.close_peer(b_address), ReliableUdpStep::default());
+        udp_assert_eq!(local_close.datagrams.len() => 1);
+        udp_assert_eq!(local_close.events => vec![ReliableUdpEvent::Disconnected { peer: b_address, reason: ReliableUdpDisconnectReason::Closed, }]);
+        udp_assert_eq!(a.peer_status(b_address) => None);
+        udp_assert_eq!(decode_reliable_udp_close(&local_close.datagrams[0].payload).unwrap() => ReliableUdpClose { packet_number: 0, address: b_address, });
+        udp_assert_eq!(a.close_peer(b_address) => ReliableUdpStep::default());
 
         let remote_close =
             b.receive_at(a_address, &local_close.datagrams[0].payload, Duration::ZERO);
-        assert!(remote_close.datagrams.is_empty());
-        assert_eq!(
-            remote_close.events,
-            vec![ReliableUdpEvent::Disconnected {
-                peer: a_address,
-                reason: ReliableUdpDisconnectReason::ClosedByPeer,
-            }]
-        );
-        assert_eq!(b.peer_status(a_address), None);
+        udp_assert!(remote_close.datagrams.is_empty());
+        udp_assert_eq!(remote_close.events => vec![ReliableUdpEvent::Disconnected { peer: a_address, reason: ReliableUdpDisconnectReason::ClosedByPeer, }]);
+        udp_assert_eq!(b.peer_status(a_address) => None);
         let replay = b.receive_at(a_address, &local_close.datagrams[0].payload, Duration::ZERO);
-        assert_eq!(replay, ReliableUdpStep::default());
+        udp_assert_eq!(replay => ReliableUdpStep::default());
     }
 
     #[test]
@@ -2996,10 +2781,7 @@ mod tests {
         for value in 0..=RELIABLE_UDP_OUTGOING_PACKET_CAPACITY {
             a.send_packet(b_address, &[value as u8]).unwrap();
         }
-        assert_eq!(
-            a.outgoing_packet_count(b_address),
-            Some(RELIABLE_UDP_OUTGOING_PACKET_CAPACITY)
-        );
+        udp_assert_eq!(a.outgoing_packet_count(b_address) => Some(RELIABLE_UDP_OUTGOING_PACKET_CAPACITY));
         let ask_evicted = encode_reliable_udp_check(&ReliableUdpCheck {
             packet_number: 0,
             next_expected_packet_number: 0,
@@ -3009,7 +2791,7 @@ mod tests {
         })
         .unwrap();
         let starvation = a.receive_at(b_address, &ask_evicted, Duration::ZERO);
-        assert!(matches!(
+        udp_assert!(matches!(
             starvation.events.as_slice(),
             [ReliableUdpEvent::Disconnected {
                 reason: ReliableUdpDisconnectReason::Starvation,
@@ -3070,13 +2852,8 @@ mod tests {
             Duration::from_secs(1),
         );
 
-        assert_eq!(
-            delivered,
-            (0..600_u32)
-                .map(|value| value.to_ne_bytes().to_vec())
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(a.outgoing_packet_count(b_address), Some(0));
+        udp_assert_eq!(delivered => (0..600_u32).map(|value| value.to_ne_bytes().to_vec()).collect::<Vec<_>>());
+        udp_assert_eq!(a.outgoing_packet_count(b_address) => Some(0));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3094,7 +2871,7 @@ mod tests {
             let step = if destination == a_address {
                 a.receive_at(source, &datagram.payload, now)
             } else {
-                assert_eq!(destination, b_address);
+                udp_assert_eq!(destination => b_address);
                 b.receive_at(source, &datagram.payload, now)
             };
             for event in step.events {
@@ -3119,13 +2896,13 @@ mod tests {
         let a_address = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), a.local_addr().unwrap().port());
         let b_address = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), b.local_addr().unwrap().port());
 
-        assert!(a.connect(b_address).await.unwrap().is_empty());
-        assert!(b.poll().await.unwrap().is_empty());
-        assert!(matches!(
+        udp_assert!(a.connect(b_address).await.unwrap().is_empty());
+        udp_assert!(b.poll().await.unwrap().is_empty());
+        udp_assert!(matches!(
             next_driver_events(&mut a).await.as_slice(),
             [ReliableUdpEvent::Connected { .. }]
         ));
-        assert!(matches!(
+        udp_assert!(matches!(
             next_driver_events(&mut b).await.as_slice(),
             [ReliableUdpEvent::Connected { .. }]
         ));
@@ -3133,36 +2910,18 @@ mod tests {
         a.send_packet(b_address, b"hello over reliable udp")
             .await
             .unwrap();
-        assert!(matches!(
+        udp_assert!(matches!(
             next_driver_events(&mut b).await.as_slice(),
             [ReliableUdpEvent::Packet { payload, .. }] if payload == b"hello over reliable udp"
         ));
-        assert_eq!(
-            a.core().peer_status(b_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
-        assert_eq!(
-            b.core().peer_status(a_address),
-            Some(ReliableUdpPeerStatus::Working)
-        );
+        udp_assert_eq!(a.core().peer_status(b_address) => Some(ReliableUdpPeerStatus::Working));
+        udp_assert_eq!(b.core().peer_status(a_address) => Some(ReliableUdpPeerStatus::Working));
 
-        assert_eq!(
-            a.close_peer(b_address).await.unwrap(),
-            vec![ReliableUdpEvent::Disconnected {
-                peer: b_address,
-                reason: ReliableUdpDisconnectReason::Closed,
-            }]
-        );
-        assert_eq!(a.core().peer_status(b_address), None);
-        assert!(a.close_peer(b_address).await.unwrap().is_empty());
-        assert_eq!(
-            next_driver_events(&mut b).await,
-            vec![ReliableUdpEvent::Disconnected {
-                peer: a_address,
-                reason: ReliableUdpDisconnectReason::ClosedByPeer,
-            }]
-        );
-        assert_eq!(b.core().peer_status(a_address), None);
+        udp_assert_eq!(a.close_peer(b_address).await.unwrap() => vec![ReliableUdpEvent::Disconnected { peer: b_address, reason: ReliableUdpDisconnectReason::Closed, }]);
+        udp_assert_eq!(a.core().peer_status(b_address) => None);
+        udp_assert!(a.close_peer(b_address).await.unwrap().is_empty());
+        udp_assert_eq!(next_driver_events(&mut b).await => vec![ReliableUdpEvent::Disconnected { peer: a_address, reason: ReliableUdpDisconnectReason::ClosedByPeer, }]);
+        udp_assert_eq!(b.core().peer_status(a_address) => None);
     }
 
     #[tokio::test]
@@ -3181,15 +2940,15 @@ mod tests {
 
         for status in [0x00, 0x80] {
             spy.send_to(&[status], driver_address).await.unwrap();
-            assert!(driver.poll().await.unwrap().is_empty());
+            udp_assert!(driver.poll().await.unwrap().is_empty());
             let (length, source) =
                 tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
                     .await
                     .unwrap()
                     .unwrap();
-            assert_eq!(canonical_reliable_udp_peer_address(source), driver_address);
-            assert_eq!(&buffer[..length], &[status, 0, 0, 0, 0]);
-            assert_eq!(driver.core().peer_status(spy_address), None);
+            udp_assert_eq!(canonical_reliable_udp_peer_address(source) => driver_address);
+            udp_assert_eq!(&buffer[..length] => &[status, 0, 0, 0, 0]);
+            udp_assert_eq!(driver.core().peer_status(spy_address) => None);
         }
 
         for status in [0x01, 0x81] {
@@ -3197,13 +2956,14 @@ mod tests {
             wire.extend_from_slice(&99_u32.to_ne_bytes());
             wire.extend_from_slice(&[0xaa; 7]);
             spy.send_to(&wire, driver_address).await.unwrap();
-            assert!(driver.poll().await.unwrap().is_empty());
-            assert!(
-                tokio::time::timeout(Duration::from_millis(50), spy.recv_from(&mut buffer))
-                    .await
-                    .is_err()
-            );
-            assert_eq!(driver.core().peer_status(spy_address), None);
+            udp_assert!(driver.poll().await.unwrap().is_empty());
+            udp_assert!(tokio::time::timeout(
+                Duration::from_millis(50),
+                spy.recv_from(&mut buffer)
+            )
+            .await
+            .is_err());
+            udp_assert_eq!(driver.core().peer_status(spy_address) => None);
         }
     }
 
@@ -3217,16 +2977,13 @@ mod tests {
         let spy_address = spy.local_addr().unwrap();
         let mut buffer = [0; 512];
 
-        assert!(driver.connect(spy_address).await.unwrap().is_empty());
+        udp_assert!(driver.connect(spy_address).await.unwrap().is_empty());
         let (connect_length, driver_address) =
             tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
                 .await
                 .unwrap()
                 .unwrap();
-        assert_eq!(
-            reliable_udp_packet_kind(&buffer[..connect_length]),
-            Some(ReliableUdpPacketKind::Connect)
-        );
+        udp_assert_eq!(reliable_udp_packet_kind(&buffer[..connect_length]) => Some(ReliableUdpPacketKind::Connect));
 
         let reciprocal_connect = encode_reliable_udp_connect(&ReliableUdpConnect::unicast(
             0,
@@ -3235,43 +2992,33 @@ mod tests {
         spy.send_to(&reciprocal_connect, driver_address)
             .await
             .unwrap();
-        assert!(matches!(
-            next_driver_events(&mut driver).await.as_slice(),
-            [ReliableUdpEvent::Connected { peer, .. }] if *peer == spy_address
-        ));
+        udp_assert!(
+            matches!(next_driver_events(&mut driver).await.as_slice(), [ReliableUdpEvent::Connected { peer, .. }] if *peer == spy_address )
+        );
         let (connect_ok_length, _) =
             tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
                 .await
                 .unwrap()
                 .unwrap();
-        assert_eq!(
-            reliable_udp_packet_kind(&buffer[..connect_ok_length]),
-            Some(ReliableUdpPacketKind::ConnectOk)
-        );
+        udp_assert_eq!(reliable_udp_packet_kind(&buffer[..connect_ok_length]) => Some(ReliableUdpPacketKind::ConnectOk));
 
-        assert_eq!(
-            driver.close_peer(spy_address).await.unwrap(),
+        udp_assert_eq!(
+            driver.close_peer(spy_address).await.unwrap() =>
             vec![ReliableUdpEvent::Disconnected {
                 peer: spy_address,
                 reason: ReliableUdpDisconnectReason::Closed,
             }]
         );
-        assert_eq!(driver.core().peer_status(spy_address), None);
+        udp_assert_eq!(driver.core().peer_status(spy_address) => None);
         let (close_length, _) =
             tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
                 .await
                 .unwrap()
                 .unwrap();
-        assert_eq!(
-            &buffer[..close_length],
-            encode_reliable_udp_close(&ReliableUdpClose {
-                packet_number: 0,
-                address: spy_address,
-            })
-        );
+        udp_assert_eq!(&buffer[..close_length] => encode_reliable_udp_close(&ReliableUdpClose { packet_number: 0, address: spy_address, }));
 
-        assert!(driver.close_peer(spy_address).await.unwrap().is_empty());
-        assert!(
+        udp_assert!(driver.close_peer(spy_address).await.unwrap().is_empty());
+        udp_assert!(
             tokio::time::timeout(Duration::from_millis(50), spy.recv_from(&mut buffer))
                 .await
                 .is_err(),
@@ -3294,11 +3041,11 @@ mod tests {
         driver
             .bind_peer_statistics(spy.local_addr().unwrap(), key.connection_id)
             .unwrap();
-        assert!(statistics.connection_statistics(key).is_some());
+        udp_assert!(statistics.connection_statistics(key).is_some());
         drop(driver);
 
-        assert_eq!(statistics.connection_statistics(key), None);
-        assert!(statistics.snapshot().connections.is_empty());
+        udp_assert_eq!(statistics.connection_statistics(key) => None);
+        udp_assert!(statistics.snapshot().connections.is_empty());
     }
 
     #[tokio::test]
@@ -3313,7 +3060,7 @@ mod tests {
         let spy_address = spy.local_addr().unwrap();
         let driver_address = connect_spy(&mut driver, &spy).await;
         driver.bind_peer_statistics(spy_address, 23).unwrap();
-        assert!(statistics.generate_statistics(1_001));
+        udp_assert!(statistics.generate_statistics(1_001));
 
         driver
             .send_packet(spy_address, b"physical UDP")
@@ -3324,10 +3071,10 @@ mod tests {
         spy.send_to(&[0x7f, 0x42], driver_address).await.unwrap();
         next_driver_datagram(&mut driver).await;
 
-        assert!(statistics.generate_statistics(2_002));
+        udp_assert!(statistics.generate_statistics(2_002));
         let udp = statistics.protocol_statistics(crate::NetworkProtocol::Udp);
-        assert!(udp.input_rate > 0);
-        assert!(udp.output_rate > 0);
+        udp_assert!(udp.input_rate > 0);
+        udp_assert!(udp.output_rate > 0);
     }
 
     #[tokio::test]
@@ -3349,12 +3096,12 @@ mod tests {
             .next_expected_packet_number();
 
         spy.send_to(&voice, driver_address).await.unwrap();
-        assert!(next_driver_datagram(&mut driver).await.is_empty());
-        assert_eq!(driver.take_voice_media(), Some((spy_address, voice)));
-        assert_eq!(
+        udp_assert!(next_driver_datagram(&mut driver).await.is_empty());
+        udp_assert_eq!(driver.take_voice_media() => Some((spy_address, voice)));
+        udp_assert_eq!(
             driver.core.peers[&peer_key]
                 .receive_window
-                .next_expected_packet_number(),
+                .next_expected_packet_number() =>
             receive_packet_number,
             "media must not enter the reliable receive window"
         );
@@ -3363,8 +3110,8 @@ mod tests {
         oversized[..crate::voice::VOICE_MEDIA_PREFIX.len()]
             .copy_from_slice(crate::voice::VOICE_MEDIA_PREFIX);
         spy.send_to(&oversized, driver_address).await.unwrap();
-        assert!(next_driver_datagram(&mut driver).await.is_empty());
-        assert_eq!(driver.take_voice_media(), None);
+        udp_assert!(next_driver_datagram(&mut driver).await.is_empty());
+        udp_assert_eq!(driver.take_voice_media() => None);
     }
 
     #[tokio::test]
@@ -3382,16 +3129,16 @@ mod tests {
         .unwrap();
         let reliable_packets = driver.core().outgoing_packet_count(spy_address);
 
-        assert!(driver.try_send_voice_media(spy_address, &voice).unwrap());
+        udp_assert!(driver.try_send_voice_media(spy_address, &voice).unwrap());
         let mut received = [0_u8; 512];
         let (length, _) =
             tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut received))
                 .await
                 .unwrap()
                 .unwrap();
-        assert_eq!(&received[..length], voice);
-        assert_eq!(
-            driver.core().outgoing_packet_count(spy_address),
+        udp_assert_eq!(&received[..length] => voice);
+        udp_assert_eq!(
+            driver.core().outgoing_packet_count(spy_address) =>
             reliable_packets,
             "media must not enter retransmission or postmortem storage"
         );
@@ -3416,7 +3163,7 @@ mod tests {
         let first_address = first.local_addr().unwrap();
         let second_address = second.local_addr().unwrap();
         let driver_address = connect_spy(&mut driver, &first).await;
-        assert_eq!(connect_spy(&mut driver, &second).await, driver_address);
+        udp_assert_eq!(connect_spy(&mut driver, &second).await => driver_address);
         let first_key = crate::ConnectionStatisticsKey::new(7, crate::NetworkProtocol::Udp);
         let second_key = crate::ConnectionStatisticsKey::new(9, crate::NetworkProtocol::Udp);
         driver
@@ -3428,13 +3175,13 @@ mod tests {
 
         // Handshake traffic accumulated before the real IDs were available is
         // transferred into those routes, never a synthetic socket key.
-        assert!(statistics.generate_statistics(1_001));
+        udp_assert!(statistics.generate_statistics(1_001));
         for key in [first_key, second_key] {
             let route = statistics.connection_statistics(key).unwrap();
-            assert!(route.input_rate > 0);
-            assert!(route.output_rate > 0);
+            udp_assert!(route.input_rate > 0);
+            udp_assert!(route.output_rate > 0);
         }
-        assert!(statistics
+        udp_assert!(statistics
             .snapshot()
             .connections
             .iter()
@@ -3453,43 +3200,26 @@ mod tests {
             recv_spy_kind(&first, &mut first_wire, ReliableUdpPacketKind::Data).await;
         let (second_length, _) =
             recv_spy_kind(&second, &mut second_wire, ReliableUdpPacketKind::Data).await;
-        assert!(statistics.generate_statistics(2_002));
+        udp_assert!(statistics.generate_statistics(2_002));
         // C++ queues one logical send and forwards each reliable fragment once;
         // physical accounting must therefore charge each route exactly once too
         // (oracle-src-pinned src/C4NetIO.cpp:2789-2809,3124-3144,3261-3285).
         let first_output = normalize(udp_accounted_bytes(first_length));
         let second_output = normalize(udp_accounted_bytes(second_length));
-        assert_eq!(
-            statistics
-                .connection_statistics(first_key)
-                .unwrap()
-                .output_rate,
-            first_output
-        );
-        assert_eq!(
-            statistics
-                .connection_statistics(second_key)
-                .unwrap()
-                .output_rate,
-            second_output
-        );
-        assert_ne!(first_output, second_output);
-        assert_eq!(
-            statistics
-                .protocol_statistics(crate::NetworkProtocol::Udp)
-                .output_rate,
-            normalize(first_output.saturating_add(second_output))
-        );
+        udp_assert_eq!(statistics.connection_statistics(first_key).unwrap().output_rate => first_output);
+        udp_assert_eq!(statistics.connection_statistics(second_key).unwrap().output_rate => second_output);
+        udp_assert_ne!(first_output => second_output);
+        udp_assert_eq!(statistics.protocol_statistics(crate::NetworkProtocol::Udp).output_rate => normalize(first_output.saturating_add(second_output)));
 
         // Known-peer datagrams count before validation. Broadcast remains a
         // separate low-level bucket and never inflates either route.
         first.send_to(&[0x7f, 0x11], driver_address).await.unwrap();
-        assert!(next_driver_datagram(&mut driver).await.is_empty());
+        udp_assert!(next_driver_datagram(&mut driver).await.is_empty());
         second
             .send_to(&[0x7e, 0x22, 0x33], driver_address)
             .await
             .unwrap();
-        assert!(next_driver_datagram(&mut driver).await.is_empty());
+        udp_assert!(next_driver_datagram(&mut driver).await.is_empty());
         let connectionless = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
             .await
             .unwrap();
@@ -3497,7 +3227,7 @@ mod tests {
             .send_to(&[0x80], driver_address)
             .await
             .unwrap();
-        assert!(next_driver_datagram(&mut driver).await.is_empty());
+        udp_assert!(next_driver_datagram(&mut driver).await.is_empty());
         let mut broadcast_wire = [0_u8; 16];
         let (broadcast_length, _) = recv_spy_kind(
             &connectionless,
@@ -3505,67 +3235,33 @@ mod tests {
             ReliableUdpPacketKind::Ping,
         )
         .await;
-        assert!(statistics.generate_statistics(3_003));
+        udp_assert!(statistics.generate_statistics(3_003));
         let first_input = normalize(udp_accounted_bytes(2));
         let second_input = normalize(udp_accounted_bytes(3));
-        assert_eq!(
-            statistics
-                .connection_statistics(first_key)
-                .unwrap()
-                .input_rate,
-            first_input
-        );
-        assert_eq!(
-            statistics
-                .connection_statistics(second_key)
-                .unwrap()
-                .input_rate,
-            second_input
-        );
-        assert_eq!(
-            statistics
-                .protocol_statistics(crate::NetworkProtocol::Udp)
-                .input_rate,
-            normalize(first_input.saturating_add(second_input))
-        );
-        assert_eq!(
-            statistics
-                .protocol_statistics(crate::NetworkProtocol::Udp)
-                .broadcast_rate,
-            normalize(udp_accounted_bytes(broadcast_length))
-        );
+        udp_assert_eq!(statistics.connection_statistics(first_key).unwrap().input_rate => first_input);
+        udp_assert_eq!(statistics.connection_statistics(second_key).unwrap().input_rate => second_input);
+        udp_assert_eq!(statistics.protocol_statistics(crate::NetworkProtocol::Udp).input_rate => normalize(first_input.saturating_add(second_input)));
+        udp_assert_eq!(statistics.protocol_statistics(crate::NetworkProtocol::Udp).broadcast_rate => normalize(udp_accounted_bytes(broadcast_length)));
 
         // Closing removes only that route. Reopening the same endpoint may
         // safely reuse its real key without disturbing the surviving peer.
         driver.close_peer(first_address).await.unwrap();
         let _ = recv_spy_kind(&first, &mut first_wire, ReliableUdpPacketKind::Close).await;
-        assert_eq!(statistics.connection_statistics(first_key), None);
-        assert!(statistics.connection_statistics(second_key).is_some());
+        udp_assert_eq!(statistics.connection_statistics(first_key) => None);
+        udp_assert!(statistics.connection_statistics(second_key).is_some());
         connect_spy(&mut driver, &first).await;
         driver
             .bind_peer_statistics(first_address, first_key.connection_id)
             .unwrap();
-        assert!(statistics.connection_statistics(first_key).is_some());
-        assert!(statistics.generate_statistics(4_004));
+        udp_assert!(statistics.connection_statistics(first_key).is_some());
+        udp_assert!(statistics.generate_statistics(4_004));
         first
             .send_to(&[0x7d, 0x44, 0x55, 0x66], driver_address)
             .await
             .unwrap();
-        assert!(next_driver_datagram(&mut driver).await.is_empty());
-        assert!(statistics.generate_statistics(5_005));
-        assert_eq!(
-            statistics
-                .connection_statistics(first_key)
-                .unwrap()
-                .input_rate,
-            normalize(udp_accounted_bytes(4))
-        );
-        assert_eq!(
-            statistics
-                .connection_statistics(second_key)
-                .unwrap()
-                .input_rate,
-            0
-        );
+        udp_assert!(next_driver_datagram(&mut driver).await.is_empty());
+        udp_assert!(statistics.generate_statistics(5_005));
+        udp_assert_eq!(statistics.connection_statistics(first_key).unwrap().input_rate => normalize(udp_accounted_bytes(4)));
+        udp_assert_eq!(statistics.connection_statistics(second_key).unwrap().input_rate => 0);
     }
 }

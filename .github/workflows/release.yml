@@ -70,14 +70,7 @@ jobs:
             exit 0
           fi
 
-          version=$(python3 - <<'PY'
-          import re
-          from pathlib import Path
-          text = Path("Cargo.toml").read_text(encoding="utf-8")
-          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
-          print(re.search(r'^version = "([^"]+)"$', section.group(1), re.M).group(1))
-          PY
-          )
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "sha=$RESOLVED_SHA" >> "$GITHUB_OUTPUT"
 

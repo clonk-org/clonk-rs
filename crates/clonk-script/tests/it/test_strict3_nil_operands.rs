@@ -3,19 +3,15 @@
 //! default `allowAny=true`, so unary `-`/`~` and `++`/`--` deliberately retain
 //! the legacy nil-to-zero coercion even at STRICT3.
 
-use clonk_script::{Engine, ScriptError, Value};
+use crate::support::{runtime_error as shared_runtime_error, try_eval};
+use clonk_script::{ScriptError, Value};
 
 fn call(source: &str) -> Result<Value, ScriptError> {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("script loads");
-    engine.call("Test", &[])
+    try_eval(source, &[])
 }
 
 fn runtime_error(source: &str) -> String {
-    match call(source).expect_err("nil operand must raise a runtime error") {
-        ScriptError::Runtime(error) => error.message().to_string(),
-        other => panic!("expected runtime error, got {other}"),
-    }
+    shared_runtime_error(source, &[])
 }
 
 #[test]

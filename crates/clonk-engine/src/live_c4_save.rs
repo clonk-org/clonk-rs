@@ -3913,6 +3913,178 @@ mod tests {
     use super::*;
     use crate::PlayerStatus;
 
+    const SCENARIO_SAVE: LiveC4SavePolicy<'static> = LiveC4SavePolicy::Scenario {
+        force_exact_landscape: false,
+    };
+
+    fn test_engine(definition_id: &str, definition_name: &str) -> Engine {
+        let definition = crate::Definition::from_script(definition_id, definition_name, "")
+            .expect("fixture definition compiles");
+        engine_with_definition(definition)
+    }
+
+    fn engine_with_definition(definition: crate::Definition) -> Engine {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("fixture definition registers");
+        engine
+    }
+
+    fn spawn(engine: &mut Engine, config: crate::SpawnConfig) -> ObjectId {
+        engine.spawn_object(config).expect("fixture object spawns")
+    }
+
+    fn spawn_with_id(engine: &mut Engine, definition_id: &str, id: u64) -> ObjectId {
+        spawn(
+            engine,
+            crate::SpawnConfig::new(definition_id).with_id(ObjectId::new(id)),
+        )
+    }
+
+    fn object_index(engine: &Engine, object: ObjectId) -> usize {
+        engine
+            .find_object_index(object)
+            .expect("fixture object exists")
+    }
+
+    fn objects_text(engine: &Engine) -> String {
+        String::from_utf8(serialize_objects(engine, &mut LegacyStringTable::default()))
+            .expect("Objects.txt is UTF-8")
+    }
+
+    fn persisted_objects(engine: &Engine) -> Vec<u8> {
+        let state = engine.capture_state();
+        serialize_persisted_objects(
+            engine,
+            &state.objects,
+            &state.object_order,
+            &mut LegacyStringTable::default(),
+        )
+    }
+
+    fn player_bytes(players: &[PlayerState]) -> Vec<u8> {
+        serialize_players(&Engine::new(), players, &mut LegacyStringTable::default())
+    }
+
+    fn player_text(players: &[PlayerState]) -> String {
+        String::from_utf8(player_bytes(players)).expect("runtime player section is UTF-8")
+    }
+
+    fn assert_bytes_contains(bytes: &[u8], expected: &[u8]) {
+        assert!(
+            bytes
+                .windows(expected.len())
+                .any(|window| window == expected),
+            "missing {expected:?}",
+        );
+    }
+
+    fn assert_bytes_excludes(bytes: &[u8], absent: &[u8]) {
+        assert!(
+            !bytes.windows(absent.len()).any(|window| window == absent),
+            "unexpected {absent:?}",
+        );
+    }
+
+    fn save_spec<'a>(title: &'a str, origin: &'a str) -> LiveC4SaveSpec<'a> {
+        LiveC4SaveSpec {
+            title,
+            definition_modules: &[],
+            definition_executable_path: "",
+            definition_path: "",
+            origin,
+            music_enabled: false,
+            copied_material_group_is_file: false,
+            title_component: LiveC4ComponentHost::Unmodified,
+            info_component: LiveC4ComponentHost::Unmodified,
+            script_component: LiveC4ComponentHost::Unmodified,
+        }
+    }
+
+    fn player_policy(
+        save_user_players: bool,
+        embed_user_player_files: bool,
+    ) -> LiveC4SavePlayerPolicy {
+        LiveC4SavePlayerPolicy {
+            save_user_players,
+            save_script_players: true,
+            embed_user_player_files,
+            embed_script_player_files: true,
+        }
+    }
+
+    fn packed_group(name: &str, files: &[(&str, &[u8])]) -> Group {
+        packed_group_with_maker(name, None, files)
+    }
+
+    fn packed_group_with_maker(name: &str, maker: Option<&str>, files: &[(&str, &[u8])]) -> Group {
+        let mut group = MutableGroup::new(name);
+        if let Some(maker) = maker {
+            group.set_maker(maker);
+        }
+        for (file_name, payload) in files {
+            group
+                .add_file(*file_name, payload.to_vec())
+                .expect("fixture file is unique");
+        }
+        open_group(name, group.pack_raw().expect("fixture group packs"))
+    }
+
+    fn open_group(name: &str, payload: Vec<u8>) -> Group {
+        Group::from_raw_memory(PathBuf::from(name), payload).expect("fixture group opens")
+    }
+
+    fn static_landscape_with_map(
+        texmap: crate::landscape::RuntimeTexMapState,
+        indices: Vec<u8>,
+    ) -> crate::Landscape {
+        let mut raster = crate::landscape::LandscapeRasterState::new(1, 0, texmap);
+        raster.set_map(&IndexedBitmap {
+            width: 2,
+            height: 2,
+            indices,
+        });
+        let mut landscape = crate::Landscape::flat(2, 2);
+        assert!(landscape.set_mode(LANDSCAPE_MODE_STATIC));
+        landscape.set_raster_state(raster);
+        landscape
+    }
+
+    fn save_pointer_fixture() -> (Engine, ObjectId, ObjectId, usize) {
+        let mut engine = test_engine("SAVE", "Save");
+        let object = spawn_with_id(&mut engine, "SAVE", 1);
+        let off_list = spawn_with_id(&mut engine, "SAVE", 2);
+        engine.exec_list = vec![object];
+        engine.inactive_exec_list.clear();
+        let index = object_index(&engine, object);
+        engine.objects[index].state.action.target = Some(off_list);
+        engine.objects[index].compiler_cache.action_target1 = 777;
+        (engine, object, off_list, index)
+    }
+
+    fn user_and_script_crew_fixture() -> (Engine, ObjectId, ObjectId) {
+        let mut engine = test_engine("CLNK", "Crew");
+        for (id, name) in [(1, "User"), (2, "Script")] {
+            engine
+                .register_player(crate::PlayerConfig::new(id, name))
+                .expect("fixture player registers");
+        }
+        engine
+            .player_mut(2)
+            .expect("script player")
+            .set_script_player(true);
+        let user_object = spawn(&mut engine, crate::SpawnConfig::new("CLNK").with_owner(1));
+        let script_object = spawn(&mut engine, crate::SpawnConfig::new("CLNK").with_owner(2));
+        for (player, crew) in [(1, user_object), (2, script_object)] {
+            engine
+                .player_mut(player)
+                .expect("fixture player exists")
+                .set_crew(vec![crew]);
+        }
+        (engine, user_object, script_object)
+    }
+
     fn section_spec(
         name: &str,
         source_group: Option<Group>,
@@ -3995,14 +4167,8 @@ mod tests {
 
     #[test]
     fn ordinary_scenario_save_allows_an_absent_dynamic_landscape() {
-        let saved = serialize_landscape_for_policy(
-            &Engine::new(),
-            LiveC4SavePolicy::Scenario {
-                force_exact_landscape: false,
-            },
-            false,
-        )
-        .expect("a non-forced scenario has no landscape component to save");
+        let saved = serialize_landscape_for_policy(&Engine::new(), SCENARIO_SAVE, false)
+            .expect("a non-forced scenario has no landscape component to save");
         assert!(saved.landscape_bmp.is_none());
         assert!(saved.diff_landscape_bmp.is_none());
         assert!(saved.map_bmp.is_none());
@@ -4023,13 +4189,6 @@ mod tests {
         let save = engine
             .serialize_live_c4_save_with_policy(
                 LiveC4SaveSpec {
-                    title: "Components",
-                    definition_modules: &[],
-                    definition_executable_path: "",
-                    definition_path: "",
-                    origin: "Components.c4s",
-                    music_enabled: false,
-                    copied_material_group_is_file: false,
                     title_component: LiveC4ComponentHost::Delete {
                         name: "TitleDE.txt",
                     },
@@ -4038,10 +4197,9 @@ mod tests {
                         payload: b"localized info",
                     }),
                     script_component: LiveC4ComponentHost::Delete { name: "ScriptDE.c" },
+                    ..save_spec("Components", "Components.c4s")
                 },
-                LiveC4SavePolicy::Scenario {
-                    force_exact_landscape: false,
-                },
+                SCENARIO_SAVE,
             )
             .expect("component-host scenario saves");
 
@@ -4071,19 +4229,10 @@ mod tests {
 
     #[test]
     fn ordinary_static_scenario_save_always_writes_the_retained_map() {
-        let mut landscape = crate::Landscape::flat(2, 2);
-        assert!(landscape.set_mode(LANDSCAPE_MODE_STATIC));
-        let mut raster = crate::landscape::LandscapeRasterState::new(
-            1,
-            0,
+        let landscape = static_landscape_with_map(
             crate::landscape::RuntimeTexMapState::default(),
+            vec![0, 1, 1, 0],
         );
-        raster.set_map(&IndexedBitmap {
-            width: 2,
-            height: 2,
-            indices: vec![0, 1, 1, 0],
-        });
-        landscape.set_raster_state(raster);
         assert!(
             !landscape.map_changed(),
             "fixture map is deliberately clean"
@@ -4091,14 +4240,8 @@ mod tests {
         let mut engine = Engine::new();
         engine.set_landscape(landscape);
 
-        let saved = serialize_landscape_for_policy(
-            &engine,
-            LiveC4SavePolicy::Scenario {
-                force_exact_landscape: false,
-            },
-            false,
-        )
-        .expect("unchanged static map still saves");
+        let saved = serialize_landscape_for_policy(&engine, SCENARIO_SAVE, false)
+            .expect("unchanged static map still saves");
         assert!(saved.map_bmp.is_some());
     }
 
@@ -4112,9 +4255,7 @@ mod tests {
         assert!(matches!(
             serialize_landscape_for_policy(
                 &engine,
-                LiveC4SavePolicy::Scenario {
-                    force_exact_landscape: false,
-                },
+                SCENARIO_SAVE,
                 false,
             ),
             Err(SerializedLandscapeFailure {
@@ -4152,47 +4293,28 @@ mod tests {
 
     #[test]
     fn object_temporary_physical_section_is_follow_name_sibling() {
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("PHYS", "Physical", "")
-                    .expect("definition compiles"),
-            )
-            .expect("definition registers");
+        let mut engine = test_engine("PHYS", "Physical");
         let mut config = crate::SpawnConfig::new("PHYS");
         config.temporary_physical = Some(PhysicalInfo {
             energy: 123,
             ..PhysicalInfo::default()
         });
         config.physical_changes = vec![("Energy".to_owned(), 77)];
-        engine.spawn_object(config).expect("object spawns");
+        spawn(&mut engine, config);
 
-        let objects = String::from_utf8(serialize_objects(
-            &engine,
-            &mut LegacyStringTable::default(),
-        ))
-        .expect("Objects.txt is UTF-8");
+        let objects = objects_text(&engine);
         assert!(objects.contains("\r\n[Physical]\r\nEnergy=123\r\nChanges=Energy=77\r\n"));
         assert!(!objects.contains("\r\n  [Physical]"));
     }
 
     #[test]
     fn object_empty_temporary_physical_omits_empty_follow_name_section() {
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("ZERO", "Zero", "").expect("definition compiles"),
-            )
-            .expect("definition registers");
+        let mut engine = test_engine("ZERO", "Zero");
         let mut config = crate::SpawnConfig::new("ZERO");
         config.temporary_physical = Some(PhysicalInfo::default());
-        engine.spawn_object(config).expect("object spawns");
+        spawn(&mut engine, config);
 
-        let objects = String::from_utf8(serialize_objects(
-            &engine,
-            &mut LegacyStringTable::default(),
-        ))
-        .expect("Objects.txt is UTF-8");
+        let objects = objects_text(&engine);
         assert!(objects.contains("\r\nPhysicalTemporary=true\r\n"));
         assert!(!objects.contains("[Physical]"));
     }
@@ -4313,17 +4435,9 @@ mod tests {
 
     #[test]
     fn every_live_pointer_writer_uses_the_cpp_object_number_boundary() {
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("REFS", "References", "")
-                    .expect("definition compiles"),
-            )
-            .expect("definition registers");
+        let mut engine = test_engine("REFS", "References");
         for id in 1..=4 {
-            engine
-                .spawn_object(crate::SpawnConfig::new("REFS").with_id(ObjectId::new(id)))
-                .expect("object spawns");
+            spawn_with_id(&mut engine, "REFS", id);
         }
         engine.exec_list = vec![ObjectId::new(1), ObjectId::new(4)];
         engine.inactive_exec_list = vec![ObjectId::new(3)];
@@ -4644,19 +4758,9 @@ mod tests {
                 .collect()
         }
 
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("ORDR", "Order", "")
-                    .expect("fixture definition compiles"),
-            )
-            .expect("fixture definition registers");
+        let mut engine = test_engine("ORDR", "Order");
         let ids = (0..5)
-            .map(|_| {
-                engine
-                    .spawn_object(crate::SpawnConfig::new("ORDR"))
-                    .expect("fixture object spawns")
-            })
+            .map(|_| spawn(&mut engine, crate::SpawnConfig::new("ORDR")))
             .collect::<Vec<_>>();
 
         // Both vectors are Last -> Prev already. Saving must consume them
@@ -4664,9 +4768,7 @@ mod tests {
         engine.exec_list = vec![ids[2], ids[0], ids[1]];
         engine.inactive_exec_list = vec![ids[4], ids[3]];
         for id in &ids[3..] {
-            let index = engine
-                .find_object_index(*id)
-                .expect("inactive object exists");
+            let index = object_index(&engine, *id);
             engine.objects[index].state.status = ObjectStatus::Inactive;
         }
         assert_eq!(
@@ -4700,19 +4802,10 @@ mod tests {
         let mut definition =
             crate::Definition::from_script("CNAT", "Contact", "").expect("definition compiles");
         definition.set_shape_vertices(vec![crate::ObjectVertex::new(0, 0).with_cnat(u32::MAX)]);
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        engine
-            .spawn_object(crate::SpawnConfig::new("CNAT"))
-            .expect("fixture object spawns");
+        let mut engine = engine_with_definition(definition);
+        spawn(&mut engine, crate::SpawnConfig::new("CNAT"));
 
-        let text = String::from_utf8(serialize_objects(
-            &engine,
-            &mut LegacyStringTable::default(),
-        ))
-        .expect("Objects.txt is UTF-8");
+        let text = objects_text(&engine);
         let serialized = text
             .lines()
             .find_map(|line| line.strip_prefix("VertexCNAT="))
@@ -4726,38 +4819,19 @@ mod tests {
 
     #[test]
     fn live_save_enumerates_only_listed_object_pointer_caches_before_serializing() {
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("CACH", "Cache", "").expect("definition compiles"),
-            )
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(crate::SpawnConfig::new("CACH").with_id(ObjectId::new(1)))
-            .expect("cache object spawns");
-        let referenced = engine
-            .spawn_object(crate::SpawnConfig::new("CACH").with_id(ObjectId::new(2)))
-            .expect("referenced object spawns");
-        let off_list = engine
-            .spawn_object(crate::SpawnConfig::new("CACH").with_id(ObjectId::new(3)))
-            .expect("off-list object spawns");
-        let deleted = engine
-            .spawn_object(crate::SpawnConfig::new("CACH").with_id(ObjectId::new(4)))
-            .expect("deleted linked object spawns");
+        let mut engine = test_engine("CACH", "Cache");
+        let object = spawn_with_id(&mut engine, "CACH", 1);
+        let referenced = spawn_with_id(&mut engine, "CACH", 2);
+        let off_list = spawn_with_id(&mut engine, "CACH", 3);
+        let deleted = spawn_with_id(&mut engine, "CACH", 4);
         engine.exec_list = vec![object, deleted];
         engine.inactive_exec_list = vec![referenced];
-        let referenced_index = engine
-            .find_object_index(referenced)
-            .expect("referenced object index");
+        let referenced_index = object_index(&engine, referenced);
         engine.objects[referenced_index].state.status = ObjectStatus::Inactive;
-        let deleted_index = engine
-            .find_object_index(deleted)
-            .expect("deleted object index");
+        let deleted_index = object_index(&engine, deleted);
         engine.objects[deleted_index].state.status = ObjectStatus::Deleted;
         engine.objects[deleted_index].compiler_cache.contained = 456;
-        let index = engine
-            .find_object_index(object)
-            .expect("cache object index");
+        let index = object_index(&engine, object);
         engine.objects[index].state.container = Some(referenced);
         engine.objects[index].state.action.target = Some(off_list);
         engine.objects[index].state.action.target2 = Some(deleted);
@@ -4769,9 +4843,7 @@ mod tests {
             action_target2: 1_000_000_002,
             layer: -7,
         };
-        let off_list_index = engine
-            .find_object_index(off_list)
-            .expect("off-list object index");
+        let off_list_index = object_index(&engine, off_list);
         engine.objects[off_list_index].compiler_cache.contained = 123;
 
         let enumeration = engine.enumerate_object_compiler_caches_for_save();
@@ -4817,45 +4889,10 @@ mod tests {
 
     #[test]
     fn root_live_save_enumerates_cache_words_before_writing_objects_txt() {
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("SAVE", "Save", "").expect("definition compiles"),
-            )
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(crate::SpawnConfig::new("SAVE").with_id(ObjectId::new(1)))
-            .expect("saved object spawns");
-        let off_list = engine
-            .spawn_object(crate::SpawnConfig::new("SAVE").with_id(ObjectId::new(2)))
-            .expect("off-list object spawns");
-        engine.exec_list = vec![object];
-        engine.inactive_exec_list.clear();
-        let index = engine
-            .find_object_index(object)
-            .expect("saved object index");
-        engine.objects[index].state.action.target = Some(off_list);
-        engine.objects[index].compiler_cache.action_target1 = 777;
+        let (mut engine, _object, _off_list, index) = save_pointer_fixture();
 
-        let definition_modules = Vec::new();
         let save = engine
-            .serialize_live_c4_save_with_policy(
-                LiveC4SaveSpec {
-                    title: "Cache save",
-                    definition_modules: &definition_modules,
-                    definition_executable_path: "",
-                    definition_path: "",
-                    origin: "Cache.c4s",
-                    music_enabled: false,
-                    copied_material_group_is_file: false,
-                    title_component: LiveC4ComponentHost::Unmodified,
-                    info_component: LiveC4ComponentHost::Unmodified,
-                    script_component: LiveC4ComponentHost::Unmodified,
-                },
-                LiveC4SavePolicy::Scenario {
-                    force_exact_landscape: false,
-                },
-            )
+            .serialize_live_c4_save_with_policy(save_spec("Cache save", "Cache.c4s"), SCENARIO_SAVE)
             .expect("ordinary scenario save succeeds without a landscape");
 
         let objects_txt = String::from_utf8(save.objects_txt).expect("Objects.txt is UTF-8");
@@ -4867,37 +4904,11 @@ mod tests {
 
     #[test]
     fn failed_landscape_save_does_not_enumerate_object_wrappers() {
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("SAVE", "Save", "").expect("definition compiles"),
-            )
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(crate::SpawnConfig::new("SAVE").with_id(ObjectId::new(1)))
-            .expect("saved object spawns");
-        let off_list = engine
-            .spawn_object(crate::SpawnConfig::new("SAVE").with_id(ObjectId::new(2)))
-            .expect("off-list object spawns");
-        engine.exec_list = vec![object];
-        let index = engine.find_object_index(object).unwrap();
-        engine.objects[index].state.action.target = Some(off_list);
-        engine.objects[index].compiler_cache.action_target1 = 777;
+        let (mut engine, _object, off_list, index) = save_pointer_fixture();
 
         let error = engine
             .serialize_live_c4_save_with_policy(
-                LiveC4SaveSpec {
-                    title: "Failed save",
-                    definition_modules: &[],
-                    definition_executable_path: "",
-                    definition_path: "",
-                    origin: "Failure.c4s",
-                    music_enabled: false,
-                    copied_material_group_is_file: false,
-                    title_component: LiveC4ComponentHost::Unmodified,
-                    info_component: LiveC4ComponentHost::Unmodified,
-                    script_component: LiveC4ComponentHost::Unmodified,
-                },
+                save_spec("Failed save", "Failure.c4s"),
                 LiveC4SavePolicy::RuntimeNetwork,
             )
             .expect_err("runtime save requires a landscape");
@@ -4911,58 +4922,22 @@ mod tests {
 
     #[test]
     fn copied_material_file_fails_before_object_enumeration_but_after_game_denumeration() {
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("SAVE", "Save", "").expect("definition compiles"),
-            )
-            .expect("definition registers");
-        let object = engine
-            .spawn_object(crate::SpawnConfig::new("SAVE").with_id(ObjectId::new(1)))
-            .expect("saved object spawns");
-        let off_list = engine
-            .spawn_object(crate::SpawnConfig::new("SAVE").with_id(ObjectId::new(2)))
-            .expect("off-list object spawns");
-        engine.exec_list = vec![object];
-        let index = engine
-            .find_object_index(object)
-            .expect("saved object index");
-        engine.objects[index].state.action.target = Some(off_list);
-        engine.objects[index].compiler_cache.action_target1 = 777;
+        let (mut engine, _object, off_list, index) = save_pointer_fixture();
         engine
             .global_effects
             .push(EffectState::new("Save").with_command_target(Some(2)));
 
         let mut texmap = crate::landscape::RuntimeTexMapState::default();
         texmap.entries_added = true;
-        let mut raster = crate::landscape::LandscapeRasterState::new(1, 0, texmap);
-        raster.set_map(&IndexedBitmap {
-            width: 2,
-            height: 2,
-            indices: vec![0; 4],
-        });
-        let mut landscape = crate::Landscape::flat(2, 2);
-        assert!(landscape.set_mode(LANDSCAPE_MODE_STATIC));
-        landscape.set_raster_state(raster);
-        engine.set_landscape(landscape);
+        engine.set_landscape(static_landscape_with_map(texmap, vec![0; 4]));
 
         let error = engine
             .serialize_live_c4_save_with_policy(
                 LiveC4SaveSpec {
-                    title: "Failed material save",
-                    definition_modules: &[],
-                    definition_executable_path: "",
-                    definition_path: "",
-                    origin: "Failure.c4s",
-                    music_enabled: false,
                     copied_material_group_is_file: true,
-                    title_component: LiveC4ComponentHost::Unmodified,
-                    info_component: LiveC4ComponentHost::Unmodified,
-                    script_component: LiveC4ComponentHost::Unmodified,
+                    ..save_spec("Failed material save", "Failure.c4s")
                 },
-                LiveC4SavePolicy::Scenario {
-                    force_exact_landscape: false,
-                },
+                SCENARIO_SAVE,
             )
             .expect_err("dirty textures cannot replace an ordinary Material.c4g file");
 
@@ -4991,30 +4966,13 @@ mod tests {
 
     #[test]
     fn clean_texture_map_ignores_a_copied_material_file() {
-        let mut raster = crate::landscape::LandscapeRasterState::new(
-            1,
-            0,
-            crate::landscape::RuntimeTexMapState::default(),
-        );
-        raster.set_map(&IndexedBitmap {
-            width: 2,
-            height: 2,
-            indices: vec![0; 4],
-        });
-        let mut landscape = crate::Landscape::flat(2, 2);
-        assert!(landscape.set_mode(LANDSCAPE_MODE_STATIC));
-        landscape.set_raster_state(raster);
+        let landscape =
+            static_landscape_with_map(crate::landscape::RuntimeTexMapState::default(), vec![0; 4]);
         let mut engine = Engine::new();
         engine.set_landscape(landscape);
 
-        let saved = serialize_landscape_for_policy(
-            &engine,
-            LiveC4SavePolicy::Scenario {
-                force_exact_landscape: false,
-            },
-            true,
-        )
-        .expect("a clean texture map never opens the copied Material.c4g entry");
+        let saved = serialize_landscape_for_policy(&engine, SCENARIO_SAVE, true)
+            .expect("a clean texture map never opens the copied Material.c4g entry");
         assert!(saved.material_group.is_none());
     }
 
@@ -5033,16 +4991,11 @@ mod tests {
         let bytes = serialize_scenario(
             &ScenarioValueStore::default(),
             LiveC4SaveSpec {
-                title: "Runtime title",
                 definition_modules: &modules,
                 definition_executable_path: "/opt/game/",
                 definition_path: "Definitions/",
-                origin: "Folder\\Scenario.c4s",
                 music_enabled: true,
-                copied_material_group_is_file: false,
-                title_component: LiveC4ComponentHost::Unmodified,
-                info_component: LiveC4ComponentHost::Unmodified,
-                script_component: LiveC4ComponentHost::Unmodified,
+                ..save_spec("Runtime title", "Folder\\Scenario.c4s")
             },
         );
         for expected in [
@@ -5056,23 +5009,15 @@ mod tests {
             b"Origin=Folder/Scenario.c4s\r\n",
             b"Definitions=\"Objects.c4d\"\r\n",
         ] {
-            assert!(bytes
-                .windows(expected.len())
-                .any(|window| window == expected));
+            assert_bytes_contains(&bytes, expected);
         }
-        assert!(!bytes
-            .windows(b"Icon=18".len())
-            .any(|window| window == b"Icon=18"));
-        assert!(!bytes
-            .windows(b"MaxPlayer=12".len())
-            .any(|window| window == b"MaxPlayer=12"));
+        assert_bytes_excludes(&bytes, b"Icon=18");
+        assert_bytes_excludes(&bytes, b"MaxPlayer=12");
     }
 
     #[test]
     fn save_policies_match_cpp_exactness_and_player_restore_switches() {
-        let scenario = LiveC4SavePolicy::Scenario {
-            force_exact_landscape: false,
-        };
+        let scenario = SCENARIO_SAVE;
         let forced_scenario = LiveC4SavePolicy::Scenario {
             force_exact_landscape: true,
         };
@@ -5095,74 +5040,30 @@ mod tests {
         assert!(savegame.landscape_diff_is_sync_save());
         assert!(!record.landscape_diff_is_sync_save());
         assert!(!network.landscape_diff_is_sync_save());
-        assert_eq!(
-            scenario.player_policy(),
-            LiveC4SavePlayerPolicy {
-                save_user_players: false,
-                save_script_players: true,
-                embed_user_player_files: false,
-                embed_script_player_files: true,
-            }
-        );
-        assert_eq!(
-            savegame.player_policy(),
-            LiveC4SavePlayerPolicy {
-                save_user_players: true,
-                save_script_players: true,
-                embed_user_player_files: false,
-                embed_script_player_files: true,
-            }
-        );
-        assert_eq!(
-            record.player_policy(),
-            LiveC4SavePlayerPolicy {
-                save_user_players: true,
-                save_script_players: true,
-                embed_user_player_files: true,
-                embed_script_player_files: true,
-            }
-        );
-        assert_eq!(
-            network.player_policy(),
-            LiveC4SavePlayerPolicy {
-                save_user_players: true,
-                save_script_players: true,
-                embed_user_player_files: true,
-                embed_script_player_files: true,
-            }
-        );
+        assert_eq!(scenario.player_policy(), player_policy(false, false));
+        assert_eq!(savegame.player_policy(), player_policy(true, false));
+        assert_eq!(record.player_policy(), player_policy(true, true));
+        assert_eq!(network.player_policy(), player_policy(true, true));
     }
 
     #[test]
     fn scenario_and_savegame_headers_use_their_cpp_savecore_policies() {
         let modules = vec!["/opt/game/Definitions/Objects.c4d".to_owned()];
         let spec = LiveC4SaveSpec {
-            title: "Runtime title",
             definition_modules: &modules,
             definition_executable_path: "/opt/game/",
             definition_path: "Definitions/",
-            origin: "Folder\\Scenario.c4s",
             music_enabled: true,
-            copied_material_group_is_file: false,
-            title_component: LiveC4ComponentHost::Unmodified,
-            info_component: LiveC4ComponentHost::Unmodified,
-            script_component: LiveC4ComponentHost::Unmodified,
+            ..save_spec("Runtime title", "Folder\\Scenario.c4s")
         };
-        let scenario = serialize_scenario_for_policy(
-            &ScenarioValueStore::default(),
-            spec,
-            LiveC4SavePolicy::Scenario {
-                force_exact_landscape: false,
-            },
-        );
+        let scenario =
+            serialize_scenario_for_policy(&ScenarioValueStore::default(), spec, SCENARIO_SAVE);
         for expected in [
             b"Version=4,9,11\r\n".as_slice(),
             b"NoInitialize=1\r\n",
             b"ForcedGfxMode=1\r\n",
         ] {
-            assert!(scenario
-                .windows(expected.len())
-                .any(|window| window == expected));
+            assert_bytes_contains(&scenario, expected);
         }
         for absent in [
             b"Title=Runtime title\r\n".as_slice(),
@@ -5172,9 +5073,7 @@ mod tests {
             b"Origin=Folder/Scenario.c4s\r\n",
             b"Definitions=\"Objects.c4d\"\r\n",
         ] {
-            assert!(!scenario
-                .windows(absent.len())
-                .any(|window| window == absent));
+            assert_bytes_excludes(&scenario, absent);
         }
 
         let savegame = serialize_scenario_for_policy(
@@ -5192,13 +5091,9 @@ mod tests {
             b"Origin=Folder/Scenario.c4s\r\n",
             b"Definitions=\"Objects.c4d\"\r\n",
         ] {
-            assert!(savegame
-                .windows(expected.len())
-                .any(|window| window == expected));
+            assert_bytes_contains(&savegame, expected);
         }
-        assert!(!savegame
-            .windows(b"NetworkGame=true\r\n".len())
-            .any(|window| window == b"NetworkGame=true\r\n"));
+        assert_bytes_excludes(&savegame, b"NetworkGame=true\r\n");
     }
 
     #[test]
@@ -5215,16 +5110,11 @@ mod tests {
         let scenario = serialize_scenario_for_policy(
             &ScenarioValueStore::default(),
             LiveC4SaveSpec {
-                title: "007 Runtime title [362]",
                 definition_modules: &modules,
                 definition_executable_path: "/opt/game/",
                 definition_path: "Definitions/",
-                origin: "Folder\\Scenario.c4s",
                 music_enabled: true,
-                copied_material_group_is_file: false,
-                title_component: LiveC4ComponentHost::Unmodified,
-                info_component: LiveC4ComponentHost::Unmodified,
-                script_component: LiveC4ComponentHost::Unmodified,
+                ..save_spec("007 Runtime title [362]", "Folder\\Scenario.c4s")
             },
             LiveC4SavePolicy::Record,
         );
@@ -5237,43 +5127,26 @@ mod tests {
             b"Origin=Folder/Scenario.c4s\r\n",
             b"Definitions=\"Objects.c4d\"\r\n",
         ] {
-            assert!(scenario
-                .windows(expected.len())
-                .any(|window| window == expected));
+            assert_bytes_contains(&scenario, expected);
         }
-        assert!(!scenario
-            .windows(b"NetworkGame=true\r\n".len())
-            .any(|window| window == b"NetworkGame=true\r\n"));
+        assert_bytes_excludes(&scenario, b"NetworkGame=true\r\n");
     }
 
     #[test]
     fn modified_main_section_replaces_only_objects_and_filters_to_c4fls_section() {
-        let mut source = MutableGroup::new("Source.c4s");
-        source.set_maker("Root Scenario Maker");
-        source
-            .add_file("Scenario.txt", b"original scenario".to_vec())
-            .unwrap();
-        source
-            .add_file("Game.txt", b"original game".to_vec())
-            .unwrap();
-        source
-            .add_file("Sky.png", b"original sky".to_vec())
-            .unwrap();
-        source
-            .add_file("CtrlRec.c4b", b"original control".to_vec())
-            .unwrap();
-        source
-            .add_file("Strings.txt", b"old string".to_vec())
-            .unwrap();
-        source
-            .add_file("Objects.txt", b"old object".to_vec())
-            .unwrap();
-        source
-            .add_file("Custom.bin", b"not a main section component".to_vec())
-            .unwrap();
-        let source =
-            Group::from_raw_memory(PathBuf::from("Source.c4s"), source.pack_raw().unwrap())
-                .unwrap();
+        let source = packed_group_with_maker(
+            "Source.c4s",
+            Some("Root Scenario Maker"),
+            &[
+                ("Scenario.txt", b"original scenario"),
+                ("Game.txt", b"original game"),
+                ("Sky.png", b"original sky"),
+                ("CtrlRec.c4b", b"original control"),
+                ("Strings.txt", b"old string"),
+                ("Objects.txt", b"old object"),
+                ("Custom.bin", b"not a main section component"),
+            ],
+        );
 
         let mut engine = Engine::new();
         engine.configure_scenario_sections(&[
@@ -5290,9 +5163,7 @@ mod tests {
 
         let serialized = serialize_scenario_sections(&engine, &mut LegacyStringTable::default()).0;
         assert_eq!(serialized.len(), 1);
-        let group =
-            Group::from_raw_memory(PathBuf::from("Sectmain.c4g"), serialized[0].payload.clone())
-                .unwrap();
+        let group = open_group("Sectmain.c4g", serialized[0].payload.clone());
         assert_eq!(
             group.read_file("Scenario.txt").unwrap(),
             b"original scenario"
@@ -5373,28 +5244,13 @@ mod tests {
 
     #[test]
     fn persisted_section_contents_resolve_against_the_section_object_list() {
-        let mut source = MutableGroup::new("Sectarchive.c4g");
-        source
-            .add_file("Scenario.txt", b"section scenario".to_vec())
-            .unwrap();
-        let source =
-            Group::from_raw_memory(PathBuf::from("Sectarchive.c4g"), source.pack_raw().unwrap())
-                .unwrap();
+        let source = packed_group("Sectarchive.c4g", &[("Scenario.txt", b"section scenario")]);
 
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("TST1", "Section object", "").unwrap(),
-            )
-            .unwrap();
-        let container = engine
-            .spawn_object(crate::SpawnConfig::new("TST1").with_id(ObjectId::new(11)))
-            .unwrap();
-        let content = engine
-            .spawn_object(crate::SpawnConfig::new("TST1").with_id(ObjectId::new(12)))
-            .unwrap();
-        let container_index = engine.find_object_index(container).unwrap();
-        let content_index = engine.find_object_index(content).unwrap();
+        let mut engine = test_engine("TST1", "Section object");
+        let container = spawn_with_id(&mut engine, "TST1", 11);
+        let content = spawn_with_id(&mut engine, "TST1", 12);
+        let container_index = object_index(&engine, container);
+        let content_index = object_index(&engine, content);
         engine.objects[container_index].state.contents = vec![content];
         engine.objects[content_index].state.container = Some(container);
         let persisted = engine.capture_state().objects;
@@ -5416,11 +5272,7 @@ mod tests {
         section.saved_objects = Some(persisted);
 
         let serialized = serialize_scenario_sections(&engine, &mut LegacyStringTable::default()).0;
-        let group = Group::from_raw_memory(
-            PathBuf::from("Sectarchive.c4g"),
-            serialized[0].payload.clone(),
-        )
-        .unwrap();
+        let group = open_group("Sectarchive.c4g", serialized[0].payload.clone());
         let objects = String::from_utf8(group.read_file("Objects.txt").unwrap()).unwrap();
 
         assert!(objects.contains("Number=11\r\n"));
@@ -5429,18 +5281,17 @@ mod tests {
 
     #[test]
     fn no_sky_exact_section_save_deletes_only_extensionless_sky() {
-        let mut source = MutableGroup::new("Sectnight.c4g");
-        source
-            .add_file("Scenario.txt", b"old scenario".to_vec())
-            .unwrap();
-        source.add_file("Sky", b"legacy sky".to_vec()).unwrap();
-        source.add_file("Sky.bmp", b"old bitmap".to_vec()).unwrap();
-        source.add_file("Sky.png", b"old png".to_vec()).unwrap();
-        source.add_file("Sky.jpeg", b"old jpeg".to_vec()).unwrap();
-        source.add_file("Sky.jpg", b"old jpg".to_vec()).unwrap();
-        let source =
-            Group::from_raw_memory(PathBuf::from("Sectnight.c4g"), source.pack_raw().unwrap())
-                .unwrap();
+        let source = packed_group(
+            "Sectnight.c4g",
+            &[
+                ("Scenario.txt", b"old scenario"),
+                ("Sky", b"legacy sky"),
+                ("Sky.bmp", b"old bitmap"),
+                ("Sky.png", b"old png"),
+                ("Sky.jpeg", b"old jpeg"),
+                ("Sky.jpg", b"old jpg"),
+            ],
+        );
 
         let mut spec = section_spec("night", Some(source));
         spec.scenario_values = ScenarioValueStore::with_no_sky_for_test(true);
@@ -5462,11 +5313,7 @@ mod tests {
         section.landscape_modified = true;
 
         let serialized = serialize_scenario_sections(&engine, &mut LegacyStringTable::default()).0;
-        let group = Group::from_raw_memory(
-            PathBuf::from("Sectnight.c4g"),
-            serialized[0].payload.clone(),
-        )
-        .unwrap();
+        let group = open_group("Sectnight.c4g", serialized[0].payload.clone());
         assert!(!group.exists("Sky"));
         for name in ["Sky.bmp", "Sky.png", "Sky.jpeg", "Sky.jpg"] {
             assert!(group.exists(name), "{name} was over-deleted by NoSky");
@@ -5475,22 +5322,16 @@ mod tests {
 
     #[test]
     fn section_switch_freezes_the_departing_group_before_the_root_save() {
-        let mut main = MutableGroup::new("Source.c4s");
-        main.add_file("Scenario.txt", b"main scenario".to_vec())
-            .unwrap();
-        main.add_file("Strings.txt", b"old string\r\n".to_vec())
-            .unwrap();
-        main.add_file("Objects.txt", b"old object".to_vec())
-            .unwrap();
-        main.add_file("Custom.bin", b"not a section component".to_vec())
-            .unwrap();
-        let main =
-            Group::from_raw_memory(PathBuf::from("Source.c4s"), main.pack_raw().unwrap()).unwrap();
-        let mut next = MutableGroup::new("Sectnext.c4g");
-        next.add_file("Scenario.txt", b"next scenario".to_vec())
-            .unwrap();
-        let next = Group::from_raw_memory(PathBuf::from("Sectnext.c4g"), next.pack_raw().unwrap())
-            .unwrap();
+        let main = packed_group(
+            "Source.c4s",
+            &[
+                ("Scenario.txt", b"main scenario"),
+                ("Strings.txt", b"old string\r\n"),
+                ("Objects.txt", b"old object"),
+                ("Custom.bin", b"not a section component"),
+            ],
+        );
+        let next = packed_group("Sectnext.c4g", &[("Scenario.txt", b"next scenario")]);
 
         let mut engine = Engine::new();
         engine.configure_scenario_sections(&[
@@ -5517,30 +5358,27 @@ mod tests {
         assert_eq!(serialized.len(), 1);
         assert_eq!(serialized[0].payload, frozen);
 
-        let group = Group::from_raw_memory(PathBuf::from("Sectmain.c4g"), frozen).unwrap();
+        let group = open_group("Sectmain.c4g", frozen);
         assert_eq!(group.read_file("Objects.txt").unwrap(), b"");
         assert!(!group.exists("Custom.bin"));
     }
 
     #[test]
     fn non_main_named_implicit_root_freeze_extracts_only_section_components() {
-        let mut source = MutableGroup::new("Source.c4s");
-        source.set_maker("Root Scenario Maker");
-        source
-            .add_file("Scenario.txt", b"root scenario".to_vec())
-            .unwrap();
-        source
-            .add_file("Custom.bin", b"root-only payload".to_vec())
-            .unwrap();
-        let source =
-            Group::from_raw_memory(PathBuf::from("Source.c4s"), source.pack_raw().unwrap())
-                .unwrap();
+        let source = packed_group_with_maker(
+            "Source.c4s",
+            Some("Root Scenario Maker"),
+            &[
+                ("Scenario.txt", b"root scenario"),
+                ("Custom.bin", b"root-only payload"),
+            ],
+        );
 
         let mut engine = Engine::new();
         engine.configure_scenario_sections(&[section_spec("Cave", Some(source))]);
         let section = engine.scenario_sections.get("cave").unwrap();
         let frozen = freeze_scenario_section(&engine, section, false, false).unwrap();
-        let group = Group::from_raw_memory(PathBuf::from("SectCave.c4g"), frozen).unwrap();
+        let group = open_group("SectCave.c4g", frozen);
 
         assert_eq!(group.read_file("Scenario.txt").unwrap(), b"root scenario");
         assert!(!group.exists("Custom.bin"));
@@ -5549,25 +5387,15 @@ mod tests {
 
     #[test]
     fn named_main_section_freeze_preserves_its_complete_source_group() {
-        let mut root = MutableGroup::new("Source.c4s");
-        root.add_file("Scenario.txt", b"root scenario".to_vec())
-            .unwrap();
-        let root =
-            Group::from_raw_memory(PathBuf::from("Source.c4s"), root.pack_raw().unwrap()).unwrap();
-
-        let mut named_main = MutableGroup::new("SectMain.c4g");
-        named_main.set_maker("Named Section Maker");
-        named_main
-            .add_file("Scenario.txt", b"named main scenario".to_vec())
-            .unwrap();
-        named_main
-            .add_file("Custom.bin", b"named section payload".to_vec())
-            .unwrap();
-        let named_main = Group::from_raw_memory(
-            PathBuf::from("SectMain.c4g"),
-            named_main.pack_raw().unwrap(),
-        )
-        .unwrap();
+        let root = packed_group("Source.c4s", &[("Scenario.txt", b"root scenario")]);
+        let named_main = packed_group_with_maker(
+            "SectMain.c4g",
+            Some("Named Section Maker"),
+            &[
+                ("Scenario.txt", b"named main scenario"),
+                ("Custom.bin", b"named section payload"),
+            ],
+        );
 
         let mut engine = Engine::new();
         engine.configure_scenario_sections(&[
@@ -5576,7 +5404,7 @@ mod tests {
         ]);
         let section = engine.scenario_sections.get("main").unwrap();
         let frozen = freeze_scenario_section(&engine, section, false, false).unwrap();
-        let group = Group::from_raw_memory(PathBuf::from("SectMain.c4g"), frozen).unwrap();
+        let group = open_group("SectMain.c4g", frozen);
 
         assert_eq!(
             group.read_file("Scenario.txt").unwrap(),
@@ -5591,16 +5419,8 @@ mod tests {
 
     #[test]
     fn section_switch_saves_strings_before_object_reenumeration() {
-        let mut main = MutableGroup::new("Source.c4s");
-        main.add_file("Scenario.txt", b"main scenario".to_vec())
-            .unwrap();
-        let main =
-            Group::from_raw_memory(PathBuf::from("Source.c4s"), main.pack_raw().unwrap()).unwrap();
-        let mut next = MutableGroup::new("Sectnext.c4g");
-        next.add_file("Scenario.txt", b"next scenario".to_vec())
-            .unwrap();
-        let next = Group::from_raw_memory(PathBuf::from("Sectnext.c4g"), next.pack_raw().unwrap())
-            .unwrap();
+        let main = packed_group("Source.c4s", &[("Scenario.txt", b"main scenario")]);
+        let next = packed_group("Sectnext.c4g", &[("Scenario.txt", b"next scenario")]);
 
         let mut engine = Engine::new();
         engine.set_legacy_string_table(HashMap::from([(0, "loaded".to_owned())]));
@@ -5621,7 +5441,7 @@ mod tests {
             .get("main")
             .and_then(|section| section.frozen_group.clone())
             .expect("departing main group freezes");
-        let group = Group::from_raw_memory(PathBuf::from("Sectmain.c4g"), frozen).unwrap();
+        let group = open_group("Sectmain.c4g", frozen);
 
         // LoadScenarioSection saves the table while the runtime string still
         // has iEnumID=-1. Objects.Save enumerates it only after this payload.
@@ -5638,18 +5458,19 @@ mod tests {
 
     #[test]
     fn section_string_save_noop_preserves_existing_component() {
-        let mut main = MutableGroup::new("Source.c4s");
-        main.add_file("Scenario.txt", b"main scenario".to_vec())
-            .unwrap();
-        main.add_file("Strings.txt", b"stale\r\n".to_vec()).unwrap();
-        let main =
-            Group::from_raw_memory(PathBuf::from("Source.c4s"), main.pack_raw().unwrap()).unwrap();
+        let main = packed_group(
+            "Source.c4s",
+            &[
+                ("Scenario.txt", b"main scenario"),
+                ("Strings.txt", b"stale\r\n"),
+            ],
+        );
 
         let mut engine = Engine::new();
         engine.configure_scenario_sections(&[section_spec("main", Some(main))]);
         let section = engine.scenario_sections.get("main").unwrap();
         let frozen = freeze_scenario_section(&engine, section, false, true).unwrap();
-        let group = Group::from_raw_memory(PathBuf::from("Sectmain.c4g"), frozen).unwrap();
+        let group = open_group("Sectmain.c4g", frozen);
 
         assert_eq!(group.read_file("Strings.txt").unwrap(), b"stale\r\n");
     }
@@ -5697,13 +5518,9 @@ mod tests {
             message_buf: " message \\ raw ".to_owned(),
             ..PlayerState::default()
         };
-        let bytes = serialize_players(&Engine::new(), &[player], &mut LegacyStringTable::default());
-        assert!(bytes
-            .windows(b"AtClientName=client name \"raw\"\r\n".len())
-            .any(|window| window == b"AtClientName=client name \"raw\"\r\n"));
-        assert!(bytes
-            .windows(b"MessageBuf= message \\ raw \r\n".len())
-            .any(|window| window == b"MessageBuf= message \\ raw \r\n"));
+        let bytes = player_bytes(&[player]);
+        assert_bytes_contains(&bytes, b"AtClientName=client name \"raw\"\r\n");
+        assert_bytes_contains(&bytes, b"MessageBuf= message \\ raw \r\n");
     }
 
     #[test]
@@ -5716,12 +5533,7 @@ mod tests {
             player_info_id: 7,
             ..PlayerState::default()
         };
-        let text = String::from_utf8(serialize_players(
-            &Engine::new(),
-            &[player],
-            &mut LegacyStringTable::default(),
-        ))
-        .expect("runtime player section is UTF-8");
+        let text = player_text(&[player]);
 
         assert!(text.lines().any(|line| line == "Index=-1"));
     }
@@ -5740,27 +5552,17 @@ mod tests {
             ..PlayerState::default()
         };
 
-        let bytes = serialize_players(
-            &Engine::new(),
-            &[no_viewport, conflicting_viewport],
-            &mut LegacyStringTable::default(),
-        );
+        let bytes = player_bytes(&[no_viewport, conflicting_viewport]);
         for expected in [
             b"ViewX=321\r\n".as_slice(),
             b"ViewY=654\r\n".as_slice(),
             b"ViewX=777\r\n".as_slice(),
             b"ViewY=888\r\n".as_slice(),
         ] {
-            assert!(bytes
-                .windows(expected.len())
-                .any(|window| window == expected));
+            assert_bytes_contains(&bytes, expected);
         }
-        assert!(!bytes
-            .windows(b"ViewX=11\r\n".len())
-            .any(|window| window == b"ViewX=11\r\n"));
-        assert!(!bytes
-            .windows(b"ViewY=22\r\n".len())
-            .any(|window| window == b"ViewY=22\r\n"));
+        assert_bytes_excludes(&bytes, b"ViewX=11\r\n");
+        assert_bytes_excludes(&bytes, b"ViewY=22\r\n");
     }
 
     #[test]
@@ -5769,7 +5571,7 @@ mod tests {
             show_startup: true,
             ..PlayerState::default()
         };
-        let bytes = serialize_players(&Engine::new(), &[player], &mut LegacyStringTable::default());
+        let bytes = player_bytes(&[player]);
         assert_eq!(
             bytes
                 .windows(b"ShowStartup=true\r\n".len())
@@ -5806,11 +5608,7 @@ mod tests {
         assert_eq!(restored.control.auto_context_menu_value, 7);
         assert_eq!(restored.control.control_style_value, -3);
 
-        let bytes = serialize_players(
-            &Engine::new(),
-            &[restored],
-            &mut LegacyStringTable::default(),
-        );
+        let bytes = player_bytes(&[restored]);
         for expected in [
             b"Status=-7\r\n".as_slice(),
             b"Eliminated=-9\r\n",
@@ -5819,9 +5617,7 @@ mod tests {
             b"AutoContextMenu=7\r\n",
             b"AutoStopControl=-3\r\n",
         ] {
-            assert!(bytes
-                .windows(expected.len())
-                .any(|window| window == expected));
+            assert_bytes_contains(&bytes, expected);
         }
     }
 
@@ -5833,12 +5629,7 @@ mod tests {
             production_unit: 0xffff_fffe,
             ..PlayerState::default()
         };
-        let text = String::from_utf8(serialize_players(
-            &Engine::new(),
-            &[player],
-            &mut LegacyStringTable::default(),
-        ))
-        .expect("Game.txt player section is UTF-8");
+        let text = player_text(&[player]);
 
         for (name, expected, original) in [
             ("ObjectsOwned", "-1", u32::MAX),
@@ -5880,20 +5671,13 @@ mod tests {
             ..RoundResultsState::default()
         };
         let bytes = serialize_round_results(&results, false).expect("nonempty results");
-        assert!(bytes
-            .windows(b"Goals=ZERO=0;DEBT=-2\r\n".len())
-            .any(|window| window == b"Goals=ZERO=0;DEBT=-2\r\n"));
-        assert!(bytes
-            .windows(b"LeagueProgressData=\"p\\\\\\\"\\r\\n\\201\"\r\n".len())
-            .any(|window| window == b"LeagueProgressData=\"p\\\\\\\"\\r\\n\\201\"\r\n"));
-        assert!(bytes
-            .windows(b"Status=Won\r\n".len())
-            .any(|window| window == b"Status=Won\r\n"));
-        assert!(bytes
-            .windows(b"NetResult=\"bad \\\\\\\"line\\n\\200\"\r\nNetResult=LeagueError\r\n".len())
-            .any(|window| {
-                window == b"NetResult=\"bad \\\\\\\"line\\n\\200\"\r\nNetResult=LeagueError\r\n"
-            }));
+        assert_bytes_contains(&bytes, b"Goals=ZERO=0;DEBT=-2\r\n");
+        assert_bytes_contains(&bytes, b"LeagueProgressData=\"p\\\\\\\"\\r\\n\\201\"\r\n");
+        assert_bytes_contains(&bytes, b"Status=Won\r\n");
+        assert_bytes_contains(
+            &bytes,
+            b"NetResult=\"bad \\\\\\\"line\\n\\200\"\r\nNetResult=LeagueError\r\n",
+        );
     }
 
     #[test]
@@ -5913,112 +5697,30 @@ mod tests {
 
     #[test]
     fn section_object_filter_skips_user_crew_but_keeps_script_crew() {
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("CLNK", "Crew", "")
-                    .expect("fixture definition compiles"),
-            )
-            .expect("fixture definition registers");
-        engine
-            .register_player(crate::PlayerConfig::new(1, "User"))
-            .expect("user registers");
-        engine
-            .register_player(crate::PlayerConfig::new(2, "Script"))
-            .expect("script player registers");
-        engine
-            .player_mut(2)
-            .expect("script player")
-            .set_script_player(true);
-        let user_object = engine
-            .spawn_object(crate::SpawnConfig::new("CLNK").with_owner(1))
-            .expect("user crew spawns");
-        let script_object = engine
-            .spawn_object(crate::SpawnConfig::new("CLNK").with_owner(2))
-            .expect("script crew spawns");
-        engine
-            .player_mut(1)
-            .expect("user")
-            .set_crew(vec![user_object]);
-        engine
-            .player_mut(2)
-            .expect("script player")
-            .set_crew(vec![script_object]);
-        let state = engine.capture_state();
-        let bytes = serialize_persisted_objects(
-            &engine,
-            &state.objects,
-            &state.object_order,
-            &mut LegacyStringTable::default(),
-        );
+        let (engine, user_object, script_object) = user_and_script_crew_fixture();
+        let bytes = persisted_objects(&engine);
         let user_number = format!("Number={user_object}\r\n");
         let script_number = format!("Number={script_object}\r\n");
-        assert!(!bytes
-            .windows(user_number.len())
-            .any(|window| window == user_number.as_bytes()));
-        assert!(bytes
-            .windows(script_number.len())
-            .any(|window| window == script_number.as_bytes()));
+        assert_bytes_excludes(&bytes, user_number.as_bytes());
+        assert_bytes_contains(&bytes, script_number.as_bytes());
     }
 
     #[test]
     fn saved_scenario_objects_skip_user_crew_but_keep_script_crew() {
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("CLNK", "Crew", "")
-                    .expect("fixture definition compiles"),
-            )
-            .expect("fixture definition registers");
-        engine
-            .register_player(crate::PlayerConfig::new(1, "User"))
-            .expect("user registers");
-        engine
-            .register_player(crate::PlayerConfig::new(2, "Script"))
-            .expect("script player registers");
-        engine
-            .player_mut(2)
-            .expect("script player")
-            .set_script_player(true);
-        let user_object = engine
-            .spawn_object(crate::SpawnConfig::new("CLNK").with_owner(1))
-            .expect("user crew spawns");
-        let script_object = engine
-            .spawn_object(crate::SpawnConfig::new("CLNK").with_owner(2))
-            .expect("script crew spawns");
-        engine
-            .player_mut(1)
-            .expect("user")
-            .set_crew(vec![user_object]);
-        engine
-            .player_mut(2)
-            .expect("script player")
-            .set_crew(vec![script_object]);
+        let (engine, user_object, script_object) = user_and_script_crew_fixture();
 
         let bytes = serialize_objects_for_save(&engine, &mut LegacyStringTable::default(), true);
         let user_number = format!("Number={user_object}\r\n");
         let script_number = format!("Number={script_object}\r\n");
-        assert!(!bytes
-            .windows(user_number.len())
-            .any(|window| window == user_number.as_bytes()));
-        assert!(bytes
-            .windows(script_number.len())
-            .any(|window| window == script_number.as_bytes()));
+        assert_bytes_excludes(&bytes, user_number.as_bytes());
+        assert_bytes_contains(&bytes, script_number.as_bytes());
     }
 
     #[test]
     fn section_object_snapshot_retains_every_private_compiler_field() {
-        let mut engine = Engine::new();
-        engine
-            .register_definition(
-                crate::Definition::from_script("ROCK", "Rock", "")
-                    .expect("fixture definition compiles"),
-            )
-            .expect("fixture definition registers");
-        let id = engine
-            .spawn_object(crate::SpawnConfig::new("ROCK"))
-            .expect("fixture object spawns");
-        let index = engine.find_object_index(id).expect("object exists");
+        let mut engine = test_engine("ROCK", "Rock");
+        let id = spawn(&mut engine, crate::SpawnConfig::new("ROCK"));
+        let index = object_index(&engine, id);
         let object = &mut engine.objects[index];
         object.state.no_collect_delay = 9;
         object.state.entrance_status = true;
@@ -6039,13 +5741,7 @@ mod tests {
         };
         object.last_attach_movement_frame = 77;
 
-        let state = engine.capture_state();
-        let bytes = serialize_persisted_objects(
-            &engine,
-            &state.objects,
-            &state.object_order,
-            &mut LegacyStringTable::default(),
-        );
+        let bytes = persisted_objects(&engine);
         for expected in [
             b"Info=Cached Crew\r\n".as_slice(),
             b"LastSolidAtchFrame=77\r\n".as_slice(),
@@ -6060,9 +5756,7 @@ mod tests {
             b"EntranceStatus=true\r\n",
             b"CrewDisabled=true\r\n",
         ] {
-            assert!(bytes
-                .windows(expected.len())
-                .any(|window| window == expected));
+            assert_bytes_contains(&bytes, expected);
         }
     }
 
@@ -6071,24 +5765,13 @@ mod tests {
         let mut definition =
             crate::Definition::from_script("MASS", "Mass", "").expect("definition compiles");
         definition.set_mass(100);
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let mut engine = engine_with_definition(definition);
         let mut config = crate::SpawnConfig::new("MASS").with_loaded(true);
         config.compiled_mass = Some(777);
-        engine.spawn_object(config).expect("loaded object spawns");
+        spawn(&mut engine, config);
 
-        let state = engine.capture_state();
-        let bytes = serialize_persisted_objects(
-            &engine,
-            &state.objects,
-            &state.object_order,
-            &mut LegacyStringTable::default(),
-        );
-        assert!(bytes
-            .windows(b"Mass=777\r\n".len())
-            .any(|window| window == b"Mass=777\r\n"));
+        let bytes = persisted_objects(&engine);
+        assert_bytes_contains(&bytes, b"Mass=777\r\n");
     }
 
     #[test]
@@ -6096,19 +5779,15 @@ mod tests {
         let mut definition =
             crate::Definition::from_script("MASS", "Mass", "").expect("definition compiles");
         definition.set_mass(10);
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let mut engine = engine_with_definition(definition);
 
-        let root = engine
-            .spawn_object(crate::SpawnConfig::new("MASS"))
-            .expect("root object spawns");
+        let root = spawn(&mut engine, crate::SpawnConfig::new("MASS"));
         let mut parent = root;
         for _ in 1..12 {
-            parent = engine
-                .spawn_object(crate::SpawnConfig::new("MASS").with_container(parent))
-                .expect("nested object spawns");
+            parent = spawn(
+                &mut engine,
+                crate::SpawnConfig::new("MASS").with_container(parent),
+            );
         }
 
         let state = engine.capture_state();
@@ -6133,14 +5812,9 @@ mod tests {
         let mut definition =
             crate::Definition::from_script("MASK", "Mask", "").expect("definition compiles");
         definition.set_solid_mask(Some(default_mask));
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let id = engine
-            .spawn_object(crate::SpawnConfig::new("MASK"))
-            .expect("object spawns");
-        let index = engine.find_object_index(id).expect("object exists");
+        let mut engine = engine_with_definition(definition);
+        let id = spawn(&mut engine, crate::SpawnConfig::new("MASK"));
+        let index = object_index(&engine, id);
         engine.objects[index].state.custom_name = Some(String::new());
         engine.objects[index].state.solid_mask_override = Some(default_mask);
         engine.objects[index].state.base_graphics = Some(crate::ObjectBaseGraphics {
@@ -6149,11 +5823,7 @@ mod tests {
             blit_mode: 0,
         });
 
-        let defaults = String::from_utf8(serialize_objects(
-            &engine,
-            &mut LegacyStringTable::default(),
-        ))
-        .expect("Objects.txt is UTF-8");
+        let defaults = objects_text(&engine);
         assert!(!defaults.lines().any(|line| line.starts_with("Name=")));
         assert!(!defaults.lines().any(|line| line.starts_with("SolidMask=")));
         assert!(!defaults.lines().any(|line| line.starts_with("Graphics=")));
@@ -6166,11 +5836,7 @@ mod tests {
             graphics_name: Some("Alternate".to_owned()),
             blit_mode: 0,
         });
-        let overrides = String::from_utf8(serialize_objects(
-            &engine,
-            &mut LegacyStringTable::default(),
-        ))
-        .expect("Objects.txt is UTF-8");
+        let overrides = objects_text(&engine);
         assert!(overrides.lines().any(|line| line == "Name=\"Named\""));
         assert!(overrides.lines().any(|line| line.starts_with("SolidMask=")));
         assert_eq!(
@@ -6190,15 +5856,11 @@ mod tests {
             -2,
         )
         .expect("team list serializes");
-        assert!(bytes
-            .windows(b"LastTeamID=9\r\n".len())
-            .any(|window| window == b"LastTeamID=9\r\n"));
-        assert!(bytes
-            .windows(b"MaxScriptPlayers=3\r\nScriptPlayerNames=\"Bot\\\\\\\"One\\n\\200\"\r\nRandomTeamCount=-2\r\n".len())
-            .any(|window| {
-                window
-                    == b"MaxScriptPlayers=3\r\nScriptPlayerNames=\"Bot\\\\\\\"One\\n\\200\"\r\nRandomTeamCount=-2\r\n"
-            }));
+        assert_bytes_contains(&bytes, b"LastTeamID=9\r\n");
+        assert_bytes_contains(
+            &bytes,
+            b"MaxScriptPlayers=3\r\nScriptPlayerNames=\"Bot\\\\\\\"One\\n\\200\"\r\nRandomTeamCount=-2\r\n",
+        );
     }
 
     #[test]

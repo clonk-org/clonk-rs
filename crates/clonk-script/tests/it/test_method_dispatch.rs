@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use clonk_script::{clear_active_object_references, Engine, Script, Value};
+use clonk_script::{clear_active_object_references, Engine, Value};
 
 #[test]
 fn object_target_routes_through_the_method_dispatch_hook() {
@@ -19,7 +19,7 @@ fn object_target_routes_through_the_method_dispatch_hook() {
     "#;
     let log: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
     {
         let log = Arc::clone(&log);
         engine.register_method_dispatch(Arc::new(move |args: &[Value]| {
@@ -55,7 +55,7 @@ fn failsafe_arrow_passes_the_failsafe_flag() {
     "#;
     let log: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
     {
         let log = Arc::clone(&log);
         engine.register_method_dispatch(Arc::new(move |args: &[Value]| {
@@ -82,7 +82,7 @@ fn falsy_target_is_an_error_even_for_failsafe_calls() {
         global func Probe(target) { return target->~Maybe(); }
     "#;
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
     engine.register_method_dispatch(Arc::new(|_: &[Value]| Ok(Value::Nil)));
     for target in [Value::Nil, Value::C4Id("00000".into())] {
         let error = engine
@@ -111,7 +111,7 @@ fn globally_unresolved_failsafe_arrow_discards_a_zero_target_after_evaluating_op
         }
     "#;
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("strict-1 script compiles"));
+    crate::support::load_script(&mut engine, source);
 
     assert_eq!(
         engine
@@ -135,7 +135,7 @@ fn engine_wide_known_failsafe_name_preserves_zero_target_validation() {
         global func Probe(target) { return target->~KnownElsewhere(); }
     "#;
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
     engine.register_method_dispatch(Arc::new(|_: &[Value]| Ok(Value::Nil)));
     engine.register_direct_call_function_probe(Rc::new(|name| name == "KnownElsewhere"));
 
@@ -159,7 +159,7 @@ fn removal_during_arguments_stops_before_bare_local_method_dispatch() {
     "#;
     let calls = Arc::new(AtomicUsize::new(0));
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
     engine.register_host_function("Target", |_| Ok(Value::Object(7)));
     engine.register_host_function("Clear", |_| {
         clear_active_object_references(7);
@@ -199,7 +199,7 @@ fn null_target_arrow_calls_consume_random_before_the_unchanged_error() {
             observed_draws.fetch_add(1, Ordering::SeqCst) as i32
         ))
     });
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
 
     for (function, expected_draws) in [("Plain", 1), ("Failsafe", 2)] {
         let error = engine
@@ -225,7 +225,7 @@ fn id_target_dispatches_a_definition_call() {
     "#;
     let log: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
     {
         let log = Arc::clone(&log);
         engine.register_method_dispatch(Arc::new(move |args: &[Value]| {
@@ -251,7 +251,7 @@ fn self_target_routes_through_the_live_world_dispatch() {
     "#;
     let log: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
     {
         let log = Arc::clone(&log);
         engine.register_method_dispatch(Arc::new(move |args: &[Value]| {
@@ -284,7 +284,7 @@ fn arrow_func_ref_result_writes_through_the_dispatch_reference() {
     "#;
     let slot = clonk_script::value_cell(Value::Nil);
     let mut engine = Engine::new();
-    engine.add_script(Script::compile(source).expect("script compiles"));
+    crate::support::load_script(&mut engine, source);
     {
         let slot = Rc::clone(&slot);
         engine.register_method_reference_dispatch(Rc::new(move |args: &[Value]| {

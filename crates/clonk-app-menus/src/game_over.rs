@@ -29,18 +29,8 @@ const CLASSIC_PLAYER_ROW_TOP_INSET: i32 = 3;
 const CLASSIC_PLAYER_LABEL_SPACING: i32 = 2;
 const CLASSIC_CLOSE_BUTTON_SIZE: i32 = 16;
 const CLASSIC_CLOSE_BUTTON_INSET: i32 = 4;
-pub const CLASSIC_FULFILLED_STAR_SOURCE: IntRect = IntRect {
-    x: 0,
-    y: 320,
-    w: 40,
-    h: 40,
-};
-pub const CLASSIC_CLOSE_ICON_SOURCE: IntRect = IntRect {
-    x: 160,
-    y: 200,
-    w: 40,
-    h: 40,
-};
+pub const CLASSIC_FULFILLED_STAR_SOURCE: IntRect = IntRect::new(0, 320, 40, 40);
+pub const CLASSIC_CLOSE_ICON_SOURCE: IntRect = IntRect::new(160, 200, 40, 40);
 const CLASSIC_LEAGUE_ICON_PHASE: u32 = 8;
 const CLASSIC_EXTENDED_ICON_COLUMNS: u32 = 4;
 const CLASSIC_EXTENDED_ICON_NATIVE_SIZE: (u32, u32) = (256, 320);
@@ -1341,23 +1331,20 @@ impl GameOverState {
             (screen_height - 150).min(height_cap)
         }
         .max(1);
-        let dialog = IntRect {
-            x: (screen_width - dialog_width) / 2,
-            y: (screen_height - dialog_height) / 2,
-            w: dialog_width,
-            h: dialog_height,
-        };
+        let dialog = IntRect::new(
+            (screen_width - dialog_width) / 2,
+            (screen_height - dialog_height) / 2,
+            dialog_width,
+            dialog_height,
+        );
         let caption_height = CLASSIC_MIN_CAPTION_HEIGHT.min(dialog.h);
-        let caption = IntRect {
-            h: caption_height,
-            ..dialog
-        };
-        let close_button = IntRect {
-            x: caption.x + caption.w - CLASSIC_CLOSE_BUTTON_SIZE - CLASSIC_CLOSE_BUTTON_INSET,
-            y: caption.y + CLASSIC_CLOSE_BUTTON_INSET,
-            w: CLASSIC_CLOSE_BUTTON_SIZE,
-            h: CLASSIC_CLOSE_BUTTON_SIZE,
-        };
+        let caption = dialog.with_height(caption_height);
+        let close_button = IntRect::new(
+            caption.x + caption.w - CLASSIC_CLOSE_BUTTON_SIZE - CLASSIC_CLOSE_BUTTON_INSET,
+            caption.y + CLASSIC_CLOSE_BUTTON_INSET,
+            CLASSIC_CLOSE_BUTTON_SIZE,
+            CLASSIC_CLOSE_BUTTON_SIZE,
+        );
         let client_height = (dialog.h - caption_height).max(0);
 
         // ComponentAligner caMain(GetClientRect(), 0, 6, true), followed by
@@ -1367,12 +1354,12 @@ impl GameOverState {
         let button_area_y = (after_bottom_padding - button_area_height - CLASSIC_INDENT_Y).max(0);
         let remaining_height =
             (after_bottom_padding - button_area_height - 2 * CLASSIC_INDENT_Y).max(0);
-        let player_area = IntRect {
-            x: dialog.x + CLASSIC_INDENT_X,
-            y: dialog.y + caption_height + CLASSIC_INDENT_Y,
-            w: (dialog.w - 2 * CLASSIC_INDENT_X).max(0),
-            h: (remaining_height - 2 * CLASSIC_INDENT_Y).max(0),
-        };
+        let player_area = IntRect::new(
+            dialog.x + CLASSIC_INDENT_X,
+            dialog.y + caption_height + CLASSIC_INDENT_Y,
+            (dialog.w - 2 * CLASSIC_INDENT_X).max(0),
+            (remaining_height - 2 * CLASSIC_INDENT_Y).max(0),
+        );
 
         let count = self.buttons.len().max(1) as i32;
         let cell_width = ((dialog.w - CLASSIC_INDENT_X) / count - CLASSIC_INDENT_X).max(1);
@@ -1381,14 +1368,16 @@ impl GameOverState {
             .buttons
             .iter()
             .enumerate()
-            .map(|(index, _)| IntRect {
-                x: dialog.x
-                    + CLASSIC_INDENT_X
-                    + index as i32 * (cell_width + CLASSIC_INDENT_X)
-                    + (cell_width - actual_button_width) / 2,
-                y: dialog.y + caption_height + button_area_y,
-                w: actual_button_width,
-                h: button_area_height,
+            .map(|(index, _)| {
+                IntRect::new(
+                    dialog.x
+                        + CLASSIC_INDENT_X
+                        + index as i32 * (cell_width + CLASSIC_INDENT_X)
+                        + (cell_width - actual_button_width) / 2,
+                    dialog.y + caption_height + button_area_y,
+                    actual_button_width,
+                    button_area_height,
+                )
             })
             .collect();
 
@@ -1432,12 +1421,12 @@ impl GameOverState {
         } else {
             (goal_count - 1) / goals_per_row + 1
         };
-        let goal_display = (goal_rows > 0).then_some(IntRect {
-            x: chrome.dialog.x,
-            y: chrome.player_area.y,
-            w: chrome.dialog.w,
-            h: goal_rows * goal_area_height,
-        });
+        let goal_display = (goal_rows > 0).then_some(IntRect::new(
+            chrome.dialog.x,
+            chrome.player_area.y,
+            chrome.dialog.w,
+            goal_rows * goal_area_height,
+        ));
         let goals = (0..goal_count)
             .map(|index| {
                 let row = index / goals_per_row;
@@ -1445,22 +1434,22 @@ impl GameOverState {
                 let row_start = row * goals_per_row;
                 let goals_in_row = (goal_count - row_start).min(goals_per_row);
                 let group_width = goals_in_row * goal_area_height;
-                let picture = IntRect {
-                    x: chrome.dialog.x
+                let picture = IntRect::new(
+                    chrome.dialog.x
                         + (chrome.dialog.w - group_width) / 2
                         + column * goal_area_height
                         + CLASSIC_GOAL_MARGIN,
-                    y: chrome.player_area.y + row * goal_area_height + CLASSIC_GOAL_MARGIN,
-                    w: CLASSIC_GOAL_SIZE,
-                    h: CLASSIC_GOAL_SIZE,
-                };
+                    chrome.player_area.y + row * goal_area_height + CLASSIC_GOAL_MARGIN,
+                    CLASSIC_GOAL_SIZE,
+                    CLASSIC_GOAL_SIZE,
+                );
                 ClassicEvaluationGoalLayout {
-                    fulfilled_star: IntRect {
-                        x: picture.x + picture.w / 2,
-                        y: picture.y + picture.h / 2,
-                        w: picture.w / 2,
-                        h: picture.h / 2,
-                    },
+                    fulfilled_star: IntRect::new(
+                        picture.x + picture.w / 2,
+                        picture.y + picture.h / 2,
+                        picture.w / 2,
+                        picture.h / 2,
+                    ),
                     picture,
                 }
             })
@@ -1479,12 +1468,12 @@ impl GameOverState {
         let player_area_bottom = chrome.player_area.y + chrome.player_area.h;
         let network_result = self.network_result_label.as_ref().map(|_| {
             let width = (chrome.dialog.w - 6 * CLASSIC_INDENT_X).max(0);
-            let area = IntRect {
-                x: chrome.dialog.x + (chrome.dialog.w - width) / 2,
-                y: player_list_y,
-                w: width,
-                h: text_font.line_height * 2,
-            };
+            let area = IntRect::new(
+                chrome.dialog.x + (chrome.dialog.w - width) / 2,
+                player_list_y,
+                width,
+                text_font.line_height * 2,
+            );
             player_list_y += area.h + 2 * CLASSIC_INDENT_Y;
             area
         });
@@ -1500,25 +1489,25 @@ impl GameOverState {
                 let measured_height = classic_multiline_label_height(&measured_lines, text_font);
                 let maximum_height = (player_area_bottom - player_list_y).max(0) / 3;
                 let scrollable = measured_height > maximum_height;
-                let area = IntRect {
-                    x: area_x,
-                    y: player_list_y,
-                    w: width,
-                    h: if scrollable {
+                let area = IntRect::new(
+                    area_x,
+                    player_list_y,
+                    width,
+                    if scrollable {
                         maximum_height
                     } else {
                         measured_height
                     },
-                };
+                );
                 if scrollable {
                     // TextWindow keeps its 10/5px horizontal and 8px vertical
                     // client margins and always reserves the 16px ScrollBar.
-                    let viewport = IntRect {
-                        x: area.x + 10,
-                        y: area.y + 8,
-                        w: (area.w - 10 - 5 - 16).max(0),
-                        h: (area.h - 16).max(0),
-                    };
+                    let viewport = IntRect::new(
+                        area.x + 10,
+                        area.y + 8,
+                        (area.w - 10 - 5 - 16).max(0),
+                        (area.h - 16).max(0),
+                    );
                     let lines = classic_multiline_label_lines(
                         text_font,
                         self.evaluation.custom_evaluation_strings(),
@@ -1529,12 +1518,12 @@ impl GameOverState {
                         viewport,
                         content_height: classic_multiline_label_height(&lines, text_font),
                         scrollable: true,
-                        scrollbar: Some(IntRect {
-                            x: area.x + area.w - CLASSIC_SCROLLBAR_EXTENT,
-                            y: area.y,
-                            w: CLASSIC_SCROLLBAR_EXTENT,
-                            h: area.h,
-                        }),
+                        scrollbar: Some(IntRect::new(
+                            area.x + area.w - CLASSIC_SCROLLBAR_EXTENT,
+                            area.y,
+                            CLASSIC_SCROLLBAR_EXTENT,
+                            area.h,
+                        )),
                     }
                 } else {
                     ClassicEvaluationTextLayout {
@@ -1556,20 +1545,24 @@ impl GameOverState {
         let player_lists = if self.evaluation.separate_team_ids.is_some() {
             let cell_width = ((chrome.dialog.w - CLASSIC_INDENT_X) / 2 - CLASSIC_INDENT_X).max(0);
             (0..2)
-                .map(|index| IntRect {
-                    x: chrome.dialog.x + CLASSIC_INDENT_X + index * (cell_width + CLASSIC_INDENT_X),
-                    y: player_list_y,
-                    w: cell_width,
-                    h: player_list_height,
+                .map(|index| {
+                    IntRect::new(
+                        chrome.dialog.x
+                            + CLASSIC_INDENT_X
+                            + index * (cell_width + CLASSIC_INDENT_X),
+                        player_list_y,
+                        cell_width,
+                        player_list_height,
+                    )
                 })
                 .collect::<Vec<_>>()
         } else {
-            vec![IntRect {
-                x: chrome.player_area.x,
-                y: player_list_y,
-                w: chrome.player_area.w,
-                h: player_list_height,
-            }]
+            vec![IntRect::new(
+                chrome.player_area.x,
+                player_list_y,
+                chrome.player_area.w,
+                player_list_height,
+            )]
         };
 
         let split = self.evaluation.separate_team_ids;
@@ -1606,12 +1599,12 @@ impl GameOverState {
             // C4SymbolSize square and the label is centred against it
             // (`:1014-1027`).
             if let Some(team_ids) = split {
-                let icon = IntRect {
-                    x: player_list.x + CLASSIC_PLAYER_ROW_LEFT_INSET,
-                    y: row_y,
-                    w: CLASSIC_TEAM_HEADER_ICON,
-                    h: CLASSIC_TEAM_HEADER_ICON,
-                };
+                let icon = IntRect::new(
+                    player_list.x + CLASSIC_PLAYER_ROW_LEFT_INSET,
+                    row_y,
+                    CLASSIC_TEAM_HEADER_ICON,
+                    CLASSIC_TEAM_HEADER_ICON,
+                );
                 team_headers.push(ClassicEvaluationTeamHeaderLayout {
                     player_list_index,
                     team_id: team_ids[player_list_index],
@@ -1631,22 +1624,20 @@ impl GameOverState {
                 let has_custom_evaluation = !player.custom_evaluation_strings.is_empty();
                 let row_height = CLASSIC_PLAYER_ROW_HEIGHT
                     + i32::from(has_custom_evaluation) * text_font.line_height;
-                let row = IntRect {
-                    x: player_list.x + CLASSIC_PLAYER_ROW_LEFT_INSET,
-                    y: row_y,
-                    w: row_width,
-                    h: row_height,
-                };
+                let row = IntRect::new(
+                    player_list.x + CLASSIC_PLAYER_ROW_LEFT_INSET,
+                    row_y,
+                    row_width,
+                    row_height,
+                );
                 // In a league game the rank icon claims a square column at
                 // the row's right edge, and the score label's right edge is
                 // measured against it instead of the row width
                 // (src/C4PlayerInfoListBox.cpp:199-206,352).
-                let rank_icon = self.evaluation.is_league().then(|| IntRect {
-                    x: row.x + row.w - row.h,
-                    y: row.y,
-                    w: row.h,
-                    h: row.h,
-                });
+                let rank_icon = self
+                    .evaluation
+                    .is_league()
+                    .then(|| IntRect::new(row.x + row.w - row.h, row.y, row.h, row.h));
                 let right_anchor =
                     rank_icon.map_or(row.x + row.w, |rank| rank.x) - CLASSIC_PLAYER_LABEL_SPACING;
                 let score_y = if split.is_some() {
@@ -1660,11 +1651,7 @@ impl GameOverState {
                     player_index,
                     player_list_index,
                     row,
-                    icon: IntRect {
-                        w: CLASSIC_PLAYER_ROW_HEIGHT,
-                        h: CLASSIC_PLAYER_ROW_HEIGHT,
-                        ..row
-                    },
+                    icon: row.with_size(CLASSIC_PLAYER_ROW_HEIGHT, CLASSIC_PLAYER_ROW_HEIGHT),
                     name_anchor: (
                         row.x + row.h + CLASSIC_PLAYER_LABEL_SPACING,
                         row.y + CLASSIC_PLAYER_LABEL_SPACING,
@@ -2243,12 +2230,12 @@ impl GameOverState {
                 let cell = icons.width() as i32 / columns;
                 if let Some(icon) = crop_image(
                     icons,
-                    IntRect {
-                        x: (phase as i32 % columns) * cell,
-                        y: (phase as i32 / columns) * cell,
-                        w: cell,
-                        h: cell,
-                    },
+                    IntRect::new(
+                        (phase as i32 % columns) * cell,
+                        (phase as i32 / columns) * cell,
+                        cell,
+                        cell,
+                    ),
                 ) {
                     draw_classic_image(surface, &icon, rect, gamma);
                 }
@@ -2438,12 +2425,12 @@ pub fn resolve_league_evaluation_icon(image: &ImageData) -> Option<ImageData> {
     let phase = CLASSIC_LEAGUE_ICON_PHASE;
     crop_image(
         image,
-        IntRect {
-            x: (phase % CLASSIC_EXTENDED_ICON_COLUMNS * cell) as i32,
-            y: (phase / CLASSIC_EXTENDED_ICON_COLUMNS * cell) as i32,
-            w: cell as i32,
-            h: cell as i32,
-        },
+        IntRect::new(
+            (phase % CLASSIC_EXTENDED_ICON_COLUMNS * cell) as i32,
+            (phase / CLASSIC_EXTENDED_ICON_COLUMNS * cell) as i32,
+            cell as i32,
+            cell as i32,
+        ),
     )
 }
 
@@ -2499,12 +2486,7 @@ fn draw_joined_savegame_crew_overlay(
         draw_classic_image(
             surface,
             image,
-            IntRect {
-                x: icon.x + offset,
-                y,
-                w: width,
-                h: height,
-            },
+            IntRect::new(icon.x + offset, y, width, height),
             gamma,
         );
     }
@@ -2540,12 +2522,7 @@ fn render_evaluation_score(
         draw_classic_image(
             surface,
             icon,
-            IntRect {
-                x,
-                y: anchor.1,
-                w: icon_width,
-                h: icon_height,
-            },
+            IntRect::new(x, anchor.1, icon_width, icon_height),
             gamma,
         );
     }
@@ -2906,64 +2883,28 @@ mod tests {
         let geometry = |icon: IntRect| {
             let size_max = icon.w.max(icon.h);
             let crew_height = size_max / 2;
-            IntRect {
-                x: icon.x,
-                y: icon.y + crew_height,
-                w: size_max / 2,
-                h: icon.h - crew_height,
-            }
+            IntRect::new(
+                icon.x,
+                icon.y + crew_height,
+                size_max / 2,
+                icon.h - crew_height,
+            )
         };
 
-        let square = IntRect {
-            x: 40,
-            y: 60,
-            w: 40,
-            h: 40,
-        };
+        let square = IntRect::new(40, 60, 40, 40);
         assert_eq!(
             geometry(square),
-            IntRect {
-                x: 40,
-                y: 80,
-                w: 20,
-                h: 20
-            },
+            IntRect::new(40, 80, 20, 20),
             "a square icon yields a quarter-area lower-left quad"
         );
 
         // A wide icon takes its half-size from the *larger* axis, so the quad
         // can be taller than half the icon.
-        let wide = IntRect {
-            x: 0,
-            y: 0,
-            w: 64,
-            h: 32,
-        };
-        assert_eq!(
-            geometry(wide),
-            IntRect {
-                x: 0,
-                y: 32,
-                w: 32,
-                h: 0
-            }
-        );
+        let wide = IntRect::new(0, 0, 64, 32);
+        assert_eq!(geometry(wide), IntRect::new(0, 32, 32, 0));
 
-        let tall = IntRect {
-            x: 0,
-            y: 0,
-            w: 32,
-            h: 64,
-        };
-        assert_eq!(
-            geometry(tall),
-            IntRect {
-                x: 0,
-                y: 32,
-                w: 32,
-                h: 32
-            }
-        );
+        let tall = IntRect::new(0, 0, 32, 64);
+        assert_eq!(geometry(tall), IntRect::new(0, 32, 32, 32));
 
         // Only the shadow pass is offset, and only by two pixels.
         assert_eq!(square.x + 2 - square.x, 2);
@@ -2972,18 +2913,8 @@ mod tests {
     #[test]
     fn overflowing_custom_evaluation_text_reserves_and_travels_the_native_scrollbar() {
         let short = ClassicEvaluationTextLayout {
-            area: IntRect {
-                x: 0,
-                y: 0,
-                w: 200,
-                h: 40,
-            },
-            viewport: IntRect {
-                x: 0,
-                y: 0,
-                w: 200,
-                h: 40,
-            },
+            area: IntRect::new(0, 0, 200, 40),
+            viewport: IntRect::new(0, 0, 200, 40),
             content_height: 40,
             scrollable: false,
             scrollbar: None,
@@ -2993,28 +2924,13 @@ mod tests {
             "a fitting MultilineLabel has no bar at all"
         );
 
-        let area = IntRect {
-            x: 10,
-            y: 20,
-            w: 200,
-            h: 96,
-        };
+        let area = IntRect::new(10, 20, 200, 96);
         let tall = ClassicEvaluationTextLayout {
             area,
-            viewport: IntRect {
-                x: area.x + 10,
-                y: area.y + 8,
-                w: area.w - 10 - 5 - 16,
-                h: area.h - 16,
-            },
+            viewport: IntRect::new(area.x + 10, area.y + 8, area.w - 10 - 5 - 16, area.h - 16),
             content_height: 400,
             scrollable: true,
-            scrollbar: Some(IntRect {
-                x: area.x + area.w - 16,
-                y: area.y,
-                w: 16,
-                h: area.h,
-            }),
+            scrollbar: Some(IntRect::new(area.x + area.w - 16, area.y, 16, area.h)),
         };
         let bar = tall.scrollbar.expect("overflowing text reserves a bar");
         assert_eq!(bar.w, 16, "C4GUI_ScrollBarWdt");
@@ -3037,7 +2953,7 @@ mod tests {
             0,
             "an unscrollable window pins to the top"
         );
-        let squat = IntRect { h: 3 * 16, ..bar };
+        let squat = bar.with_height(3 * 16);
         assert_eq!(
             scrollbar_pin_offset(squat, maximum, maximum),
             0,
@@ -3183,12 +3099,7 @@ mod tests {
     #[test]
     fn derived_game_over_facets_reuse_retained_texture_identity() {
         let source = solid_image(4, 4, [120, 80, 40, 255]);
-        let rect = IntRect {
-            x: 1,
-            y: 1,
-            w: 2,
-            h: 2,
-        };
+        let rect = IntRect::new(1, 1, 2, 2);
         let first_crop = crop_image(&source, rect).expect("valid crop");
         let second_crop = crop_image(&source, rect).expect("valid crop");
         assert_eq!(first_crop.gpu_texture_id(), second_crop.gpu_texture_id());
@@ -3276,12 +3187,7 @@ mod tests {
         let result = layout.network_result.expect("network result label");
         assert_eq!(
             result,
-            IntRect {
-                x: 35,
-                y: 34,
-                w: 954,
-                h: fonts.text.line_height * 2,
-            }
+            IntRect::new(35, 34, 954, fonts.text.line_height * 2)
         );
         assert_eq!(
             layout.player_lists[0].y,
@@ -3516,15 +3422,7 @@ mod tests {
                 .map(|image| (image.width(), image.height())),
             Some((240, 360))
         );
-        assert_eq!(
-            CLASSIC_FULFILLED_STAR_SOURCE,
-            IntRect {
-                x: 0,
-                y: 320,
-                w: 40,
-                h: 40
-            }
-        );
+        assert_eq!(CLASSIC_FULFILLED_STAR_SOURCE, IntRect::new(0, 320, 40, 40));
         assert_eq!(
             resources
                 .player
@@ -3711,15 +3609,7 @@ mod tests {
             ],
             "an eligible host or Film 2 retains Restart without Next Mission"
         );
-        assert_eq!(
-            layout.dialog,
-            IntRect {
-                x: 112,
-                y: 75,
-                w: 800,
-                h: 450,
-            }
-        );
+        assert_eq!(layout.dialog, IntRect::new(112, 75, 800, 450));
         assert_eq!(layout.buttons.len(), 2);
     }
 
@@ -3748,15 +3638,7 @@ mod tests {
 
         assert_eq!(state.hovered_action(), None);
         let layout = state.classic_layout(1280, 720, &fonts);
-        assert_eq!(
-            layout.dialog,
-            IntRect {
-                x: 75,
-                y: 75,
-                w: 1130,
-                h: 570,
-            }
-        );
+        assert_eq!(layout.dialog, IntRect::new(75, 75, 1130, 570));
         assert_eq!(layout.buttons.len(), 4);
         let next = state.button_rects(1280, 720)[3];
         state.handle_pointer_move(
@@ -3882,54 +3764,15 @@ mod tests {
         let layout = state.classic_layout(1024, 600, &fonts);
 
         assert_eq!(CLASSIC_DIALOG_TITLE, "Evaluation");
-        assert_eq!(
-            layout.dialog,
-            IntRect {
-                x: 5,
-                y: 5,
-                w: 1014,
-                h: 590
-            }
-        );
-        assert_eq!(
-            layout.caption,
-            IntRect {
-                x: 5,
-                y: 5,
-                w: 1014,
-                h: 23
-            }
-        );
-        assert_eq!(
-            layout.player_area,
-            IntRect {
-                x: 15,
-                y: 34,
-                w: 994,
-                h: 487
-            }
-        );
+        assert_eq!(layout.dialog, IntRect::new(5, 5, 1014, 590));
+        assert_eq!(layout.caption, IntRect::new(5, 5, 1014, 23));
+        assert_eq!(layout.player_area, IntRect::new(15, 34, 994, 487));
         assert_eq!(
             layout.buttons,
             vec![
-                IntRect {
-                    x: 65,
-                    y: 533,
-                    w: 224,
-                    h: 44
-                },
-                IntRect {
-                    x: 399,
-                    y: 533,
-                    w: 224,
-                    h: 44
-                },
-                IntRect {
-                    x: 733,
-                    y: 533,
-                    w: 224,
-                    h: 44
-                },
+                IntRect::new(65, 533, 224, 44),
+                IntRect::new(399, 533, 224, 44),
+                IntRect::new(733, 533, 224, 44),
             ]
         );
     }
@@ -4123,18 +3966,8 @@ mod tests {
         assert_eq!(
             layout.player_lists,
             vec![
-                IntRect {
-                    x: 15,
-                    y: 34,
-                    w: 492,
-                    h: 487,
-                },
-                IntRect {
-                    x: 517,
-                    y: 34,
-                    w: 492,
-                    h: 487,
-                },
+                IntRect::new(15, 34, 492, 487),
+                IntRect::new(517, 34, 492, 487),
             ]
         );
         assert_eq!(
@@ -4367,60 +4200,15 @@ mod tests {
             chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(),
             vec![65, 399, 733]
         );
-        assert_eq!(
-            content.goal_display,
-            Some(IntRect {
-                x: 5,
-                y: 34,
-                w: 1014,
-                h: 72
-            })
-        );
-        assert_eq!(
-            content.goals[0].picture,
-            IntRect {
-                x: 480,
-                y: 38,
-                w: 64,
-                h: 64
-            }
-        );
+        assert_eq!(content.goal_display, Some(IntRect::new(5, 34, 1014, 72)));
+        assert_eq!(content.goals[0].picture, IntRect::new(480, 38, 64, 64));
         assert_eq!(
             content.goals[0].fulfilled_star,
-            IntRect {
-                x: 512,
-                y: 70,
-                w: 32,
-                h: 32
-            }
+            IntRect::new(512, 70, 32, 32)
         );
-        assert_eq!(
-            content.player_lists[0],
-            IntRect {
-                x: 15,
-                y: 118,
-                w: 994,
-                h: 403
-            }
-        );
-        assert_eq!(
-            content.players[0].row,
-            IntRect {
-                x: 21,
-                y: 121,
-                w: 969,
-                h: 54
-            }
-        );
-        assert_eq!(
-            content.players[0].icon,
-            IntRect {
-                x: 21,
-                y: 121,
-                w: 54,
-                h: 54
-            }
-        );
+        assert_eq!(content.player_lists[0], IntRect::new(15, 118, 994, 403));
+        assert_eq!(content.players[0].row, IntRect::new(21, 121, 969, 54));
+        assert_eq!(content.players[0].icon, IntRect::new(21, 121, 54, 54));
         assert_eq!(content.players[0].name_anchor, (77, 123));
         assert_eq!(content.players[0].score_anchor, (988, 123));
         assert_eq!(content.players[0].time_anchor, (988, 147));
@@ -4428,92 +4216,28 @@ mod tests {
         let state = evaluation_state(1280);
         let chrome = state.classic_layout(1280, 720, &fonts);
         let content = state.classic_evaluation_layout(1280, 720, &fonts);
-        assert_eq!(
-            chrome.dialog,
-            IntRect {
-                x: 75,
-                y: 75,
-                w: 1130,
-                h: 570
-            }
-        );
+        assert_eq!(chrome.dialog, IntRect::new(75, 75, 1130, 570));
         assert_eq!(
             chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(),
             vec![108, 388, 668, 948]
         );
         assert!(chrome.buttons.iter().all(|rect| rect.y == 583));
-        assert_eq!(
-            content.goals[0].picture,
-            IntRect {
-                x: 608,
-                y: 108,
-                w: 64,
-                h: 64
-            }
-        );
-        assert_eq!(
-            content.player_lists[0],
-            IntRect {
-                x: 85,
-                y: 188,
-                w: 1110,
-                h: 383
-            }
-        );
-        assert_eq!(
-            content.players[0].row,
-            IntRect {
-                x: 91,
-                y: 191,
-                w: 1085,
-                h: 54
-            }
-        );
+        assert_eq!(content.goals[0].picture, IntRect::new(608, 108, 64, 64));
+        assert_eq!(content.player_lists[0], IntRect::new(85, 188, 1110, 383));
+        assert_eq!(content.players[0].row, IntRect::new(91, 191, 1085, 54));
 
         let state = evaluation_state(1920);
         let chrome = state.classic_layout(1920, 1080, &fonts);
         let content = state.classic_evaluation_layout(1920, 1080, &fonts);
-        assert_eq!(
-            chrome.dialog,
-            IntRect {
-                x: 320,
-                y: 180,
-                w: 1280,
-                h: 720
-            }
-        );
+        assert_eq!(chrome.dialog, IntRect::new(320, 180, 1280, 720));
         assert_eq!(
             chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(),
             vec![371, 688, 1005, 1322]
         );
         assert!(chrome.buttons.iter().all(|rect| rect.y == 838));
-        assert_eq!(
-            content.goals[0].picture,
-            IntRect {
-                x: 928,
-                y: 213,
-                w: 64,
-                h: 64
-            }
-        );
-        assert_eq!(
-            content.player_lists[0],
-            IntRect {
-                x: 330,
-                y: 293,
-                w: 1260,
-                h: 533
-            }
-        );
-        assert_eq!(
-            content.players[0].row,
-            IntRect {
-                x: 336,
-                y: 296,
-                w: 1235,
-                h: 54
-            }
-        );
+        assert_eq!(content.goals[0].picture, IntRect::new(928, 213, 64, 64));
+        assert_eq!(content.player_lists[0], IntRect::new(330, 293, 1260, 533));
+        assert_eq!(content.players[0].row, IntRect::new(336, 296, 1235, 54));
     }
 
     #[test]
@@ -4541,24 +4265,8 @@ mod tests {
 
         let layout = state.classic_evaluation_layout(1024, 600, &fonts);
         assert_eq!(layout.goal_display, None);
-        assert_eq!(
-            layout.player_lists[0],
-            IntRect {
-                x: 15,
-                y: 34,
-                w: 994,
-                h: 487
-            }
-        );
-        assert_eq!(
-            layout.players[0].row,
-            IntRect {
-                x: 21,
-                y: 37,
-                w: 969,
-                h: 54
-            }
-        );
+        assert_eq!(layout.player_lists[0], IntRect::new(15, 34, 994, 487));
+        assert_eq!(layout.players[0].row, IntRect::new(21, 37, 969, 54));
 
         let caption = solid_image(192, 23, [200, 0, 0, 255]);
         let button = solid_image(128, 32, [0, 120, 0, 255]);
@@ -5078,22 +4786,17 @@ mod tests {
 
         assert_eq!(
             CLASSIC_CLOSE_ICON_SOURCE,
-            IntRect {
-                x: 160,
-                y: 200,
-                w: 40,
-                h: 40,
-            },
+            IntRect::new(160, 200, 40, 40),
             "Ico_Close is GUIIcons phase 34 in the six-column 40px atlas"
         );
         assert_eq!(
             layout.close_button,
-            IntRect {
-                x: layout.caption.x + layout.caption.w - 20,
-                y: layout.caption.y + 4,
-                w: 16,
-                h: 16,
-            }
+            IntRect::new(
+                layout.caption.x + layout.caption.w - 20,
+                layout.caption.y + 4,
+                16,
+                16
+            )
         );
 
         let resources = GameOverClassicResources::new(

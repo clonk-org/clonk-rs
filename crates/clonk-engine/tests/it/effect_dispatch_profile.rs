@@ -1,107 +1,16 @@
-//! Manual probe: what effect dispatch materialises over an effect-heavy tick.
+//! Manual effect-dispatch instrumentation for clonk-org/clonk-rs#291.
 //!
-//! clonk-org/clonk-rs#291 asks whether the transient state built around effect
-//! callbacks is still a bottleneck, and requires the dispatch to be
-//! instrumented *before* anything is restructured — specifically that shallow
-//! `HostWorldContext` cloning be told apart from what a build materialises.
-//!
-//! It reports numbers and asserts nothing about them, so it is `#[ignore]`d
-//! like the tree's other manual timing probes. Run it with:
+//! It reports transient world-context work over an effect-heavy trace without
+//! asserting timing thresholds. Run:
 //!
 //! ```sh
 //! cargo nextest run -p clonk-engine-integration-tests --test engine_it \
-//!     --run-ignored all --no-capture -E 'test(effect_dispatch_profile::)'
+//!   --run-ignored all --no-capture -E 'test(effect_dispatch_profile::)'
 //! ```
 //!
-//! # Recorded measurement
-//!
-//! `ClonkMars.c4f/03_Chaos.c4s`, seed 0, one joined player, 200 steady-state
-//! frames, on an aarch64 host at commit `343be4f56`:
-//!
-//! | counter | total | per frame |
-//! |---|---|---|
-//! | global timer events | 963 | 4.8 |
-//! | world context builds | 3,057 | 15.3 |
-//! | context base materializations | 3,057 | 15.3 |
-//! | object state snapshots | 1,944 | 9.7 |
-//!
-//! Ticking cost 406ms, or 2.03ms per frame.
-//!
-//! # What the counts say
-//!
-//! Every context build materializes its base; none are avoided. A build is
-//! therefore roughly three times as frequent as a global timer event, because
-//! object dispatch builds one too.
-//!
-//! The caches inside the base work. A throwaway counter on
-//! `solid_mask_metadata_table` recorded **one miss in 3,057 calls**, so the
-//! definition and solid-mask tables really do cost only an `Rc` clone per
-//! build, and "the cached tables are being rebuilt" is not the explanation
-//! for anything here.
-//!
-//! # What no measurement here supports
-//!
-//! An earlier revision of this comment claimed 11.9% of the tick for base
-//! materialization and attributed it to the uncached transfer-zone, player
-//! order and player-view vectors. **Both claims are withdrawn.** Timing at
-//! that granularity with `Instant::now()` did not survive its own check: two
-//! timers wrapped around the same `solid_mask_metadata_table` call disagreed
-//! by more than two orders of magnitude (0.045ms from inside the function
-//! against 21.35ms from immediately outside it), and that discrepancy is
-//! unexplained. When the instrument contradicts itself the reading is not
-//! evidence, whichever number would have been more convenient.
-//!
-//! Per-piece cost inside the base needed a sampling profiler rather than
-//! hand-placed timers, and that is what settled it.
-//!
-//! # The sampling profile, and the answer
-//!
-//! macOS `sample` over this probe with `PROFILED_FRAMES` raised so the tick
-//! loop runs long enough to sample, 5,961 samples inside
-//! `tick_without_snapshot`:
-//!
-//! | frame | samples | share of tick |
-//! |---|---|---|
-//! | `advance_tick` | 3,280 | 55% |
-//! | ‣ `dispatch_object_effect_events` | 2,822 | 47% |
-//! | ‣‣ descending into the script VM | ~2,400 | ~40% |
-//! | every `host_world_context*` frame combined | 370 | **6.2%** |
-//! | `script_state_snapshot` | 28 | 0.5% |
-//!
-//! **Transient state around effect callbacks is not the bottleneck.** Object
-//! effect dispatch is 86% of `advance_tick`, and almost all of it descends
-//! into `call_effect_timer` → the C4Script VM →
-//! `invoke_resolved_host_value` → `call_self` →
-//! `call_world_object_function_with_options` → the VM again. The cost is
-//! content script *executing*, not the world being built for it to execute
-//! against.
-//!
-//! Two corrections to clonk-org/clonk-rs#291's premise fall out of this:
-//!
-//! - Its profile attributed 47.7% to `tick_global_effects`. Here the global
-//!   list is 4.8 timer events a frame against 15.3 context builds — it is
-//!   *object* effect dispatch that dominates.
-//! - Context construction, the thing the issue set out to reduce, is 6.2%.
-//!   Worth something eventually, but not what an effect-heavy tick is
-//!   spending its time on.
-//!
-//! That satisfies the acceptance criterion allowing this issue to close "with
-//! evidence that remaining materialization is not a bottleneck". Effect-tick
-//! cost is a C4Script VM question, which is clonk-org/clonk-rs#292's
-//! territory.
-//!
-//! # What still holds regardless
-//!
-//! Two structural facts constrain any fix and come from reading the code
-//! rather than from timing:
-//!
-//! - A build cannot be hoisted to once per tick. `tick_global_effects` folds
-//!   each event's outcome back into the engine before the next event runs,
-//!   and the next callback must observe those mutations.
-//! - `with_solid_mask_instance_sequences` deep-clones its `HashMap` on every
-//!   build *because* a callback may mutate the resulting `RefCell` and that
-//!   mutation must not leak back. That is eager copy-on-write, and making it
-//!   lazy is a real change rather than a caching one.
+//! Current conclusion: C4Script execution dominates effect dispatch; context
+//! materialization is not the bottleneck. A context cannot be hoisted across
+//! callbacks because each callback must observe preceding mutations.
 
 use std::time::Instant;
 

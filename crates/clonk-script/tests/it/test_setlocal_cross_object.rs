@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use clonk_script::{
-    clear_active_object_references, value_cell, Engine, RuntimeError, Script, Value, ValueCell,
+    clear_active_object_references, value_cell, Engine, RuntimeError, Value, ValueCell,
 };
 
 type CellTable = Rc<RefCell<HashMap<(u64, String), ValueCell>>>;
@@ -36,18 +36,16 @@ fn engine_with_numbered_local_hook() -> (Engine, CellTable) {
 #[test]
 fn setlocal_with_foreign_target_writes_only_that_objects_slot_and_returns_value() {
     let (mut engine, cells) = engine_with_numbered_local_hook();
-    engine.add_script(
-        Script::compile(
-            r#"
-                #strict
-                public func Assign(target) {
-                    Local(0) = 17;
-                    var result = SetLocal(0, 1, target);
-                    return [result, Local(0), Local(0, target)];
-                }
-            "#,
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict
+        public func Assign(target) {
+            Local(0) = 17;
+            var result = SetLocal(0, 1, target);
+            return [result, Local(0), Local(0, target)];
+        }
+    "#,
     );
 
     let (result, _) = engine
@@ -82,17 +80,15 @@ fn arrow_form_setlocal_writes_the_target_without_world_method_dispatch() {
             "unexpected world method dispatch: {args:?}"
         )))
     }));
-    engine.add_script(
-        Script::compile(
-            r#"
-                #strict
-                public func Assign(target) {
-                    var result = target->SetLocal(13, 42);
-                    return [result, target->Local(13)];
-                }
-            "#,
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict
+        public func Assign(target) {
+            var result = target->SetLocal(13, 42);
+            return [result, target->Local(13)];
+        }
+    "#,
     );
 
     assert_eq!(
@@ -132,16 +128,14 @@ fn arrow_setlocal_clears_an_earlier_value_and_evaluates_surplus_operands() {
             Ok(Value::Nil)
         });
     }
-    engine.add_script(
-        Script::compile(
-            r#"#strict 3
-                public func Probe() {
-                    Target()->SetLocal(0, Victim(), Clear(), Mark());
-                    return Local(0, Target());
-                }
-            "#,
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"#strict 3
+        public func Probe() {
+            Target()->SetLocal(0, Victim(), Clear(), Mark());
+            return Local(0, Target());
+        }
+    "#,
     );
 
     assert_eq!(
@@ -161,17 +155,15 @@ fn arrow_setlocal_clears_an_earlier_value_and_evaluates_surplus_operands() {
 #[test]
 fn setlocal_without_target_still_writes_the_executing_object() {
     let (mut engine, cells) = engine_with_numbered_local_hook();
-    engine.add_script(
-        Script::compile(
-            r#"
-                #strict
-                public func Assign() {
-                    var result = SetLocal(4, 33);
-                    return [result, Local(4)];
-                }
-            "#,
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict
+        public func Assign() {
+            var result = SetLocal(4, 33);
+            return [result, Local(4)];
+        }
+    "#,
     );
 
     let (result, _) = engine
@@ -195,17 +187,15 @@ fn setlocal_evaluates_an_explicit_self_target_expression_exactly_once() {
             Ok(Value::Object(3))
         });
     }
-    engine.add_script(
-        Script::compile(
-            r#"
-                #strict
-                public func Assign() {
-                    var result = SetLocal(5, 23, SelfTarget());
-                    return [result, Local(5)];
-                }
-            "#,
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        r#"
+        #strict
+        public func Assign() {
+            var result = SetLocal(5, 23, SelfTarget());
+            return [result, Local(5)];
+        }
+    "#,
     );
 
     let (result, _) = engine

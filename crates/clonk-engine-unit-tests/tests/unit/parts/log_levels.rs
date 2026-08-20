@@ -84,8 +84,7 @@ func FxProbeStop(pThis, iNumber) { UnknownFn(); return(1); }
     tracing::subscriber::with_default(subscriber, || {
         let mut engine = Engine::with_seed(5);
         engine.register_test_script_definition("HOLD", "Holder", script);
-        let holder =
-            engine.spawn_test_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT));
+        let holder = spawn_fixture!(engine, "HOLD", with_category: CATEGORY_OBJECT);
         let index = engine.test_object_index(holder);
         engine.call_test_object_function(index, "Boot", Vec::new());
         engine.call_test_object_function(index, "Kill", Vec::new());
@@ -102,16 +101,9 @@ fn a_tolerated_effect_stop_error_is_reported_with_its_frames() {
     run_failing_effect_stop(recorder.clone());
 
     let levels = recorder.levels_mentioning("fail-safe");
-    assert!(
-        !levels.is_empty(),
-        "the effect callback failure should be reported: {:?}",
-        recorder.events()
-    );
-    assert!(
-        levels.iter().all(|level| *level == tracing::Level::ERROR),
-        "the tolerated effect error is filtered out by default: {levels:?}"
-    );
-    assert!(
+    unit_assert!(!levels.is_empty(), "the effect callback failure should be reported: {:?}", recorder.events());
+    unit_assert!(levels.iter().all(|level| *level == tracing::Level::ERROR), "the tolerated effect error is filtered out by default: {levels:?}");
+    unit_assert!(
         recorder
             .events()
             .iter()
@@ -140,7 +132,7 @@ func Construction() { UnknownFn(); return(1); }
         engine.register_test_definition(parent);
         let child = test_definition("CHLD", "Child", child_script);
         engine.register_test_definition(child);
-        engine.spawn_test_object(SpawnConfig::new("PRNT").with_category(CATEGORY_OBJECT));
+        spawn_fixture!(engine, "PRNT", with_category: CATEGORY_OBJECT);
     });
 }
 
@@ -157,16 +149,9 @@ fn a_tolerated_creation_callback_error_is_reported_with_its_frames() {
     run_failing_created_construction(recorder.clone());
 
     let levels = recorder.levels_mentioning("fail-safe");
-    assert!(
-        !levels.is_empty(),
-        "the creation callback failure should be reported: {:?}",
-        recorder.events()
-    );
-    assert!(
-        levels.iter().all(|level| *level == tracing::Level::ERROR),
-        "the tolerated creation error is filtered out by default: {levels:?}"
-    );
-    assert!(
+    unit_assert!(!levels.is_empty(), "the creation callback failure should be reported: {:?}", recorder.events());
+    unit_assert!(levels.iter().all(|level| *level == tracing::Level::ERROR), "the tolerated creation error is filtered out by default: {levels:?}");
+    unit_assert!(
         recorder
             .events()
             .iter()
@@ -188,24 +173,10 @@ fn a_tolerated_script_error_outranks_the_frames_that_trace_it() {
     run_failing_effect_ticks(recorder.clone());
 
     let frames = recorder.levels_mentioning(" by: ");
-    assert!(
-        !frames.is_empty(),
-        "the tolerated error should still be traced: {:?}",
-        recorder.events()
-    );
-    assert!(
-        frames.iter().all(|level| *level == tracing::Level::INFO),
-        "call frames reported off info: {frames:?}"
-    );
+    unit_assert!(!frames.is_empty(), "the tolerated error should still be traced: {:?}", recorder.events());
+    unit_assert!(frames.iter().all(|level| *level == tracing::Level::INFO), "call frames reported off info: {frames:?}");
 
     let levels = recorder.levels_mentioning("fail-safe");
-    assert!(
-        !levels.is_empty(),
-        "the fail-safe path should still be reported somewhere: {:?}",
-        recorder.events()
-    );
-    assert!(
-        levels.iter().all(|level| *level == tracing::Level::ERROR),
-        "the tolerated error is filtered out below its own frames: {levels:?}"
-    );
+    unit_assert!(!levels.is_empty(), "the fail-safe path should still be reported somewhere: {:?}", recorder.events());
+    unit_assert!(levels.iter().all(|level| *level == tracing::Level::ERROR), "the tolerated error is filtered out below its own frames: {levels:?}");
 }

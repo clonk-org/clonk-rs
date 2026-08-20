@@ -95,12 +95,12 @@ fn visible_window(rows: usize, selected_row: Option<usize>, height: u32) -> (usi
 
 /// The rectangle a visible row occupies.
 fn row_rect(index: usize, first: usize, width: u32) -> IntRect {
-    IntRect {
-        x: PADDING + 1,
-        y: PADDING + 1 + (index - first) as i32 * ROW_HEIGHT,
-        w: (width as i32 - PADDING * 2 - 2).max(1),
-        h: ROW_HEIGHT,
-    }
+    IntRect::new(
+        PADDING + 1,
+        PADDING + 1 + (index - first) as i32 * ROW_HEIGHT,
+        (width as i32 - PADDING * 2 - 2).max(1),
+        ROW_HEIGHT,
+    )
 }
 
 /// The C++ cell-data callback scales each `PictureRect` facet to 24 pixels on
@@ -128,12 +128,12 @@ fn icon_extent(icon: &ImageData) -> Option<(i32, i32)> {
 fn icon_rect(row: IntRect, depth: usize, icon: &ImageData) -> Option<IntRect> {
     let (width, height) = icon_extent(icon)?;
     let x = row.x + depth as i32 * INDENT;
-    Some(IntRect {
+    Some(IntRect::new(
         x,
-        y: row.y + (ROW_HEIGHT - height) / 2,
-        w: width,
-        h: height,
-    })
+        row.y + (ROW_HEIGHT - height) / 2,
+        width,
+        height,
+    ))
 }
 
 /// Which object a click landed on, or `None` past the last row.
@@ -172,12 +172,12 @@ pub(crate) fn render_object_list(
 ) {
     surface.fill(WINDOW_BACKGROUND);
     let (width, height) = (surface.width(), surface.height());
-    let client = IntRect {
-        x: PADDING,
-        y: PADDING,
-        w: (width as i32 - PADDING * 2).max(1),
-        h: (height as i32 - PADDING * 2).max(1),
-    };
+    let client = IntRect::new(
+        PADDING,
+        PADDING,
+        (width as i32 - PADDING * 2).max(1),
+        (height as i32 - PADDING * 2).max(1),
+    );
     draw_sunken(surface, client, CONTROL_BACKGROUND);
     let first_selected = rows
         .iter()
@@ -204,11 +204,7 @@ pub(crate) fn render_object_list(
         draw_fitted_text(
             surface,
             font,
-            IntRect {
-                x: text_x,
-                w: (rect.w - text_x + rect.x).max(1),
-                ..rect
-            },
+            rect.with_horizontal(text_x, (rect.w - text_x + rect.x).max(1)),
             &row.name,
             if chosen { SELECTED_TEXT } else { CONTROL_TEXT },
             SMALL_FONT_SIZE,
@@ -291,12 +287,12 @@ mod tests {
         assert_eq!(icon_extent(&tall), Some((ICON_SIZE / 2, ICON_SIZE)));
         assert_eq!(
             icon_rect(row, 1, &wide),
-            Some(IntRect {
-                x: row.x + INDENT,
-                y: row.y + (ROW_HEIGHT - ICON_SIZE / 2) / 2,
-                w: ICON_SIZE,
-                h: ICON_SIZE / 2,
-            })
+            Some(IntRect::new(
+                row.x + INDENT,
+                row.y + (ROW_HEIGHT - ICON_SIZE / 2) / 2,
+                ICON_SIZE,
+                ICON_SIZE / 2
+            ))
         );
     }
 

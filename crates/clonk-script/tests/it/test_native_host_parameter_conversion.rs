@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use clonk_script::{C4VType, DebuggerHooks, Engine, Script, ScriptError, Value, ValueMap};
+use clonk_script::{C4VType, DebuggerHooks, Engine, ScriptError, Value, ValueMap};
 
 fn runtime_message(error: ScriptError) -> String {
     match error {
@@ -41,14 +41,14 @@ fn native_host_parameter_conversion_respects_caller_strictness_and_rejects_maps_
     assert!(
         strict_destination.set_host_function_parameter_types("CaptureObject", [C4VType::C4Object])
     );
-    strict_destination.add_script(
-        Script::compile("#strict 3\nfunc DestinationOwn() { return true; }")
-            .expect("strict destination compiles"),
+    crate::support::load_script(
+        &mut strict_destination,
+        "#strict 3\nfunc DestinationOwn() { return true; }",
     );
     let mut legacy_source = Engine::new();
-    legacy_source.add_script(
-        Script::compile("func LegacyFalse() { return CaptureObject(1 == 2); }")
-            .expect("legacy source compiles"),
+    crate::support::load_script(
+        &mut legacy_source,
+        "func LegacyFalse() { return CaptureObject(1 == 2); }",
     );
     strict_destination.merge_from(&legacy_source);
 
@@ -73,19 +73,17 @@ fn native_host_parameter_conversion_respects_caller_strictness_and_rejects_maps_
     assert!(
         legacy_destination.set_host_function_parameter_types("CaptureObject", [C4VType::C4Object])
     );
-    legacy_destination.add_script(
-        Script::compile("func DestinationOwn() { return true; }")
-            .expect("legacy destination compiles"),
+    crate::support::load_script(
+        &mut legacy_destination,
+        "func DestinationOwn() { return true; }",
     );
     let mut strict_source = Engine::new();
-    strict_source.add_script(
-        Script::compile(
-            r#"#strict 3
-func StrictFalse() { return CaptureObject(1 == 2); }
-func StrictMap() { return CaptureObject({ answer = 42 }); }
-"#,
-        )
-        .expect("strict source compiles"),
+    crate::support::load_script(
+        &mut strict_source,
+        r#"#strict 3
+    func StrictFalse() { return CaptureObject(1 == 2); }
+    func StrictMap() { return CaptureObject({ answer = 42 }); }
+    "#,
     );
     legacy_destination.merge_from(&strict_source);
 

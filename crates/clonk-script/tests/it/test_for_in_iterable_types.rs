@@ -1,16 +1,12 @@
-use clonk_script::{Engine, ScriptError, Value};
+use crate::support::{runtime_error as shared_runtime_error, try_eval};
+use clonk_script::{ScriptError, Value};
 
 fn call_test(source: &str) -> Result<Value, ScriptError> {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("script should load");
-    engine.call("Test", &[])
+    try_eval(source, &[])
 }
 
 fn runtime_error(source: &str) -> String {
-    match call_test(source).expect_err("for-in must raise a runtime error") {
-        ScriptError::Runtime(error) => error.message().to_string(),
-        other => panic!("expected runtime error, got {other}"),
-    }
+    shared_runtime_error(source, &[])
 }
 
 #[test]

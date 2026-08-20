@@ -689,48 +689,6 @@ impl Engine {
             .is_some_and(|object| Self::object_contacts_solid_mask_bake(object, bake, vehicle))
     }
 
-    fn capture_solid_mask_attachments(
-        &self,
-        mover_index: usize,
-        bake: &SolidMaskBake,
-        vehicle: u8,
-    ) -> Option<SolidMaskAttachmentBackup> {
-        let mover = self.objects.get(mover_index)?;
-        let candidate_ids: Vec<ObjectId> = self.sectors.as_ref().map_or_else(
-            || self.objects.iter().map(|object| object.id).collect(),
-            |sectors| {
-                let area = sectors.area(DefinitionRect::new(
-                    bake.x.saturating_sub(1),
-                    bake.y.saturating_sub(1),
-                    bake.width.saturating_add(2),
-                    bake.height.saturating_add(2),
-                ));
-                sectors
-                    .shape_id_lists_in_area(&area)
-                    .into_iter()
-                    .flatten()
-                    .collect()
-            },
-        );
-        let object_ids = candidate_ids
-            .into_iter()
-            .filter_map(|object_id| self.find_object_index(object_id))
-            .filter(|index| *index != mover_index)
-            .filter(|index| self.object_is_moveable_by_solid_mask(*index))
-            .filter(|index| {
-                let position = self.objects[*index].state.position;
-                !self.object_shape_contacts_at(*index, position)
-            })
-            .filter(|index| self.object_contacts_solid_mask(*index, bake, vehicle))
-            .map(|index| self.objects[index].id)
-            .collect();
-        Some(SolidMaskAttachmentBackup {
-            instance_sequence: mover.solid_mask_instance_sequence,
-            removal_position: mover.state.position,
-            object_ids,
-        })
-    }
-
     /// C4SolidMask::Put(..., fRestoreAttachment=true), including the
     /// destination contact probe, once-per-frame guard, and MovePosition's
     /// recursive mask lifecycle for stacked carriers (C4SolidMask.cpp:178-195;

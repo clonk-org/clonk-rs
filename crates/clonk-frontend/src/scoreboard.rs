@@ -364,35 +364,30 @@ pub fn scoreboard_layout_with_title_presence(
         .saturating_sub(width)
         .saturating_sub(PLACEMENT_RIGHT_INSET);
     let y = preferred.y.saturating_add(PLACEMENT_TOP_INSET);
-    let bounds = IntRect {
+    let bounds = IntRect::new(x, y, width, height);
+    let caption =
+        visible_caption_height.map(|title_height| IntRect::new(x, y, width, title_height));
+    let client = IntRect::new(
         x,
-        y,
-        w: width,
-        h: height,
-    };
-    let caption = visible_caption_height.map(|title_height| IntRect {
-        x,
-        y,
-        w: width,
-        h: title_height,
+        y + title_margin_height.unwrap_or(0),
+        width,
+        client_height,
+    );
+    let title_icon = caption.map(|caption| {
+        IntRect::new(
+            caption.x + CAPTION_ICON_INSET,
+            caption.y + CAPTION_ICON_INSET,
+            caption.h - 2 * CAPTION_ICON_INSET,
+            caption.h - 2 * CAPTION_ICON_INSET,
+        )
     });
-    let client = IntRect {
-        x,
-        y: y + title_margin_height.unwrap_or(0),
-        w: width,
-        h: client_height,
-    };
-    let title_icon = caption.map(|caption| IntRect {
-        x: caption.x + CAPTION_ICON_INSET,
-        y: caption.y + CAPTION_ICON_INSET,
-        w: caption.h - 2 * CAPTION_ICON_INSET,
-        h: caption.h - 2 * CAPTION_ICON_INSET,
-    });
-    let close_button = caption.map(|caption| IntRect {
-        x: caption.x + caption.w - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_INSET,
-        y: caption.y + CLOSE_BUTTON_INSET,
-        w: CLOSE_BUTTON_SIZE,
-        h: CLOSE_BUTTON_SIZE,
+    let close_button = caption.map(|caption| {
+        IntRect::new(
+            caption.x + caption.w - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_INSET,
+            caption.y + CLOSE_BUTTON_INSET,
+            CLOSE_BUTTON_SIZE,
+            CLOSE_BUTTON_SIZE,
+        )
     });
 
     Ok(ScoreboardLayout {
@@ -698,12 +693,12 @@ pub fn render_scoreboard_caption_with_layout(
 
         // WoodenLabel clips after its icon indent and before its 20px close
         // control, while keeping the left text offset at +5.
-        let text_clip = IntRect {
-            x: caption.x + caption.h,
-            y: caption.y,
-            w: (caption.w - caption.h - CAPTION_RIGHT_INDENT + 1).max(0),
-            h: caption.h + 1,
-        };
+        let text_clip = IntRect::new(
+            caption.x + caption.h,
+            caption.y,
+            (caption.w - caption.h - CAPTION_RIGHT_INDENT + 1).max(0),
+            caption.h + 1,
+        );
         let text_y = caption.y + (caption.h - resources.fonts.text.line_height) / 2 - 1;
         with_surface_clip(surface, text_clip, |caption_surface| {
             // WoodenLabel stores fMarkup=false here, but its DrawElement
@@ -1613,12 +1608,7 @@ mod tests {
     }
 
     fn preferred() -> IntRect {
-        IntRect {
-            x: 40,
-            y: 20,
-            w: 560,
-            h: 400,
-        }
+        IntRect::new(40, 20, 560, 400)
     }
 
     fn solid_test_font() -> ClonkFont {
@@ -1777,11 +1767,7 @@ mod tests {
 
         layout.translate(-37, 29);
 
-        let translated = |rect: IntRect| IntRect {
-            x: rect.x - 37,
-            y: rect.y + 29,
-            ..rect
-        };
+        let translated = |rect: IntRect| rect.with_position(rect.x - 37, rect.y + 29);
         assert_eq!(layout.bounds, translated(before.bounds));
         assert_eq!(layout.client, translated(before.client));
         assert_eq!(layout.caption, before.caption.map(translated));

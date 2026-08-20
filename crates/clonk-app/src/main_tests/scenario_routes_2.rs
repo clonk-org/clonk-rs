@@ -22,7 +22,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     let wood = app_object_with_definition_near_x(&app, "WOOD", 280).test_value();
     let metal = app_object_with_definition_near_x(&app, "METL", 285).test_value();
     let home_base = app_object_with_definition(&app, "HUT3").test_value();
-    assert_ne!(hill_cata, valley_cata);
+    main_assert_ne!(hill_cata => valley_cata);
 
     advance_app_until(
         &mut app,
@@ -38,8 +38,8 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     );
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
     let valley = app.engine.test_crew_cursor(app.local_owner);
-    assert_ne!(valley, constructor);
-    assert!(
+    main_assert_ne!(valley => constructor);
+    main_assert!(
         app.engine.object_snapshot(valley).is_some_and(|object| {
             (200..300).contains(&object.position.x) && object.position.y >= 350
         }),
@@ -98,13 +98,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
             |app| app_clonk_carries(app, valley, "WOOD"),
         );
     }
-    assert_eq!(
-        app.engine
-            .object_snapshot(wood)
-            .expect("collected valley WOOD survives")
-            .container,
-        Some(valley)
-    );
+    main_assert_eq!(app.engine.object_snapshot(wood).expect("collected valley WOOD survives").container => Some(valley));
     advance_app_until(
         &mut app,
         "Tutorial05 points to the valley CATA",
@@ -153,7 +147,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
 
     AppVirtualKeyboard::new(&mut app).press(VirtualKeyCode::KeyX);
     AppVirtualKeyboard::new(&mut app).press(VirtualKeyCode::KeyX);
-    assert!(
+    main_assert!(
         app.engine.object_snapshot(valley).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(valley_cata)
         }),
@@ -166,31 +160,18 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     });
     AppVirtualKeyboard::new(&mut app).release(VirtualKeyCode::KeyX);
     let tensioned = app.engine.test_object_snapshot(valley_cata);
-    assert_eq!(
-        (tensioned.action.name.as_str(), tensioned.action.phase),
-        ("Ready", 6)
-    );
-    assert!(
+    main_assert_eq!((tensioned.action.name.as_str(), tensioned.action.phase) => ("Ready", 6));
+    main_assert!(
         tensioned
             .effects
             .iter()
             .all(|effect| effect.name != "IntJnRAim" || effect.priority == 0),
         "physical X release must cancel CATA's aim timer without losing phase six"
     );
-    assert!(tensioned
-        .effects
-        .iter()
-        .any(|effect| effect.name == "IntJnRAim" && effect.priority == 0));
+    main_assert!(tensioned.effects.iter().any(|effect| effect.name == "IntJnRAim" && effect.priority == 0));
 
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyA);
-    assert_eq!(
-        app.engine
-            .object_snapshot(valley_cata)
-            .expect("valley CATA survives firing")
-            .action
-            .name,
-        "Fire"
-    );
+    main_assert_eq!(app.engine.object_snapshot(valley_cata).expect("valley CATA survives firing").action.name => "Fire");
     advance_app_until(
         &mut app,
         "real valley CATA flings WOOD to the right hill",
@@ -203,7 +184,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
             })
         },
     );
-    assert!(app
+    main_assert!(app
         .engine
         .object_snapshot(valley_cata)
         .expect("valley CATA survives the projectile flight")
@@ -227,9 +208,9 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // the app's E/Z/C keyboard mapping.
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
     let catapult_clonk = app.engine.test_crew_cursor(app.local_owner);
-    assert_ne!(catapult_clonk, constructor);
-    assert_ne!(catapult_clonk, valley);
-    assert!(
+    main_assert_ne!(catapult_clonk => constructor);
+    main_assert_ne!(catapult_clonk => valley);
+    main_assert!(
         app.engine
             .object_snapshot(catapult_clonk)
             .is_some_and(|object| object.position.x >= 450 && object.position.y < 350),
@@ -275,11 +256,11 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
                 .is_some_and(|object| object.container == Some(catapult_clonk))
         },
     );
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .object_snapshot(wood)
             .expect("collected flung WOOD survives")
-            .container,
+            .container =>
         Some(catapult_clonk),
         "physical Z/C movement must collect the original valley WOOD"
     );
@@ -290,12 +271,12 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         300,
         |app| app_tutorial_message_contains(app, "grab the other catapult"),
     );
-    assert_eq!(
+    main_assert_eq!(
         app.snapshot
             .script_globals
             .named
             .get("arrow_target")
-            .and_then(|value| serde_json::to_value(value).ok()),
+            .and_then(|value| serde_json::to_value(value).ok()) =>
         Some(serde_json::json!({ "Object": hill_cata.as_u64() })),
         "SetArrowToObj must identify Tutorial05's real right-hill CATA"
     );
@@ -370,11 +351,11 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
             },
         );
     }
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .object_snapshot(hill_cata)
             .expect("right-hill CATA survives turning")
-            .direction,
+            .direction =>
         Direction::Left,
         "the pushed right-hill CATA must face the cabin before loading"
     );
@@ -395,11 +376,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
                 .is_some_and(|object| object.container == Some(hill_cata))
         },
     );
-    assert_eq!(
-        app_object_contents_count(&app, hill_cata, "WOOD"),
-        1,
-        "the right-hill CATA must contain the original valley WOOD exactly once"
-    );
+    main_assert_eq!(app_object_contents_count(&app, hill_cata, "WOOD") => 1, "the right-hill CATA must contain the original valley WOOD exactly once");
     advance_app_until(
         &mut app,
         "Tutorial05 asks for the shot toward the cabin",
@@ -420,31 +397,18 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     );
     AppVirtualKeyboard::new(&mut app).release(VirtualKeyCode::KeyX);
     let tensioned = app.engine.test_object_snapshot(hill_cata);
-    assert_eq!(
-        (tensioned.action.name.as_str(), tensioned.action.phase),
-        ("Ready", 6)
-    );
-    assert!(
+    main_assert_eq!((tensioned.action.name.as_str(), tensioned.action.phase) => ("Ready", 6));
+    main_assert!(
         tensioned
             .effects
             .iter()
             .all(|effect| effect.name != "IntJnRAim" || effect.priority == 0),
         "physical X release must cancel the right-hill CATA aim timer"
     );
-    assert!(tensioned
-        .effects
-        .iter()
-        .any(|effect| effect.name == "IntJnRAim" && effect.priority == 0));
+    main_assert!(tensioned.effects.iter().any(|effect| effect.name == "IntJnRAim" && effect.priority == 0));
 
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyA);
-    assert_eq!(
-        app.engine
-            .object_snapshot(hill_cata)
-            .expect("right-hill CATA survives firing")
-            .action
-            .name,
-        "Fire"
-    );
+    main_assert_eq!(app.engine.object_snapshot(hill_cata).expect("right-hill CATA survives firing").action.name => "Fire");
     advance_app_until(
         &mut app,
         "the right-hill CATA flings the same WOOD to the cabin hill",
@@ -457,7 +421,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
             })
         },
     );
-    assert!(app
+    main_assert!(app
         .engine
         .object_snapshot(hill_cata)
         .expect("right-hill CATA survives the projectile flight")
@@ -465,9 +429,9 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         .iter()
         .all(|effect| effect.name != "IntJnRAim"));
     let delivered = app.engine.test_object_snapshot(wood);
-    assert!(delivered.container.is_none());
-    assert!((0..220).contains(&delivered.position.x));
-    assert!((0..140).contains(&delivered.position.y));
+    main_assert!(delivered.container.is_none());
+    main_assert!((0..220).contains(&delivered.position.x));
+    main_assert!((0..140).contains(&delivered.position.y));
 
     advance_app_until(
         &mut app,
@@ -475,12 +439,12 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         300,
         |app| app_tutorial_message_contains(app, "switch back to the clonk near the cabin"),
     );
-    assert_eq!(
+    main_assert_eq!(
         app.snapshot
             .script_globals
             .named
             .get("arrow_target")
-            .and_then(|value| serde_json::to_value(value).ok()),
+            .and_then(|value| serde_json::to_value(value).ok()) =>
         Some(serde_json::json!({ "Object": constructor.as_u64() })),
         "Script83 must target Tutorial05's constructor CLNK"
     );
@@ -492,11 +456,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // only when they cross the selected crew's collection rectangle
     // (src/C4Player.cpp:1261-1275; src/C4GameObjects.cpp:140-196).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(
-        app.engine.crew_cursor(app.local_owner),
-        Some(constructor),
-        "third physical CursorRight must wrap to Tutorial05's constructor CLNK"
-    );
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor), "third physical CursorRight must wrap to Tutorial05's constructor CLNK");
     advance_app_until(
         &mut app,
         "Tutorial05 asks the constructor CLNK to collect the delivered material",
@@ -538,11 +498,11 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
             },
         );
     }
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .object_snapshot(wood)
             .expect("constructor-collected WOOD survives")
-            .container,
+            .container =>
         Some(constructor),
         "physical Z/C movement must collect the original twice-flung WOOD"
     );
@@ -552,12 +512,12 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         300,
         |app| app_tutorial_message_contains(app, "continue work on the elevator"),
     );
-    assert_eq!(
+    main_assert_eq!(
         app.snapshot
             .script_globals
             .named
             .get("arrow_target")
-            .and_then(|value| serde_json::to_value(value).ok()),
+            .and_then(|value| serde_json::to_value(value).ok()) =>
         Some(serde_json::json!({ "Object": elevator.as_u64() })),
         "Script85 must target Tutorial05's real ELEV construction site"
     );
@@ -607,12 +567,9 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         |app| app.engine.object_snapshot(wood).is_none(),
     );
     let first_delivery = app.engine.test_object_snapshot(elevator);
-    assert_eq!(first_delivery.components.get("WOOD"), Some(4));
-    assert_eq!(first_delivery.components.get("METL"), Some(1));
-    assert_eq!(
-        first_delivery.construction, 80_000,
-        "ELEV needs its second METL before construction can pass 80%"
-    );
+    main_assert_eq!(first_delivery.components.get("WOOD") => Some(4));
+    main_assert_eq!(first_delivery.components.get("METL") => Some(1));
+    main_assert_eq!(first_delivery.construction => 80_000, "ELEV needs its second METL before construction can pass 80%");
     // C++ Build immediately queues Acquire(METL) and posts its
     // needed-material target message (C4Object.cpp:1682-1744). With the
     // shipped CATA GrabGet bit restored, that autonomous builder can now
@@ -656,7 +613,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // movement/collection (src/C4Player.cpp:1261-1275,1522-1536;
     // src/C4Object.cpp:3520-3567; src/C4GameObjects.cpp:140-196).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(valley));
     if app
         .engine
         .object_snapshot(valley)
@@ -689,13 +646,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
                 .is_some_and(|object| object.container == Some(valley))
         },
     );
-    assert_eq!(
-        app.engine
-            .object_snapshot(metal)
-            .expect("valley-collected METL survives")
-            .container,
-        Some(valley)
-    );
+    main_assert_eq!(app.engine.object_snapshot(metal).expect("valley-collected METL survives").container => Some(valley));
 
     let valley_x = app.engine.test_object_snapshot(valley).position.x;
     let valley_cata_x = app.engine.test_object_snapshot(valley_cata).position.x;
@@ -747,7 +698,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
             .object_snapshot(metal)
             .is_some_and(|object| object.container == Some(valley_cata))
     });
-    assert_eq!(app_object_contents_count(&app, valley_cata, "METL"), 1);
+    main_assert_eq!(app_object_contents_count(&app, valley_cata, "METL") => 1);
     AppVirtualKeyboard::new(&mut app).press(VirtualKeyCode::KeyX);
     advance_app_until(
         &mut app,
@@ -793,10 +744,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // from Projectile (Catapult.c4d/Script.c:31-77,121-163;
     // src/C4Object.cpp:3520-3567).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(
-        app.engine.crew_cursor(app.local_owner),
-        Some(catapult_clonk)
-    );
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(catapult_clonk));
     if app
         .engine
         .object_snapshot(catapult_clonk)
@@ -829,13 +777,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
                 .is_some_and(|object| object.container == Some(catapult_clonk))
         },
     );
-    assert_eq!(
-        app.engine
-            .object_snapshot(metal)
-            .expect("right-hill-collected METL survives")
-            .container,
-        Some(catapult_clonk)
-    );
+    main_assert_eq!(app.engine.object_snapshot(metal).expect("right-hill-collected METL survives").container => Some(catapult_clonk));
 
     let hill_clonk_x = app.engine.test_object_snapshot(catapult_clonk).position.x;
     let hill_cata_x = app.engine.test_object_snapshot(hill_cata).position.x;
@@ -889,7 +831,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
             .object_snapshot(metal)
             .is_some_and(|object| object.container == Some(hill_cata))
     });
-    assert_eq!(app_object_contents_count(&app, hill_cata, "METL"), 1);
+    main_assert_eq!(app_object_contents_count(&app, hill_cata, "METL") => 1);
     AppVirtualKeyboard::new(&mut app).press(VirtualKeyCode::KeyX);
     advance_app_until(
         &mut app,
@@ -922,7 +864,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // ELEC (src/C4Object.cpp:1682-1762; src/C4ObjectCom.cpp:573-589;
     // Elevator.c4d/DefCore.txt:16; Elevator.c4d/Script.c:8-15).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor));
     advance_app_until(
         &mut app,
         "second-relay METL settles on the cabin hill",
@@ -957,13 +899,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
             },
         );
     }
-    assert_eq!(
-        app.engine
-            .object_snapshot(metal)
-            .expect("constructor-collected METL survives")
-            .container,
-        Some(constructor)
-    );
+    main_assert_eq!(app.engine.object_snapshot(metal).expect("constructor-collected METL survives").container => Some(constructor));
     let constructor_x = app.engine.test_object_snapshot(constructor).position.x;
     let elevator_x = app.engine.test_object_snapshot(elevator).position.x;
     if (constructor_x - elevator_x).abs() > 4 {
@@ -1005,11 +941,11 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         |app| app_object_with_definition(app, "ELEC").is_some(),
     );
     let completed = app.engine.test_object_snapshot(elevator);
-    assert_eq!(completed.components.get("WOOD"), Some(4));
-    assert_eq!(completed.components.get("METL"), Some(2));
-    assert_eq!(completed.construction, 100_000);
+    main_assert_eq!(completed.components.get("WOOD") => Some(4));
+    main_assert_eq!(completed.components.get("METL") => Some(2));
+    main_assert_eq!(completed.construction => 100_000);
     let carriage = app_object_with_definition(&app, "ELEC").test_value();
-    assert_eq!(completed.action.target, Some(carriage));
+    main_assert_eq!(completed.action.target => Some(carriage));
     advance_app_until(
         &mut app,
         "Tutorial05 Script160 asks for the completed elevator carriage",
@@ -1097,10 +1033,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // 1453-1553; C4Object.cpp:3406-3556).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(
-        app.engine.crew_cursor(app.local_owner),
-        Some(catapult_clonk)
-    );
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(catapult_clonk));
     hold_app_key_until(
         &mut app,
         VirtualKeyCode::KeyZ,
@@ -1194,7 +1127,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
 
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(valley));
     hold_app_key_until(
         &mut app,
         VirtualKeyCode::KeyZ,
@@ -1268,10 +1201,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         })
     });
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(
-        app.engine.crew_cursor(app.local_owner),
-        Some(catapult_clonk)
-    );
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(catapult_clonk));
     hold_app_key_until(
         &mut app,
         VirtualKeyCode::KeyC,
@@ -1304,7 +1234,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         },
     );
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor));
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyX);
     if app
         .engine
@@ -1335,10 +1265,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     selected.sort_by_key(|object| object.as_u64());
     let mut expected = vec![constructor, valley, catapult_clonk];
     expected.sort_by_key(|object| object.as_u64());
-    assert_eq!(
-        selected, expected,
-        "physical W/W must select all exact crew"
-    );
+    main_assert_eq!(selected => expected, "physical W/W must select all exact crew");
     advance_app_until(
         &mut app,
         "Tutorial05 Script211 asks all Clonks to return to HUT3",
@@ -1376,7 +1303,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         (valley, "valley CLNK"),
         (catapult_clonk, "right-hill CLNK"),
     ] {
-        assert_eq!(app.engine.crew_cursor(app.local_owner), Some(clonk));
+        main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(clonk));
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard.tap(VirtualKeyCode::KeyX);
@@ -1428,7 +1355,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         },
     );
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor));
     {
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
         keyboard.press(VirtualKeyCode::KeyZ);
@@ -1460,7 +1387,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         },
     );
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(valley));
     hold_app_key_until(
         &mut app,
         VirtualKeyCode::KeyC,
@@ -1503,8 +1430,8 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         keyboard.tap(VirtualKeyCode::KeyW);
         keyboard.tap(VirtualKeyCode::KeyW);
     }
-    assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
-    assert!(
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor));
+    main_assert!(
         [constructor, valley, catapult_clonk]
             .into_iter()
             .all(|clonk| app.engine.selected_crew(app.local_owner).contains(&clonk)),
@@ -1571,7 +1498,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     // crew member before HUT3 opens its context menu (Hut3.c4d/
     // DefCore.txt:18; C4ObjectCom.cpp:335-350; C4Command.cpp:545-617).
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(valley));
     if app
         .engine
         .object_snapshot(valley)
@@ -1590,10 +1517,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         );
     }
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(
-        app.engine.crew_cursor(app.local_owner),
-        Some(catapult_clonk)
-    );
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(catapult_clonk));
     if app
         .engine
         .object_snapshot(catapult_clonk)
@@ -1612,7 +1536,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         );
     }
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(constructor));
     if app
         .engine
         .object_snapshot(constructor)
@@ -1632,13 +1556,10 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     }
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyS);
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(valley));
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyS);
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyE);
-    assert_eq!(
-        app.engine.crew_cursor(app.local_owner),
-        Some(catapult_clonk)
-    );
+    main_assert_eq!(app.engine.crew_cursor(app.local_owner) => Some(catapult_clonk));
     AppVirtualKeyboard::new(&mut app).tap(VirtualKeyCode::KeyS);
     advance_app_until(
         &mut app,
@@ -1660,16 +1581,9 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
     advance_app_until(&mut app, "Tutorial05 reaches GameOver", 400, |app| {
         app.snapshot.game_over && app.game_over_dialog.is_some()
     });
-    assert!(
-        app.snapshot
-            .round_results
-            .fulfilled_goals
-            .iter()
-            .any(|goal| goal == "SCRG"),
-        "Tutorial05 must fulfill its real SCRG before GameOver"
-    );
-    assert_eq!(
-        app.engine.next_mission().path,
+    main_assert!(app.snapshot.round_results.fulfilled_goals.iter().any(|goal| goal == "SCRG"), "Tutorial05 must fulfill its real SCRG before GameOver");
+    main_assert_eq!(
+        app.engine.next_mission().path =>
         r"Tutorial.c4f\Tutorial06.c4s"
     );
 }
@@ -1785,11 +1699,11 @@ fn app_tutorial08_catch_and_load_one_wipf(
                     app.engine.object_snapshot(clonk)
                 )
             });
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .object_snapshot(caught_wipf)
             .expect("caught Tutorial08 object survives")
-            .definition_id,
+            .definition_id =>
         "WIPF",
         "caught surface object {delivery} is a WIPF"
     );
@@ -1873,12 +1787,7 @@ fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
     let clonk = app.engine.test_crew_cursor(owner);
     let lorry = app_object_with_definition(&app, "LORY").test_value();
     let hut = app_object_with_definition(&app, "HUT3").test_value();
-    assert!(
-        app.engine
-            .player(owner)
-            .is_some_and(|player| player.control_style()),
-        "fresh app Tutorial08 player uses C++ AutoStopControl"
-    );
+    main_assert!(app.engine.player(owner).is_some_and(|player| player.control_style()), "fresh app Tutorial08 player uses C++ AutoStopControl");
     let mut cave_wipfs = app
         .engine
         .snapshot()
@@ -1890,8 +1799,8 @@ fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
         .map(|object| (object.id.as_u64(), object.position.x, object.position.y))
         .collect::<Vec<_>>();
     cave_wipfs.sort_unstable();
-    assert_eq!(
-        cave_wipfs,
+    main_assert_eq!(
+        cave_wipfs =>
         vec![
             (57, 569, 500),
             (58, 202, 619),
@@ -1903,13 +1812,13 @@ fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
     advance_app_until(&mut app, "Tutorial08 teaches catching WIPFs", 500, |app| {
         app_tutorial_message_contains(app, "catch them either by hand or with the lorry")
     });
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .snapshot()
             .objects
             .into_iter()
             .filter(|object| object.definition_id == "WIPF")
-            .count(),
+            .count() =>
         10,
         "real Tutorial08 activation places ten WIPFs"
     );
@@ -1988,11 +1897,11 @@ fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
         .object_snapshot(clonk)
         .and_then(|object| object.contents.first().copied())
         .test_value();
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .object_snapshot(caught_wipf)
             .expect("caught Tutorial08 object survives")
-            .definition_id,
+            .definition_id =>
         "WIPF",
         "first caught surface object is a WIPF"
     );
@@ -2061,13 +1970,13 @@ fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Walk")
     });
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .snapshot()
             .objects
             .into_iter()
             .filter(|object| { object.definition_id == "WIPF" && object.container == Some(lorry) })
-            .count(),
+            .count() =>
         2,
         "C++ rotation accumulation lets one nearby WIPF enter LORY before the first hand delivery"
     );
@@ -2082,26 +1991,22 @@ fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
             break;
         }
         let caught = app_tutorial08_catch_and_load_one_wipf(&mut app, clonk, lorry, delivery);
-        assert_eq!(
+        main_assert_eq!(
             app.engine
                 .object_snapshot(caught)
                 .expect("delivered Tutorial08 WIPF survives in LORY")
-                .container,
+                .container =>
             Some(lorry),
             "physical delivery {delivery} loads its exact WIPF into LORY"
         );
         let after = app_tutorial08_wipfs_in_lorry(&app, lorry);
-        assert!(
+        main_assert!(
             after > before && after <= 6,
             "physical delivery {delivery} advances the bounded C++ LORY stack: \
                  before={before}, after={after}"
         );
     }
-    assert_eq!(
-        app_tutorial08_wipfs_in_lorry(&app, lorry),
-        6,
-        "real default-seed surface sweep loads all six walkable WIPFs into LORY"
-    );
+    main_assert_eq!(app_tutorial08_wipfs_in_lorry(&app, lorry) => 6, "real default-seed surface sweep loads all six walkable WIPFs into LORY");
 
     // C4Game::PlaceAnimal legitimately chose underground caves for the
     // remaining C++-seed animals; the app route must not relocate them.
@@ -2119,10 +2024,7 @@ fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
             object.definition_id == "WIPF" && object.container.is_none() && object.position.y > 450
         })
         .count();
-    assert_eq!(
-        subterranean_wipfs, 4,
-        "C++ seed leaves four live WIPFs in underground caves"
-    );
+    main_assert_eq!(subterranean_wipfs => 4, "C++ seed leaves four live WIPFs in underground caves");
     for _ in 0..12 {
         app.test_update();
     }
@@ -2206,11 +2108,7 @@ fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
             .count()
             == 6
     });
-    assert_eq!(
-        app_tutorial08_wipfs_in_lorry(&app, lorry),
-        0,
-        "LORY's C++ Entrance callback empties its surface WIPFs into HUT3"
-    );
+    main_assert_eq!(app_tutorial08_wipfs_in_lorry(&app, lorry) => 0, "LORY's C++ Entrance callback empties its surface WIPFs into HUT3");
 }
 
 #[test]
@@ -2264,11 +2162,11 @@ fn saved_game_restores_music_level_after_scenario_reconfiguration(
 
     app.apply_loaded_game(save).test_value();
 
-    assert_eq!(app.engine.capture_state().music_level, 25);
+    main_assert_eq!(app.engine.capture_state().music_level => 25);
     let audio = app.audio.test_ref();
     let control = lock_unpoisoned(&audio.music_control);
-    assert_eq!(control.scenario_level, Some(25));
-    assert!((control.effective_volume() - audio.options.music_volume * 0.25).abs() < f32::EPSILON);
+    main_assert_eq!(control.scenario_level => Some(25));
+    main_assert!((control.effective_volume() - audio.options.music_volume * 0.25).abs() < f32::EPSILON);
 }
 
 fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter(
@@ -2302,25 +2200,12 @@ fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter(
 
     app.apply_loaded_game(save).test_value();
 
-    assert!(app.runtime_music_enabled, "RXMusic force-enables resume");
-    assert_eq!(
-        app.engine.capture_state().play_list.as_deref(),
-        Some("Theme*"),
-        "Game.PlayList remains available to script and the next save"
-    );
-    assert_eq!(
-        app.audio
-            .as_ref()
-            .expect("test audio")
-            .music_resolver
-            .playlist
-            .as_deref(),
-        None,
-        "PlayScenarioMusic installs the physical DEFAULT filter"
-    );
+    main_assert!(app.runtime_music_enabled, "RXMusic force-enables resume");
+    main_assert_eq!(app.engine.capture_state().play_list.as_deref() => Some("Theme*"), "Game.PlayList remains available to script and the next save");
+    main_assert_eq!(app.audio.as_ref().expect("test audio").music_resolver.playlist.as_deref() => None, "PlayScenarioMusic installs the physical DEFAULT filter");
 
     app.snapshot = app.engine.test_tick();
-    assert!(
+    main_assert!(
         app.snapshot
             .audio
             .iter()
@@ -2328,19 +2213,8 @@ fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter(
         "the delayed restore command cannot reinstall the saved filter"
     );
     app.update_audio();
-    assert_eq!(
-        app.audio
-            .as_ref()
-            .expect("test audio")
-            .music_resolver
-            .playlist
-            .as_deref(),
-        None
-    );
-    assert_eq!(
-        app.engine.capture_state().play_list.as_deref(),
-        Some("Theme*")
-    );
+    main_assert_eq!(app.audio.as_ref().expect("test audio").music_resolver.playlist.as_deref() => None);
+    main_assert_eq!(app.engine.capture_state().play_list.as_deref() => Some("Theme*"));
 }
 
 /// A modal that consumes a key-up must not leave the held-key latch set.
@@ -2389,11 +2263,11 @@ fn running_modal_key_up_does_not_swallow_the_next_airbike_steering_press() {
     // double-tap below starts from a clean buffer (`C4Player::ExecuteControl`,
     // C4Player.cpp:1213-1229, C4DoubleClick = 10 frames).
     app.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
-    assert_eq!(
+    main_assert_eq!(
         app.engine
             .object_snapshot(bike)
             .expect("the airbike remains live")
-            .command_direction,
+            .command_direction =>
         CommandDirection::Left,
         "the shipped Airbike::ControlLeft sets COMD_Left"
     );
@@ -2405,17 +2279,11 @@ fn running_modal_key_up_does_not_swallow_the_next_airbike_steering_press() {
     // holds keyboard focus, then dismiss it.
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    assert!(
-        !app.message_dialogs.is_empty(),
-        "Escape opens a modal over the running game"
-    );
+    main_assert!(!app.message_dialogs.is_empty(), "Escape opens a modal over the running game");
     app.test_key(VirtualKeyCode::KeyZ, ElementState::Released);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    assert!(
-        app.message_dialogs.is_empty(),
-        "the abort dialog is dismissed again"
-    );
+    main_assert!(app.message_dialogs.is_empty(), "the abort dialog is dismissed again");
 
     // Double-tap Left. Both presses have to arrive for `C4Player::InCom` to
     // raise the second to `COM_Left | COM_Double` (C4Player.cpp:1532-1533) and
@@ -2425,9 +2293,5 @@ fn running_modal_key_up_does_not_swallow_the_next_airbike_steering_press() {
     app.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
     app.test_key(VirtualKeyCode::KeyZ, ElementState::Released);
     app.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
-    assert_eq!(
-        bike_action(&app),
-        "Hyperfly",
-        "the first press after a modal must not be discarded as a repeat"
-    );
+    main_assert_eq!(bike_action(&app) => "Hyperfly", "the first press after a modal must not be discarded as a repeat");
 }

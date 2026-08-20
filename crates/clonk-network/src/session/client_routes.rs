@@ -782,30 +782,6 @@ impl ClientRouteManager {
         );
     }
 
-    #[allow(clippy::too_many_arguments, dead_code)]
-    pub(crate) fn add_udp_route<S>(
-        &mut self,
-        local_connection_id: u32,
-        remote_connection_id: u32,
-        peer_addr: Option<SocketAddr>,
-        transport: crate::ControlTransport<S>,
-        liveness: ConnectionLivenessState,
-        outbound: crate::udp_session::ReliableUdpRouteSender,
-    ) where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        self.add_udp_peer_route(
-            HOST_CLIENT_ID,
-            HOST_CLIENT_ID,
-            local_connection_id,
-            remote_connection_id,
-            peer_addr,
-            transport,
-            liveness,
-            outbound,
-        );
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_udp_route_with_peer_capabilities<S>(
         &mut self,
@@ -1992,22 +1968,11 @@ mod udp_outbox_tests {
             post_failure: PostFailureBuffer::default(),
             udp: Some(udp.clone()),
         };
-        let accepted = ControlMessage::Status(crate::NetworkStatus {
-            state: crate::NETWORK_STATE_LOBBY,
-            control_mode: 1,
-            target_tick: 2,
-        });
+        let accepted =
+            ControlMessage::Status(crate::NetworkStatus::new(crate::NETWORK_STATE_LOBBY, 1, 2));
         let after_failure = [
-            ControlMessage::Status(crate::NetworkStatus {
-                state: crate::NETWORK_STATE_PAUSE,
-                control_mode: 3,
-                target_tick: 4,
-            }),
-            ControlMessage::StatusAck(crate::NetworkStatus {
-                state: crate::NETWORK_STATE_GO,
-                control_mode: 5,
-                target_tick: 6,
-            }),
+            ControlMessage::Status(crate::NetworkStatus::new(crate::NETWORK_STATE_PAUSE, 3, 4)),
+            ControlMessage::StatusAck(crate::NetworkStatus::new(crate::NETWORK_STATE_GO, 5, 6)),
         ];
 
         assert!(outbound.send(ClientRouteCommand::Message(accepted)).is_ok());

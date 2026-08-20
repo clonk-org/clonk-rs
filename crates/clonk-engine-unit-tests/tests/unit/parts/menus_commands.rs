@@ -15,9 +15,8 @@ fn close_menu_and_menu_query_cancel_follow_cpp_close_semantics() {
         func Shut() { return CloseMenu(this()); }
         func ReadMenu() { return GetMenu(this()); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    let (mut engine, clonk) =
+        script_object_fixture(7, "CLNK", "Clonk", script, SpawnConfig::new("CLNK"));
     engine.tick_without_snapshot().test_value();
 
     let call = |engine: &mut Engine, name: &str| {
@@ -27,38 +26,26 @@ fn close_menu_and_menu_query_cancel_follow_cpp_close_semantics() {
 
     // CloseMenu without a menu still succeeds (C4Object::CloseMenu
     // returns true when Menu is null, C4Object.cpp:2009-2016).
-    assert_eq!(call(&mut engine, "Shut"), Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "Shut") => Value::Bool(true));
 
     // Open, then force-close despite MenuQueryCancel denying.
-    assert_eq!(call(&mut engine, "OpenMenu"), Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "OpenMenu") => Value::Bool(true));
     let idx = engine.test_object_index(clonk);
     engine.call_test_object_function(idx, "SetDeny", vec![Value::Int(1)]);
-    assert_eq!(
-        call(&mut engine, "Shut"),
-        Value::Bool(true),
-        "forced close skips MenuQueryCancel"
-    );
-    assert_eq!(call(&mut engine, "ReadMenu"), Value::Int(0));
+    unit_assert_eq!(call(&mut engine, "Shut") => Value::Bool(true), "forced close skips MenuQueryCancel");
+    unit_assert_eq!(call(&mut engine, "ReadMenu") => Value::Int(0));
 
     // Open again; the denied SOFT close makes a second CreateMenu fail
     // and keeps the old menu.
-    assert_eq!(call(&mut engine, "OpenMenu"), Value::Bool(true));
-    assert_eq!(
-        call(&mut engine, "OpenOther"),
-        Value::Bool(false),
-        "MenuQueryCancel denies replacing the menu"
-    );
-    assert_eq!(
-        call(&mut engine, "ReadMenu"),
-        Value::C4Id("WIPF".into()),
-        "the old menu survives the denied replace"
-    );
+    unit_assert_eq!(call(&mut engine, "OpenMenu") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "OpenOther") => Value::Bool(false), "MenuQueryCancel denies replacing the menu");
+    unit_assert_eq!(call(&mut engine, "ReadMenu") => Value::C4Id("WIPF".into()), "the old menu survives the denied replace");
 
     // Allow the close: the replace goes through.
     let idx = engine.test_object_index(clonk);
     engine.call_test_object_function(idx, "SetDeny", vec![Value::Int(0)]);
-    assert_eq!(call(&mut engine, "OpenOther"), Value::Bool(true));
-    assert_eq!(call(&mut engine, "ReadMenu"), Value::C4Id("MENU".into()));
+    unit_assert_eq!(call(&mut engine, "OpenOther") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "ReadMenu") => Value::C4Id("MENU".into()));
 }
 
 #[test]
@@ -79,9 +66,8 @@ fn add_menu_item_composes_commands_and_counts_like_cpp() {
         func AddOld() { return AddMenuItem("Old %s", "Choose", CLNK, this(), 3, 7, "info"); }
         func AddValued() { return AddMenuItem("Val", "Choose", CLNK, this(), 0, "txt", 0, 384, 0, 42); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    let (mut engine, clonk) =
+        script_object_fixture(7, "CLNK", "Clonk", script, SpawnConfig::new("CLNK"));
     engine.tick_without_snapshot().test_value();
 
     let call = |engine: &mut Engine, name: &str| {
@@ -89,60 +75,56 @@ fn add_menu_item_composes_commands_and_counts_like_cpp() {
         engine.call_test_object_function(idx, name, Vec::new())
     };
 
-    assert_eq!(
-        call(&mut engine, "TryEarly"),
-        Value::Bool(false),
-        "no menu -> false (C4Script.cpp:1475)"
-    );
-    assert_eq!(call(&mut engine, "OpenMenu"), Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "TryEarly") => Value::Bool(false), "no menu -> false (C4Script.cpp:1475)");
+    unit_assert_eq!(call(&mut engine, "OpenMenu") => Value::Bool(true));
     for adder in ["AddPlain", "AddNew", "AddFmt", "AddOld", "AddValued"] {
-        assert_eq!(call(&mut engine, adder), Value::Bool(true), "{adder}");
+        unit_assert_eq!(call(&mut engine, adder) => Value::Bool(true), "{adder}");
     }
 
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.items.len(), 5);
+    unit_assert_eq!(menu.items.len() => 5);
 
     // Command-less item: never selectable, no-count sentinel.
     let plain = &menu.items[0];
-    assert_eq!(plain.command, "");
-    assert!(!plain.selectable);
-    assert_eq!(plain.count, 12_345_678, "C4MN_Item_NoCount");
+    unit_assert_eq!(plain.command => "");
+    unit_assert!(!plain.selectable);
+    unit_assert_eq!(plain.count => 12_345_678, "C4MN_Item_NoCount");
 
     // New style without %d: both commands are the literal text.
     let easy = &menu.items[1];
-    assert_eq!(easy.command, "SetDifficulty(0)");
-    assert_eq!(easy.command2, "SetDifficulty(0)");
-    assert!(easy.selectable);
+    unit_assert_eq!(easy.command => "SetDifficulty(0)");
+    unit_assert_eq!(easy.command2 => "SetDifficulty(0)");
+    unit_assert!(easy.selectable);
 
     // New style with %d: the FIRST %d takes the parameter, the second
     // gets 0 (left) / 1 (right) (C4Script.cpp:1563-1570).
     let fmt = &menu.items[2];
-    assert_eq!(fmt.command, "Choose(5,0)");
-    assert_eq!(fmt.command2, "Choose(5,1)");
+    unit_assert_eq!(fmt.command => "Choose(5,0)");
+    unit_assert_eq!(fmt.command2 => "Choose(5,1)");
 
     // Old style: Fn(ID,param) / Fn(ID,param,1); caption %s takes the
     // item def's name (C4Script.cpp:1492-1505); explicit count kept.
     let old = &menu.items[3];
-    assert_eq!(old.caption, "Old Clonk");
-    assert_eq!(old.command, "Choose(CLNK,7)");
-    assert_eq!(old.command2, "Choose(CLNK,7,1)");
-    assert_eq!(old.count, 3);
-    assert_eq!(old.item_id, "CLNK");
+    unit_assert_eq!(old.caption => "Old Clonk");
+    unit_assert_eq!(old.command => "Choose(CLNK,7)");
+    unit_assert_eq!(old.command2 => "Choose(CLNK,7,1)");
+    unit_assert_eq!(old.count => 3);
+    unit_assert_eq!(old.item_id => "CLNK");
 
     // C4MN_Add_PassValue (128) + C4MN_Add_ForceCount (256): string
     // parameters are quoted, the value rides along, count 0 stays 0.
     let valued = &menu.items[4];
-    assert_eq!(valued.command, "Choose(CLNK,\"txt\",0,42)");
-    assert_eq!(valued.command2, "Choose(CLNK,\"txt\",1,42)");
-    assert_eq!(valued.count, 0);
-    assert_eq!(valued.value, Some(42));
+    unit_assert_eq!(valued.command => "Choose(CLNK,\"txt\",0,42)");
+    unit_assert_eq!(valued.command2 => "Choose(CLNK,\"txt\",1,42)");
+    unit_assert_eq!(valued.count => 0);
+    unit_assert_eq!(valued.value => Some(42));
 
     // The first SELECTABLE item took the initial selection
     // (item 0 is not selectable, so index 1).
-    assert_eq!(menu.selection, 1);
+    unit_assert_eq!(menu.selection => 1);
 }
 
 fn attach_one_pixel_portrait(engine: &mut Engine, definition: &mut Definition, name: &str) {
@@ -203,16 +185,16 @@ fn add_menu_item_preserves_cpp_image_recipes() {
         engine.call_test_object_function(idx, name, Vec::new())
     };
 
-    assert_eq!(call(&mut engine, "OpenDialog"), Value::Bool(true));
-    assert_eq!(call(&mut engine, "AddNone"), Value::Bool(true));
-    assert_eq!(call(&mut engine, "AddDefinition"), Value::Bool(true));
-    assert_eq!(call(&mut engine, "AddFallback"), Value::Bool(true));
-    assert_eq!(call(&mut engine, "AddPortrait"), Value::Bool(true));
-    assert_eq!(call(&mut engine, "AddMissingPortrait"), Value::Bool(false));
-    assert_eq!(call(&mut engine, "AddColoredTextSpec"), Value::Bool(true));
-    assert_eq!(call(&mut engine, "AddUnknownPortrait"), Value::Bool(false));
-    assert_eq!(call(&mut engine, "AddBadObjectRank"), Value::Bool(false));
-    assert_eq!(call(&mut engine, "AddBadObject"), Value::Bool(false));
+    unit_assert_eq!(call(&mut engine, "OpenDialog") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "AddNone") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "AddDefinition") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "AddFallback") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "AddPortrait") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "AddMissingPortrait") => Value::Bool(false));
+    unit_assert_eq!(call(&mut engine, "AddColoredTextSpec") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "AddUnknownPortrait") => Value::Bool(false));
+    unit_assert_eq!(call(&mut engine, "AddBadObjectRank") => Value::Bool(false));
+    unit_assert_eq!(call(&mut engine, "AddBadObject") => Value::Bool(false));
     for adder in [
         "AddRank",
         "AddIndexed",
@@ -221,75 +203,42 @@ fn add_menu_item_preserves_cpp_image_recipes() {
         "AddColor",
         "AddIndexedColor",
     ] {
-        assert_eq!(call(&mut engine, adder), Value::Bool(true), "{adder}");
+        unit_assert_eq!(call(&mut engine, adder) => Value::Bool(true), "{adder}");
     }
 
-    assert_eq!(call(&mut engine, "Recolor"), Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "Recolor") => Value::Bool(true));
 
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.items.len(), 11, "failed image recipes must not append");
+    unit_assert_eq!(menu.items.len() => 11, "failed image recipes must not append");
 
-    assert_eq!(menu.items[0].image, ObjectMenuImage::None);
-    assert_eq!(menu.items[1].image, ObjectMenuImage::Definition);
-    assert_eq!(
-        menu.items[1].presentation_definition_id.as_deref(),
-        Some("CLNK")
-    );
+    unit_assert_eq!(menu.items[0].image => ObjectMenuImage::None);
+    unit_assert_eq!(menu.items[1].image => ObjectMenuImage::Definition);
+    unit_assert_eq!(menu.items[1].presentation_definition_id.as_deref() => Some("CLNK"));
     let fallback = &menu.items[2];
-    assert_eq!(fallback.caption, "Fallback Clonk");
-    assert_eq!(fallback.item_id, "MISS", "the command ID remains unchanged");
-    assert_eq!(fallback.image, ObjectMenuImage::Definition);
-    assert_eq!(fallback.presentation_definition_id.as_deref(), Some("CLNK"));
+    unit_assert_eq!(fallback.caption => "Fallback Clonk");
+    unit_assert_eq!(fallback.item_id => "MISS", "the command ID remains unchanged");
+    unit_assert_eq!(fallback.image => ObjectMenuImage::Definition);
+    unit_assert_eq!(fallback.presentation_definition_id.as_deref() => Some("CLNK"));
     let portrait = &menu.items[3];
-    assert_eq!(portrait.caption, "", "TextSpec consumes the caption");
-    assert_eq!(
-        portrait.image,
-        ObjectMenuImage::TextSpec {
-            spec: "Portrait:CLNK::0000ff::1".to_string(),
-            color: 0xff,
-        }
-    );
-    assert!(!portrait.selectable);
-    assert_eq!(
-        menu.items[4].image,
-        ObjectMenuImage::TextSpec {
-            spec: "CLNK".to_string(),
-            color: 0x112233,
-        }
-    );
+    unit_assert_eq!(portrait.caption => "", "TextSpec consumes the caption");
+    unit_assert_eq!(portrait.image => ObjectMenuImage::TextSpec {spec: "Portrait:CLNK::0000ff::1".to_string(), color: 0xff,});
+    unit_assert!(!portrait.selectable);
+    unit_assert_eq!(menu.items[4].image => ObjectMenuImage::TextSpec {spec: "CLNK".to_string(), color: 0x112233,});
 
     let rank = &menu.items[5];
-    assert_eq!(rank.image, ObjectMenuImage::Rank { rank: 4 });
-    assert_eq!(rank.count, 12_345_678, "rank consumes the item count");
-    assert_eq!(menu.items[6].image, ObjectMenuImage::Indexed { index: 3 });
-    assert_eq!(
-        menu.items[7].image,
-        ObjectMenuImage::ObjectRank { object: clonk }
-    );
-    assert_eq!(
-        menu.items[8].image,
-        ObjectMenuImage::Object { object: clonk }
-    );
+    unit_assert_eq!(rank.image => ObjectMenuImage::Rank { rank: 4 });
+    unit_assert_eq!(rank.count => 12_345_678, "rank consumes the item count");
+    unit_assert_eq!(menu.items[6].image => ObjectMenuImage::Indexed { index: 3 });
+    unit_assert_eq!(menu.items[7].image => ObjectMenuImage::ObjectRank { object: clonk });
+    unit_assert_eq!(menu.items[8].image => ObjectMenuImage::Object { object: clonk });
     let cached_picture = menu.items[8].picture_snapshot.as_ref().test_value();
-    assert_eq!(cached_picture.definition_id, "CLNK");
-    assert_eq!(
-        cached_picture.color, 0,
-        "later SetColorDw must not mutate the icon"
-    );
-    assert_eq!(
-        menu.items[9].image,
-        ObjectMenuImage::Color { color: 0x112233 }
-    );
-    assert_eq!(
-        menu.items[10].image,
-        ObjectMenuImage::IndexedColor {
-            index: 2,
-            color: 0x445566,
-        }
-    );
+    unit_assert_eq!(cached_picture.definition_id => "CLNK");
+    unit_assert_eq!(cached_picture.color => 0, "later SetColorDw must not mutate the icon");
+    unit_assert_eq!(menu.items[9].image => ObjectMenuImage::Color { color: 0x112233 });
+    unit_assert_eq!(menu.items[10].image => ObjectMenuImage::IndexedColor {index: 2, color: 0x445566,});
 }
 
 #[test]
@@ -308,8 +257,7 @@ fn add_menu_text_spec_uses_the_shared_cpp_grammar() {
         func AddEmptyPortrait() { return AddMenuItem("Portrait:cowb::", "", NONE, this(), 0, 0, "", 5); }
         func AddLowercaseIcon() { return AddMenuItem("ico:Locked", "", NONE, this(), 0, 0, "", 5); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("AB_D", "Uppercase", "");
+    let mut engine = script_engine(7, "AB_D", "Uppercase", "");
     engine.register_test_script_definition("abcd", "Lowercase", "");
     let mut portrait_definition = test_definition("cowb", "Portrait", "");
     attach_one_pixel_portrait(&mut engine, &mut portrait_definition, "Captain1");
@@ -323,7 +271,7 @@ fn add_menu_text_spec_uses_the_shared_cpp_grammar() {
         engine.call_test_object_function(idx, name, Vec::new())
     };
 
-    assert_eq!(call(&mut engine, "OpenDialog"), Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "OpenDialog") => Value::Bool(true));
     for adder in [
         "AddBare",
         "AddIndexed",
@@ -332,7 +280,7 @@ fn add_menu_text_spec_uses_the_shared_cpp_grammar() {
         "AddPortrait",
         "AddIcon",
     ] {
-        assert_eq!(call(&mut engine, adder), Value::Bool(true), "{adder}");
+        unit_assert_eq!(call(&mut engine, adder) => Value::Bool(true), "{adder}");
     }
     for adder in [
         "AddLowercase",
@@ -341,16 +289,16 @@ fn add_menu_text_spec_uses_the_shared_cpp_grammar() {
         "AddEmptyPortrait",
         "AddLowercaseIcon",
     ] {
-        assert_eq!(call(&mut engine, adder), Value::Bool(false), "{adder}");
+        unit_assert_eq!(call(&mut engine, adder) => Value::Bool(false), "{adder}");
     }
 
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.items.len(), 6, "invalid TextSpecs must not append");
-    assert_eq!(
-        menu.items[4].image,
+    unit_assert_eq!(menu.items.len() => 6, "invalid TextSpecs must not append");
+    unit_assert_eq!(
+        menu.items[4].image =>
         ObjectMenuImage::TextSpec {
             spec: "Portrait:cowb::nope::captain1".to_string(),
             color: 0x123456,
@@ -384,14 +332,14 @@ fn menu_definition_picture_phase_preserves_index_and_clips_out_of_bounds() {
     let phase_two = engine
         .definition_picture_phase_image("PHAS", 2)
         .test_value();
-    assert_eq!((phase_two.width(), phase_two.height()), (1, 1));
-    assert_eq!(&*phase_two.pixels(), &[0, 0, 0xff, 0xff]);
+    unit_assert_eq!((phase_two.width(), phase_two.height()) => (1, 1));
+    unit_assert_eq!(&*phase_two.pixels() => &[0, 0, 0xff, 0xff]);
 
     let outside = engine
         .definition_picture_phase_image("PHAS", 5)
         .test_value();
-    assert_eq!((outside.width(), outside.height()), (1, 1));
-    assert_eq!(&*outside.pixels(), &[0, 0, 0, 0]);
+    unit_assert_eq!((outside.width(), outside.height()) => (1, 1));
+    unit_assert_eq!(&*outside.pixels() => &[0, 0, 0, 0]);
 }
 
 #[test]
@@ -422,12 +370,8 @@ fn object_list_definition_picture_uses_the_raw_picture_rect() {
     engine.register_test_definition(definition);
 
     let icon = engine.definition_picture_icon_image("ICON").test_value();
-    assert_eq!((icon.width(), icon.height()), (2, 1));
-    assert_eq!(
-        icon.pixels().as_ref(),
-        &[17, 0, 0, 255, 18, 0, 0, 255],
-        "Scale belongs to game rendering, not the raw object-list callback"
-    );
+    unit_assert_eq!((icon.width(), icon.height()) => (2, 1));
+    unit_assert_eq!(icon.pixels().as_ref() => &[17, 0, 0, 255, 18, 0, 0, 255], "Scale belongs to game rendering, not the raw object-list callback");
 }
 
 #[test]
@@ -442,10 +386,10 @@ fn real_clonk_category_agrees_across_definition_object_and_reflection() {
             .test_value();
     let resource = ResourceDefinitionData::load(&group).test_value();
     let expected = CATEGORY_LIVING | (1 << 11) | (1 << 18);
-    assert_eq!(resource.core.category, expected);
+    unit_assert_eq!(resource.core.category => expected);
 
     let clonk_definition = Definition::from_resource(&resource).test_value();
-    assert_eq!(clonk_definition.category(), expected);
+    unit_assert_eq!(clonk_definition.category() => expected);
     let probe_definition = test_definition(
         "CATP",
         "Category probe",
@@ -458,24 +402,17 @@ fn real_clonk_category_agrees_across_definition_object_and_reflection() {
         "#,
     );
 
-    let mut engine = Engine::with_seed(0);
-    engine.register_test_definition(clonk_definition);
+    let mut engine = definition_engine(0, clonk_definition);
     engine.register_test_definition(probe_definition);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK").with_loaded(true));
-    let probe = engine.spawn_test_object(SpawnConfig::new("CATP").with_loaded(true));
+    let clonk = spawn_fixture!(engine, "CLNK", with_loaded: true);
+    let probe = spawn_fixture!(engine, "CATP", with_loaded: true);
 
-    assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("Clonk exists")
-            .category,
-        expected
-    );
+    unit_assert_eq!(engine.object_snapshot(clonk).expect("Clonk exists").category => expected);
     let probe_index = engine.test_object_index(probe);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(probe_index, "Probe", vec![Value::Object(clonk.as_u64())],)
-            .expect("category probe succeeds"),
+            .expect("category probe succeeds") =>
         Value::Array(vec![
             Value::Int(expected),
             Value::Int(expected),
@@ -507,8 +444,8 @@ fn knight_include_chain_inherits_clonk_rank_strip_and_base_count() {
         let image = engine
             .definition_rank_symbols_image(definition_id)
             .test_value();
-        assert_eq!((image.width(), image.height()), (464, 16));
-        assert_eq!(engine.definition_rank_symbol_count(definition_id), Some(24));
+        unit_assert_eq!((image.width(), image.height()) => (464, 16));
+        unit_assert_eq!(engine.definition_rank_symbol_count(definition_id) => Some(24));
     }
 }
 
@@ -545,24 +482,24 @@ fn object_menu_picture_snapshot_captures_same_call_mutation_and_round_trips() {
         let index = engine.test_object_index(clonk);
         engine.call_test_object_function(index, function, Vec::new())
     };
-    assert_eq!(call(&mut engine, "Open"), Value::Bool(true));
-    assert_eq!(call(&mut engine, "Capture"), Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "Open") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "Capture") => Value::Bool(true));
 
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
     let item = menu.items.first().test_value();
-    assert_eq!(item.presentation_definition_id.as_deref(), Some("NEWW"));
+    unit_assert_eq!(item.presentation_definition_id.as_deref() => Some("NEWW"));
     let picture = item.picture_snapshot.as_ref().test_value();
-    assert_eq!(picture.definition_id, "NEWW");
-    assert_eq!(picture.base_graphics, None);
-    assert_eq!(picture.color, 0, "non-CBO ChangeDef clears object color");
-    assert_eq!(picture.color_modulation, 0x70402010);
+    unit_assert_eq!(picture.definition_id => "NEWW");
+    unit_assert_eq!(picture.base_graphics => None);
+    unit_assert_eq!(picture.color => 0, "non-CBO ChangeDef clears object color");
+    unit_assert_eq!(picture.color_modulation => 0x70402010);
 
     let encoded = serde_json::to_string(item).test_value();
     let decoded: ObjectMenuItem = serde_json::from_str(&encoded).test_value();
-    assert_eq!(decoded, *item);
+    unit_assert_eq!(decoded => *item);
 }
 
 #[test]
@@ -588,26 +525,18 @@ fn object_menu_picture_caches_foreign_temporary_overlay_before_removal() {
     let controller = engine.spawn_test_object(SpawnConfig::new("CTRL"));
     engine.tick_without_snapshot().test_value();
     let index = engine.test_object_index(controller);
-    assert_eq!(
-        engine
-            .call_object_function(index, "Configure", Vec::new())
-            .expect("configure succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(index, "Configure", Vec::new()).expect("configure succeeds") => Value::Bool(true));
 
     let menu = engine
         .debug_object_menu(controller.as_u64())
         .test_value()
         .test_value();
     let picture = menu.items[0].picture_snapshot.as_ref().test_value();
-    assert_eq!(picture.graphics_overlays.len(), 1);
+    unit_assert_eq!(picture.graphics_overlays.len() => 1);
     let overlay = &picture.graphics_overlays[0];
-    assert_eq!(overlay.definition.as_deref(), Some("PICT"));
-    assert_eq!(overlay.mode, GraphicsOverlayMode::Picture);
-    assert_eq!(
-        overlay.transform,
-        Some(DrawTransform::from_components(0.65, 0.65, 5.0, 5.0))
-    );
+    unit_assert_eq!(overlay.definition.as_deref() => Some("PICT"));
+    unit_assert_eq!(overlay.mode => GraphicsOverlayMode::Picture);
+    unit_assert_eq!(overlay.transform => Some(DrawTransform::from_components(0.65, 0.65, 5.0, 5.0)));
 }
 
 #[test]
@@ -662,15 +591,7 @@ fn menu_item_caches_custom_components_from_the_menu_target_builder_like_cpp() {
         "SetComponentMode",
         vec![Value::Int(1)],
     );
-    assert_eq!(
-        call(
-            &mut engine,
-            command,
-            "Open",
-            vec![object_reference_value(builder)],
-        ),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(call(&mut engine, command, "Open", vec![object_reference_value(builder)],) => Value::Bool(true));
     // The C4MenuItem owns the resolved C4IDList. A later builder-state
     // change must not re-run GetCustomComponents during presentation.
     call(
@@ -684,10 +605,10 @@ fn menu_item_caches_custom_components_from_the_menu_target_builder_like_cpp() {
         .debug_object_menu(builder.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.command_object, Some(command));
-    assert_eq!(menu.extra, ObjectMenuExtra::Components);
-    assert_eq!(
-        menu.items[0].components,
+    unit_assert_eq!(menu.command_object => Some(command));
+    unit_assert_eq!(menu.extra => ObjectMenuExtra::Components);
+    unit_assert_eq!(
+        menu.items[0].components =>
         vec![
             ObjectMenuComponent {
                 definition_id: "WOOD".to_string(),
@@ -771,47 +692,36 @@ fn menu_item_custom_component_fallbacks_and_force_no_desc_match_cpp() {
     let command = engine.spawn_test_object(SpawnConfig::new("CMND"));
     engine.tick_without_snapshot().test_value();
     let command_index = engine.test_object_index(command);
-    assert_eq!(
-        engine
-            .call_object_function(command_index, "Open", vec![object_reference_value(builder)],)
-            .expect("Open succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(command_index, "Open", vec![object_reference_value(builder)],).expect("Open succeeds") => Value::Bool(true));
 
     let menu = engine
         .debug_object_menu(builder.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.extra, ObjectMenuExtra::Components);
-    assert_eq!(menu.items.len(), 4);
-    assert!(
-        menu.items[0].components.is_empty(),
-        "an empty custom array overrides EMPT's static WOOD component"
-    );
-    assert_eq!(menu.items[0].info_caption, "Empty custom description.");
-    assert_eq!(
-        menu.items[1].components,
+    unit_assert_eq!(menu.extra => ObjectMenuExtra::Components);
+    unit_assert_eq!(menu.items.len() => 4);
+    unit_assert!(menu.items[0].components.is_empty(), "an empty custom array overrides EMPT's static WOOD component");
+    unit_assert_eq!(menu.items[0].info_caption => "Empty custom description.");
+    unit_assert_eq!(
+        menu.items[1].components =>
         vec![ObjectMenuComponent {
             definition_id: "METL".to_string(),
             count: 3,
         }],
         "a non-array result falls back to NARR's DefCore components"
     );
-    assert_eq!(menu.items[1].info_caption, "Non-array description.");
-    assert_eq!(
-        menu.items[2].components,
+    unit_assert_eq!(menu.items[1].info_caption => "Non-array description.");
+    unit_assert_eq!(
+        menu.items[2].components =>
         vec![ObjectMenuComponent {
             definition_id: "GOLD".to_string(),
             count: 2,
         }],
         "a missing hook falls back to MISS's DefCore components"
     );
-    assert_eq!(menu.items[2].info_caption, "Missing-hook description.");
-    assert_eq!(menu.items[3].components, menu.items[2].components);
-    assert_eq!(
-        menu.items[3].info_caption, "",
-        "C4MN_Add_ForceNoDesc suppresses the omitted-caption fallback"
-    );
+    unit_assert_eq!(menu.items[2].info_caption => "Missing-hook description.");
+    unit_assert_eq!(menu.items[3].components => menu.items[2].components);
+    unit_assert_eq!(menu.items[3].info_caption => "", "C4MN_Add_ForceNoDesc suppresses the omitted-caption fallback");
 }
 
 #[test]
@@ -849,11 +759,7 @@ fn context_menu_overlay_write_keeps_the_objects_other_overlays() {
         .iter()
         .map(|overlay| overlay.id)
         .collect::<Vec<_>>();
-    assert_eq!(
-        overlays,
-        vec![1, 9],
-        "the context-menu callback wrote overlay 9; overlay 1 must survive"
-    );
+    unit_assert_eq!(overlays => vec![1, 9], "the context-menu callback wrote overlay 9; overlay 1 must survive");
 }
 
 #[test]
@@ -900,11 +806,7 @@ fn menu_callback_overlay_write_keeps_the_objects_other_overlays() {
         .iter()
         .map(|overlay| overlay.id)
         .collect::<Vec<_>>();
-    assert_eq!(
-        overlays,
-        vec![1, 9],
-        "the menu callback wrote overlay 9; overlay 1 must survive"
-    );
+    unit_assert_eq!(overlays => vec![1, 9], "the menu callback wrote overlay 9; overlay 1 must survive");
 }
 
 #[test]
@@ -929,9 +831,8 @@ fn select_menu_item_moves_selection_and_fires_on_menu_selection_like_cpp() {
         }
         func Sel(i) { return SelectMenuItem(i, this()); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    let (mut engine, clonk) =
+        script_object_fixture(7, "CLNK", "Clonk", script, SpawnConfig::new("CLNK"));
     engine.tick_without_snapshot().test_value();
 
     let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
@@ -948,48 +849,35 @@ fn select_menu_item_moves_selection_and_fires_on_menu_selection_like_cpp() {
             .unwrap_or(Value::Nil)
     };
 
-    assert_eq!(
-        call(&mut engine, "NoMenu", Vec::new()),
-        Value::Bool(false),
-        "no menu -> false (C4Script.cpp:1739)"
-    );
-    assert_eq!(call(&mut engine, "OpenMenu", Vec::new()), Value::Int(1));
+    unit_assert_eq!(call(&mut engine, "NoMenu", Vec::new()) => Value::Bool(false), "no menu -> false (C4Script.cpp:1739)");
+    unit_assert_eq!(call(&mut engine, "OpenMenu", Vec::new()) => Value::Int(1));
 
     // Selectable item: selection moves, callback sees the new index.
-    assert_eq!(
-        call(&mut engine, "Sel", vec![Value::Int(1)]),
-        Value::Bool(true)
-    );
-    assert_eq!(last_sel(&engine), Value::Int(1));
+    unit_assert_eq!(call(&mut engine, "Sel", vec![Value::Int(1)]) => Value::Bool(true));
+    unit_assert_eq!(last_sel(&engine) => Value::Int(1));
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.selection, 1);
+    unit_assert_eq!(menu.selection => 1);
 
     // Non-selectable item: selection stays, call still true, callback
     // fires with the OLD selection.
-    assert_eq!(
-        call(&mut engine, "Sel", vec![Value::Int(2)]),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(call(&mut engine, "Sel", vec![Value::Int(2)]) => Value::Bool(true));
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.selection, 1, "item without command is not selectable");
-    assert_eq!(last_sel(&engine), Value::Int(1));
+    unit_assert_eq!(menu.selection => 1, "item without command is not selectable");
+    unit_assert_eq!(last_sel(&engine) => Value::Int(1));
 
     // Out of range behaves the same.
-    assert_eq!(
-        call(&mut engine, "Sel", vec![Value::Int(9)]),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(call(&mut engine, "Sel", vec![Value::Int(9)]) => Value::Bool(true));
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.selection, 1);
+    unit_assert_eq!(menu.selection => 1);
 }
 
 #[test]
@@ -1025,48 +913,47 @@ func Clear() { return ClearMenuItems(); }
 func AddAgain() { return AddMenuItem("C", "CmdC", WIPF, this()); }
 func ReadMenu() { return GetMenu(); }
 "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    let (mut engine, clonk) =
+        script_object_fixture(7, "CLNK", "Clonk", script, SpawnConfig::new("CLNK"));
     engine.tick_without_snapshot().test_value();
 
     let call = |engine: &mut Engine, name: &str| {
         let index = engine.test_object_index(clonk);
         engine.call_test_object_function(index, name, Vec::new())
     };
-    assert_eq!(call(&mut engine, "NoObject"), Value::Bool(false));
-    assert_eq!(call(&mut engine, "NoMenu"), Value::Bool(false));
-    assert_eq!(call(&mut engine, "OpenMenu"), Value::Bool(true));
-    assert_eq!(call(&mut engine, "ResetCallbacks"), Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "NoObject") => Value::Bool(false));
+    unit_assert_eq!(call(&mut engine, "NoMenu") => Value::Bool(false));
+    unit_assert_eq!(call(&mut engine, "OpenMenu") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "ResetCallbacks") => Value::Bool(true));
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.items.len(), 2);
-    assert_eq!(menu.selection, 1);
+    unit_assert_eq!(menu.items.len() => 2);
+    unit_assert_eq!(menu.selection => 1);
 
-    assert_eq!(call(&mut engine, "Clear"), Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "Clear") => Value::Bool(true));
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert!(menu.items.is_empty());
-    assert_eq!(menu.selection, -1);
-    assert_eq!(call(&mut engine, "ReadMenu"), Value::C4Id("WIPF".into()));
+    unit_assert!(menu.items.is_empty());
+    unit_assert_eq!(menu.selection => -1);
+    unit_assert_eq!(call(&mut engine, "ReadMenu") => Value::C4Id("WIPF".into()));
     let index = engine.test_object_index(clonk);
     let locals = &engine.objects[index].state.local_vars;
-    assert_eq!(locals.get("selection_calls"), Some(&Value::Nil));
-    assert_eq!(locals.get("last_selection"), Some(&Value::Int(99)));
-    assert_eq!(locals.get("cancel_calls"), Some(&Value::Nil));
+    unit_assert_eq!(locals.get("selection_calls") => Some(&Value::Nil));
+    unit_assert_eq!(locals.get("last_selection") => Some(&Value::Int(99)));
+    unit_assert_eq!(locals.get("cancel_calls") => Some(&Value::Nil));
 
-    assert_eq!(call(&mut engine, "AddAgain"), Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "AddAgain") => Value::Bool(true));
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.items.len(), 1);
-    assert_eq!(menu.selection, 0);
-    assert_eq!(call(&mut engine, "Clear"), Value::Bool(true));
+    unit_assert_eq!(menu.items.len() => 1);
+    unit_assert_eq!(menu.selection => 0);
+    unit_assert_eq!(call(&mut engine, "Clear") => Value::Bool(true));
 }
 
 #[test]
@@ -1079,35 +966,25 @@ fn exit_closes_the_object_menu_like_cpp() {
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         func LeaveAndRead() { Exit(); return GetMenu(this()); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
+    let mut engine = script_engine(7, "CLNK", "Clonk", script);
     engine.register_test_script_definition("HUT1", "Hut", "");
     let hut = engine.spawn_test_object(SpawnConfig::new("HUT1"));
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK").with_container(hut));
+    let clonk = spawn_fixture!(engine, "CLNK", with_container: hut);
     engine.tick_without_snapshot().test_value();
 
     let idx = engine.test_object_index(clonk);
-    assert_eq!(
-        engine
-            .call_object_function(idx, "OpenMenu", Vec::new())
-            .expect("OpenMenu succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(idx, "OpenMenu", Vec::new()).expect("OpenMenu succeeds") => Value::Bool(true));
     let idx = engine.test_object_index(clonk);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(idx, "LeaveAndRead", Vec::new())
-            .expect("LeaveAndRead succeeds"),
+            .expect("LeaveAndRead succeeds") =>
         Value::Int(0),
         "Exit closes the menu before the same-call GetMenu (C4Object.cpp:1555)"
     );
     let idx = engine.test_object_index(clonk);
-    assert_eq!(engine.objects[idx].state.container, None, "exit folded");
-    assert_eq!(
-        engine.debug_object_menu(clonk.as_u64()),
-        Some(None),
-        "the menu stays closed after the fold"
-    );
+    unit_assert_eq!(engine.objects[idx].state.container => None, "exit folded");
+    unit_assert_eq!(engine.debug_object_menu(clonk.as_u64()) => Some(None), "the menu stays closed after the fold");
 }
 
 #[test]
@@ -1121,47 +998,41 @@ fn enter_closes_the_object_menu_and_a_later_create_menu_survives_like_cpp() {
         func BoardAndRead(hut) { Enter(hut); return GetMenu(this()); }
         func BoardThenReopen(hut) { Enter(hut); Exit(); Enter(hut); CreateMenu(MENU, this(), this(), 0, "After"); return GetMenu(this()); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
+    let mut engine = script_engine(7, "CLNK", "Clonk", script);
     engine.register_test_script_definition("HUT1", "Hut", "");
     let hut = engine.spawn_test_object(SpawnConfig::new("HUT1"));
     let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
     engine.tick_without_snapshot().test_value();
 
     let idx = engine.test_object_index(clonk);
-    assert_eq!(
-        engine
-            .call_object_function(idx, "OpenMenu", Vec::new())
-            .expect("OpenMenu succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(idx, "OpenMenu", Vec::new()).expect("OpenMenu succeeds") => Value::Bool(true));
     let idx = engine.test_object_index(clonk);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(idx, "BoardAndRead", vec![object_reference_value(hut)])
-            .expect("BoardAndRead succeeds"),
+            .expect("BoardAndRead succeeds") =>
         Value::Int(0),
         "Enter closes the menu before the same-call GetMenu (C4Object.cpp:1594)"
     );
     let idx = engine.test_object_index(clonk);
-    assert_eq!(engine.objects[idx].state.container, Some(hut));
-    assert_eq!(engine.debug_object_menu(clonk.as_u64()), Some(None));
+    unit_assert_eq!(engine.objects[idx].state.container => Some(hut));
+    unit_assert_eq!(engine.debug_object_menu(clonk.as_u64()) => Some(None));
 
     // Exit+Enter then CreateMenu in ONE call: the new menu must survive
     // the container-change fold (C++ closed at Enter time, then the
     // script reopened — the reopened menu stays).
     let idx = engine.test_object_index(clonk);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(idx, "BoardThenReopen", vec![object_reference_value(hut)])
-            .expect("BoardThenReopen succeeds"),
+            .expect("BoardThenReopen succeeds") =>
         Value::C4Id("MENU".into())
     );
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.identification, Value::C4Id("MENU".into()));
+    unit_assert_eq!(menu.identification => Value::C4Id("MENU".into()));
 }
 
 #[test]
@@ -1199,8 +1070,7 @@ fn enter_and_exit_force_close_the_moving_objects_menu_before_callbacks() {
         protected func Collection2(object item) { return item->RecordCallback(1); }
         protected func Ejection(object item) { return item->RecordCallback(3); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", moving_script);
+    let mut engine = script_engine(7, "CLNK", "Clonk", moving_script);
     engine.register_test_script_definition("HUT1", "Hut", container_script);
     let container = engine.spawn_test_object(SpawnConfig::new("HUT1"));
     let moving = engine.spawn_test_object(SpawnConfig::new("CLNK"));
@@ -1210,27 +1080,13 @@ fn enter_and_exit_force_close_the_moving_objects_menu_before_callbacks() {
         let index = engine.test_object_index(moving);
         engine.call_test_object_function(index, name, args)
     };
-    assert_eq!(
-        call(&mut engine, "ResetAndOpen", Vec::new()),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        call(
-            &mut engine,
-            "Board",
-            vec![object_reference_value(container)],
-        ),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(call(&mut engine, "ResetAndOpen", Vec::new()) => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "Board", vec![object_reference_value(container)],) => Value::Bool(true));
 
     let index = engine.test_object_index(moving);
-    assert_eq!(engine.objects[index].state.container, Some(container));
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("callback_order"),
-        Some(&Value::Int(12)),
-        "Collection2 runs before Entrance"
-    );
-    assert!(
+    unit_assert_eq!(engine.objects[index].state.container => Some(container));
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("callback_order") => Some(&Value::Int(12)), "Collection2 runs before Entrance");
+    unit_assert!(
         !engine.objects[index]
             .state
             .local_vars
@@ -1238,26 +1094,15 @@ fn enter_and_exit_force_close_the_moving_objects_menu_before_callbacks() {
             .is_some_and(Value::as_bool),
         "both Enter callbacks observe the old menu already closed"
     );
-    assert!(
-        !engine.objects[index]
-            .state
-            .local_vars
-            .get("query_calls")
-            .is_some_and(Value::as_bool),
-        "forced Enter close bypasses a denying MenuQueryCancel"
-    );
+    unit_assert!(!engine.objects[index].state.local_vars.get("query_calls").is_some_and(Value::as_bool), "forced Enter close bypasses a denying MenuQueryCancel");
 
-    assert_eq!(call(&mut engine, "OpenMenu", Vec::new()), Value::Bool(true));
-    assert_eq!(call(&mut engine, "Leave", Vec::new()), Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "OpenMenu", Vec::new()) => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "Leave", Vec::new()) => Value::Bool(true));
 
     let index = engine.test_object_index(moving);
-    assert_eq!(engine.objects[index].state.container, None);
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("callback_order"),
-        Some(&Value::Int(1234)),
-        "Ejection runs before Departure"
-    );
-    assert!(
+    unit_assert_eq!(engine.objects[index].state.container => None);
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("callback_order") => Some(&Value::Int(1234)), "Ejection runs before Departure");
+    unit_assert!(
         !engine.objects[index]
             .state
             .local_vars
@@ -1265,15 +1110,8 @@ fn enter_and_exit_force_close_the_moving_objects_menu_before_callbacks() {
             .is_some_and(Value::as_bool),
         "both Exit callbacks observe the old menu already closed"
     );
-    assert!(
-        !engine.objects[index]
-            .state
-            .local_vars
-            .get("query_calls")
-            .is_some_and(Value::as_bool),
-        "forced Exit close bypasses a denying MenuQueryCancel"
-    );
-    assert_eq!(engine.debug_object_menu(moving.as_u64()), Some(None));
+    unit_assert!(!engine.objects[index].state.local_vars.get("query_calls").is_some_and(Value::as_bool), "forced Exit close bypasses a denying MenuQueryCancel");
+    unit_assert_eq!(engine.debug_object_menu(moving.as_u64()) => Some(None));
 }
 
 #[test]
@@ -1285,8 +1123,7 @@ fn engine_internal_container_moves_close_the_object_menu_like_cpp() {
     let script = r#"
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
+    let mut engine = script_engine(7, "CLNK", "Clonk", script);
     engine.register_test_script_definition("HUT1", "Hut", "");
     let hut = engine.spawn_test_object(SpawnConfig::new("HUT1"));
     let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
@@ -1294,37 +1131,23 @@ fn engine_internal_container_moves_close_the_object_menu_like_cpp() {
 
     let idx = engine.test_object_index(clonk);
     engine.call_test_object_function(idx, "OpenMenu", Vec::new());
-    assert!(engine
-        .debug_object_menu(clonk.as_u64())
-        .expect("clonk exists")
-        .is_some());
+    unit_assert!(engine.debug_object_menu(clonk.as_u64()).expect("clonk exists").is_some());
 
     // Host-driven Enter, like the collection cross-check
     // (C4Object::Collect -> Enter, C4Object.cpp:5698 -> :1552).
     engine
         .apply_object_update(clonk, ObjectUpdate::new().with_container(hut))
         .test_value();
-    assert_eq!(
-        engine.debug_object_menu(clonk.as_u64()),
-        Some(None),
-        "the entering object's menu closes (C4Object.cpp:1594)"
-    );
+    unit_assert_eq!(engine.debug_object_menu(clonk.as_u64()) => Some(None), "the entering object's menu closes (C4Object.cpp:1594)");
 
     // Reopen, then a host-driven Exit (e.g. drop) closes it again.
     let idx = engine.test_object_index(clonk);
     engine.call_test_object_function(idx, "OpenMenu", Vec::new());
-    assert!(engine
-        .debug_object_menu(clonk.as_u64())
-        .expect("clonk exists")
-        .is_some());
+    unit_assert!(engine.debug_object_menu(clonk.as_u64()).expect("clonk exists").is_some());
     engine
         .apply_object_update(clonk, ObjectUpdate::new().clear_container())
         .test_value();
-    assert_eq!(
-        engine.debug_object_menu(clonk.as_u64()),
-        Some(None),
-        "the exiting object's menu closes (C4Object.cpp:1555)"
-    );
+    unit_assert_eq!(engine.debug_object_menu(clonk.as_u64()) => Some(None), "the exiting object's menu closes (C4Object.cpp:1555)");
 }
 
 #[test]
@@ -1335,24 +1158,16 @@ fn sync_clearance_closes_the_object_menu_like_cpp() {
     let script = r#"
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    let (mut engine, clonk) =
+        script_object_fixture(7, "CLNK", "Clonk", script, SpawnConfig::new("CLNK"));
     engine.tick_without_snapshot().test_value();
 
     let idx = engine.test_object_index(clonk);
     engine.call_test_object_function(idx, "OpenMenu", Vec::new());
-    assert!(engine
-        .debug_object_menu(clonk.as_u64())
-        .expect("clonk exists")
-        .is_some());
+    unit_assert!(engine.debug_object_menu(clonk.as_u64()).expect("clonk exists").is_some());
 
     engine.game_start_synchronize().test_value();
-    assert_eq!(
-        engine.debug_object_menu(clonk.as_u64()),
-        Some(None),
-        "SyncClearance closes menus (C4Object.cpp:3842)"
-    );
+    unit_assert_eq!(engine.debug_object_menu(clonk.as_u64()) => Some(None), "SyncClearance closes menus (C4Object.cpp:3842)");
 }
 
 #[test]
@@ -1371,19 +1186,10 @@ fn control_set_command_soft_closes_the_menu_and_a_denial_aborts_like_cpp() {
         func MenuQueryCancel(sel, menuObj) { queried = queried + 1; return deny; }
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         "#;
-    let mut definition = test_definition("CLNK", "Clonk", script);
-    let mut actions = HashMap::new();
-    actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
-    definition.configure_actions(Some("Idle".to_string()), actions);
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_definition(definition);
+    let definition = procedure_definition("CLNK", "Clonk", script, "Idle", "walk");
+    let mut engine = definition_engine(7, definition);
     engine.register_test_player(PlayerConfig::new(1, "Test"));
-    let clonk = engine.spawn_test_object(
-        SpawnConfig::new("CLNK")
-            .with_owner(1)
-            .with_crew_member(true)
-            .with_action(ActionState::new("Idle")),
-    );
+    let clonk = spawn_fixture!(engine, "CLNK", with_owner: 1, with_crew_member: true, with_action: ActionState::new("Idle"));
     engine.set_crew_cursor(1, Some(clonk)).test_value();
 
     let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
@@ -1405,18 +1211,10 @@ fn control_set_command_soft_closes_the_menu_and_a_denial_aborts_like_cpp() {
     engine
         .player_object_command(1, CommandId::Dig, None, 10, 20)
         .test_value();
-    assert_eq!(
-        engine.debug_object_menu(clonk.as_u64()),
-        Some(None),
-        "SetCommand(fControl) closed the undenied menu (C4Object.cpp:3945)"
-    );
-    assert_eq!(queried(&engine), Value::Int(1), "the soft close queried");
+    unit_assert_eq!(engine.debug_object_menu(clonk.as_u64()) => Some(None), "SetCommand(fControl) closed the undenied menu (C4Object.cpp:3945)");
+    unit_assert_eq!(queried(&engine) => Value::Int(1), "the soft close queried");
     let idx = engine.test_object_index(clonk);
-    assert_eq!(
-        engine.objects[idx].commands.snapshot().command_names(),
-        vec!["Dig".to_string()],
-        "the command was set after the close"
-    );
+    unit_assert_eq!(engine.objects[idx].commands.snapshot().command_names() => vec!["Dig".to_string()], "the command was set after the close");
 
     // Denied menu: it survives, and the SetCommand aborts AFTER the
     // ClearCommands — the old Dig is gone, nothing new is pushed.
@@ -1427,19 +1225,10 @@ fn control_set_command_soft_closes_the_menu_and_a_denial_aborts_like_cpp() {
     engine
         .player_object_command(1, CommandId::Dig, None, 30, 40)
         .test_value();
-    assert!(
-        engine
-            .debug_object_menu(clonk.as_u64())
-            .expect("clonk exists")
-            .is_some(),
-        "the denied menu stays open (C4Object.cpp:3946)"
-    );
-    assert_eq!(queried(&engine), Value::Int(2));
+    unit_assert!(engine.debug_object_menu(clonk.as_u64()).expect("clonk exists").is_some(), "the denied menu stays open (C4Object.cpp:3946)");
+    unit_assert_eq!(queried(&engine) => Value::Int(2));
     let idx = engine.test_object_index(clonk);
-    assert!(
-        engine.objects[idx].commands.snapshot().is_empty(),
-        "the abort still cleared the stack (ClearCommands ran first, :3941)"
-    );
+    unit_assert!(engine.objects[idx].commands.snapshot().is_empty(), "the abort still cleared the stack (ClearCommands ran first, :3941)");
 }
 
 #[test]
@@ -1459,9 +1248,8 @@ fn get_menu_selection_reads_the_selection_or_minus_one_like_cpp() {
             return SelectMenuItem(2, this());
         }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    let (mut engine, clonk) =
+        script_object_fixture(7, "CLNK", "Clonk", script, SpawnConfig::new("CLNK"));
     engine.tick_without_snapshot().test_value();
 
     let call = |engine: &mut Engine, name: &str| {
@@ -1469,23 +1257,11 @@ fn get_menu_selection_reads_the_selection_or_minus_one_like_cpp() {
         engine.call_test_object_function(idx, name, Vec::new())
     };
 
-    assert_eq!(
-        call(&mut engine, "Read"),
-        Value::Int(-1),
-        "no menu -> -1 (C4Script.cpp:4314)"
-    );
-    assert_eq!(call(&mut engine, "OpenEmpty"), Value::Bool(true));
-    assert_eq!(
-        call(&mut engine, "ReadSelf"),
-        Value::Int(-1),
-        "open menu without a selection reports its raw -1"
-    );
-    assert_eq!(call(&mut engine, "Fill"), Value::Bool(true));
-    assert_eq!(
-        call(&mut engine, "Read"),
-        Value::Int(2),
-        "the selected index is reported (C4Script.cpp:4315)"
-    );
+    unit_assert_eq!(call(&mut engine, "Read") => Value::Int(-1), "no menu -> -1 (C4Script.cpp:4314)");
+    unit_assert_eq!(call(&mut engine, "OpenEmpty") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "ReadSelf") => Value::Int(-1), "open menu without a selection reports its raw -1");
+    unit_assert_eq!(call(&mut engine, "Fill") => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "Read") => Value::Int(2), "the selected index is reported (C4Script.cpp:4315)");
 }
 
 #[test]
@@ -1499,9 +1275,8 @@ fn set_menu_size_clamps_and_keeps_zero_axes_like_cpp() {
         func Resize(c, r) { return SetMenuSize(c, r, this()); }
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    let (mut engine, clonk) =
+        script_object_fixture(7, "CLNK", "Clonk", script, SpawnConfig::new("CLNK"));
     engine.tick_without_snapshot().test_value();
 
     let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
@@ -1516,34 +1291,17 @@ fn set_menu_size_clamps_and_keeps_zero_axes_like_cpp() {
         (menu.columns, menu.lines)
     };
 
-    assert_eq!(
-        call(&mut engine, "Resize", vec![Value::Int(3), Value::Int(4)]),
-        Value::Bool(false),
-        "no menu -> false (C4Script.cpp:4489)"
-    );
+    unit_assert_eq!(call(&mut engine, "Resize", vec![Value::Int(3), Value::Int(4)]) => Value::Bool(false), "no menu -> false (C4Script.cpp:4489)");
     call(&mut engine, "OpenMenu", Vec::new());
-    assert_eq!(
-        size(&engine),
-        (5, 0),
-        "InitMenu gives normal menus five columns (C4Menu.cpp:359-365)"
-    );
-    assert_eq!(
-        call(&mut engine, "Resize", vec![Value::Int(3), Value::Int(4)]),
-        Value::Bool(true)
-    );
-    assert_eq!(size(&engine), (3, 4));
+    unit_assert_eq!(size(&engine) => (5, 0), "InitMenu gives normal menus five columns (C4Menu.cpp:359-365)");
+    unit_assert_eq!(call(&mut engine, "Resize", vec![Value::Int(3), Value::Int(4)]) => Value::Bool(true));
+    unit_assert_eq!(size(&engine) => (3, 4));
     // Zero keeps the previous axis (C4Menu.cpp:637-638); a negative
     // clamps to 0 and thus also keeps; oversize clamps to 50.
-    assert_eq!(
-        call(&mut engine, "Resize", vec![Value::Int(0), Value::Int(7)]),
-        Value::Bool(true)
-    );
-    assert_eq!(size(&engine), (3, 7));
-    assert_eq!(
-        call(&mut engine, "Resize", vec![Value::Int(99), Value::Int(-5)]),
-        Value::Bool(true)
-    );
-    assert_eq!(size(&engine), (50, 7));
+    unit_assert_eq!(call(&mut engine, "Resize", vec![Value::Int(0), Value::Int(7)]) => Value::Bool(true));
+    unit_assert_eq!(size(&engine) => (3, 7));
+    unit_assert_eq!(call(&mut engine, "Resize", vec![Value::Int(99), Value::Int(-5)]) => Value::Bool(true));
+    unit_assert_eq!(size(&engine) => (50, 7));
 }
 
 #[test]
@@ -1559,9 +1317,8 @@ fn set_menu_text_progress_requires_an_explicit_menu_object_like_cpp() {
         func NoObj() { return SetMenuTextProgress(0); }
         func Prog(n) { return SetMenuTextProgress(n, this()); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    let (mut engine, clonk) =
+        script_object_fixture(7, "CLNK", "Clonk", script, SpawnConfig::new("CLNK"));
     engine.tick_without_snapshot().test_value();
 
     let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
@@ -1576,33 +1333,13 @@ fn set_menu_text_progress_requires_an_explicit_menu_object_like_cpp() {
             .text_progressing
     };
 
-    assert_eq!(
-        call(&mut engine, "Prog", vec![Value::Int(0)]),
-        Value::Bool(false),
-        "no menu -> false (C4Script.cpp:1752)"
-    );
+    unit_assert_eq!(call(&mut engine, "Prog", vec![Value::Int(0)]) => Value::Bool(false), "no menu -> false (C4Script.cpp:1752)");
     call(&mut engine, "OpenMenu", Vec::new());
-    assert_eq!(
-        call(&mut engine, "NoObj", Vec::new()),
-        Value::Bool(false),
-        "nil menu object -> false even with a scope object (C4Script.cpp:1752)"
-    );
-    assert_eq!(
-        call(&mut engine, "Prog", vec![Value::Int(5)]),
-        Value::Bool(true)
-    );
-    assert!(
-        !progressing(&engine),
-        "an empty menu has no unfinished text"
-    );
-    assert_eq!(
-        call(&mut engine, "Prog", vec![Value::Int(-1)]),
-        Value::Bool(true)
-    );
-    assert!(
-        !progressing(&engine),
-        "negative n disables text progress (fTextProgressing = false)"
-    );
+    unit_assert_eq!(call(&mut engine, "NoObj", Vec::new()) => Value::Bool(false), "nil menu object -> false even with a scope object (C4Script.cpp:1752)");
+    unit_assert_eq!(call(&mut engine, "Prog", vec![Value::Int(5)]) => Value::Bool(true));
+    unit_assert!(!progressing(&engine), "an empty menu has no unfinished text");
+    unit_assert_eq!(call(&mut engine, "Prog", vec![Value::Int(-1)]) => Value::Bool(true));
+    unit_assert!(!progressing(&engine), "negative n disables text progress (fTextProgressing = false)");
 }
 
 #[test]
@@ -1640,60 +1377,40 @@ fn menu_text_progress_distributes_a_shared_cpp_byte_budget() {
             .test_value()
     };
 
-    assert_eq!(
-        call(&mut engine, "OpenDialog", Vec::new()),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        call(&mut engine, "Prog", vec![Value::Int(0)]),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(call(&mut engine, "OpenDialog", Vec::new()) => Value::Bool(true));
+    unit_assert_eq!(call(&mut engine, "Prog", vec![Value::Int(0)]) => Value::Bool(true));
     let state = menu(&engine);
-    assert!(state.text_progressing);
-    assert_eq!(
+    unit_assert!(state.text_progressing);
+    unit_assert_eq!(
         state
             .items
             .iter()
             .map(|item| item.text_display_progress)
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>() =>
         vec![-1, 0, 0, 0],
         "portrait is excluded and every text row starts hidden"
     );
 
     call(&mut engine, "Prog", vec![Value::Int(1)]);
-    assert_eq!(
-        menu(&engine).items[1].text_display_progress,
-        4,
-        "<i> is skipped and the A byte consumes the budget"
-    );
+    unit_assert_eq!(menu(&engine).items[1].text_display_progress => 4, "<i> is skipped and the A byte consumes the budget");
 
     call(&mut engine, "Prog", vec![Value::Int(3)]);
     let state = menu(&engine);
-    assert_eq!(state.items[1].text_display_progress, -1);
-    assert_eq!(state.items[2].text_display_progress, -1);
-    assert_eq!(
-        state.items[3].text_display_progress, 1,
-        "the remaining byte enters the two-byte UTF-8 character"
-    );
+    unit_assert_eq!(state.items[1].text_display_progress => -1);
+    unit_assert_eq!(state.items[2].text_display_progress => -1);
+    unit_assert_eq!(state.items[3].text_display_progress => 1, "the remaining byte enters the two-byte UTF-8 character");
 
-    assert_eq!(call(&mut engine, "AddLate", Vec::new()), Value::Bool(true));
-    assert_eq!(menu(&engine).items[4].text_display_progress, 0);
+    unit_assert_eq!(call(&mut engine, "AddLate", Vec::new()) => Value::Bool(true));
+    unit_assert_eq!(menu(&engine).items[4].text_display_progress => 0);
 
     call(&mut engine, "Prog", vec![Value::Int(0)]);
     engine.tick_without_snapshot().test_value();
-    assert_eq!(
-        menu(&engine).items[1].text_display_progress,
-        4,
-        "C4Menu::Execute advances one shared byte per object tick"
-    );
+    unit_assert_eq!(menu(&engine).items[1].text_display_progress => 4, "C4Menu::Execute advances one shared byte per object tick");
 
     call(&mut engine, "Prog", vec![Value::Int(-1)]);
     let state = menu(&engine);
-    assert!(!state.text_progressing);
-    assert!(state
-        .items
-        .iter()
-        .all(|item| item.text_display_progress == -1));
+    unit_assert!(!state.text_progressing);
+    unit_assert!(state.items.iter().all(|item| item.text_display_progress == -1));
 }
 
 #[test]
@@ -1709,8 +1426,7 @@ fn set_menu_decoration_requires_a_known_def_and_a_menu_like_cpp() {
         func NoObj() { return SetMenuDecoration(DECO); }
         func Deco(decoration) { return SetMenuDecoration(decoration, this()); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
+    let mut engine = script_engine(7, "CLNK", "Clonk", script);
     let mut decoration = test_definition(
         "DECO",
         "Deco",
@@ -1745,40 +1461,22 @@ fn set_menu_decoration_requires_a_known_def_and_a_menu_like_cpp() {
         engine.call_test_object_function(idx, name, args)
     };
 
-    assert_eq!(
-        call(&mut engine, "Deco", vec![Value::C4Id("DECO".into())]),
-        Value::Bool(false),
-        "no menu -> false (C4Script.cpp:1739)"
-    );
+    unit_assert_eq!(call(&mut engine, "Deco", vec![Value::C4Id("DECO".into())]) => Value::Bool(false), "no menu -> false (C4Script.cpp:1739)");
     call(&mut engine, "OpenMenu", Vec::new());
-    assert_eq!(
-        call(&mut engine, "NoObj", Vec::new()),
-        Value::Bool(false),
-        "nil menu object -> false even with a scope object (C4Script.cpp:1739)"
-    );
-    assert_eq!(
-        call(&mut engine, "Deco", vec![Value::C4Id("GOLD".into())]),
+    unit_assert_eq!(call(&mut engine, "NoObj", Vec::new()) => Value::Bool(false), "nil menu object -> false even with a scope object (C4Script.cpp:1739)");
+    unit_assert_eq!(
+        call(&mut engine, "Deco", vec![Value::C4Id("GOLD".into())]) =>
         Value::Bool(false),
         "unknown deco def -> SetByDef fails (C4GuiDialogs.cpp:113-114)"
     );
-    assert_eq!(
+    unit_assert_eq!(engine.debug_object_menu(clonk.as_u64()).expect("clonk exists").expect("menu is open").decoration => None);
+    unit_assert_eq!(call(&mut engine, "Deco", vec![Value::C4Id("DECO".into())]) => Value::Bool(true));
+    unit_assert_eq!(
         engine
             .debug_object_menu(clonk.as_u64())
             .expect("clonk exists")
             .expect("menu is open")
-            .decoration,
-        None
-    );
-    assert_eq!(
-        call(&mut engine, "Deco", vec![Value::C4Id("DECO".into())]),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        engine
-            .debug_object_menu(clonk.as_u64())
-            .expect("clonk exists")
-            .expect("menu is open")
-            .decoration,
+            .decoration =>
         Some(ObjectMenuFrameDecoration {
             source_definition: "DECO".to_string(),
             background_color: 123456,
@@ -1826,9 +1524,8 @@ fn menu_user_enter_executes_the_item_command_and_closes_like_cpp() {
         }
         func OpenEmpty() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+    let (mut engine, clonk) =
+        script_object_fixture(7, "CLNK", "Clonk", script, SpawnConfig::new("CLNK"));
     engine.tick_without_snapshot().test_value();
 
     let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
@@ -1846,7 +1543,7 @@ fn menu_user_enter_executes_the_item_command_and_closes_like_cpp() {
     };
 
     // No menu -> false (C4Menu::Enter !IsActive, C4Menu.cpp:501).
-    assert!(!engine.menu_user_enter(clonk, false).expect("enter runs"));
+    unit_assert!(!engine.menu_user_enter(clonk, false).expect("enter runs"));
 
     // Left enter: command with %d — the second %d gets 0 for left
     // (C4Script.cpp:1563-1570). The non-permanent menu closes.
@@ -1860,13 +1557,9 @@ fn menu_user_enter_executes_the_item_command_and_closes_like_cpp() {
             Value::Int(0),
         ],
     );
-    assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
-    assert_eq!(hit(&engine), Value::Int(40), "Mark(40,0) ran");
-    assert_eq!(
-        engine.debug_object_menu(clonk.as_u64()),
-        Some(None),
-        "non-permanent menu closed before the exec (C4Menu.cpp:517)"
-    );
+    unit_assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
+    unit_assert_eq!(hit(&engine) => Value::Int(40), "Mark(40,0) ran");
+    unit_assert_eq!(engine.debug_object_menu(clonk.as_u64()) => Some(None), "non-permanent menu closed before the exec (C4Menu.cpp:517)");
 
     // Right enter takes Command2 (:514): the second %d gets 1.
     call(
@@ -1879,8 +1572,8 @@ fn menu_user_enter_executes_the_item_command_and_closes_like_cpp() {
             Value::Int(0),
         ],
     );
-    assert!(engine.menu_user_enter(clonk, true).expect("enter runs"));
-    assert_eq!(hit(&engine), Value::Int(41), "Mark(40,1) ran");
+    unit_assert!(engine.menu_user_enter(clonk, true).expect("enter runs"));
+    unit_assert_eq!(hit(&engine) => Value::Int(41), "Mark(40,1) ran");
 
     // MenuCommand's C4AulScript::DirectExec consumes the copied raw
     // C4 string bytes. It must not reinterpret an invalid UTF-8 byte in
@@ -1900,14 +1593,9 @@ fn menu_user_enter_executes_the_item_command_and_closes_like_cpp() {
             Value::Int(0),
         ],
     );
-    assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
+    unit_assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
     let idx = engine.test_object_index(clonk);
-    assert_eq!(
-        engine.objects[idx].state.local_vars.get("text"),
-        Some(&Value::String(
-            clonk_script::c4_string_from_bytes(&[0xff]).into()
-        ))
-    );
+    unit_assert_eq!(engine.objects[idx].state.local_vars.get("text") => Some(&Value::String(clonk_script::c4_string_from_bytes(&[0xff]).into())));
 
     // A PERMANENT menu survives its own execution (C4Menu.cpp:517).
     call(
@@ -1920,15 +1608,9 @@ fn menu_user_enter_executes_the_item_command_and_closes_like_cpp() {
             Value::Int(1),
         ],
     );
-    assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
-    assert_eq!(hit(&engine), Value::Int(50));
-    assert!(
-        engine
-            .debug_object_menu(clonk.as_u64())
-            .expect("clonk exists")
-            .is_some(),
-        "permanent menu stays open"
-    );
+    unit_assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
+    unit_assert_eq!(hit(&engine) => Value::Int(50));
+    unit_assert!(engine.debug_object_menu(clonk.as_u64()).expect("clonk exists").is_some(), "permanent menu stays open");
 
     // Style_Info menus refuse Enter outright (C4Menu.cpp:502).
     call(
@@ -1941,18 +1623,15 @@ fn menu_user_enter_executes_the_item_command_and_closes_like_cpp() {
             Value::Int(0),
         ],
     );
-    assert!(!engine.menu_user_enter(clonk, false).expect("enter runs"));
-    assert_eq!(hit(&engine), Value::Int(50), "info menu ran nothing");
+    unit_assert!(!engine.menu_user_enter(clonk, false).expect("enter runs"));
+    unit_assert_eq!(hit(&engine) => Value::Int(50), "info menu ran nothing");
 
     // No selected item in a non-dialog menu: true, menu stays, nothing
     // runs (C4Menu.cpp:504-510).
     call(&mut engine, "OpenEmpty", Vec::new());
-    assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
-    assert_eq!(hit(&engine), Value::Int(50));
-    assert!(engine
-        .debug_object_menu(clonk.as_u64())
-        .expect("clonk exists")
-        .is_some());
+    unit_assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
+    unit_assert_eq!(hit(&engine) => Value::Int(50));
+    unit_assert!(engine.debug_object_menu(clonk.as_u64()).expect("clonk exists").is_some());
 }
 
 #[test]
@@ -1964,25 +1643,14 @@ fn landscape_width_and_height_report_gback_dimensions_like_cpp() {
         func ReadWidth() { return LandscapeWidth(); }
         func ReadHeight() { return LandscapeHeight(); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("HORS", "Horse", script);
+    let mut engine = script_engine(7, "HORS", "Horse", script);
     engine.set_landscape(Landscape::flat_with_material(23, 41, None));
     let horse = engine.spawn_test_object(SpawnConfig::new("HORS"));
     engine.tick_without_snapshot().test_value();
 
     let idx = engine.test_object_index(horse);
-    assert_eq!(
-        engine
-            .call_object_function(idx, "ReadWidth", Vec::new())
-            .expect("ReadWidth succeeds"),
-        Value::Int(23)
-    );
-    assert_eq!(
-        engine
-            .call_object_function(idx, "ReadHeight", Vec::new())
-            .expect("ReadHeight succeeds"),
-        Value::Int(41)
-    );
+    unit_assert_eq!(engine.call_object_function(idx, "ReadWidth", Vec::new()).expect("ReadWidth succeeds") => Value::Int(23));
+    unit_assert_eq!(engine.call_object_function(idx, "ReadHeight", Vec::new()).expect("ReadHeight succeeds") => Value::Int(41));
 }
 
 #[test]
@@ -2009,16 +1677,18 @@ fn punch_follows_object_com_punch_semantics_like_cpp() {
         fight: 50_000,
         ..PhysicalInfo::default()
     });
-    let mut victim_def = test_definition("CLNK", "Clonk", victim_script);
-    let mut actions = HashMap::new();
-    actions.insert("Idle".to_string(), ActionSpec::default());
-    actions.insert("GetPunched".to_string(), ActionSpec::default());
-    actions.insert("Tumble".to_string(), ActionSpec::default());
-    actions.insert(
-        "Dead".to_string(),
-        ActionSpec::default().with_no_other_action(true),
+    let mut victim_def = action_definition(
+        "CLNK",
+        "Clonk",
+        victim_script,
+        Some("Idle"),
+        [
+            ("Idle", ActionSpec::default()),
+            ("GetPunched", ActionSpec::default()),
+            ("Tumble", ActionSpec::default()),
+            ("Dead", ActionSpec::default().with_no_other_action(true)),
+        ],
     );
-    victim_def.configure_actions(Some("Idle".to_string()), actions);
     victim_def.set_physical(PhysicalInfo {
         fight: 25_000,
         energy: 50_000,
@@ -2028,44 +1698,20 @@ fn punch_follows_object_com_punch_semantics_like_cpp() {
     // punch stays zero -> Punch is a no-op success (C4ObjectCom.cpp:741).
     let pillow_def = test_definition("PILW", "Pillow", victim_script);
 
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_definition(attacker_def);
+    let mut engine = definition_engine(7, attacker_def);
     engine.register_test_definition(victim_def);
     engine.register_test_definition(pillow_def);
-    let snake =
-        engine.spawn_test_object(SpawnConfig::new("SNKE").with_position(Vector2::new(50, 50)));
-    let spawn_victim = |engine: &mut Engine| {
-        engine.spawn_test_object(
-            SpawnConfig::new("CLNK")
-                .with_position(Vector2::new(52, 50))
-                .with_alive(true)
-                .with_energy(50_000),
-        )
-    };
+    let snake = spawn_fixture!(engine, "SNKE", with_position: Vector2::new(50, 50));
+    let spawn_victim = |engine: &mut Engine| spawn_fixture!(engine, "CLNK", with_position: Vector2::new(52, 50), with_alive: true, with_energy: 50_000);
     let v_regular = spawn_victim(&mut engine);
     let v_hard = spawn_victim(&mut engine);
     let v_catcher = spawn_victim(&mut engine);
     let v_derived = spawn_victim(&mut engine);
     let dead_velocity = FixedVec2::new(fixed100(37), itofix(-3));
-    let spawn_dead_victim = |engine: &mut Engine| {
-        engine.spawn_test_object(
-            SpawnConfig::new("CLNK")
-                .with_position(Vector2::new(52, 50))
-                .with_alive(true)
-                .with_energy(50_000)
-                .with_action(ActionState::new("Dead"))
-                .with_command_direction(CommandDirection::Right)
-                .with_fixed_velocity(dead_velocity),
-        )
-    };
+    let spawn_dead_victim = |engine: &mut Engine| spawn_fixture!(engine, "CLNK", with_position: Vector2::new(52, 50), with_alive: true, with_energy: 50_000, with_action: ActionState::new("Dead"), with_command_direction: CommandDirection::Right, with_fixed_velocity: dead_velocity);
     let v_dead_regular = spawn_dead_victim(&mut engine);
     let v_dead_hard = spawn_dead_victim(&mut engine);
-    let pillow = engine.spawn_test_object(
-        SpawnConfig::new("PILW")
-            .with_position(Vector2::new(52, 50))
-            .with_alive(true)
-            .with_energy(50_000),
-    );
+    let pillow = spawn_fixture!(engine, "PILW", with_position: Vector2::new(52, 50), with_alive: true, with_energy: 50_000);
     engine.tick_without_snapshot().test_value();
 
     // tdir = +1 for a right-facing attacker (C4ObjectCom.cpp:745).
@@ -2085,66 +1731,41 @@ fn punch_follows_object_com_punch_semantics_like_cpp() {
     };
 
     // Regular punch (8 < 10): GetPunched, xdir FIXED100(250), ydir 0.
-    assert_eq!(bite(&mut engine, v_regular, Some(8)), Value::Bool(true));
-    let idx = engine.test_object_index(v_regular);
-    let victim = &engine.objects[idx];
-    assert_eq!(victim.state.energy, 42_000, "-8% of C4MaxPhysical");
-    assert_eq!(victim.state.action.name, "GetPunched");
-    assert_eq!(victim.fixed_velocity.x, fixed100(250));
-    assert_eq!(victim.fixed_velocity.y, C4Fixed::ZERO);
-    assert_eq!(victim.state.command_direction, CommandDirection::Stop);
-    assert_eq!(
-        victim.state.local_vars.get("catchBlow"),
-        Some(&Value::Int(8)),
-        "CatchBlow(level, byObj) fired"
-    );
+    unit_assert_eq!(bite(&mut engine, v_regular, Some(8)) => Value::Bool(true));
+    let victim = test_object(&engine, v_regular);
+    unit_assert_eq!(victim.state.energy => 42_000, "-8% of C4MaxPhysical");
+    unit_assert_eq!(victim.state.action.name => "GetPunched");
+    unit_assert_eq!(victim.fixed_velocity.x => fixed100(250));
+    unit_assert_eq!(victim.fixed_velocity.y => C4Fixed::ZERO);
+    unit_assert_eq!(victim.state.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(victim.state.local_vars.get("catchBlow") => Some(&Value::Int(8)), "CatchBlow(level, byObj) fired");
 
     // Hard punch (>= 10): Tumble with the tumble fling.
-    assert_eq!(bite(&mut engine, v_hard, Some(12)), Value::Bool(true));
-    let idx = engine.test_object_index(v_hard);
-    let victim = &engine.objects[idx];
-    assert_eq!(victim.state.energy, 38_000, "-12%");
-    assert_eq!(victim.state.action.name, "Tumble");
-    assert_eq!(victim.fixed_velocity.x, fixed100(150));
-    assert_eq!(victim.fixed_velocity.y, itofix(-2));
+    unit_assert_eq!(bite(&mut engine, v_hard, Some(12)) => Value::Bool(true));
+    let victim = test_object(&engine, v_hard);
+    unit_assert_eq!(victim.state.energy => 38_000, "-12%");
+    unit_assert_eq!(victim.state.action.name => "Tumble");
+    unit_assert_eq!(victim.fixed_velocity.x => fixed100(150));
+    unit_assert_eq!(victim.fixed_velocity.y => itofix(-2));
 
     // A NoOtherAction Dead victim takes damage and stops its ComDir, but
     // ordinary ObjectActionGetPunched/ObjectActionTumble transitions
     // fail without changing action or motion (C4Object.cpp:4111-4115).
-    assert_eq!(
-        bite(&mut engine, v_dead_regular, Some(8)),
-        Value::Bool(false)
-    );
-    let idx = engine.test_object_index(v_dead_regular);
-    let victim = &engine.objects[idx];
-    assert_eq!(victim.state.energy, 42_000);
-    assert_eq!(victim.state.action.name, "Dead");
-    assert_eq!(victim.fixed_velocity, dead_velocity);
-    assert_eq!(victim.state.command_direction, CommandDirection::Stop);
-    assert!(
-        !victim
-            .state
-            .local_vars
-            .get("catchBlow")
-            .is_some_and(Value::as_bool),
-        "failed GetPunched does not fire CatchBlow"
-    );
+    unit_assert_eq!(bite(&mut engine, v_dead_regular, Some(8)) => Value::Bool(false));
+    let victim = test_object(&engine, v_dead_regular);
+    unit_assert_eq!(victim.state.energy => 42_000);
+    unit_assert_eq!(victim.state.action.name => "Dead");
+    unit_assert_eq!(victim.fixed_velocity => dead_velocity);
+    unit_assert_eq!(victim.state.command_direction => CommandDirection::Stop);
+    unit_assert!(!victim.state.local_vars.get("catchBlow").is_some_and(Value::as_bool), "failed GetPunched does not fire CatchBlow");
 
-    assert_eq!(bite(&mut engine, v_dead_hard, Some(12)), Value::Bool(false));
-    let idx = engine.test_object_index(v_dead_hard);
-    let victim = &engine.objects[idx];
-    assert_eq!(victim.state.energy, 38_000);
-    assert_eq!(victim.state.action.name, "Dead");
-    assert_eq!(victim.fixed_velocity, dead_velocity);
-    assert_eq!(victim.state.command_direction, CommandDirection::Stop);
-    assert!(
-        !victim
-            .state
-            .local_vars
-            .get("catchBlow")
-            .is_some_and(Value::as_bool),
-        "failed Tumble and GetPunched do not fire CatchBlow"
-    );
+    unit_assert_eq!(bite(&mut engine, v_dead_hard, Some(12)) => Value::Bool(false));
+    let victim = test_object(&engine, v_dead_hard);
+    unit_assert_eq!(victim.state.energy => 38_000);
+    unit_assert_eq!(victim.state.action.name => "Dead");
+    unit_assert_eq!(victim.fixed_velocity => dead_velocity);
+    unit_assert_eq!(victim.state.command_direction => CommandDirection::Stop);
+    unit_assert!(!victim.state.local_vars.get("catchBlow").is_some_and(Value::as_bool), "failed Tumble and GetPunched do not fire CatchBlow");
 
     // Caught blow: halved damage, no tumble, Punch returns false.
     let idx = engine.test_object_index(v_catcher);
@@ -2152,22 +1773,21 @@ fn punch_follows_object_com_punch_semantics_like_cpp() {
         .state
         .local_vars
         .insert("stopBlows".to_string(), Value::Int(1));
-    assert_eq!(bite(&mut engine, v_catcher, Some(8)), Value::Bool(false));
-    let idx = engine.test_object_index(v_catcher);
-    let victim = &engine.objects[idx];
-    assert_eq!(victim.state.energy, 46_000, "halved to -4%");
-    assert_ne!(victim.state.action.name, "GetPunched", "no fling");
+    unit_assert_eq!(bite(&mut engine, v_catcher, Some(8)) => Value::Bool(false));
+    let victim = test_object(&engine, v_catcher);
+    unit_assert_eq!(victim.state.energy => 46_000, "halved to -4%");
+    unit_assert_ne!(victim.state.action.name => "GetPunched", "no fling");
 
     // Zero punch derives from the Fight physicals:
     // clamp(5*50000/25000, 0, 10) = 10 -> hard punch.
-    assert_eq!(bite(&mut engine, v_derived, None), Value::Bool(true));
+    unit_assert_eq!(bite(&mut engine, v_derived, None) => Value::Bool(true));
     let idx = engine.test_object_index(v_derived);
-    assert_eq!(engine.objects[idx].state.action.name, "Tumble");
+    unit_assert_eq!(engine.objects[idx].state.action.name => "Tumble");
 
     // No Fight physical on the target: punch stays 0 -> no-op success.
-    assert_eq!(bite(&mut engine, pillow, None), Value::Bool(true));
+    unit_assert_eq!(bite(&mut engine, pillow, None) => Value::Bool(true));
     let idx = engine.test_object_index(pillow);
-    assert_eq!(engine.objects[idx].state.energy, 50_000, "untouched");
+    unit_assert_eq!(engine.objects[idx].state.energy => 50_000, "untouched");
 }
 
 #[test]
@@ -2181,43 +1801,27 @@ fn set_command_dispatches_to_a_foreign_object_like_cpp() {
         func Order(target) { return SetCommand(target, "MoveTo", 0, 44, 55); }
         func Halt(target) { return SetCommand(target, "None"); }
         "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("BOSS", "Boss", script);
+    let mut engine = script_engine(7, "BOSS", "Boss", script);
     engine.register_test_script_definition("MNON", "Minion", "");
     let boss = engine.spawn_test_object(SpawnConfig::new("BOSS"));
     let minion = engine.spawn_test_object(SpawnConfig::new("MNON"));
     engine.tick_without_snapshot().test_value();
 
     let boss_idx = engine.test_object_index(boss);
-    assert_eq!(
-        engine
-            .call_object_function(boss_idx, "Order", vec![Value::Object(minion.as_u64())],)
-            .expect("Order succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(boss_idx, "Order", vec![Value::Object(minion.as_u64())],).expect("Order succeeds") => Value::Bool(true));
     let minion_idx = engine.test_object_index(minion);
-    assert_eq!(
-        engine.objects[minion_idx].commands.command_names(),
-        vec!["MoveTo".to_string()],
-        "the foreign target carries the command"
-    );
+    unit_assert_eq!(engine.objects[minion_idx].commands.command_names() => vec!["MoveTo".to_string()], "the foreign target carries the command");
 
     let boss_idx = engine.test_object_index(boss);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(boss_idx, "Halt", vec![Value::Object(minion.as_u64())])
-            .expect("Halt succeeds"),
+            .expect("Halt succeeds") =>
         Value::Bool(false),
         "unknown command name -> ClearCommands + false"
     );
     let minion_idx = engine.test_object_index(minion);
-    assert!(
-        engine.objects[minion_idx]
-            .commands
-            .command_names()
-            .is_empty(),
-        "\"None\" cleared the foreign stack"
-    );
+    unit_assert!(engine.objects[minion_idx].commands.command_names().is_empty(), "\"None\" cleared the foreign stack");
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2298,8 +1902,7 @@ fn player_object_command_fixture() -> (Engine, ObjectId, ObjectId, ObjectId) {
         func IdData() { return PlayerObjectCommand(1, "Wait", nil, 0, 0, nil, ITEM); }
         "#;
 
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CALL", "Caller", caller_script);
+    let mut engine = script_engine(7, "CALL", "Caller", caller_script);
     let mut crew_definition = test_definition("CREW", "Crew", "");
     crew_definition.set_ocf_base(ocf::CONTAINER);
     engine.register_test_definition(crew_definition);
@@ -2310,14 +1913,10 @@ fn player_object_command_fixture() -> (Engine, ObjectId, ObjectId, ObjectId) {
     engine.register_test_player(PlayerConfig::new(1, "Player"));
 
     let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
-    let crew = engine.spawn_test_object(
-        SpawnConfig::new("CREW")
-            .with_owner(1)
-            .with_crew_member(true),
-    );
+    let crew = spawn_fixture!(engine, "CREW", with_owner: 1, with_crew_member: true);
     engine.select_crew(1, [crew]).test_value();
     engine.set_crew_cursor(1, Some(crew)).test_value();
-    engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(crew));
+    spawn_fixture!(engine, "ITEM", with_container: crew);
     let container = engine.spawn_test_object(SpawnConfig::new("CONT"));
     engine.tick_without_snapshot().test_value();
 
@@ -2358,14 +1957,14 @@ fn player_object_command_call_warns_below_strict3_and_errors_at_strict3() {
     engine.tick_without_snapshot().test_value();
 
     for (strict_directive, caller) in legacy_callers {
-        assert_eq!(
+        unit_assert_eq!(
             call_player_object_command_fixture(
                 &mut engine,
                 strict3_caller,
                 "Seed",
                 vec![Value::Object(crew.as_u64())],
             )
-            .expect("old Wait command seeds"),
+            .expect("old Wait command seeds") =>
             Value::Bool(true)
         );
 
@@ -2388,13 +1987,9 @@ fn player_object_command_call_warns_below_strict3_and_errors_at_strict3() {
             )
         });
 
-        assert_eq!(
-            result.expect("legacy Call continues after its diagnostic"),
-            Value::Bool(true),
-            "caller {strict_directive:?}"
-        );
-        assert_eq!(
-            records.lock().expect("diagnostic records lock").as_slice(),
+        unit_assert_eq!(result.expect("legacy Call continues after its diagnostic") => Value::Bool(true), "caller {strict_directive:?}");
+        unit_assert_eq!(
+            records.lock().expect("diagnostic records lock").as_slice() =>
             &[PlayerObjectCommandDiagnostic {
                 level: tracing::Level::WARN,
                 target: "clonk-script".to_string(),
@@ -2408,17 +2003,13 @@ fn player_object_command_call_warns_below_strict3_and_errors_at_strict3() {
             .test_object_snapshot(crew)
             .command_stack
             .command_views();
-        assert_eq!(views.len(), 1, "Call replaces the seeded Wait command");
-        assert_eq!(views[0].name, "Call");
-        assert_eq!(views[0].target, Some(container));
-        assert_eq!(views[0].tx, Some(17));
-        assert_eq!(views[0].ty, Some(19));
-        assert_eq!(views[0].target2, Some(strict3_caller));
-        assert_eq!(
-            views[0].data,
-            CommandData::Integer(0),
-            "Call ignores the supplied 4711 data value"
-        );
+        unit_assert_eq!(views.len() => 1, "Call replaces the seeded Wait command");
+        unit_assert_eq!(views[0].name => "Call");
+        unit_assert_eq!(views[0].target => Some(container));
+        unit_assert_eq!(views[0].tx => Some(17));
+        unit_assert_eq!(views[0].ty => Some(19));
+        unit_assert_eq!(views[0].target2 => Some(strict3_caller));
+        unit_assert_eq!(views[0].data => CommandData::Integer(0), "Call ignores the supplied 4711 data value");
     }
 
     call_player_object_command_fixture(
@@ -2441,26 +2032,11 @@ fn player_object_command_call_warns_below_strict3_and_errors_at_strict3() {
     })
     .expect_err("strict-3 Call errors");
     match error {
-        EngineError::Script { source, .. } => assert!(
-            source
-                .to_string()
-                .contains("PlayerObjectCommand: Command \"Call\" not supported"),
-            "unexpected strict error: {source}"
-        ),
+        EngineError::Script { source, .. } => unit_assert!(source.to_string().contains("PlayerObjectCommand: Command \"Call\" not supported"), "unexpected strict error: {source}"),
         other => panic!("expected script error, got {other:?}"),
     }
-    assert!(
-        records.lock().expect("diagnostic records lock").is_empty(),
-        "strict-3 throws instead of warning"
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(crew)
-            .expect("crew exists")
-            .command_stack,
-        before,
-        "strict-3 rejection precedes every command mutation"
-    );
+    unit_assert!(records.lock().expect("diagnostic records lock").is_empty(), "strict-3 throws instead of warning");
+    unit_assert_eq!(engine.object_snapshot(crew).expect("crew exists").command_stack => before, "strict-3 rejection precedes every command mutation");
 }
 
 #[test]
@@ -2473,61 +2049,35 @@ fn player_object_command_sets_put_and_converts_int_or_id_data() {
     let crew_ref = Value::Object(crew.as_u64());
     let container_ref = Value::Object(container.as_u64());
 
-    assert_eq!(
-        call_player_object_command_fixture(&mut engine, caller, "Seed", vec![crew_ref])
-            .expect("old command seeds"),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(crew)
-            .expect("crew exists")
-            .command_stack
-            .command_names(),
-        vec!["Wait".to_string()]
-    );
+    unit_assert_eq!(call_player_object_command_fixture(&mut engine, caller, "Seed", vec![crew_ref]).expect("old command seeds") => Value::Bool(true));
+    unit_assert_eq!(engine.object_snapshot(crew).expect("crew exists").command_stack.command_names() => vec!["Wait".to_string()]);
 
-    assert_eq!(
-        call_player_object_command_fixture(&mut engine, caller, "PutInto", vec![container_ref],)
-            .expect("Put command succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(call_player_object_command_fixture(&mut engine, caller, "PutInto", vec![container_ref],).expect("Put command succeeds") => Value::Bool(true));
     let views = engine
         .test_object_snapshot(crew)
         .command_stack
         .command_views();
-    assert_eq!(views.len(), 1, "Set mode replaces the old Wait stack");
-    assert_eq!(views[0].name, "Put");
-    assert_eq!(views[0].target, Some(container));
-    assert_eq!(views[0].target2, None);
-    assert_eq!(views[0].data, CommandData::Integer(0));
+    unit_assert_eq!(views.len() => 1, "Set mode replaces the old Wait stack");
+    unit_assert_eq!(views[0].name => "Put");
+    unit_assert_eq!(views[0].target => Some(container));
+    unit_assert_eq!(views[0].target2 => None);
+    unit_assert_eq!(views[0].data => CommandData::Integer(0));
 
-    assert_eq!(
-        call_player_object_command_fixture(&mut engine, caller, "IntData", Vec::new())
-            .expect("integer Data succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(call_player_object_command_fixture(&mut engine, caller, "IntData", Vec::new()).expect("integer Data succeeds") => Value::Bool(true));
     let views = engine
         .test_object_snapshot(crew)
         .command_stack
         .command_views();
-    assert_eq!(views.len(), 1);
-    assert_eq!(views[0].data, CommandData::Integer(4711));
+    unit_assert_eq!(views.len() => 1);
+    unit_assert_eq!(views[0].data => CommandData::Integer(4711));
 
-    assert_eq!(
-        call_player_object_command_fixture(&mut engine, caller, "IdData", Vec::new())
-            .expect("C4ID Data succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(call_player_object_command_fixture(&mut engine, caller, "IdData", Vec::new()).expect("C4ID Data succeeds") => Value::Bool(true));
     let views = engine
         .test_object_snapshot(crew)
         .command_stack
         .command_views();
-    assert_eq!(views.len(), 1);
-    assert_eq!(
-        views[0].data,
-        CommandData::Integer(i32::from_le_bytes(*b"ITEM"))
-    );
+    unit_assert_eq!(views.len() => 1);
+    unit_assert_eq!(views[0].data => CommandData::Integer(i32::from_le_bytes(*b"ITEM")));
 }
 
 #[test]
@@ -2546,45 +2096,26 @@ fn player_object_command_rejections_leave_selected_crew_unchanged() {
     let before = engine.test_object_snapshot(crew).command_stack;
 
     for function in ["BadPlayer", "BadName"] {
-        assert_eq!(
+        unit_assert_eq!(
             call_player_object_command_fixture(
                 &mut engine,
                 caller,
                 function,
                 vec![Value::Object(container.as_u64())],
             )
-            .expect("invalid request returns normally"),
+            .expect("invalid request returns normally") =>
             Value::Bool(false)
         );
-        assert_eq!(
-            engine
-                .object_snapshot(crew)
-                .expect("crew exists")
-                .command_stack,
-            before,
-            "{function} must not alter the selected crew's stack"
-        );
+        unit_assert_eq!(engine.object_snapshot(crew).expect("crew exists").command_stack => before, "{function} must not alter the selected crew's stack");
     }
 
     let error = call_player_object_command_fixture(&mut engine, caller, "BadCall", Vec::new())
         .expect_err("Call is a strict-3 error");
     match error {
-        EngineError::Script { source, .. } => assert!(
-            source
-                .to_string()
-                .contains("PlayerObjectCommand: Command \"Call\" not supported"),
-            "unexpected strict error: {source}"
-        ),
+        EngineError::Script { source, .. } => unit_assert!(source.to_string().contains("PlayerObjectCommand: Command \"Call\" not supported"), "unexpected strict error: {source}"),
         other => panic!("expected script error, got {other:?}"),
     }
-    assert_eq!(
-        engine
-            .object_snapshot(crew)
-            .expect("crew exists")
-            .command_stack,
-        before,
-        "strict-3 Call rejection must happen before the Set path"
-    );
+    unit_assert_eq!(engine.object_snapshot(crew).expect("crew exists").command_stack => before, "strict-3 Call rejection must happen before the Set path");
 }
 
 fn reject_grabbed_test_engine() -> Engine {
@@ -2673,34 +2204,26 @@ protected func ControlCommandFinished(command, target)
     let mut actor = test_definition("RGAC", "Grab actor", actor_script);
     actor.set_c4_callback_convention(true);
     actor.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
-    actor.configure_actions(
-        Some("Walk".to_string()),
-        HashMap::from([
+    set_test_actions(
+        &mut actor,
+        Some("Walk"),
+        [
+            ("Walk", ActionSpec::default().with_procedure("WALK")),
             (
-                "Walk".to_string(),
-                ActionSpec::default().with_procedure("WALK"),
-            ),
-            (
-                "Push".to_string(),
+                "Push",
                 ActionSpec::default()
                     .with_procedure("PUSH")
                     .with_start_call("PushStart"),
             ),
+            ("Scale", ActionSpec::default().with_procedure("SCALE")),
+            ("Hangle", ActionSpec::default().with_procedure("HANGLE")),
             (
-                "Scale".to_string(),
-                ActionSpec::default().with_procedure("SCALE"),
-            ),
-            (
-                "Hangle".to_string(),
-                ActionSpec::default().with_procedure("HANGLE"),
-            ),
-            (
-                "Jump".to_string(),
+                "Jump",
                 ActionSpec::default()
                     .with_procedure("FLIGHT")
                     .with_start_call("JumpStart"),
             ),
-        ]),
+        ],
     );
 
     let veto_script = r#"#strict
@@ -2767,8 +2290,7 @@ protected func RejectGrabbed(clonk)
 }
 "#;
 
-    let mut engine = Engine::with_seed(15);
-    engine.register_test_definition(actor);
+    let mut engine = definition_engine(15, actor);
     for (id, name, script) in [
         ("RGVT", "Veto target", veto_script),
         ("RGPS", "Pass target", pass_script),
@@ -2804,19 +2326,8 @@ fn spawn_grab_probe(
     x: i32,
 ) -> (ObjectId, ObjectId) {
     let position = Vector2::new(x, 100);
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("RGAC")
-            .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-            .with_position(position)
-            .with_action(ActionState::new(action))
-            .with_command_direction(CommandDirection::Right)
-            .with_alive(true),
-    );
-    let target = engine.spawn_test_object(
-        SpawnConfig::new(target_definition)
-            .with_category(CATEGORY_VEHICLE)
-            .with_position(position),
-    );
+    let actor = spawn_fixture!(engine, "RGAC", with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_position: position, with_action: ActionState::new(action), with_command_direction: CommandDirection::Right, with_alive: true);
+    let target = spawn_fixture!(engine, target_definition, with_category: CATEGORY_VEHICLE, with_position: position);
     let actor_index = engine.test_object_index(actor);
     engine.call_test_object_function(actor_index, "ResetGrabProbe", Vec::new());
     let actor_index = engine.test_object_index(actor);
@@ -2843,30 +2354,23 @@ fn script_add_command_null_grab_ungrabs_then_reports_finished() {
         )
         .test_value();
 
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(actor_index, "QueueNullGrab", Vec::new())
-            .expect("script AddCommand returns"),
+            .expect("script AddCommand returns") =>
         Value::Bool(true),
         "C4Object::AddCommand validates the command id, not Target"
     );
-    assert_eq!(
-        engine
-            .object_snapshot(actor)
-            .expect("actor remains")
-            .command_stack
-            .command_names(),
-        vec!["Grab".to_string(), "Wait".to_string()]
-    );
+    unit_assert_eq!(engine.object_snapshot(actor).expect("actor remains").command_stack.command_names() => vec!["Grab".to_string(), "Wait".to_string()]);
 
     let actor_index = engine.test_object_index(actor);
     engine.call_test_object_function(actor_index, "RunOneCommand", Vec::new());
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .object_snapshot(actor)
             .expect("actor remains")
             .command_stack
-            .command_names(),
+            .command_names() =>
         vec!["UnGrab".to_string(), "Grab".to_string(), "Wait".to_string()],
         "the pushing actor queues UnGrab before checking the null target"
     );
@@ -2874,17 +2378,11 @@ fn script_add_command_null_grab_ungrabs_then_reports_finished() {
     let actor_index = engine.test_object_index(actor);
     engine.call_test_object_function(actor_index, "RunOneCommand", Vec::new());
     let after_ungrab = engine.test_object_snapshot(actor);
-    assert_eq!(after_ungrab.action.name, "Walk");
-    assert_eq!(
-        after_ungrab.command_stack.command_names(),
-        vec!["Grab".to_string(), "Wait".to_string()]
-    );
-    assert_eq!(
-        after_ungrab.local_vars.get("finished"),
-        Some(&Value::String("UnGrab".to_string().into()))
-    );
-    assert_eq!(
-        after_ungrab.local_vars.get("finished_front"),
+    unit_assert_eq!(after_ungrab.action.name => "Walk");
+    unit_assert_eq!(after_ungrab.command_stack.command_names() => vec!["Grab".to_string(), "Wait".to_string()]);
+    unit_assert_eq!(after_ungrab.local_vars.get("finished") => Some(&Value::String("UnGrab".to_string().into())));
+    unit_assert_eq!(
+        after_ungrab.local_vars.get("finished_front") =>
         Some(&Value::String("UnGrab".to_string().into())),
         "ControlCommandFinished observes the finished UnGrab front"
     );
@@ -2892,35 +2390,23 @@ fn script_add_command_null_grab_ungrabs_then_reports_finished() {
     let actor_index = engine.test_object_index(actor);
     engine.call_test_object_function(actor_index, "RunOneCommand", Vec::new());
     let after_grab = engine.test_object_snapshot(actor);
-    assert_eq!(
-        after_grab.command_stack.command_names(),
-        vec!["Wait".to_string()]
-    );
-    assert_eq!(
-        after_grab.local_vars.get("finished"),
-        Some(&Value::String("Grab".to_string().into()))
-    );
-    assert_eq!(
-        after_grab.local_vars.get("finished_front"),
+    unit_assert_eq!(after_grab.command_stack.command_names() => vec!["Wait".to_string()]);
+    unit_assert_eq!(after_grab.local_vars.get("finished") => Some(&Value::String("Grab".to_string().into())));
+    unit_assert_eq!(
+        after_grab.local_vars.get("finished_front") =>
         Some(&Value::String("Grab".to_string().into())),
         "the failed Grab remains visible during ControlCommandFinished"
     );
-    assert_eq!(
-        after_grab.local_vars.get("finished_target"),
-        Some(&Value::Nil)
-    );
+    unit_assert_eq!(after_grab.local_vars.get("finished_target") => Some(&Value::Nil));
     let actor_index = engine.test_object_index(actor);
     let failed_base =
         serde_json::to_value(engine.objects[actor_index].commands.snapshot()).test_value();
-    assert_eq!(failed_base["commands"][0]["failures"], serde_json::json!(1));
-    assert_eq!(failed_base["commands"][0]["retries"], serde_json::json!(1));
+    unit_assert_eq!(failed_base["commands"][0]["failures"] => serde_json::json!(1));
+    unit_assert_eq!(failed_base["commands"][0]["retries"] => serde_json::json!(1));
 
     engine.call_test_object_function(actor_index, "RunOneCommand", Vec::new());
     let during_retry = engine.test_object_snapshot(actor);
-    assert_eq!(
-        during_retry.command_stack.command_names(),
-        vec!["Retry".to_string(), "Wait".to_string()]
-    );
+    unit_assert_eq!(during_retry.command_stack.command_names() => vec!["Retry".to_string(), "Wait".to_string()]);
 }
 
 #[test]
@@ -2949,105 +2435,66 @@ fn grab_calls_reject_grabbed_before_push_and_honors_veto() {
     engine.tick_without_snapshot().test_value();
 
     let veto = engine.test_object_snapshot(veto_actor);
-    assert_eq!(veto.action.name, "Walk");
-    assert_eq!(veto.command_direction, CommandDirection::Right);
-    assert_eq!(veto.local_vars.get("order"), Some(&Value::Int(1)));
-    assert_eq!(
-        veto.local_vars.get("seen_action"),
-        Some(&Value::String("Walk".to_string().into()))
-    );
-    assert_eq!(
-        veto.local_vars.get("seen_target"),
-        Some(&object_reference_value(veto_target))
-    );
-    assert_eq!(
-        veto.local_vars.get("finished"),
-        Some(&Value::String("Grab".to_string().into()))
-    );
-    assert!(veto.command_stack.is_empty(), "vetoed Grab finishes now");
+    unit_assert_eq!(veto.action.name => "Walk");
+    unit_assert_eq!(veto.command_direction => CommandDirection::Right);
+    unit_assert_eq!(veto.local_vars.get("order") => Some(&Value::Int(1)));
+    unit_assert_eq!(veto.local_vars.get("seen_action") => Some(&Value::String("Walk".to_string().into())));
+    unit_assert_eq!(veto.local_vars.get("seen_target") => Some(&object_reference_value(veto_target)));
+    unit_assert_eq!(veto.local_vars.get("finished") => Some(&Value::String("Grab".to_string().into())));
+    unit_assert!(veto.command_stack.is_empty(), "vetoed Grab finishes now");
 
     let pass = engine.test_object_snapshot(pass_actor);
-    assert_eq!(pass.action.name, "Push");
-    assert_eq!(pass.action.target, Some(pass_target));
-    assert_eq!(pass.command_direction, CommandDirection::Stop);
-    assert_eq!(pass.local_vars.get("order"), Some(&Value::Int(12)));
-    assert_eq!(pass.command_stack.command_names(), vec!["Grab".to_string()]);
+    unit_assert_eq!(pass.action.name => "Push");
+    unit_assert_eq!(pass.action.target => Some(pass_target));
+    unit_assert_eq!(pass.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(pass.local_vars.get("order") => Some(&Value::Int(12)));
+    unit_assert_eq!(pass.command_stack.command_names() => vec!["Grab".to_string()]);
 
     let plain = engine.test_object_snapshot(plain_actor);
-    assert_eq!(plain.action.name, "Push");
-    assert_eq!(plain.action.target, Some(plain_target));
-    assert_eq!(plain.local_vars.get("order"), Some(&Value::Int(2)));
+    unit_assert_eq!(plain.action.name => "Push");
+    unit_assert_eq!(plain.action.target => Some(plain_target));
+    unit_assert_eq!(plain.local_vars.get("order") => Some(&Value::Int(2)));
 
     let zero_id = engine.test_object_snapshot(zero_id_actor);
-    assert_eq!(zero_id.action.name, "Push");
-    assert_eq!(zero_id.action.target, Some(zero_id_target));
-    assert_eq!(zero_id.local_vars.get("order"), Some(&Value::Int(12)));
+    unit_assert_eq!(zero_id.action.name => "Push");
+    unit_assert_eq!(zero_id.action.target => Some(zero_id_target));
+    unit_assert_eq!(zero_id.local_vars.get("order") => Some(&Value::Int(12)));
 
     let clear_target = engine.test_object_snapshot(clear_target_actor);
-    assert_eq!(clear_target.action.name, "Walk");
-    assert_eq!(clear_target.command_direction, CommandDirection::Stop);
-    assert_eq!(clear_target.local_vars.get("order"), Some(&Value::Int(1)));
+    unit_assert_eq!(clear_target.action.name => "Walk");
+    unit_assert_eq!(clear_target.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(clear_target.local_vars.get("order") => Some(&Value::Int(1)));
 
     let clear_then_replace = engine.test_object_snapshot(clear_then_replace_actor);
-    assert_eq!(clear_then_replace.action.name, "Walk");
-    assert_eq!(
-        clear_then_replace.command_stack.command_names(),
-        vec!["Wait".to_string()]
-    );
+    unit_assert_eq!(clear_then_replace.action.name => "Walk");
+    unit_assert_eq!(clear_then_replace.command_stack.command_names() => vec!["Wait".to_string()]);
 
     let replace_then_clear = engine.test_object_snapshot(replace_then_clear_actor);
-    assert_eq!(replace_then_clear.action.name, "Push");
-    assert_eq!(
-        replace_then_clear.action.target,
-        Some(replace_then_clear_target)
-    );
-    assert_eq!(
-        replace_then_clear.command_stack.command_names(),
-        vec!["Wait".to_string()]
-    );
+    unit_assert_eq!(replace_then_clear.action.name => "Push");
+    unit_assert_eq!(replace_then_clear.action.target => Some(replace_then_clear_target));
+    unit_assert_eq!(replace_then_clear.command_stack.command_names() => vec!["Wait".to_string()]);
 
     let removed_target = engine.test_object_snapshot(removed_actor_target);
-    assert_eq!(
-        removed_target.local_vars.get("reject_calls"),
-        Some(&Value::Int(1)),
-        "RejectGrabbed still runs after scale let-go removes the actor"
-    );
+    unit_assert_eq!(removed_target.local_vars.get("reject_calls") => Some(&Value::Int(1)), "RejectGrabbed still runs after scale let-go removes the actor");
 
     for (actor, expected_xdir) in [(scale_actor, 100), (hangle_actor, -100)] {
         let actor = engine.test_object_snapshot(actor);
-        assert_eq!(actor.local_vars.get("order"), Some(&Value::Int(31)));
-        assert_eq!(
-            actor.local_vars.get("seen_action"),
-            Some(&Value::String("Jump".to_string().into())),
-            "let-go and its Jump StartCall precede RejectGrabbed"
-        );
-        assert_eq!(
-            actor.local_vars.get("jump_xdir"),
-            Some(&Value::Int(expected_xdir)),
-            "ObjectComLetGo jumps opposite the climber's facing"
-        );
-        assert_eq!(actor.local_vars.get("jump_ydir"), Some(&Value::Nil));
-        assert_eq!(
-            actor.local_vars.get("jump_by_com"),
-            Some(&Value::Bool(true))
-        );
-        assert_ne!(actor.action.name, "Push", "the veto prevents grabbing");
+        unit_assert_eq!(actor.local_vars.get("order") => Some(&Value::Int(31)));
+        unit_assert_eq!(actor.local_vars.get("seen_action") => Some(&Value::String("Jump".to_string().into())), "let-go and its Jump StartCall precede RejectGrabbed");
+        unit_assert_eq!(actor.local_vars.get("jump_xdir") => Some(&Value::Int(expected_xdir)), "ObjectComLetGo jumps opposite the climber's facing");
+        unit_assert_eq!(actor.local_vars.get("jump_ydir") => Some(&Value::Nil));
+        unit_assert_eq!(actor.local_vars.get("jump_by_com") => Some(&Value::Bool(true)));
+        unit_assert_ne!(actor.action.name => "Push", "the veto prevents grabbing");
     }
 
     let mutating = engine.test_object_snapshot(mutating_actor);
-    assert_eq!(mutating.action.name, "Walk");
-    assert_eq!(
-        mutating.command_stack.command_names(),
-        vec!["Wait".to_string(), "Grab".to_string()]
-    );
+    unit_assert_eq!(mutating.action.name => "Walk");
+    unit_assert_eq!(mutating.command_stack.command_names() => vec!["Wait".to_string(), "Grab".to_string()]);
     engine.tick_without_snapshot().test_value();
     let mutating = engine.test_object_snapshot(mutating_actor);
-    assert!(
-        mutating.command_stack.is_empty(),
-        "the finished original Grab must not resume below the callback-added command"
-    );
-    assert_eq!(mutating.action.name, "Walk");
-    assert!(
+    unit_assert!(mutating.command_stack.is_empty(), "the finished original Grab must not resume below the callback-added command");
+    unit_assert_eq!(mutating.action.name => "Walk");
+    unit_assert!(
         engine
             .object_snapshot(clear_target_actor)
             .expect("pointer-cleared actor remains")
@@ -3103,46 +2550,36 @@ fn execute_command_runs_reject_grabbed_before_returning_to_script() {
         ),
     ] {
         let actor_index = engine.test_object_index(actor);
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(actor_index, "RunGrab", vec![object_reference_value(target)],)
-                .expect("RunGrab executes"),
+                .expect("RunGrab executes") =>
             Value::Int(expected_order)
         );
         let actor = engine.test_object_snapshot(actor);
-        assert_eq!(
-            actor.local_vars.get("after_execute"),
-            Some(&Value::Int(expected_order))
-        );
-        assert_eq!(
-            actor.local_vars.get("after_action"),
-            Some(&Value::String(expected_action.to_string().into()))
-        );
-        assert_eq!(actor.command_stack.command_names(), expected_commands);
+        unit_assert_eq!(actor.local_vars.get("after_execute") => Some(&Value::Int(expected_order)));
+        unit_assert_eq!(actor.local_vars.get("after_action") => Some(&Value::String(expected_action.to_string().into())));
+        unit_assert_eq!(actor.command_stack.command_names() => expected_commands);
     }
 
     let far_scale_actor_index = engine.test_object_index(far_scale_actor);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 far_scale_actor_index,
                 "RunGrab",
                 vec![object_reference_value(far_scale_target)],
             )
-            .expect("far Scale RunGrab executes"),
+            .expect("far Scale RunGrab executes") =>
         Value::Nil
     );
     let far_scale = engine.test_object_snapshot(far_scale_actor);
-    assert_eq!(far_scale.action.name, "Scale");
-    assert_eq!(far_scale.local_vars.get("jump_xdir"), Some(&Value::Nil));
-    assert_eq!(
-        far_scale.command_stack.command_names(),
-        vec!["MoveTo".to_string(), "Grab".to_string()],
-        "Scale only lets go inside Grab's at-target branch"
-    );
+    unit_assert_eq!(far_scale.action.name => "Scale");
+    unit_assert_eq!(far_scale.local_vars.get("jump_xdir") => Some(&Value::Nil));
+    unit_assert_eq!(far_scale.command_stack.command_names() => vec!["MoveTo".to_string(), "Grab".to_string()], "Scale only lets go inside Grab's at-target branch");
 
     engine.tick_without_snapshot().test_value();
-    assert!(
+    unit_assert!(
         engine
             .object_snapshot(mutating_actor)
             .expect("command-mutating actor remains")
@@ -3150,7 +2587,7 @@ fn execute_command_runs_reject_grabbed_before_returning_to_script() {
             .is_empty(),
         "ExecuteCommand must finish the original Grab below the callback-added command"
     );
-    assert!(
+    unit_assert!(
         engine
             .object_snapshot(clear_target_actor)
             .expect("pointer-cleared actor remains")
@@ -3358,56 +2795,45 @@ protected func ControlCommandFinished(command)
     let mut actor = test_definition("OGAC", "ObjectComGrab actor", actor_script);
     actor.set_c4_callback_convention(true);
     actor.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
-    actor.configure_actions(
-        Some("Walk".to_string()),
-        HashMap::from([
+    set_test_actions(
+        &mut actor,
+        Some("Walk"),
+        [
             (
-                "Walk".to_string(),
+                "Walk",
                 ActionSpec::default()
                     .with_procedure("WALK")
                     .with_start_call("StopWalkStart"),
             ),
             (
-                "LockedWalk".to_string(),
+                "LockedWalk",
                 ActionSpec::default()
                     .with_procedure("WALK")
                     .with_no_other_action(true),
             ),
             (
-                "LockedBuild".to_string(),
+                "LockedBuild",
                 ActionSpec::default()
                     .with_procedure("BUILD")
                     .with_no_other_action(true),
             ),
             (
-                "Push".to_string(),
+                "Push",
                 ActionSpec::default()
                     .with_procedure("PUSH")
                     .with_start_call("PushStart"),
             ),
             (
-                "Build".to_string(),
+                "Build",
                 ActionSpec::default()
                     .with_procedure("BUILD")
                     .with_abort_call("StopAbort"),
             ),
-            (
-                "Chop".to_string(),
-                ActionSpec::default().with_procedure("CHOP"),
-            ),
-            (
-                "Dig".to_string(),
-                ActionSpec::default().with_procedure("DIG"),
-            ),
-            (
-                "Flight".to_string(),
-                ActionSpec::default().with_procedure("FLIGHT"),
-            ),
-            (
-                "Swim".to_string(),
-                ActionSpec::default().with_procedure("SWIM"),
-            ),
-        ]),
+            ("Chop", ActionSpec::default().with_procedure("CHOP")),
+            ("Dig", ActionSpec::default().with_procedure("DIG")),
+            ("Flight", ActionSpec::default().with_procedure("FLIGHT")),
+            ("Swim", ActionSpec::default().with_procedure("SWIM")),
+        ],
     );
 
     let target_script = r#"#strict
@@ -3454,8 +2880,7 @@ protected func Grabbed(clonk, grab)
     no_reject.set_shape_rect(Some(DefinitionRect::new(-10, -12, 20, 24)));
     no_reject.set_grab(0);
 
-    let mut engine = Engine::with_seed(176);
-    engine.register_test_definition(actor);
+    let mut engine = definition_engine(176, actor);
     engine.register_test_definition(target);
     engine.register_test_definition(no_reject);
     for player in [1, 2, 7] {
@@ -3475,21 +2900,8 @@ fn spawn_object_com_grab_probe_with_target(
     target_definition: &str,
 ) -> (ObjectId, ObjectId) {
     let position = Vector2::new(x, 100);
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("OGAC")
-            .with_owner(1)
-            .with_alive(true)
-            .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-            .with_position(position)
-            .with_action(ActionState::new(action))
-            .with_command_direction(CommandDirection::Right),
-    );
-    let target = engine.spawn_test_object(
-        SpawnConfig::new(target_definition)
-            .with_owner(2)
-            .with_category(CATEGORY_VEHICLE)
-            .with_position(position),
-    );
+    let actor = spawn_fixture!(engine, "OGAC", with_owner: 1, with_alive: true, with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_position: position, with_action: ActionState::new(action), with_command_direction: CommandDirection::Right);
+    let target = spawn_fixture!(engine, target_definition, with_owner: 2, with_category: CATEGORY_VEHICLE, with_position: position);
     let actor_index = engine.test_object_index(actor);
     engine.call_test_object_function(actor_index, "ResetGrabCallbacks", Vec::new());
     let actor_index = engine.test_object_index(actor);
@@ -3590,91 +3002,42 @@ fn object_com_grab_matches_cpp_callbacks_controller_walk_and_stop_gates() {
 
     for (actor, target) in std::iter::once((walk_actor, walk_target)).chain(stopped) {
         let actor = engine.test_object_snapshot(actor);
-        assert_eq!(actor.action.name, "Push");
-        assert_eq!(actor.action.target, Some(target));
-        assert_eq!(actor.command_direction, CommandDirection::Stop);
-        assert_eq!(actor.local_vars.get("order"), Some(&Value::Int(1234)));
-        assert_eq!(
-            actor.local_vars.get("push_start_comdir"),
-            Some(&Value::Int(CommandDirection::Stop.to_script_value()))
-        );
-        assert_eq!(
-            actor.local_vars.get("push_start_action"),
-            Some(&Value::String("Push".to_string().into()))
-        );
-        assert_eq!(
-            actor.local_vars.get("push_start_target"),
-            Some(&object_reference_value(target))
-        );
-        assert_eq!(
-            actor.local_vars.get("grab_target"),
-            Some(&object_reference_value(target))
-        );
-        assert_eq!(actor.local_vars.get("grab_flag"), Some(&Value::Bool(true)));
-        assert_eq!(
-            actor.local_vars.get("target_controller_in_grab"),
-            Some(&Value::Int(2)),
-            "Grab runs before Controller propagation"
-        );
-        assert_eq!(
-            actor.local_vars.get("grabbed_controller"),
-            Some(&Value::Int(7)),
-            "Grabbed sees the actor's post-Grab Controller"
-        );
-        assert_eq!(
-            engine
-                .object_snapshot(target)
-                .expect("target remains")
-                .controller,
-            7
-        );
+        unit_assert_eq!(actor.action.name => "Push");
+        unit_assert_eq!(actor.action.target => Some(target));
+        unit_assert_eq!(actor.command_direction => CommandDirection::Stop);
+        unit_assert_eq!(actor.local_vars.get("order") => Some(&Value::Int(1234)));
+        unit_assert_eq!(actor.local_vars.get("push_start_comdir") => Some(&Value::Int(CommandDirection::Stop.to_script_value())));
+        unit_assert_eq!(actor.local_vars.get("push_start_action") => Some(&Value::String("Push".to_string().into())));
+        unit_assert_eq!(actor.local_vars.get("push_start_target") => Some(&object_reference_value(target)));
+        unit_assert_eq!(actor.local_vars.get("grab_target") => Some(&object_reference_value(target)));
+        unit_assert_eq!(actor.local_vars.get("grab_flag") => Some(&Value::Bool(true)));
+        unit_assert_eq!(actor.local_vars.get("target_controller_in_grab") => Some(&Value::Int(2)), "Grab runs before Controller propagation");
+        unit_assert_eq!(actor.local_vars.get("grabbed_controller") => Some(&Value::Int(7)), "Grabbed sees the actor's post-Grab Controller");
+        unit_assert_eq!(engine.object_snapshot(target).expect("target remains").controller => 7);
     }
     let stopped_build = engine.test_object_snapshot(stopped_build_actor);
-    assert_eq!(
-        stopped_build.local_vars.get("stop_order"),
-        Some(&Value::Int(12))
-    );
-    assert_eq!(
-        stopped_build.local_vars.get("stop_abort_action"),
-        Some(&Value::String("Idle".to_string().into()))
-    );
-    assert_eq!(
-        stopped_build.local_vars.get("stop_walk_start_action"),
-        Some(&Value::String("Walk".to_string().into()))
-    );
+    unit_assert_eq!(stopped_build.local_vars.get("stop_order") => Some(&Value::Int(12)));
+    unit_assert_eq!(stopped_build.local_vars.get("stop_abort_action") => Some(&Value::String("Idle".to_string().into())));
+    unit_assert_eq!(stopped_build.local_vars.get("stop_walk_start_action") => Some(&Value::String("Walk".to_string().into())));
 
     for (actor, target, expected_action) in [
         (flight_actor, flight_target, "Flight"),
         (swim_actor, swim_target, "Swim"),
     ] {
         let actor = engine.test_object_snapshot(actor);
-        assert_eq!(actor.action.name, expected_action);
-        assert_eq!(actor.command_direction, CommandDirection::Stop);
-        assert_eq!(actor.local_vars.get("order"), Some(&Value::Int(1)));
-        assert_eq!(
-            engine
-                .object_snapshot(target)
-                .expect("air/water target remains")
-                .controller,
-            2,
-            "non-Walk ObjectComGrab cannot propagate Controller"
-        );
+        unit_assert_eq!(actor.action.name => expected_action);
+        unit_assert_eq!(actor.command_direction => CommandDirection::Stop);
+        unit_assert_eq!(actor.local_vars.get("order") => Some(&Value::Int(1)));
+        unit_assert_eq!(engine.object_snapshot(target).expect("air/water target remains").controller => 2, "non-Walk ObjectComGrab cannot propagate Controller");
     }
 
     let removed_actor_target = engine.test_object_snapshot(removed_actor_target);
-    assert_eq!(removed_actor_target.controller, 2);
-    assert_eq!(
-        removed_actor_target.local_vars.get("grabbed_calls"),
-        Some(&Value::Nil),
-        "Grabbed is suppressed when Grab removes the actor"
-    );
+    unit_assert_eq!(removed_actor_target.controller => 2);
+    unit_assert_eq!(removed_actor_target.local_vars.get("grabbed_calls") => Some(&Value::Nil), "Grabbed is suppressed when Grab removes the actor");
 
     let target_remover = engine.test_object_snapshot(target_remover);
-    assert_eq!(
-        target_remover.local_vars.get("order"),
-        Some(&Value::Int(123))
-    );
-    assert!(
+    unit_assert_eq!(target_remover.local_vars.get("order") => Some(&Value::Int(123)));
+    unit_assert!(
         engine
             .object_snapshot(removed_target)
             .is_none_or(|target| target.status == ObjectStatus::Deleted),
@@ -3682,156 +3045,105 @@ fn object_com_grab_matches_cpp_callbacks_controller_walk_and_stop_gates() {
     );
 
     let far_builder = engine.test_object_snapshot(far_builder);
-    assert_eq!(
-        far_builder.action.name, "Walk",
-        "Build runs the full ObjectComStop before testing At"
-    );
-    assert_eq!(
-        far_builder.command_stack.command_names(),
+    unit_assert_eq!(far_builder.action.name => "Walk", "Build runs the full ObjectComStop before testing At");
+    unit_assert_eq!(
+        far_builder.command_stack.command_names() =>
         vec!["MoveTo".to_string(), "Grab".to_string()],
         "the live post-stop At result inserts MoveTo in the same command pass"
     );
 
     let command_replacer = engine.test_object_snapshot(command_replacer);
-    assert_eq!(
-        command_replacer.local_vars.get("order"),
-        Some(&Value::Int(1234))
-    );
-    assert_eq!(
-        command_replacer.command_stack.command_names(),
+    unit_assert_eq!(command_replacer.local_vars.get("order") => Some(&Value::Int(1234)));
+    unit_assert_eq!(
+        command_replacer.command_stack.command_names() =>
         vec!["Wait".to_string()],
         "Grab callback command replacement survives the remaining callbacks"
     );
-    assert_eq!(
-        engine
-            .object_snapshot(replacement_target)
-            .expect("replacement target remains")
-            .controller,
-        7
-    );
+    unit_assert_eq!(engine.object_snapshot(replacement_target).expect("replacement target remains").controller => 7);
 
     let cleared_builder = engine.test_object_snapshot(cleared_builder);
-    assert_eq!(cleared_builder.action.name, "Walk");
-    assert_eq!(cleared_builder.local_vars.get("order"), Some(&Value::Nil));
-    assert_eq!(
-        cleared_builder.local_vars.get("finished"),
+    unit_assert_eq!(cleared_builder.action.name => "Walk");
+    unit_assert_eq!(cleared_builder.local_vars.get("order") => Some(&Value::Nil));
+    unit_assert_eq!(
+        cleared_builder.local_vars.get("finished") =>
         Some(&Value::String("Grab".to_string().into())),
         "post-stop null Target fails in the same command execution"
     );
-    assert!(cleared_builder.command_stack.is_empty());
+    unit_assert!(cleared_builder.command_stack.is_empty());
     let cleared_target = engine.test_object_snapshot(cleared_target);
-    assert_eq!(cleared_target.status, ObjectStatus::Inactive);
-    assert_eq!(
-        cleared_target.local_vars.get("reject_calls"),
-        None,
-        "RejectGrabbed is after the post-stop null-target check"
-    );
+    unit_assert_eq!(cleared_target.status => ObjectStatus::Inactive);
+    unit_assert_eq!(cleared_target.local_vars.get("reject_calls") => None, "RejectGrabbed is after the post-stop null-target check");
 
     let sequential_builder = engine.test_object_snapshot(sequential_builder);
-    assert_eq!(sequential_builder.action.name, "Push");
-    assert_eq!(sequential_builder.action.target, Some(sequential_target));
-    assert_eq!(
-        sequential_builder.local_vars.get("stop_walk_starts"),
-        Some(&Value::Int(2)),
-        "BUILD stop is followed by an independent DIG stop"
-    );
-    assert_eq!(
-        sequential_builder.local_vars.get("order"),
-        Some(&Value::Int(1234))
-    );
+    unit_assert_eq!(sequential_builder.action.name => "Push");
+    unit_assert_eq!(sequential_builder.action.target => Some(sequential_target));
+    unit_assert_eq!(sequential_builder.local_vars.get("stop_walk_starts") => Some(&Value::Int(2)), "BUILD stop is followed by an independent DIG stop");
+    unit_assert_eq!(sequential_builder.local_vars.get("order") => Some(&Value::Int(1234)));
 
     let mutated_actor = engine.test_object_snapshot(mutated_actor);
-    assert_eq!(mutated_actor.action.name, "Walk");
-    assert_eq!(
-        mutated_actor.local_vars.get("order"),
-        Some(&Value::Int(1234))
-    );
-    assert_eq!(
-        mutated_actor.command_stack.command_names(),
-        vec!["Grab".to_string()],
-        "Grabbed's action mutation survives and the unfinished Grab remains"
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(mutated_target)
-            .expect("mutation target remains")
-            .controller,
-        7
-    );
+    unit_assert_eq!(mutated_actor.action.name => "Walk");
+    unit_assert_eq!(mutated_actor.local_vars.get("order") => Some(&Value::Int(1234)));
+    unit_assert_eq!(mutated_actor.command_stack.command_names() => vec!["Grab".to_string()], "Grabbed's action mutation survives and the unfinished Grab remains");
+    unit_assert_eq!(engine.object_snapshot(mutated_target).expect("mutation target remains").controller => 7);
 
     let locked_actor = engine.test_object_snapshot(locked_actor);
-    assert_eq!(locked_actor.action.name, "LockedWalk");
-    assert_eq!(locked_actor.command_direction, CommandDirection::Stop);
-    assert_eq!(locked_actor.local_vars.get("order"), Some(&Value::Int(1)));
-    assert_eq!(
+    unit_assert_eq!(locked_actor.action.name => "LockedWalk");
+    unit_assert_eq!(locked_actor.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(locked_actor.local_vars.get("order") => Some(&Value::Int(1)));
+    unit_assert_eq!(
         engine
             .object_snapshot(locked_target)
             .expect("locked-Walk target remains")
-            .controller,
+            .controller =>
         2,
         "ObjectActionPush is non-forced and respects NoOtherAction"
     );
 
     let locked_build_actor = engine.test_object_snapshot(locked_build_actor);
-    assert_eq!(
-        locked_build_actor.local_vars.get("reject_action"),
+    unit_assert_eq!(
+        locked_build_actor.local_vars.get("reject_action") =>
         Some(&Value::String("LockedBuild".to_string().into())),
         "Grab's ObjectComStop cannot bypass NoOtherAction before RejectGrabbed"
     );
-    assert_eq!(locked_build_actor.command_direction, CommandDirection::Stop);
-    assert_eq!(
-        locked_build_actor.local_vars.get("order"),
-        Some(&Value::Int(1))
-    );
-    assert_eq!(
+    unit_assert_eq!(locked_build_actor.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(locked_build_actor.local_vars.get("order") => Some(&Value::Int(1)));
+    unit_assert_eq!(
         engine
             .object_snapshot(locked_build_target)
             .expect("locked-Build target remains")
-            .controller,
+            .controller =>
         2,
         "Grab's ObjectComStop is non-forced and cannot bypass NoOtherAction"
     );
 
     let inactive_actor = engine.test_object_snapshot(inactive_actor);
-    assert_eq!(inactive_actor.action.name, "Push");
-    assert_eq!(inactive_actor.action.target, Some(inactive_target));
-    assert_eq!(
-        inactive_actor.local_vars.get("order"),
-        Some(&Value::Int(1234))
-    );
+    unit_assert_eq!(inactive_actor.action.name => "Push");
+    unit_assert_eq!(inactive_actor.action.target => Some(inactive_target));
+    unit_assert_eq!(inactive_actor.local_vars.get("order") => Some(&Value::Int(1234)));
     let inactive_target = engine.test_object_snapshot(inactive_target);
-    assert_eq!(inactive_target.status, ObjectStatus::Inactive);
-    assert_eq!(inactive_target.controller, 7);
+    unit_assert_eq!(inactive_target.status => ObjectStatus::Inactive);
+    unit_assert_eq!(inactive_target.controller => 7);
 
     let clear_then_detach = engine.test_object_snapshot(clear_then_detach);
-    assert_eq!(clear_then_detach.action.name, "Walk");
-    assert_eq!(
-        clear_then_detach.command_stack.command_names(),
-        vec!["Wait".to_string()],
-        "a pointer cleared before detachment remains null"
-    );
-    assert_eq!(clear_then_detach.local_vars.get("order"), Some(&Value::Nil));
+    unit_assert_eq!(clear_then_detach.action.name => "Walk");
+    unit_assert_eq!(clear_then_detach.command_stack.command_names() => vec!["Wait".to_string()], "a pointer cleared before detachment remains null");
+    unit_assert_eq!(clear_then_detach.local_vars.get("order") => Some(&Value::Nil));
 
     let detach_then_remove = engine.test_object_snapshot(detach_then_remove);
-    assert_eq!(detach_then_remove.action.name, "Walk");
-    assert_eq!(
-        detach_then_remove.command_stack.command_names(),
+    unit_assert_eq!(detach_then_remove.action.name => "Walk");
+    unit_assert_eq!(
+        detach_then_remove.command_stack.command_names() =>
         vec!["MoveTo".to_string(), "Wait".to_string()],
         "a pointer frozen by detachment still queues MoveTo after Status becomes zero"
     );
-    assert!(engine
-        .object_snapshot(detach_then_remove_target)
-        .is_none_or(|target| target.status == ObjectStatus::Deleted));
+    unit_assert!(engine.object_snapshot(detach_then_remove_target).is_none_or(|target| target.status == ObjectStatus::Deleted));
 
     let reject_detacher = engine.test_object_snapshot(reject_detacher);
-    assert_eq!(reject_detacher.action.name, "Walk");
-    assert_eq!(reject_detacher.action.target, Some(reject_removed_target));
-    assert_eq!(
-        reject_detacher.local_vars.get("order"),
-        Some(&Value::Int(123))
-    );
-    assert_eq!(
-            reject_detacher.command_stack.command_names(),
+    unit_assert_eq!(reject_detacher.action.name => "Walk");
+    unit_assert_eq!(reject_detacher.action.target => Some(reject_removed_target));
+    unit_assert_eq!(reject_detacher.local_vars.get("order") => Some(&Value::Int(123)));
+    unit_assert_eq!(
+            reject_detacher.command_stack.command_names() =>
             vec!["Wait".to_string(), "Wait".to_string()],
             "ObjectComGrab runs before same-frame PUSH notices the status-zero target and adds its delay"
         );
@@ -3842,216 +3154,167 @@ fn execute_command_runs_object_com_grab_callbacks_before_returning() {
     let mut engine = object_com_grab_test_engine();
     let (actor, target) = spawn_object_com_grab_probe(&mut engine, "Walk", 0);
     let actor_index = engine.test_object_index(actor);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 actor_index,
                 "RunGrabNow",
                 vec![object_reference_value(target), Value::Int(0)],
             )
-            .expect("RunGrabNow executes"),
+            .expect("RunGrabNow executes") =>
         Value::Int(1234)
     );
     let actor = engine.test_object_snapshot(actor);
-    assert_eq!(actor.action.name, "Push");
-    assert_eq!(actor.action.target, Some(target));
-    assert_eq!(
-        actor.local_vars.get("grabbed_controller"),
-        Some(&Value::Int(7))
-    );
-    assert_eq!(
-        actor.local_vars.get("push_start_comdir"),
-        Some(&Value::Int(CommandDirection::Stop.to_script_value()))
-    );
-    assert_eq!(
-        actor.local_vars.get("push_start_action"),
-        Some(&Value::String("Push".to_string().into()))
-    );
-    assert_eq!(
-        actor.local_vars.get("push_start_target"),
-        Some(&object_reference_value(target))
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(target)
-            .expect("target remains")
-            .controller,
-        7
-    );
+    unit_assert_eq!(actor.action.name => "Push");
+    unit_assert_eq!(actor.action.target => Some(target));
+    unit_assert_eq!(actor.local_vars.get("grabbed_controller") => Some(&Value::Int(7)));
+    unit_assert_eq!(actor.local_vars.get("push_start_comdir") => Some(&Value::Int(CommandDirection::Stop.to_script_value())));
+    unit_assert_eq!(actor.local_vars.get("push_start_action") => Some(&Value::String("Push".to_string().into())));
+    unit_assert_eq!(actor.local_vars.get("push_start_target") => Some(&object_reference_value(target)));
+    unit_assert_eq!(engine.object_snapshot(target).expect("target remains").controller => 7);
 
     let (self_remover, self_remover_target) = spawn_object_com_grab_probe(&mut engine, "Walk", 50);
     let self_remover_index = engine.test_object_index(self_remover);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 self_remover_index,
                 "RunGrabNow",
                 vec![object_reference_value(self_remover_target), Value::Int(1)],
             )
-            .expect("self-removing Grab executes"),
+            .expect("self-removing Grab executes") =>
         Value::Int(123)
     );
     let self_remover_target = engine.test_object_snapshot(self_remover_target);
-    assert_eq!(self_remover_target.controller, 2);
-    assert_eq!(
-        self_remover_target.local_vars.get("grabbed_calls"),
-        Some(&Value::Nil),
-        "status-zero grabber suppresses Controller propagation and Grabbed"
-    );
+    unit_assert_eq!(self_remover_target.controller => 2);
+    unit_assert_eq!(self_remover_target.local_vars.get("grabbed_calls") => Some(&Value::Nil), "status-zero grabber suppresses Controller propagation and Grabbed");
 
     let (remover, doomed) = spawn_object_com_grab_probe(&mut engine, "Walk", 100);
     let remover_index = engine.test_object_index(remover);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 remover_index,
                 "RunGrabNow",
                 vec![object_reference_value(doomed), Value::Int(2)],
             )
-            .expect("target-removing Grab executes"),
+            .expect("target-removing Grab executes") =>
         Value::Int(123)
     );
     let remover = engine.test_object_snapshot(remover);
-    assert_eq!(remover.local_vars.get("grabbed_target"), Some(&Value::Nil));
+    unit_assert_eq!(remover.local_vars.get("grabbed_target") => Some(&Value::Nil));
 
     let (plain_actor, plain_target) =
         spawn_object_com_grab_probe_with_target(&mut engine, "Walk", 200, "OGNR");
     let plain_actor_index = engine.test_object_index(plain_actor);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 plain_actor_index,
                 "RunGrabNow",
                 vec![object_reference_value(plain_target), Value::Int(0)],
             )
-            .expect("missing RejectGrabbed is accepted"),
+            .expect("missing RejectGrabbed is accepted") =>
         Value::Int(234)
     );
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .object_snapshot(plain_target)
             .expect("plain target remains")
-            .controller,
+            .controller =>
         7,
         "host preview creates a target scope before propagating Controller"
     );
 
     let (stop_actor, stop_target) = spawn_object_com_grab_probe(&mut engine, "Build", 300);
     let stop_actor_index = engine.test_object_index(stop_actor);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 stop_actor_index,
                 "RunStopClearGrabNow",
                 vec![object_reference_value(stop_target)],
             )
-            .expect("synchronous stop-clear executes"),
+            .expect("synchronous stop-clear executes") =>
         Value::String("Grab".to_string().into())
     );
     let stop_actor = engine.test_object_snapshot(stop_actor);
-    assert!(stop_actor.command_stack.is_empty());
-    assert_eq!(stop_actor.local_vars.get("order"), Some(&Value::Nil));
-    assert_eq!(
-        stop_actor.local_vars.get("stop_order"),
-        Some(&Value::Int(12))
-    );
-    assert_eq!(
-        stop_actor.local_vars.get("stop_abort_action"),
-        Some(&Value::String("Idle".to_string().into()))
-    );
-    assert_eq!(
-        stop_actor.local_vars.get("stop_walk_start_action"),
-        Some(&Value::String("Walk".to_string().into()))
-    );
+    unit_assert!(stop_actor.command_stack.is_empty());
+    unit_assert_eq!(stop_actor.local_vars.get("order") => Some(&Value::Nil));
+    unit_assert_eq!(stop_actor.local_vars.get("stop_order") => Some(&Value::Int(12)));
+    unit_assert_eq!(stop_actor.local_vars.get("stop_abort_action") => Some(&Value::String("Idle".to_string().into())));
+    unit_assert_eq!(stop_actor.local_vars.get("stop_walk_start_action") => Some(&Value::String("Walk".to_string().into())));
     let stop_target = engine.test_object_snapshot(stop_target);
-    assert_eq!(stop_target.status, ObjectStatus::Inactive);
-    assert_eq!(stop_target.local_vars.get("reject_calls"), None);
+    unit_assert_eq!(stop_target.status => ObjectStatus::Inactive);
+    unit_assert_eq!(stop_target.local_vars.get("reject_calls") => None);
 
     let (sequential_actor, sequential_target) =
         spawn_object_com_grab_probe(&mut engine, "Build", 400);
     let sequential_actor_index = engine.test_object_index(sequential_actor);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 sequential_actor_index,
                 "RunStopToDigGrabNow",
                 vec![object_reference_value(sequential_target)],
             )
-            .expect("synchronous Build-to-Dig Grab executes"),
+            .expect("synchronous Build-to-Dig Grab executes") =>
         Value::Int(1234)
     );
     let sequential_actor = engine.test_object_snapshot(sequential_actor);
-    assert_eq!(sequential_actor.action.name, "Push");
-    assert_eq!(
-        sequential_actor.local_vars.get("stop_walk_starts"),
-        Some(&Value::Int(2))
-    );
+    unit_assert_eq!(sequential_actor.action.name => "Push");
+    unit_assert_eq!(sequential_actor.local_vars.get("stop_walk_starts") => Some(&Value::Int(2)));
 
     let (mutated_actor, mutated_target) = spawn_object_com_grab_probe(&mut engine, "Walk", 500);
     let mutated_actor_index = engine.test_object_index(mutated_actor);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 mutated_actor_index,
                 "RunGrabNow",
                 vec![object_reference_value(mutated_target), Value::Int(4)],
             )
-            .expect("Grabbed action mutation executes"),
+            .expect("Grabbed action mutation executes") =>
         Value::Int(1234)
     );
     let mutated_actor = engine.test_object_snapshot(mutated_actor);
-    assert_eq!(mutated_actor.action.name, "Walk");
-    assert_eq!(
-        mutated_actor.command_stack.command_names(),
-        vec!["Grab".to_string()]
-    );
+    unit_assert_eq!(mutated_actor.action.name => "Walk");
+    unit_assert_eq!(mutated_actor.command_stack.command_names() => vec!["Grab".to_string()]);
 
     let (locked_actor, locked_target) = spawn_object_com_grab_probe(&mut engine, "LockedWalk", 600);
     let locked_actor_index = engine.test_object_index(locked_actor);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 locked_actor_index,
                 "RunGrabNow",
                 vec![object_reference_value(locked_target), Value::Int(0)],
             )
-            .expect("locked-Walk Grab executes"),
+            .expect("locked-Walk Grab executes") =>
         Value::Int(1)
     );
     let locked_actor = engine.test_object_snapshot(locked_actor);
-    assert_eq!(locked_actor.action.name, "LockedWalk");
-    assert_eq!(locked_actor.command_direction, CommandDirection::Stop);
-    assert_eq!(
-        engine
-            .object_snapshot(locked_target)
-            .expect("locked target remains")
-            .controller,
-        2
-    );
+    unit_assert_eq!(locked_actor.action.name => "LockedWalk");
+    unit_assert_eq!(locked_actor.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(engine.object_snapshot(locked_target).expect("locked target remains").controller => 2);
 
     let (locked_build_actor, locked_build_target) =
         spawn_object_com_grab_probe(&mut engine, "LockedBuild", 650);
     let locked_build_actor_index = engine.test_object_index(locked_build_actor);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 locked_build_actor_index,
                 "RunGrabNow",
                 vec![object_reference_value(locked_build_target), Value::Int(0)],
             )
-            .expect("locked-Build Grab executes"),
+            .expect("locked-Build Grab executes") =>
         Value::Int(1)
     );
     let locked_build_actor = engine.test_object_snapshot(locked_build_actor);
-    assert_eq!(locked_build_actor.action.name, "LockedBuild");
-    assert_eq!(locked_build_actor.command_direction, CommandDirection::Stop);
-    assert_eq!(
-        engine
-            .object_snapshot(locked_build_target)
-            .expect("locked-Build target remains")
-            .controller,
-        2
-    );
+    unit_assert_eq!(locked_build_actor.action.name => "LockedBuild");
+    unit_assert_eq!(locked_build_actor.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(engine.object_snapshot(locked_build_target).expect("locked-Build target remains").controller => 2);
 
     let (inactive_actor, inactive_target) = spawn_object_com_grab_probe(&mut engine, "Walk", 700);
     let inactive_actor_index = engine.test_object_index(inactive_actor);
@@ -4060,23 +3323,17 @@ fn execute_command_runs_object_com_grab_callbacks_before_returning() {
         "DeactivateTarget",
         vec![object_reference_value(inactive_target)],
     );
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 inactive_actor_index,
                 "RunGrabNow",
                 vec![object_reference_value(inactive_target), Value::Int(0)],
             )
-            .expect("inactive-target Grab executes"),
+            .expect("inactive-target Grab executes") =>
         Value::Int(1234)
     );
-    assert_eq!(
-        engine
-            .object_snapshot(inactive_target)
-            .expect("inactive host target remains")
-            .controller,
-        7
-    );
+    unit_assert_eq!(engine.object_snapshot(inactive_target).expect("inactive host target remains").controller => 7);
 
     let (clear_then_detach, clear_then_detach_target) =
         spawn_object_com_grab_probe(&mut engine, "Build", 800);
@@ -4089,12 +3346,12 @@ fn execute_command_runs_object_com_grab_callbacks_before_returning() {
             Value::Int(1),
         ],
     );
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .object_snapshot(clear_then_detach)
             .expect("host clear-then-detach actor remains")
             .command_stack
-            .command_names(),
+            .command_names() =>
         vec!["Wait".to_string()]
     );
 
@@ -4109,49 +3366,39 @@ fn execute_command_runs_object_com_grab_callbacks_before_returning() {
             Value::Int(2),
         ],
     );
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .object_snapshot(detach_then_remove)
             .expect("host detach-then-remove actor remains")
             .command_stack
-            .command_names(),
+            .command_names() =>
         vec!["MoveTo".to_string(), "Wait".to_string()]
     );
 
     let (reject_detacher, reject_removed_target) =
         spawn_object_com_grab_probe(&mut engine, "Walk", 1_000);
     let reject_detacher_index = engine.test_object_index(reject_detacher);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 reject_detacher_index,
                 "RunGrabNow",
                 vec![object_reference_value(reject_removed_target), Value::Int(5)],
             )
-            .expect("host Reject detach-before-remove executes"),
+            .expect("host Reject detach-before-remove executes") =>
         Value::Int(123)
     );
     let reject_detacher = engine.test_object_snapshot(reject_detacher);
-    assert_eq!(reject_detacher.action.name, "Push");
-    assert_eq!(reject_detacher.action.target, Some(reject_removed_target));
-    assert_eq!(
-        reject_detacher.command_stack.command_names(),
-        vec!["Wait".to_string()]
-    );
+    unit_assert_eq!(reject_detacher.action.name => "Push");
+    unit_assert_eq!(reject_detacher.action.target => Some(reject_removed_target));
+    unit_assert_eq!(reject_detacher.command_stack.command_names() => vec!["Wait".to_string()]);
 }
 
 #[test]
 fn execute_command_grab_at_uses_live_construction_rotation_and_addtop_shape() {
     let mut engine = object_com_grab_test_engine();
     let spawn_actor = |engine: &mut Engine, position: Vector2| {
-        let actor = engine.spawn_test_object(
-            SpawnConfig::new("OGAC")
-                .with_owner(1)
-                .with_alive(true)
-                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
-                .with_position(position)
-                .with_action(ActionState::new("Walk")),
-        );
+        let actor = spawn_fixture!(engine, "OGAC", with_owner: 1, with_alive: true, with_category: CATEGORY_OBJECT | CATEGORY_LIVING, with_position: position, with_action: ActionState::new("Walk"));
         let actor_index = engine.test_object_index(actor);
         engine.force_object_position(actor_index, position);
         actor
@@ -4165,65 +3412,36 @@ fn execute_command_grab_at_uses_live_construction_rotation_and_addtop_shape() {
         )
     };
 
-    let short_target = engine.spawn_test_object(
-        SpawnConfig::new("OGTG")
-            .with_owner(2)
-            .with_category(CATEGORY_VEHICLE)
-            .with_position(Vector2::new(0, 100))
-            .with_construction(FULL_CON / 2),
-    );
+    let short_target = spawn_fixture!(engine, "OGTG", with_owner: 2, with_category: CATEGORY_VEHICLE, with_position: Vector2::new(0, 100), with_construction: FULL_CON / 2);
     let short_position = engine.test_object_snapshot(short_target).position;
     let addtop_actor = spawn_actor(
         &mut engine,
         Vector2::new(short_position.x, short_position.y - 10),
     );
-    assert_eq!(
-        run_grab(&mut engine, addtop_actor, short_target),
-        Value::Int(1234),
-        "C4Object::addtop expands a short construction shape upward"
-    );
+    unit_assert_eq!(run_grab(&mut engine, addtop_actor, short_target) => Value::Int(1234), "C4Object::addtop expands a short construction shape upward");
 
-    let outside_target = engine.spawn_test_object(
-        SpawnConfig::new("OGTG")
-            .with_owner(2)
-            .with_category(CATEGORY_VEHICLE)
-            .with_position(Vector2::new(100, 100))
-            .with_construction(FULL_CON / 2),
-    );
+    let outside_target = spawn_fixture!(engine, "OGTG", with_owner: 2, with_category: CATEGORY_VEHICLE, with_position: Vector2::new(100, 100), with_construction: FULL_CON / 2);
     let outside_position = engine.test_object_snapshot(outside_target).position;
     let outside_actor = spawn_actor(
         &mut engine,
         Vector2::new(outside_position.x, outside_position.y + 8),
     );
-    assert_eq!(
-        run_grab(&mut engine, outside_actor, outside_target),
-        Value::Nil
-    );
+    unit_assert_eq!(run_grab(&mut engine, outside_actor, outside_target) => Value::Nil);
     let outside_actor = engine.test_object_snapshot(outside_actor);
-    assert_eq!(outside_actor.action.name, "Walk");
-    assert_eq!(
-        outside_actor.command_stack.command_names(),
+    unit_assert_eq!(outside_actor.action.name => "Walk");
+    unit_assert_eq!(
+        outside_actor.command_stack.command_names() =>
         vec!["MoveTo".to_string(), "Grab".to_string()],
         "the unscaled definition rect must not make At succeed"
     );
 
-    let rotated_target = engine.spawn_test_object(
-        SpawnConfig::new("OGTG")
-            .with_owner(2)
-            .with_category(CATEGORY_VEHICLE)
-            .with_position(Vector2::new(200, 100))
-            .with_rotation(90),
-    );
+    let rotated_target = spawn_fixture!(engine, "OGTG", with_owner: 2, with_category: CATEGORY_VEHICLE, with_position: Vector2::new(200, 100), with_rotation: 90);
     let rotated_position = engine.test_object_snapshot(rotated_target).position;
     let rotated_actor = spawn_actor(
         &mut engine,
         Vector2::new(rotated_position.x - 15, rotated_position.y),
     );
-    assert_eq!(
-        run_grab(&mut engine, rotated_actor, rotated_target),
-        Value::Int(1234),
-        "At uses the target's rotated live shape"
-    );
+    unit_assert_eq!(run_grab(&mut engine, rotated_actor, rotated_target) => Value::Int(1234), "At uses the target's rotated live shape");
 }
 
 #[test]
@@ -4292,75 +3510,34 @@ protected func WorkFailed(caller, tx, ty, other)
                     .with_mode(CommandMode::Base),
             )
             .test_value();
-        assert!(engine.objects[index]
-            .commands
-            .fail_front_if(CommandId::Call));
+        unit_assert!(engine.objects[index].commands.fail_front_if(CommandId::Call));
         engine.refresh_object_ocf(index);
     };
 
     // Script ExecuteCommand must run the tail inside the current VM call.
-    let execute_actor = engine.spawn_test_object(
-        SpawnConfig::new("AEXE")
-            .with_alive(true)
-            .with_crew_member(true)
-            .with_command_direction(CommandDirection::Right),
-    );
+    let execute_actor = spawn_fixture!(engine, "AEXE", with_alive: true, with_crew_member: true, with_command_direction: CommandDirection::Right);
     queue_failed_call(&mut engine, execute_actor, falsy_target);
     let execute_index = engine.test_object_index(execute_actor);
-    assert_eq!(
-        engine
-            .call_object_function(execute_index, "RunNow", Vec::new())
-            .expect("ExecuteCommand succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(execute_index, "RunNow", Vec::new()).expect("ExecuteCommand succeeds") => Value::Bool(true));
     let execute = engine.test_object_snapshot(execute_actor);
-    assert_eq!(execute.command_direction, CommandDirection::Stop);
-    assert_eq!(
-        execute.local_vars.get("finished_calls"),
-        Some(&Value::Int(1))
-    );
-    assert_eq!(
-        execute.local_vars.get("finished_dir"),
-        Some(&Value::Int(CommandDirection::Stop.to_script_value()))
-    );
+    unit_assert_eq!(execute.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(execute.local_vars.get("finished_calls") => Some(&Value::Int(1)));
+    unit_assert_eq!(execute.local_vars.get("finished_dir") => Some(&Value::Int(CommandDirection::Stop.to_script_value())));
     let falsy = engine.test_object_snapshot(falsy_target);
-    assert_eq!(falsy.local_vars.get("calls"), Some(&Value::Int(1)));
-    assert_eq!(
-        falsy.local_vars.get("caller_seen"),
-        Some(&Value::Object(execute_actor.as_u64()))
-    );
-    assert_eq!(
-        falsy.local_vars.get("tx_seen"),
-        Some(&Value::C4Id("WOOD".into()))
-    );
-    assert_eq!(falsy.local_vars.get("ty_seen"), Some(&Value::Int(17)));
-    assert_eq!(
-        falsy.local_vars.get("target2_seen"),
-        Some(&Value::Object(marker.as_u64()))
-    );
-    assert_eq!(
-        falsy.local_vars.get("pre_dir"),
+    unit_assert_eq!(falsy.local_vars.get("calls") => Some(&Value::Int(1)));
+    unit_assert_eq!(falsy.local_vars.get("caller_seen") => Some(&Value::Object(execute_actor.as_u64())));
+    unit_assert_eq!(falsy.local_vars.get("tx_seen") => Some(&Value::C4Id("WOOD".into())));
+    unit_assert_eq!(falsy.local_vars.get("ty_seen") => Some(&Value::Int(17)));
+    unit_assert_eq!(falsy.local_vars.get("target2_seen") => Some(&Value::Object(marker.as_u64())));
+    unit_assert_eq!(
+        falsy.local_vars.get("pre_dir") =>
         Some(&Value::Int(CommandDirection::Right.to_script_value())),
         "CallFailed runs before the common ComDir stop"
     );
 
-    let normal_actor = engine.spawn_test_object(
-        SpawnConfig::new("ACRW")
-            .with_alive(true)
-            .with_crew_member(true)
-            .with_command_direction(CommandDirection::Right),
-    );
-    let silent_actor = engine.spawn_test_object(
-        SpawnConfig::new("ASLT")
-            .with_alive(true)
-            .with_crew_member(true)
-            .with_command_direction(CommandDirection::Right),
-    );
-    let noncrew_actor = engine.spawn_test_object(
-        SpawnConfig::new("ANCR")
-            .with_alive(true)
-            .with_command_direction(CommandDirection::Right),
-    );
+    let normal_actor = spawn_fixture!(engine, "ACRW", with_alive: true, with_crew_member: true, with_command_direction: CommandDirection::Right);
+    let silent_actor = spawn_fixture!(engine, "ASLT", with_alive: true, with_crew_member: true, with_command_direction: CommandDirection::Right);
+    let noncrew_actor = spawn_fixture!(engine, "ANCR", with_alive: true, with_command_direction: CommandDirection::Right);
     queue_failed_call(&mut engine, normal_actor, truthy_target);
     queue_failed_call(&mut engine, silent_actor, falsy_target);
     queue_failed_call(&mut engine, noncrew_actor, falsy_target);
@@ -4368,32 +3545,17 @@ protected func WorkFailed(caller, tx, ty, other)
     engine.tick_without_snapshot().test_value();
 
     let normal = engine.test_object_snapshot(normal_actor);
-    assert_eq!(
-        normal.command_direction,
-        CommandDirection::Right,
-        "truthy CallFailed suppresses the entire common tail"
-    );
-    assert_eq!(
-        normal.local_vars.get("finished_dir"),
-        Some(&Value::Int(CommandDirection::Right.to_script_value()))
-    );
+    unit_assert_eq!(normal.command_direction => CommandDirection::Right, "truthy CallFailed suppresses the entire common tail");
+    unit_assert_eq!(normal.local_vars.get("finished_dir") => Some(&Value::Int(CommandDirection::Right.to_script_value())));
     let silent = engine.test_object_snapshot(silent_actor);
-    assert_eq!(
-        silent.command_direction,
-        CommandDirection::Right,
-        "SilentCommands suppresses only the common tail"
-    );
+    unit_assert_eq!(silent.command_direction => CommandDirection::Right, "SilentCommands suppresses only the common tail");
     let noncrew = engine.test_object_snapshot(noncrew_actor);
-    assert_eq!(noncrew.command_direction, CommandDirection::Right);
+    unit_assert_eq!(noncrew.command_direction => CommandDirection::Right);
 
     let falsy = engine.test_object_snapshot(falsy_target);
-    assert_eq!(
-        falsy.local_vars.get("calls"),
-        Some(&Value::Int(2)),
-        "silent crew still gets CallFailed; the noncrew does not"
-    );
+    unit_assert_eq!(falsy.local_vars.get("calls") => Some(&Value::Int(2)), "silent crew still gets CallFailed; the noncrew does not");
     let truthy = engine.test_object_snapshot(truthy_target);
-    assert_eq!(truthy.local_vars.get("calls"), Some(&Value::Int(1)));
+    unit_assert_eq!(truthy.local_vars.get("calls") => Some(&Value::Int(1)));
 }
 
 #[test]
@@ -4454,20 +3616,14 @@ protected func WorkFailed(caller, tx, ty, target2)
 
     let mut engine = Engine::with_seed(312);
     register(&mut engine);
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("CTXA")
-            .with_alive(true)
-            .with_crew_member(true)
-            .with_command_direction(CommandDirection::Right),
-    );
-    let target =
-        engine.spawn_test_object(SpawnConfig::new("CTXT").with_status(ObjectStatus::Inactive));
+    let actor = spawn_fixture!(engine, "CTXA", with_alive: true, with_crew_member: true, with_command_direction: CommandDirection::Right);
+    let target = spawn_fixture!(engine, "CTXT", with_status: ObjectStatus::Inactive);
     let marker = engine.spawn_test_object(SpawnConfig::new("CTXM"));
     let doomed = engine.spawn_test_object(SpawnConfig::new("CTXD"));
 
     let queue = |engine: &mut Engine, tx: Value| {
         let actor_index = engine.test_object_index(actor);
-        assert_eq!(
+        unit_assert_eq!(
             engine
                 .call_object_function(
                     actor_index,
@@ -4478,7 +3634,7 @@ protected func WorkFailed(caller, tx, ty, target2)
                         object_reference_value(marker),
                     ],
                 )
-                .expect("Call queues"),
+                .expect("Call queues") =>
             Value::Bool(true)
         );
     };
@@ -4523,81 +3679,43 @@ protected func WorkFailed(caller, tx, ty, target2)
 
     for (index, payload) in payloads.into_iter().enumerate() {
         queue(&mut engine, payload.clone());
-        assert_eq!(read_tx(&mut engine), payload, "live GetCommand tag {index}");
+        unit_assert_eq!(read_tx(&mut engine) => payload, "live GetCommand tag {index}");
         engine = round_trip(&engine);
-        assert_eq!(
-            read_tx(&mut engine),
-            payload,
-            "restored GetCommand tag {index}"
-        );
+        unit_assert_eq!(read_tx(&mut engine) => payload, "restored GetCommand tag {index}");
 
         engine.tick_without_snapshot().test_value();
         let target_state = engine.test_object_snapshot(target);
-        assert_eq!(
-            target_state.local_vars.get("success_count"),
-            Some(&Value::Int(index as i32 + 1))
-        );
-        assert_eq!(target_state.local_vars.get("success_tx"), Some(&payload));
-        assert_eq!(
-            target_state.local_vars.get("last_ty"),
-            Some(&Value::Int(17))
-        );
-        assert_eq!(
-            target_state.local_vars.get("last_target2"),
-            Some(&Value::Object(marker.as_u64()))
-        );
+        unit_assert_eq!(target_state.local_vars.get("success_count") => Some(&Value::Int(index as i32 + 1)));
+        unit_assert_eq!(target_state.local_vars.get("success_tx") => Some(&payload));
+        unit_assert_eq!(target_state.local_vars.get("last_ty") => Some(&Value::Int(17)));
+        unit_assert_eq!(target_state.local_vars.get("last_target2") => Some(&Value::Object(marker.as_u64())));
         let actor_state = engine.test_object_snapshot(actor);
-        assert_eq!(
-            actor_state.local_vars.get("finished_count"),
-            Some(&Value::Int(index as i32 * 2 + 1))
-        );
-        assert_eq!(actor_state.local_vars.get("finished_tx"), Some(&payload));
-        assert_eq!(
-            actor_state.local_vars.get("finished_data"),
-            Some(&Value::Nil)
-        );
-        assert_eq!(
-            actor_state.command_direction,
-            CommandDirection::Right,
-            "successful Call does not stop ComDir"
-        );
+        unit_assert_eq!(actor_state.local_vars.get("finished_count") => Some(&Value::Int(index as i32 * 2 + 1)));
+        unit_assert_eq!(actor_state.local_vars.get("finished_tx") => Some(&payload));
+        unit_assert_eq!(actor_state.local_vars.get("finished_data") => Some(&Value::Nil));
+        unit_assert_eq!(actor_state.command_direction => CommandDirection::Right, "successful Call does not stop ComDir");
 
         queue(&mut engine, payload.clone());
         engine = round_trip(&engine);
-        assert_eq!(
-            read_tx(&mut engine),
-            payload,
-            "failure-side restored GetCommand tag {index}"
-        );
+        unit_assert_eq!(read_tx(&mut engine) => payload, "failure-side restored GetCommand tag {index}");
         let actor_index = engine.test_object_index(actor);
-        assert!(engine.objects[actor_index]
-            .commands
-            .fail_front_if(CommandId::Call));
+        unit_assert!(engine.objects[actor_index].commands.fail_front_if(CommandId::Call));
         engine.refresh_object_ocf(actor_index);
         engine.tick_without_snapshot().test_value();
 
         let target_state = engine.test_object_snapshot(target);
-        assert_eq!(
-            target_state.local_vars.get("failed_count"),
-            Some(&Value::Int(index as i32 + 1))
-        );
-        assert_eq!(target_state.local_vars.get("failed_tx"), Some(&payload));
+        unit_assert_eq!(target_state.local_vars.get("failed_count") => Some(&Value::Int(index as i32 + 1)));
+        unit_assert_eq!(target_state.local_vars.get("failed_tx") => Some(&payload));
         let actor_state = engine.test_object_snapshot(actor);
-        assert_eq!(
-            actor_state.local_vars.get("finished_count"),
-            Some(&Value::Int(index as i32 * 2 + 2))
-        );
-        assert_eq!(actor_state.local_vars.get("finished_tx"), Some(&payload));
-        assert_eq!(
-            actor_state.local_vars.get("finished_data"),
-            Some(&Value::Nil)
-        );
-        assert_eq!(actor_state.command_direction, CommandDirection::Right);
+        unit_assert_eq!(actor_state.local_vars.get("finished_count") => Some(&Value::Int(index as i32 * 2 + 2)));
+        unit_assert_eq!(actor_state.local_vars.get("finished_tx") => Some(&payload));
+        unit_assert_eq!(actor_state.local_vars.get("finished_data") => Some(&Value::Nil));
+        unit_assert_eq!(actor_state.command_direction => CommandDirection::Right);
     }
 
     let textless_tx = Value::Array(vec![Value::String("textless".into()), Value::Int(0)]);
     let actor_index = engine.test_object_index(actor);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 actor_index,
@@ -4609,40 +3727,21 @@ protected func WorkFailed(caller, tx, ty, target2)
                     Value::Int(99),
                 ],
             )
-            .expect("non-string Call data queues"),
+            .expect("non-string Call data queues") =>
         Value::Bool(true)
     );
-    assert_eq!(read_tx(&mut engine), textless_tx);
+    unit_assert_eq!(read_tx(&mut engine) => textless_tx);
     engine = round_trip(&engine);
-    assert_eq!(read_tx(&mut engine), textless_tx);
+    unit_assert_eq!(read_tx(&mut engine) => textless_tx);
     engine.tick_without_snapshot().test_value();
     let target_state = engine.test_object_snapshot(target);
-    assert_eq!(
-        target_state.local_vars.get("success_count"),
-        Some(&Value::Int(9))
-    );
-    assert_eq!(
-        target_state.local_vars.get("failed_count"),
-        Some(&Value::Int(9))
-    );
+    unit_assert_eq!(target_state.local_vars.get("success_count") => Some(&Value::Int(9)));
+    unit_assert_eq!(target_state.local_vars.get("failed_count") => Some(&Value::Int(9)));
     let actor_state = engine.test_object_snapshot(actor);
-    assert_eq!(
-        actor_state.local_vars.get("finished_count"),
-        Some(&Value::Int(19))
-    );
-    assert_eq!(
-        actor_state.local_vars.get("finished_tx"),
-        Some(&textless_tx)
-    );
-    assert_eq!(
-        actor_state.local_vars.get("finished_data"),
-        Some(&Value::Nil)
-    );
-    assert_eq!(
-        actor_state.command_direction,
-        CommandDirection::Stop,
-        "an unhandled empty-name failure runs the common failure tail"
-    );
+    unit_assert_eq!(actor_state.local_vars.get("finished_count") => Some(&Value::Int(19)));
+    unit_assert_eq!(actor_state.local_vars.get("finished_tx") => Some(&textless_tx));
+    unit_assert_eq!(actor_state.local_vars.get("finished_data") => Some(&Value::Nil));
+    unit_assert_eq!(actor_state.command_direction => CommandDirection::Stop, "an unhandled empty-name failure runs the common failure tail");
 
     let missing_payload = Value::Array(vec![
         Value::Object(doomed.as_u64()),
@@ -4656,8 +3755,8 @@ protected func WorkFailed(caller, tx, ty, target2)
     let mut restored = Engine::with_seed(0);
     register(&mut restored);
     restored.restore_state(&state).test_value();
-    assert_eq!(
-        read_tx(&mut restored),
+    unit_assert_eq!(
+        read_tx(&mut restored) =>
         Value::Array(vec![Value::Nil, Value::Object(marker.as_u64())]),
         "missing saved object references denumerate recursively without changing survivors"
     );
@@ -4696,13 +3795,9 @@ protected func Work(object caller, object payload)
 
     let handler = engine.spawn_test_object(SpawnConfig::new("ECCH"));
     let payload = engine.spawn_test_object(SpawnConfig::new("ECCP"));
-    let actor_id = engine.spawn_test_object(
-        SpawnConfig::new("ECCA")
-            .with_alive(true)
-            .with_crew_member(true),
-    );
+    let actor_id = spawn_fixture!(engine, "ECCA", with_alive: true, with_crew_member: true);
     let actor_idx = engine.test_object_index(actor_id);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 actor_idx,
@@ -4712,26 +3807,14 @@ protected func Work(object caller, object payload)
                     object_reference_value(payload),
                 ],
             )
-            .expect("ExecuteCommand Call completes"),
+            .expect("ExecuteCommand Call completes") =>
         Value::Bool(true)
     );
 
     let handler_state = engine.test_object_snapshot(handler);
-    assert_eq!(
-        handler_state.local_vars.get("called"),
-        Some(&Value::Int(1)),
-        "Work must run synchronously inside ExecuteCommand"
-    );
-    assert_eq!(
-        handler_state.local_vars.get("seen"),
-        Some(&Value::Nil),
-        "AssignRemoval still clears the stored payload after Work returns"
-    );
-    assert_eq!(
-        handler_state.local_vars.get("truthy"),
-        Some(&Value::Bool(true)),
-        "Work must observe the live payload before RemoveObject"
-    );
+    unit_assert_eq!(handler_state.local_vars.get("called") => Some(&Value::Int(1)), "Work must run synchronously inside ExecuteCommand");
+    unit_assert_eq!(handler_state.local_vars.get("seen") => Some(&Value::Nil), "AssignRemoval still clears the stored payload after Work returns");
+    unit_assert_eq!(handler_state.local_vars.get("truthy") => Some(&Value::Bool(true)), "Work must observe the live payload before RemoveObject");
 }
 
 #[test]
@@ -4756,16 +3839,10 @@ protected func BuildNeedsMaterial()
     let mut site = test_definition("SITE", "Site", "#strict");
     site.set_constructable(true);
 
-    let mut engine = Engine::with_seed(313);
-    engine.register_test_definition(builder);
+    let mut engine = definition_engine(313, builder);
     engine.register_test_definition(site);
-    let target = engine.spawn_test_object(SpawnConfig::new("SITE").with_construction(1_000));
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("BLDR")
-            .with_alive(true)
-            .with_crew_member(true)
-            .with_command_direction(CommandDirection::Right),
-    );
+    let target = spawn_fixture!(engine, "SITE", with_construction: 1_000);
+    let actor = spawn_fixture!(engine, "BLDR", with_alive: true, with_crew_member: true, with_command_direction: CommandDirection::Right);
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .commands
@@ -4779,23 +3856,18 @@ protected func BuildNeedsMaterial()
 
     let snapshot = engine.test_tick();
     let actor_snapshot = snapshot.object(actor).test_value();
-    assert_eq!(actor_snapshot.command_direction, CommandDirection::Stop);
-    assert_eq!(
-        actor_snapshot.local_vars.get("needs_material_called"),
+    unit_assert_eq!(actor_snapshot.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(
+        actor_snapshot.local_vars.get("needs_material_called") =>
         Some(&Value::Int(1)),
         "the explicit CANTBUILD message does not skip BuildNeedsMaterial"
     );
-    assert_eq!(snapshot.hud.messages.len(), 1);
-    assert_eq!(snapshot.hud.messages[0].kind, MessageKind::Target);
-    assert_eq!(snapshot.hud.messages[0].target, Some(actor));
-    assert_eq!(snapshot.hud.messages[0].lines, vec!["Builder can't build."]);
+    unit_assert_eq!(snapshot.hud.messages.len() => 1);
+    unit_assert_eq!(snapshot.hud.messages[0].kind => MessageKind::Target);
+    unit_assert_eq!(snapshot.hud.messages[0].target => Some(actor));
+    unit_assert_eq!(snapshot.hud.messages[0].lines => vec!["Builder can't build."]);
 
-    let sync_actor = engine.spawn_test_object(
-        SpawnConfig::new("BLDR")
-            .with_alive(true)
-            .with_crew_member(true)
-            .with_command_direction(CommandDirection::Right),
-    );
+    let sync_actor = spawn_fixture!(engine, "BLDR", with_alive: true, with_crew_member: true, with_command_direction: CommandDirection::Right);
     let sync_index = engine.test_object_index(sync_actor);
     engine.objects[sync_index]
         .commands
@@ -4806,21 +3878,10 @@ protected func BuildNeedsMaterial()
         )
         .test_value();
     engine.refresh_object_ocf(sync_index);
-    assert_eq!(
-        engine
-            .call_object_function(sync_index, "RunNow", Vec::new())
-            .expect("synchronous Build failure runs"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(sync_index, "RunNow", Vec::new()).expect("synchronous Build failure runs") => Value::Bool(true));
     let sync_snapshot = engine.snapshot();
-    assert_eq!(
-        sync_snapshot
-            .object(sync_actor)
-            .expect("synchronous builder remains")
-            .command_direction,
-        CommandDirection::Stop
-    );
-    assert!(sync_snapshot.hud.messages.iter().any(|message| {
+    unit_assert_eq!(sync_snapshot.object(sync_actor).expect("synchronous builder remains").command_direction => CommandDirection::Stop);
+    unit_assert!(sync_snapshot.hud.messages.iter().any(|message| {
         message.kind == MessageKind::Target
             && message.target == Some(sync_actor)
             && message.lines == vec!["Builder can't build."]
@@ -4850,33 +3911,18 @@ public func RunNow() { return ExecuteCommand(); }
         count: 1,
     }]);
 
-    let mut engine = Engine::with_seed(72);
-    engine.register_test_definition(builder);
+    let mut engine = definition_engine(72, builder);
     engine.register_test_definition(site);
     engine.register_test_script_definition("WOOD", "Wood", "#strict");
-    let target = engine.spawn_test_object(
-        SpawnConfig::new("SITE")
-            .with_construction(1_000)
-            .with_ordered_components(vec![("WOOD".to_owned(), 0)]),
-    );
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("BLDR")
-            .with_alive(true)
-            .with_crew_member(true)
-            .with_controller(4),
-    );
+    let target = spawn_fixture!(engine, "SITE", with_construction: 1_000, with_ordered_components: vec![("WOOD".to_owned(), 0)]);
+    let actor = spawn_fixture!(engine, "BLDR", with_alive: true, with_crew_member: true, with_controller: 4);
     let actor_index = engine.test_object_index(actor);
     engine.refresh_object_ocf(actor_index);
-    assert_eq!(
-        engine
-            .call_object_function(actor_index, "SeedMessage", Vec::new())
-            .expect("seed message succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(actor_index, "SeedMessage", Vec::new()).expect("seed message succeeds") => Value::Bool(true));
     let seeded = engine.snapshot();
-    assert_eq!(seeded.hud.messages.len(), 1);
+    unit_assert_eq!(seeded.hud.messages.len() => 1);
     let seeded_id = seeded.hud.messages[0].id;
-    assert_eq!(seeded.hud.messages[0].lines, vec!["Working"]);
+    unit_assert_eq!(seeded.hud.messages[0].lines => vec!["Working"]);
 
     engine.objects[actor_index]
         .commands
@@ -4886,27 +3932,13 @@ public func RunNow() { return ExecuteCommand(); }
                 .with_mode(CommandMode::Base),
         )
         .test_value();
-    assert!(engine.objects[actor_index]
-        .commands
-        .fail_front_if(CommandId::Build));
-    assert_eq!(
-        engine
-            .call_object_function(actor_index, "RunNow", Vec::new())
-            .expect("synchronous Build failure runs"),
-        Value::Bool(true)
-    );
+    unit_assert!(engine.objects[actor_index].commands.fail_front_if(CommandId::Build));
+    unit_assert_eq!(engine.call_object_function(actor_index, "RunNow", Vec::new()).expect("synchronous Build failure runs") => Value::Bool(true));
 
     let failed = engine.snapshot();
-    assert_eq!(
-        failed.hud.messages.len(),
-        1,
-        "C++ reuses the existing target message"
-    );
-    assert_eq!(failed.hud.messages[0].id, seeded_id);
-    assert_eq!(
-        failed.hud.messages[0].lines,
-        vec!["Working", "Site", "needs", "1x Wood"]
-    );
+    unit_assert_eq!(failed.hud.messages.len() => 1, "C++ reuses the existing target message");
+    unit_assert_eq!(failed.hud.messages[0].id => seeded_id);
+    unit_assert_eq!(failed.hud.messages[0].lines => vec!["Working", "Site", "needs", "1x Wood"]);
 
     engine.objects[actor_index]
         .commands
@@ -4916,20 +3948,9 @@ public func RunNow() { return ExecuteCommand(); }
                 .with_mode(CommandMode::Base),
         )
         .test_value();
-    assert!(engine.objects[actor_index]
-        .commands
-        .fail_front_if(CommandId::Build));
-    assert_eq!(
-        engine
-            .call_object_function(actor_index, "RunNow", Vec::new())
-            .expect("second synchronous Build failure runs"),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        engine.snapshot().hud.messages,
-        failed.hud.messages,
-        "C4GameMessage::Append suppresses the repeated material text"
-    );
+    unit_assert!(engine.objects[actor_index].commands.fail_front_if(CommandId::Build));
+    unit_assert_eq!(engine.call_object_function(actor_index, "RunNow", Vec::new()).expect("second synchronous Build failure runs") => Value::Bool(true));
+    unit_assert_eq!(engine.snapshot().hud.messages => failed.hud.messages, "C4GameMessage::Append suppresses the repeated material text");
 }
 
 #[test]
@@ -4970,10 +3991,7 @@ fn completed_builders_queue_only_one_energy_command_in_same_tick() {
         .flat_map(|object| object.command_stack.command_names())
         .filter(|name| name == "Energy")
         .count();
-    assert_eq!(
-        energy_count, 1,
-        "the later builder must see the earlier builder's live Energy command"
-    );
+    unit_assert_eq!(energy_count => 1, "the later builder must see the earlier builder's live Energy command");
 }
 
 #[test]
@@ -5005,22 +4023,13 @@ protected func ControlCommandFinished() { finished_dir = GetComDir(); }
         count: 99,
     }]);
 
-    let mut engine = Engine::with_seed(312);
-    engine.register_test_definition(builder);
+    let mut engine = definition_engine(312, builder);
     engine.register_test_definition(site);
     engine.register_test_script_definition("WOOD", "Wood", "#strict");
     engine.register_test_script_definition("METL", "Metal", "#strict");
 
-    let target = engine.spawn_test_object(
-        SpawnConfig::new("SITE")
-            .with_ordered_components(vec![("METL".into(), 3), ("WOOD".into(), 8)]),
-    );
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("BLDR")
-            .with_alive(true)
-            .with_crew_member(true)
-            .with_command_direction(CommandDirection::Right),
-    );
+    let target = spawn_fixture!(engine, "SITE", with_ordered_components: vec![("METL".into(), 3), ("WOOD".into(), 8)]);
+    let actor = spawn_fixture!(engine, "BLDR", with_alive: true, with_crew_member: true, with_command_direction: CommandDirection::Right);
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .commands
@@ -5030,38 +4039,21 @@ protected func ControlCommandFinished() { finished_dir = GetComDir(); }
                 .with_mode(CommandMode::Base),
         )
         .test_value();
-    assert!(engine.objects[actor_index]
-        .commands
-        .fail_front_if(CommandId::Build));
+    unit_assert!(engine.objects[actor_index].commands.fail_front_if(CommandId::Build));
     engine.refresh_object_ocf(actor_index);
 
     engine.tick_without_snapshot().test_value();
 
     let actor = engine.test_object_snapshot(actor);
-    assert_eq!(
-        actor.local_vars.get("needed_id"),
-        Some(&Value::C4Id("METL".into()))
-    );
-    assert_eq!(actor.local_vars.get("needed_count"), Some(&Value::Int(3)));
-    assert_eq!(
-        actor.local_vars.get("pre_dir"),
-        Some(&Value::Int(CommandDirection::Right.to_script_value()))
-    );
-    assert_eq!(actor.command_direction, CommandDirection::Stop);
-    assert_eq!(
-        actor.local_vars.get("finished_dir"),
-        Some(&Value::Int(CommandDirection::Stop.to_script_value()))
-    );
+    unit_assert_eq!(actor.local_vars.get("needed_id") => Some(&Value::C4Id("METL".into())));
+    unit_assert_eq!(actor.local_vars.get("needed_count") => Some(&Value::Int(3)));
+    unit_assert_eq!(actor.local_vars.get("pre_dir") => Some(&Value::Int(CommandDirection::Right.to_script_value())));
+    unit_assert_eq!(actor.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(actor.local_vars.get("finished_dir") => Some(&Value::Int(CommandDirection::Stop.to_script_value())));
 
-    let empty_target = engine.spawn_test_object(
-        SpawnConfig::new("SITE").with_ordered_components(Vec::<(String, i32)>::new()),
-    );
-    let empty_actor = engine.spawn_test_object(
-        SpawnConfig::new("BLDR")
-            .with_alive(true)
-            .with_crew_member(true)
-            .with_command_direction(CommandDirection::Right),
-    );
+    let empty_target =
+        spawn_fixture!(engine, "SITE", with_ordered_components: Vec::<(String, i32)>::new());
+    let empty_actor = spawn_fixture!(engine, "BLDR", with_alive: true, with_crew_member: true, with_command_direction: CommandDirection::Right);
     let empty_actor_index = engine.test_object_index(empty_actor);
     engine.objects[empty_actor_index]
         .commands
@@ -5071,38 +4063,22 @@ protected func ControlCommandFinished() { finished_dir = GetComDir(); }
                 .with_mode(CommandMode::Base),
         )
         .test_value();
-    assert!(engine.objects[empty_actor_index]
-        .commands
-        .fail_front_if(CommandId::Build));
+    unit_assert!(engine.objects[empty_actor_index].commands.fail_front_if(CommandId::Build));
     engine.refresh_object_ocf(empty_actor_index);
-    assert_eq!(
-        engine
-            .call_object_function(empty_actor_index, "RunNow", Vec::new())
-            .expect("component-free Build failure succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(empty_actor_index, "RunNow", Vec::new()).expect("component-free Build failure succeeds") => Value::Bool(true));
 
     let empty_actor = engine.test_object_snapshot(empty_actor);
-    assert_eq!(
-        empty_actor.local_vars.get("pre_dir"),
+    unit_assert_eq!(
+        empty_actor.local_vars.get("pre_dir") =>
         Some(&Value::Int(CommandDirection::Right.to_script_value())),
         "BuildNeedsMaterial must run even when Component[0] is empty: {:?}",
         empty_actor.local_vars
     );
-    assert_eq!(empty_actor.command_direction, CommandDirection::Stop);
-    assert_eq!(empty_actor.local_vars.get("needed_id"), Some(&Value::Nil));
-    assert_eq!(
-        empty_actor.local_vars.get("needed_count"),
-        Some(&Value::Int(0))
-    );
-    assert_eq!(
-        empty_actor.local_vars.get("needed_id_is_nil"),
-        Some(&Value::Bool(true))
-    );
-    assert_eq!(
-        empty_actor.local_vars.get("needed_count_is_int"),
-        Some(&Value::Bool(true))
-    );
+    unit_assert_eq!(empty_actor.command_direction => CommandDirection::Stop);
+    unit_assert_eq!(empty_actor.local_vars.get("needed_id") => Some(&Value::Nil));
+    unit_assert_eq!(empty_actor.local_vars.get("needed_count") => Some(&Value::Int(0)));
+    unit_assert_eq!(empty_actor.local_vars.get("needed_id_is_nil") => Some(&Value::Bool(true)));
+    unit_assert_eq!(empty_actor.local_vars.get("needed_count_is_int") => Some(&Value::Bool(true)));
 }
 
 #[test]
@@ -5127,58 +4103,36 @@ protected func ControlCommandFinished(command)
   callback_comdir = GetComDir();
 }
 "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
+    let mut engine = script_engine(7, "CLNK", "Clonk", script);
     engine.register_test_player(PlayerConfig::new(1, "Player"));
-    let clonk = engine.spawn_test_object(
-        SpawnConfig::new("CLNK")
-            .with_owner(1)
-            .with_crew_member(true)
-            .with_alive(true),
-    );
+    let clonk =
+        spawn_fixture!(engine, "CLNK", with_owner: 1, with_crew_member: true, with_alive: true);
     engine.select_crew(1, vec![clonk]).test_value();
     engine.set_crew_cursor(1, Some(clonk)).test_value();
     let index = engine.test_object_index(clonk);
     engine.objects[index].state.command_direction = CommandDirection::Right;
 
-    assert!(engine
-        .handle_control_command(1, ControlCommand::Special2, CommandKind::Press)
-        .expect("ControlSpecial2 succeeds"));
+    unit_assert!(engine.handle_control_command(1, ControlCommand::Special2, CommandKind::Press).expect("ControlSpecial2 succeeds"));
 
     let index = engine.test_object_index(clonk);
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("callback_name"),
-        Some(&Value::String("Context".to_string().into()))
-    );
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("callback_front"),
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("callback_name") => Some(&Value::String("Context".to_string().into())));
+    unit_assert_eq!(
+        engine.objects[index].state.local_vars.get("callback_front") =>
         Some(&Value::String("Context".to_string().into())),
         "the callback observes the finished command before it is cleared"
     );
-    assert_eq!(
-        engine.objects[index]
-            .state
-            .local_vars
-            .get("callback_comdir"),
-        Some(&Value::Int(CommandDirection::Stop.to_script_value()))
-    );
-    assert!(
-        engine.objects[index].commands.is_empty(),
-        "the finished front is cleared after the callback"
-    );
-    assert!(
-        engine.pending_menu_requests.is_empty(),
-        "C4MN_Context is installed by the engine, not deferred to app UI"
-    );
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("callback_comdir") => Some(&Value::Int(CommandDirection::Stop.to_script_value())));
+    unit_assert!(engine.objects[index].commands.is_empty(), "the finished front is cleared after the callback");
+    unit_assert!(engine.pending_menu_requests.is_empty(), "C4MN_Context is installed by the engine, not deferred to app UI");
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .test_value()
         .test_value();
-    assert_eq!(menu.identification, Value::Int(14));
-    assert_eq!(menu.style, 1);
-    assert!(!menu.permanent);
-    assert_eq!(menu.location, Some(Vector2::new(17, 23)));
-    assert_eq!(menu.command_object, Some(clonk));
+    unit_assert_eq!(menu.identification => Value::Int(14));
+    unit_assert_eq!(menu.style => 1);
+    unit_assert!(!menu.permanent);
+    unit_assert_eq!(menu.location => Some(Vector2::new(17, 23)));
+    unit_assert_eq!(menu.command_object => Some(clonk));
 }
 
 #[test]
@@ -5200,16 +4154,14 @@ public func Steer()
         float: 100,
         ..PhysicalInfo::default()
     });
-    floater.configure_actions(
-        Some("Float".to_string()),
-        HashMap::from([(
-            "Float".to_string(),
-            ActionSpec::default().with_procedure("FLOAT"),
-        )]),
+    set_test_actions(
+        &mut floater,
+        Some("Float"),
+        [("Float", ActionSpec::default().with_procedure("FLOAT"))],
     );
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_definition(floater);
-    let object = engine.spawn_test_object(
+    let (mut engine, object) = definition_fixture(
+        7,
+        floater,
         SpawnConfig::new("FLTR")
             .with_position(Vector2::new(100, 100))
             .with_fixed_position(FixedVec2::new(itofix(100) + fixed100(25), itofix(100)))
@@ -5221,7 +4173,7 @@ public func Steer()
     engine.call_test_object_function(index, "Steer", Vec::new());
 
     let object = engine.test_object_snapshot(object);
-    assert_eq!(object.command_direction, CommandDirection::Down);
+    unit_assert_eq!(object.command_direction => CommandDirection::Down);
 }
 
 #[test]
@@ -5267,18 +4219,10 @@ protected func WalkStart() { stop_order = stop_order * 10 + 2; }
     );
     definition.configure_actions(Some("Walk".to_string()), actions);
 
-    let mut engine = Engine::with_seed(319);
-    engine.register_test_definition(definition);
+    let mut engine = definition_engine(319, definition);
 
     for (offset, action) in ["Dig", "Chop", "Build", "Bridge"].into_iter().enumerate() {
-        let object = engine.spawn_test_object(
-            SpawnConfig::new("MVST")
-                .with_position(Vector2::new(100, 100 + offset as i32 * 30))
-                .with_fixed_velocity(FixedVec2::new(itofix(2), itofix(-3)))
-                .with_action(ActionState::new(action))
-                .with_command_direction(CommandDirection::Left)
-                .with_alive(true),
-        );
+        let object = spawn_fixture!(engine, "MVST", with_position: Vector2::new(100, 100 + offset as i32 * 30), with_fixed_velocity: FixedVec2::new(itofix(2), itofix(-3)), with_action: ActionState::new(action), with_command_direction: CommandDirection::Left, with_alive: true);
         let index = engine.test_object_index(object);
         engine.objects[index]
             .commands
@@ -5290,44 +4234,21 @@ protected func WalkStart() { stop_order = stop_order * 10 + 2; }
             )
             .test_value();
 
-        assert_eq!(
-            engine
-                .call_object_function(index, "RunNow", Vec::new())
-                .expect("MoveTo executes"),
-            Value::Bool(true)
-        );
+        unit_assert_eq!(engine.call_object_function(index, "RunNow", Vec::new()).expect("MoveTo executes") => Value::Bool(true));
 
         let live_index = engine.test_object_index(object);
-        assert_eq!(
-            engine.objects[live_index].fixed_velocity,
-            FixedVec2::ZERO,
-            "{action}"
-        );
+        unit_assert_eq!(engine.objects[live_index].fixed_velocity => FixedVec2::ZERO, "{action}");
         let object = engine.test_object_snapshot(object);
-        assert_eq!(object.action.name, "Walk", "{action}");
-        assert_eq!(
-            object.command_direction,
-            CommandDirection::Right,
-            "{action}: steering must resume after ObjectComStop in the same Execute"
-        );
-        assert_eq!(
-            object.local_vars.get("stop_order"),
-            Some(&Value::Int(12)),
-            "{action}: Idle transition abort precedes Walk start"
-        );
-        assert_eq!(object.command_stack.command_names(), vec!["MoveTo"]);
+        unit_assert_eq!(object.action.name => "Walk", "{action}");
+        unit_assert_eq!(object.command_direction => CommandDirection::Right, "{action}: steering must resume after ObjectComStop in the same Execute");
+        unit_assert_eq!(object.local_vars.get("stop_order") => Some(&Value::Int(12)), "{action}: Idle transition abort precedes Walk start");
+        unit_assert_eq!(object.command_stack.command_names() => vec!["MoveTo"]);
     }
 
     // ClearCommands/SetCommand only detaches an executing native
     // command (iExec=2); its current MoveTo body still resumes after the
     // callback and steers the object before being deleted.
-    let replaced = engine.spawn_test_object(
-        SpawnConfig::new("MVST")
-            .with_position(Vector2::new(100, 220))
-            .with_action(ActionState::new("DigClear"))
-            .with_command_direction(CommandDirection::Left)
-            .with_alive(true),
-    );
+    let replaced = spawn_fixture!(engine, "MVST", with_position: Vector2::new(100, 220), with_action: ActionState::new("DigClear"), with_command_direction: CommandDirection::Left, with_alive: true);
     let replaced_index = engine.test_object_index(replaced);
     engine.objects[replaced_index]
         .commands
@@ -5340,20 +4261,14 @@ protected func WalkStart() { stop_order = stop_order * 10 + 2; }
         .test_value();
     engine.call_test_object_function(replaced_index, "RunNow", Vec::new());
     let replaced = engine.test_object_snapshot(replaced);
-    assert_eq!(replaced.action.name, "Walk");
-    assert_eq!(replaced.command_direction, CommandDirection::Right);
-    assert_eq!(replaced.local_vars.get("stop_order"), Some(&Value::Int(12)));
-    assert_eq!(replaced.command_stack.command_names(), vec!["Wait"]);
+    unit_assert_eq!(replaced.action.name => "Walk");
+    unit_assert_eq!(replaced.command_direction => CommandDirection::Right);
+    unit_assert_eq!(replaced.local_vars.get("stop_order") => Some(&Value::Int(12)));
+    unit_assert_eq!(replaced.command_stack.command_names() => vec!["Wait"]);
 
     // The ordinary object-tick path applies the same live command event
     // before ExecAction later in the frame.
-    let tick_worker = engine.spawn_test_object(
-        SpawnConfig::new("MVST")
-            .with_position(Vector2::new(100, 250))
-            .with_action(ActionState::new("Dig"))
-            .with_command_direction(CommandDirection::Left)
-            .with_alive(true),
-    );
+    let tick_worker = spawn_fixture!(engine, "MVST", with_position: Vector2::new(100, 250), with_action: ActionState::new("Dig"), with_command_direction: CommandDirection::Left, with_alive: true);
     let tick_index = engine.test_object_index(tick_worker);
     engine.objects[tick_index]
         .commands
@@ -5366,21 +4281,13 @@ protected func WalkStart() { stop_order = stop_order * 10 + 2; }
         .test_value();
     engine.tick_without_snapshot().test_value();
     let tick_worker = engine.test_object_snapshot(tick_worker);
-    assert_eq!(tick_worker.action.name, "Walk");
-    assert_eq!(tick_worker.command_direction, CommandDirection::Right);
-    assert_eq!(
-        tick_worker.local_vars.get("stop_order"),
-        Some(&Value::Int(12))
-    );
+    unit_assert_eq!(tick_worker.action.name => "Walk");
+    unit_assert_eq!(tick_worker.command_direction => CommandDirection::Right);
+    unit_assert_eq!(tick_worker.local_vars.get("stop_order") => Some(&Value::Int(12)));
 
     // The auto-inserted bare Idle slot is inactive and fails an
     // out-of-range MoveTo; it is not confused with a real action name.
-    let idle = engine.spawn_test_object(
-        SpawnConfig::new("MVST")
-            .with_position(Vector2::new(100, 300))
-            .with_action(ActionState::new("Idle"))
-            .with_alive(true),
-    );
+    let idle = spawn_fixture!(engine, "MVST", with_position: Vector2::new(100, 300), with_action: ActionState::new("Idle"), with_alive: true);
     let idle_index = engine.test_object_index(idle);
     engine.objects[idle_index]
         .commands
@@ -5392,7 +4299,7 @@ protected func WalkStart() { stop_order = stop_order * 10 + 2; }
         )
         .test_value();
     engine.call_test_object_function(idle_index, "RunNow", Vec::new());
-    assert!(
+    unit_assert!(
         engine
             .object_snapshot(idle)
             .expect("idle worker remains")
@@ -5416,30 +4323,18 @@ protected func ControlCommandFinished(command)
   callback_front = GetCommand(0);
 }
 "#;
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
+    let mut engine = script_engine(7, "CLNK", "Clonk", script);
     engine.register_test_player(PlayerConfig::new(1, "Player"));
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK").with_owner(1).with_alive(true));
+    let clonk = spawn_fixture!(engine, "CLNK", with_owner: 1, with_alive: true);
     let index = engine.test_object_index(clonk);
-    assert_eq!(
-        engine
-            .call_object_function(index, "Arm", Vec::new())
-            .expect("command arms"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(index, "Arm", Vec::new()).expect("command arms") => Value::Bool(true));
 
     engine.tick_without_snapshot().test_value();
 
     let index = engine.test_object_index(clonk);
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("callback_name"),
-        Some(&Value::String("Context".to_string().into()))
-    );
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("callback_front"),
-        Some(&Value::String("Context".to_string().into()))
-    );
-    assert!(engine.objects[index].commands.is_empty());
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("callback_name") => Some(&Value::String("Context".to_string().into())));
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("callback_front") => Some(&Value::String("Context".to_string().into())));
+    unit_assert!(engine.objects[index].commands.is_empty());
 }
 
 #[test]
@@ -5460,42 +4355,35 @@ public func ExecuteEmpty(other) { return ExecuteCommand(other); }
 local finished;
 protected func ControlCommandFinished(command) { finished = command; }
 "#;
-    let mut engine = Engine::with_seed(3);
-    engine.register_test_script_definition("CALL", "Caller", caller_script);
+    let mut engine = script_engine(3, "CALL", "Caller", caller_script);
     engine.register_test_script_definition("TARG", "Target", target_script);
     engine.register_test_player(PlayerConfig::new(1, "Player"));
-    let caller = engine.spawn_test_object(SpawnConfig::new("CALL").with_alive(true));
-    let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_owner(1).with_alive(true));
+    let caller = spawn_fixture!(engine, "CALL", with_alive: true);
+    let target = spawn_fixture!(engine, "TARG", with_owner: 1, with_alive: true);
     let caller_index = engine.test_object_index(caller);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 caller_index,
                 "OpenOther",
                 vec![Value::Object(target.as_u64())],
             )
-            .expect("foreign ExecuteCommand succeeds"),
+            .expect("foreign ExecuteCommand succeeds") =>
         Value::Bool(true)
     );
     let target_index = engine.test_object_index(target);
-    assert_eq!(
-        engine.objects[target_index]
-            .state
-            .local_vars
-            .get("finished"),
-        Some(&Value::String("Context".to_string().into()))
-    );
-    assert!(engine.objects[target_index].commands.is_empty());
+    unit_assert_eq!(engine.objects[target_index].state.local_vars.get("finished") => Some(&Value::String("Context".to_string().into())));
+    unit_assert!(engine.objects[target_index].commands.is_empty());
 
     let caller_index = engine.test_object_index(caller);
-    assert_eq!(
+    unit_assert_eq!(
         engine
             .call_object_function(
                 caller_index,
                 "ExecuteEmpty",
                 vec![Value::Object(target.as_u64())],
             )
-            .expect("empty ExecuteCommand succeeds"),
+            .expect("empty ExecuteCommand succeeds") =>
         Value::Bool(true)
     );
 }
@@ -5516,21 +4404,20 @@ public func RunNow()
   return true;
 }
 "#;
-    let mut definition = test_definition("CLNK", "Clonk", script);
-    definition.configure_actions(
-        Some("Walk".to_string()),
-        HashMap::from([
+    let mut definition = action_definition(
+        "CLNK",
+        "Clonk",
+        script,
+        Some("Walk"),
+        [
             (
-                "Walk".to_string(),
+                "Walk",
                 ActionSpec::default()
                     .with_procedure("WALK")
                     .with_no_other_action(true),
             ),
-            (
-                "Dig".to_string(),
-                ActionSpec::default().with_procedure("DIG"),
-            ),
-        ]),
+            ("Dig", ActionSpec::default().with_procedure("DIG")),
+        ],
     );
     definition.set_physical(PhysicalInfo {
         can_dig: 1,
@@ -5539,34 +4426,19 @@ public func RunNow()
     let mut engine = Engine::new();
     engine.set_object_no_dig_resource_string("%s kann|nicht graben.");
     engine.register_test_definition(definition);
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("CLNK")
-            .with_action(ActionState::new("Walk"))
-            .with_custom_name("Skript"),
-    );
+    let actor = spawn_fixture!(engine, "CLNK", with_action: ActionState::new("Walk"), with_custom_name: "Skript");
     let index = engine.test_object_index(actor);
 
-    assert_eq!(
-        engine
-            .call_object_function(index, "RunNow", Vec::new())
-            .expect("RunNow succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(index, "RunNow", Vec::new()).expect("RunNow succeeds") => Value::Bool(true));
 
     let index = engine.test_object_index(actor);
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("after_action"),
-        Some(&Value::String("Walk".to_string().into()))
-    );
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("after_command"),
-        Some(&Value::Nil)
-    );
-    assert!(engine.objects[index].commands.is_empty());
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("after_action") => Some(&Value::String("Walk".to_string().into())));
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("after_command") => Some(&Value::Nil));
+    unit_assert!(engine.objects[index].commands.is_empty());
     let messages = engine.snapshot().hud.messages;
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].target, Some(actor));
-    assert_eq!(messages[0].lines, vec!["Skript kann", "nicht graben."]);
+    unit_assert_eq!(messages.len() => 1);
+    unit_assert_eq!(messages[0].target => Some(actor));
+    unit_assert_eq!(messages[0].lines => vec!["Skript kann", "nicht graben."]);
 }
 
 #[test]
@@ -5583,19 +4455,15 @@ public func RunNow()
   return true;
 }
 "#;
-    let mut definition = test_definition("CLNK", "Clonk", script);
-    definition.configure_actions(
-        Some("Walk".to_string()),
-        HashMap::from([
-            (
-                "Walk".to_string(),
-                ActionSpec::default().with_procedure("WALK"),
-            ),
-            (
-                "Dig".to_string(),
-                ActionSpec::default().with_procedure("DIG"),
-            ),
-        ]),
+    let mut definition = action_definition(
+        "CLNK",
+        "Clonk",
+        script,
+        Some("Walk"),
+        [
+            ("Walk", ActionSpec::default().with_procedure("WALK")),
+            ("Dig", ActionSpec::default().with_procedure("DIG")),
+        ],
     );
     definition.set_physical(PhysicalInfo {
         can_dig: 1,
@@ -5603,37 +4471,19 @@ public func RunNow()
     });
     let mut engine = Engine::new();
     engine.register_test_definition(definition);
-    let actor =
-        engine.spawn_test_object(SpawnConfig::new("CLNK").with_action(ActionState::new("Walk")));
+    let actor = spawn_fixture!(engine, "CLNK", with_action: ActionState::new("Walk"));
     let index = engine.test_object_index(actor);
 
-    assert_eq!(
-        engine
-            .call_object_function(index, "RunNow", Vec::new())
-            .expect("RunNow succeeds"),
-        Value::Bool(true)
-    );
+    unit_assert_eq!(engine.call_object_function(index, "RunNow", Vec::new()).expect("RunNow succeeds") => Value::Bool(true));
 
     let index = engine.test_object_index(actor);
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("after_action"),
-        Some(&Value::String("Dig".to_string().into()))
-    );
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("after_data"),
-        Some(&Value::Int(1))
-    );
-    assert_eq!(
-        engine.objects[index].state.local_vars.get("after_dir"),
-        Some(&Value::Int(CommandDirection::DownLeft.to_script_value()))
-    );
-    assert_eq!(engine.objects[index].state.action.name, "Dig");
-    assert_eq!(engine.objects[index].state.action.data, 1);
-    assert_eq!(
-        engine.objects[index].state.command_direction,
-        CommandDirection::DownLeft
-    );
-    assert!(engine.snapshot().hud.messages.is_empty());
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("after_action") => Some(&Value::String("Dig".to_string().into())));
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("after_data") => Some(&Value::Int(1)));
+    unit_assert_eq!(engine.objects[index].state.local_vars.get("after_dir") => Some(&Value::Int(CommandDirection::DownLeft.to_script_value())));
+    unit_assert_eq!(engine.objects[index].state.action.name => "Dig");
+    unit_assert_eq!(engine.objects[index].state.action.data => 1);
+    unit_assert_eq!(engine.objects[index].state.command_direction => CommandDirection::DownLeft);
+    unit_assert!(engine.snapshot().hud.messages.is_empty());
 }
 
 #[test]
@@ -5649,21 +4499,17 @@ public func Run()
 }
 protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
 "#;
-    let mut engine = Engine::with_seed(3);
-    engine.register_test_script_definition("CLNK", "Clonk", script);
-    let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK").with_alive(true));
-    let index = engine.test_object_index(clonk);
-    assert_eq!(
-        engine
-            .call_object_function(index, "Run", Vec::new())
-            .expect("Run succeeds"),
-        Value::Bool(true)
+    let (mut engine, clonk) = script_object_fixture(
+        3,
+        "CLNK",
+        "Clonk",
+        script,
+        SpawnConfig::new("CLNK").with_alive(true),
     );
     let index = engine.test_object_index(clonk);
-    assert_eq!(
-        engine.objects[index].commands.command_names(),
-        vec!["Wait".to_string()]
-    );
+    unit_assert_eq!(engine.call_object_function(index, "Run", Vec::new()).expect("Run succeeds") => Value::Bool(true));
+    let index = engine.test_object_index(clonk);
+    unit_assert_eq!(engine.objects[index].commands.command_names() => vec!["Wait".to_string()]);
 }
 
 #[test]
@@ -5700,31 +4546,27 @@ fn do_damage_asks_effects_for_non_living_and_fires_callback() {
     }
     let mut definition = test_definition("Actor", "Actor", script);
     definition.set_debugger_hooks(hooks);
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_definition(definition);
+    let mut engine = definition_engine(7, definition);
 
     // Non-living: the effect halves the damage.
-    let crate_id = engine.spawn_test_object(SpawnConfig::new("Actor").with_alive(false));
+    let crate_id = spawn_fixture!(engine, "Actor", with_alive: false);
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(crate_id);
     engine
         .change_object_damage(idx, 10, C4FX_CALL_DMG_SCRIPT, 3)
         .test_value();
-    assert_eq!(engine.objects[idx].state.damage, 5);
+    unit_assert_eq!(engine.objects[idx].state.damage => 5);
     let calls = call_log.lock().test_value().clone();
-    assert!(
-        calls.iter().any(|name| name == "Damage"),
-        "the Damage script callback fires (C4Object.cpp:1342)"
-    );
+    unit_assert!(calls.iter().any(|name| name == "Damage"), "the Damage script callback fires (C4Object.cpp:1342)");
 
     // Living: effects are NOT asked for damage (C4Object.cpp:1333).
-    let clonk_id = engine.spawn_test_object(SpawnConfig::new("Actor").with_alive(true));
+    let clonk_id = spawn_fixture!(engine, "Actor", with_alive: true);
     engine.tick_without_snapshot().test_value();
     let idx = engine.test_object_index(clonk_id);
     engine
         .change_object_damage(idx, 10, C4FX_CALL_DMG_SCRIPT, 3)
         .test_value();
-    assert_eq!(engine.objects[idx].state.damage, 10);
+    unit_assert_eq!(engine.objects[idx].state.damage => 10);
 }
 
 #[test]
@@ -5765,9 +4607,9 @@ fn do_energy_asks_fx_damage_effects_first() {
         energy: 50_000,
         ..PhysicalInfo::default()
     });
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_definition(definition);
-    let id = engine.spawn_test_object(
+    let (mut engine, id) = definition_fixture(
+        7,
+        definition,
         SpawnConfig::new("Actor")
             .with_alive(true)
             .with_energy(50_000),
@@ -5781,14 +4623,14 @@ fn do_energy_asks_fx_damage_effects_first() {
     engine
         .change_object_energy(idx, -10, C4FX_CALL_ENG_SCRIPT, 3)
         .test_value();
-    assert_eq!(engine.objects[idx].state.energy, 45_000);
+    unit_assert_eq!(engine.objects[idx].state.energy => 45_000);
 
     // A fire-cause hit is zeroed by Ward; the zero aborts the walk AND
     // DoEnergy (C4Object.cpp:1358) — Armor never halves, energy keeps.
     engine
         .change_object_energy(idx, -10, C4FX_CALL_ENG_FIRE, 3)
         .test_value();
-    assert_eq!(engine.objects[idx].state.energy, 45_000);
+    unit_assert_eq!(engine.objects[idx].state.energy => 45_000);
 }
 
 #[test]
@@ -5820,41 +4662,29 @@ func FxAmplifierDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
         ..PhysicalInfo::default()
     });
 
-    let mut engine = Engine::with_seed(144);
-    engine.register_test_definition(definition);
-    let id = engine.spawn_test_object(
+    let (mut engine, id) = definition_fixture(
+        144,
+        definition,
         SpawnConfig::new("PING")
             .with_category(CATEGORY_LIVING)
             .with_alive(true)
             .with_energy(50_000),
     );
     let index = engine.test_object_index(id);
-    assert_eq!(
-        engine
-            .call_object_function(index, "Arm", Vec::new())
-            .expect("effect installs"),
-        Value::Int(1)
-    );
+    unit_assert_eq!(engine.call_object_function(index, "Arm", Vec::new()).expect("effect installs") => Value::Int(1));
 
     engine
         .change_object_energy(index, 0, C4FX_CALL_ENG_OBJ_HIT, 9)
         .test_value();
 
     let index = engine.test_object_index(id);
-    assert_eq!(engine.objects[index].state.energy, 49_000);
-    assert_eq!(engine.objects[index].last_energy_loss_cause, 9);
+    unit_assert_eq!(engine.objects[index].state.energy => 49_000);
+    unit_assert_eq!(engine.objects[index].last_energy_loss_cause => 9);
     let locals = &engine.objects[index].state.local_vars;
-    assert_eq!(locals.get("iDamageCalls"), Some(&Value::Int(1)));
-    assert_eq!(
-        locals.get("iSeenChange"),
-        Some(&Value::Int(1)),
-        "the callback received C4Script's falsy zero change"
-    );
-    assert_eq!(
-        locals.get("iSeenCause"),
-        Some(&Value::Int(C4FX_CALL_ENG_OBJ_HIT))
-    );
-    assert_eq!(locals.get("iSeenBy"), Some(&Value::Int(9)));
+    unit_assert_eq!(locals.get("iDamageCalls") => Some(&Value::Int(1)));
+    unit_assert_eq!(locals.get("iSeenChange") => Some(&Value::Int(1)), "the callback received C4Script's falsy zero change");
+    unit_assert_eq!(locals.get("iSeenCause") => Some(&Value::Int(C4FX_CALL_ENG_OBJ_HIT)));
+    unit_assert_eq!(locals.get("iSeenBy") => Some(&Value::Int(9)));
 }
 
 #[test]
@@ -5870,29 +4700,25 @@ fn do_energy_clamps_to_physical_energy_ceiling() {
     });
     let zero_physical_definition = test_definition("Crate", "Crate", script);
 
-    let mut engine = Engine::with_seed(7);
-    engine.register_test_definition(definition);
+    let mut engine = definition_engine(7, definition);
     engine.register_test_definition(zero_physical_definition);
 
-    let clonk_id = engine.spawn_test_object(SpawnConfig::new("Clonk").with_energy(40_000));
+    let clonk_id = spawn_fixture!(engine, "Clonk", with_energy: 40_000);
     let clonk_idx = engine.test_object_index(clonk_id);
     engine
         .change_object_energy(clonk_idx, 30, C4FX_CALL_ENG_SCRIPT, -1)
         .test_value();
-    assert_eq!(
-        engine.objects[clonk_idx].state.energy, 50_000,
-        "gain (+30% = +30000 raw) clamps to GetPhysical()->Energy"
-    );
+    unit_assert_eq!(engine.objects[clonk_idx].state.energy => 50_000, "gain (+30% = +30000 raw) clamps to GetPhysical()->Energy");
 
     // C4PhysicalInfo::Default zeroes Energy. BoundBy applies that zero
     // ceiling just like every positive one (C4Object.cpp:1388).
     let crate_id = engine.spawn_test_object(SpawnConfig::new("Crate"));
     let crate_idx = engine.test_object_index(crate_id);
-    assert_eq!(engine.objects[crate_idx].state.energy, 0);
+    unit_assert_eq!(engine.objects[crate_idx].state.energy => 0);
     engine
         .change_object_energy(crate_idx, 30, C4FX_CALL_ENG_SCRIPT, -1)
         .test_value();
-    assert_eq!(engine.objects[crate_idx].state.energy, 0);
+    unit_assert_eq!(engine.objects[crate_idx].state.energy => 0);
 }
 
 // Hazard's in-round rule chooser is the ONLY way its NoFriendlyFire rule
@@ -5996,10 +4822,7 @@ func RuleCounts() { return [ObjectCount(NOFF), ObjectCount(IGIB)]; }
     };
     call(&mut engine, "Boot", Vec::new());
     let noff_index = call(&mut engine, "IndexOfNoff", Vec::new());
-    assert!(
-        matches!(noff_index, Value::Int(index) if index >= 0),
-        "NOFF is enumerated under Chooser_Cat, got {noff_index:?}"
-    );
+    unit_assert!(matches!(noff_index, Value::Int(index) if index >= 0), "NOFF is enumerated under Chooser_Cat, got {noff_index:?}");
     let Value::Int(noff_index) = noff_index else {
         unreachable!("checked above")
     };
@@ -6013,8 +4836,8 @@ func RuleCounts() { return [ObjectCount(NOFF), ObjectCount(IGIB)]; }
         .debug_object_menu(clonk.as_u64())
         .expect("clonk exists")
         .expect("the rule menu opened on the clonk, not on the chooser");
-    assert_eq!(
-        menu.command_object,
+    unit_assert_eq!(
+        menu.command_object =>
         Some(chooser),
         "CreateMenu's omitted command object defaults to cthr->Obj — the \
              chooser — so ChangeRuleConf resolves there (C4Script.cpp:1431)"
@@ -6024,24 +4847,18 @@ func RuleCounts() { return [ObjectCount(NOFF), ObjectCount(IGIB)]; }
         .iter()
         .position(|item| item.item_id == "NOFF")
         .expect("NOFF has a menu item");
-    assert_eq!(
-        menu.items[item].command,
-        format!("ChangeRuleConf(NOFF,{noff_index})"),
-        "the item command carries the definition index as source text"
-    );
+    unit_assert_eq!(menu.items[item].command => format!("ChangeRuleConf(NOFF,{noff_index})"), "the item command carries the definition index as source text");
 
     call(
         &mut engine,
         "Pick",
         vec![object_reference_value(clonk), Value::Int(item as i32)],
     );
-    assert!(engine
-        .menu_user_enter(clonk, false)
-        .expect("menu enter runs"));
+    unit_assert!(engine.menu_user_enter(clonk, false).expect("menu enter runs"));
     call(&mut engine, "ConfigurationFinished2", Vec::new());
 
-    assert_eq!(
-        call(&mut engine, "RuleCounts", Vec::new()),
+    unit_assert_eq!(
+        call(&mut engine, "RuleCounts", Vec::new()) =>
         Value::Array(vec![Value::Int(1), Value::Int(0)]),
         "only the toggled rule is created, and ObjectCount sees it the \
              way Hazard's NoFriendlyFire() reads it"

@@ -7,12 +7,6 @@
 
 use clonk_script::{Engine, Value};
 
-fn eval(source: &str) -> Value {
-    let mut engine = Engine::new();
-    engine.load_script(source).expect("script loads");
-    engine.call("Test", &[]).expect("call succeeds")
-}
-
 #[test]
 fn var_reads_before_declaration_are_nil() {
     let mut engine = Engine::new();
@@ -50,46 +44,27 @@ fn vars_declared_in_nested_blocks_hoist_to_the_function() {
     assert_eq!(result, Value::Nil, "nested-block vars exist from entry");
 }
 
-#[test]
-fn classic_for_init_var_inside_if_remains_visible_after_the_block() {
-    assert_eq!(
-        eval(
+eval_cases! {
+    classic_for_init_var_inside_if_remains_visible_after_the_block:
             "func Test() {\n\
                  if (true) {\n\
                      for (var i = 0; i < 3; i++) {}\n\
                  }\n\
                  return i;\n\
-             }",
-        ),
-        Value::Int(3)
-    );
-}
+             }" => Value::Int(3);
 
-#[test]
-fn classic_for_init_var_at_function_top_level_still_works() {
-    assert_eq!(
-        eval(
+    classic_for_init_var_at_function_top_level_still_works:
             "func Test() {\n\
                  for (var i = 0; i < 3; i++) {}\n\
                  return i;\n\
-             }",
-        ),
-        Value::Int(3)
-    );
-}
+             }" => Value::Int(3);
 
-#[test]
-fn array_for_in_binder_inside_if_keeps_its_final_item_after_the_block() {
-    assert_eq!(
-        eval(
+    array_for_in_binder_inside_if_keeps_its_final_item_after_the_block:
             "#strict\n\
              func Test() {\n\
                  if (true) {\n\
                      for (var item in [4, 8, 12]) {}\n\
                  }\n\
                  return item;\n\
-             }",
-        ),
-        Value::Int(12)
-    );
+             }" => Value::Int(12);
 }

@@ -369,22 +369,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def counterbalanced_schedule(runs: int) -> list[tuple[str, int]]:
-    """Alternate AB/BA ordering while giving each binary ``runs`` processes."""
-
-    if runs < 1:
-        raise BenchmarkFailure("run count must be positive")
-    schedule = []
-    for run_index in range(1, runs + 1):
-        labels = (
-            ("baseline", "candidate")
-            if run_index % 2 == 1
-            else ("candidate", "baseline")
-        )
-        schedule.extend((label, run_index) for label in labels)
-    return schedule
-
-
 def randomized_pair_orders(pair_count: int, seed_hex: str) -> list[str]:
     try:
         seed = int(seed_hex, 16)
@@ -1083,13 +1067,6 @@ def _integration_test_artifacts(cargo_stdout: str) -> list[dict[str, Any]]:
             f"{len(unique_candidates)} clonk-network integration test binaries"
         )
     return list(unique_candidates.values())
-
-
-def discover_test_binary(cargo_stdout: str) -> Path:
-    """Find the one integration-test executable emitted by Cargo."""
-
-    artifact = _integration_test_artifacts(cargo_stdout)[0]
-    return Path(artifact["executable"])
 
 
 def discover_test_binary_artifact(

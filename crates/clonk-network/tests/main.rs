@@ -1,6 +1,11 @@
 // Keep the network integration suite in one harness. Each integration target
 // links the complete engine/network dependency graph, while modules preserve
 // the existing test isolation and namespacing inside a single executable.
+fn c4(bytes: impl AsRef<[u8]>) -> clonk_engine::LegacyCString {
+    clonk_engine::LegacyCString::from_bytes(bytes.as_ref().to_vec())
+        .expect("fixture contains no NUL")
+}
+
 mod client_player_resource;
 mod exact_game_reference;
 mod host_initial_resources;

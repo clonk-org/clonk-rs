@@ -1232,19 +1232,10 @@ impl Engine {
                 strings.format_blocked(&self.object_message_name(blocker))
             }
         };
-        self.messages.add_message(crate::message::MessageSpec {
-            kind: crate::message::MessageKind::Target,
-            text,
-            target: Some(actor_id),
-            player: None,
-            offset: Vector2::ZERO,
-            color: CONSTRUCTION_CHECK_MESSAGE_COLOR,
-            flags: 0,
-            width: None,
-            decoration: None,
-            frame_decoration: None,
-            portrait: None,
-        });
+        self.messages.add_message(
+            crate::message::MessageSpec::target(text, actor_id)
+                .with_color(CONSTRUCTION_CHECK_MESSAGE_COLOR),
+        );
     }
 
     /// C4Command::Fail's mode-gated ExecFail tail. CommandStack decides the
@@ -1384,19 +1375,7 @@ impl Engine {
         }
         if let Some(text) = fail_message {
             self.messages.apply_command(MessageCommand::Append {
-                spec: MessageSpec {
-                    kind: message::MessageKind::Target,
-                    text,
-                    target: Some(actor_id),
-                    player: None,
-                    offset: Vector2::ZERO,
-                    color: 0xffff_ffff,
-                    flags: 0,
-                    width: None,
-                    decoration: None,
-                    frame_decoration: None,
-                    portrait: None,
-                },
+                spec: MessageSpec::target(text, actor_id),
                 no_duplicates: true,
             });
         }
@@ -1436,19 +1415,10 @@ impl Engine {
                 .get(&owner)
                 .map(|player| player.name().to_string())
             {
-                self.messages.add_message(MessageSpec {
-                    kind: message::MessageKind::Target,
-                    text: format!("{owner_name} hostile.|No entrance!"),
-                    target: Some(object_id),
-                    player: None,
-                    offset: Vector2::ZERO,
-                    color: 0xffff_ffff,
-                    flags: 0,
-                    width: None,
-                    decoration: None,
-                    frame_decoration: None,
-                    portrait: None,
-                });
+                self.messages.add_message(MessageSpec::target(
+                    format!("{owner_name} hostile.|No entrance!"),
+                    object_id,
+                ));
             }
             return Ok(false);
         }

@@ -52,21 +52,8 @@ fn airbike_dismount_parks_the_bike_dead_still() {
     let mut engine = prepare_installed_scenario(SCENARIO, 0).instantiate();
     let owner = engine
         .join_player(JoinPlayerConfig {
-            name: "Airbike pilot".into(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
             control_style: true,
-            auto_context_menu: false,
-            startup_player_count: 1,
+            ..crate::support::join_player_config("Airbike pilot")
         })
         .expect("the local virtual player joins")
         .initialized()

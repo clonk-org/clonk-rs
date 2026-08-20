@@ -1433,12 +1433,12 @@ impl PortraitSelController {
         let scroll_y = self.scroll_y.clamp(0, max_scroll_y);
         with_surface_clip(surface, layout.grid_viewport, |surface| {
             for (index, item_layout) in grid_content.items.iter().enumerate() {
-                let tile = IntRect {
-                    x: layout.grid_viewport.x + item_layout.rect.x,
-                    y: layout.grid_viewport.y + item_layout.rect.y - scroll_y,
-                    w: item_layout.rect.w,
-                    h: item_layout.rect.h,
-                };
+                let tile = IntRect::new(
+                    layout.grid_viewport.x + item_layout.rect.x,
+                    layout.grid_viewport.y + item_layout.rect.y - scroll_y,
+                    item_layout.rect.w,
+                    item_layout.rect.h,
+                );
                 if tile.y >= layout.grid_viewport.y + layout.grid_viewport.h
                     || tile.y + tile.h <= layout.grid_viewport.y
                 {
@@ -1608,10 +1608,7 @@ impl PortraitSelController {
         resources: PortraitSelResources<'_>,
         gamma: Option<&GammaRamp>,
     ) {
-        let picture = IntRect {
-            h: PREVIEW_SIZE.min(tile.h),
-            ..tile
-        };
+        let picture = tile.with_height(PREVIEW_SIZE.min(tile.h));
         if self.selected == Some(index) {
             draw_engine_box(
                 surface,
@@ -1646,12 +1643,12 @@ impl PortraitSelController {
             }
             PortraitThumbnail::None | PortraitThumbnail::Failed => {
                 let size = 32.min(picture.w).min(picture.h);
-                let marker = IntRect {
-                    x: picture.x + (picture.w - size) / 2,
-                    y: picture.y + (picture.h - size) / 2,
-                    w: size,
-                    h: size,
-                };
+                let marker = IntRect::new(
+                    picture.x + (picture.w - size) / 2,
+                    picture.y + (picture.h - size) / 2,
+                    size,
+                    size,
+                );
                 draw_facet_nearest(
                     surface,
                     resources.control,
@@ -1711,14 +1708,14 @@ fn portrait_grid_content_layout(
         let item_height = PREVIEW_SIZE.saturating_add(label_height);
         row_height = row_height.max(item_height);
         layouts.push(PortraitGridItemLayout {
-            rect: IntRect {
-                x: i32::try_from(column)
+            rect: IntRect::new(
+                i32::try_from(column)
                     .unwrap_or(i32::MAX)
                     .saturating_mul(PREVIEW_SIZE),
-                y: row_y,
-                w: PREVIEW_SIZE,
-                h: item_height,
-            },
+                row_y,
+                PREVIEW_SIZE,
+                item_height,
+            ),
             wrapped_label,
         });
     }
@@ -1789,94 +1786,71 @@ pub fn portrait_sel_layout(
         .clamp(i64::from(MIN_WIDTH), i64::from(MAX_WIDTH)) as i32;
     let height = (i64::from(screen_height) * 2 / 3 + 10)
         .clamp(i64::from(MIN_HEIGHT), i64::from(MAX_HEIGHT)) as i32;
-    let bounds = IntRect {
-        x: ((i64::from(screen_width) - i64::from(width)) / 2) as i32,
-        y: ((i64::from(screen_height) - i64::from(height)) / 2) as i32,
-        w: width,
-        h: height,
-    };
-    let caption = IntRect {
-        x: bounds.x,
-        y: bounds.y,
-        w: bounds.w,
-        h: CAPTION_HEIGHT,
-    };
-    let close = IntRect {
-        x: bounds.x + bounds.w - 20,
-        y: bounds.y + 4,
-        w: 16,
-        h: 16,
-    };
+    let bounds = IntRect::new(
+        ((i64::from(screen_width) - i64::from(width)) / 2) as i32,
+        ((i64::from(screen_height) - i64::from(height)) / 2) as i32,
+        width,
+        height,
+    );
+    let caption = IntRect::new(bounds.x, bounds.y, bounds.w, CAPTION_HEIGHT);
+    let close = IntRect::new(bounds.x + bounds.w - 20, bounds.y + 4, 16, 16);
     let location_y = bounds.y + CAPTION_HEIGHT + 14;
-    let location_label = IntRect {
-        x: bounds.x + 20,
-        y: location_y,
-        w: 57,
-        h: TEXT_LINE_HEIGHT,
-    };
-    let location_combo = IntRect {
-        x: location_label.x + location_label.w + 20,
-        y: location_y,
-        w: bounds.x + bounds.w - 20 - (location_label.x + location_label.w + 20),
-        h: CONTROL_HEIGHT,
-    };
-    let grid = IntRect {
-        x: bounds.x + 10,
-        y: bounds.y + CAPTION_HEIGHT + TEXT_LINE_HEIGHT + 42,
-        w: bounds.w - 20,
-        h: bounds.h - CAPTION_HEIGHT - 2 * TEXT_LINE_HEIGHT - 100,
-    };
-    let grid_client = IntRect {
-        x: grid.x + 3,
-        y: grid.y + 3,
-        w: (grid.w - 6).max(0),
-        h: (grid.h - 6).max(0),
-    };
-    let grid_viewport = IntRect {
-        w: (grid_client.w - SCROLLBAR_WIDTH).max(0),
-        ..grid_client
-    };
-    let grid_scrollbar = IntRect {
-        x: grid_viewport.x + grid_viewport.w,
-        y: grid_client.y,
-        w: SCROLLBAR_WIDTH,
-        h: grid_client.h,
-    };
+    let location_label = IntRect::new(bounds.x + 20, location_y, 57, TEXT_LINE_HEIGHT);
+    let location_combo = IntRect::new(
+        location_label.x + location_label.w + 20,
+        location_y,
+        bounds.x + bounds.w - 20 - (location_label.x + location_label.w + 20),
+        CONTROL_HEIGHT,
+    );
+    let grid = IntRect::new(
+        bounds.x + 10,
+        bounds.y + CAPTION_HEIGHT + TEXT_LINE_HEIGHT + 42,
+        bounds.w - 20,
+        bounds.h - CAPTION_HEIGHT - 2 * TEXT_LINE_HEIGHT - 100,
+    );
+    let grid_client = IntRect::new(
+        grid.x + 3,
+        grid.y + 3,
+        (grid.w - 6).max(0),
+        (grid.h - 6).max(0),
+    );
+    let grid_viewport = grid_client.with_width((grid_client.w - SCROLLBAR_WIDTH).max(0));
+    let grid_scrollbar = IntRect::new(
+        grid_viewport.x + grid_viewport.w,
+        grid_client.y,
+        SCROLLBAR_WIDTH,
+        grid_client.h,
+    );
     let columns = (grid_viewport.w / PREVIEW_SIZE).max(1) as usize;
     let visible_rows = ((grid_viewport.h + TILE_HEIGHT - 1) / TILE_HEIGHT).max(1) as usize;
     let options_y = bounds.y + bounds.h - TEXT_LINE_HEIGHT - 44;
-    let import_label = IntRect {
-        x: bounds.x + 10,
-        y: options_y,
-        w: 106,
-        h: TEXT_LINE_HEIGHT,
-    };
+    let import_label = IntRect::new(bounds.x + 10, options_y, 106, TEXT_LINE_HEIGHT);
     let option_width = ((bounds.w - 10) / 3 - 10).max(1);
-    let set_picture = IntRect {
-        x: bounds.x + option_width + 20,
-        y: options_y,
-        w: option_width,
-        h: TEXT_LINE_HEIGHT,
-    };
-    let set_big_icon = IntRect {
-        x: bounds.x + option_width * 2 + 30,
-        y: options_y,
-        w: option_width,
-        h: TEXT_LINE_HEIGHT,
-    };
+    let set_picture = IntRect::new(
+        bounds.x + option_width + 20,
+        options_y,
+        option_width,
+        TEXT_LINE_HEIGHT,
+    );
+    let set_big_icon = IntRect::new(
+        bounds.x + option_width * 2 + 30,
+        options_y,
+        option_width,
+        TEXT_LINE_HEIGHT,
+    );
     let buttons_y = bounds.y + bounds.h - 36;
-    let ok = IntRect {
-        x: bounds.x + (bounds.w - 260) / 2,
-        y: buttons_y,
-        w: BUTTON_WIDTH,
-        h: BUTTON_HEIGHT,
-    };
-    let cancel = IntRect {
-        x: bounds.x + bounds.w / 2 + 10,
-        y: buttons_y,
-        w: BUTTON_WIDTH,
-        h: BUTTON_HEIGHT,
-    };
+    let ok = IntRect::new(
+        bounds.x + (bounds.w - 260) / 2,
+        buttons_y,
+        BUTTON_WIDTH,
+        BUTTON_HEIGHT,
+    );
+    let cancel = IntRect::new(
+        bounds.x + bounds.w / 2 + 10,
+        buttons_y,
+        BUTTON_WIDTH,
+        BUTTON_HEIGHT,
+    );
     let location_count_i32 = i32::try_from(location_count).unwrap_or(i32::MAX);
     let popup_content_height = location_count_i32
         .saturating_mul(TEXT_LINE_HEIGHT)
@@ -1887,21 +1861,23 @@ pub fn portrait_sel_layout(
         )
         .max(8);
     let popup_height = popup_content_height.saturating_add(10);
-    let location_popup = IntRect {
-        x: location_combo.x,
-        y: location_combo.y + location_combo.h,
-        w: location_combo.w,
-        h: popup_height,
-    };
+    let location_popup = IntRect::new(
+        location_combo.x,
+        location_combo.y + location_combo.h,
+        location_combo.w,
+        popup_height,
+    );
     let location_options = (0..location_count)
-        .map(|index| IntRect {
-            x: location_popup.x + 5,
-            y: location_popup.y.saturating_add(5).saturating_add(
-                (TEXT_LINE_HEIGHT + CONTEXT_ROW_SPACING)
-                    .saturating_mul(i32::try_from(index).unwrap_or(i32::MAX)),
-            ),
-            w: location_popup.w - 10,
-            h: TEXT_LINE_HEIGHT,
+        .map(|index| {
+            IntRect::new(
+                location_popup.x + 5,
+                location_popup.y.saturating_add(5).saturating_add(
+                    (TEXT_LINE_HEIGHT + CONTEXT_ROW_SPACING)
+                        .saturating_mul(i32::try_from(index).unwrap_or(i32::MAX)),
+                ),
+                location_popup.w - 10,
+                TEXT_LINE_HEIGHT,
+            )
         })
         .collect();
     PortraitSelLayout {
@@ -1941,12 +1917,12 @@ enum GridMove {
 fn list_selection_hitbox(layout: &PortraitSelLayout) -> IntRect {
     // ListBox checks its zero-origin ScrollWindow bounds before subtracting
     // the three-pixel client margins (`C4GuiListBox.cpp:149-162`).
-    IntRect {
-        x: layout.grid.x,
-        y: layout.grid.y,
-        w: layout.grid_viewport.w,
-        h: layout.grid_client.h,
-    }
+    IntRect::new(
+        layout.grid.x,
+        layout.grid.y,
+        layout.grid_viewport.w,
+        layout.grid_client.h,
+    )
 }
 
 fn contains(rect: IntRect, point: GuiPoint) -> bool {
@@ -2014,12 +1990,7 @@ fn draw_combo_box(
     );
     with_surface_clip(
         surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y,
-            w: (arrow_x - rect.x).max(0),
-            h: rect.h,
-        },
+        IntRect::new(rect.x, rect.y, (arrow_x - rect.x).max(0), rect.h),
         |surface| {
             resources.fonts.text.draw_with_gamma(
                 surface,
@@ -2080,12 +2051,7 @@ fn draw_checkbox(
         let size = rect.h / 2;
         draw_highlight(
             surface,
-            IntRect {
-                x: rect.x + rect.h / 4,
-                y: rect.y + rect.h / 4,
-                w: size,
-                h: size,
-            },
+            IntRect::new(rect.x + rect.h / 4, rect.y + rect.h / 4, size, size),
             resources.button_highlight,
             gamma,
         );
@@ -2150,7 +2116,7 @@ fn draw_scrollbar(
 }
 
 fn checkbox_square(rect: IntRect) -> IntRect {
-    IntRect { w: rect.h, ..rect }
+    rect.with_width(rect.h)
 }
 
 fn with_surface_clip(surface: &mut Surface, clip: IntRect, draw: impl FnOnce(&mut Surface)) {
@@ -2220,12 +2186,12 @@ fn aspect_fit(image: &ImageData, rect: IntRect) -> IntRect {
     } else {
         ((i64::from(rect.h) * width / height).max(1) as i32, rect.h)
     };
-    IntRect {
-        x: rect.x + (rect.w - fitted_w) / 2,
-        y: rect.y + (rect.h - fitted_h) / 2,
-        w: fitted_w,
-        h: fitted_h,
-    }
+    IntRect::new(
+        rect.x + (rect.w - fitted_w) / 2,
+        rect.y + (rect.h - fitted_h) / 2,
+        fitted_w,
+        fitted_h,
+    )
 }
 
 #[cfg(test)]
@@ -2279,7 +2245,7 @@ mod tests {
         // 23px caption/16px close button, and `C4GuiListBox.h:119-123` plus
         // `C4GuiContainers.cpp:477-490` reserve the list margins/scrollbar.
         let layout = portrait_sel_layout(1152, 723, 4);
-        let rect = |x, y, w, h| IntRect { x, y, w, h };
+        let rect = |x, y, w, h| IntRect::new(x, y, w, h);
 
         assert_eq!(layout.bounds, rect(276, 115, 600, 492));
         assert_eq!(layout.caption, rect(276, 115, 600, 23));
@@ -3808,12 +3774,7 @@ mod tests {
         let malformed = ImageData::new(0, 0, Vec::new());
         draw_icon_phase(
             &mut surface,
-            IntRect {
-                x: 0,
-                y: 0,
-                w: 16,
-                h: 16,
-            },
+            IntRect::new(0, 0, 16, 16),
             &malformed,
             34,
             None,

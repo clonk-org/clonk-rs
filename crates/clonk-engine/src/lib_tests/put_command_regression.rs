@@ -1,39 +1,5 @@
 use super::*;
-
-trait TestEngineExt {
-    fn test_object_index(&self, object: ObjectId) -> usize;
-    fn register_test_definition(&mut self, definition: Definition);
-    fn register_test_player(&mut self, player: PlayerConfig);
-    fn register_test_script_definition(&mut self, id: &str, name: &str, script: &str);
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
-}
-
-impl TestEngineExt for Engine {
-    #[track_caller]
-    fn test_object_index(&self, object: ObjectId) -> usize {
-        crate::TestValueExt::test_value(self.find_object_index(object))
-    }
-
-    #[track_caller]
-    fn register_test_definition(&mut self, definition: Definition) {
-        crate::TestValueExt::test_value(self.register_definition(definition));
-    }
-
-    #[track_caller]
-    fn register_test_player(&mut self, player: PlayerConfig) {
-        crate::TestValueExt::test_value(self.register_player(player));
-    }
-
-    #[track_caller]
-    fn register_test_script_definition(&mut self, id: &str, name: &str, script: &str) {
-        crate::TestValueExt::test_value(self.register_script_definition(id, name, script));
-    }
-
-    #[track_caller]
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
-        crate::TestValueExt::test_value(self.spawn_object(config))
-    }
-}
+use crate::lib_test_support::{register_fixture, spawn_fixture, EngineTestExt};
 
 fn put_fixture_engine() -> Engine {
     let actor_script = r#"#strict
@@ -192,23 +158,15 @@ protected func Departure(pTarget)
 }
 
 fn spawn_push_put_triplet(engine: &mut Engine, reject: bool) -> (ObjectId, ObjectId, ObjectId) {
-    let target = engine.spawn_test_object(
-        SpawnConfig::new("TARG")
-            .with_position(Vector2::new(80, 40))
-            .with_velocity(Vector2::new(3, -2))
-            .with_local_vars(HashMap::from([(
-                "reject".to_string(),
-                Value::Int(i32::from(reject)),
-            )])),
-    );
+    let target = spawn_fixture!(engine, "TARG", with_position: Vector2::new(80, 40), with_velocity: Vector2::new(3, -2), with_local_vars: HashMap::from([(
+        "reject".to_string(),
+        Value::Int(i32::from(reject)),
+    )]));
     let mut push = ActionState::new("Push");
     push.target = Some(target);
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("ACTR")
-            .with_position(Vector2::new(20, 40))
-            .with_action(push),
-    );
-    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let actor =
+        spawn_fixture!(engine, "ACTR", with_position: Vector2::new(20, 40), with_action: push);
+    let item = spawn_fixture!(engine, "ITEM", with_container: actor);
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .state
@@ -230,11 +188,11 @@ fn spawn_contained_put_take_triplet(
     reject: bool,
     command: CommandId,
 ) -> (ObjectId, ObjectId, ObjectId) {
-    let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_local_vars(HashMap::from(
+    let target = spawn_fixture!(engine, "TARG", with_local_vars: HashMap::from(
         [("reject".to_string(), Value::Int(i32::from(reject)))],
-    )));
-    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
-    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    ));
+    let actor = spawn_fixture!(engine, "ACTR", with_container: target);
+    let item = spawn_fixture!(engine, "ITEM", with_container: actor);
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .state
@@ -251,9 +209,9 @@ fn spawn_contained_put_take_triplet(
 #[test]
 fn object_com_put_accepts_an_explicit_non_content_object() {
     let mut engine = put_fixture_engine();
-    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
-    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR"));
-    let item = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+    let target = spawn_fixture!(engine, "TARG");
+    let actor = spawn_fixture!(engine, "ACTR");
+    let item = spawn_fixture!(engine, "ITEM");
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .state
@@ -274,8 +232,8 @@ fn object_com_put_accepts_an_explicit_non_content_object() {
 #[test]
 fn empty_put_take_opens_menu_on_a_retained_status_zero_target() {
     let mut engine = put_fixture_engine();
-    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
-    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
+    let target = spawn_fixture!(engine, "TARG");
+    let actor = spawn_fixture!(engine, "ACTR", with_container: target);
     let target_index = engine.test_object_index(target);
     let _ = engine.objects[target_index].mark_destroyed();
 
@@ -298,8 +256,8 @@ fn empty_put_take_opens_menu_on_a_retained_status_zero_target() {
 #[test]
 fn exit_unlinks_a_retained_status_zero_object() {
     let mut engine = put_fixture_engine();
-    let container = engine.spawn_test_object(SpawnConfig::new("TARG"));
-    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(container));
+    let container = spawn_fixture!(engine, "TARG");
+    let item = spawn_fixture!(engine, "ITEM", with_container: container);
     let item_index = engine.test_object_index(item);
     let position = engine.objects[item_index].state.position;
     let rotation = engine.objects[item_index].state.rotation;
@@ -331,13 +289,17 @@ protected func Departure(pTarget)
   return(1);
 }
 "#;
-    let mut reentering = test_definition("RITM", "Reentering item", reentering_script);
-    reentering.set_c4_callback_convention(true);
-    engine.register_test_definition(reentering);
-    let destination = engine.spawn_test_object(SpawnConfig::new("TARG"));
-    let parent = engine.spawn_test_object(SpawnConfig::new("ACTR"));
-    let first = engine.spawn_test_object(SpawnConfig::new("RITM").with_container(parent));
-    let second = engine.spawn_test_object(SpawnConfig::new("RITM").with_container(parent));
+    register_fixture!(
+        engine,
+        "RITM",
+        "Reentering item",
+        reentering_script,
+        set_c4_callback_convention(true)
+    );
+    let destination = spawn_fixture!(engine, "TARG");
+    let parent = spawn_fixture!(engine, "ACTR");
+    let first = spawn_fixture!(engine, "RITM", with_container: parent);
+    let second = spawn_fixture!(engine, "RITM", with_container: parent);
     let parent_index = engine.test_object_index(parent);
     let first_link = engine.objects[parent_index].state.contents[0];
     let sibling = if first_link == first { second } else { first };
@@ -483,10 +445,10 @@ fn contained_throw_and_drop_run_object_com_put_callbacks_before_finishing() {
 fn command_references_accept_inactive_live_put_take_helpers_like_cpp() {
     for command in [CommandId::Throw, CommandId::Drop] {
         let mut engine = put_fixture_engine();
-        let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
-        let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
-        let deleted = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
-        let inactive = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+        let target = spawn_fixture!(engine, "TARG");
+        let actor = spawn_fixture!(engine, "ACTR", with_container: target);
+        let deleted = spawn_fixture!(engine, "ITEM", with_container: actor);
+        let inactive = spawn_fixture!(engine, "ITEM", with_container: actor);
 
         let deleted_index = engine.test_object_index(deleted);
         let _ = engine.objects[deleted_index].mark_destroyed();
@@ -525,12 +487,12 @@ fn command_references_accept_inactive_live_put_take_helpers_like_cpp() {
 fn command_references_accept_inactive_sell_candidates_like_cpp() {
     let mut engine = put_fixture_engine();
     engine.register_test_player(PlayerConfig::new(1, "Seller"));
-    let base = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let base = spawn_fixture!(engine, "TARG");
     let base_index = engine.test_object_index(base);
     engine.objects[base_index].state.base = 1;
-    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_owner(1));
-    let deleted = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(base));
-    let inactive = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(base));
+    let actor = spawn_fixture!(engine, "ACTR", with_owner: 1);
+    let deleted = spawn_fixture!(engine, "ITEM", with_container: base);
+    let inactive = spawn_fixture!(engine, "ITEM", with_container: base);
 
     let deleted_index = engine.test_object_index(deleted);
     let _ = engine.objects[deleted_index].mark_destroyed();
@@ -556,7 +518,7 @@ fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
     crate::TestValueExt::test_value(engine.definitions.get_mut(&DefinitionId::from("TARG")))
         .set_collection_limit(1);
     let (actor, first_item, target) = spawn_push_put_triplet(&mut engine, false);
-    let second_item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let second_item = spawn_fixture!(engine, "ITEM", with_container: actor);
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .state
@@ -605,10 +567,10 @@ fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
 #[test]
 fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
     let mut engine = put_fixture_engine();
-    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
-    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
-    let outer_item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
-    let replacement_item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let target = spawn_fixture!(engine, "TARG");
+    let actor = spawn_fixture!(engine, "ACTR", with_container: target);
+    let outer_item = spawn_fixture!(engine, "ITEM", with_container: actor);
+    let replacement_item = spawn_fixture!(engine, "ITEM", with_container: actor);
     let target_index = engine.test_object_index(target);
     engine.objects[target_index].state.local_vars.extend([
         (
@@ -668,10 +630,10 @@ fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
 #[test]
 fn removed_nested_throw_does_not_finish_the_outer_throw_instance() {
     let mut engine = put_fixture_engine();
-    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
-    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
-    let first_item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
-    let second_item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let target = spawn_fixture!(engine, "TARG");
+    let actor = spawn_fixture!(engine, "ACTR", with_container: target);
+    let first_item = spawn_fixture!(engine, "ITEM", with_container: actor);
+    let second_item = spawn_fixture!(engine, "ITEM", with_container: actor);
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.local_vars.extend([
         ("tracked".to_string(), object_reference_value(first_item)),
@@ -713,9 +675,9 @@ fn removed_nested_throw_does_not_finish_the_outer_throw_instance() {
 #[test]
 fn callback_execute_command_reenters_the_same_in_flight_throw() {
     let mut engine = put_fixture_engine();
-    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
-    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
-    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let target = spawn_fixture!(engine, "TARG");
+    let actor = spawn_fixture!(engine, "ACTR", with_container: target);
+    let item = spawn_fixture!(engine, "ITEM", with_container: actor);
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.local_vars.extend([
         ("tracked".to_string(), object_reference_value(item)),
@@ -751,9 +713,8 @@ fn callback_execute_command_reenters_the_same_in_flight_throw() {
 #[test]
 fn script_execute_command_runs_outside_throw_callbacks_before_returning() {
     let mut engine = put_fixture_engine();
-    let actor =
-        engine.spawn_test_object(SpawnConfig::new("ACTR").with_action(ActionState::new("Walk")));
-    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let actor = spawn_fixture!(engine, "ACTR", with_action: ActionState::new("Walk"));
+    let item = spawn_fixture!(engine, "ITEM", with_container: actor);
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .state
@@ -824,12 +785,8 @@ public func RunExecute()
     let mut engine = Engine::with_seed(119);
     engine.register_test_definition(actor);
     engine.register_test_definition(item);
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("NDIG")
-            .with_action(ActionState::new("Dig"))
-            .with_velocity(Vector2::new(7, -3)),
-    );
-    let item = engine.spawn_test_object(SpawnConfig::new("NDIT").with_container(actor));
+    let actor = spawn_fixture!(engine, "NDIG", with_action: ActionState::new("Dig"), with_velocity: Vector2::new(7, -3));
+    let item = spawn_fixture!(engine, "NDIT", with_container: actor);
     let actor_index = engine.test_object_index(actor);
     crate::TestValueExt::test_value(
         engine.objects[actor_index]
@@ -911,12 +868,8 @@ protected func StartWalk()
     let mut engine = Engine::with_seed(121);
     engine.register_test_definition(actor);
     engine.register_test_definition(item);
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("DDIG")
-            .with_action(ActionState::new("Dig"))
-            .with_velocity(Vector2::new(7, -3)),
-    );
-    let item = engine.spawn_test_object(SpawnConfig::new("DDIT").with_container(actor));
+    let actor = spawn_fixture!(engine, "DDIG", with_action: ActionState::new("Dig"), with_velocity: Vector2::new(7, -3));
+    let item = spawn_fixture!(engine, "DDIT", with_container: actor);
     let actor_index = engine.test_object_index(actor);
     crate::TestValueExt::test_value(
         engine.objects[actor_index]
@@ -992,14 +945,11 @@ protected func Grabbed(object actor, bool grab)
     let mut engine = Engine::new();
     engine.register_test_definition(actor);
     engine.register_test_definition(target);
-    let target = engine.spawn_test_object(SpawnConfig::new("UNGT"));
+    let target = spawn_fixture!(engine, "UNGT");
     let mut push = ActionState::new("Push");
     push.target = Some(target);
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("UNGA")
-            .with_action(push)
-            .with_velocity(Vector2::new(4, -2)),
-    );
+    let actor =
+        spawn_fixture!(engine, "UNGA", with_action: push, with_velocity: Vector2::new(4, -2));
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.command_direction = CommandDirection::Left;
     crate::TestValueExt::test_value(
@@ -1092,14 +1042,11 @@ protected func Grabbed(object actor, bool grab)
     let mut engine = Engine::new();
     engine.register_test_definition(actor);
     engine.register_test_definition(target);
-    let target = engine.spawn_test_object(SpawnConfig::new("UGMT"));
+    let target = spawn_fixture!(engine, "UGMT");
     let mut push = ActionState::new("Push");
     push.target = Some(target);
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("UGMA")
-            .with_action(push)
-            .with_velocity(Vector2::new(4, -2)),
-    );
+    let actor =
+        spawn_fixture!(engine, "UGMA", with_action: push, with_velocity: Vector2::new(4, -2));
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.command_direction = CommandDirection::Left;
 
@@ -1248,11 +1195,10 @@ protected func Grabbed(object actor, bool grab)
     engine.register_test_definition(actor);
     engine.register_test_definition(target);
 
-    let inactive_target =
-        engine.spawn_test_object(SpawnConfig::new("UGRT").with_status(ObjectStatus::Inactive));
+    let inactive_target = spawn_fixture!(engine, "UGRT", with_status: ObjectStatus::Inactive);
     let mut push = ActionState::new("Push");
     push.target = Some(inactive_target);
-    let first_actor = engine.spawn_test_object(SpawnConfig::new("UGRA").with_action(push));
+    let first_actor = spawn_fixture!(engine, "UGRA", with_action: push);
     let first_actor_index = engine.test_object_index(first_actor);
     assert!(engine
         .object_com_ungrab(first_actor_index)
@@ -1276,10 +1222,10 @@ protected func Grabbed(object actor, bool grab)
         "inactive Status is nonzero and still receives Grabbed(false)"
     );
 
-    let live_target = engine.spawn_test_object(SpawnConfig::new("UGRT"));
+    let live_target = spawn_fixture!(engine, "UGRT");
     let mut push = ActionState::new("Push");
     push.target = Some(live_target);
-    let removing_actor = engine.spawn_test_object(SpawnConfig::new("UGRA").with_action(push));
+    let removing_actor = spawn_fixture!(engine, "UGRA", with_action: push);
     let removing_actor_index = engine.test_object_index(removing_actor);
     engine.objects[removing_actor_index]
         .state
@@ -1367,13 +1313,8 @@ protected func StartThrow()
     engine.set_landscape(landscape);
     engine.register_test_definition(actor);
     engine.register_test_definition(item);
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("TTRN")
-            .with_position(Vector2::new(99, 99))
-            .with_direction(Direction::Left)
-            .with_action(ActionState::new("Walk")),
-    );
-    let item = engine.spawn_test_object(SpawnConfig::new("TIT2").with_container(actor));
+    let actor = spawn_fixture!(engine, "TTRN", with_position: Vector2::new(99, 99), with_direction: Direction::Left, with_action: ActionState::new("Walk"));
+    let item = spawn_fixture!(engine, "TIT2", with_container: actor);
     let actor_index = engine.test_object_index(actor);
     crate::TestValueExt::test_value(
         engine.objects[actor_index].commands.push_front(
@@ -1449,41 +1390,44 @@ protected func Departure(pContainer)
 "#;
 
     let mut engine = Engine::with_seed(118);
-    let mut actor = test_definition("TACT", "Throw actor", actor_script);
-    actor.set_c4_callback_convention(true);
-    actor.configure_actions(
-        Some("Walk".to_string()),
-        HashMap::from([
-            (
-                "Walk".to_string(),
-                ActionSpec::default().with_procedure("WALK"),
-            ),
-            (
-                "Throw".to_string(),
-                ActionSpec::default().with_procedure("THROW"),
-            ),
-        ]),
+    register_fixture!(
+        engine,
+        "TACT",
+        "Throw actor",
+        actor_script,
+        set_c4_callback_convention(true),
+        configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Throw".to_string(),
+                    ActionSpec::default().with_procedure("THROW"),
+                ),
+            ]),
+        ),
+        set_physical(PhysicalInfo {
+            throw: 50_000,
+            ..PhysicalInfo::default()
+        })
     );
-    actor.set_physical(PhysicalInfo {
-        throw: 50_000,
-        ..PhysicalInfo::default()
-    });
-    engine.register_test_definition(actor);
 
-    let mut item = test_definition("TITM", "Thrown item", item_script);
-    item.set_c4_callback_convention(true);
-    item.set_contact_function_calls(true);
-    item.set_border_bound(C4D_BORDER_TOP);
-    item.set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 4)));
-    engine.register_test_definition(item);
-
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("TACT")
-            .with_position(Vector2::new(20, 0))
-            .with_direction(Direction::Right)
-            .with_action(ActionState::new("Walk")),
+    register_fixture!(
+        engine,
+        "TITM",
+        "Thrown item",
+        item_script,
+        set_c4_callback_convention(true),
+        set_contact_function_calls(true),
+        set_border_bound(C4D_BORDER_TOP),
+        set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 4)))
     );
-    let item = engine.spawn_test_object(SpawnConfig::new("TITM").with_container(actor));
+
+    let actor = spawn_fixture!(engine, "TACT", with_position: Vector2::new(20, 0), with_direction: Direction::Right, with_action: ActionState::new("Walk"));
+    let item = spawn_fixture!(engine, "TITM", with_container: actor);
     let item_index = engine.test_object_index(item);
     engine.objects[item_index].state.shape_override = Some(DefinitionRect::new(0, 0, 6, 6));
     engine.objects[item_index].shape_rect = Some(DefinitionRect::new(0, 0, 6, 6));
@@ -1511,16 +1455,17 @@ protected func Departure(pContainer)
 #[test]
 fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
     let mut engine = put_fixture_engine();
-    let mut new_item = test_definition("NITM", "New menu item", "#strict");
-    new_item.set_category(CATEGORY_STRUCTURE);
-    engine.register_test_definition(new_item);
-    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
-    let actor = engine.spawn_test_object(
-        SpawnConfig::new("ACTR")
-            .with_container(target)
-            .with_category(CATEGORY_OBJECT),
+    register_fixture!(
+        engine,
+        "NITM",
+        "New menu item",
+        "#strict",
+        set_category(CATEGORY_STRUCTURE)
     );
-    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let target = spawn_fixture!(engine, "TARG");
+    let actor =
+        spawn_fixture!(engine, "ACTR", with_container: target, with_category: CATEGORY_OBJECT);
+    let item = spawn_fixture!(engine, "ITEM", with_container: actor);
     let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.local_vars.extend([
         ("tracked".to_string(), object_reference_value(item)),
@@ -1612,18 +1557,11 @@ fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double
         crate::TestValueExt::test_value(engine.player_mut(1))
             .control
             .last_com_down_double = down_double;
-        let target = engine.spawn_test_object(SpawnConfig::new("NOPU"));
+        let target = spawn_fixture!(engine, "NOPU");
         let mut push = ActionState::new("Push");
         push.target = Some(target);
-        let actor = engine.spawn_test_object(
-            SpawnConfig::new("ACTR")
-                .with_owner(1)
-                .with_position(Vector2::new(20, 40))
-                .with_velocity(Vector2::new(-2, 0))
-                .with_command_direction(CommandDirection::Right)
-                .with_action(push),
-        );
-        let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+        let actor = spawn_fixture!(engine, "ACTR", with_owner: 1, with_position: Vector2::new(20, 40), with_velocity: Vector2::new(-2, 0), with_command_direction: CommandDirection::Right, with_action: push);
+        let item = spawn_fixture!(engine, "ITEM", with_container: actor);
         assert_eq!(
             engine
                 .try_object_com_put(actor, target, item)
@@ -1680,8 +1618,8 @@ fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double
 fn empty_contained_throw_and_drop_open_the_activate_menu_before_finishing() {
     for command in [CommandId::Throw, CommandId::Drop] {
         let mut engine = put_fixture_engine();
-        let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
-        let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
+        let target = spawn_fixture!(engine, "TARG");
+        let actor = spawn_fixture!(engine, "ACTR", with_container: target);
         let actor_index = engine.test_object_index(actor);
         crate::TestValueExt::test_value(
             engine.objects[actor_index]
@@ -1707,13 +1645,17 @@ fn empty_contained_throw_and_drop_open_the_activate_menu_before_finishing() {
 fn empty_pushing_throw_and_drop_open_get_only_for_grab_get_targets() {
     for command in [CommandId::Throw, CommandId::Drop] {
         let mut engine = put_fixture_engine();
-        let mut target_definition = test_definition("GETT", "Get target", "#strict");
-        target_definition.set_grab_put_get(GRAB_PUT_GET_GET);
-        engine.register_test_definition(target_definition);
-        let target = engine.spawn_test_object(SpawnConfig::new("GETT"));
+        register_fixture!(
+            engine,
+            "GETT",
+            "Get target",
+            "#strict",
+            set_grab_put_get(GRAB_PUT_GET_GET)
+        );
+        let target = spawn_fixture!(engine, "GETT");
         let mut push = ActionState::new("Push");
         push.target = Some(target);
-        let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_action(push));
+        let actor = spawn_fixture!(engine, "ACTR", with_action: push);
         let actor_index = engine.test_object_index(actor);
         crate::TestValueExt::test_value(
             engine.objects[actor_index]
@@ -1730,10 +1672,10 @@ fn empty_pushing_throw_and_drop_open_get_only_for_grab_get_targets() {
         assert!(engine.objects[actor_index].commands.snapshot().is_empty());
 
         let mut denied = put_fixture_engine();
-        let target = denied.spawn_test_object(SpawnConfig::new("TARG"));
+        let target = spawn_fixture!(denied, "TARG");
         let mut push = ActionState::new("Push");
         push.target = Some(target);
-        let actor = denied.spawn_test_object(SpawnConfig::new("ACTR").with_action(push));
+        let actor = spawn_fixture!(denied, "ACTR", with_action: push);
         let actor_index = denied.test_object_index(actor);
         crate::TestValueExt::test_value(
             denied.objects[actor_index]

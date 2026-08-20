@@ -2,6 +2,26 @@
 // `include!` from compat.rs so every test id stays `compat::tests::*`.
 // Mostly: host registration, object state, players.
 
+fn compat_join_player_config(name: impl Into<String>) -> crate::JoinPlayerConfig {
+    crate::JoinPlayerConfig {
+        name: name.into(),
+        player_info_id: 1,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff0000,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: false,
+        auto_context_menu: false,
+        startup_player_count: 1,
+    }
+}
+
 /// The idle object scope these tests hand to `with_effect_context`: one
 /// object at rest with no effects and full construction. Sites that need
 /// a different channel override it through a record update, so the
@@ -2035,21 +2055,9 @@ global func PreInitializePlayer(int player)
         ..Default::default()
     };
     let config = crate::JoinPlayerConfig {
-        name: "Player".into(),
         player_info_id: info.id,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
         color_dw: 0x00ff_ffff,
-        pref_color: 0,
-        pref_position: 0,
-        crew: Vec::new(),
-        control_style: false,
-        auto_context_menu: false,
-        startup_player_count: 1,
+        ..compat_join_player_config("Player")
     };
     let player = engine
         .join_player_with_info(config, &info)

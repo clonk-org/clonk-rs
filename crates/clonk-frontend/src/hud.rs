@@ -2858,6 +2858,112 @@ mod tests {
     use super::*;
     use clonk_graphics::{FontMetrics, GpuBlend, GpuCommand, GpuSampler, PixelFormat, TextFont};
 
+    macro_rules! check_eq {
+        ($left:expr => $right:expr) => {
+            assert_eq!($left, $right);
+        };
+        ($left:expr => $right:expr, $($message:tt)+) => {
+            assert_eq!($left, $right, $($message)+);
+        };
+    }
+
+    macro_rules! check {
+        ($condition:expr) => {
+            assert!($condition);
+        };
+        ($condition:expr, $($message:tt)+) => {
+            assert!($condition, $($message)+);
+        };
+    }
+
+    macro_rules! check_ne {
+        ($left:expr => $right:expr) => {
+            assert_ne!($left, $right);
+        };
+        ($left:expr => $right:expr, $($message:tt)+) => {
+            assert_ne!($left, $right, $($message)+);
+        };
+    }
+
+    macro_rules! hud_graphics {
+        ($($field:ident => $image:expr),+ $(,)?) => {
+            HudGraphics {
+                $($field: Some($image),)+
+                ..HudGraphics::default()
+            }
+        };
+    }
+
+    #[derive(Default)]
+    struct CursorFixture<'a> {
+        name: &'a str,
+        rank: i32,
+        rank_name: Option<&'a str>,
+        portrait: Option<&'a ImageData>,
+        portrait_owner_overlay: Option<&'a ImageData>,
+        portrait_owner_color: Option<u32>,
+        rank_symbols: Option<&'a ImageData>,
+        rank_symbol_count: Option<u32>,
+        is_captain: bool,
+        hide_hud_elements: i32,
+        gamma: Option<&'a GammaRamp>,
+    }
+
+    impl CursorFixture<'_> {
+        fn draw(
+            &self,
+            surface: &mut Surface,
+            font: &HudFont<'_>,
+            hud: &HudGraphics,
+            viewport: SurfaceRect,
+        ) {
+            draw_cursor_info_with_gamma(
+                surface,
+                font,
+                hud,
+                viewport,
+                self.name,
+                self.rank,
+                self.rank_name,
+                self.portrait,
+                self.portrait_owner_overlay,
+                self.portrait_owner_color.unwrap_or(u32::MAX),
+                self.rank_symbols,
+                self.rank_symbol_count,
+                self.is_captain,
+                self.hide_hud_elements,
+                self.gamma,
+            );
+        }
+    }
+
+    macro_rules! draw_cursor_fixture {
+        ($surface:expr, $font:expr, $hud:expr, $viewport:expr; $($field:ident => $value:expr),* $(,)?) => {
+            CursorFixture {
+                $($field: $value,)*
+                ..CursorFixture::default()
+            }
+            .draw($surface, $font, $hud, $viewport)
+        };
+    }
+
+    macro_rules! draw_upper_board_fixture {
+        ($surface:expr, $font:expr, $hud:expr; mode => $mode:expr, title => $title:expr, seconds => $seconds:expr, clock => $clock:expr, fps => $fps:expr) => {
+            draw_upper_board_with_gamma(
+                $surface, $font, $hud, $mode, $title, $seconds, $clock, $fps, None,
+            )
+        };
+    }
+
+    macro_rules! draw_controls_fixture {
+        ($surface:expr, $regular:expr, $tiny:expr, $hud:expr, $viewport:expr; mask => $mask:expr, position => $position:expr, last => $last:expr, labels => $labels:expr, frame => $frame:expr, gamma => $gamma:expr) => {
+            draw_player_controls_with_gamma(
+                $surface, $regular, $tiny, $hud, $viewport, $mask, $position, $last, $labels,
+                $frame, $gamma,
+            )
+        };
+    }
+
     struct MarkerFont;
 
     impl TextFont for MarkerFont {
@@ -2922,14 +3028,19 @@ mod tests {
         ImageData::new(width, height, pixels)
     }
 
-    fn horizontal_cell_strip(cell: u32, colors: &[[u8; 4]]) -> ImageData {
-        let mut pixels = Vec::with_capacity((cell * cell * colors.len() as u32 * 4) as usize);
-        for _ in 0..cell {
+    fn horizontal_strip(cell_width: u32, height: u32, colors: &[[u8; 4]]) -> ImageData {
+        let mut pixels =
+            Vec::with_capacity((cell_width * height * colors.len() as u32 * 4) as usize);
+        for _ in 0..height {
             for color in colors {
-                pixels.extend(std::iter::repeat_n(*color, cell as usize).flatten());
+                pixels.extend(std::iter::repeat_n(*color, cell_width as usize).flatten());
             }
         }
-        ImageData::new(cell * colors.len() as u32, cell, pixels)
+        ImageData::new(cell_width * colors.len() as u32, height, pixels)
+    }
+
+    fn horizontal_cell_strip(cell: u32, colors: &[[u8; 4]]) -> ImageData {
+        horizontal_strip(cell, cell, colors)
     }
 
     fn surface(width: u32, height: u32) -> Surface {
@@ -2957,8 +3068,8 @@ mod tests {
             .take_gpu_scene_capture()
             .expect("GPU capture remains active")
             .into_scene([8, 4], Color::transparent(), &gamma);
-        assert_eq!(scene.textures.len(), 1);
-        assert_eq!(scene.commands.len(), 1);
+        check_eq! { scene.textures.len() => 1 }
+        check_eq! { scene.commands.len() => 1 }
         // clonk-org/clonk-rs#271: a compact instance rather than a generic
         // quad. The geometry this test is about is unchanged — the compact
         // record carries the same four corner positions and the same UV
@@ -2972,14 +3083,14 @@ mod tests {
         else {
             panic!("scaled command region did not lower to a textured command");
         };
-        assert_eq!(sprites.len(), 1);
+        check_eq! { sprites.len() => 1 }
         let sprite = &sprites[0];
-        assert_eq!(sprite.sampler(), GpuSampler::Nearest);
-        assert_eq!(*blend, GpuBlend::Normal);
-        assert!(*gamma);
-        assert_eq!(sprite.positions[0], [2.0, 1.0, 1.0]);
-        assert_eq!(sprite.positions[3], [6.0, 3.0, 1.0]);
-        assert_eq!(sprite.uv, [0.25, 0.0, 0.75, 1.0]);
+        check_eq! { sprite.sampler() => GpuSampler::Nearest }
+        check_eq! { *blend => GpuBlend::Normal }
+        check! { *gamma }
+        check_eq! { sprite.positions[0] => [2.0, 1.0, 1.0] }
+        check_eq! { sprite.positions[3] => [6.0, 3.0, 1.0] }
+        check_eq! { sprite.uv => [0.25, 0.0, 0.75, 1.0] }
     }
 
     #[test]
@@ -2993,7 +3104,7 @@ mod tests {
             SurfaceRect::new(0, 0, 1, 1),
             None,
         );
-        assert_eq!(surface.get_pixel(0, 0), Some(Color::new(0, 1, 2, 128)));
+        check_eq! { surface.get_pixel(0, 0) => Some(Color::new(0, 1, 2, 128)) }
     }
 
     fn paint_rect(
@@ -3028,20 +3139,25 @@ mod tests {
             [200, 200, 10, 255],
         ];
         for (phase, color) in keyboard.into_iter().enumerate() {
-            let left = phase as u32 * KEYBOARD_CELL.0;
-            for y in 0..KEYBOARD_CELL.1 {
-                for x in left..left + KEYBOARD_CELL.0 {
-                    let index = ((y * width + x) * 4) as usize;
-                    pixels[index..index + 4].copy_from_slice(&color);
-                }
-            }
+            paint_rect(
+                &mut pixels,
+                width,
+                phase as u32 * KEYBOARD_CELL.0,
+                0,
+                KEYBOARD_CELL.0,
+                KEYBOARD_CELL.1,
+                color,
+            );
         }
-        for y in MOUSE_SOURCE.1..MOUSE_SOURCE.1 + MOUSE_SOURCE.3 {
-            for x in MOUSE_SOURCE.0..MOUSE_SOURCE.0 + MOUSE_SOURCE.2 {
-                let index = ((y * width + x) * 4) as usize;
-                pixels[index..index + 4].copy_from_slice(&[200, 10, 200, 255]);
-            }
-        }
+        paint_rect(
+            &mut pixels,
+            width,
+            MOUSE_SOURCE.0,
+            MOUSE_SOURCE.1,
+            MOUSE_SOURCE.2,
+            MOUSE_SOURCE.3,
+            [200, 10, 200, 255],
+        );
         ImageData::new(width, height, pixels)
     }
 
@@ -3052,14 +3168,7 @@ mod tests {
             [100, 100, 10, 255],
             [180, 80, 20, 255],
         ];
-        let width = GAMEPAD_CELL_WIDTH * colors.len() as u32;
-        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-        for _ in 0..height {
-            for color in colors {
-                pixels.extend(std::iter::repeat_n(color, GAMEPAD_CELL_WIDTH as usize).flatten());
-            }
-        }
-        ImageData::new(width, height, pixels)
+        horizontal_strip(GAMEPAD_CELL_WIDTH, height, &colors)
     }
 
     #[test]
@@ -3069,13 +3178,9 @@ mod tests {
         let dest_y = 105;
         let text_x = 130;
         let text_color = Color::opaque(7, 8, 9);
-        let hud = HudGraphics {
-            control: Some(startup_control_sheet()),
-            // A non-shipped height proves that the name offset comes from the
-            // loaded fctGamepad height rather than the keyboard constant.
-            gamepad: Some(startup_gamepad_sheet(20)),
-            ..HudGraphics::default()
-        };
+        // A non-shipped height proves that the name offset comes from the
+        // loaded fctGamepad height rather than the keyboard constant.
+        let hud = hud_graphics! { control => startup_control_sheet(), gamepad => startup_gamepad_sheet(20) };
         let marker = MarkerFont;
         let font = HudFont::Fallback(&marker);
         let render = |control_set, mouse_control| {
@@ -3101,21 +3206,13 @@ mod tests {
         ];
         for (control_set, expected) in keyboard_colors.into_iter().enumerate() {
             let target = render(control_set as i32, false);
-            assert_eq!(target.get_pixel(dest_x, dest_y), Some(expected));
-            assert_eq!(target.get_pixel(text_x, dest_y + 36), Some(text_color));
+            check_eq! { target.get_pixel(dest_x, dest_y) => Some(expected) }
+            check_eq! { target.get_pixel(text_x, dest_y + 36) => Some(text_color) }
         }
 
         let with_mouse = render(0, true);
-        assert_eq!(
-            with_mouse.get_pixel(dest_x + 55, dest_y - 10),
-            Some(Color::opaque(200, 10, 200)),
-            "fctMouse uses the +55/-10 destination offset"
-        );
-        assert_eq!(
-            with_mouse.get_pixel(dest_x + 55, dest_y),
-            Some(keyboard_colors[0]),
-            "the keyboard facet draws after and over the mouse overlap"
-        );
+        check_eq! { with_mouse.get_pixel(dest_x + 55, dest_y - 10) => Some(Color::opaque(200, 10, 200)), "fctMouse uses the +55/-10 destination offset" }
+        check_eq! { with_mouse.get_pixel(dest_x + 55, dest_y) => Some(keyboard_colors[0]), "the keyboard facet draws after and over the mouse overlap" }
 
         let gamepad_colors = [
             Color::opaque(10, 100, 100),
@@ -3125,12 +3222,8 @@ mod tests {
         ];
         for (phase, expected) in gamepad_colors.into_iter().enumerate() {
             let target = render(phase as i32 + 4, false);
-            assert_eq!(target.get_pixel(dest_x, dest_y), Some(expected));
-            assert_eq!(
-                target.get_pixel(text_x, dest_y + 20),
-                Some(text_color),
-                "name follows the loaded gamepad height"
-            );
+            check_eq! { target.get_pixel(dest_x, dest_y) => Some(expected) }
+            check_eq! { target.get_pixel(text_x, dest_y + 20) => Some(text_color), "name follows the loaded gamepad height" }
         }
     }
 
@@ -3143,8 +3236,8 @@ mod tests {
         });
         let font = HudFont::Clonk(&font);
 
-        assert_eq!(font.character_advance('☃'), 4);
-        assert_eq!(font.character_advance('\t'), 0);
+        check_eq! { font.character_advance('☃') => 4 }
+        check_eq! { font.character_advance('\t') => 0 }
     }
 
     /// Control.png stand-in sized like the C++ sheet regions
@@ -3155,20 +3248,21 @@ mod tests {
         let width = 512u32;
         let height = 164u32;
         let mut pixels = vec![0u8; (width * height * 4) as usize];
-        for y in 0..height {
-            for x in 0..width {
-                let idx = ((y * width + x) * 4) as usize;
-                let color: [u8; 4] = if (100..164).contains(&y) && x < 64 {
-                    [10, 10, 200, 255] // fctKey phase 0
-                } else if (68..100).contains(&y) {
-                    [10, 200, 10, 255] // fctCommand double row
-                } else {
-                    [0, 0, 0, 0]
-                };
-                pixels[idx..idx + 4].copy_from_slice(&color);
-            }
-        }
+        paint_rect(&mut pixels, width, 0, 100, 64, 64, [10, 10, 200, 255]);
+        paint_rect(&mut pixels, width, 0, 68, width, 32, [10, 200, 10, 255]);
         ImageData::new(width, height, pixels)
+    }
+
+    macro_rules! command_icon {
+        (com => $com:expr, side => $side:expr, image => $image:expr) => {
+            CommandIcon {
+                com: $com,
+                key_label: String::new(),
+                side: $side,
+                caption: String::new(),
+                image: $image,
+            }
+        };
     }
 
     fn viewport_button_control_sheet() -> ImageData {
@@ -3194,51 +3288,26 @@ mod tests {
     #[test]
     fn viewport_button_regions_match_cpp_slots_and_mouse_gating() {
         let viewport = SurfaceRect::new(10, 20, 200, 150);
-        assert_eq!(
-            viewport_button_rect(viewport, ViewportButton::Help),
-            SurfaceRect::new(187, 65, 23, 23)
-        );
-        assert_eq!(
-            viewport_button_rect(viewport, ViewportButton::PlayerMenu),
-            SurfaceRect::new(187, 88, 23, 23)
-        );
-        assert_eq!(
-            viewport_button_rect(viewport, ViewportButton::Chat),
-            SurfaceRect::new(187, 111, 23, 23)
-        );
+        check_eq! { viewport_button_rect(viewport, ViewportButton::Help) => SurfaceRect::new(187, 65, 23, 23) }
+        check_eq! { viewport_button_rect(viewport, ViewportButton::PlayerMenu) => SurfaceRect::new(187, 88, 23, 23) }
+        check_eq! { viewport_button_rect(viewport, ViewportButton::Chat) => SurfaceRect::new(187, 111, 23, 23) }
 
         let at = |x, y, mouse, chat| {
             viewport_button_region(viewport, clonk_gui::Point::new(x, y), true, mouse, chat)
         };
-        assert_eq!(at(187.0, 65.0, true, false), Some(ViewportButton::Help));
-        assert_eq!(
-            at(209.9, 110.9, true, false),
-            Some(ViewportButton::PlayerMenu),
-            "the final integer pixel remains inside the half-open cell"
-        );
-        assert_eq!(at(210.0, 88.0, true, false), None);
-        assert_eq!(at(187.0, 111.0, true, false), None);
-        assert_eq!(at(187.0, 111.0, true, true), Some(ViewportButton::Chat));
-        assert_eq!(at(187.0, 88.0, false, true), None);
-        assert_eq!(
-            viewport_button_region(
-                viewport,
-                clonk_gui::Point::new(187.0, 65.0),
-                false,
-                true,
-                true,
-            ),
-            None
-        );
+        check_eq! { at(187.0, 65.0, true, false) => Some(ViewportButton::Help) }
+        check_eq! { at(209.9, 110.9, true, false) => Some(ViewportButton::PlayerMenu), "the final integer pixel remains inside the half-open cell" }
+        check_eq! { at(210.0, 88.0, true, false) => None }
+        check_eq! { at(187.0, 111.0, true, false) => None }
+        check_eq! { at(187.0, 111.0, true, true) => Some(ViewportButton::Chat) }
+        check_eq! { at(187.0, 88.0, false, true) => None }
+        check_eq! { viewport_button_region(viewport, clonk_gui::Point::new(187.0, 65.0), false, true, true,) => None }
     }
 
     #[test]
     fn viewport_button_stack_uses_cpp_facets_and_keyboard_menu_only() {
         let viewport = SurfaceRect::new(10, 20, 200, 150);
-        let hud = HudGraphics {
-            control: Some(viewport_button_control_sheet()),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { control => viewport_button_control_sheet() };
         let gui_icons2 = viewport_button_gui_icons2_sheet();
         let marker = MarkerFont;
         let font = HudFont::Fallback(&marker);
@@ -3262,33 +3331,22 @@ mod tests {
 
         let mouse = render(true, true, true);
         for y in [65, 88, 111] {
-            assert_eq!(
-                mouse.get_pixel(189, y + 11),
-                Some(Color::opaque(10, 10, 200)),
-                "transparent symbol half preserves the key cap in row {y}"
-            );
+            check_eq! { mouse.get_pixel(189, y + 11) => Some(Color::opaque(10, 10, 200)), "transparent symbol half preserves the key cap in row {y}" }
         }
-        assert_eq!(mouse.get_pixel(207, 76), Some(Color::opaque(200, 20, 20)));
-        assert_eq!(mouse.get_pixel(207, 99), Some(Color::opaque(20, 200, 20)));
-        assert_eq!(mouse.get_pixel(207, 122), Some(Color::opaque(200, 200, 20)));
+        check_eq! { mouse.get_pixel(207, 76) => Some(Color::opaque(200, 20, 20)) }
+        check_eq! { mouse.get_pixel(207, 99) => Some(Color::opaque(20, 200, 20)) }
+        check_eq! { mouse.get_pixel(207, 122) => Some(Color::opaque(200, 200, 20)) }
 
         let keyboard = render(true, false, true);
-        assert_eq!(keyboard.get_pixel(207, 76), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(
-            keyboard.get_pixel(207, 99),
-            Some(Color::opaque(20, 200, 20))
-        );
-        assert_eq!(keyboard.get_pixel(207, 122), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(
-            keyboard.get_pixel(198, 108),
-            Some(MESSAGE_COLOR),
-            "the keyboard PlayerMenu variant includes its configured key hint"
-        );
+        check_eq! { keyboard.get_pixel(207, 76) => Some(Color::opaque(0, 0, 0)) }
+        check_eq! { keyboard.get_pixel(207, 99) => Some(Color::opaque(20, 200, 20)) }
+        check_eq! { keyboard.get_pixel(207, 122) => Some(Color::opaque(0, 0, 0)) }
+        check_eq! { keyboard.get_pixel(198, 108) => Some(MESSAGE_COLOR), "the keyboard PlayerMenu variant includes its configured key hint" }
 
         let hidden = render(false, true, true);
-        assert_eq!(hidden.get_pixel(207, 76), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(hidden.get_pixel(207, 99), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(hidden.get_pixel(207, 122), Some(Color::opaque(0, 0, 0)));
+        check_eq! { hidden.get_pixel(207, 76) => Some(Color::opaque(0, 0, 0)) }
+        check_eq! { hidden.get_pixel(207, 99) => Some(Color::opaque(0, 0, 0)) }
+        check_eq! { hidden.get_pixel(207, 122) => Some(Color::opaque(0, 0, 0)) }
     }
 
     /// Transparent command symbols over blue unpressed and red pressed key
@@ -3297,17 +3355,8 @@ mod tests {
         let width = 320u32;
         let height = 164u32;
         let mut pixels = vec![0u8; (width * height * 4) as usize];
-        for y in 100..164 {
-            for x in 0..128 {
-                let idx = ((y * width + x) * 4) as usize;
-                let color: [u8; 4] = if x < 64 {
-                    [10, 10, 200, 255]
-                } else {
-                    [200, 10, 10, 255]
-                };
-                pixels[idx..idx + 4].copy_from_slice(&color);
-            }
-        }
+        paint_rect(&mut pixels, width, 0, 100, 64, 64, [10, 10, 200, 255]);
+        paint_rect(&mut pixels, width, 64, 100, 64, 64, [200, 10, 10, 255]);
         ImageData::new(width, height, pixels)
     }
 
@@ -3318,30 +3367,17 @@ mod tests {
         // DrawControlKey selects fctKey phase 1 for LastCom's control
         // (src/C4ObjectCom.cpp:946-958).
         let mut target = surface(300, 240);
-        let hud = HudGraphics {
-            control: Some(tutorial_control_sheet()),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { control => tutorial_control_sheet() };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
-        draw_player_controls(
-            &mut target,
-            &font,
-            &font,
-            &hud,
-            SurfaceRect::new(0, 0, 300, 240),
-            (1 << 0) | (1 << 3),
-            2,
-            12, // COM_CursorLeft -> CON_CursorLeft
-            &[],
-            0,
-        );
+        // COM_CursorLeft -> CON_CursorLeft.
+        draw_controls_fixture! { &mut target, &font, &font, &hud, SurfaceRect::new(0, 0, 300, 240); mask => (1 << 0) | (1 << 3), position => 2, last => 12, labels => &[], frame => 0, gamma => None };
 
         // size=70, origin=(40,85), cell=23x17. Control 0 is pressed/red;
         // control 3 is present but unpressed/blue; control 1 is absent.
-        assert_eq!(target.get_pixel(45, 90), Some(Color::opaque(200, 10, 10)));
-        assert_eq!(target.get_pixel(45, 107), Some(Color::opaque(10, 10, 200)));
-        assert_eq!(target.get_pixel(70, 90), Some(Color::opaque(0, 0, 0)));
+        check_eq! { target.get_pixel(45, 90) => Some(Color::opaque(200, 10, 10)) }
+        check_eq! { target.get_pixel(45, 107) => Some(Color::opaque(10, 10, 200)) }
+        check_eq! { target.get_pixel(70, 90) => Some(Color::opaque(0, 0, 0)) }
     }
 
     #[test]
@@ -3349,8 +3385,8 @@ mod tests {
         // Com2Control accepts C4Player::LastCom as int32_t. High bits must
         // therefore keep an otherwise-valid low byte in the default Menu
         // bucket instead of being narrowed to a visible movement control.
-        assert_eq!(com_control_index(0x101), (9, false));
-        assert_eq!(com_control_index(1), (6, false));
+        check_eq! { com_control_index(0x101) => (9, false) }
+        check_eq! { com_control_index(1) => (6, false) }
     }
 
     #[test]
@@ -3359,32 +3395,18 @@ mod tests {
         // Tick35 > 18 (src/C4Viewport.cpp:1431-1439).
         let render = |mask: i32, frame: u64| {
             let mut target = surface(300, 240);
-            let hud = HudGraphics {
-                control: Some(tutorial_control_sheet()),
-                ..HudGraphics::default()
-            };
+            let hud = hud_graphics! { control => tutorial_control_sheet() };
             let font = bitmap_font();
             let font = HudFont::Fallback(&font);
-            draw_player_controls(
-                &mut target,
-                &font,
-                &font,
-                &hud,
-                SurfaceRect::new(0, 0, 300, 240),
-                mask,
-                0,
-                0,
-                &["K".to_string()],
-                frame,
-            );
+            draw_controls_fixture! { &mut target, &font, &font, &hud, SurfaceRect::new(0, 0, 300, 240); mask => mask, position => 0, last => 0, labels => &["K".to_string()], frame => frame, gamma => None };
             target
         };
         let key_only = render(1, 18);
         let visible_label = render(1 | (1 << 10) | (1 << 20), 18);
         let hidden_label = render(1 | (1 << 10) | (1 << 20), 19);
 
-        assert_ne!(visible_label.pixels(), key_only.pixels());
-        assert_eq!(hidden_label.pixels(), key_only.pixels());
+        check_ne! { visible_label.pixels() => key_only.pixels() }
+        check_eq! { hidden_label.pixels() => key_only.pixels() }
     }
 
     #[test]
@@ -3413,55 +3435,30 @@ mod tests {
             .filter(|(_, byte)| !matches!(byte, b'_' | b' '))
             .fold(0_i32, |mask, (position, _)| mask | (1_i32 << position));
         let movement_mask = (1 << 4) | (1 << 6) | (1 << 7) | (1 << 8);
-        assert_eq!(
-            show_control,
-            movement_mask | (movement_mask << 10) | (movement_mask << 20)
-        );
+        check_eq! { show_control => movement_mask | (movement_mask << 10) | (movement_mask << 20) }
 
         // C4ConfigControls keyboard set one is Q/W/E/A/S/D/Z/X/C/R in
         // CON_* order (C4Config.cpp:624-633). PlrControlKeyName returns those
         // short configured names; in the guide's spatial order this is S
         // above Z/X/C, with no arrow-key aliases.
         let labels = ["Q", "W", "E", "A", "S", "D", "Z", "X", "C", "R"].map(str::to_string);
-        assert_eq!(
-            [
-                labels[6].as_str(),
-                labels[4].as_str(),
-                labels[7].as_str(),
-                labels[8].as_str()
-            ],
-            ["Z", "S", "X", "C"]
-        );
-        assert!(labels.iter().all(|label| !label.contains("Arrow")));
+        check_eq! { [labels[6].as_str(), labels[4].as_str(), labels[7].as_str(), labels[8].as_str()] => ["Z", "S", "X", "C"] }
+        check! { labels.iter().all(|label| !label.contains("Arrow")) }
 
         let viewport = SurfaceRect::new(0, 0, 1068, 780);
-        let hud = HudGraphics {
-            control: Some(crate::test_support::load_graphics_png("Control.png")),
-            ..HudGraphics::default()
-        };
+        let hud =
+            hud_graphics! { control => crate::test_support::load_graphics_png("Control.png") };
         let fonts = crate::test_support::endeavour_font_set();
         let render = |key_labels: &[String], frame: u64| {
             let mut target = Surface::new(1068, 780, PixelFormat::Rgba8888);
             target.fill(Color::opaque(12, 24, 40));
-            draw_player_controls_with_gamma(
-                &mut target,
-                &HudFont::Clonk(&fonts.text),
-                &HudFont::Clonk(&fonts.mini),
-                &hud,
-                viewport,
-                show_control,
-                3,
-                0,
-                key_labels,
-                frame,
-                Some(crate::test_support::standard_gamma()),
-            );
+            draw_controls_fixture! { &mut target, &HudFont::Clonk(&fonts.text), &HudFont::Clonk(&fonts.mini), &hud, viewport; mask => show_control, position => 3, last => 0, labels => key_labels, frame => frame, gamma => Some(crate::test_support::standard_gamma()) };
             target
         };
         let no_labels = vec![String::new(); 10];
         let unlabeled = render(&no_labels, 18);
         let guide = render(&labels, 18);
-        assert_eq!(guide.snapshot().to_string(), "1068x780#54938995");
+        check_eq! { guide.snapshot().to_string() => "1068x780#54938995" }
 
         // At the user's high-resolution viewport size, prove each glyph's
         // changed pixels remain inside its own C++ 3x4 grid cell. This catches
@@ -3494,15 +3491,10 @@ mod tests {
                     )
                 })
                 .collect::<Vec<_>>();
-            assert!(!changed.is_empty(), "control {control} label renders");
-            assert!(changed.iter().all(|&(x, y)| {
-                x >= cell.x
-                    && x < cell.x + cell.width as i32
-                    && y >= cell.y
-                    && y < cell.y + cell.height as i32
-            }));
+            check! { !changed.is_empty(), "control {control} label renders" }
+            check! { changed.iter().all(|&(x, y)| {x >= cell.x && x < cell.x + cell.width as i32 && y >= cell.y && y < cell.y + cell.height as i32}) }
         }
-        assert_eq!(render(&labels, 19).pixels(), unlabeled.pixels());
+        check_eq! { render(&labels, 19).pixels() => unlabeled.pixels() }
     }
 
     #[test]
@@ -3513,18 +3505,12 @@ mod tests {
         // its right end — image cell rightmost, key cell left of it
         // (src/C4Object.cpp:4043-4048).
         let mut target = surface(200, 100);
-        let hud = HudGraphics {
-            control: Some(control_sheet()),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { control => control_sheet() };
         let font = bitmap_font();
-        let icons = vec![CommandIcon {
-            com: 5, // COM_Throw
-            key_label: String::new(),
-            side: false,
-            caption: String::new(),
-            image: CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))),
-        }];
+        // COM_Throw.
+        let icons = vec![
+            command_icon! { com => 5, side => false, image => CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))) },
+        ];
         draw_commands(
             &mut target,
             &HudFont::Fallback(&font),
@@ -3534,28 +3520,12 @@ mod tests {
             false,
         );
         // Image cell: [177,200) x [77,100), def picture aspect-fit fills it.
-        assert_eq!(
-            target.get_pixel(188, 88),
-            Some(Color::opaque(200, 20, 20)),
-            "picture centered in the rightmost 23px cell"
-        );
+        check_eq! { target.get_pixel(188, 88) => Some(Color::opaque(200, 20, 20)), "picture centered in the rightmost 23px cell" }
         // Key cell: [154,177) — key cap blue (single-row symbol transparent).
-        assert_eq!(
-            target.get_pixel(160, 88),
-            Some(Color::opaque(10, 10, 200)),
-            "key cap fills the second-from-right 23px cell"
-        );
+        check_eq! { target.get_pixel(160, 88) => Some(Color::opaque(10, 10, 200)), "key cap fills the second-from-right 23px cell" }
         // Nothing further left.
-        assert_eq!(target.get_pixel(140, 88), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(
-            command_region_index(
-                SurfaceRect::new(0, 0, 200, 100),
-                clonk_gui::Point::new(154.0, 77.0),
-                &icons,
-            ),
-            Some(0),
-            "the key cell's first pixel belongs to the paired C4Region"
-        );
+        check_eq! { target.get_pixel(140, 88) => Some(Color::opaque(0, 0, 0)) }
+        check_eq! { command_region_index(SurfaceRect::new(0, 0, 200, 100), clonk_gui::Point::new(154.0, 77.0), &icons,) => Some(0), "the key cell's first pixel belongs to the paired C4Region" }
         assert_eq!(
             command_region_hit(
                 SurfaceRect::new(0, 0, 200, 100),
@@ -3565,23 +3535,8 @@ mod tests {
             Some((0, SurfaceRect::new(154, 77, 46, 23))),
             "the hit exposes the exact pair geometry used by CaptionBottomY"
         );
-        assert_eq!(
-            command_region_index(
-                SurfaceRect::new(0, 0, 200, 100),
-                clonk_gui::Point::new(199.0, 99.0),
-                &icons,
-            ),
-            Some(0),
-            "the image cell's final integer pixel remains inside"
-        );
-        assert_eq!(
-            command_region_index(
-                SurfaceRect::new(0, 0, 200, 100),
-                clonk_gui::Point::new(153.0, 88.0),
-                &icons,
-            ),
-            None
-        );
+        check_eq! { command_region_index(SurfaceRect::new(0, 0, 200, 100), clonk_gui::Point::new(199.0, 99.0), &icons,) => Some(0), "the image cell's final integer pixel remains inside" }
+        check_eq! { command_region_index(SurfaceRect::new(0, 0, 200, 100), clonk_gui::Point::new(153.0, 88.0), &icons,) => None }
     }
 
     #[test]
@@ -3589,18 +3544,11 @@ mod tests {
         // C4Object::DrawCommand keeps the command image and hit region while
         // hiding the exact FlashCom key for Tick35 0..=15, then drawing it
         // for 16..=34 (src/C4Object.cpp:4043-4047,4084-4091).
-        let hud = HudGraphics {
-            control: Some(control_sheet()),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { control => control_sheet() };
         let font = bitmap_font();
-        let icons = vec![CommandIcon {
-            com: 5,
-            key_label: String::new(),
-            side: false,
-            caption: String::new(),
-            image: CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))),
-        }];
+        let icons = vec![
+            command_icon! { com => 5, side => false, image => CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))) },
+        ];
         let render = |frame| {
             let mut target = surface(200, 100);
             draw_commands_with_gamma(
@@ -3619,27 +3567,11 @@ mod tests {
 
         for frame in [0, 15] {
             let target = render(frame);
-            assert_eq!(target.get_pixel(160, 88), Some(Color::opaque(0, 0, 0)));
-            assert_eq!(
-                target.get_pixel(188, 88),
-                Some(Color::opaque(200, 20, 20)),
-                "command image remains visible at frame {frame}"
-            );
+            check_eq! { target.get_pixel(160, 88) => Some(Color::opaque(0, 0, 0)) }
+            check_eq! { target.get_pixel(188, 88) => Some(Color::opaque(200, 20, 20)), "command image remains visible at frame {frame}" }
         }
-        assert_eq!(
-            render(16).get_pixel(160, 88),
-            Some(Color::opaque(10, 10, 200)),
-            "matching key returns for Tick35 16"
-        );
-        assert_eq!(
-            command_region_index(
-                SurfaceRect::new(0, 0, 200, 100),
-                clonk_gui::Point::new(160.0, 88.0),
-                &icons,
-            ),
-            Some(0),
-            "blinking never removes the command region"
-        );
+        check_eq! { render(16).get_pixel(160, 88) => Some(Color::opaque(10, 10, 200)), "matching key returns for Tick35 16" }
+        check_eq! { command_region_index(SurfaceRect::new(0, 0, 200, 100), clonk_gui::Point::new(160.0, 88.0), &icons,) => Some(0), "blinking never removes the command region" }
     }
 
     #[test]
@@ -3648,18 +3580,12 @@ mod tests {
         // Com2Control(iCom), (iCom & COM_Double) != 0) — the double row is
         // one cell height below the single row.
         let mut target = surface(200, 100);
-        let hud = HudGraphics {
-            control: Some(control_sheet()),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { control => control_sheet() };
         let font = bitmap_font();
-        let icons = vec![CommandIcon {
-            com: 4 | 128, // COM_Down_D
-            key_label: String::new(),
-            side: false,
-            caption: String::new(),
-            image: CommandImage::Picture(None),
-        }];
+        // COM_Down_D.
+        let icons = vec![
+            command_icon! { com => 4 | 128, side => false, image => CommandImage::Picture(None) },
+        ];
         draw_commands(
             &mut target,
             &HudFont::Fallback(&font),
@@ -3669,11 +3595,7 @@ mod tests {
             false,
         );
         // Key cell shows the green double-row symbol over the blue cap.
-        assert_eq!(
-            target.get_pixel(160, 88),
-            Some(Color::opaque(10, 200, 10)),
-            "double-row fctCommand phase over the key cap"
-        );
+        check_eq! { target.get_pixel(160, 88) => Some(Color::opaque(10, 200, 10)), "double-row fctCommand phase over the key cap" }
     }
 
     #[test]
@@ -3684,17 +3606,11 @@ mod tests {
         // strip BOTTOM, key cell left, image cell right
         // (src/C4Facet.cpp:182-215, src/C4Object.cpp:4044-4047).
         let mut target = surface(200, 150);
-        let hud = HudGraphics {
-            control: Some(control_sheet()),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { control => control_sheet() };
         let font = bitmap_font();
-        let icon = |color: [u8; 4]| CommandIcon {
-            com: 7, // COM_Special
-            key_label: String::new(),
-            side: true,
-            caption: String::new(),
-            image: CommandImage::Picture(Some(solid_image(8, 8, color))),
+        // COM_Special.
+        let icon = |color| {
+            command_icon! { com => 7, side => true, image => CommandImage::Picture(Some(solid_image(8, 8, color))) }
         };
         let icons = vec![icon([200, 20, 20, 255]), icon([20, 20, 200, 255])];
         draw_commands(
@@ -3707,40 +3623,21 @@ mod tests {
         );
         // Strip: x in [154,200), bottom at y = 150 - 23 - 5 = 122.
         // First pair occupies y [99,122): key at x[154,177), image x[177,200).
-        assert_eq!(
-            target.get_pixel(188, 110),
-            Some(Color::opaque(200, 20, 20)),
-            "first side image cell at the strip bottom"
-        );
-        assert_eq!(
-            target.get_pixel(160, 110),
-            Some(Color::opaque(10, 10, 200)),
-            "first side key cell left of the image cell"
-        );
+        check_eq! { target.get_pixel(188, 110) => Some(Color::opaque(200, 20, 20)), "first side image cell at the strip bottom" }
+        check_eq! { target.get_pixel(160, 110) => Some(Color::opaque(10, 10, 200)), "first side key cell left of the image cell" }
         // Second pair stacks above: y [76,99).
-        assert_eq!(
-            target.get_pixel(188, 87),
-            Some(Color::opaque(20, 20, 200)),
-            "second side image cell above the first"
-        );
+        check_eq! { target.get_pixel(188, 87) => Some(Color::opaque(20, 20, 200)), "second side image cell above the first" }
     }
 
     #[test]
     fn command_rows_need_viewport_taller_than_symbol_size() {
         // `if (cgo.Hgt > C4SymbolSize)` (src/C4Viewport.cpp:950).
         let mut target = surface(200, 35);
-        let hud = HudGraphics {
-            control: Some(control_sheet()),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { control => control_sheet() };
         let font = bitmap_font();
-        let icons = vec![CommandIcon {
-            com: 5,
-            key_label: String::new(),
-            side: false,
-            caption: String::new(),
-            image: CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))),
-        }];
+        let icons = vec![
+            command_icon! { com => 5, side => false, image => CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))) },
+        ];
         draw_commands(
             &mut target,
             &HudFont::Fallback(&font),
@@ -3749,13 +3646,7 @@ mod tests {
             &icons,
             false,
         );
-        assert!(
-            target
-                .pixels()
-                .chunks_exact(4)
-                .all(|chunk| chunk == [0, 0, 0, 255]),
-            "35px-high viewports draw no command rows"
-        );
+        check! { target.pixels().chunks_exact(4).all(|chunk| chunk == [0, 0, 0, 255]), "35px-high viewports draw no command rows" }
     }
 
     #[test]
@@ -3776,21 +3667,13 @@ mod tests {
                 });
             }
         }
-        let hud = HudGraphics {
-            control: Some(control_sheet()),
-            hand: Some(ImageData::new(16, 8, hand_pixels)),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { control => control_sheet(), hand => ImageData::new(16, 8, hand_pixels) };
         let font = bitmap_font();
-        let icons = vec![CommandIcon {
-            com: 5,
-            key_label: String::new(),
-            side: false,
-            caption: String::new(),
-            image: CommandImage::Composite {
+        let icons = vec![command_icon! {
+            com => 5, side => false, image => CommandImage::Composite {
                 picture: Some(solid_image(8, 8, [200, 20, 20, 255])),
                 icon: CommandOverlayIcon::Hand(1),
-            },
+            }
         }];
         draw_commands(
             &mut target,
@@ -3802,58 +3685,37 @@ mod tests {
         );
         // Image cell [177,200) x [77,100): picture fraction right-top
         // (x 181..200, y 77..96), hand fraction left-bottom (177..196, 81..100).
-        assert_eq!(
-            target.get_pixel(197, 79),
-            Some(Color::opaque(200, 20, 20)),
-            "picture in the right-top 85% fraction"
-        );
-        assert_eq!(
-            target.get_pixel(178, 97),
-            Some(Color::opaque(20, 200, 200)),
-            "fctHand phase 1 in the left-bottom 85% fraction"
-        );
+        check_eq! { target.get_pixel(197, 79) => Some(Color::opaque(200, 20, 20)), "picture in the right-top 85% fraction" }
+        check_eq! { target.get_pixel(178, 97) => Some(Color::opaque(20, 200, 200)), "fctHand phase 1 in the left-bottom 85% fraction" }
     }
 
     #[test]
     fn formats_game_time_like_upper_board_execute() {
         // C4UpperBoard::Execute (src/C4UpperBoard.cpp:41).
-        assert_eq!(format_game_time(0), "00:00:00");
-        assert_eq!(format_game_time(18), "00:00:18");
-        assert_eq!(format_game_time(3600 + 2 * 60 + 3), "01:02:03");
+        check_eq! { format_game_time(0) => "00:00:00" }
+        check_eq! { format_game_time(18) => "00:00:18" }
+        check_eq! { format_game_time(3600 + 2 * 60 + 3) => "01:02:03" }
     }
 
     #[test]
     fn upper_board_modes_match_cpp_reserved_and_output_geometry() {
-        let hud = HudGraphics {
-            upper_board: Some(solid_image(8, 55, [120, 80, 40, 255])),
-            ..HudGraphics::default()
-        };
-        assert_eq!(upper_board_reserved_height(UpperBoardMode::Hide), 0);
-        assert_eq!(upper_board_reserved_height(UpperBoardMode::Full), 50);
-        assert_eq!(upper_board_reserved_height(UpperBoardMode::Small), 25);
-        assert_eq!(upper_board_reserved_height(UpperBoardMode::Mini), 0);
-        assert_eq!(upper_board_output_height(UpperBoardMode::Hide, &hud), 0);
-        assert_eq!(upper_board_output_height(UpperBoardMode::Full, &hud), 55);
-        assert_eq!(upper_board_output_height(UpperBoardMode::Small, &hud), 27);
-        assert_eq!(upper_board_output_height(UpperBoardMode::Mini, &hud), 0);
+        let hud = hud_graphics! { upper_board => solid_image(8, 55, [120, 80, 40, 255]) };
+        check_eq! { upper_board_reserved_height(UpperBoardMode::Hide) => 0 }
+        check_eq! { upper_board_reserved_height(UpperBoardMode::Full) => 50 }
+        check_eq! { upper_board_reserved_height(UpperBoardMode::Small) => 25 }
+        check_eq! { upper_board_reserved_height(UpperBoardMode::Mini) => 0 }
+        check_eq! { upper_board_output_height(UpperBoardMode::Hide, &hud) => 0 }
+        check_eq! { upper_board_output_height(UpperBoardMode::Full, &hud) => 55 }
+        check_eq! { upper_board_output_height(UpperBoardMode::Small, &hud) => 27 }
+        check_eq! { upper_board_output_height(UpperBoardMode::Mini, &hud) => 0 }
 
         let marker = FixedWidthMarkerFont;
         let font = HudFont::Fallback(&marker);
         let mut hidden = surface(400, 60);
         hidden.fill(Color::opaque(7, 11, 13));
         let before = hidden.pixels().to_vec();
-        draw_upper_board_with_gamma(
-            &mut hidden,
-            &font,
-            &hud,
-            UpperBoardMode::Hide,
-            "Hidden title",
-            0,
-            Some("[12:34:56]"),
-            Some(42),
-            None,
-        );
-        assert_eq!(hidden.pixels(), before);
+        draw_upper_board_fixture! { &mut hidden, &font, &hud; mode => UpperBoardMode::Hide, title => "Hidden title", seconds => 0, clock => Some("[12:34:56]"), fps => Some(42) };
+        check_eq! { hidden.pixels() => before }
     }
 
     #[test]
@@ -3868,69 +3730,41 @@ mod tests {
                 });
             }
         }
-        let hud = HudGraphics {
-            upper_board: Some(ImageData::new(4, 2, tile_pixels)),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { upper_board => ImageData::new(4, 2, tile_pixels) };
         let marker = FixedWidthMarkerFont;
         let font = HudFont::Fallback(&marker);
         let mut tiled = surface(16, 30);
         draw_upper_board(&mut tiled, &font, &hud, UpperBoardMode::Small, "", 0);
-        assert_eq!(tiled.get_pixel(0, 0), tiled.get_pixel(2, 0));
-        assert_eq!(tiled.get_pixel(1, 0), tiled.get_pixel(3, 0));
-        assert_ne!(tiled.get_pixel(0, 0), tiled.get_pixel(1, 0));
-        assert_eq!(tiled.get_pixel(0, 0).expect("scaled tile").a, 255);
+        check_eq! { tiled.get_pixel(0, 0) => tiled.get_pixel(2, 0) }
+        check_eq! { tiled.get_pixel(1, 0) => tiled.get_pixel(3, 0) }
+        check_ne! { tiled.get_pixel(0, 0) => tiled.get_pixel(1, 0) }
+        check_eq! { tiled.get_pixel(0, 0).expect("scaled tile").a => 255 }
 
-        let hud = HudGraphics {
-            upper_board: Some(solid_image(8, 55, [120, 80, 40, 255])),
-            logo: Some(solid_image(960, 320, [10, 200, 30, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { upper_board => solid_image(8, 55, [120, 80, 40, 255]), logo => solid_image(960, 320, [10, 200, 30, 255]) };
         let mut target = surface(400, 60);
-        draw_upper_board_with_gamma(
-            &mut target,
-            &font,
-            &hud,
-            UpperBoardMode::Small,
-            "T",
-            0,
-            None,
-            None,
-            None,
-        );
-        assert_eq!(target.get_pixel(145, 10), Some(Color::opaque(120, 80, 40)));
-        assert_eq!(target.get_pixel(146, 10), Some(Color::opaque(10, 200, 30)));
-        assert_eq!(target.get_pixel(252, 10), Some(Color::opaque(10, 200, 30)));
-        assert_eq!(target.get_pixel(253, 10), Some(Color::opaque(120, 80, 40)));
-        assert_eq!(target.get_pixel(10, 10), Some(MESSAGE_COLOR));
-        assert_eq!(target.get_pixel(358, 9), Some(MESSAGE_COLOR));
-        assert_eq!(target.get_pixel(20, 26), Some(Color::opaque(120, 80, 40)));
-        assert_eq!(target.get_pixel(20, 27), Some(Color::opaque(0, 0, 0)));
+        draw_upper_board_fixture! { &mut target, &font, &hud; mode => UpperBoardMode::Small, title => "T", seconds => 0, clock => None, fps => None };
+        check_eq! { target.get_pixel(145, 10) => Some(Color::opaque(120, 80, 40)) }
+        check_eq! { target.get_pixel(146, 10) => Some(Color::opaque(10, 200, 30)) }
+        check_eq! { target.get_pixel(252, 10) => Some(Color::opaque(10, 200, 30)) }
+        check_eq! { target.get_pixel(253, 10) => Some(Color::opaque(120, 80, 40)) }
+        check_eq! { target.get_pixel(10, 10) => Some(MESSAGE_COLOR) }
+        check_eq! { target.get_pixel(358, 9) => Some(MESSAGE_COLOR) }
+        check_eq! { target.get_pixel(20, 26) => Some(Color::opaque(120, 80, 40)) }
+        check_eq! { target.get_pixel(20, 27) => Some(Color::opaque(0, 0, 0)) }
     }
 
     #[test]
     fn mini_upper_board_carves_message_width_and_draws_only_bottom_text() {
         let marker = FixedWidthMarkerFont;
         let font = HudFont::Fallback(&marker);
-        assert_eq!(upper_board_text_strip_width(&font, 0), 126);
-        assert_eq!(
-            message_board_available_width(400, &font, UpperBoardMode::Mini, 0),
-            274
-        );
+        check_eq! { upper_board_text_strip_width(&font, 0) => 126 }
+        check_eq! { message_board_available_width(400, &font, UpperBoardMode::Mini, 0) => 274 }
 
-        let hud = HudGraphics {
-            upper_board: Some(solid_image(8, 50, [120, 80, 40, 255])),
-            background: Some(solid_image(8, 8, [30, 50, 70, 255])),
-            logo: Some(solid_image(960, 320, [10, 200, 30, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { upper_board => solid_image(8, 50, [120, 80, 40, 255]), background => solid_image(8, 8, [30, 50, 70, 255]), logo => solid_image(960, 320, [10, 200, 30, 255]) };
         let mut target = surface(400, 60);
         let long_line = "X".repeat(136);
-        assert_eq!(message_board_tail_line(&font, &long_line, 274), "  XX");
-        assert_eq!(
-            message_board_physical_lines(&font, &format!("{} ", "X".repeat(68)), 274),
-            vec!["X".repeat(68)]
-        );
+        check_eq! { message_board_tail_line(&font, &long_line, 274) => "  XX" }
+        check_eq! { message_board_physical_lines(&font, &format!("{} ", "X".repeat(68)), 274) => vec!["X".repeat(68)] }
         let tail = message_board_tail_line(&font, &long_line, 274);
         let board = MessageBoardOverlay {
             log_lines: vec![tail],
@@ -3938,9 +3772,9 @@ mod tests {
             ..MessageBoardOverlay::default()
         };
         draw_message_board_with_gamma(&mut target, &font, &hud, &board, None);
-        assert_eq!(target.get_pixel(0, 54), Some(MESSAGE_COLOR));
-        assert_eq!(target.get_pixel(273, 54), Some(Color::opaque(30, 50, 70)));
-        assert_eq!(target.get_pixel(274, 54), Some(Color::opaque(30, 50, 70)));
+        check_eq! { target.get_pixel(0, 54) => Some(MESSAGE_COLOR) }
+        check_eq! { target.get_pixel(273, 54) => Some(Color::opaque(30, 50, 70)) }
+        check_eq! { target.get_pixel(274, 54) => Some(Color::opaque(30, 50, 70)) }
 
         let mut unclipped = surface(400, 60);
         let unclipped_board = MessageBoardOverlay {
@@ -3949,28 +3783,14 @@ mod tests {
             ..MessageBoardOverlay::default()
         };
         draw_message_board_with_gamma(&mut unclipped, &font, &hud, &unclipped_board, None);
-        assert_eq!(
-            unclipped.get_pixel(275, 54),
-            Some(MESSAGE_COLOR),
-            "the shortened facet wraps at append time but does not clip StringOut"
-        );
-        draw_upper_board_with_gamma(
-            &mut target,
-            &font,
-            &hud,
-            UpperBoardMode::Mini,
-            "Must not draw",
-            0,
-            Some("[12:34:56]"),
-            Some(42),
-            None,
-        );
+        check_eq! { unclipped.get_pixel(275, 54) => Some(MESSAGE_COLOR), "the shortened facet wraps at append time but does not clip StringOut" }
+        draw_upper_board_fixture! { &mut target, &font, &hud; mode => UpperBoardMode::Mini, title => "Must not draw", seconds => 0, clock => Some("[12:34:56]"), fps => Some(42) };
 
-        assert_eq!(target.get_pixel(10, 10), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(target.get_pixel(100, 54), Some(Color::opaque(30, 50, 70)));
-        assert_eq!(target.get_pixel(358, 54), Some(MESSAGE_COLOR));
-        assert_eq!(target.get_pixel(306, 54), Some(MESSAGE_COLOR));
-        assert_eq!(target.get_pixel(274, 54), Some(MESSAGE_COLOR));
+        check_eq! { target.get_pixel(10, 10) => Some(Color::opaque(0, 0, 0)) }
+        check_eq! { target.get_pixel(100, 54) => Some(Color::opaque(30, 50, 70)) }
+        check_eq! { target.get_pixel(358, 54) => Some(MESSAGE_COLOR) }
+        check_eq! { target.get_pixel(306, 54) => Some(MESSAGE_COLOR) }
+        check_eq! { target.get_pixel(274, 54) => Some(MESSAGE_COLOR) }
     }
 
     #[test]
@@ -3979,56 +3799,19 @@ mod tests {
         // playing time at 1*TextWidth-10, then Clock/FPS at successive
         // TextWidth slots with the 30px inset (src/C4UpperBoard.cpp:74-88).
         let mut target = surface(400, 60);
-        let hud = HudGraphics {
-            upper_board: Some(solid_image(8, 50, [120, 80, 40, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { upper_board => solid_image(8, 50, [120, 80, 40, 255]) };
         let marker = FixedWidthMarkerFont;
         let font = HudFont::Fallback(&marker);
-        draw_upper_board_with_gamma(
-            &mut target,
-            &font,
-            &hud,
-            UpperBoardMode::Full,
-            "",
-            0,
-            Some("[12:34:56]"),
-            Some(42),
-            None,
-        );
+        draw_upper_board_fixture! { &mut target, &font, &hud; mode => UpperBoardMode::Full, title => "", seconds => 0, clock => Some("[12:34:56]"), fps => Some(42) };
 
         let text_y = (UPPER_BOARD_HEIGHT / 2 - font.line_height() / 2) as u32;
-        assert_eq!(
-            target.get_pixel(306, text_y),
-            Some(MESSAGE_COLOR),
-            "clock starts at width - 2*TextWidth - 30"
-        );
-        assert_eq!(
-            target.get_pixel(274, text_y),
-            Some(MESSAGE_COLOR),
-            "FPS starts at width - 3*TextWidth - 30 when Clock is present"
-        );
+        check_eq! { target.get_pixel(306, text_y) => Some(MESSAGE_COLOR), "clock starts at width - 2*TextWidth - 30" }
+        check_eq! { target.get_pixel(274, text_y) => Some(MESSAGE_COLOR), "FPS starts at width - 3*TextWidth - 30 when Clock is present" }
 
         let mut disabled = surface(400, 60);
-        draw_upper_board_with_gamma(
-            &mut disabled,
-            &font,
-            &hud,
-            UpperBoardMode::Full,
-            "",
-            0,
-            None,
-            None,
-            None,
-        );
-        assert_eq!(
-            disabled.get_pixel(306, text_y),
-            Some(Color::opaque(120, 80, 40))
-        );
-        assert_eq!(
-            disabled.get_pixel(274, text_y),
-            Some(Color::opaque(120, 80, 40))
-        );
+        draw_upper_board_fixture! { &mut disabled, &font, &hud; mode => UpperBoardMode::Full, title => "", seconds => 0, clock => None, fps => None };
+        check_eq! { disabled.get_pixel(306, text_y) => Some(Color::opaque(120, 80, 40)) }
+        check_eq! { disabled.get_pixel(274, text_y) => Some(Color::opaque(120, 80, 40)) }
     }
 
     #[test]
@@ -4056,10 +3839,7 @@ mod tests {
             },
         );
         let font = HudFont::Clonk(&font);
-        let hud = HudGraphics {
-            upper_board: Some(solid_image(8, 55, [120, 80, 40, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { upper_board => solid_image(8, 55, [120, 80, 40, 255]) };
         let mut target = surface(400, 60);
         draw_upper_board(
             &mut target,
@@ -4073,32 +3853,12 @@ mod tests {
         // Glyphs advance by width + iHSpace = 3 from x = 10, so glyph n owns
         // columns 10+3n..10+3n+3 before the next cell overlaps it.
         let title_row = 27;
-        assert_eq!(
-            target.get_pixel(10, title_row),
-            Some(MESSAGE_COLOR),
-            "'Q' keeps dwFCol"
-        );
-        assert_eq!(
-            target.get_pixel(25, title_row),
-            Some(MESSAGE_COLOR),
-            "'n' keeps dwFCol"
-        );
+        check_eq! { target.get_pixel(10, title_row) => Some(MESSAGE_COLOR), "'Q' keeps dwFCol" }
+        check_eq! { target.get_pixel(25, title_row) => Some(MESSAGE_COLOR), "'n' keeps dwFCol" }
         let tag_color = clonk_graphics::clonk_font::markup_blit_color([0xff, 0x2c, 0x28]);
-        assert_eq!(
-            target.get_pixel(31, title_row),
-            Some(Color::opaque(tag_color[0], tag_color[1], tag_color[2])),
-            "'3' takes the <c ff2c28> tag color"
-        );
-        assert_eq!(
-            target.get_pixel(42, title_row),
-            Some(Color::opaque(tag_color[0], tag_color[1], tag_color[2])),
-            "'1' still inside the tag"
-        );
-        assert_eq!(
-            target.get_pixel(60, title_row),
-            Some(Color::opaque(120, 80, 40)),
-            "the 25-character raw string would still be drawing here"
-        );
+        check_eq! { target.get_pixel(31, title_row) => Some(Color::opaque(tag_color[0], tag_color[1], tag_color[2])), "'3' takes the <c ff2c28> tag color" }
+        check_eq! { target.get_pixel(42, title_row) => Some(Color::opaque(tag_color[0], tag_color[1], tag_color[2])), "'1' still inside the tag" }
+        check_eq! { target.get_pixel(60, title_row) => Some(Color::opaque(120, 80, 40)), "the 25-character raw string would still be drawing here" }
     }
 
     #[test]
@@ -4106,17 +3866,14 @@ mod tests {
         // BlitSurfaceTile over Output.Wdt x Output.Hgt where Output.Hgt =
         // max(50, texture height) (src/C4UpperBoard.cpp:52,117-120).
         let mut target = surface(64, 80);
-        let hud = HudGraphics {
-            upper_board: Some(solid_image(16, 55, [120, 80, 40, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { upper_board => solid_image(16, 55, [120, 80, 40, 255]) };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
         draw_upper_board(&mut target, &font, &hud, UpperBoardMode::Full, "", 0);
         // Tiles cover x beyond one tile width and the full 55px height...
-        assert_eq!(target.get_pixel(40, 54), Some(Color::opaque(120, 80, 40)));
+        check_eq! { target.get_pixel(40, 54) => Some(Color::opaque(120, 80, 40)) }
         // ...but not below the texture height.
-        assert_eq!(target.get_pixel(40, 55), Some(Color::opaque(0, 0, 0)));
+        check_eq! { target.get_pixel(40, 55) => Some(Color::opaque(0, 0, 0)) }
     }
 
     #[test]
@@ -4124,35 +3881,27 @@ mod tests {
         // fLogoZoom = 0.21 * 960/Wdt for the 3:1 logo
         // (src/C4UpperBoard.cpp:56-68).
         let mut target = surface(400, 80);
-        let hud = HudGraphics {
-            upper_board: Some(solid_image(16, 50, [120, 80, 40, 255])),
-            logo: Some(solid_image(960, 320, [10, 200, 30, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { upper_board => solid_image(16, 50, [120, 80, 40, 255]), logo => solid_image(960, 320, [10, 200, 30, 255]) };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
         draw_upper_board(&mut target, &font, &hud, UpperBoardMode::Full, "", 0);
         // dst x = 400/2 - 480*0.21 = 99.2 -> 99, width 201, height 67.
-        assert_eq!(target.get_pixel(98, 30), Some(Color::opaque(120, 80, 40)));
-        assert_eq!(target.get_pixel(100, 30), Some(Color::opaque(10, 200, 30)));
-        assert_eq!(target.get_pixel(200, 66), Some(Color::opaque(10, 200, 30)));
-        assert_eq!(target.get_pixel(200, 68), Some(Color::opaque(0, 0, 0)));
+        check_eq! { target.get_pixel(98, 30) => Some(Color::opaque(120, 80, 40)) }
+        check_eq! { target.get_pixel(100, 30) => Some(Color::opaque(10, 200, 30)) }
+        check_eq! { target.get_pixel(200, 66) => Some(Color::opaque(10, 200, 30)) }
+        check_eq! { target.get_pixel(200, 68) => Some(Color::opaque(0, 0, 0)) }
     }
 
     #[test]
     fn two_line_product_logo_keeps_the_classic_upper_board_height() {
         let mut target = surface(400, 120);
-        let hud = HudGraphics {
-            upper_board: Some(solid_image(16, 50, [120, 80, 40, 255])),
-            logo: Some(solid_image(972, 440, [10, 200, 30, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { upper_board => solid_image(16, 50, [120, 80, 40, 255]), logo => solid_image(972, 440, [10, 200, 30, 255]) };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
         draw_upper_board(&mut target, &font, &hud, UpperBoardMode::Full, "", 0);
 
-        assert_eq!(target.get_pixel(200, 66), Some(Color::opaque(10, 200, 30)));
-        assert_eq!(target.get_pixel(200, 68), Some(Color::opaque(0, 0, 0)));
+        check_eq! { target.get_pixel(200, 66) => Some(Color::opaque(10, 200, 30)) }
+        check_eq! { target.get_pixel(200, 68) => Some(Color::opaque(0, 0, 0)) }
     }
 
     #[test]
@@ -4160,12 +3909,12 @@ mod tests {
         // 150x150 portrait into the 56x45 facet -> 45x45 at x+5
         // (src/C4Facet.cpp:100-121, src/C4ObjectInfo.cpp:313).
         let fitted = aspect_fit(150, 150, SurfaceRect::new(5, 5, 56, 45));
-        assert_eq!((fitted.x, fitted.y), (10, 5));
-        assert_eq!((fitted.width, fitted.height), (45, 45));
+        check_eq! { (fitted.x, fitted.y) => (10, 5) }
+        check_eq! { (fitted.width, fitted.height) => (45, 45) }
         // 60x30 wealth icon into 35x17 -> 34x17 at x+0.
         let fitted = aspect_fit(60, 30, SurfaceRect::new(0, 0, 35, 17));
-        assert_eq!((fitted.x, fitted.y), (0, 0));
-        assert_eq!((fitted.width, fitted.height), (34, 17));
+        check_eq! { (fitted.x, fitted.y) => (0, 0) }
+        check_eq! { (fitted.width, fitted.height) => (34, 17) }
     }
 
     #[test]
@@ -4174,15 +3923,12 @@ mod tests {
         // color by its gray value (src/C4Surface.cpp:236-287).
         let image = solid_image(1, 1, [0, 0, 255, 255]);
         let colored = colorize_by_owner(&image, Color::opaque(255, 0, 0));
-        assert_eq!(&colored.pixels()[..4], &[255, 0, 0, 255]);
-        assert_eq!(
-            colored.gpu_texture_id(),
-            colorize_by_owner(&image, Color::opaque(255, 0, 0)).gpu_texture_id()
-        );
+        check_eq! { &colored.pixels()[..4] => &[255, 0, 0, 255] }
+        check_eq! { colored.gpu_texture_id() => colorize_by_owner(&image, Color::opaque(255, 0, 0)).gpu_texture_id() }
         // Non-blue pixels pass through untouched.
         let image = solid_image(1, 1, [200, 30, 30, 255]);
         let colored = colorize_by_owner(&image, Color::opaque(255, 0, 0));
-        assert_eq!(&colored.pixels()[..4], &[200, 30, 30, 255]);
+        check_eq! { &colored.pixels()[..4] => &[200, 30, 30, 255] }
     }
 
     #[test]
@@ -4231,11 +3977,7 @@ mod tests {
                 for (b_index, &b) in CHANNELS.iter().enumerate() {
                     let x = r_index as u32 * side + g_index as u32;
                     let y = b_index as u32;
-                    assert_eq!(
-                        mask.pixels[(y * width + x) as usize],
-                        clr_by_owner_gray(i32::from(r), i32::from(g), i32::from(b)).unwrap_or(0),
-                        "sample rgb({r}, {g}, {b})"
-                    );
+                    check_eq! { mask.pixels[(y * width + x) as usize] => clr_by_owner_gray(i32::from(r), i32::from(g), i32::from(b)).unwrap_or(0), "sample rgb({r}, {g}, {b})" }
                 }
             }
         }
@@ -4253,10 +3995,7 @@ mod tests {
             pixels.extend_from_slice(&[60, 60, 60, 255]); // col 1: empty
             pixels.extend_from_slice(&[0, 0, 200, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         }
-        let hud = HudGraphics {
-            energy_bars: Some(ImageData::new(6, 3, pixels)),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { energy_bars => ImageData::new(6, 3, pixels) };
         let viewport = SurfaceRect::new(0, 0, 40, 200);
         draw_level_bar(
             &mut target,
@@ -4274,23 +4013,11 @@ mod tests {
         let bar_top = SYMBOL_SIZE + 2 * SYMBOL_BORDER + 10;
         let bar_height = 200 - 3 * SYMBOL_BORDER - 2 * SYMBOL_SIZE - 10;
         let x = SYMBOL_BORDER as u32;
-        assert_eq!(bar_height, 105);
-        assert_eq!(level_bar_y(bar_height, 1, 2), 53);
-        assert_eq!(
-            target.get_pixel(x, (bar_top + 52) as u32),
-            Some(Color::opaque(60, 60, 60)),
-            "the last C++-empty fractional boundary row remains empty"
-        );
-        assert_eq!(
-            target.get_pixel(x, (bar_top + 53) as u32),
-            Some(Color::opaque(200, 0, 0)),
-            "the native threshold row begins the filled half"
-        );
-        assert_eq!(
-            target.get_pixel(x, (bar_top + bar_height - 2) as u32),
-            Some(Color::opaque(200, 0, 0)),
-            "bottom of a half-full bar is filled"
-        );
+        check_eq! { bar_height => 105 }
+        check_eq! { level_bar_y(bar_height, 1, 2) => 53 }
+        check_eq! { target.get_pixel(x, (bar_top + 52) as u32) => Some(Color::opaque(60, 60, 60)), "the last C++-empty fractional boundary row remains empty" }
+        check_eq! { target.get_pixel(x, (bar_top + 53) as u32) => Some(Color::opaque(200, 0, 0)), "the native threshold row begins the filled half" }
+        check_eq! { target.get_pixel(x, (bar_top + bar_height - 2) as u32) => Some(Color::opaque(200, 0, 0)), "bottom of a half-full bar is filled" }
 
         let mut without_portraits = surface(40, 200);
         draw_level_bar(
@@ -4305,33 +4032,17 @@ mod tests {
         );
         let portraitless_top = SYMBOL_SIZE + 2 * SYMBOL_BORDER;
         let portraitless_height = 200 - 3 * SYMBOL_BORDER - 2 * SYMBOL_SIZE;
-        assert_eq!(
-            without_portraits.get_pixel(x, (portraitless_top - 1) as u32),
-            Some(Color::opaque(0, 0, 0)),
-            "the row above the portraitless bar stays untouched"
-        );
-        assert_eq!(
-            without_portraits.get_pixel(x, portraitless_top as u32),
-            Some(Color::opaque(60, 60, 60)),
-            "disabling portraits moves the bar top up ten pixels"
-        );
-        assert_eq!(
-            without_portraits.get_pixel(x, (portraitless_top + portraitless_height - 1) as u32),
-            Some(Color::opaque(200, 0, 0)),
-            "the portraitless bar keeps the portraits-on bottom edge"
-        );
-        assert_eq!(
-            without_portraits.get_pixel(x, (portraitless_top + portraitless_height) as u32),
-            Some(Color::opaque(0, 0, 0)),
-            "the row below the bar stays untouched"
-        );
-        assert_eq!(portraitless_height, bar_height + 10);
-        assert_eq!(portraitless_top + portraitless_height, bar_top + bar_height);
+        check_eq! { without_portraits.get_pixel(x, (portraitless_top - 1) as u32) => Some(Color::opaque(0, 0, 0)), "the row above the portraitless bar stays untouched" }
+        check_eq! { without_portraits.get_pixel(x, portraitless_top as u32) => Some(Color::opaque(60, 60, 60)), "disabling portraits moves the bar top up ten pixels" }
+        check_eq! { without_portraits.get_pixel(x, (portraitless_top + portraitless_height - 1) as u32) => Some(Color::opaque(200, 0, 0)), "the portraitless bar keeps the portraits-on bottom edge" }
+        check_eq! { without_portraits.get_pixel(x, (portraitless_top + portraitless_height) as u32) => Some(Color::opaque(0, 0, 0)), "the row below the bar stays untouched" }
+        check_eq! { portraitless_height => bar_height + 10 }
+        check_eq! { portraitless_top + portraitless_height => bar_top + bar_height }
 
         // BoundBy tests the lower bound before the inverted upper bound.
-        assert_eq!(level_bar_y(105, -1, -2), 105);
-        assert_eq!(level_bar_y(105, 0, 0), 105);
-        assert_eq!(level_bar_y(105, 0, -2), 315);
+        check_eq! { level_bar_y(105, -1, -2) => 105 }
+        check_eq! { level_bar_y(105, 0, 0) => 105 }
+        check_eq! { level_bar_y(105, 0, -2) => 315 }
     }
 
     #[test]
@@ -4347,33 +4058,21 @@ mod tests {
             rank_pixels.extend(std::iter::repeat_n([220u8, 220, 0, 255], 4).flatten());
         }
         let ranks = ImageData::new(8, 4, rank_pixels);
-        let hud = HudGraphics {
-            rank: Some(ranks.clone()),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { rank => ranks.clone() };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
         let viewport = SurfaceRect::new(0, 0, 200, 200);
-        draw_cursor_info(
-            &mut target,
-            &font,
-            &hud,
-            viewport,
-            "William",
-            0,
-            Some(&portrait),
-            Some(&ranks),
-        );
+        draw_cursor_fixture! { &mut target, &font, &hud, viewport; name => "William", portrait => Some(&portrait), rank_symbols => Some(&ranks) };
         // Portrait: (5,5,56,45) aspect-fit -> (10,5,45,45).
-        assert_eq!(target.get_pixel(9, 20), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(target.get_pixel(11, 20), Some(Color::opaque(10, 200, 30)));
-        assert_eq!(target.get_pixel(54, 20), Some(Color::opaque(10, 200, 30)));
-        assert_eq!(target.get_pixel(56, 20), Some(Color::opaque(0, 0, 0)));
+        check_eq! { target.get_pixel(9, 20) => Some(Color::opaque(0, 0, 0)) }
+        check_eq! { target.get_pixel(11, 20) => Some(Color::opaque(10, 200, 30)) }
+        check_eq! { target.get_pixel(54, 20) => Some(Color::opaque(10, 200, 30)) }
+        check_eq! { target.get_pixel(56, 20) => Some(Color::opaque(0, 0, 0)) }
         // Rank 0 cell at (5 + 46, 5), 4x4, blue — drawn over the portrait's
         // right edge, exactly like C++ (iX advances 4*Hgt/3 while the
         // portrait facet is 4*Hgt/3+10 wide, src/C4ObjectInfo.cpp:313-320).
-        assert_eq!(target.get_pixel(51, 6), Some(Color::opaque(0, 0, 220)));
-        assert_eq!(target.get_pixel(51, 10), Some(Color::opaque(10, 200, 30)));
+        check_eq! { target.get_pixel(51, 6) => Some(Color::opaque(0, 0, 220)) }
+        check_eq! { target.get_pixel(51, 10) => Some(Color::opaque(10, 200, 30)) }
     }
 
     #[test]
@@ -4383,19 +4082,10 @@ mod tests {
         let ranks = solid_image(4, 4, [220, 30, 20, 255]);
         let mut target = surface(100, 60);
         let font = bitmap_font();
-        draw_cursor_info(
-            &mut target,
-            &HudFont::Fallback(&font),
-            &HudGraphics::default(),
-            SurfaceRect::new(0, 0, 100, 60),
-            "",
-            0,
-            None,
-            Some(&ranks),
-        );
+        draw_cursor_fixture! { &mut target, &HudFont::Fallback(&font), &HudGraphics::default(), SurfaceRect::new(0, 0, 100, 60); rank_symbols => Some(&ranks) };
 
-        assert_eq!(target.get_pixel(5, 5), Some(Color::opaque(220, 30, 20)));
-        assert_eq!(target.get_pixel(51, 5), Some(Color::opaque(0, 0, 0)));
+        check_eq! { target.get_pixel(5, 5) => Some(Color::opaque(220, 30, 20)) }
+        check_eq! { target.get_pixel(51, 5) => Some(Color::opaque(0, 0, 0)) }
     }
 
     #[test]
@@ -4404,48 +4094,16 @@ mod tests {
         let owner_overlay = solid_image(1, 1, [147, 0, 0, 255]);
         let mut target = surface(80, 60);
         let font = bitmap_font();
-        draw_cursor_info_with_gamma(
-            &mut target,
-            &HudFont::Fallback(&font),
-            &HudGraphics::default(),
-            SurfaceRect::new(0, 0, 80, 60),
-            "",
-            0,
-            None,
-            Some(&base),
-            Some(&owner_overlay),
-            0x00e8_0000,
-            None,
-            None,
-            false,
-            0,
-            None,
-        );
+        draw_cursor_fixture! { &mut target, &HudFont::Fallback(&font), &HudGraphics::default(), SurfaceRect::new(0, 0, 80, 60); portrait => Some(&base), portrait_owner_overlay => Some(&owner_overlay), portrait_owner_color => Some(0x00e8_0000) };
 
-        assert_eq!(target.get_pixel(20, 20), Some(Color::opaque(134, 0, 0)));
+        check_eq! { target.get_pixel(20, 20) => Some(Color::opaque(134, 0, 0)) }
 
         let base = solid_image(1, 1, [10, 20, 30, 255]);
         let owner_overlay = solid_image(1, 1, [64, 128, 192, 128]);
         let mut target = surface(80, 60);
-        draw_cursor_info_with_gamma(
-            &mut target,
-            &HudFont::Fallback(&font),
-            &HudGraphics::default(),
-            SurfaceRect::new(0, 0, 80, 60),
-            "",
-            0,
-            None,
-            Some(&base),
-            Some(&owner_overlay),
-            0x00e8_8040,
-            None,
-            None,
-            false,
-            0,
-            None,
-        );
+        draw_cursor_fixture! { &mut target, &HudFont::Fallback(&font), &HudGraphics::default(), SurfaceRect::new(0, 0, 80, 60); portrait => Some(&base), portrait_owner_overlay => Some(&owner_overlay), portrait_owner_color => Some(0x00e8_8040) };
 
-        assert_eq!(target.get_pixel(20, 20), Some(Color::opaque(34, 42, 39)));
+        check_eq! { target.get_pixel(20, 20) => Some(Color::opaque(34, 42, 39)) }
     }
 
     #[test]
@@ -4459,31 +4117,15 @@ mod tests {
             rank_pixels.extend(std::iter::repeat_n([220u8, 220, 0, 255], 4).flatten());
         }
         let ranks = ImageData::new(8, 4, rank_pixels);
-        let hud = HudGraphics {
-            captain: Some(captain),
-            rank: Some(global_ranks),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { captain => captain, rank => global_ranks };
         let font = bitmap_font();
         let render = |hide_hud_elements| {
             let mut target = surface(160, 80);
-            draw_cursor_info_with_gamma(
-                &mut target,
-                &HudFont::Fallback(&font),
-                &hud,
-                SurfaceRect::new(0, 0, 160, 80),
-                "WW",
-                1,
-                Some("I"),
-                Some(&portrait),
-                None,
-                u32::MAX,
-                Some(&ranks),
-                None,
-                true,
-                hide_hud_elements,
-                None,
-            );
+            draw_cursor_fixture! {
+                &mut target, &HudFont::Fallback(&font), &hud, SurfaceRect::new(0, 0, 160, 80);
+                name => "WW", rank => 1, rank_name => Some("I"), portrait => Some(&portrait),
+                rank_symbols => Some(&ranks), is_captain => true, hide_hud_elements => hide_hud_elements,
+            };
             target
         };
         let white_pixels = |surface: &Surface| {
@@ -4504,59 +4146,23 @@ mod tests {
         let baseline = render(0);
         let baseline_white = white_pixels(&baseline);
         let baseline_min_x = baseline_white.iter().map(|(x, _)| *x).min().unwrap();
-        assert_eq!(baseline.get_pixel(11, 20), Some(Color::opaque(10, 200, 30)));
-        assert_eq!(baseline.get_pixel(51, 6), Some(Color::opaque(220, 30, 20)));
-        assert_eq!(baseline.get_pixel(57, 6), Some(Color::opaque(220, 220, 0)));
+        check_eq! { baseline.get_pixel(11, 20) => Some(Color::opaque(10, 200, 30)) }
+        check_eq! { baseline.get_pixel(51, 6) => Some(Color::opaque(220, 30, 20)) }
+        check_eq! { baseline.get_pixel(57, 6) => Some(Color::opaque(220, 220, 0)) }
 
         let hidden_portrait = render(clonk_engine::HIDE_HUD_ELEMENT_PORTRAIT);
-        assert_ne!(
-            hidden_portrait.get_pixel(11, 20),
-            Some(Color::opaque(10, 200, 30))
-        );
-        assert_eq!(
-            hidden_portrait.get_pixel(5, 6),
-            Some(Color::opaque(220, 30, 20))
-        );
-        assert_eq!(
-            hidden_portrait.get_pixel(11, 6),
-            Some(Color::opaque(220, 220, 0))
-        );
-        assert_eq!(
-            white_pixels(&hidden_portrait)
-                .iter()
-                .map(|(x, _)| *x)
-                .min()
-                .unwrap(),
-            baseline_min_x - 46
-        );
+        check_ne! { hidden_portrait.get_pixel(11, 20) => Some(Color::opaque(10, 200, 30)) }
+        check_eq! { hidden_portrait.get_pixel(5, 6) => Some(Color::opaque(220, 30, 20)) }
+        check_eq! { hidden_portrait.get_pixel(11, 6) => Some(Color::opaque(220, 220, 0)) }
+        check_eq! { white_pixels(&hidden_portrait).iter().map(|(x, _)| *x).min().unwrap() => baseline_min_x - 46 }
 
         let hidden_captain = render(clonk_engine::HIDE_HUD_ELEMENT_CAPTAIN);
-        assert_eq!(
-            hidden_captain.get_pixel(51, 6),
-            Some(Color::opaque(220, 220, 0))
-        );
-        assert_eq!(
-            white_pixels(&hidden_captain)
-                .iter()
-                .map(|(x, _)| *x)
-                .min()
-                .unwrap(),
-            baseline_min_x - 6
-        );
+        check_eq! { hidden_captain.get_pixel(51, 6) => Some(Color::opaque(220, 220, 0)) }
+        check_eq! { white_pixels(&hidden_captain).iter().map(|(x, _)| *x).min().unwrap() => baseline_min_x - 6 }
 
         let hidden_rank_image = render(clonk_engine::HIDE_HUD_ELEMENT_RANK_IMAGE);
-        assert_ne!(
-            hidden_rank_image.get_pixel(57, 6),
-            Some(Color::opaque(220, 220, 0))
-        );
-        assert_eq!(
-            white_pixels(&hidden_rank_image)
-                .iter()
-                .map(|(x, _)| *x)
-                .min()
-                .unwrap(),
-            baseline_min_x - 7
-        );
+        check_ne! { hidden_rank_image.get_pixel(57, 6) => Some(Color::opaque(220, 220, 0)) }
+        check_eq! { white_pixels(&hidden_rank_image).iter().map(|(x, _)| *x).min().unwrap() => baseline_min_x - 7 }
 
         let hidden_rank = white_pixels(&render(clonk_engine::HIDE_HUD_ELEMENT_RANK));
         let hidden_name = white_pixels(&render(clonk_engine::HIDE_HUD_ELEMENT_NAME));
@@ -4564,14 +4170,11 @@ mod tests {
             clonk_engine::HIDE_HUD_ELEMENT_RANK | clonk_engine::HIDE_HUD_ELEMENT_NAME,
         ));
         let second_line = (SYMBOL_BORDER + HudFont::Fallback(&font).line_height()) as usize;
-        assert!(hidden_rank.iter().all(|(_, y)| *y < second_line));
-        assert!(!hidden_name.is_empty(), "rank title survives HH_Name");
-        assert!(hidden_name.iter().all(|(_, y)| *y < second_line));
-        assert!(
-            hidden_rank.len() > hidden_name.len(),
-            "WW remains while I is hidden"
-        );
-        assert!(hidden_text.is_empty());
+        check! { hidden_rank.iter().all(|(_, y)| *y < second_line) }
+        check! { !hidden_name.is_empty(), "rank title survives HH_Name" }
+        check! { hidden_name.iter().all(|(_, y)| *y < second_line) }
+        check! { hidden_rank.len() > hidden_name.len(), "WW remains while I is hidden" }
+        check! { hidden_text.is_empty() }
     }
 
     #[test]
@@ -4583,30 +4186,14 @@ mod tests {
         let mut target = surface(40, 40);
         let font = bitmap_font();
 
-        draw_cursor_info_with_gamma(
-            &mut target,
-            &HudFont::Fallback(&font),
-            &HudGraphics::default(),
-            SurfaceRect::new(0, 0, 40, 40),
-            "",
-            25,
-            None,
-            None,
-            None,
-            u32::MAX,
-            Some(&ranks),
-            Some(24),
-            false,
-            0,
-            None,
-        );
+        draw_cursor_fixture! { &mut target, &HudFont::Fallback(&font), &HudGraphics::default(), SurfaceRect::new(0, 0, 40, 40); rank => 25, rank_symbols => Some(&ranks), rank_symbol_count => Some(24) };
 
         // Base phase 1 starts at (5,5). Extension phase 24 is drawn at its
         // native 6x6 size at (1,2), the direct C++ HUD offset (-4,-3).
-        assert_eq!(target.get_pixel(1, 2), Some(Color::opaque(220, 40, 20)));
-        assert_eq!(target.get_pixel(6, 2), Some(Color::opaque(220, 40, 20)));
-        assert_eq!(target.get_pixel(7, 2), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(target.get_pixel(10, 8), Some(Color::opaque(20, 40, 220)));
+        check_eq! { target.get_pixel(1, 2) => Some(Color::opaque(220, 40, 20)) }
+        check_eq! { target.get_pixel(6, 2) => Some(Color::opaque(220, 40, 20)) }
+        check_eq! { target.get_pixel(7, 2) => Some(Color::opaque(0, 0, 0)) }
+        check_eq! { target.get_pixel(10, 8) => Some(Color::opaque(20, 40, 220)) }
     }
 
     #[test]
@@ -4618,61 +4205,25 @@ mod tests {
         let mut target = surface(40, 40);
         let font = bitmap_font();
 
-        draw_cursor_info_with_gamma(
-            &mut target,
-            &HudFont::Fallback(&font),
-            &HudGraphics::default(),
-            SurfaceRect::new(0, 0, 40, 40),
-            "",
-            144,
-            None,
-            None,
-            None,
-            u32::MAX,
-            Some(&ranks),
-            Some(24),
-            false,
-            0,
-            None,
-        );
+        draw_cursor_fixture! { &mut target, &HudFont::Fallback(&font), &HudGraphics::default(), SurfaceRect::new(0, 0, 40, 40); rank => 144, rank_symbols => Some(&ranks), rank_symbol_count => Some(24) };
 
-        assert_eq!(target.get_pixel(1, 2), Some(Color::opaque(220, 20, 200)));
-        assert_eq!(target.get_pixel(10, 8), Some(Color::opaque(20, 220, 40)));
+        check_eq! { target.get_pixel(1, 2) => Some(Color::opaque(220, 20, 200)) }
+        check_eq! { target.get_pixel(10, 8) => Some(Color::opaque(20, 220, 40)) }
     }
 
     #[test]
     fn cursor_info_global_rank_strip_uses_captain_for_extensions() {
         let ranks = horizontal_cell_strip(6, &[[20, 40, 220, 255], [220, 220, 20, 255]]);
-        let hud = HudGraphics {
-            rank: Some(ranks),
-            captain: Some(solid_image(6, 6, [220, 40, 20, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { rank => ranks, captain => solid_image(6, 6, [220, 40, 20, 255]) };
         let mut target = surface(40, 40);
         let font = bitmap_font();
 
-        draw_cursor_info_with_gamma(
-            &mut target,
-            &HudFont::Fallback(&font),
-            &hud,
-            SurfaceRect::new(0, 0, 40, 40),
-            "",
-            2,
-            None,
-            None,
-            None,
-            u32::MAX,
-            None,
-            Some(1),
-            false,
-            clonk_engine::HIDE_HUD_ELEMENT_CAPTAIN,
-            None,
-        );
+        draw_cursor_fixture! { &mut target, &HudFont::Fallback(&font), &hud, SurfaceRect::new(0, 0, 40, 40); rank => 2, rank_symbol_count => Some(1), hide_hud_elements => clonk_engine::HIDE_HUD_ELEMENT_CAPTAIN };
 
         // HH_Captain gates only the standalone status column. This Captain
         // texture is the extended-rank overlay and remains part of RankImage.
-        assert_eq!(target.get_pixel(1, 2), Some(Color::opaque(220, 40, 20)));
-        assert_eq!(target.get_pixel(10, 8), Some(Color::opaque(20, 40, 220)));
+        check_eq! { target.get_pixel(1, 2) => Some(Color::opaque(220, 40, 20)) }
+        check_eq! { target.get_pixel(10, 8) => Some(Color::opaque(20, 40, 220)) }
     }
 
     #[test]
@@ -4681,41 +4232,9 @@ mod tests {
         let font = HudFont::Fallback(&font);
         let viewport = SurfaceRect::new(0, 0, 120, 80);
         let mut unranked = surface(120, 80);
-        draw_cursor_info_with_gamma(
-            &mut unranked,
-            &font,
-            &HudGraphics::default(),
-            viewport,
-            "Joe",
-            0,
-            Some("Captain"),
-            None,
-            None,
-            u32::MAX,
-            None,
-            None,
-            false,
-            0,
-            None,
-        );
+        draw_cursor_fixture! { &mut unranked, &font, &HudGraphics::default(), viewport; name => "Joe", rank_name => Some("Captain") };
         let mut ranked = surface(120, 80);
-        draw_cursor_info_with_gamma(
-            &mut ranked,
-            &font,
-            &HudGraphics::default(),
-            viewport,
-            "Joe",
-            1,
-            Some("Captain"),
-            None,
-            None,
-            u32::MAX,
-            None,
-            None,
-            false,
-            0,
-            None,
-        );
+        draw_cursor_fixture! { &mut ranked, &font, &HudGraphics::default(), viewport; name => "Joe", rank => 1, rank_name => Some("Captain") };
 
         let white_rows = |surface: &Surface| {
             surface
@@ -4729,9 +4248,9 @@ mod tests {
         let unranked_rows = white_rows(&unranked);
         let ranked_rows = white_rows(&ranked);
         let second_line = (SYMBOL_BORDER + font.line_height()) as usize;
-        assert!(unranked_rows.iter().all(|row| *row < second_line));
-        assert!(ranked_rows.iter().any(|row| *row < second_line));
-        assert!(ranked_rows.iter().any(|row| *row >= second_line));
+        check! { unranked_rows.iter().all(|row| *row < second_line) }
+        check! { ranked_rows.iter().any(|row| *row < second_line) }
+        check! { ranked_rows.iter().any(|row| *row >= second_line) }
     }
 
     #[test]
@@ -4766,12 +4285,12 @@ mod tests {
 
         // Origin = (10+5, 20+100-5-35) = (15,80); the second section starts
         // at x=50. Pixels immediately above/left remain untouched.
-        assert_eq!(target.get_pixel(15, 80), Some(Color::opaque(220, 10, 10)));
-        assert_eq!(target.get_pixel(49, 114), Some(Color::opaque(220, 10, 10)));
-        assert_eq!(target.get_pixel(50, 80), Some(Color::opaque(10, 220, 10)));
-        assert_eq!(target.get_pixel(84, 114), Some(Color::opaque(10, 220, 10)));
-        assert_eq!(target.get_pixel(14, 80), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(target.get_pixel(15, 79), Some(Color::opaque(0, 0, 0)));
+        check_eq! { target.get_pixel(15, 80) => Some(Color::opaque(220, 10, 10)) }
+        check_eq! { target.get_pixel(49, 114) => Some(Color::opaque(220, 10, 10)) }
+        check_eq! { target.get_pixel(50, 80) => Some(Color::opaque(10, 220, 10)) }
+        check_eq! { target.get_pixel(84, 114) => Some(Color::opaque(10, 220, 10)) }
+        check_eq! { target.get_pixel(14, 80) => Some(Color::opaque(0, 0, 0)) }
+        check_eq! { target.get_pixel(15, 79) => Some(Color::opaque(0, 0, 0)) }
     }
 
     #[test]
@@ -4798,18 +4317,8 @@ mod tests {
 
         let single = render(1);
         let stack = render(2);
-        assert!(
-            single
-                .pixels()
-                .chunks_exact(4)
-                .all(|pixel| pixel == [0, 0, 0, 255]),
-            "DrawIDList suppresses the count for exactly one item"
-        );
-        assert_ne!(
-            stack.pixels(),
-            single.pixels(),
-            "a stack draws the C++ `2x` suffix"
-        );
+        check! { single.pixels().chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]), "DrawIDList suppresses the count for exactly one item" }
+        check_ne! { stack.pixels() => single.pixels(), "a stack draws the C++ `2x` suffix" }
     }
 
     #[test]
@@ -4820,43 +4329,12 @@ mod tests {
         // C4Region.cpp:87-94).
         let viewport = SurfaceRect::new(10, 20, 320, 200);
         let top = 20 + 200 - SYMBOL_BORDER - SYMBOL_SIZE;
-        assert_eq!(
-            inventory_region_index(viewport, clonk_gui::Point::new(15.0, top as f32), 2),
-            Some(0)
-        );
-        assert_eq!(
-            inventory_region_index(
-                viewport,
-                clonk_gui::Point::new(
-                    (15 + SYMBOL_SIZE - 1) as f32,
-                    (top + SYMBOL_SIZE - 1) as f32
-                ),
-                2,
-            ),
-            Some(0),
-            "last integer pixel remains inside the first C4Region"
-        );
-        assert_eq!(
-            inventory_region_index(
-                viewport,
-                clonk_gui::Point::new((15 + SYMBOL_SIZE) as f32, top as f32),
-                2,
-            ),
-            Some(1)
-        );
-        assert_eq!(
-            inventory_region_index(
-                viewport,
-                clonk_gui::Point::new((15 + 2 * SYMBOL_SIZE) as f32, top as f32),
-                2,
-            ),
-            None
-        );
-        assert_eq!(
-            inventory_region_rect(viewport, 1, 2),
-            Some(SurfaceRect::new(50, top, 35, 35))
-        );
-        assert_eq!(inventory_region_rect(viewport, 2, 2), None);
+        check_eq! { inventory_region_index(viewport, clonk_gui::Point::new(15.0, top as f32), 2) => Some(0) }
+        check_eq! { inventory_region_index(viewport, clonk_gui::Point::new((15 + SYMBOL_SIZE - 1) as f32, (top + SYMBOL_SIZE - 1) as f32), 2,) => Some(0), "last integer pixel remains inside the first C4Region" }
+        check_eq! { inventory_region_index(viewport, clonk_gui::Point::new((15 + SYMBOL_SIZE) as f32, top as f32), 2,) => Some(1) }
+        check_eq! { inventory_region_index(viewport, clonk_gui::Point::new((15 + 2 * SYMBOL_SIZE) as f32, top as f32), 2,) => None }
+        check_eq! { inventory_region_rect(viewport, 1, 2) => Some(SurfaceRect::new(50, top, 35, 35)) }
+        check_eq! { inventory_region_rect(viewport, 2, 2) => None }
     }
 
     #[test]
@@ -4878,29 +4356,11 @@ mod tests {
         )
         .expect("nonempty caption draws");
 
-        assert_eq!(rect.x, viewport.x + 1, "left edge is clamped inside");
-        assert!(
-            rect.x + (rect.width as i32) < viewport.x + viewport.width as i32,
-            "right edge remains inside the viewport"
-        );
-        assert_eq!(
-            rect.y + rect.height as i32,
-            79,
-            "CaptionBottomY leaves the native one-pixel gap"
-        );
-        assert_eq!(
-            target.get_pixel(
-                (rect.x + rect.width as i32 / 2 - font.text_width("Grab Wagon.") / 2) as u32,
-                rect.y as u32,
-            ),
-            Some(MOUSE_CAPTION_COLOR),
-            "the first centered line uses 0xfaFF0000"
-        );
-        assert_eq!(
-            target.clip(),
-            Some(previous_clip),
-            "caption drawing restores its caller's clip"
-        );
+        check_eq! { rect.x => viewport.x + 1, "left edge is clamped inside" }
+        check! { rect.x + (rect.width as i32) < viewport.x + viewport.width as i32, "right edge remains inside the viewport" }
+        check_eq! { rect.y + rect.height as i32 => 79, "CaptionBottomY leaves the native one-pixel gap" }
+        check_eq! { target.get_pixel((rect.x + rect.width as i32 / 2 - font.text_width("Grab Wagon.") / 2) as u32, rect.y as u32,) => Some(MOUSE_CAPTION_COLOR), "the first centered line uses 0xfaFF0000" }
+        check_eq! { target.clip() => Some(previous_clip), "caption drawing restores its caller's clip" }
 
         let oversized = draw_mouse_caption(
             &mut target,
@@ -4912,21 +4372,9 @@ mod tests {
             None,
         )
         .expect("oversized caption still draws with native geometry");
-        assert_eq!(
-            oversized.x,
-            viewport.x + 1,
-            "BoundBy chooses its left bound even when that exceeds the right bound"
-        );
-        assert_eq!(
-            target.get_pixel((viewport.x + viewport.width as i32 - 1) as u32, 53),
-            Some(MOUSE_CAPTION_COLOR),
-            "caption reaches the last pixel inside its viewport clip"
-        );
-        assert_eq!(
-            target.get_pixel((viewport.x + viewport.width as i32) as u32, 53),
-            Some(Color::opaque(0, 0, 0)),
-            "caption pixels cannot leak into an adjacent viewport"
-        );
+        check_eq! { oversized.x => viewport.x + 1, "BoundBy chooses its left bound even when that exceeds the right bound" }
+        check_eq! { target.get_pixel((viewport.x + viewport.width as i32 - 1) as u32, 53) => Some(MOUSE_CAPTION_COLOR), "caption reaches the last pixel inside its viewport clip" }
+        check_eq! { target.get_pixel((viewport.x + viewport.width as i32) as u32, 53) => Some(Color::opaque(0, 0, 0)), "caption pixels cannot leak into an adjacent viewport" }
     }
 
     #[test]
@@ -4934,12 +4382,7 @@ mod tests {
         // Wealth at right - (35+5), score at right - 2*(35+5), crew at
         // right - 3*(35+5), all at y = border (src/C4Viewport.cpp:1287-1321).
         let mut target = surface(200, 100);
-        let hud = HudGraphics {
-            wealth: Some(solid_image(60, 30, [220, 180, 0, 255])),
-            score: Some(solid_image(60, 30, [180, 90, 0, 255])),
-            crew: Some(solid_image(60, 30, [0, 0, 255, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { wealth => solid_image(60, 30, [220, 180, 0, 255]), score => solid_image(60, 30, [180, 90, 0, 255]), crew => solid_image(60, 30, [0, 0, 255, 255]) };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
         let viewport = SurfaceRect::new(0, 0, 200, 100);
@@ -4955,22 +4398,17 @@ mod tests {
             Color::opaque(255, 0, 0),
         );
         // Wealth icon: cgo (160,5,35,17), aspect-fit 34x17 at x 160.
-        assert_eq!(target.get_pixel(161, 10), Some(Color::opaque(220, 180, 0)));
+        check_eq! { target.get_pixel(161, 10) => Some(Color::opaque(220, 180, 0)) }
         // Score icon: cgo (120,5,...).
-        assert_eq!(target.get_pixel(121, 10), Some(Color::opaque(180, 90, 0)));
+        check_eq! { target.get_pixel(121, 10) => Some(Color::opaque(180, 90, 0)) }
         // Crew icon: cgo (80,5,...) — pure blue is ClrByOwner, so it takes
         // the red owner color (src/C4Viewport.cpp:1320, C4Surface.cpp:236).
-        assert_eq!(target.get_pixel(81, 10), Some(Color::opaque(255, 0, 0)));
+        check_eq! { target.get_pixel(81, 10) => Some(Color::opaque(255, 0, 0)) }
     }
 
     #[test]
     fn fixed_items_respect_individual_visibility() {
-        let hud = HudGraphics {
-            wealth: Some(solid_image(60, 30, [220, 180, 0, 255])),
-            score: Some(solid_image(60, 30, [180, 90, 0, 255])),
-            crew: Some(solid_image(60, 30, [0, 0, 255, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { wealth => solid_image(60, 30, [220, 180, 0, 255]), score => solid_image(60, 30, [180, 90, 0, 255]), crew => solid_image(60, 30, [0, 0, 255, 255]) };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
         let viewport = SurfaceRect::new(0, 0, 200, 100);
@@ -4992,12 +4430,9 @@ mod tests {
             false,
             None,
         );
-        assert_eq!(
-            wealth_only.get_pixel(161, 10),
-            Some(Color::opaque(220, 180, 0))
-        );
-        assert_eq!(wealth_only.get_pixel(121, 10), Some(black));
-        assert_eq!(wealth_only.get_pixel(81, 10), Some(black));
+        check_eq! { wealth_only.get_pixel(161, 10) => Some(Color::opaque(220, 180, 0)) }
+        check_eq! { wealth_only.get_pixel(121, 10) => Some(black) }
+        check_eq! { wealth_only.get_pixel(81, 10) => Some(black) }
 
         let mut score_and_crew = surface(200, 100);
         draw_player_fixed_items_with_gamma(
@@ -5015,15 +4450,9 @@ mod tests {
             true,
             None,
         );
-        assert_eq!(score_and_crew.get_pixel(161, 10), Some(black));
-        assert_eq!(
-            score_and_crew.get_pixel(121, 10),
-            Some(Color::opaque(180, 90, 0))
-        );
-        assert_eq!(
-            score_and_crew.get_pixel(81, 10),
-            Some(Color::opaque(255, 0, 0))
-        );
+        check_eq! { score_and_crew.get_pixel(161, 10) => Some(black) }
+        check_eq! { score_and_crew.get_pixel(121, 10) => Some(Color::opaque(180, 90, 0)) }
+        check_eq! { score_and_crew.get_pixel(81, 10) => Some(Color::opaque(255, 0, 0)) }
     }
 
     #[test]
@@ -5042,49 +4471,27 @@ mod tests {
         draw_image_aspect(&mut canonical_target, &canonical, rect, None);
         draw_image_aspect(&mut dirty_target, &hidden_white, rect, None);
 
-        assert_eq!(
-            canonical_target.get_pixel(2, 0),
-            Some(Color::opaque(191, 191, 191))
-        );
-        assert_eq!(
-            dirty_target.get_pixel(2, 0),
-            Some(Color::opaque(239, 239, 239))
-        );
+        check_eq! { canonical_target.get_pixel(2, 0) => Some(Color::opaque(191, 191, 191)) }
+        check_eq! { dirty_target.get_pixel(2, 0) => Some(Color::opaque(239, 239, 239)) }
     }
 
     #[test]
     fn message_board_fills_bottom_strip_with_background_tile() {
         // C4MessageBoard::Draw background blit (src/C4MessageBoard.cpp:258).
         let mut target = surface(64, 64);
-        let hud = HudGraphics {
-            background: Some(solid_image(8, 8, [20, 24, 28, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { background => solid_image(8, 8, [20, 24, 28, 255]) };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
         let strip_height = font.line_height();
         draw_message_board(&mut target, &font, &hud, &MessageBoardOverlay::default());
-        assert_eq!(
-            target.get_pixel(50, 64 - 1),
-            Some(Color::opaque(20, 24, 28))
-        );
-        assert_eq!(
-            target.get_pixel(50, (64 - strip_height - 1) as u32),
-            Some(Color::opaque(0, 0, 0))
-        );
+        check_eq! { target.get_pixel(50, 64 - 1) => Some(Color::opaque(20, 24, 28)) }
+        check_eq! { target.get_pixel(50, (64 - strip_height - 1) as u32) => Some(Color::opaque(0, 0, 0)) }
     }
 
     #[test]
     fn message_board_background_tile_is_screen_anchored() {
         let mut target = surface(8, 10);
-        let hud = HudGraphics {
-            background: Some(ImageData::new(
-                1,
-                3,
-                vec![200, 0, 0, 255, 0, 200, 0, 255, 0, 0, 200, 255],
-            )),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { background => ImageData::new( 1, 3, vec![200, 0, 0, 255, 0, 200, 0, 255, 0, 0, 200, 255], ) };
         let fallback = FixedWidthMarkerFont;
         let font = HudFont::Fallback(&fallback);
 
@@ -5092,18 +4499,15 @@ mod tests {
 
         // Output.Y is 4, so the first board row continues screen row 4 of
         // the three-row tile instead of restarting at source row zero.
-        assert_eq!(target.get_pixel(7, 4), Some(Color::opaque(0, 200, 0)));
-        assert_eq!(target.get_pixel(7, 5), Some(Color::opaque(0, 0, 200)));
-        assert_eq!(target.get_pixel(7, 6), Some(Color::opaque(200, 0, 0)));
+        check_eq! { target.get_pixel(7, 4) => Some(Color::opaque(0, 200, 0)) }
+        check_eq! { target.get_pixel(7, 5) => Some(Color::opaque(0, 0, 200)) }
+        check_eq! { target.get_pixel(7, 6) => Some(Color::opaque(200, 0, 0)) }
     }
 
     #[test]
     fn single_line_fader_offsets_and_alpha_fades_older_text() {
         let mut target = surface(64, 24);
-        let hud = HudGraphics {
-            background: Some(solid_image(2, 2, [0, 0, 0, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { background => solid_image(2, 2, [0, 0, 0, 255]) };
         let fallback = FixedWidthMarkerFont;
         let font = HudFont::Fallback(&fallback);
         let line_height = font.line_height();
@@ -5117,26 +4521,15 @@ mod tests {
 
         draw_message_board(&mut target, &font, &hud, &board);
 
-        assert_eq!(
-            target.get_pixel(0, (output_y + 3) as u32),
-            Some(Color::opaque(255, 255, 255)),
-            "Fader vertically offsets the current line"
-        );
-        assert_eq!(
-            target.get_pixel(0, (output_y - 3) as u32),
-            Some(Color::new(255, 255, 255, 234)),
-            "the preceding line keeps native integer alpha fade ordering"
-        );
+        check_eq! { target.get_pixel(0, (output_y + 3) as u32) => Some(Color::opaque(255, 255, 255)), "Fader vertically offsets the current line" }
+        check_eq! { target.get_pixel(0, (output_y - 3) as u32) => Some(Color::new(255, 255, 255, 234)), "the preceding line keeps native integer alpha fade ordering" }
     }
 
     #[test]
     fn continuous_message_board_draws_multiple_lines_over_opaque_dynamic_strip() {
         let mut target = surface(96, 96);
         let background_color = Color::opaque(20, 24, 28);
-        let hud = HudGraphics {
-            background: Some(solid_image(8, 8, [20, 24, 28, 255])),
-            ..HudGraphics::default()
-        };
+        let hud = hud_graphics! { background => solid_image(8, 8, [20, 24, 28, 255]) };
         let fallback = bitmap_font();
         let font = HudFont::Fallback(&fallback);
         let line_height = font.line_height();
@@ -5156,17 +4549,9 @@ mod tests {
 
         draw_message_board(&mut target, &font, &hud, &board);
 
-        assert_eq!(output_height, 4 * line_height);
-        assert_eq!(
-            target.get_pixel(90, 95),
-            Some(background_color),
-            "continuous mode tiles the complete (iLines + 1)-line output"
-        );
-        assert_eq!(
-            target.get_pixel(90, (output_y - 1) as u32),
-            Some(Color::opaque(0, 0, 0)),
-            "the opaque backdrop begins at MessageBoard.Output.Y"
-        );
+        check_eq! { output_height => 4 * line_height }
+        check_eq! { target.get_pixel(90, 95) => Some(background_color), "continuous mode tiles the complete (iLines + 1)-line output" }
+        check_eq! { target.get_pixel(90, (output_y - 1) as u32) => Some(Color::opaque(0, 0, 0)), "the opaque backdrop begins at MessageBoard.Output.Y" }
 
         let has_opaque_text_in_band = |start_y: i32| {
             (start_y..start_y + line_height).any(|y| {
@@ -5177,8 +4562,8 @@ mod tests {
                 })
             })
         };
-        assert!(has_opaque_text_in_band(output_y));
-        assert!(has_opaque_text_in_band(output_y + line_height));
+        check! { has_opaque_text_in_band(output_y) }
+        check! { has_opaque_text_in_band(output_y + line_height) }
         assert!(
             !(output_y - line_height..output_y).any(|y| {
                 (0..target.width()).any(|x| {
@@ -5220,10 +4605,10 @@ mod tests {
             Some(&gamma),
         );
 
-        assert_eq!(target.get_pixel(0, 0), Some(Color::new(50, 100, 150, 255)));
+        check_eq! { target.get_pixel(0, 0) => Some(Color::new(50, 100, 150, 255)) }
         let expected = Some(Color::new(125, 150, 175, 255));
         for x in [3, 6, 9] {
-            assert_eq!(target.get_pixel(x, 0), expected, "HUD leaf at x={x}");
+            check_eq! { target.get_pixel(x, 0) => expected, "HUD leaf at x={x}" }
         }
     }
 
@@ -5244,10 +4629,7 @@ mod tests {
             TextAlign::Left,
             Some(&gamma),
         );
-        assert!(fallback_surface
-            .pixels()
-            .chunks_exact(4)
-            .any(|pixel| pixel == encoded));
+        check! { fallback_surface.pixels().chunks_exact(4).any(|pixel| pixel == encoded) }
 
         let mut clonk = clonk_graphics::clonk_font::ClonkFont::new(1);
         clonk.add_glyph(
@@ -5268,10 +4650,7 @@ mod tests {
             TextAlign::Left,
             Some(&gamma),
         );
-        assert_eq!(
-            clonk_surface.get_pixel(0, 0),
-            Some(Color::new(17, 33, 49, 255))
-        );
+        check_eq! { clonk_surface.get_pixel(0, 0) => Some(Color::new(17, 33, 49, 255)) }
     }
 
     #[test]
@@ -5284,36 +4663,19 @@ mod tests {
             .enumerate()
             .filter(|(_, byte)| !matches!(byte, b'_' | b' '))
             .fold(0i32, |mask, (position, _)| mask | (1i32 << position));
-        let hud = HudGraphics {
-            control: Some(crate::test_support::load_graphics_png("Control.png")),
-            ..HudGraphics::default()
-        };
+        let hud =
+            hud_graphics! { control => crate::test_support::load_graphics_png("Control.png") };
         let fonts = crate::test_support::endeavour_font_set();
         let labels = ["Z", "S", "X", "C", "A", "D", "Q", "W", "E", "R"].map(str::to_string);
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
         let render = |gamma| {
             let mut target = surface(320, 240);
             target.fill(Color::opaque(200, 200, 200));
-            draw_player_controls_with_gamma(
-                &mut target,
-                &HudFont::Clonk(&fonts.text),
-                &HudFont::Clonk(&fonts.mini),
-                &hud,
-                SurfaceRect::new(0, 0, 320, 240),
-                show_control,
-                1,
-                0,
-                &labels,
-                0,
-                gamma,
-            );
+            draw_controls_fixture! { &mut target, &HudFont::Clonk(&fonts.text), &HudFont::Clonk(&fonts.mini), &hud, SurfaceRect::new(0, 0, 320, 240); mask => show_control, position => 1, last => 0, labels => &labels, frame => 0, gamma => gamma };
             target.snapshot().checksum()
         };
 
-        assert_eq!(
-            (render(None), render(Some(&gamma))),
-            (727_770_473, 366_450_976)
-        );
+        check_eq! { (render(None), render(Some(&gamma))) => (727_770_473, 366_450_976) }
     }
 
     /// A doubled sheet built by nearest-neighbour expansion: every logical
@@ -5340,18 +4702,9 @@ mod tests {
     fn gui_art_scale_detects_only_exact_integer_multiples() {
         // There is no per-sheet scale metadata in Graphics.c4g, so the factor
         // has to be an exact multiple in both axes to be believed.
-        assert_eq!(
-            GuiArtScale::detect(400, 164, CONTROL_SHEET_NATIVE_SIZE),
-            GuiArtScale::NATIVE
-        );
-        assert_eq!(
-            GuiArtScale::detect(800, 328, CONTROL_SHEET_NATIVE_SIZE).percent(),
-            200
-        );
-        assert_eq!(
-            GuiArtScale::detect(1600, 656, CONTROL_SHEET_NATIVE_SIZE).percent(),
-            400
-        );
+        check_eq! { GuiArtScale::detect(400, 164, CONTROL_SHEET_NATIVE_SIZE) => GuiArtScale::NATIVE }
+        check_eq! { GuiArtScale::detect(800, 328, CONTROL_SHEET_NATIVE_SIZE).percent() => 200 }
+        check_eq! { GuiArtScale::detect(1600, 656, CONTROL_SHEET_NATIVE_SIZE).percent() => 400 }
         // Only one axis doubled, a non-integer multiple, an oversized guess,
         // and degenerate inputs all stay 1x.
         for (width, height) in [
@@ -5362,22 +4715,12 @@ mod tests {
             (0, 0),
             (200, 82),
         ] {
-            assert_eq!(
-                GuiArtScale::detect(width, height, CONTROL_SHEET_NATIVE_SIZE),
-                GuiArtScale::NATIVE,
-                "{width}x{height} must not be read as remastered art"
-            );
+            check_eq! { GuiArtScale::detect(width, height, CONTROL_SHEET_NATIVE_SIZE) => GuiArtScale::NATIVE, "{width}x{height} must not be read as remastered art" }
         }
-        assert_eq!(
-            GuiArtScale::detect(96, 72, ENERGY_BARS_NATIVE_SIZE).percent(),
-            200
-        );
-        assert_eq!(
-            GuiArtScale::detect(640, 72, GAMEPAD_SHEET_NATIVE_SIZE).percent(),
-            200
-        );
-        assert_eq!(GuiArtScale::NATIVE.percent(), 100);
-        assert!(GuiArtScale::default().is_native());
+        check_eq! { GuiArtScale::detect(96, 72, ENERGY_BARS_NATIVE_SIZE).percent() => 200 }
+        check_eq! { GuiArtScale::detect(640, 72, GAMEPAD_SHEET_NATIVE_SIZE).percent() => 200 }
+        check_eq! { GuiArtScale::NATIVE.percent() => 100 }
+        check! { GuiArtScale::default().is_native() }
     }
 
     #[test]
@@ -5405,43 +4748,18 @@ mod tests {
             target
         };
 
-        let native = HudGraphics {
-            control: Some(startup_control_sheet()),
-            gamepad: Some(startup_gamepad_sheet(36)),
-            ..HudGraphics::default()
-        };
-        let doubled = HudGraphics {
-            control: Some(upscaled_sheet(&startup_control_sheet(), 2)),
-            gamepad: Some(upscaled_sheet(&startup_gamepad_sheet(36), 2)),
-            ..HudGraphics::default()
-        };
-        assert_eq!(
-            GuiArtScale::of(
-                doubled.control.as_ref().expect("control"),
-                CONTROL_SHEET_NATIVE_SIZE
-            )
-            .percent(),
-            200
-        );
+        let native = hud_graphics! { control => startup_control_sheet(), gamepad => startup_gamepad_sheet(36) };
+        let doubled = hud_graphics! { control => upscaled_sheet(&startup_control_sheet(), 2), gamepad => upscaled_sheet(&startup_gamepad_sheet(36), 2) };
+        check_eq! { GuiArtScale::of(doubled.control.as_ref().expect("control"), CONTROL_SHEET_NATIVE_SIZE).percent() => 200 }
 
         for control_set in 0..8 {
-            assert_eq!(
-                render(&doubled, control_set, true).snapshot().checksum(),
-                render(&native, control_set, true).snapshot().checksum(),
-                "control set {control_set} must render identically from 2x art"
-            );
+            check_eq! { render(&doubled, control_set, true).snapshot().checksum() => render(&native, control_set, true).snapshot().checksum(), "control set {control_set} must render identically from 2x art" }
         }
         // The keyboard facet still ends where the 1x cell ended, so the name
         // baseline is unmoved.
         let target = render(&doubled, 0, false);
-        assert_eq!(
-            target.get_pixel(dest_x + KEYBOARD_CELL.0 - 1, dest_y + KEYBOARD_CELL.1 - 1),
-            Some(Color::opaque(200, 10, 10))
-        );
-        assert_eq!(
-            target.get_pixel(dest_x + KEYBOARD_CELL.0, dest_y),
-            Some(Color::opaque(0, 0, 0))
-        );
+        check_eq! { target.get_pixel(dest_x + KEYBOARD_CELL.0 - 1, dest_y + KEYBOARD_CELL.1 - 1) => Some(Color::opaque(200, 10, 10)) }
+        check_eq! { target.get_pixel(dest_x + KEYBOARD_CELL.0, dest_y) => Some(Color::opaque(0, 0, 0)) }
     }
 
     #[test]
@@ -5458,18 +4776,12 @@ mod tests {
         // The oracle's own 48x36 grid of 8x12 cells, so the fixture is
         // recognised as 1x at all.
         let native_sheet = expanded_sheet(&ImageData::new(6, 3, pixels), 8, 12);
-        assert_eq!(
-            (native_sheet.width(), native_sheet.height()),
-            ENERGY_BARS_NATIVE_SIZE
-        );
+        check_eq! { (native_sheet.width(), native_sheet.height()) => ENERGY_BARS_NATIVE_SIZE }
         let render = |bars: ImageData| {
             let mut target = surface(40, 200);
             draw_level_bar(
                 &mut target,
-                &HudGraphics {
-                    energy_bars: Some(bars),
-                    ..HudGraphics::default()
-                },
+                &hud_graphics! { energy_bars => bars },
                 SurfaceRect::new(0, 0, 40, 200),
                 HudBarKind::Energy,
                 1,
@@ -5479,13 +4791,7 @@ mod tests {
             );
             target
         };
-        assert_eq!(
-            render(upscaled_sheet(&native_sheet, 2))
-                .snapshot()
-                .checksum(),
-            render(native_sheet).snapshot().checksum(),
-            "a 2x EnergyBars.png must produce the same logical bar"
-        );
+        check_eq! { render(upscaled_sheet(&native_sheet, 2)).snapshot().checksum() => render(native_sheet).snapshot().checksum(), "a 2x EnergyBars.png must produce the same logical bar" }
     }
 
     #[test]
@@ -5500,10 +4806,7 @@ mod tests {
             draw_command_key_cell(
                 &mut target,
                 &font,
-                &HudGraphics {
-                    control: Some(sheet),
-                    ..HudGraphics::default()
-                },
+                &hud_graphics! { control => sheet },
                 SurfaceRect::new(0, 0, 40, 40),
                 1,
                 "",
@@ -5512,9 +4815,6 @@ mod tests {
             );
             target
         };
-        assert_eq!(
-            render(upscaled_sheet(&control, 2)).snapshot().checksum(),
-            render(control).snapshot().checksum()
-        );
+        check_eq! { render(upscaled_sheet(&control, 2)).snapshot().checksum() => render(control).snapshot().checksum() }
     }
 }

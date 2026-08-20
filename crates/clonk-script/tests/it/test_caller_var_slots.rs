@@ -29,11 +29,9 @@ fn host_functions_read_and_write_the_callers_var_slots() {
         slots.set(1, Value::Int(99));
         Ok(seen)
     });
-    engine.add_script(
-        Script::compile(
-            "#strict\n\nfunc Run() { Var(0) = 42; if (Probe() != 42) return(-1); return(Var(1)); }\n",
-        )
-        .expect("script compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "#strict\n\nfunc Run() { Var(0) = 42; if (Probe() != 42) return(-1); return(Var(1)); }\n",
     );
     assert_eq!(
         engine.call("Run", &[]).expect("run succeeds"),
@@ -49,7 +47,7 @@ fn host_functions_without_a_script_caller_see_none() {
     engine.register_host_function("Probe", |_args| {
         Ok(Value::Bool(clonk_script::caller_var_slots().is_some()))
     });
-    engine.add_script(Script::compile("#strict\n").expect("compiles"));
+    crate::support::load_script(&mut engine, "#strict\n");
     assert_eq!(
         engine.call("Probe", &[]).expect("direct host call runs"),
         Value::Bool(false)
@@ -65,9 +63,7 @@ fn unset_caller_var_slots_read_nil() {
             .ok_or_else(|| RuntimeError::new("host fn must see its script caller"))?;
         Ok(Value::Bool(slots.get(7) == Value::Nil))
     });
-    engine.add_script(
-        Script::compile("#strict\n\nfunc Run() { return(Probe()); }\n").expect("compiles"),
-    );
+    crate::support::load_script(&mut engine, "#strict\n\nfunc Run() { return(Probe()); }\n");
     assert_eq!(engine.call("Run", &[]).expect("runs"), Value::Bool(true));
 }
 
@@ -89,9 +85,9 @@ fn host_caller_strictness_distinguishes_absent_nonstrict_and_strict_frames() {
     ] {
         let mut engine = Engine::new();
         engine.register_host_function("Probe", |_args| Ok(Value::Int(caller_strictness_code())));
-        engine.add_script(
-            Script::compile(&format!("{directive}func Run() {{ return Probe(); }}\n"))
-                .expect("script compiles"),
+        crate::support::load_script(
+            &mut engine,
+            &format!("{directive}func Run() {{ return Probe(); }}\n"),
         );
         assert_eq!(
             engine.call("Run", &[]).expect("script call runs"),
@@ -105,9 +101,7 @@ fn host_caller_strictness_distinguishes_absent_nonstrict_and_strict_frames() {
 fn strict_engine_scope_global_function_is_the_native_callers_frame() {
     let mut engine = Engine::new();
     engine.register_host_function("Probe", |_args| Ok(Value::Int(caller_strictness_code())));
-    engine.add_script(
-        Script::compile("global func Run() { return Probe(); }\n").expect("script compiles"),
-    );
+    crate::support::load_script(&mut engine, "global func Run() { return Probe(); }\n");
     assert_eq!(
         engine.call("Run", &[]).expect("global function runs"),
         Value::Int(3),
@@ -131,10 +125,10 @@ fn linked_function_native_caller_uses_destination_script_strictness() {
     ] {
         let mut target = Engine::new();
         target.register_host_function("Probe", |_args| Ok(Value::Int(caller_strictness_code())));
-        target.add_script(Script::compile(destination).expect("destination compiles"));
+        crate::support::load_script(&mut target, destination);
 
         let mut included = Engine::new();
-        included.add_script(Script::compile(source).expect("included script compiles"));
+        crate::support::load_script(&mut included, source);
         target.merge_from(&included);
 
         assert_eq!(
@@ -149,9 +143,9 @@ fn linked_function_native_caller_uses_destination_script_strictness() {
 fn inherited_native_call_uses_the_overriding_functions_strictness() {
     let mut engine = Engine::new();
     engine.register_host_function("Probe", |_args| Ok(Value::Int(caller_strictness_code())));
-    engine.add_script(
-        Script::compile("#strict 2\nfunc Probe() { return inherited(); }\n")
-            .expect("script compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "#strict 2\nfunc Probe() { return inherited(); }\n",
     );
     assert_eq!(
         engine.call("Probe", &[]).expect("inherited host call runs"),
@@ -187,9 +181,9 @@ fn reentrant_vm_restores_the_outer_host_caller_context() {
         }
         Ok(value)
     });
-    outer.add_script(
-        Script::compile("#strict 2\nfunc Run() { return OuterProbe(); }\n")
-            .expect("script compiles"),
+    crate::support::load_script(
+        &mut outer,
+        "#strict 2\nfunc Run() { return OuterProbe(); }\n",
     );
     assert_eq!(
         outer.call("Run", &[]).expect("nested call runs"),
@@ -200,9 +194,9 @@ fn reentrant_vm_restores_the_outer_host_caller_context() {
 #[test]
 fn arrow_bridge_can_preserve_the_suspended_script_caller() {
     let mut outer = Engine::new();
-    outer.add_script(
-        Script::compile("#strict 3\nfunc Run(target) { return target->Native(); }\n")
-            .expect("script compiles"),
+    crate::support::load_script(
+        &mut outer,
+        "#strict 3\nfunc Run(target) { return target->Native(); }\n",
     );
     outer.register_method_dispatch(Arc::new(|_args| {
         if clonk_script::caller_strictness() != HostCallerStrictness::Strict(3) {

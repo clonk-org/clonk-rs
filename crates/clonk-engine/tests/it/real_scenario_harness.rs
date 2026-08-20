@@ -421,21 +421,12 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
     let mut engine = load_installed_scenario("Races.c4f/Skyrace.c4s", 0);
     let winner = join_local_player(&mut engine, "Sky Race winner");
     let loser = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-        name: "Sky Race loser".to_string(),
         player_info_id: 2,
-        score: 0,
-        rounds: 0,
-        rounds_won: 0,
-        rounds_lost: 0,
-        total_playing_time: 0,
-        team: None,
         color_dw: 0x00_00_ff,
         pref_color: 1,
         pref_position: 1,
-        crew: Vec::new(),
-        control_style: false,
-        auto_context_menu: false,
         startup_player_count: 2,
+        ..crate::support::join_player_config("Sky Race loser")
     }))
     .number();
     let winner_clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(winner));
@@ -5537,21 +5528,9 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
         .collect();
     let owner = crate::support::TestValueExt::test_value(
         crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
-            name: "Lance parity".to_owned(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
             team: Some(1),
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
             crew,
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
+            ..crate::support::join_player_config("Lance parity")
         }))
         .initialized(),
     )

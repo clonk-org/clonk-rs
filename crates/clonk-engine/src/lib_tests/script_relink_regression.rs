@@ -1,15 +1,5 @@
 use super::*;
-
-trait TestEngineExt {
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
-}
-
-impl TestEngineExt for Engine {
-    #[track_caller]
-    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
-        crate::TestValueExt::test_value(self.spawn_object(config))
-    }
-}
+use crate::lib_test_support::spawn_fixture;
 
 fn register(engine: &mut Engine, id: &str, source: &str) {
     crate::TestValueExt::test_value(engine.register_script_definition(id, id, source));
@@ -80,7 +70,7 @@ fn an_appendto_hosts_hard_inherited_resolves_through_its_target() {
     );
     link_initial_scripts(&mut engine);
 
-    let base = engine.spawn_test_object(SpawnConfig::new("BASE"));
+    let base = spawn_fixture!(engine, "BASE");
     assert_eq!(
         call(&mut engine, base, "Layer"),
         Value::Int(11),
@@ -91,7 +81,7 @@ fn an_appendto_hosts_hard_inherited_resolves_through_its_target() {
     // to C4Aul's. What must not happen is that copy being truncated first and
     // then linked onto the target, which is what judging the host before
     // `resolve_appends` produced.
-    let own = engine.spawn_test_object(SpawnConfig::new("APND"));
+    let own = spawn_fixture!(engine, "APND");
     let index = crate::TestValueExt::test_value(engine.find_object_index(own));
     assert!(engine
         .call_object_function(index, "Layer", Vec::new())
@@ -262,8 +252,8 @@ fn reload_rebuilds_append_include_copies_once_and_keeps_globals() {
     register(&mut engine, "CHLD", "#include BASE");
 
     crate::TestValueExt::test_value(engine.relink_scripts());
-    let base = engine.spawn_test_object(SpawnConfig::new("BASE"));
-    let child = engine.spawn_test_object(SpawnConfig::new("CHLD"));
+    let base = spawn_fixture!(engine, "BASE");
+    let child = spawn_fixture!(engine, "CHLD");
     assert_eq!(call(&mut engine, base, "Layer"), Value::Int(11_111));
     assert_eq!(call(&mut engine, child, "Layer"), Value::Int(11_111));
     assert_eq!(call(&mut engine, base, "Seed"), Value::Int(41));
@@ -356,8 +346,8 @@ fn relink_replays_interleaved_global_hosts_and_declaring_links() {
     );
     crate::TestValueExt::test_value(engine.relink_scripts());
 
-    let owner = engine.spawn_test_object(SpawnConfig::new("OWNR"));
-    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let owner = spawn_fixture!(engine, "OWNR");
+    let caller = spawn_fixture!(engine, "CALL");
     assert_eq!(call(&mut engine, owner, "Probe"), Value::Int(1_234));
     assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(1_234));
     assert_eq!(
@@ -407,7 +397,7 @@ fn declaring_definition_calls_use_the_latest_engine_global_chain() {
         );
         register(&mut engine, "GFB1", later_source);
         crate::TestValueExt::test_value(engine.relink_scripts());
-        let declaring = engine.spawn_test_object(SpawnConfig::new("GFA1"));
+        let declaring = spawn_fixture!(engine, "GFA1");
         assert_eq!(
             call(&mut engine, declaring, "CallF"),
             Value::Int(expected),
@@ -467,7 +457,7 @@ fn relink_keeps_global_resort_lookup_bound_to_the_declaring_definition() {
         crate::TestValueExt::test_value(engine.definitions.get("ADEF")).script_arc();
     let destination_script =
         crate::TestValueExt::test_value(engine.definitions.get("BDEF")).script_arc();
-    let caller = engine.spawn_test_object(SpawnConfig::new("BDEF"));
+    let caller = spawn_fixture!(engine, "BDEF");
 
     assert_eq!(call(&mut engine, caller, "Trigger"), Value::Bool(true));
     let [ObjectOrderCommand::OrderFuncAll { order, category }] =
@@ -514,8 +504,8 @@ fn retained_system_host_owns_and_executes_its_local_resort_comparator() {
                 _ => None,
             }
         }));
-    let first = engine.spawn_test_object(SpawnConfig::new("BDEF"));
-    let second = engine.spawn_test_object(SpawnConfig::new("BDEF"));
+    let first = spawn_fixture!(engine, "BDEF");
+    let second = spawn_fixture!(engine, "BDEF");
     assert_eq!(engine.debug_exec_order(), [first, second]);
 
     assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
@@ -567,8 +557,8 @@ fn global_resort_comparator_executes_without_a_definition_context() {
     crate::TestValueExt::test_value(engine.relink_scripts());
     let declaring_script =
         crate::TestValueExt::test_value(engine.definitions.get("BDEF")).script_arc();
-    let first = engine.spawn_test_object(SpawnConfig::new("BDEF"));
-    let second = engine.spawn_test_object(SpawnConfig::new("BDEF"));
+    let first = spawn_fixture!(engine, "BDEF");
+    let second = spawn_fixture!(engine, "BDEF");
     assert_eq!(engine.debug_exec_order(), [first, second]);
 
     assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
@@ -605,8 +595,8 @@ fn queued_global_resort_pins_its_body_across_relink() {
              func Trigger() { return Queue(); }",
     );
     crate::TestValueExt::test_value(engine.relink_scripts());
-    let first = engine.spawn_test_object(SpawnConfig::new("BDEF"));
-    let second = engine.spawn_test_object(SpawnConfig::new("BDEF"));
+    let first = spawn_fixture!(engine, "BDEF");
+    let second = spawn_fixture!(engine, "BDEF");
     assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
 
     assert!(engine
@@ -650,9 +640,9 @@ fn reloaded_definition_globals_move_to_the_engine_function_tail() {
     );
     register(&mut engine, "CALL", "func Probe() { return Layer(); }");
     crate::TestValueExt::test_value(engine.relink_scripts());
-    let early = engine.spawn_test_object(SpawnConfig::new("EARL"));
-    let late = engine.spawn_test_object(SpawnConfig::new("LATE"));
-    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let early = spawn_fixture!(engine, "EARL");
+    let late = spawn_fixture!(engine, "LATE");
+    let caller = spawn_fixture!(engine, "CALL");
     assert_eq!(call(&mut engine, early, "Own"), Value::Int(123));
     assert_eq!(call(&mut engine, late, "Own"), Value::Int(123));
     assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(123));

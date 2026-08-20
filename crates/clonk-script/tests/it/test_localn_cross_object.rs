@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use clonk_script::{value_cell, Engine, Script, Value, ValueCell};
+use clonk_script::{value_cell, Engine, Value, ValueCell};
 
 type CellTable = Rc<RefCell<HashMap<(u64, String), ValueCell>>>;
 
@@ -35,14 +35,12 @@ fn engine_with_stub_hook() -> (Engine, CellTable) {
 #[test]
 fn cross_object_localn_reads_and_writes_through_the_host_cell() {
     let (mut engine, cells) = engine_with_stub_hook();
-    engine.add_script(
-        Script::compile(
-            "public func Poke(target) {\n\
-                 LocalN(\"iWater\", target) = 90;\n\
-                 return LocalN(\"iWater\", target);\n\
-             }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "public func Poke(target) {\n\
+         LocalN(\"iWater\", target) = 90;\n\
+         return LocalN(\"iWater\", target);\n\
+     }",
     );
     assert_eq!(
         engine
@@ -68,14 +66,12 @@ fn arrow_form_localn_read_resolves_the_target_object_local() {
     // through the same host cell as the two-argument form — Goal.c4d's
     // `curr_goal->LocalN("missionPassword")` depends on it.
     let (mut engine, cells) = engine_with_stub_hook();
-    engine.add_script(
-        Script::compile(
-            "public func Peek(target) {\n\
-                 LocalN(\"iWater\", target) = 77;\n\
-                 return target->LocalN(\"iWater\");\n\
-             }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "public func Peek(target) {\n\
+         LocalN(\"iWater\", target) = 77;\n\
+         return target->LocalN(\"iWater\");\n\
+     }",
     );
     assert_eq!(
         engine
@@ -103,18 +99,16 @@ fn object_index_and_property_read_named_local_cells() {
             value_cell(Value::Array(vec![Value::Int(9)])),
         ),
     ]);
-    engine.add_script(
-        Script::compile(
-            "#strict 3\n\
-             local iWater;\n\
-             public func Peek(target, key, items_key) {\n\
-                 return [target[key], target.iWater, target[\"unset\"], target.unset,\n\
-                         target[items_key][0], target.items[0]];\n\
-             }\n\
-             public func PeekSelf(key) { return [this[key], this.iWater]; }\n\
-             public func BadKey(target) { return target[1]; }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "#strict 3\n\
+     local iWater;\n\
+     public func Peek(target, key, items_key) {\n\
+         return [target[key], target.iWater, target[\"unset\"], target.unset,\n\
+                 target[items_key][0], target.items[0]];\n\
+     }\n\
+     public func PeekSelf(key) { return [this[key], this.iWater]; }\n\
+     public func BadKey(target) { return target[1]; }",
     );
 
     assert_eq!(
@@ -180,16 +174,14 @@ fn object_index_assignment_evaluates_base_key_then_rhs_once() {
             Ok(value.clone())
         });
     }
-    engine.add_script(
-        Script::compile(
-            "#strict 3\n\
-             public func Assign(other) {\n\
-                 var targets = [other];\n\
-                 targets[MarkBase()][MarkKey()] = MarkRhs();\n\
-                 return other.money;\n\
-             }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "#strict 3\n\
+     public func Assign(other) {\n\
+         var targets = [other];\n\
+         targets[MarkBase()][MarkKey()] = MarkRhs();\n\
+         return other.money;\n\
+     }",
     );
 
     assert_eq!(
@@ -215,31 +207,29 @@ fn object_index_dereferences_the_base_after_key_side_effects() {
         ((7, "money".to_string()), value_cell(Value::Int(1))),
         ((8, "money".to_string()), value_cell(Value::Int(2))),
     ]);
-    engine.add_script(
-        Script::compile(
-            "#strict 3\n\
-             static current, replacement;\n\
-             private func SelectReplacement() {\n\
-                 current = replacement;\n\
-                 return \"money\";\n\
-             }\n\
-             public func ReadAfterSwitch(first, second) {\n\
-                 current = first;\n\
-                 replacement = second;\n\
-                 return current[SelectReplacement()] + 0;\n\
-             }\n\
-             public func ReadTrackedAfterSwitch(first, second) {\n\
-                 current = first;\n\
-                 replacement = second;\n\
-                 return current[SelectReplacement()];\n\
-             }\n\
-             public func WriteAfterSwitch(first, second) {\n\
-                 current = first;\n\
-                 replacement = second;\n\
-                 current[SelectReplacement()] = 9;\n\
-             }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "#strict 3\n\
+     static current, replacement;\n\
+     private func SelectReplacement() {\n\
+         current = replacement;\n\
+         return \"money\";\n\
+     }\n\
+     public func ReadAfterSwitch(first, second) {\n\
+         current = first;\n\
+         replacement = second;\n\
+         return current[SelectReplacement()] + 0;\n\
+     }\n\
+     public func ReadTrackedAfterSwitch(first, second) {\n\
+         current = first;\n\
+         replacement = second;\n\
+         return current[SelectReplacement()];\n\
+     }\n\
+     public func WriteAfterSwitch(first, second) {\n\
+         current = first;\n\
+         replacement = second;\n\
+         current[SelectReplacement()] = 9;\n\
+     }",
     );
 
     assert_eq!(
@@ -290,8 +280,9 @@ fn arrow_form_numbered_local_read_resolves_the_target_object_slot() {
     cells
         .borrow_mut()
         .insert((8, "__local_0".to_string()), value_cell(Value::Int(55)));
-    engine.add_script(
-        Script::compile("public func Peek(target) { return target->Local(0); }").expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "public func Peek(target) { return target->Local(0); }",
     );
     assert_eq!(
         engine
@@ -307,12 +298,10 @@ fn falsy_target_falls_back_to_the_executing_object() {
     // FnLocalN: `if (!pObj) pObj = cthr->Obj` (C4Script.cpp:4593-4596) —
     // a nil/0 target means the executing object, NOT the hook.
     let (mut engine, cells) = engine_with_stub_hook();
-    engine.add_script(
-        Script::compile(
-            "local own;\n\
-             public func SelfPoke() { LocalN(\"own\", 0) = 5; return own; }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "local own;\n\
+     public func SelfPoke() { LocalN(\"own\", 0) = 5; return own; }",
     );
     let locals = HashMap::new();
     let (value, finals) = engine
@@ -328,15 +317,13 @@ fn cross_object_localn_supports_compound_assignment() {
     // The WaterTower pattern: `LocalN("iWater", pObj) += x` — compound
     // operators read-modify-write the same reference cell.
     let (mut engine, cells) = engine_with_stub_hook();
-    engine.add_script(
-        Script::compile(
-            "public func Fill(target, amount) {\n\
-                 LocalN(\"iWater\", target) = 10;\n\
-                 LocalN(\"iWater\", target) += amount;\n\
-                 return LocalN(\"iWater\", target);\n\
-             }",
-        )
-        .expect("compiles"),
+    crate::support::load_script(
+        &mut engine,
+        "public func Fill(target, amount) {\n\
+         LocalN(\"iWater\", target) = 10;\n\
+         LocalN(\"iWater\", target) += amount;\n\
+         return LocalN(\"iWater\", target);\n\
+     }",
     );
     assert_eq!(
         engine

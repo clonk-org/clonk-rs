@@ -607,63 +607,51 @@ impl MessageDialogState {
         let x = base_x + self.dialog_offset.0;
         let y = base_y + self.dialog_offset.1;
         let client_y = y + title_height;
-        let caption = (title_height > 0).then_some(IntRect {
-            x,
-            y,
-            w: width,
-            h: title_height,
-        });
-        let close_button = (title_height > 0).then_some(IntRect {
-            x: x + width - 20,
-            y: y + 4,
-            w: 16,
-            h: 16,
-        });
-        let icon = IntRect {
-            x: x + DIALOG_INDENT,
-            y: client_y + DIALOG_INDENT,
-            w: ICON_SIZE,
-            h: ICON_SIZE,
-        };
-        let message = IntRect {
-            x: if is_progress {
+        let caption = (title_height > 0).then_some(IntRect::new(x, y, width, title_height));
+        let close_button =
+            (title_height > 0).then_some(IntRect::new(x + width - 20, y + 4, 16, 16));
+        let icon = IntRect::new(
+            x + DIALOG_INDENT,
+            client_y + DIALOG_INDENT,
+            ICON_SIZE,
+            ICON_SIZE,
+        );
+        let message = IntRect::new(
+            if is_progress {
                 x + 3 * DIALOG_INDENT + ICON_SIZE
             } else {
                 x + 70
             },
-            y: client_y + 10,
-            w: if is_progress {
+            client_y + 10,
+            if is_progress {
                 width - 4 * DIALOG_INDENT - ICON_SIZE
             } else {
                 message_width
             },
-            h: message_height,
-        };
+            message_height,
+        );
         let checkbox = checkbox_size.map(|(checkbox_width, checkbox_height)| {
-            let bounds = IntRect {
-                x: message.x + (message.w - checkbox_width) / 2,
-                y: client_y + message_height + 30,
-                w: checkbox_width,
-                h: checkbox_height,
-            };
+            let bounds = IntRect::new(
+                message.x + (message.w - checkbox_width) / 2,
+                client_y + message_height + 30,
+                checkbox_width,
+                checkbox_height,
+            );
             MessageDialogCheckboxLayout {
                 bounds,
-                square: IntRect {
-                    w: checkbox_height,
-                    ..bounds
-                },
+                square: bounds.with_width(checkbox_height),
                 label_x: bounds.x + checkbox_height + 4,
             }
         });
-        let progress = is_progress.then_some(IntRect {
-            x: x + DIALOG_INDENT,
-            y: client_y + client_height
+        let progress = is_progress.then_some(IntRect::new(
+            x + DIALOG_INDENT,
+            client_y + client_height
                 - PROGRESS_BUTTON_AREA_HEIGHT
                 - PROGRESS_HEIGHT
                 - 3 * DIALOG_INDENT,
-            w: width - 2 * DIALOG_INDENT,
-            h: PROGRESS_HEIGHT,
-        });
+            width - 2 * DIALOG_INDENT,
+            PROGRESS_HEIGHT,
+        ));
         let ordered = self.buttons.ordered();
         let count = i32::try_from(ordered.len()).unwrap_or(i32::MAX);
         let button_width = if is_progress {
@@ -690,22 +678,17 @@ impl MessageDialogState {
             .enumerate()
             .map(|(index, button)| MessageDialogButtonLayout {
                 button,
-                rect: IntRect {
-                    x: first_button_x
+                rect: IntRect::new(
+                    first_button_x
                         + i32::try_from(index).unwrap_or(i32::MAX) * (button_width + BUTTON_GAP),
-                    y: button_y,
-                    w: button_width,
-                    h: BUTTON_HEIGHT,
-                },
+                    button_y,
+                    button_width,
+                    BUTTON_HEIGHT,
+                ),
             })
             .collect();
         MessageDialogLayout {
-            bounds: IntRect {
-                x,
-                y,
-                w: width,
-                h: height,
-            },
+            bounds: IntRect::new(x, y, width, height),
             caption,
             close_button,
             icon,

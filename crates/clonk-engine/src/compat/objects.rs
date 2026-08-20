@@ -6633,19 +6633,9 @@ fn register_construction_check_feedback(context: &mut EffectHostContext, text: S
     let Some(target) = context.object_context().map(ObjectScopeContext::id) else {
         return;
     };
-    context.register_message(MessageCommand::Add(MessageSpec {
-        kind: MessageKind::Target,
-        text,
-        target: Some(target),
-        player: None,
-        offset: Vector2::ZERO,
-        color: crate::CONSTRUCTION_CHECK_MESSAGE_COLOR,
-        flags: 0,
-        width: None,
-        decoration: None,
-        frame_decoration: None,
-        portrait: None,
-    }));
+    context.register_message(MessageCommand::Add(
+        MessageSpec::target(text, target).with_color(crate::CONSTRUCTION_CHECK_MESSAGE_COLOR),
+    ));
 }
 
 pub(crate) fn construction_check(
@@ -7767,19 +7757,10 @@ pub(crate) fn compose_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             });
             HOST_CONTEXT.with(|cell| {
                 if let Some(context) = cell.borrow_mut().as_mut() {
-                    context.register_message(MessageCommand::Add(MessageSpec {
-                        kind: MessageKind::Target,
-                        text,
-                        target: Some(container),
-                        player: None,
-                        offset: Vector2::ZERO,
-                        color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                        flags: 0,
-                        width: None,
-                        decoration: None,
-                        frame_decoration: None,
-                        portrait: None,
-                    }));
+                    context.register_message(MessageCommand::Add(
+                        MessageSpec::target(text, container)
+                            .with_color(invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR)),
+                    ));
                 }
             });
         }

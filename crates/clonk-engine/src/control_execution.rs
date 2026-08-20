@@ -619,6 +619,11 @@ fn c4_names_equal(first: &[u8], second: &[u8]) -> bool {
             .all(|(&first, &second)| c4_name_byte_capital(first) == c4_name_byte_capital(second))
 }
 
+fn legacy_cstring(bytes: impl AsRef<[u8]>) -> LegacyCString {
+    LegacyCString::from_bytes(bytes.as_ref().to_vec())
+        .expect("engine-generated legacy string contains no NUL")
+}
+
 fn generated_forced_player_name(original: &LegacyCString, suffix: i32) -> LegacyCString {
     let mut bytes = original.as_bytes().to_vec();
     bytes.extend_from_slice(format!(" ({suffix})").as_bytes());
@@ -626,8 +631,7 @@ fn generated_forced_player_name(original: &LegacyCString, suffix: i32) -> Legacy
     // an already-validated original plus this ASCII suffix is C4MaxName's
     // byte-length truncation.
     bytes.truncate(30);
-    LegacyCString::from_bytes(bytes)
-        .expect("a validated player name plus an ASCII suffix contains no NUL")
+    legacy_cstring(bytes)
 }
 
 fn generate_random_player_color(oracle: &mut impl InitialHostTeamAssignmentOracle) -> u32 {
@@ -2294,12 +2298,12 @@ impl ControlPlayerInfoRegistry {
             return None;
         }
         assign_players(&mut request.players);
-        Some(PlayerInfoControlData {
-            client_id: request.client_id,
-            flags: request.flags,
-            players: request.players,
-            by_client: 0,
-        })
+        Some(PlayerInfoControlData::new(
+            request.client_id,
+            request.flags,
+            request.players,
+            0,
+        ))
     }
 
     pub fn apply(&mut self, info: PlayerInfoControlData) {
@@ -2590,12 +2594,14 @@ impl ControlPlayerInfoRegistry {
         self.clients
             .iter()
             .find(|client| client.client_id == client_id)
-            .map(|client| PlayerInfoControlData {
-                client_id,
-                flags: client.flags
-                    & !(CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS | CLIENT_PLAYER_INFO_FLAG_UPDATED),
-                players: client.players.clone(),
-                by_client: 0,
+            .map(|client| {
+                PlayerInfoControlData::new(
+                    client_id,
+                    client.flags
+                        & !(CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS | CLIENT_PLAYER_INFO_FLAG_UPDATED),
+                    client.players.clone(),
+                    0,
+                )
             })
     }
 
@@ -2607,10 +2613,8 @@ impl ControlPlayerInfoRegistry {
         self.clients
             .iter()
             .find(|client| client.client_id == client_id)
-            .map(|client| PlayerInfoUpdateRequest {
-                client_id,
-                flags: client.flags,
-                players: client.players.clone(),
+            .map(|client| {
+                PlayerInfoUpdateRequest::new(client_id, client.flags, client.players.clone())
             })
     }
 
@@ -2838,8 +2842,7 @@ impl ControlPlayerInfoRegistry {
             return false;
         };
         info.league_progress_data_is_null = data.is_none();
-        info.league_progress_data = LegacyCString::from_bytes(data.unwrap_or_default())
-            .expect("engine-normalized league progress data contains no interior NUL");
+        info.league_progress_data = legacy_cstring(data.unwrap_or_default());
         true
     }
 
@@ -3357,7 +3360,7 @@ mod tests {
                 .push((id, existing_teams.iter().map(|team| team.id).collect()));
             crate::InitialNetworkTeam {
                 id,
-                name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+                name: legacy_cstring(format!("Team {id}").into_bytes()),
                 player_start_index: 0,
                 player_ids: Vec::new(),
                 color: 0x0010_0000 + u32::try_from(id).unwrap(),
@@ -3373,12 +3376,8 @@ mod tests {
             outcomes: [].into(),
             ranges: Vec::new(),
         };
-        let fixed = generate_default_initial_team(
-            2,
-            LegacyCString::from_bytes(b"Team 2".to_vec()).unwrap(),
-            &[],
-            &mut fixed_oracle,
-        );
+        let fixed =
+            generate_default_initial_team(2, legacy_cstring(b"Team 2"), &[], &mut fixed_oracle);
         assert_eq!(fixed.name.as_bytes(), b"Team 2");
         assert_eq!(fixed.color, 0x0000_c800);
         assert!(fixed_oracle.ranges.is_empty());
@@ -3390,7 +3389,7 @@ mod tests {
         };
         let generated = generate_default_initial_team(
             11,
-            LegacyCString::from_bytes(b"Team 11".to_vec()).unwrap(),
+            legacy_cstring(b"Team 11"),
             &[crate::InitialNetworkTeam {
                 id: 1,
                 name: LegacyCString::default(),
@@ -3422,7 +3421,7 @@ mod tests {
     ) -> crate::InitialNetworkTeam {
         crate::InitialNetworkTeam {
             id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            name: legacy_cstring(format!("Team {id}").into_bytes()),
             player_start_index: 0,
             player_ids,
             color,
@@ -3457,8 +3456,7 @@ mod tests {
         ControlPlayerInfoEntry {
             id,
             flags: crate::PLAYER_INFO_FLAG_HAS_RESOURCE,
-            filename: LegacyCString::from_bytes(format!("Player{resource_id}.c4p").into_bytes())
-                .expect("NUL-free filename"),
+            filename: legacy_cstring(format!("Player{resource_id}.c4p").into_bytes()),
             resource: Some(NetworkResourceCore {
                 resource_type: 3,
                 id: resource_id,
@@ -3769,7 +3767,7 @@ mod tests {
             team_colors: true,
             teams: vec![crate::InitialNetworkTeam {
                 id: 1,
-                name: LegacyCString::from_bytes(b"Only team".to_vec()).unwrap(),
+                name: legacy_cstring(b"Only team"),
                 player_start_index: 0,
                 player_ids: vec![99],
                 color: first_team_color,
@@ -3836,11 +3834,11 @@ mod tests {
     fn queued_add_resource_normalization_updates_only_its_original_row() {
         let resource = |id| NetworkResourceCore {
             id,
-            filename: LegacyCString::from_bytes(format!("Player{id}.ocp").into_bytes()).unwrap(),
+            filename: legacy_cstring(format!("Player{id}.ocp").into_bytes()),
             ..NetworkResourceCore::default()
         };
         let mut first = player(7);
-        first.name = LegacyCString::from_bytes(b"First retained".to_vec()).unwrap();
+        first.name = legacy_cstring(b"First retained");
         first.flags = PLAYER_INFO_FLAG_HAS_RESOURCE | PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK;
         first.resource = Some(resource(7));
         let mut second = player(8);
@@ -3856,7 +3854,7 @@ mod tests {
             vec![second.clone()],
         ));
         let mut echoed_first = first;
-        echoed_first.name = LegacyCString::from_bytes(b"Must not replace".to_vec()).unwrap();
+        echoed_first.name = legacy_cstring(b"Must not replace");
         echoed_first.flags = PLAYER_INFO_FLAG_JOINED;
         echoed_first.resource = None;
         let echo = flagged_player_info_data(
@@ -3879,7 +3877,7 @@ mod tests {
     fn stale_same_id_scenario_flag_replacement_skips_resource_normalization() {
         let resource = |id| NetworkResourceCore {
             id,
-            filename: LegacyCString::from_bytes(format!("Player{id}.ocp").into_bytes()).unwrap(),
+            filename: legacy_cstring(format!("Player{id}.ocp").into_bytes()),
             ..NetworkResourceCore::default()
         };
         let mut original_player = player(7);
@@ -3978,12 +3976,11 @@ mod tests {
     #[test]
     fn league_progress_snapshot_is_sorted_and_keeps_retained_empty_rows() {
         let mut first_nine = player(9);
-        first_nine.league_progress_data = LegacyCString::from_bytes(b"first".to_vec()).unwrap();
+        first_nine.league_progress_data = legacy_cstring(b"first");
         let mut five = player(5);
-        five.league_progress_data = LegacyCString::from_bytes(b"five".to_vec()).unwrap();
+        five.league_progress_data = legacy_cstring(b"five");
         let mut duplicate_nine = player(9);
-        duplicate_nine.league_progress_data =
-            LegacyCString::from_bytes(b"duplicate".to_vec()).unwrap();
+        duplicate_nine.league_progress_data = legacy_cstring(b"duplicate");
         let mut retained_empty = player(2);
         retained_empty.flags = PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_REMOVED;
         retained_empty.league_progress_data_is_null = false;
@@ -4188,13 +4185,13 @@ mod tests {
             crate::ClientCoreControlData {
                 client_id: 0,
                 activated: true,
-                name: LegacyCString::from_bytes(b"Host".to_vec()).unwrap(),
+                name: legacy_cstring(b"Host"),
                 ..Default::default()
             },
             crate::ClientCoreControlData {
                 client_id: 7,
                 observer: true,
-                name: LegacyCString::from_bytes(b"Local observer".to_vec()).unwrap(),
+                name: legacy_cstring(b"Local observer"),
                 lobby_ready: true,
                 ..Default::default()
             },
@@ -4225,11 +4222,11 @@ mod tests {
         assert!(players.get(12).is_some());
         let admitted = players
             .admit_request(
-                PlayerInfoUpdateRequest {
-                    client_id: 7,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![player(0)],
-                },
+                PlayerInfoUpdateRequest::new(
+                    7,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![player(0)],
+                ),
                 4,
             )
             .expect("snapshot leaves a free player slot");
@@ -4244,37 +4241,37 @@ mod tests {
         let mut clients = ControlClientRegistry::default();
         clients.register(3, false, false);
 
-        clients.apply_update(&crate::ClientUpdateControlData {
-            update_type: crate::CLIENT_UPDATE_ACTIVATE,
-            client_id: 3,
-            data: 1,
-            by_client: 3,
-        });
+        clients.apply_update(&crate::ClientUpdateControlData::new(
+            crate::CLIENT_UPDATE_ACTIVATE,
+            3,
+            1,
+            3,
+        ));
         assert!(!clients.is_activated(3));
 
-        clients.apply_update(&crate::ClientUpdateControlData {
-            update_type: crate::CLIENT_UPDATE_ACTIVATE,
-            client_id: 3,
-            data: 1,
-            by_client: 0,
-        });
+        clients.apply_update(&crate::ClientUpdateControlData::new(
+            crate::CLIENT_UPDATE_ACTIVATE,
+            3,
+            1,
+            0,
+        ));
         assert!(clients.is_activated(3));
 
-        clients.apply_update(&crate::ClientUpdateControlData {
-            update_type: crate::CLIENT_UPDATE_SET_OBSERVER,
-            client_id: 3,
-            data: 99,
-            by_client: 0,
-        });
+        clients.apply_update(&crate::ClientUpdateControlData::new(
+            crate::CLIENT_UPDATE_SET_OBSERVER,
+            3,
+            99,
+            0,
+        ));
         assert!(!clients.is_activated(3));
         assert!(clients.is_observer(3));
 
-        clients.apply_update(&crate::ClientUpdateControlData {
-            update_type: crate::CLIENT_UPDATE_ACTIVATE,
-            client_id: 3,
-            data: 0,
-            by_client: 0,
-        });
+        clients.apply_update(&crate::ClientUpdateControlData::new(
+            crate::CLIENT_UPDATE_ACTIVATE,
+            3,
+            0,
+            0,
+        ));
         assert!(
             clients.is_observer(3),
             "equal Activate request is a full native no-op"
@@ -4292,8 +4289,8 @@ mod tests {
                 client_id: 3,
                 activated: true,
                 observer: true,
-                name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
-                nick: LegacyCString::from_bytes(b"Ali".to_vec()).unwrap(),
+                name: legacy_cstring(b"Alice"),
+                nick: legacy_cstring(b"Ali"),
                 lobby_ready: true,
             },
             by_client: 3,
@@ -4312,7 +4309,7 @@ mod tests {
 
         let mut duplicate = host_join;
         duplicate.core.activated = false;
-        duplicate.core.name = LegacyCString::from_bytes(b"Replacement".to_vec()).unwrap();
+        duplicate.core.name = legacy_cstring(b"Replacement");
         assert!(!clients.apply_join(&duplicate));
         let state = clients.state(3).expect("original client retained");
         assert!(state.activated);
@@ -4356,22 +4353,22 @@ mod tests {
             .activation_update_for_request(99, 2_000, 2_000, true, true, 0, 36)
             .is_none());
 
-        clients.apply_update(&crate::ClientUpdateControlData {
-            update_type: crate::CLIENT_UPDATE_SET_OBSERVER,
-            client_id: 3,
-            data: 0,
-            by_client: 0,
-        });
+        clients.apply_update(&crate::ClientUpdateControlData::new(
+            crate::CLIENT_UPDATE_SET_OBSERVER,
+            3,
+            0,
+            0,
+        ));
         assert!(clients
             .activation_update_for_request(3, 2_000, 2_000, true, true, 0, 36)
             .is_none());
 
-        clients.apply_update(&crate::ClientUpdateControlData {
-            update_type: crate::CLIENT_UPDATE_ACTIVATE,
-            client_id: 3,
-            data: 1,
-            by_client: 0,
-        });
+        clients.apply_update(&crate::ClientUpdateControlData::new(
+            crate::CLIENT_UPDATE_ACTIVATE,
+            3,
+            1,
+            0,
+        ));
         assert!(clients
             .activation_update_for_request(3, 2_000, 2_000, true, true, 0, 36)
             .is_none());
@@ -4434,20 +4431,16 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         let existing = registry
             .admit_request(
-                crate::PlayerInfoUpdateRequest {
-                    client_id: 1,
-                    flags: 0,
-                    players: vec![player(0); 7],
-                },
+                crate::PlayerInfoUpdateRequest::new(1, 0, vec![player(0); 7]),
                 8,
             )
             .expect("seven free player slots accept the first request");
         registry.apply(existing);
-        let request = crate::PlayerInfoUpdateRequest {
-            client_id: 3,
-            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![player(0)],
-        };
+        let request = crate::PlayerInfoUpdateRequest::new(
+            3,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![player(0)],
+        );
 
         let admitted = registry
             .admit_request(request, 8)
@@ -4484,15 +4477,15 @@ mod tests {
 
         let admitted = registry
             .admit_request_with(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![
                         resource_player(0, 61),
                         resource_player(0, 62),
                         resource_player(0, 63),
                     ],
-                },
+                ),
                 8,
                 |players| {
                     callback_resource_ids = players
@@ -4527,11 +4520,11 @@ mod tests {
 
         let admitted = registry
             .admit_request(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![profile_row(0, 61)],
-                },
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![profile_row(0, 61)],
+                ),
                 8,
             )
             .expect("the released profile rejoins");
@@ -4564,11 +4557,11 @@ mod tests {
 
         let admitted = registry
             .admit_request(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![profile_row(0, 61), profile_row(0, 63)],
-                },
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![profile_row(0, 61), profile_row(0, 63)],
+                ),
                 8,
             )
             .expect("neither request repeats an eliminated profile");
@@ -4600,11 +4593,11 @@ mod tests {
         let before = registry.retained_rows_snapshot();
 
         let refused = registry.admit_request(
-            PlayerInfoUpdateRequest {
-                client_id: 3,
-                flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                players: vec![profile_row(0, 61)],
-            },
+            PlayerInfoUpdateRequest::new(
+                3,
+                CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                vec![profile_row(0, 61)],
+            ),
             8,
         );
 
@@ -4634,14 +4627,14 @@ mod tests {
         let mut callback_called = false;
 
         let admitted = registry.admit_request_with(
-            PlayerInfoUpdateRequest {
-                client_id: 3,
-                flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                players: vec![
+            PlayerInfoUpdateRequest::new(
+                3,
+                CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                vec![
                     resource_player(0, 61, 0),
                     resource_player(0, 62, PLAYER_INFO_FLAG_REMOVED),
                 ],
-            },
+            ),
             8,
             |_| callback_called = true,
         );
@@ -4680,15 +4673,15 @@ mod tests {
 
         let same_client = registry
             .admit_request(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![
                         resource_player(77, 61, 0),
                         resource_player(0, 62, 0),
                         player(0),
                     ],
-                },
+                ),
                 8,
             )
             .expect("assigned, resource-less, and removed-resource rows are exempt");
@@ -4703,11 +4696,11 @@ mod tests {
 
         let other_client = registry
             .admit_request(
-                PlayerInfoUpdateRequest {
-                    client_id: 4,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![resource_player(0, 61, 0)],
-                },
+                PlayerInfoUpdateRequest::new(
+                    4,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![resource_player(0, 61, 0)],
+                ),
                 8,
             )
             .expect("another client's matching resource is not a duplicate");
@@ -4715,11 +4708,11 @@ mod tests {
 
         let initial = registry
             .admit_request(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                    players: vec![resource_player(0, 61, 0)],
-                },
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    vec![resource_player(0, 61, 0)],
+                ),
                 8,
             )
             .expect("initial packets bypass duplicate-resource filtering");
@@ -4727,11 +4720,11 @@ mod tests {
 
         let within_request = registry
             .admit_request(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![resource_player(0, 64, 0), resource_player(0, 64, 0)],
-                },
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![resource_player(0, 64, 0), resource_player(0, 64, 0)],
+                ),
                 8,
             )
             .expect("new rows are not deduplicated against each other");
@@ -4749,7 +4742,7 @@ mod tests {
     fn admission_resolves_incoming_duplicate_name_with_c4_byte_folding() {
         let named = |id, name: &[u8], color| ControlPlayerInfoEntry {
             id,
-            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            name: legacy_cstring(name),
             color,
             original_color: color,
             ..Default::default()
@@ -4767,11 +4760,11 @@ mod tests {
 
         let admission = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![named(0, b"\xe4LICE", 0x0000_00f4)],
-                },
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![named(0, b"\xe4LICE", 0x0000_00f4)],
+                ),
                 8,
                 None,
                 &[],
@@ -4802,7 +4795,7 @@ mod tests {
         let named = |id, player_type, color| ControlPlayerInfoEntry {
             id,
             player_type,
-            name: LegacyCString::from_bytes(b"Same".to_vec()).unwrap(),
+            name: legacy_cstring(b"Same"),
             color,
             original_color: color,
             ..Default::default()
@@ -4824,11 +4817,11 @@ mod tests {
         };
         let admission = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 7,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![named(0, PLAYER_INFO_TYPE_USER, 0x0000_00f4)],
-                },
+                PlayerInfoUpdateRequest::new(
+                    7,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![named(0, PLAYER_INFO_TYPE_USER, 0x0000_00f4)],
+                ),
                 8,
                 None,
                 &[],
@@ -4871,8 +4864,8 @@ mod tests {
             |id, player_type, name: &[u8], forced_name: &[u8], color| ControlPlayerInfoEntry {
                 id,
                 player_type,
-                name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
-                forced_name: LegacyCString::from_bytes(forced_name.to_vec()).unwrap(),
+                name: legacy_cstring(name),
+                forced_name: legacy_cstring(forced_name),
                 color,
                 original_color: color,
                 ..Default::default()
@@ -4908,11 +4901,11 @@ mod tests {
 
         let admission = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 30,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![fixed_incoming],
-                },
+                PlayerInfoUpdateRequest::new(
+                    30,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![fixed_incoming],
+                ),
                 8,
                 None,
                 &[],
@@ -4947,8 +4940,8 @@ mod tests {
             |id, player_type, name: &[u8], forced_name: &[u8], color| ControlPlayerInfoEntry {
                 id,
                 player_type,
-                name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
-                forced_name: LegacyCString::from_bytes(forced_name.to_vec()).unwrap(),
+                name: legacy_cstring(name),
+                forced_name: legacy_cstring(forced_name),
                 color,
                 original_color: color,
                 ..Default::default()
@@ -5002,7 +4995,7 @@ mod tests {
     fn admission_color_conflict_uses_three_injected_safe_random_draws() {
         let named = |id, name: &[u8]| ControlPlayerInfoEntry {
             id,
-            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            name: legacy_cstring(name),
             color: 0x00f4_0000,
             original_color: 0x00f4_0000,
             ..Default::default()
@@ -5017,11 +5010,11 @@ mod tests {
 
         let admission = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![named(0, b"Two")],
-                },
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![named(0, b"Two")],
+                ),
                 8,
                 None,
                 &[],
@@ -5047,7 +5040,7 @@ mod tests {
             1,
             vec![ControlPlayerInfoEntry {
                 id: 1,
-                name: LegacyCString::from_bytes(b"Existing".to_vec()).unwrap(),
+                name: legacy_cstring(b"Existing"),
                 color: 0x0000_00f4,
                 original_color: 0x0000_00f4,
                 ..Default::default()
@@ -5061,16 +5054,16 @@ mod tests {
 
         let admission = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Incoming".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Incoming"),
                         color: 0x0000_00f4,
                         original_color: 0x00f4_0000,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 None,
                 &[],
@@ -5097,7 +5090,7 @@ mod tests {
                 1,
                 vec![ControlPlayerInfoEntry {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"Shifted".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Shifted"),
                     color: 0x0000_00f4,
                     original_color: 0x00f4_0000,
                     ..Default::default()
@@ -5112,16 +5105,16 @@ mod tests {
 
         let error = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Ordinary".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Ordinary"),
                         color: 0x0000_00f4,
                         original_color: 0x0000_00f4,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 None,
                 &[],
@@ -5145,7 +5138,7 @@ mod tests {
             vec![ControlPlayerInfoEntry {
                 id: 1,
                 player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
-                name: LegacyCString::from_bytes(b"Lower".to_vec()).unwrap(),
+                name: legacy_cstring(b"Lower"),
                 color: 0x00f4_0000,
                 original_color: 0x00f4_0000,
                 ..Default::default()
@@ -5159,16 +5152,16 @@ mod tests {
 
         let admission = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Higher".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Higher"),
                         color: 0x0000_00f4,
                         original_color: 0x00f4_0000,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 None,
                 &[],
@@ -5197,7 +5190,7 @@ mod tests {
                 1,
                 vec![ControlPlayerInfoEntry {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"Blocker".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Blocker"),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
@@ -5212,16 +5205,16 @@ mod tests {
 
         let error = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Candidate".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Candidate"),
                         color: 0x0000_c800,
                         original_color: 0x00f4_0000,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 None,
                 &[],
@@ -5249,7 +5242,7 @@ mod tests {
                 1,
                 vec![ControlPlayerInfoEntry {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"Blocker".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Blocker"),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
@@ -5263,11 +5256,11 @@ mod tests {
         };
         let admission = registry
             .admit_request_with_attributes_and_alternate_colors(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Candidate".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Candidate"),
                         color: 0x0000_c800,
                         original_color: 0x00f4_0000,
                         resource: Some(NetworkResourceCore {
@@ -5276,7 +5269,7 @@ mod tests {
                         }),
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 None,
                 &[],
@@ -5304,7 +5297,7 @@ mod tests {
     fn known_zero_alternate_color_enters_the_native_random_fallback() {
         let named = |id, name: &[u8], color| ControlPlayerInfoEntry {
             id,
-            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            name: legacy_cstring(name),
             color,
             original_color: color,
             ..Default::default()
@@ -5327,16 +5320,16 @@ mod tests {
 
         let admission = registry
             .admit_request_with_attributes_and_alternate_colors(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Candidate".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Candidate"),
                         color: 0x0000_00f4,
                         original_color: 0x00f4_0000,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 None,
                 &[],
@@ -5359,7 +5352,7 @@ mod tests {
                 1,
                 vec![ControlPlayerInfoEntry {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"Blocker".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Blocker"),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
@@ -5382,16 +5375,16 @@ mod tests {
 
         let error = registry
             .admit_remote_request_with_runtime_teams_and_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Candidate".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Candidate"),
                         color: 0x0000_c800,
                         original_color: 0x00f4_0000,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 &mut teams,
                 &[],
@@ -5415,7 +5408,7 @@ mod tests {
         let named = |id, player_type, color| ControlPlayerInfoEntry {
             id,
             player_type,
-            name: LegacyCString::from_bytes(b"Same".to_vec()).unwrap(),
+            name: legacy_cstring(b"Same"),
             color,
             original_color: color,
             ..Default::default()
@@ -5433,11 +5426,11 @@ mod tests {
 
         let admission = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![named(0, PLAYER_INFO_TYPE_USER, 0x0000_00f4)],
-                },
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![named(0, PLAYER_INFO_TYPE_USER, 0x0000_00f4)],
+                ),
                 8,
                 None,
                 &[],
@@ -5476,16 +5469,16 @@ mod tests {
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Lobby player".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Lobby player"),
                         color: 0x0012_3456,
                         original_color: 0x0012_3456,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 &mut teams,
                 false,
@@ -5598,7 +5591,7 @@ mod tests {
             };
             let existing = ControlPlayerInfoEntry {
                 id: 10,
-                name: LegacyCString::from_bytes(b"Existing".to_vec()).unwrap(),
+                name: legacy_cstring(b"Existing"),
                 team: 1,
                 color: 0x0012_3456,
                 original_color: 0x0012_3456,
@@ -5615,11 +5608,7 @@ mod tests {
 
             let admission = registry
                 .admit_request_with_teams_and_attributes(
-                    PlayerInfoUpdateRequest {
-                        client_id: 3,
-                        flags: 0,
-                        players: vec![requested],
-                    },
+                    PlayerInfoUpdateRequest::new(3, 0, vec![requested]),
                     8,
                     &mut teams,
                     by_host,
@@ -5659,17 +5648,17 @@ mod tests {
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 0,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
+                PlayerInfoUpdateRequest::new(
+                    0,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
                         player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
-                        name: LegacyCString::from_bytes(b"Host script".to_vec()).unwrap(),
+                        name: legacy_cstring(b"Host script"),
                         color: 0x0012_3456,
                         original_color: 0x0012_3456,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 &mut teams,
                 true,
@@ -5707,16 +5696,16 @@ mod tests {
             };
             let admission = registry
                 .admit_request_with_teams_and_attributes(
-                    PlayerInfoUpdateRequest {
-                        client_id: 3,
-                        flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                        players: vec![ControlPlayerInfoEntry {
-                            name: LegacyCString::from_bytes(b"Runtime user".to_vec()).unwrap(),
+                    PlayerInfoUpdateRequest::new(
+                        3,
+                        CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                        vec![ControlPlayerInfoEntry {
+                            name: legacy_cstring(b"Runtime user"),
                             color: 0x0012_3456,
                             original_color: 0x0012_3456,
                             ..Default::default()
                         }],
-                    },
+                    ),
                     8,
                     &mut teams,
                     false,
@@ -5752,16 +5741,16 @@ mod tests {
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Runtime user".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Runtime user"),
                         color: 0x0000_c800,
                         original_color,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 &mut teams,
                 false,
@@ -5805,7 +5794,7 @@ mod tests {
                 1,
                 vec![ControlPlayerInfoEntry {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"Existing".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Existing"),
                     team: 1,
                     color: conflicting_original,
                     original_color: conflicting_original,
@@ -5820,16 +5809,16 @@ mod tests {
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Shifted".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Shifted"),
                         color: 0x0000_00f4,
                         original_color: conflicting_original,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 &mut teams,
                 false,
@@ -5857,7 +5846,7 @@ mod tests {
         let team = |id, player_ids, color| initial_team(id, player_ids, color, 0);
         let joined = ControlPlayerInfoEntry {
             id: 7,
-            name: LegacyCString::from_bytes(b"Joined".to_vec()).unwrap(),
+            name: legacy_cstring(b"Joined"),
             flags: PLAYER_INFO_FLAG_JOINED,
             color: 0x0012_3456,
             original_color: 0x0012_3456,
@@ -5883,11 +5872,7 @@ mod tests {
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: 0,
-                    players: vec![joined],
-                },
+                PlayerInfoUpdateRequest::new(3, 0, vec![joined]),
                 8,
                 &mut teams,
                 false,
@@ -5935,7 +5920,7 @@ mod tests {
                 1,
                 vec![ControlPlayerInfoEntry {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"Existing".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Existing"),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
@@ -5950,16 +5935,16 @@ mod tests {
 
         let error = registry
             .admit_request_with_teams_and_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 2,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![ControlPlayerInfoEntry {
-                        name: LegacyCString::from_bytes(b"Shifted".to_vec()).unwrap(),
+                PlayerInfoUpdateRequest::new(
+                    2,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![ControlPlayerInfoEntry {
+                        name: legacy_cstring(b"Shifted"),
                         color: 0x0000_c800,
                         original_color: 0x00f4_0000,
                         ..Default::default()
                     }],
-                },
+                ),
                 8,
                 &mut teams,
                 false,
@@ -5994,15 +5979,15 @@ mod tests {
             ..initial_team_metadata()
         };
         let original_color = 0x0012_3456;
-        let request = crate::PlayerInfoUpdateRequest {
-            client_id: 3,
-            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![ControlPlayerInfoEntry {
+        let request = crate::PlayerInfoUpdateRequest::new(
+            3,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![ControlPlayerInfoEntry {
                 color: original_color,
                 original_color,
                 ..Default::default()
             }],
-        };
+        );
         let mut registry = ControlPlayerInfoRegistry::default();
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [0].into(),
@@ -6039,11 +6024,11 @@ mod tests {
             teams: vec![team(1), team(2)],
             ..initial_team_metadata()
         };
-        let request = crate::PlayerInfoUpdateRequest {
-            client_id: 3,
-            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![player(0)],
-        };
+        let request = crate::PlayerInfoUpdateRequest::new(
+            3,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![player(0)],
+        );
         let mut registry = ControlPlayerInfoRegistry::default();
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [0].into(),
@@ -6241,18 +6226,18 @@ mod tests {
             ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 7,
-            flags: CLIENT_PLAYER_INFO_FLAG_INITIAL | CLIENT_PLAYER_INFO_FLAG_UPDATED,
-            players: (1..=3)
+        registry.apply(PlayerInfoControlData::new(
+            7,
+            CLIENT_PLAYER_INFO_FLAG_INITIAL | CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            (1..=3)
                 .map(|id| ControlPlayerInfoEntry {
                     id,
                     team: 1,
                     ..Default::default()
                 })
                 .collect(),
-            by_client: 0,
-        });
+            0,
+        ));
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
             ranges: Vec::new(),
@@ -6430,7 +6415,7 @@ mod tests {
                 random_team_count,
                 teams: vec![crate::InitialNetworkTeam {
                     id: 7,
-                    name: LegacyCString::from_bytes(b"Old team".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Old team"),
                     player_start_index: 0,
                     player_ids: vec![3, 2, 1],
                     color: old_team_color,
@@ -6582,7 +6567,7 @@ mod tests {
             teams: vec![
                 crate::InitialNetworkTeam {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"Red".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Red"),
                     player_start_index: 0,
                     player_ids: vec![1],
                     color: 0x00f4_0000,
@@ -6591,7 +6576,7 @@ mod tests {
                 },
                 crate::InitialNetworkTeam {
                     id: 2,
-                    name: LegacyCString::from_bytes(b"Blue".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Blue"),
                     player_start_index: 0,
                     player_ids: vec![2],
                     color: 0x0000_00f4,
@@ -6605,8 +6590,8 @@ mod tests {
             |id, team, name: &[u8], forced_name: &[u8], original_color| ControlPlayerInfoEntry {
                 id,
                 team,
-                name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
-                forced_name: LegacyCString::from_bytes(forced_name.to_vec()).unwrap(),
+                name: legacy_cstring(name),
+                forced_name: legacy_cstring(forced_name),
                 color: original_color,
                 original_color,
                 ..Default::default()
@@ -6629,10 +6614,8 @@ mod tests {
         assert_eq!(registry.get(2).unwrap().color, 0x0000_00f4);
 
         let mut conflicting = registry.clone();
-        conflicting.get_mut(2).unwrap().name =
-            LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
-        conflicting.get_mut(1).unwrap().forced_name =
-            LegacyCString::from_bytes(b"Alias".to_vec()).unwrap();
+        conflicting.get_mut(2).unwrap().name = legacy_cstring(b"Alice");
+        conflicting.get_mut(1).unwrap().forced_name = legacy_cstring(b"Alias");
         let before = conflicting.retained_rows_snapshot();
         let error = conflicting
             .update_team_colors(&teams, false, &[])
@@ -6659,14 +6642,14 @@ mod tests {
             vec![
                 ControlPlayerInfoEntry {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"One".to_vec()).unwrap(),
+                    name: legacy_cstring(b"One"),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
                 },
                 ControlPlayerInfoEntry {
                     id: 2,
-                    name: LegacyCString::from_bytes(b"Two".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Two"),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
@@ -6702,14 +6685,14 @@ mod tests {
             vec![
                 ControlPlayerInfoEntry {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"One".to_vec()).unwrap(),
+                    name: legacy_cstring(b"One"),
                     color: 0x0000_f400,
                     original_color: 0x00f4_0000,
                     ..Default::default()
                 },
                 ControlPlayerInfoEntry {
                     id: 2,
-                    name: LegacyCString::from_bytes(b"Two".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Two"),
                     color: 0x00f4_0000,
                     original_color: 0x0000_00f4,
                     ..Default::default()
@@ -6729,16 +6712,16 @@ mod tests {
             vec![
                 ControlPlayerInfoEntry {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
-                    forced_name: LegacyCString::from_bytes(b"Alias".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Alice"),
+                    forced_name: legacy_cstring(b"Alias"),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
                 },
                 ControlPlayerInfoEntry {
                     id: 2,
-                    name: LegacyCString::from_bytes(b"Bob".to_vec()).unwrap(),
-                    forced_name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Bob"),
+                    forced_name: legacy_cstring(b"Alice"),
                     color: 0x0000_00f4,
                     original_color: 0x0000_00f4,
                     ..Default::default()
@@ -6762,7 +6745,7 @@ mod tests {
             team_colors: false,
             teams: vec![crate::InitialNetworkTeam {
                 id: 1,
-                name: LegacyCString::from_bytes(b"Blue".to_vec()).unwrap(),
+                name: legacy_cstring(b"Blue"),
                 player_start_index: 0,
                 player_ids: vec![1],
                 color: team_color,
@@ -6778,7 +6761,7 @@ mod tests {
             vec![
                 ControlPlayerInfoEntry {
                     id: 1,
-                    name: LegacyCString::from_bytes(b"One".to_vec()).unwrap(),
+                    name: legacy_cstring(b"One"),
                     savegame_player: 91,
                     team: 1,
                     color: 0x00f4_0000,
@@ -6787,7 +6770,7 @@ mod tests {
                 },
                 ControlPlayerInfoEntry {
                     id: 2,
-                    name: LegacyCString::from_bytes(b"Two".to_vec()).unwrap(),
+                    name: legacy_cstring(b"Two"),
                     savegame_player: 92,
                     team: 0,
                     color: unchanged_color,
@@ -6812,11 +6795,7 @@ mod tests {
         // CIF_Initial, before ID assignment or direct PlayerInfo emission
         // (src/C4Network2Players.cpp:167-190).
         let mut registry = ControlPlayerInfoRegistry::default();
-        let request = crate::PlayerInfoUpdateRequest {
-            client_id: 3,
-            flags: 0,
-            players: Vec::new(),
-        };
+        let request = crate::PlayerInfoUpdateRequest::new(3, 0, Vec::new());
 
         assert_eq!(registry.admit_request(request, 8), None);
     }
@@ -6864,8 +6843,7 @@ mod tests {
             resource_type: 3,
             id: 61,
             loadable: true,
-            filename: LegacyCString::from_bytes(b"Remote.c4p".to_vec())
-                .expect("valid resource filename"),
+            filename: legacy_cstring(b"Remote.c4p"),
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
@@ -6894,9 +6872,7 @@ mod tests {
             }]
         );
         assert!(registry
-            .issue_unjoined_players(3, |_| {
-                Some(LegacyCString::from_bytes(b"Complete.c4p".to_vec()).unwrap())
-            })
+            .issue_unjoined_players(3, |_| { Some(legacy_cstring(b"Complete.c4p")) })
             .is_empty());
     }
 
@@ -6978,7 +6954,7 @@ mod tests {
             resource_type: 3,
             id: 61,
             loadable: true,
-            filename: LegacyCString::from_bytes(b"Remote.c4p".to_vec()).unwrap(),
+            filename: legacy_cstring(b"Remote.c4p"),
             ..Default::default()
         };
         let players = vec![ControlPlayerInfoEntry {
@@ -7044,7 +7020,7 @@ mod tests {
             by_client: 0,
             ..Default::default()
         });
-        let duplicate = LegacyCString::from_bytes(b"Alice.c4p".to_vec()).expect("valid path");
+        let duplicate = legacy_cstring(b"Alice.c4p");
 
         let joins = registry.issue_unjoined_local_players(0, |player| {
             matches!(player.id, 1 | 2).then(|| duplicate.clone())
@@ -7087,8 +7063,7 @@ mod tests {
         // C4Player::Load supplies score, preferences and crew from the .c4p
         // (src/C4Player.cpp:246-284,1089-1106).
         let info = ControlPlayerInfoEntry {
-            name: crate::LegacyCString::from_bytes(b"Network Tyler".to_vec())
-                .expect("valid legacy name"),
+            name: legacy_cstring(b"Network Tyler"),
             id: 7,
             team: 2,
             color: 0x0011_2233,
@@ -7157,7 +7132,7 @@ mod tests {
     #[test]
     fn savegame_assignment_missing_rows_reset_prune_and_swap_in_attribute_admission() {
         let candidate = |name: &[u8], savegame_player, flags, color| ControlPlayerInfoEntry {
-            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            name: legacy_cstring(name),
             flags,
             color,
             original_color: color,
@@ -7172,10 +7147,10 @@ mod tests {
 
         let admission = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![
                         candidate(b"Retained", 70, 0, 0x00f4_0000),
                         candidate(b"Pruned", 71, PLAYER_INFO_FLAG_SAVEGAME_JOIN, 0x0000_c800),
                         candidate(
@@ -7185,7 +7160,7 @@ mod tests {
                             0x0000_00f4,
                         ),
                     ],
-                },
+                ),
                 8,
                 None,
                 &[],
@@ -7247,10 +7222,10 @@ mod tests {
 
         let admission = registry
             .admit_request_with_teams_and_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![
                         ControlPlayerInfoEntry {
                             savegame_player: 80,
                             flags: PLAYER_INFO_FLAG_SAVEGAME_JOIN,
@@ -7262,7 +7237,7 @@ mod tests {
                             ..Default::default()
                         },
                     ],
-                },
+                ),
                 8,
                 &mut teams,
                 false,
@@ -7291,7 +7266,7 @@ mod tests {
             ..Default::default()
         };
         let candidate = |name: &[u8], flags| ControlPlayerInfoEntry {
-            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            name: legacy_cstring(name),
             flags,
             color: restore.color,
             original_color: restore.color,
@@ -7306,14 +7281,14 @@ mod tests {
 
         let admission = registry
             .admit_request_with_attributes(
-                PlayerInfoUpdateRequest {
-                    client_id: 3,
-                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![
+                PlayerInfoUpdateRequest::new(
+                    3,
+                    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    vec![
                         candidate(b"Earlier", PLAYER_INFO_FLAG_SAVEGAME_JOIN),
                         candidate(b"Later", 0),
                     ],
-                },
+                ),
                 8,
                 None,
                 std::slice::from_ref(&restore),
@@ -7343,7 +7318,7 @@ mod tests {
         };
         let associated = |id, name: &[u8]| ControlPlayerInfoEntry {
             id,
-            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            name: legacy_cstring(name),
             color: 0x0000_00f4,
             original_color: 0x0000_00f4,
             savegame_player: restore.id,
@@ -7358,11 +7333,7 @@ mod tests {
             };
             let admission = registry
                 .admit_request_with_attributes(
-                    PlayerInfoUpdateRequest {
-                        client_id,
-                        flags,
-                        players: vec![associated(0, name)],
-                    },
+                    PlayerInfoUpdateRequest::new(client_id, flags, vec![associated(0, name)]),
                     8,
                     None,
                     std::slice::from_ref(&restore),
@@ -7477,8 +7448,8 @@ mod tests {
 
     #[test]
     fn exact_savegame_resume_copies_only_native_takeover_fields() {
-        let current_name = LegacyCString::from_bytes(b"Current identity".to_vec()).unwrap();
-        let current_filename = LegacyCString::from_bytes(b"Current.c4p".to_vec()).unwrap();
+        let current_name = legacy_cstring(b"Current identity");
+        let current_filename = legacy_cstring(b"Current.c4p");
         let current_flags = PLAYER_INFO_FLAG_SAVEGAME_JOIN
             | crate::PLAYER_INFO_FLAG_DISCONNECTED
             | crate::PLAYER_INFO_FLAG_WON
@@ -7505,8 +7476,8 @@ mod tests {
             )],
         );
         let restore = ControlPlayerInfoEntry {
-            name: LegacyCString::from_bytes(b"Saved identity".to_vec()).unwrap(),
-            filename: LegacyCString::from_bytes(b"Saved.c4p".to_vec()).unwrap(),
+            name: legacy_cstring(b"Saved identity"),
+            filename: legacy_cstring(b"Saved.c4p"),
             flags: PLAYER_INFO_FLAG_JOINED
                 | PLAYER_INFO_FLAG_JOIN_ISSUED
                 | PLAYER_INFO_FLAG_NO_SCENARIO_INIT
@@ -7550,8 +7521,7 @@ mod tests {
         // name/team/color (src/C4Player.cpp:256-284;
         // src/C4InfoCore.cpp:66-85).
         let info = ControlPlayerInfoEntry {
-            name: crate::LegacyCString::from_bytes(b"Script Tyler".to_vec())
-                .expect("valid legacy name"),
+            name: legacy_cstring(b"Script Tyler"),
             id: 9,
             player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
             color: 0x0044_5566,
@@ -7583,7 +7553,7 @@ mod tests {
     #[test]
     fn script_player_join_preserves_non_utf8_name_bytes() {
         let info = ControlPlayerInfoEntry {
-            name: crate::LegacyCString::from_bytes(vec![0xff]).expect("name has no NUL"),
+            name: legacy_cstring(vec![0xff]),
             id: 9,
             player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
             ..Default::default()
@@ -7609,10 +7579,7 @@ mod tests {
         // Remote non-resource joins save PlrData and load that temporary .c4p;
         // the transmitted Filename is not opened (src/C4Control.cpp:731-744).
         let join = JoinPlayerControlData {
-            filename: crate::LegacyCString::from_bytes(
-                b"/definitely/missing/RemotePlayer.c4p".to_vec(),
-            )
-            .expect("valid legacy filename"),
+            filename: legacy_cstring(b"/definitely/missing/RemotePlayer.c4p"),
             info_id: 7,
             source: crate::JoinPlayerSource::Embedded(
                 include_bytes!("../tests/fixtures/embedded_player.c4p").to_vec(),
