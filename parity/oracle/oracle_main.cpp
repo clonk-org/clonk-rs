@@ -105,6 +105,7 @@
 #include <C4SolidMaskBitmap.h> // real production active-bitmap mask sampling
 #include <C4Rect.h>            // real production rect, incl. the Scaled() decl
 #include <C4Components.h>     // real C4FLS_Scenario group sort order
+#include <C4Strings.h>       // real declarations (and defaults) for the S* helpers
 
 extern long SineTable[9001]; // defined by the generated sine_table.cpp
 
@@ -4349,7 +4350,8 @@ struct GameStub
 static GameStub Game;
 
 static bool ValidPlr(int32_t player) { return player >= 0; }
-static bool SEqual(const char *a, const char *b) { return std::strcmp(a, b) == 0; }
+// SEqual now comes from the lifted C4Strings helpers, which additionally treat
+// a null operand as unequal; every call here passes a literal.
 
 struct ContentsList
 {
@@ -5273,6 +5275,28 @@ namespace wildcard
 
 } // namespace wildcard
 
+// The pure C4Strings helpers, lifted whole. They must sit at global scope so
+// each definition matches the declaration in the real C4Strings.h -- that
+// header is where the default arguments (SizeMax, ';', false) come from, and
+// SAppend calls SCopy with two arguments relying on exactly that.
+#include "c4strings_helpers.inc"
+#include "c4strings_advance_space.inc"
+
+// C4ConfigGeneral::GetLanguageSequence, with the smallest class that lets the
+// real out-of-line definition compile.
+namespace config_language
+{
+
+struct C4ConfigGeneral
+{
+	int GetLanguageSequence(const char *strSource, char *strTarget);
+};
+
+#include "config_language_sequence.inc"
+
+} // namespace config_language
+
+
 
 
 int main()
@@ -6150,6 +6174,58 @@ int main()
             sep();
             printf("{\"pattern\":\"%s\",\"name\":\"%s\",\"match\":%d}", c.pattern, c.name,
                    wildcard::WildcardMatch(c.pattern, c.name) ? 1 : 0);
+        }
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("config_language_sequence");
+    {
+        struct Case
+        {
+            const char *name;
+            const char *source;
+        };
+
+        const Case cases[] = {
+            // The shipped defaults and the shapes a config file carries.
+            {"empty", ""},
+            {"single", "DE"},
+            {"pair", "DE,US"},
+            {"shipped_default", "US,DE"},
+            // Whitespace after a separator is skipped outright; whitespace
+            // before one is not, and disappears only because the copy stops at
+            // two characters.
+            {"space_after_comma", "DE, US"},
+            {"spaces_everywhere", " DE , US "},
+            // Long descriptions are TRUNCATED to two characters rather than
+            // rejected, which is the whole point of the condensing pass.
+            {"long_names", "German,English"},
+            {"mixed_lengths", "DE,English,US"},
+            // Empty segments are dropped, so separators do not produce blanks.
+            {"empty_segment", "DE,,US"},
+            {"leading_comma", ",DE"},
+            {"trailing_comma", "DE,"},
+            {"only_commas", ",,,"},
+            // A single-character code stays one character.
+            {"one_char", "D"},
+            {"one_char_pair", "D,U"},
+            // Case is preserved -- the sequence is copied, not normalized.
+            {"lowercase", "de,us"},
+            {"mixed_case", "De,uS"},
+            // Whitespace-only segments become empty and are dropped.
+            {"space_segment", "DE,   ,US"},
+            {"only_space", "   "},
+        };
+
+        for (const Case &c : cases)
+        {
+            char target[256] = {0};
+            config_language::C4ConfigGeneral general;
+            const int count = general.GetLanguageSequence(c.source, target);
+            sep();
+            printf("{\"case\":\"%s\",\"source\":\"%s\",\"count\":%d,\"target\":\"%s\"}", c.name,
+                   c.source, count, target);
         }
     }
     arr_end();

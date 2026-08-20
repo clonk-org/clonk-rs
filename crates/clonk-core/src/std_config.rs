@@ -13,6 +13,39 @@ use std::path::Path;
 /// unescaped closing quote or raw line ending. Numeric escapes deliberately
 /// consume every following digit of their radix rather than using C's usual
 /// length limits.
+/// `IsWhiteSpace` (C4Strings.cpp:48): space, tab, CR and LF only -- narrower
+/// than Rust's `char::is_whitespace`.
+fn is_cpp_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | 0x09 | 0x0d | 0x0a)
+}
+
+/// `C4ConfigGeneral::GetLanguageSequence` (C4Config.cpp:1492-1507): condense a
+/// comma-separated language list into two-letter codes.
+///
+/// This is a condensing pass, not a validation pass. Each comma-separated
+/// segment has its leading whitespace skipped and is then **truncated** to its
+/// first two bytes rather than rejected, so `DE - Deutsch` yields `DE` and
+/// `English` yields `En`. Case is preserved, a one-character segment stays one
+/// character, and duplicates are kept. Only a segment that is empty after the
+/// whitespace skip is dropped, which is why `DE,,US` yields two entries.
+///
+/// C++ writes into a fixed buffer and returns the count; the count here is the
+/// length of the returned list.
+pub fn language_sequence(source: &str) -> Vec<String> {
+    source
+        .as_bytes()
+        .split(|byte| *byte == b',')
+        .filter_map(|segment| {
+            let start = segment
+                .iter()
+                .position(|byte| !is_cpp_whitespace(*byte))
+                .unwrap_or(segment.len());
+            let code = &segment[start..segment.len().min(start + 2)];
+            (!code.is_empty()).then(|| String::from_utf8_lossy(code).into_owned())
+        })
+        .collect()
+}
+
 pub fn decode_cpp_escaped_string(value: &[u8], max_length: usize) -> Option<Vec<u8>> {
     decode_cpp_escaped_string_impl(value, max_length)
 }
