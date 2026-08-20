@@ -1531,6 +1531,76 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
+    // 0c. C4MassMoverSet::Create's slot scan (C4MassMover.cpp:67-94). The
+    //     search starts AFTER `CreatePtr` and wraps at the chunk end, so a slot
+    //     freed behind the cursor is not reused until the cursor comes round to
+    //     it — the opposite of the PXS allocator above, which always hands back
+    //     the lowest free slot. Where a mover lands decides whether the frame's
+    //     descending `Execute` pass reaches it again this pass or only the next,
+    //     so the sequence of chosen slots is parity state.
+    //
+    //     The oracle stubs `Init` to succeed, which also holds its `Count` at
+    //     zero, so `Create`'s `Count == C4MassMoverChunk` gate never fires there
+    //     and this section pins the scan alone; the gate has its own test
+    //     (`create_gate_is_exact_equality_on_count`).
+    {
+        let mut set = crate::mass_mover::MassMoverSet::default();
+        let material = crate::material::MaterialId::new(1).expect("material 1");
+        let take = |set: &mut crate::mass_mover::MassMoverSet| {
+            set.find_free_slot()
+                .map(|index| {
+                    set.fill_slot(
+                        index,
+                        crate::mass_mover::MassMover {
+                            mat: material,
+                            x: 7,
+                            y: 9,
+                        },
+                    );
+                })
+                .is_some()
+        };
+
+        for (idx, e) in golden["mass_mover_allocation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let step = e["step"].as_str().unwrap_or_default();
+            let ok = match step {
+                "free_behind" | "free_for_wrap" => {
+                    set.cease(1);
+                    true
+                }
+                "free_behind_again" => {
+                    set.cease(2);
+                    true
+                }
+                // Fill the chunk, then record where the cursor stopped.
+                "full" => {
+                    while take(&mut set) {}
+                    false
+                }
+                _ => take(&mut set),
+            };
+            expect_eq(
+                "mass_mover_allocation",
+                idx,
+                "ok",
+                i(e, "ok"),
+                i64::from(ok),
+            );
+            expect_eq(
+                "mass_mover_allocation",
+                idx,
+                "create_ptr",
+                i(e, "create_ptr"),
+                i64::from(set.create_ptr()),
+            );
+        }
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));

@@ -3466,6 +3466,50 @@ struct C4MaterialMap
 #include "mrf_poof.inc"
 } // namespace poof_reaction
 
+
+// ---------------------------------------------------------------------------
+// C4MassMoverSet::Create's slot scan (src/C4MassMover.cpp). The search starts
+// *after* CreatePtr, wraps at the chunk end, takes the first free slot and
+// leaves CreatePtr on it. That is what decides whether the frame's descending
+// Execute pass reaches a newly created mover again this pass or only the next
+// one, so the sequence of chosen slots is parity state.
+//
+// `Init` is stubbed to succeed: it does landscape bounds and material work that
+// this section deliberately does not scaffold, and the scan is what is being
+// pinned. `Execute` is never requested (`fExecute` is false throughout).
+namespace mover_allocation
+{
+const int32_t MNone = -1;
+const int32_t C4MassMoverChunk = 10000;
+
+struct C4MassMover
+{
+    int32_t Mat = MNone;
+    int32_t x = 0, y = 0;
+
+    bool Init(int32_t tx, int32_t ty)
+    {
+        Mat = 1;
+        x = tx;
+        y = ty;
+        return true;
+    }
+
+    void Execute() {}
+};
+
+struct C4MassMoverSet
+{
+    int32_t Count = 0;
+    int32_t CreatePtr = 0;
+    C4MassMover Set[C4MassMoverChunk];
+
+    bool Create(int32_t x, int32_t y, bool fExecute = false);
+};
+
+#include "mass_mover_create.inc"
+} // namespace mover_allocation
+
 int main()
 {
     printf("{\n");
@@ -3558,6 +3602,53 @@ int main()
                        poof_reaction::g_extractions, poof_reaction::g_smoke,
                        poof_reaction::g_sound, RandomCount, static_cast<unsigned>(RandomHold));
             }
+    }
+    arr_end();
+    printf(",\n");
+
+    // C4MassMoverSet::Create's cyclic slot scan (C4MassMover.cpp:67-94). The
+    // search starts *after* CreatePtr, so a slot freed behind the cursor is not
+    // reused until the pointer comes round to it — the opposite of the PXS
+    // allocator, which always takes the lowest free slot. A port that made the
+    // two consistent would pass one section and fail the other.
+    arr_begin("mass_mover_allocation");
+    {
+        static mover_allocation::C4MassMoverSet set;
+        const auto take = [&](const char *step)
+        {
+            const bool ok = set.Create(7, 9);
+            sep();
+            printf("{\"step\":\"%s\",\"ok\":%d,\"create_ptr\":%d}", step, ok ? 1 : 0,
+                   set.CreatePtr);
+        };
+        const auto free_slot = [&](int32_t slot, const char *step)
+        {
+            set.Set[slot].Mat = mover_allocation::MNone;
+            sep();
+            printf("{\"step\":\"%s\",\"ok\":1,\"create_ptr\":%d}", step, set.CreatePtr);
+        };
+
+        take("first");
+        take("second");
+        take("third");
+        // Freeing behind the cursor does not bring the cursor back: the next
+        // scan starts at CreatePtr + 1 and takes the next slot forward.
+        free_slot(1, "free_behind");
+        take("takes_next_forward");
+        free_slot(2, "free_behind_again");
+        take("still_forward");
+
+        // Fill the rest of the chunk so the only free slots are the two behind
+        // the cursor. Now the scan has to wrap the chunk end to find them, and
+        // it takes the lower one first because it reaches it first going
+        // forward from the wrap.
+        while (set.Create(7, 9))
+        {
+        }
+        sep();
+        printf("{\"step\":\"full\",\"ok\":0,\"create_ptr\":%d}", set.CreatePtr);
+        free_slot(1, "free_for_wrap");
+        take("wraps_to_freed");
     }
     arr_end();
     printf(",\n");

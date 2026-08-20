@@ -545,6 +545,23 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Material.cpp" > "$gen/mrf_poof.inc"
 
+# 3x. Lift C4MassMoverSet::Create's slot scan. Where a mover lands decides
+#     whether the descending Execute pass reaches it again this frame or next,
+#     so the cyclic search — start after CreatePtr, wrap at the chunk end, first
+#     `Mat == MNone` wins, CreatePtr follows the slot taken — is parity state.
+#     Two things are dropped, both instrumentation rather than behaviour: the
+#     `LC_RNG_TRACE` block this fork adds for tracing, and the DEBUGREC record
+#     (already inactive, since the oracle compiles without DEBUGREC).
+awk '
+  /^bool C4MassMoverSet::Create\(/ { p = 1 }
+  p && /getenv\("LC_RNG_TRACE"\)/ { trace = 1; next }
+  trace && /^\t}$/ { trace = 0; next }
+  trace { next }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4MassMover.cpp" > "$gen/mass_mover_create.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;
