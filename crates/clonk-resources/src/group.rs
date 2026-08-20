@@ -107,7 +107,13 @@ impl Group {
                     io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
                 ) =>
             {
-                return Err(GroupError::Missing(path.to_path_buf()));
+                // Not a real reference. C4Group::Open truncates components
+                // until one exists, opens that as the mother and reopens the
+                // remainder as a child (C4Group.cpp:695-716) — which is how a
+                // packed scenario folder addresses its contents, as in
+                // `Pack.c4f/Scenario.c4s`.
+                return Self::open_below_mother(path)
+                    .ok_or_else(|| GroupError::Missing(path.to_path_buf()));
             }
             Err(error) => return Err(GroupError::Io(error)),
         };
@@ -131,6 +137,25 @@ impl Group {
             }),
             Err(err) => Err(err),
         }
+    }
+
+    /// `C4Group::Open`'s mother trace-back (C4Group.cpp:697-716): walk up to
+    /// the nearest real file or folder, open it, and reopen everything below
+    /// it as a child chain. C++ reports one undifferentiated failure for every
+    /// way this can go wrong, so the caller keeps its own `Missing` error.
+    fn open_below_mother(path: &Path) -> Option<Self> {
+        let mut mother = path.parent()?;
+        let mut child = PathBuf::from(path.file_name()?);
+        while !mother.as_os_str().is_empty() {
+            if fs::metadata(mother).is_ok() {
+                return Self::open(mother)
+                    .and_then(|group| group.open_child(&child))
+                    .ok();
+            }
+            child = Path::new(mother.file_name()?).join(&child);
+            mother = mother.parent()?;
+        }
+        None
     }
 
     pub fn root(&self) -> &Path {
@@ -1358,6 +1383,46 @@ mod tests {
     }
 
     #[test]
+    fn open_traces_back_to_the_mother_group_for_a_child_path() {
+        // `C4Group::Open` only stats the path when it is a real reference;
+        // otherwise it truncates components until one exists, opens that as
+        // the mother and reopens the remainder as a child
+        // (C4Group.cpp:670-716). A packed scenario folder therefore names its
+        // scenarios as `Pack.c4f/Scenario.c4s`, a path no stat can resolve.
+        let dir = tempdir().unwrap();
+        let inner = packed_group_image_with_entry("Scenario.txt", false, b"[Head]");
+        let pack = dir.path().join("Pack.c4f");
+        fs::write(
+            &pack,
+            gz_wrapped(&packed_group_image_with_entry("Scenario.c4s", true, &inner)),
+        )
+        .unwrap();
+
+        let group = Group::open(pack.join("Scenario.c4s")).unwrap();
+        assert_eq!(group.read_file("Scenario.txt").unwrap(), b"[Head]");
+    }
+
+    #[test]
+    fn open_traces_back_past_several_packed_levels() {
+        // C++ truncates in a loop (`do { TruncatePath } while (!FileExists)`,
+        // C4Group.cpp:699-702), so an arbitrarily deep chain of packed groups
+        // resolves against the one real file at its head. UCC folder groups
+        // nest a pack inside a category folder inside the compilation.
+        let dir = tempdir().unwrap();
+        let scenario = packed_group_image_with_entry("Scenario.txt", false, b"[Head]");
+        let inner = packed_group_image_with_entry("Scenario.c4s", true, &scenario);
+        let pack = dir.path().join("Pack.c4f");
+        fs::write(
+            &pack,
+            gz_wrapped(&packed_group_image_with_entry("Inner.c4f", true, &inner)),
+        )
+        .unwrap();
+
+        let group = Group::open(pack.join("Inner.c4f").join("Scenario.c4s")).unwrap();
+        assert_eq!(group.read_file("Scenario.txt").unwrap(), b"[Head]");
+    }
+
+    #[test]
     fn open_directory_group() {
         let dir = tempdir().unwrap();
         fs::create_dir(dir.path().join("sub")).unwrap();
@@ -1549,6 +1614,22 @@ mod tests {
     /// scrambled header + one entry ("hello.txt" -> b"world").
     fn packed_group_image() -> Vec<u8> {
         packed_group_image_with_entry("hello.txt", false, b"world")
+    }
+
+    /// Wraps a raw packed image in the on-disk gz envelope, whose magic bytes
+    /// are replaced by {0x1E, 0x8C} (StdGzCompressedFile.cpp:62-95).
+    fn gz_wrapped(image: &[u8]) -> Vec<u8> {
+        let mut compressed = Vec::new();
+        {
+            use std::io::Write as _;
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
+            encoder.write_all(image).unwrap();
+            encoder.finish().unwrap();
+        }
+        compressed[0] = 0x1E;
+        compressed[1] = 0x8C;
+        compressed
     }
 
     fn packed_group_image_with_entry(name: &str, child: bool, data: &[u8]) -> Vec<u8> {
