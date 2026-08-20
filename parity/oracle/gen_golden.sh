@@ -698,6 +698,13 @@ awk '
 #     effect above it. Which of those branches a port takes decides whether a
 #     second effect exists at all.
 awk '
+  /^void C4Effect::Execute\(C4Object \*pObj\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Effect.cpp" > "$gen/effect_execute.inc"
+
+awk '
   /^int32_t C4Effect::Check\(C4Object \*pForObj, const char \*szCheckEffect/ { p = 1 }
   p { print }
   p && /^}$/ { found = 1; exit }

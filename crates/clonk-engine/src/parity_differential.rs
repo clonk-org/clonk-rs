@@ -2764,6 +2764,180 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
+    // 0l. C4Effect::Execute (C4Effect.cpp:319-363), the per-frame effect pass.
+    //     It walks the list unlinking dead effects as it goes, advances each
+    //     survivor's clock FIRST, and only then tests `iTime % iIntervall` — so
+    //     an effect created this frame with interval 1 fires immediately, and
+    //     one with a non-zero starting time lands on different frames. An
+    //     interval with no timer function at all is killed the moment the
+    //     boundary arrives (:355-357), and a timer answering
+    //     `C4Fx_Execute_Kill` finishes its effect, which the NEXT pass unlinks.
+    for (idx, case) in golden["effect_execute"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let name = case["case"].as_str().unwrap_or_default();
+        // (priority, interval, has_timer, timer_result, start_time) per effect,
+        // recovered from the case the oracle emitted.
+        let rows: [(i32, i32, bool, i32, i32); 3] = match name {
+            "interval_zero_never_fires" => [
+                (100, 0, true, 0, 0),
+                (60, 0, true, 0, 0),
+                (20, 0, true, 0, 0),
+            ],
+            "interval_two_fires_every_other" => [
+                (100, 2, true, 0, 0),
+                (60, 0, true, 0, 0),
+                (20, 0, true, 0, 0),
+            ],
+            "interval_one_fires_every_frame" => [
+                (100, 1, true, 0, 0),
+                (60, 0, true, 0, 0),
+                (20, 0, true, 0, 0),
+            ],
+            "start_time_shifts_boundary" => [
+                (100, 3, true, 0, 1),
+                (60, 0, true, 0, 0),
+                (20, 0, true, 0, 0),
+            ],
+            "timer_kills_then_unlinks" => [
+                (100, 1, true, -1, 0),
+                (60, 0, true, 0, 0),
+                (20, 0, true, 0, 0),
+            ],
+            "interval_without_timer_dies" => [
+                (100, 2, false, 0, 0),
+                (60, 0, true, 0, 0),
+                (20, 0, true, 0, 0),
+            ],
+            "dead_head_unlinked" => [
+                (100, 0, true, 0, 0),
+                (60, 0, true, 0, 0),
+                (0, 0, true, 0, 0),
+            ],
+            "dead_middle_unlinked" => [
+                (100, 0, true, 0, 0),
+                (0, 0, true, 0, 0),
+                (20, 0, true, 0, 0),
+            ],
+            "dead_tail_unlinked" => [(0, 0, true, 0, 0), (60, 0, true, 0, 0), (20, 0, true, 0, 0)],
+            "all_dead_unlinked" => [(0, 0, true, 0, 0), (0, 0, true, 0, 0), (0, 0, true, 0, 0)],
+            other => panic!("unhandled effect_execute case `{other}`"),
+        };
+
+        let mut script = String::from("#strict 2\nstatic fx_log;\n");
+        for (index, id) in ["A", "B", "C"].into_iter().enumerate() {
+            let (_, _, has_timer, timer_result, _) = rows[index];
+            let digit = index + 1;
+            if has_timer {
+                script.push_str(&format!(
+                    "func FxEffect{id}Timer(object target, int number, int time) {{ fx_log = fx_log * 11 + {digit}; return {timer_result}; }}\n"
+                ));
+            }
+            script.push_str(&format!(
+                "func FxEffect{id}Start(object target, int number, int temp) {{ return 0; }}\n"
+            ));
+        }
+        script.push_str("func Arm() {\n");
+        for (index, id) in ["A", "B", "C"].into_iter().enumerate() {
+            let (priority, interval, ..) = rows[index];
+            // A zero priority would be refused outright, so every effect is
+            // added alive and the dead ones are zeroed afterwards.
+            let add_priority = if priority == 0 {
+                10 * (index as i32 + 1)
+            } else {
+                priority
+            };
+            script.push_str(&format!(
+                "  AddEffect(\"Effect{id}\", this(), {add_priority}, {interval}, this());\n"
+            ));
+        }
+        script.push_str("  fx_log = 0; return 1;\n}\n");
+        script.push_str("func ReadLog() { return fx_log; }\n");
+        script.push_str("func ResetLog() { fx_log = 0; return 1; }\n");
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("EFEX", "Effect execute", &script)
+                    .expect("effect execute fixture compiles"),
+            )
+            .expect("effect execute fixture registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("EFEX"))
+            .expect("effect execute object spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+        engine
+            .call_object_function(index, "Arm", Vec::new())
+            .expect("the three effects are added");
+        for (row, id) in rows.iter().zip(["A", "B", "C"]) {
+            let (priority, _, _, _, start_time) = *row;
+            let effect_name = format!("Effect{id}");
+            if let Some(effect) = engine.objects[index]
+                .state
+                .effects
+                .iter_mut()
+                .find(|effect| effect.name == effect_name)
+            {
+                if priority == 0 {
+                    effect.priority = 0;
+                }
+                effect.timer = start_time;
+            }
+        }
+
+        for pass in case["passes"].as_array().unwrap() {
+            engine
+                .call_object_function(index, "ResetLog", Vec::new())
+                .expect("the log resets");
+            engine.tick().expect("the effect frame runs");
+
+            let expected_log = pass["calls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|call| match call.as_str().unwrap_or_default() {
+                    "EffectA" => Some(1_i64),
+                    "EffectB" => Some(2),
+                    "EffectC" => Some(3),
+                    // The oracle records the Kill the pass performed; the port
+                    // shows it as the effect being gone on the next pass, which
+                    // the live list below compares.
+                    _ => None,
+                })
+                .fold(0_i64, |log, digit| log * 11 + digit);
+            let log = match engine
+                .call_object_function(index, "ReadLog", Vec::new())
+                .expect("the log reads back")
+            {
+                ScriptValue::Int(value) => i64::from(value),
+                ScriptValue::Nil | ScriptValue::Bool(false) => 0,
+                other => panic!("unexpected effect log value {other:?}"),
+            };
+            let frame = i(pass, "frame");
+            expect_eq("effect_execute", idx, "timer calls", expected_log, log);
+
+            let expected_live = pass["live"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>();
+            let live = engine.objects[index]
+                .state
+                .effects
+                .iter()
+                .map(|effect| effect.name.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                expected_live, live,
+                "PARITY DIVERGENCE in `effect_execute` entry {idx} frame {frame} live effects"
+            );
+        }
+    }
+
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
         let (x, prec, raw) = (i(e, "x") as i32, i(e, "prec") as i32, i(e, "raw"));

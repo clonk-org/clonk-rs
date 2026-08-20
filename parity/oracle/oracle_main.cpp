@@ -4439,6 +4439,9 @@ inline int32_t C4Object::Call(const char *fn, ParSet)
 namespace effect_check
 {
 struct C4Object;
+struct C4Effect;
+
+struct FnTimer;
 
 // C4Effects.h:34-43.
 const int32_t C4Fx_OK = 0;
@@ -4448,6 +4451,10 @@ const int32_t C4Fx_Effect_AnnulCalls = -3;
 const int32_t C4Fx_Start_Deny = -1;
 
 #define PSFS_FxAdd "Add"
+
+// The lifted Execute `delete`s the effects it unlinks, so the scaffold's
+// effects are heap-allocated and their destruction is counted.
+static int32_t g_deleted = 0;
 
 const int32_t MaxTrace = 32;
 static const char *g_trace[MaxTrace];
@@ -4497,6 +4504,13 @@ struct FnEffect
     C4Value Exec(C4Object *, ParSet, bool, bool);
 };
 
+struct FnTimer
+{
+    C4Effect *owner{};
+
+    C4Value Exec(C4Object *, ParSet, bool, bool);
+};
+
 struct C4Effect
 {
     const char *Name{""};
@@ -4508,6 +4522,14 @@ struct C4Effect
     C4Effect *pNext{};
     C4Object *pCommandTarget{};
     FnEffect *pFnEffect{};
+    FnTimer *pFnTimer{};
+    int32_t iTime{};
+    int32_t iIntervall{};
+    int32_t TimerResult{C4Fx_OK};
+
+    // C4Effects.h:110 — a dead effect is one whose priority was zeroed, not a
+    // separate flag, which is also how the port marks it.
+    ~C4Effect() { ++g_deleted; }
 
     // C4Effects.h:110 — a dead effect is one whose priority was zeroed, not a
     // separate flag, which is also how the port marks it.
@@ -4539,13 +4561,44 @@ struct C4Effect
         C4Object *pForObj, const char *szCheckEffect, int32_t iPrio, int32_t iTimer,
         const C4Value &rVal1, const C4Value &rVal2, const C4Value &rVal3, const C4Value &rVal4,
         bool passErrors);
+    void Execute(C4Object *pObj);
 };
+
+// C4Effects.h: the timer's "finish me" answer.
+const int32_t C4Fx_Execute_Kill = -1;
+
+
 
 C4Value FnEffect::Exec(C4Object *, ParSet, bool, bool)
 {
     trace(owner->Name);
     return {owner->EffectResult};
 }
+
+// C4Effect::Execute's per-frame pass. It walks the list unlinking dead effects
+// as it goes, advances each survivor's clock, and fires the timer only on an
+// exact interval boundary — or kills the effect outright when it has no timer
+// function at all. Only the two members it reads are scaffolded on C4Object.
+struct C4Object
+{
+    int32_t Status{1};
+    C4Effect *pEffects{};
+};
+
+struct GameStub
+{
+    C4Effect *pGlobalEffects{};
+};
+
+static GameStub Game;
+
+C4Value FnTimer::Exec(C4Object *, ParSet, bool, bool)
+{
+    trace(owner->Name);
+    return {owner->TimerResult};
+}
+
+#include "effect_execute.inc"
 
 #include "effect_check.inc"
 } // namespace effect_check
@@ -5163,6 +5216,124 @@ int main()
     // different priorities; each case configures what their checker callbacks
     // answer and records the exact sequence of calls the negotiation made,
     // together with the number it returned.
+    // C4Effect::Execute (C4Effect.cpp:319-363), the per-frame pass. It walks
+    // the list unlinking dead effects as it goes, advances each survivor's
+    // clock FIRST, then fires the timer only when the new time lands exactly on
+    // an interval boundary — and kills outright any effect that has an interval
+    // but no timer function at all.
+    arr_begin("effect_execute");
+    {
+        struct Row
+        {
+            int32_t priority; // zero marks it already dead
+            int32_t interval;
+            bool has_timer;
+            int32_t timer_result;
+            int32_t start_time;
+        };
+        struct Case
+        {
+            const char *name;
+            int32_t frames;
+            Row rows[3];
+        };
+        const int32_t Kill = effect_check::C4Fx_Execute_Kill;
+        const int32_t OK = effect_check::C4Fx_OK;
+
+        const Case cases[] = {
+            // An interval of zero never fires the timer, however long it runs.
+            {"interval_zero_never_fires", 4,
+             {{100, 0, true, OK, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            // Interval 2 fires on the even frames only, and the clock is
+            // advanced BEFORE the modulo, so frame 1 already counts as time 1.
+            {"interval_two_fires_every_other", 4,
+             {{100, 2, true, OK, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            {"interval_one_fires_every_frame", 3,
+             {{100, 1, true, OK, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            // A non-zero start time shifts which frames land on the boundary.
+            {"start_time_shifts_boundary", 4,
+             {{100, 3, true, OK, 1}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            // The timer answering Kill finishes the effect, which the NEXT
+            // frame's pass then unlinks.
+            {"timer_kills_then_unlinks", 3,
+             {{100, 1, true, Kill, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            // An interval with no timer function is killed the moment the
+            // boundary arrives (C4Effect.cpp:355-357).
+            {"interval_without_timer_dies", 3,
+             {{100, 2, false, OK, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            // Already-dead effects are unlinked on the first pass, wherever
+            // they sit in the list.
+            {"dead_head_unlinked", 2,
+             {{100, 0, true, OK, 0}, {60, 0, true, OK, 0}, {0, 0, true, OK, 0}}},
+            {"dead_middle_unlinked", 2,
+             {{100, 0, true, OK, 0}, {0, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            {"dead_tail_unlinked", 2,
+             {{0, 0, true, OK, 0}, {60, 0, true, OK, 0}, {20, 0, true, OK, 0}}},
+            {"all_dead_unlinked", 2,
+             {{0, 0, true, OK, 0}, {0, 0, true, OK, 0}, {0, 0, true, OK, 0}}},
+        };
+
+        for (const Case &c : cases)
+        {
+            // Same list shape as the check section: added A, B, C, kept sorted
+            // by ascending priority, so the pass visits C, then B, then A.
+            const char *names[3] = {"EffectA", "EffectB", "EffectC"};
+            const int32_t order[3] = {2, 1, 0};
+            effect_check::FnEffect checkers[3];
+            effect_check::FnTimer timers[3];
+            effect_check::C4Effect *effects[3];
+            for (int32_t i = 0; i < 3; ++i)
+            {
+                effects[i] = new effect_check::C4Effect();
+                effects[i]->Name = names[i];
+                effects[i]->iPriority = c.rows[i].priority;
+                effects[i]->iNumber = i + 1;
+                effects[i]->iIntervall = c.rows[i].interval;
+                effects[i]->iTime = c.rows[i].start_time;
+                effects[i]->TimerResult = c.rows[i].timer_result;
+                checkers[i].owner = effects[i];
+                timers[i].owner = effects[i];
+                effects[i]->pFnEffect = &checkers[i];
+                effects[i]->pFnTimer = c.rows[i].has_timer ? &timers[i] : nullptr;
+            }
+            for (int32_t i = 0; i < 3; ++i)
+                effects[order[i]]->pNext = i + 1 < 3 ? effects[order[i + 1]] : nullptr;
+
+            effect_check::C4Object object;
+            object.pEffects = effects[order[0]];
+            effect_check::g_trace_count = 0;
+            effect_check::g_deleted = 0;
+
+            sep();
+            printf("{\"case\":\"%s\",\"frames\":%d,\"passes\":[", c.name, c.frames);
+            for (int32_t frame = 0; frame < c.frames; ++frame)
+            {
+                const int32_t before = effect_check::g_trace_count;
+                if (object.pEffects) object.pEffects->Execute(&object);
+                if (frame) printf(",");
+                printf("{\"frame\":%d,\"deleted\":%d,\"live\":[", frame,
+                       effect_check::g_deleted);
+                {
+                    bool first_live = true;
+                    for (effect_check::C4Effect *live = object.pEffects; live; live = live->pNext)
+                    {
+                        printf("%s\"%s\"", first_live ? "" : ",", live->Name);
+                        first_live = false;
+                    }
+                }
+                printf("],\"calls\":[");
+                for (int32_t i = before; i < effect_check::g_trace_count
+                                         && i < effect_check::MaxTrace;
+                     ++i)
+                    printf("%s\"%s\"", i > before ? "," : "", effect_check::g_trace[i]);
+                printf("]}");
+            }
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
     arr_begin("effect_check");
     {
         struct Case
