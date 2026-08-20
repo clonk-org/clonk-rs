@@ -934,23 +934,24 @@ pub fn discover_player_files_in(
     Ok(players)
 }
 
-/// Rewrites `Config.General.Participants` from the checked entries and saves it.
+/// Rebuilds the `Config.General.Participants` list from the checked entries,
+/// without writing anything.
 ///
 /// C++ reserves `CFG_MaxString + 1` bytes and, before each `SAddModule`,
 /// requires `current_len + 1 + filename_len < sizeof(Participants)`. The
 /// unconditional separator byte means the first filename is limited to 1023
 /// bytes, while a populated list may reach the full 1024-byte payload.
-pub fn persist_activations(
-    config_path: &Path,
-    players: &mut [StartupPlayerFile],
-) -> io::Result<Vec<PlayerActivationRefusal>> {
+///
+/// Separated from the write because `C4StartupPlrSelDlg` rebuilds this list in
+/// memory and never saves it — that file contains no `Config.Save()` at all —
+/// so a caller mirroring that lifetime needs the rebuilt value without a disk
+/// write. Refusals are returned rather than applied, because the eager writer
+/// deactivates refused players only once its save has succeeded.
+pub fn rebuild_participant_list(
+    players: &[StartupPlayerFile],
+) -> (String, Vec<PlayerActivationRefusal>) {
     const CFG_MAX_STRING: usize = 1024;
 
-    let mut config = match Config::load(config_path) {
-        Ok(config) => config,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
-        Err(error) => return Err(error),
-    };
     let mut participant_keys = Vec::new();
     let mut participants = Vec::new();
     let mut participants_byte_len = 0_usize;
@@ -987,7 +988,21 @@ pub fn persist_activations(
         participants_byte_len += filename_byte_len;
         participants.push(player.file_name.as_str());
     }
-    config.set_in(Some("General"), "Participants", participants.join(";"));
+    (participants.join(";"), refusals)
+}
+
+/// Rewrites `Config.General.Participants` from the checked entries and saves it.
+pub fn persist_activations(
+    config_path: &Path,
+    players: &mut [StartupPlayerFile],
+) -> io::Result<Vec<PlayerActivationRefusal>> {
+    let mut config = match Config::load(config_path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+        Err(error) => return Err(error),
+    };
+    let (participants, refusals) = rebuild_participant_list(players);
+    config.set_in(Some("General"), "Participants", participants);
     if let Some(parent) = config_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
