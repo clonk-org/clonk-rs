@@ -15,7 +15,6 @@ default = []
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 indexmap = "2"
-tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

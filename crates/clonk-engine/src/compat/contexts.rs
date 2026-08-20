@@ -1828,12 +1828,6 @@ impl<'a> HostObjectContext<'a> {
         self
     }
 
-    #[cfg(test)]
-    pub fn with_crew_member(mut self, crew_member: bool) -> Self {
-        self.crew_member = crew_member;
-        self
-    }
-
     pub fn with_plr_view_range(mut self, plr_view_range: i32) -> Self {
         self.plr_view_range = plr_view_range;
         self
@@ -1858,12 +1852,6 @@ impl<'a> HostObjectContext<'a> {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn with_draw_transform(mut self, transform: Option<DrawTransform>) -> Self {
-        self.draw_transform = transform;
-        self
-    }
-
     pub fn with_base_graphics(mut self, base: Option<ObjectBaseGraphics>) -> Self {
         self.base_graphics = base;
         self
@@ -1872,21 +1860,6 @@ impl<'a> HostObjectContext<'a> {
     pub fn with_ocf(mut self, ocf: u32) -> Self {
         self.ocf = ocf;
         self
-    }
-
-    #[allow(dead_code)]
-    pub fn ocf(&self) -> u32 {
-        self.ocf
-    }
-
-    #[allow(dead_code)]
-    pub fn ocf_base(&self) -> u32 {
-        self.ocf_base
-    }
-
-    #[allow(dead_code)]
-    pub fn is_crew_member(&self) -> bool {
-        self.crew_member
     }
 }
 
@@ -7190,11 +7163,6 @@ impl EffectHostContext {
             .as_mut()
     }
 
-    fn take_runtime_texmap(&mut self) -> Option<crate::landscape::RuntimeTexMapState> {
-        let _ = self.runtime_texmap_mut();
-        self.runtime_texmap.get_mut()?.take()
-    }
-
     pub(crate) fn set_runtime_texmap(&mut self, texmap: crate::landscape::RuntimeTexMapState) {
         if let Some(slot) = self.runtime_texmap.get_mut() {
             *slot = Some(texmap);
@@ -7426,16 +7394,6 @@ impl EffectHostContext {
         self.record_player_command(PlayerCommand::SetCrewRosters { rosters });
     }
 
-    fn clear_player_object_pointers(&mut self, target: ObjectId) {
-        let players = self.player_ids().to_vec();
-        for player in players {
-            if let Some(state) = self.player_state_mut(player) {
-                state.clear_object_pointers(target);
-            }
-        }
-        self.record_player_command(PlayerCommand::ClearObjectPointers { object: target });
-    }
-
     pub(crate) fn record_player_command(&mut self, command: PlayerCommand) {
         self.player_commands.push(command);
     }
@@ -7530,11 +7488,6 @@ impl EffectHostContext {
     #[allow(dead_code)]
     pub(crate) fn audio_mut(&mut self) -> &mut AudioRegistry {
         &mut self.audio
-    }
-
-    #[allow(dead_code)]
-    fn audio(&self) -> &AudioRegistry {
-        &self.audio
     }
 
     pub(crate) fn request_game_over(&mut self) -> bool {
@@ -7815,37 +7768,6 @@ impl EffectScopeContext {
             }
         }
         self.commands.extend(updates);
-    }
-
-    // iIntervall/iTime stored verbatim (C4Effect.cpp:66-67).
-    fn add_effect(&mut self, mut effect: EffectState) -> i32 {
-        if effect.timer < 0 {
-            effect.timer = 0;
-        }
-
-        // C4Effect::New: same-name effects coexist; the number is the
-        // per-object max + 1 (C4Effect.cpp:76-78) and is the script-side
-        // handle AddEffect returns.
-        effect.number = self
-            .effects
-            .iter()
-            .map(|existing| existing.number)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1)
-            .max(1);
-
-        let mut insert_pos = 0;
-        while insert_pos < self.effects.len()
-            && self.effects[insert_pos].priority.abs() < effect.priority.abs()
-        {
-            insert_pos += 1;
-        }
-
-        self.effects.insert(insert_pos, effect.clone());
-        self.had_list_head = true;
-        self.commands.push(EffectCommand::add(effect.clone()));
-        effect.number
     }
 
     /// Links the constructor's not-yet-valid node before C4Effect::Check.
@@ -9624,12 +9546,6 @@ impl ObjectScopeContext {
         self.pending_update
             .construction
             .unwrap_or(self.current_construction)
-    }
-
-    fn set_construction(&mut self, construction: i32) {
-        let clamped = construction.clamp(0, FULL_CON);
-        self.current_construction = clamped;
-        self.pending_update.construction = Some(clamped);
     }
 
     pub(crate) fn contact_density(&self) -> i32 {

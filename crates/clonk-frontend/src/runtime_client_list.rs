@@ -9,6 +9,7 @@ use clonk_graphics::{GammaRamp, Surface};
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
+use crate::caption_scroll::{advance_caption_scroll, CaptionScrollState};
 use crate::classic_gui::{
     draw_3d_frame, draw_clipped_text, draw_clipped_text_with_markup, draw_engine_box,
     draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect,
@@ -318,13 +319,6 @@ enum HitTarget {
 enum DialogTitle {
     Main,
     Info,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct CaptionScrollState {
-    last_change: Option<Instant>,
-    position: i32,
-    direction: i8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3008,27 +3002,7 @@ fn caption_scroll_offset_at(
     let max_scroll = (font.measure(text, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
         - caption_width)
         .max(0);
-    let mut current = state.get();
-    let Some(last_change) = current.last_change else {
-        current.last_change = Some(now);
-        state.set(current);
-        return 0;
-    };
-    if now.checked_duration_since(last_change).unwrap_or_default() >= TITLE_SCROLL_DELAY {
-        if current.direction == 0 {
-            current.direction = 1;
-        }
-        if max_scroll > 0 {
-            current.position += i32::from(current.direction);
-            if current.position >= max_scroll || current.position < 0 {
-                current.direction = -current.direction;
-                current.position += i32::from(current.direction);
-                current.last_change = Some(now);
-            }
-        }
-    }
-    state.set(current);
-    current.position
+    advance_caption_scroll(state, now, max_scroll, TITLE_SCROLL_DELAY)
 }
 
 fn client_label_rect(row: &RuntimeClientRow, layout: &RuntimeClientListLayout, y: i32) -> IntRect {

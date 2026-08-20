@@ -359,7 +359,6 @@ pub(crate) fn register_bubble(
         0,
         0,
         None,
-        None,
     )
     .with_ocf(preview_ocf)
     .with_full_state(Rc::new(crate::preview_spawn_state_with_components(

@@ -338,7 +338,6 @@ impl Engine {
             object.state.action.time,
             object.state.action.phase,
             object.state.container,
-            object.state.draw_transform,
         )
         .with_action_index(object.state.action.act_map_index)
         .with_unsorted(object.unsorted)
@@ -364,9 +363,6 @@ impl Engine {
         .with_alive(object.state.alive)
         .with_need_energy(object.state.need_energy)
         .with_collectible(definition.is_some_and(Definition::is_collectible))
-        .with_collection_available_ignoring_delay(definition.is_some_and(|definition| {
-            definition.collection_ocf_enabled(&object.state, object.state.contents.len(), 0)
-        }))
         .with_collection_enabled(
             definition
                 .is_some_and(|definition| definition.collection_ocf_enabled(&object.state, 0, 0)),

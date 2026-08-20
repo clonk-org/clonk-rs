@@ -6,6 +6,7 @@
 //! multi-selection specialization; [`FileSelMode::Player`] models the
 //! single-selection `C4PlayerSelDlg` specialization.
 
+use crate::caption_scroll::{advance_caption_scroll, CaptionScrollState};
 use crate::classic_gui::{
     draw_3d_frame, draw_clipped_text, draw_engine_box, draw_facet_stretch, ClassicButtonState,
     IntRect,
@@ -284,13 +285,6 @@ struct TitleDrag {
     pointer_y: f32,
     offset_x: i32,
     offset_y: i32,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct CaptionScrollState {
-    last_change: Option<Instant>,
-    position: i32,
-    direction: i8,
 }
 
 #[derive(Clone, Debug)]
@@ -1222,27 +1216,7 @@ impl DefinitionSelController {
         let max_scroll = (font.measure(caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
             - caption_width)
             .max(0);
-        let mut state = self.caption_scroll.get();
-        let Some(last_change) = state.last_change else {
-            state.last_change = Some(now);
-            self.caption_scroll.set(state);
-            return 0;
-        };
-        if now.checked_duration_since(last_change).unwrap_or_default() >= TITLE_SCROLL_DELAY {
-            if state.direction == 0 {
-                state.direction = 1;
-            }
-            if max_scroll > 0 {
-                state.position += i32::from(state.direction);
-                if state.position >= max_scroll || state.position < 0 {
-                    state.direction = -state.direction;
-                    state.position += i32::from(state.direction);
-                    state.last_change = Some(now);
-                }
-            }
-        }
-        self.caption_scroll.set(state);
-        state.position
+        advance_caption_scroll(&self.caption_scroll, now, max_scroll, TITLE_SCROLL_DELAY)
     }
 
     fn draw_close_button(

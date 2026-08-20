@@ -6,6 +6,7 @@
 )]
 
 pub mod accessibility;
+mod caption_scroll;
 pub mod classic_gui;
 pub mod clonk_fonts;
 pub mod context_menu;

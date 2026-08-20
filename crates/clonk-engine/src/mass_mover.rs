@@ -244,26 +244,6 @@ impl MassMoverSet {
         self.occupancy = SlotOccupancy::default();
     }
 
-    /// C4MassMoverSet::Save consolidates occupied slots, resets CreatePtr,
-    /// and replaces the quirky runtime Count ledger with the live count
-    /// before the compact array is loaded again.
-    pub(crate) fn prepared_for_save(&self) -> Self {
-        let slots = self
-            .slots
-            .iter()
-            .filter_map(|slot| *slot)
-            .map(Some)
-            .collect::<Vec<_>>();
-        let occupancy = SlotOccupancy::rebuild(&slots);
-        Self {
-            count: slots.len() as i32,
-            slots,
-            create_ptr: 0,
-            scan: MassMoverScan::default(),
-            occupancy,
-        }
-    }
-
     /// The C++ `Count` ledger value (see the struct docs for its quirks).
     pub(crate) fn count(&self) -> i32 {
         self.count
@@ -329,16 +309,6 @@ impl MassMoverSet {
     #[cfg(test)]
     pub(crate) fn occupancy_matches_slots(&self) -> bool {
         (0..CHUNK).all(|index| self.occupancy.is_live(index) == self.slot(index).is_some())
-    }
-
-    /// Slots the last `Execute` inspected across both descending passes.
-    pub(crate) fn last_inspected_slots(&self) -> u64 {
-        self.scan.inspected
-    }
-
-    /// Live slots the last `Execute` actually ran, of those inspected.
-    pub(crate) fn last_executed_slots(&self) -> u64 {
-        self.scan.executed
     }
 
     /// Starts a fresh measurement for one `Execute`.
@@ -541,17 +511,6 @@ impl MassMoverSet {
 }
 
 impl Engine {
-    /// `C4Landscape::CheckInstability` (C4Landscape.cpp:860-867): only an
-    /// Instable material at the exact pixel creates a mover — the Instable
-    /// gate lives HERE, not in `C4MassMover::Init`.
-    pub(crate) fn check_instability(&mut self, tx: i32, ty: i32) -> bool {
-        let Some(landscape) = self.landscape.as_ref() else {
-            return false;
-        };
-        self.mass_movers
-            .check_instability_for_landscape(landscape, &self.materials, tx, ty)
-    }
-
     /// `C4Landscape::CheckInstabilityRange` (C4Landscape.cpp:869-878): try
     /// the pixel itself; ONLY if that fails, probe (tx,ty-1), (tx,ty-2),
     /// (tx-1,ty), (tx+1,ty) — all four, in that order.
@@ -988,9 +947,13 @@ mod tests {
             vec![crate::LiquidSegment::with_material(0, 0, Some(water))],
         );
         let mut engine = engine_with(materials, landscape);
-        assert!(!engine.check_instability(0, 10)); // solid earth: no mover
+        let before = engine.mass_movers.live_movers();
+        engine.check_instability_range(0, 10); // solid earth: no mover
+        assert_eq!(engine.mass_movers.live_movers(), before);
         assert_eq!(engine.mass_movers.live_movers(), 0);
-        assert!(engine.check_instability(1, 0)); // instable water: mover
+        let before = engine.mass_movers.live_movers();
+        engine.check_instability_range(1, 0); // instable water: mover
+        assert_eq!(engine.mass_movers.live_movers(), before + 1);
         assert_eq!(engine.mass_movers.live_movers(), 1);
     }
 
@@ -1136,17 +1099,15 @@ mod tests {
         let mut engine = water_drop_engine();
         engine.tick_mass_movers();
         assert_eq!(
-            engine.mass_movers.last_inspected_slots(),
-            0,
+            engine.mass_movers.scan.inspected, 0,
             "an empty set inspects nothing at all, where it walked 20000"
         );
 
         assert!(engine.mass_mover_create(1, 0, false));
         engine.tick_mass_movers();
-        let inspected = engine.mass_movers.last_inspected_slots();
+        let inspected = engine.mass_movers.scan.inspected;
         assert_eq!(
-            inspected,
-            engine.mass_movers.last_executed_slots(),
+            inspected, engine.mass_movers.scan.executed,
             "every slot inspected is a live one"
         );
         assert!(
@@ -1232,8 +1193,9 @@ mod tests {
             set.fill_slot(index, mover);
         }
 
-        let saved = set.prepared_for_save();
-        assert!(saved.occupancy_matches_slots(), "prepared_for_save");
+        let mut synchronized = set.clone();
+        synchronized.synchronize();
+        assert!(synchronized.occupancy_matches_slots(), "synchronize");
 
         let mut consolidated = set.clone();
         consolidated.consolidate();

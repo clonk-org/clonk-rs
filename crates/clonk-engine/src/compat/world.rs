@@ -28,10 +28,6 @@ pub(crate) struct HostWorldObject {
     pub crew_disabled: bool,
     pub category: i32,
     pub collectible: bool,
-    /// Whether SetOCF would expose OCF_Collection with NoCollectDelay
-    /// temporarily cleared. FnCollect performs exactly that temporary
-    /// recompute before its gate (C4Script.cpp:397-406).
-    collection_available_ignoring_delay: bool,
     /// Whether the definition/action/construction gates allow collection
     /// with an empty inventory and no delay. Live Enter/Exit combines this
     /// with the current limit and delay before callback-visible SetOCF.
@@ -75,8 +71,6 @@ pub(crate) struct HostWorldObject {
     pub action_phase: i32,
     pub(crate) container: Option<ObjectId>,
     pub(crate) contents: Vec<ObjectId>,
-    #[allow(dead_code)]
-    pub draw_transform: Option<DrawTransform>,
     /// FnGetCommand views of the object's command stack, top first
     /// (C4Script.cpp:918-945). A frame-start snapshot — mid-frame command
     /// changes are not re-read (C++ reads live).
@@ -1087,9 +1081,6 @@ pub enum PlayerCommand {
         player_id: i32,
         object: Option<ObjectId>,
     },
-    /// C4Player::ClearPointers for an object removed during the same script
-    /// call. Ordered after earlier SetPlrView/SetViewCursor commands.
-    ClearObjectPointers { object: ObjectId },
     /// The prefix of one `C4Player::ClearPointers` step: clear Captain/Crew
     /// and write Cursor=null before callbackful AdjustCursorCommand.
     ClearPlayerObjectPointersBeforeAdjust { player_id: i32, object: ObjectId },
@@ -1168,12 +1159,6 @@ impl HostWorldObject {
     pub(crate) fn with_velocity(mut self, velocity: Vector2) -> Self {
         self.velocity = velocity;
         self.fixed_velocity = FixedVec2::from_ints(velocity.x, velocity.y);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_construction(mut self, construction: i32) -> Self {
-        self.construction = construction.max(0);
         self
     }
 
@@ -1296,7 +1281,6 @@ impl HostWorldObject {
             action_ticks,
             0,
             container,
-            None,
         )
     }
 
@@ -1321,7 +1305,6 @@ impl HostWorldObject {
         action_ticks: i32,
         action_phase: i32,
         container: Option<ObjectId>,
-        draw_transform: Option<DrawTransform>,
     ) -> Self {
         Self {
             id,
@@ -1342,7 +1325,6 @@ impl HostWorldObject {
             crew_disabled: false,
             category,
             collectible: false,
-            collection_available_ignoring_delay: false,
             collection_enabled: false,
             no_collect_delay: 0,
             collection_limit: 0,
@@ -1374,7 +1356,6 @@ impl HostWorldObject {
             action_phase,
             container,
             contents: Vec::new(),
-            draw_transform,
             commands: Vec::new(),
             command_stack: CommandStackSnapshot::default(),
             state: None,
@@ -1426,11 +1407,6 @@ impl HostWorldObject {
 
     pub(crate) fn with_collectible(mut self, collectible: bool) -> Self {
         self.collectible = collectible;
-        self
-    }
-
-    pub(crate) fn with_collection_available_ignoring_delay(mut self, available: bool) -> Self {
-        self.collection_available_ignoring_delay = available;
         self
     }
 
@@ -1513,10 +1489,6 @@ impl HostWorldObject {
 
     pub fn ocf(&self) -> u32 {
         self.ocf
-    }
-
-    fn collection_available_ignoring_delay(&self) -> bool {
-        self.collection_available_ignoring_delay || self.ocf & ocf::COLLECTION != 0
     }
 
     pub fn action_target(&self, index: usize) -> Option<ObjectId> {
@@ -1616,10 +1588,6 @@ impl HostWorldObject {
 
     pub fn action_phase(&self) -> i32 {
         self.action_phase
-    }
-
-    pub fn set_action_phase(&mut self, phase: i32) {
-        self.action_phase = phase;
     }
 }
 

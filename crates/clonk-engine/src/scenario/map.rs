@@ -225,20 +225,6 @@ impl MapPixelClassifier {
         }
     }
 
-    /// DensitySolid: density >= C4M_Solid=50 (C4Wrappers.h:68-71).
-    pub(in crate::scenario) fn is_solid(&self, pixel: u8) -> bool {
-        self.density(pixel) >= 50
-    }
-
-    /// DensityLiquid: C4M_Liquid=25 <= density < 50 (C4Wrappers.h:78-81).
-    pub(in crate::scenario) fn is_liquid(&self, pixel: u8) -> bool {
-        (25..50).contains(&self.density(pixel))
-    }
-
-    pub(in crate::scenario) fn density(&self, pixel: u8) -> i32 {
-        self.state.densities[(pixel & 0x7F) as usize]
-    }
-
     /// C4TextureMap::CheckTexture (the map creators validate `tex=`
     /// fields against the loaded texture inventory).
     pub(crate) fn texture_exists(&self, name: &str) -> bool {

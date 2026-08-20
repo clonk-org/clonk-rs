@@ -165,14 +165,7 @@ impl MoveToState {
         None
     }
 
-    pub(in crate::command) fn step(
-        &mut self,
-        ctx: &CommandRuntimeContext<'_>,
-    ) -> CommandStepResult {
-        self.step_with_waypoint(ctx, false)
-    }
-
-    fn step_with_waypoint(
+    pub(in crate::command) fn step_with_waypoint(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
         next_is_move_to: bool,
@@ -3433,13 +3426,6 @@ impl PutState {
         Ok(None)
     }
 
-    pub(in crate::command) fn step(
-        &mut self,
-        ctx: &CommandRuntimeContext<'_>,
-    ) -> CommandStepResult {
-        self.step_with_gravity(ctx, crate::PhysicsSettings::default().gravity_as_c4fixed())
-    }
-
     pub(in crate::command) fn step_with_gravity(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
@@ -4534,13 +4520,6 @@ impl ThrowState {
     pub(in crate::command) fn throw_position(&self) -> Option<Vector2> {
         let position = Vector2::new(self.tx.unwrap_or(0), self.ty.unwrap_or(0));
         (position != Vector2::ZERO).then_some(position)
-    }
-
-    pub(in crate::command) fn step(
-        &mut self,
-        ctx: &CommandRuntimeContext<'_>,
-    ) -> CommandStepResult {
-        self.step_with_gravity(ctx, crate::PhysicsSettings::default().gravity_as_c4fixed())
     }
 
     pub(in crate::command) fn step_with_gravity(

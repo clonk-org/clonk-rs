@@ -319,7 +319,6 @@ pub(in crate::command) struct DetachedThrowPrelude {
 #[derive(Debug, Clone)]
 pub(in crate::command) struct DetachedMoveToFlight {
     entry: ActiveCommand,
-    base_chain: Vec<DetachedCommandBase>,
 }
 
 #[derive(Debug, Clone)]
@@ -687,7 +686,6 @@ impl CommandStack {
             self.detached_move_to_flights
                 .push_back(DetachedMoveToFlight {
                     entry: entry.clone(),
-                    base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
                 });
         }
     }
@@ -948,21 +946,14 @@ impl CommandStack {
         let move_to_flights = self
             .entries
             .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
+            .filter(|entry| {
                 matches!(
                     &entry.state,
                     CommandState::MoveTo(state) if state.flight_continuation.is_some()
                 )
             })
-            .map(|(index, entry)| DetachedMoveToFlight {
+            .map(|entry| DetachedMoveToFlight {
                 entry: entry.clone(),
-                base_chain: self
-                    .entries
-                    .iter()
-                    .skip(index + 1)
-                    .map(DetachedCommandBase::from)
-                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_move_to_flights.extend(move_to_flights);
@@ -1224,21 +1215,14 @@ impl CommandStack {
         let detached_move_to_flights = self
             .entries
             .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
+            .filter(|entry| {
                 matches!(
                     &entry.state,
                     CommandState::MoveTo(state) if state.flight_continuation.is_some()
                 ) && !retained_move_to_flight_ids.contains(&entry.instance_id)
             })
-            .map(|(index, entry)| DetachedMoveToFlight {
+            .map(|entry| DetachedMoveToFlight {
                 entry: entry.clone(),
-                base_chain: self
-                    .entries
-                    .iter()
-                    .skip(index + 1)
-                    .map(DetachedCommandBase::from)
-                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_move_to_flights
@@ -2632,7 +2616,6 @@ impl CommandStack {
                     self.detached_move_to_flights
                         .push_back(DetachedMoveToFlight {
                             entry: detached.entry,
-                            base_chain: detached.base_chain,
                         });
                 } else if matches!(
                     &detached.entry.state,
@@ -3521,52 +3504,6 @@ impl CommandStack {
                 state.script_result = Some(result);
                 return true;
             }
-        }
-        false
-    }
-
-    pub(crate) fn resolve_construct_script_result(
-        &mut self,
-        command_instance_id: u64,
-        result: AcquireScriptResult,
-    ) -> bool {
-        if result == AcquireScriptResult::Complete {
-            self.record_native_success(CommandId::Construct);
-        }
-        if let Some(entry) = self.entries.iter_mut().find(|entry| {
-            (command_instance_id == 0 || entry.instance_id == command_instance_id)
-                && matches!(&entry.state, CommandState::Construct(state) if state.script_pending)
-        }) {
-            let CommandState::Construct(state) = &mut entry.state else {
-                unreachable!("pending Construct predicate matched another command");
-            };
-            if result == AcquireScriptResult::Complete {
-                state.script_pending = false;
-                state.script_invoked = false;
-                state.script_result = None;
-                entry.finished = Some(CommandStatus::Completed);
-            } else {
-                state.script_result = Some(result);
-            }
-            return true;
-        }
-        let detached_index = self
-            .detached_construct_commands
-            .iter()
-            .position(|detached| {
-                (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
-                    && matches!(
-                        &detached.entry.state,
-                        CommandState::Construct(state) if state.script_pending
-                    )
-            });
-        if let Some(detached_index) = detached_index {
-            let detached = &mut self.detached_construct_commands[detached_index];
-            let CommandState::Construct(state) = &mut detached.entry.state else {
-                unreachable!("detached Construct predicate matched another command");
-            };
-            state.script_result = Some(result);
-            return true;
         }
         false
     }

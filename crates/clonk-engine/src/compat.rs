@@ -209,12 +209,6 @@ mod tests {
     trait TestEngineExt {
         fn register_test_definition(&mut self, definition: crate::Definition);
         fn register_test_player(&mut self, config: crate::PlayerConfig);
-        fn register_test_script_definition(
-            &mut self,
-            id: impl Into<String>,
-            name: impl Into<String>,
-            source: &str,
-        );
         fn spawn_test_object(&mut self, config: crate::SpawnConfig) -> crate::ObjectId;
     }
 
@@ -228,17 +222,6 @@ mod tests {
         #[track_caller]
         fn register_test_player(&mut self, config: crate::PlayerConfig) {
             self.register_player(config).expect("test player registers");
-        }
-
-        #[track_caller]
-        fn register_test_script_definition(
-            &mut self,
-            id: impl Into<String>,
-            name: impl Into<String>,
-            source: &str,
-        ) {
-            self.register_script_definition(id, name, source)
-                .expect("test script definition registers");
         }
 
         #[track_caller]

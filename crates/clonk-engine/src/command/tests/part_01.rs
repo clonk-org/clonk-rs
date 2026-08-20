@@ -88,13 +88,33 @@
         assert_eq!(acquire.take_successful_finishes(), [CommandId::Acquire]);
 
         let mut construct = CommandStack::new();
+        let definition_id = "HUT1".to_owned();
         construct
-            .push_front(request!(Construct, with_data: CommandData::Text("HUT1".into())))
+            .push_front(request!(Construct, with_data: CommandData::Text(definition_id.clone())))
             .expect("Construct queues");
         let construct_instance = construct.entries.front().unwrap().instance_id;
+        let CommandState::Construct(state) = &mut construct.entries.front_mut().unwrap().state
+        else {
+            panic!("queued command should be Construct");
+        };
+        state.script_pending = true;
+        state.script_invoked = true;
         construct.clear();
-        assert!(!construct
-            .resolve_construct_script_result(construct_instance, AcquireScriptResult::Complete,));
+        assert!(construct.entries.is_empty());
+        let builder = snapshot_with_id(1);
+        let definitions = HashMap::from([(definition_id, command_definition! {})]);
+        let ctx = command_ctx_with_definitions(&builder, &EMPTY_COMMAND_OBJECTS, &definitions, 0);
+        assert_eq!(
+            construct
+                .execute_pending_construct_script(
+                    &ctx,
+                    construct_instance,
+                    AcquireScriptResult::Complete,
+                )
+                .expect("detached Construct callback resumes")
+                .status,
+            CommandStatus::Completed
+        );
         assert_eq!(construct.take_successful_finishes(), [CommandId::Construct]);
     }
 
