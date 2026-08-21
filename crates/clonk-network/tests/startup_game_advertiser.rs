@@ -29,6 +29,7 @@ fn advertised_game() -> NetworkGameReference {
         netpuncher_ipv6: 0x9abc_def0,
         netpuncher_address: "puncher.invalid:11115".into(),
         tcp_addresses: vec!["0.0.0.0:11112".parse().unwrap()],
+        compat_profile: None,
         ..Default::default()
     }
 }
@@ -279,4 +280,60 @@ fn http_request(reference_port: u16, request: &[u8]) -> Vec<u8> {
     let mut response = Vec::new();
     stream.read_to_end(&mut response).unwrap();
     response
+}
+
+/// The compatibility profile rides in the reference as an ordinary named key,
+/// and only when the host actually runs one (clonk-org/clonk-rs#583).
+///
+/// Two properties matter more than the round trip itself. A host in the
+/// ordinary profile must emit **exactly** the bytes it emitted before, because
+/// every existing peer -- stock C++ included -- parses that reference today.
+/// And a reference without the key must read back as "said nothing" rather
+/// than as some default profile, because a stock C++ host is precisely the
+/// peer that will never send it: `StdCompilerINIRead` reads by name, so C++
+/// neither writes this key nor looks it up.
+#[test]
+fn the_compatibility_profile_is_advertised_only_when_the_host_runs_one() {
+    let ordinary = advertised_game();
+    assert_eq!(
+        ordinary.compat_profile, None,
+        "a reference names no profile until a host sets one"
+    );
+    let ordinary_bytes = encode_reference_response(&ordinary);
+    assert!(
+        !String::from_utf8_lossy(&ordinary_bytes).contains("CompatProfile"),
+        "an ordinary host's reference must be byte-for-byte what it was"
+    );
+    assert_eq!(
+        parse_reference_response(&ordinary_bytes).expect("the ordinary reference parses")[0]
+            .compat_profile,
+        None,
+        "and a reference without the key reads back as silence, not a default"
+    );
+
+    let mut compatible = advertised_game();
+    compatible.compat_profile = Some("legacy-clonk".to_string());
+    let encoded = encode_reference_response(&compatible);
+    assert!(
+        String::from_utf8_lossy(&encoded).contains("CompatProfile=legacy-clonk\r\n"),
+        "a host running a profile advertises it as a named key"
+    );
+    assert_eq!(
+        parse_reference_response(&encoded).expect("the profile-bearing reference parses")[0]
+            .compat_profile
+            .as_deref(),
+        Some("legacy-clonk"),
+        "and a peer reads it back"
+    );
+
+    // An empty value is silence too: a peer that writes the key with nothing
+    // in it has not named a profile, and must not be read as having one.
+    let mut empty = advertised_game();
+    empty.compat_profile = Some(String::new());
+    let encoded = encode_reference_response(&empty);
+    assert!(!String::from_utf8_lossy(&encoded).contains("CompatProfile"));
+    assert_eq!(
+        parse_reference_response(&encoded).expect("the reference parses")[0].compat_profile,
+        None
+    );
 }

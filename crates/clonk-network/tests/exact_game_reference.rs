@@ -629,6 +629,7 @@ fn fixture_summary() -> NetworkGameReference {
         netpuncher_ipv6: 0x9abc_def0,
         netpuncher_address: "puncher.invalid:11115".into(),
         tcp_addresses: vec!["127.0.0.1:11112".parse().unwrap()],
+        compat_profile: None,
     }
 }
 

@@ -109,6 +109,18 @@ pub struct NetworkGameReference {
     pub netpuncher_address: String,
     /// Transitional TCP display projection retained for existing consumers.
     pub tcp_addresses: Vec<SocketAddr>,
+    /// The host's compatibility profile, when it advertises one.
+    ///
+    /// Port-only, and deliberately absent rather than defaulted: a reference
+    /// carries this key only when the host runs a non-default profile, so a
+    /// host in the ordinary profile emits exactly the bytes it emits today.
+    /// `None` therefore means "said nothing", which is what a stock C++ host
+    /// and every existing Rust host both are -- the silent legacy case.
+    ///
+    /// It rides in the `[Reference]` section as an ordinary named key, which
+    /// C++ tolerates: `StdCompilerINIRead` reads by name and simply never
+    /// looks this one up.
+    pub compat_profile: Option<String>,
 }
 
 /// Prepared C++ client routes before `InitClient` starts the transports.
@@ -131,6 +143,7 @@ impl Default for NetworkGameReference {
             host_nick: String::new(),
             state: "None".to_string(),
             control_mode: -1,
+            compat_profile: None,
             time: 0,
             start_time: 0,
             comment: String::new(),
@@ -2086,6 +2099,11 @@ fn parse_reference_chunk(
             "League" => reference.league = value,
             "LeagueAddress" => reference.league_address = value,
             "MaxPlayers" => reference.max_players = parse_integer(key, &value)?,
+            // An empty value is treated as absent: a peer that advertises the
+            // key with nothing in it has not named a profile.
+            "CompatProfile" => {
+                reference.compat_profile = (!value.is_empty()).then_some(value);
+            }
             "Address" => {
                 let addresses = parse_reference_addresses(&value);
                 reference.tcp_addresses = addresses
