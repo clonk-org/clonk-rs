@@ -7035,14 +7035,28 @@ impl GameApp {
         self.process_classic_lobby_actions(actions)
     }
 
-    /// State the operating mode in the lobby both a host and a joining client
-    /// see, so the profile is visible *before* anyone commits to the session.
+    /// State the operating mode in the lobby, so the profile is visible
+    /// *before* anyone commits to the session.
+    ///
+    /// Only the host announces, because only the host's setting decides what
+    /// the session actually runs: `session_control_mode` resolves the host's
+    /// `initial_status.control_mode`, and every client adopts the received
+    /// `status.control_mode` rather than applying its own. A joining client
+    /// stating its local profile here would assert a promise about a session
+    /// its configuration has no part in — the host may be running the normal
+    /// profile. Surfacing the *host's* advertised profile to a client is the
+    /// missing half; the reference already carries it as `CompatProfile=`
+    /// (`clonk-network/src/advertise.rs:131-135`) and nothing reads it yet
+    /// (clonk-org/clonk-rs#583, clonk-org/clonk-rs#588).
     ///
     /// Only a non-default profile says anything. `CompatProfile::Normal`
     /// promises nothing and is what every session runs today, so announcing it
     /// would add a line to a C++-mirrored surface for no information — the
     /// default lobby stays exactly as it was.
     fn announce_compat_profile_in_lobby(&mut self) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
         if self.compat_profile == crate::settings::CompatProfile::Normal {
             return;
         }

@@ -6313,6 +6313,48 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
 }
 
 #[test]
+fn only_a_host_announces_its_compatibility_profile_in_the_lobby() {
+    // The lobby line states a property of the *session*, and only the host's
+    // setting decides that: `session_control_mode` resolves the host's
+    // `initial_status.control_mode` (`game_app/network.rs:5612,7190`) and every
+    // client adopts the received `status.control_mode`
+    // (`game_app/network.rs:2208`). A joining client's own profile therefore
+    // changes nothing about the session it is joining, so announcing it there
+    // asserts a promise that session never made.
+    let compat_line = |app: &GameApp| {
+        app.network_lobby
+            .as_ref()
+            .expect("the lobby exists")
+            .logs
+            .iter()
+            .any(|line| line.text.starts_with("Compatibility profile:"))
+    };
+
+    let (mut client, _client_events) = networked_client_lobby(
+        new_menu_app(640, 480),
+        "Client",
+        NetworkLobbyState::new(7, "Client".to_string(), false),
+    );
+    client.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    client.open_network_lobby();
+    main_assert!(
+        !compat_line(&client),
+        "a joining client must not announce its own profile as the session's"
+    );
+
+    let (mut host, _host_events, _host_commands) = networked_host_lobby_with_commands(
+        new_menu_app(640, 480),
+        NetworkLobbyState::new(0, "Host".to_string(), true),
+    );
+    host.compat_profile = crate::settings::CompatProfile::LegacyClonk;
+    host.open_network_lobby();
+    main_assert!(
+        compat_line(&host),
+        "the host decides the session profile, so it still states it"
+    );
+}
+
+#[test]
 fn network_lobby_does_not_displace_join_or_host_startup_dialog() {
     let mut joined = new_menu_app(640, 480);
     joined.open_network_game_dialog();
