@@ -4,6 +4,144 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-08-21
+
+### Bug fixes
+
+- Compare c4group entry names by byte like native stricmp (#908)
+- Defer the fair crew toggle like every other game option (#906)
+- Announce the compatibility profile only where it governs the session (#905)
+- Drop the update download bar when the transfer length is unknown (#902)
+- Compare a null-object C4Value by tag like C++ (#858)
+- Arm the client start barrier from JoinData so runtime joins run (#900)
+- Match C4Group entry wildcards with backtracking like C++ (#848)
+- Let a player control outrank a rebound pause chord (#897)
+- Recover missing legacy definitions during startup (#887)
+- End a cancelled download in the classic error modal (#893)
+- Resolve a scenario's definition packs from its own folder (#892)
+- Widen and clamp the portrait location dropdown like C++ (#871)
+- Honor PointFiltering when upscaling portrait thumbnails (#869)
+- Suppress the download bar when the transfer length is unknown (#857)
+- Walk live effects when building the object info menu (#852)
+- Open scenarios inside packed folder groups (#849)
+- Resolve chop_action through the ActMap slot order (#836)
+
+### Continuous integration
+
+- Enforce merge queue latency budget (#839)
+- Halve merge queue latency (#829)
+
+### Documentation
+
+- Record the live effect walk in the Info menu inventory (#862)
+- Define the LegacyClonk compatibility profile contract (#851)
+
+### Features
+
+- Drag the portrait selector by its title and share one decode cadence (#883)
+- Localize every portrait selector caption and size its location label (#876)
+- Bounce the portrait selector title like a classic wooden label (#879)
+- Raise the native context-menu sounds for the location dropdown (#873)
+- Compute compatibility readiness from the contract (#891)
+- Carry the compatibility profile in the game reference (#888)
+- Apply the C++ control mode default under the compatibility profile (#872)
+
+### Performance
+
+- Avoid inspecting hidden scenario descendants (#890)
+- Stop copying the container on every indexed assignment (#877)
+- Stop snapshotting the effect list on every CheckEffect (#843)
+- Sort host world storage order on read instead of every materialization (#807)
+
+### Refactoring
+
+- Separate the participant list rebuild from its disk write (#841)
+- Remove residual dead and duplicate code (#805)
+
+### Testing
+
+- Differential-check the pxs savegame load path against the c++ golden (#917)
+- Differential-check pxs casting against the c++ golden (#916)
+- Differential-check the pxs insert arm against the c++ golden (#914)
+- Differential-check the pxs conversion arm against the c++ golden (#913)
+- Differential-check the pxs insertion arm against the c++ golden (#912)
+- Pin the density gate on the builtin material reaction ladder (#911)
+- Differential-check the per-tick pxs step against the c++ golden (#910)
+- Pin the shipped english table as utf-8 so launcher ellipses survive (#909)
+- Pin that alt mnemonics follow the translated access key (#907)
+- Pin that mouse picking ignores the fore and background categories (#904)
+- Pin that a late JoinData packet is dropped without a disconnect (#903)
+- Differential-check the config language sequence against C++ (#855)
+- Pin per-client independence of the resync throttle (#899)
+- Differential-check the save policy matrix against C++ (#846)
+- Pin update idempotence and unknown-source refusal (#898)
+- Pin native startup text rasterization at every supported scale (#886)
+- Differential-check the mouse cursor priority cascade against C++ (#838)
+- Pin the effect removal reason for death against removal (#861)
+- Pin the update request combined with a direct launch (#867)
+- Pin that live tracing output reaches the loading screen (#896)
+- Pin Info-menu markup geometry and cumulative italic at scale one (#865)
+- Pin the serialized C4Value tag and array size rules (#894)
+- Pin that scoreboard icon facets never sample neighbouring cells (#889)
+- Differential-check the definition change sequence against C++ (#833)
+- Measure where global AddEffect cost actually goes (#860)
+- Pin the C++ wildcard exhaustion and backtracking rules (#882)
+- Drive the shipped MWTH and FREZ thermal pair end to end (#864)
+- Pin that an explicit launch failure exits instead of reconstructing startup (#881)
+- Pin that overlapping Queron relaunches keep separate countdowns (#868)
+- Refuse a dynamic whose metadata disagrees with its bytes (#875)
+- Differential-check the object death sequence against C++ (#828)
+- Let parity verify run comparators outside clonk-engine (#859)
+- Differential-check the MWTH and FREZ thermal pair (#866)
+- Cover every shipped Goal and Rule Activate family (#863)
+- Differential-check the object removal teardown against C++ (#825)
+- Measure how indexed array assignment scales with length (#842)
+- Measure what deep sea volcanoes cost per frame (#840)
+- Cover the shipped catapult launch and wagon cargo paths (#808)
+- Pin that italic shears a mixed text and image row together (#854)
+- Pin that C4Script arrays copy on assignment and argument (#853)
+- Pin that both control styles steer the shipped submarine alike (#850)
+- Differential-check the shape attachment search against C++ (#802)
+- Drive the shipped SMIC ice crow summon end to end (#791)
+- Pin the script player name draw bound and timing (#834)
+- Pin the unspoken message format abort (#845)
+- Differential-check the team change-request gate (#831)
+- Differential-check the weather disaster gates against C++ (#797)
+- Differential-check the SafeRandom team reservoir bounds (#817)
+- Pin cursor atlas indices to the C++ constants (#837)
+- Differential-check the blast selection chain against C++ (#790)
+- Pin that a rebound pause key replaces the default (#832)
+- Pin that F9 capture ignores the window scale (#830)
+- Pin that a removed Queron crew member still relaunches (#827)
+- Differential-check the melee and teamwork team assignment arms (#826)
+- Pin that GVTY hands off to a new attached carrier (#824)
+- Pin the hardcoded US language fallback and its error arm (#823)
+- Pin that MCOK kills live prey and outlives its own cast (#822)
+- Pin that the no-magic-energy rule gates MMED (#820)
+- Pin that each recovery elixir installs its own cure (#818)
+- Pin how the MGRP combo sets its replica count (#816)
+- Differential-check the liquid entry splash against C++ (#785)
+- Pin the MSSH stone shield rock combo strength (#793)
+- Pin that MARK swaps its projectile for a combo arrow (#814)
+- Differential-check the deterministic smallest-team scan bounds (#813)
+- Pin that MGBW loads and spends a carried arrow (#812)
+- Pin what a released port build reads from this build's wire (#811)
+- Pin the MFWL firewall owner and controller split (#810)
+- Pin that every MFSK snake chases the selected victim (#809)
+- Pin the MBOT blackout rock combo as an exact doubling (#806)
+- Drive the shipped MBLS bloodsucker through its aimer (#804)
+- Drive the shipped RUND raise undead through its selector (#792)
+- Pin the GZ9Z gold combo short-circuit (#803)
+- Pin how FHSK picks its fishskin revaluation target (#801)
+- Separate volcano advance cost from the dirty-rect scan (#799)
+- Pin the WOLI walk-on-liquid duration on its real caster (#798)
+- Differential-check the mass-mover slot scan against C++ (#781)
+- Drive the shipped MGWP warp through real player controls (#776)
+- Drive the shipped EXTG extinguish through real player controls (#782)
+- Drive the shipped DGCL dragon call against a real dragon (#789)
+- Baseline the per-glyph draw and binding cost of native text (#784)
+- Differential-check the poof reaction's unsynchronised draws (#778)
+
 ## [0.17.0] - 2026-08-20
 
 ### Documentation
