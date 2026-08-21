@@ -343,6 +343,62 @@ mod tests {
         assert_eq!(repeated, vec![ResyncRequest::new(7, 20)]);
     }
 
+    /// One divergent client must not throttle a healthy one
+    /// (clonk-org/clonk-rs#527: "cover one divergent client without perturbing
+    /// healthy peers").
+    ///
+    /// `ResyncScheduler` keys its throttle state by `ClientId`
+    /// (`entries: BTreeMap<ClientId, (Tick, Instant)>`), so independence is a
+    /// property of that shape rather than of any single branch — and every
+    /// other scheduler test drives exactly one client, so collapsing the map to
+    /// a single slot would leave all of them green while silently starving
+    /// every peer but the first of its resync requests.
+    ///
+    /// The order matters too: the second client asks at the *same instant* the
+    /// first was just throttled at, which is the only moment a shared
+    /// last-sent timestamp would suppress it.
+    #[test]
+    fn scheduler_throttles_each_client_independently() {
+        let mut scheduler = ResyncScheduler::new(Duration::from_millis(2000));
+        let now = Instant::now();
+        let first = [MissingRange::new(1, 10, 12)];
+        let second = [MissingRange::new(2, 10, 12)];
+
+        assert_eq!(
+            scheduler.schedule(first.iter(), now),
+            vec![ResyncRequest::new(1, 10)],
+            "the first client's initial request goes out"
+        );
+        assert!(
+            scheduler.schedule(first.iter(), now).is_empty(),
+            "and an immediate repeat for that same client is throttled"
+        );
+
+        // Same instant, same tick, different client: this must still be sent.
+        assert_eq!(
+            scheduler.schedule(second.iter(), now),
+            vec![ResyncRequest::new(2, 10)],
+            "a healthy peer's first request is not suppressed by another \
+             client's throttle window"
+        );
+
+        // And the two windows expire independently rather than in lockstep:
+        // advancing past the interval lets both through again.
+        let later = now + Duration::from_millis(2000);
+        assert_eq!(
+            scheduler.schedule(first.iter().chain(second.iter()), later),
+            vec![ResyncRequest::new(1, 10), ResyncRequest::new(2, 10)],
+            "both clients become eligible once their own interval elapses"
+        );
+
+        // Dropping one client leaves the other's window intact.
+        scheduler.remove_client(1);
+        assert!(
+            scheduler.schedule(second.iter(), later).is_empty(),
+            "removing a different client must not reset this one's throttle"
+        );
+    }
+
     #[test]
     fn scheduler_sends_when_gap_moves() {
         let mut scheduler = ResyncScheduler::new(Duration::from_millis(5000));
