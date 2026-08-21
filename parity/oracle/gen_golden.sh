@@ -731,7 +731,13 @@ awk '
 #     with named locals, and the one drawn FIRST is the one used for ydir — so a
 #     port reading them in argument order gets swapped velocities while drawing
 #     exactly as many numbers.
-for fn in Create Cast; do
+#
+#     `Load` comes along because its accept/reject matrix is entirely arithmetic
+#     on the file length — a four-byte number-format tag is detected by the
+#     remainder being exactly 4, not by a magic value — and because its
+#     float-format conversion is applied ONLY to slots whose material is set,
+#     leaving dead slots holding raw float bits.
+for fn in Create Cast Load Clear; do
   awk -v fn="$fn" '
     $0 ~ ("^(C4PXS \\*|bool |void )C4PXSSystem::" fn "\\(") { p = 1 }
     p { print }

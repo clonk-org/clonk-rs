@@ -5788,6 +5788,8 @@ struct C4PXS
     void Deactivate();
 };
 
+struct C4Group;
+
 struct C4PXSSystem
 {
     int32_t Count = 0;
@@ -5798,6 +5800,8 @@ struct C4PXSSystem
     bool Create(int32_t mat, C4Fixed ix, C4Fixed iy, C4Fixed ixdir, C4Fixed iydir);
     void Cast(int32_t mat, int32_t num, int32_t tx, int32_t ty, int32_t level);
     void Delete(C4PXS *pPXS);
+    void Clear();
+    bool Load(C4Group &hGroup);
 
     void reset()
     {
@@ -5818,12 +5822,189 @@ struct GameStub
 
 static GameStub Game;
 
+// `Load` reads its bytes through a C4Group. Only the two calls it makes are
+// modelled, over a buffer the fixture fills — the group layer itself is not
+// under test here, the length arithmetic and the per-slot recount are.
+// C4CFN_PXS comes from the real C4Components.h, which is already included.
+static std::vector<uint8_t> g_entry;
+static size_t g_entry_pos = 0;
+static bool g_entry_present = true;
+
+struct C4Group
+{
+    bool AccessEntry(const char *, size_t *size)
+    {
+        if (!g_entry_present) return false;
+        *size = g_entry.size();
+        g_entry_pos = 0;
+        return true;
+    }
+
+    bool Read(void *dest, size_t size)
+    {
+        if (g_entry_pos + size > g_entry.size()) return false;
+        std::memcpy(dest, g_entry.data() + g_entry_pos, size);
+        g_entry_pos += size;
+        return true;
+    }
+};
+
 #include "pxs_new.inc"
 #include "pxs_create.inc"
 #include "pxs_cast.inc"
 #include "pxs_delete.inc"
 #include "pxs_deactivate.inc"
+#include "pxs_clear.inc"
+#include "pxs_load.inc"
 } // namespace pxs_slots
+
+// `C4PXSSystem::Load`'s accept/reject decision is pure arithmetic on the file
+// length: a four-byte number-format tag is detected by the remainder being
+// exactly 4, NOT by reading a magic value, so a file whose payload happens to
+// be four bytes past a chunk boundary is read as tagged. Everything else — the
+// 1..2 format range, the chunk ceiling, the per-chunk recount — follows from
+// that first decision, and the float conversion is applied only to slots whose
+// material is set.
+//
+// The golden carries a compact recipe rather than the bytes (one case is 21
+// chunks, 210 KB); both sides build the buffer from it.
+struct PxsLoadSlot
+{
+    int32_t chunk, slot, mat, x, y, xdir, ydir;
+};
+
+struct PxsLoadCase
+{
+    const char *name;
+    bool present;      // does the group hold a PXS entry at all
+    int32_t tag;       // number-format tag, or 0 for "write no tag"
+    int32_t chunks;    // whole chunks of payload
+    int32_t extra;     // stray bytes appended, to break the length arithmetic
+    std::vector<PxsLoadSlot> live;
+};
+
+static void buildPxsLoadEntry(const PxsLoadCase &c)
+{
+    pxs_slots::g_entry.clear();
+    pxs_slots::g_entry_present = c.present;
+    const auto push = [](int32_t value)
+    {
+        for (int b = 0; b < 4; b++)
+            pxs_slots::g_entry.push_back(static_cast<uint8_t>((value >> (8 * b)) & 0xff));
+    };
+    if (c.tag) push(c.tag);
+    const size_t payload_start = pxs_slots::g_entry.size();
+    for (int32_t chunk = 0; chunk < c.chunks; chunk++)
+        for (size_t slot = 0; slot < pxs_slots::PXSChunkSize; slot++)
+        {
+            push(pxs_slots::MNone);
+            push(0); push(0); push(0); push(0);
+        }
+    for (const auto &live : c.live)
+    {
+        const size_t offset = payload_start
+            + (static_cast<size_t>(live.chunk) * pxs_slots::PXSChunkSize
+               + static_cast<size_t>(live.slot)) * 20;
+        const int32_t fields[5] = {live.mat, live.x, live.y, live.xdir, live.ydir};
+        for (int f = 0; f < 5; f++)
+            for (int b = 0; b < 4; b++)
+                pxs_slots::g_entry[offset + f * 4 + b] =
+                    static_cast<uint8_t>((fields[f] >> (8 * b)) & 0xff);
+    }
+    for (int32_t b = 0; b < c.extra; b++)
+        pxs_slots::g_entry.push_back(0);
+}
+
+static void printPxsLoadCases()
+{
+    printf("\"pxs_load\":[");
+    // A float bit pattern, for the format-2 conversion: 2.5f and -0.75f.
+    const int32_t f2_5 = 0x40200000, fm0_75 = 0xbf400000;
+    const std::vector<PxsLoadCase> cases = {
+        // No entry in the group at all: refused before anything is cleared.
+        {"absent_entry", false, 0, 0, 0, {}},
+        // A length that is neither a whole number of chunks nor four past one.
+        {"ragged_length", true, 0, 1, 7, {}},
+        // Exactly one chunk and no tag: the legacy untagged form, format 1.
+        {"untagged_chunk", true, 0, 1, 0, {{0, 3, 2, 100, 200, 300, 400}}},
+        // The same payload with a tag: detected by the remainder alone.
+        {"tagged_chunk", true, 1, 1, 0, {{0, 3, 2, 100, 200, 300, 400}}},
+        // Tag outside 1..2 is refused.
+        {"bad_number_format", true, 3, 1, 0, {}},
+        // Exactly at the chunk ceiling: accepted. The pair with the case
+        // below is what separates `>` from `>=`.
+        {"at_chunk_ceiling", true, 1, 20, 0, {{19, 0, 1, 41, 42, 43, 44}}},
+        // One past it: refused.
+        {"too_many_chunks", true, 1, 21, 0, {}},
+        // Untagged, but the first payload word is a material id that is also a
+        // valid format tag. Detecting the tag by VALUE rather than by the
+        // length remainder mistakes this for a tagged file and shifts the whole
+        // payload four bytes.
+        {"untagged_first_slot_looks_like_a_tag", true, 0, 1, 0,
+         {{0, 0, 2, 55, 66, 77, 88}}},
+        // Two chunks, live slots in both, so the per-chunk recount has to
+        // attribute them separately.
+        {"recount_per_chunk", true, 1, 2, 0,
+         {{0, 0, 1, 11, 12, 13, 14}, {0, 499, 2, 21, 22, 23, 24}, {1, 7, 3, 31, 32, 33, 34}}},
+        // Format 2 stores floats. The live slot is converted; the dead slot
+        // beside it keeps its raw bits, because the conversion is inside the
+        // `Mat != MNone` branch.
+        {"float_format", true, 2, 1, 0,
+         {{0, 5, 1, f2_5, fm0_75, f2_5, fm0_75}}},
+    };
+
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        if (!first) printf(",");
+        first = false;
+
+        buildPxsLoadEntry(c);
+        pxs_slots::Game.PXS.Clear();
+        pxs_slots::C4Group group;
+        const bool ok = pxs_slots::Game.PXS.Load(group);
+
+        printf("{\"name\":\"%s\",\"present\":%s,\"tag\":%d,\"chunks\":%d,\"extra\":%d,"
+               "\"input\":[",
+               c.name, c.present ? "true" : "false", c.tag, c.chunks, c.extra);
+        bool first_in = true;
+        for (const auto &live : c.live)
+        {
+            if (!first_in) printf(",");
+            first_in = false;
+            printf("{\"chunk\":%d,\"slot\":%d,\"mat\":%d,\"x\":%d,\"y\":%d,"
+                   "\"xdir\":%d,\"ydir\":%d}",
+                   live.chunk, live.slot, live.mat, live.x, live.y, live.xdir, live.ydir);
+        }
+        printf("],\"ok\":%s,\"counts\":[", ok ? "true" : "false");
+        for (size_t chunk = 0; chunk < 3; chunk++)
+        {
+            if (chunk) printf(",");
+            printf("%zu", pxs_slots::Game.PXS.iChunkPXS[chunk]);
+        }
+        printf("],\"loaded\":[");
+        bool first_out = true;
+        for (const auto &live : c.live)
+        {
+            if (!ok) break;
+            const pxs_slots::C4PXS *chunk = pxs_slots::Game.PXS.Chunk[live.chunk];
+            if (!chunk) continue;
+            const pxs_slots::C4PXS &pxp = chunk[live.slot];
+            if (pxp.Mat == pxs_slots::MNone) continue;
+            if (!first_out) printf(",");
+            first_out = false;
+            printf("{\"chunk\":%d,\"slot\":%d,\"mat\":%d,\"x\":%d,\"y\":%d,"
+                   "\"xdir\":%d,\"ydir\":%d}",
+                   live.chunk, live.slot, pxp.Mat, pxp.x.val, pxp.y.val,
+                   pxp.xdir.val, pxp.ydir.val);
+        }
+        printf("]}");
+    }
+    pxs_slots::Game.PXS.Clear();
+    pxs_slots::g_entry.clear();
+    pxs_slots::g_entry_present = true;
+    printf("]");
+}
 
 static void printPxsSlotStep(const char *step, int32_t draws)
 {
@@ -8425,6 +8606,11 @@ int main()
 
     // 22f. pxs_slots: New's positional slot reuse and Cast's forced draw order.
     printPxsSlotCases();
+    printf(",\n");
+
+    // 22g. pxs_load: Load's length arithmetic, chunk ceiling and per-chunk
+    //      recount, plus the float conversion that only touches live slots.
+    printPxsLoadCases();
     printf(",\n");
 
     // 23. DFA_FLOAT's raw C4Fixed bounds. C4DefCore's Physical member is
