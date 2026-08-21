@@ -1606,6 +1606,82 @@ fn network_create_selects_a_scenario_before_binding_a_host() {
 }
 
 #[test]
+fn network_definition_transfer_limit_fits_large_classic_families_by_default() {
+    use crate::settings::{session_max_load_file_size, CompatProfile};
+
+    // C++ defaults MaxLoadFileSize to 100 MiB (src/C4Config.cpp:543) and
+    // publishes a larger definition family as non-loadable. Normal mode needs
+    // room for classic compilations whose enclosing `.c4f` exceeds that cap;
+    // the compatibility profile retains the oracle default, and either profile
+    // continues to honor an explicit host policy.
+    main_assert_eq!(session_max_load_file_size(CompatProfile::Normal, None) => 256 * 1024 * 1024);
+    main_assert_eq!(session_max_load_file_size(CompatProfile::LegacyClonk, None) => 100 * 1024 * 1024);
+    main_assert_eq!(session_max_load_file_size(CompatProfile::Normal, Some(123_456)) => 123_456);
+    main_assert_eq!(session_max_load_file_size(CompatProfile::LegacyClonk, Some(123_456)) => 123_456);
+}
+
+#[test]
+fn advanced_network_config_shows_the_active_profile_transfer_default() {
+    use crate::settings::{CompatProfile, CPP_MAX_LOAD_FILE_SIZE, DEFAULT_MAX_LOAD_FILE_SIZE};
+
+    let displayed_limit = |config: &Config| {
+        crate::advanced_config::sections(config)
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .find(|row| row.name == "MaxLoadFileSize")
+            .test_value()
+            .value
+            .serialized()
+    };
+
+    main_assert_eq!(displayed_limit(&Config::new()) => DEFAULT_MAX_LOAD_FILE_SIZE.to_string());
+    let mut legacy = Config::new();
+    legacy.set_in(
+        Some("General"),
+        "CompatProfile",
+        CompatProfile::LEGACY_CLONK,
+    );
+    main_assert_eq!(displayed_limit(&legacy) => CPP_MAX_LOAD_FILE_SIZE.to_string());
+}
+
+#[test]
+fn unconfigured_normal_host_prepares_the_large_definition_transfer_limit() {
+    use crate::settings::DEFAULT_MAX_LOAD_FILE_SIZE;
+
+    let install = tempdir();
+    install_global_gui_and_loader_test_root(install.path());
+    let scenario_path = install.path().join("content/LargeFamily.c4f/Round.c4s");
+    fs::create_dir_all(&scenario_path).test_value();
+    let user_data = tempdir();
+    let _guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(install.path())),
+        ("LC_USER_DATA_DIR", Some(user_data.path())),
+    ]);
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+    let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
+    let mut scenario = FrontendScenario::fallback();
+    scenario.title = "Large family".to_string();
+    scenario.path = Some(scenario_path);
+
+    let preparation = build_network_host_preparation(
+        &app,
+        &scenario,
+        &ScenarioDefinitionLoad::Seed {
+            modules: Vec::new(),
+            definition_root: None,
+        },
+        &[],
+        &[],
+        None,
+        None,
+    )
+    .test_value();
+
+    main_assert_eq!(preparation.config.max_load_file_size => DEFAULT_MAX_LOAD_FILE_SIZE);
+}
+
+#[test]
 fn network_host_preparation_keeps_cpp_configured_participant_order() {
     // C4Game freezes Config.General.Participants into PlayerFilenames and
     // C4ClientPlayerInfos walks those modules in order. The separately

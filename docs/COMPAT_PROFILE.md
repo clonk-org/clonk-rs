@@ -201,11 +201,13 @@ Everything else determinism-critical is either reverted or blocked.
 
 ### Transport
 
-Every transport row is `kept`: each is host-local or browser-local and changes
-which datagram a machine chooses to send, never which data is synchronized.
+Transport divergences are host-local or browser-local and do not change
+synchronized data. The profile keeps the quality improvements below and
+restores C++'s definition-transfer default.
 
 | Id | Action | Disposition |
 | --- | --- | --- |
+| `transport-definition-transfer-limit` | reverted | `Network.MaxLoadFileSize` defaults to 256 MiB rather than C++'s 100 MiB so large classic definition families can be transferred. The profile restores 100 MiB; an explicitly configured host limit wins in either mode. Owned by clonk-org/clonk-rs#945. |
 | `transport-presend-envelope` | kept | The host sizes the control PreSend horizon from a decaying delivery-time envelope instead of C++'s 1/150 EWMA of the mean control-send time, so a jittery link no longer stalls every participant on about half its ticks. |
 | `transport-udp-repair-interval` | kept | Reliable-UDP repair re-request damping is 250 ms rather than C++'s one-second `iReCheckInterval`. Only a repair request that is itself lost is affected. |
 | `transport-lan-probe-interval` | kept | LAN discovery probes on its own shorter interval instead of C++'s single 30-second countdown that refreshes the LAN list and the masterserver row together. The masterserver keeps the oracle interval. |
