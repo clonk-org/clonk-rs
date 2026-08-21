@@ -4644,14 +4644,29 @@ static void trace(const char *what)
 
 struct C4Value
 {
+    int32_t value{};
 };
 
 static C4Value C4VObj(C4Object *) { return {}; }
+static C4Value C4VInt(int32_t value) { return {value}; }
 
+// Only the first parameter is kept, which is all these callbacks carry that
+// this section compares — PSF_Death's death-causing player.
 struct ParSet
 {
+    int32_t First{};
+    bool Any{};
+
     ParSet() {}
-    ParSet(std::initializer_list<C4Value>) {}
+
+    ParSet(std::initializer_list<C4Value> values)
+    {
+        if (values.size())
+        {
+            First = values.begin()->value;
+            Any = true;
+        }
+    }
 };
 
 // What a configured callback does besides being recorded.
@@ -4704,6 +4719,7 @@ struct ContentsList
     void Add(C4Object *object);
     void Remove(C4Object *object);
     int32_t Count() const;
+    C4Object *GetObject() const { return First ? First->Obj : nullptr; }
 };
 
 // The two particle chunks the teardown clears. Only the emptiness test and the
@@ -4723,7 +4739,36 @@ struct ParticleList
 
 struct EffectsStub
 {
-    void ClearAll(C4Object *, int32_t) { trace("ClearAllEffects"); }
+    // When set, the clear puts the object back on its feet — the resurrection
+    // C4Object::AssignDeath aborts an unforced kill for.
+    bool Resurrects{};
+
+    void ClearAll(C4Object *object, int32_t);
+};
+
+// C4Effects.h: the reason code a death-driven effect clear passes on.
+const int32_t C4FxCall_RemoveDeath = 6;
+const int32_t C4D_Living = 1 << 3; // C4Def.h:47
+
+// Only the two members AssignDeath reads: the pointer cleanup and the
+// fog-of-war view list that decides whether the view range is reset.
+struct C4Player
+{
+    struct ViewList
+    {
+        bool Contains{};
+
+        bool IsContained(C4Object *) const { return Contains; }
+    } FoWViewObjs;
+
+    void ClearPointers(C4Object *, bool) { trace("PlayerClearPointers"); }
+};
+
+struct PlayerListStub
+{
+    C4Player *Held{};
+
+    C4Player *Get(int32_t owner) { return owner >= 0 ? Held : nullptr; }
 };
 
 struct InactiveList
@@ -4743,6 +4788,7 @@ struct ObjectsStub
 struct GameStub
 {
     ObjectsStub Objects;
+    PlayerListStub Players;
 
     void ClearPointers(C4Object *) { trace("ClearPointers"); }
 };
@@ -4751,8 +4797,13 @@ static GameStub Game;
 
 struct InfoStub
 {
+    bool HasDied{};
+    int32_t DeathCount{};
+
     void Retire() { trace("InfoRetire"); }
 };
+
+
 
 struct C4Object
 {
@@ -4790,7 +4841,23 @@ struct C4Object
         int32_t Wdt{};
     } SolidMask;
 
+    // C4Object::AssignDeath's state.
+    int32_t Alive{1};
+    int32_t Select{};
+    int32_t Owner{-1};
+    int32_t Category{};
+    int32_t LastEnergyLossCausePlayer{-1};
+    int32_t DeathPlayerSeen{-1};
+
     int32_t Call(const char *fn, ParSet = {});
+
+    void AssignDeath(bool fForced = false);
+    bool SetActionByName(const char *name)
+    {
+        trace(name);
+        return true;
+    }
+    void SetPlrViewRange(int32_t) { trace("SetPlrViewRange"); }
 
     void UpdateMass() { trace("UpdateMass"); }
     void SetOCF() { trace("SetOCF"); }
@@ -4847,13 +4914,14 @@ void C4Object::RefStub::Set0()
     if (g_ref_owner) g_ref_owner->FirstRef = NextRef;
 }
 
-int32_t C4Object::Call(const char *fn, ParSet)
+int32_t C4Object::Call(const char *fn, ParSet pars)
 {
     // C4Object::Call (C4Object.cpp:2224-2228) drops the call outright when the
     // callee's Status is zero, so a container that is itself already torn down
     // receives nothing — the teardown reaches the call site either way, which
     // is why the guard belongs here rather than at the caller.
     if (!Status || !Def) return 0;
+    if (pars.Any) DeathPlayerSeen = pars.First;
     trace(fn);
     for (int32_t i = 0; i < g_config_count; ++i)
     {
@@ -4870,7 +4938,18 @@ int32_t C4Object::Call(const char *fn, ParSet)
     return 0;
 }
 
+void EffectsStub::ClearAll(C4Object *object, int32_t)
+{
+    trace("ClearAllEffects");
+    if (Resurrects && object) object->Alive = 1;
+}
+
+// PSF_Death takes the death-causing player, which AssignDeath captures BEFORE
+// the effect clear can meddle with it.
+#define PSF_Death "~Death"
+
 #include "object_assign_removal.inc"
+#include "object_assign_death.inc"
 } // namespace object_removal
 
 int main()
@@ -5497,6 +5576,112 @@ int main()
     // is followed by a Status re-check because the callback may already have
     // deleted the object. Contents are torn down BEFORE the object leaves its
     // own container.
+    // C4Object::AssignDeath (C4Object.cpp:1164-1205). Two orderings carry it:
+    // the death-causing player is read BEFORE the effect clear, because the
+    // effects can meddle with the flags, and it is handed to the Death callback
+    // at the very END; and `Alive` is cleared BEFORE that clear so a dying
+    // object cannot recurse into its own death. An effect that puts the object
+    // back on its feet aborts the kill unless it was forced.
+    arr_begin("object_death");
+    {
+        struct Case
+        {
+            const char *name;
+            int32_t alive;
+            bool forced;
+            bool has_effects;
+            bool effects_resurrect;
+            bool has_info;
+            bool has_player;
+            bool in_view_list;
+            int32_t category;
+            int32_t cause_player;
+            int32_t contents;
+        };
+
+        const Case cases[] = {
+            // Not alive: nothing happens at all.
+            {"already_dead", 0, false, true, false, true, true, false, object_removal::C4D_Living, 3, 2},
+            // The plain death, with the cause player reaching the callback.
+            {"plain", 1, false, false, false, false, false, false, object_removal::C4D_Living, 3, 0},
+            // An effect clear that resurrects aborts an unforced kill — after
+            // the clear has already run.
+            {"resurrected_aborts", 1, false, true, true, false, false, false, object_removal::C4D_Living, 3, 0},
+            // ...but not a forced one.
+            {"resurrected_forced_continues", 1, true, true, true, false, false, false,
+             object_removal::C4D_Living, 3, 0},
+            // An effect clear that does not resurrect just runs.
+            {"effects_cleared", 1, false, true, false, false, false, false, object_removal::C4D_Living, 3, 0},
+            // The info bookkeeping: died, death count, retire.
+            {"with_info", 1, false, false, false, true, false, false, object_removal::C4D_Living, 3, 0},
+            // Contents are EXITED, not removed — a dying Clonk drops its load.
+            {"contents_exited", 1, false, false, false, false, false, false, object_removal::C4D_Living, 3, 2},
+            // A living object already in the player's fog-of-war view list
+            // keeps its view range; anything else has it reset.
+            {"living_in_view_keeps_range", 1, false, false, false, false, true, true,
+             object_removal::C4D_Living, 3, 0},
+            {"living_out_of_view_resets", 1, false, false, false, false, true, false,
+             object_removal::C4D_Living, 3, 0},
+            {"non_living_resets_range", 1, false, false, false, false, true, true, 0, 3, 0},
+            {"no_player_resets_range", 1, false, false, false, false, false, false, object_removal::C4D_Living,
+             3, 0},
+        };
+
+        for (const Case &c : cases)
+        {
+            object_removal::DefStub object_def, content_def;
+            object_removal::EffectsStub *effects =
+                c.has_effects ? new object_removal::EffectsStub() : nullptr;
+            if (effects) effects->Resurrects = c.effects_resurrect;
+            object_removal::InfoStub info;
+            object_removal::C4Player player;
+            player.FoWViewObjs.Contains = c.in_view_list;
+            object_removal::Game.Players.Held = c.has_player ? &player : nullptr;
+
+            object_removal::C4Object object;
+            object.Tag = "object";
+            object.Def = &object_def;
+            object.Alive = c.alive;
+            object.Select = 1;
+            object.Category = c.category;
+            object.Owner = c.has_player ? 0 : -1;
+            object.LastEnergyLossCausePlayer = c.cause_player;
+            object.pEffects = effects;
+            object.Info = c.has_info ? &info : nullptr;
+
+            object_removal::C4Object contents[2];
+            for (int32_t i = 0; i < c.contents; ++i)
+            {
+                contents[i].Tag = "content";
+                contents[i].Def = &content_def;
+                contents[i].Contained = &object;
+                object.Contents.Add(&contents[i]);
+            }
+
+            object_removal::g_config_count = 0;
+            object_removal::g_trace_count = 0;
+            object_removal::g_removing = &object;
+
+            object.AssignDeath(c.forced);
+
+            sep();
+            printf("{\"case\":\"%s\",\"forced\":%d,\"alive_after\":%d,\"select_after\":%d,"
+                   "\"death_player_seen\":%d,\"has_died\":%d,\"death_count\":%d,"
+                   "\"contents_left\":%d,\"contents_contained\":%d,\"calls\":[",
+                   c.name, c.forced ? 1 : 0, object.Alive, object.Select,
+                   object.DeathPlayerSeen, info.HasDied ? 1 : 0, info.DeathCount,
+                   object.Contents.Count(),
+                   c.contents ? (contents[0].Contained == &object ? 1 : 0) : 0);
+            for (int32_t i = 0; i < object_removal::g_trace_count
+                                && i < object_removal::MaxTrace;
+                 ++i)
+                printf("%s\"%s\"", i ? "," : "", object_removal::g_trace[i]);
+            printf("]}");
+        }
+    }
+    arr_end();
+    printf(",\n");
+
     arr_begin("object_removal");
     {
         using namespace object_removal;
