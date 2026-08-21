@@ -1826,25 +1826,7 @@ impl GameApp {
             })
             .collect::<Vec<_>>();
         let network_host = matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
-        let runtime_join_allowed = self
-            .runtime_network_join_allowed
-            .or_else(|| match self.network_mode.as_ref() {
-                Some(NetworkMode::Host(HostSettings {
-                    prepared: Some(prepared),
-                    ..
-                })) => Some(prepared.admission().runtime_join_allowed()),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                !native_config_text(
-                    &load_native_config_bytes(self.app_paths.as_ref()),
-                    "Network",
-                    "NoRuntimeJoin",
-                )
-                .as_deref()
-                .map(parse_config_bool)
-                .unwrap_or(true)
-            });
+        let runtime_join_allowed = self.runtime_join_admission_allowed();
         let options = core_runtime_option_rows(
             self.engine.is_control_host(),
             network_host,
@@ -5546,6 +5528,35 @@ impl GameApp {
                 tracing::error!(%error, "failed to publish netpuncher host reference");
             }
         }
+    }
+
+    /// The runtime-join admission this host is actually enforcing.
+    ///
+    /// Mirrors C++'s single `C4Network2::fAllowJoin`, which the lobby exit
+    /// seeds from `Config.Network.NoRuntimeJoin` and `AllowJoin` overwrites
+    /// thereafter (`src/C4Network2.cpp:513,835-842`). The port spreads the same
+    /// value over three places - the live field a runtime toggle writes, a
+    /// prepared host's admission, and the config file - so resolve them in one
+    /// place rather than at each use.
+    pub(crate) fn runtime_join_admission_allowed(&self) -> bool {
+        self.runtime_network_join_allowed
+            .or_else(|| match self.network_mode.as_ref() {
+                Some(NetworkMode::Host(HostSettings {
+                    prepared: Some(prepared),
+                    ..
+                })) => Some(prepared.admission().runtime_join_allowed()),
+                Some(NetworkMode::Host(_) | NetworkMode::Client(_)) | None => None,
+            })
+            .unwrap_or_else(|| {
+                !native_config_text(
+                    &load_native_config_bytes(self.app_paths.as_ref()),
+                    "Network",
+                    "NoRuntimeJoin",
+                )
+                .as_deref()
+                .map(parse_config_bool)
+                .unwrap_or(true)
+            })
     }
 
     pub(crate) fn publish_running_host_reference(&mut self) {

@@ -3072,25 +3072,7 @@ impl GameApp {
         if !matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
             return Ok(true);
         }
-        let currently_allowed = self
-            .runtime_network_join_allowed
-            .or_else(|| match self.network_mode.as_ref() {
-                Some(NetworkMode::Host(HostSettings {
-                    prepared: Some(prepared),
-                    ..
-                })) => Some(prepared.admission().runtime_join_allowed()),
-                Some(NetworkMode::Host(_) | NetworkMode::Client(_)) | None => None,
-            })
-            .unwrap_or_else(|| {
-                !native_config_text(
-                    &load_native_config_bytes(self.app_paths.as_ref()),
-                    "Network",
-                    "NoRuntimeJoin",
-                )
-                .as_deref()
-                .map(parse_config_bool)
-                .unwrap_or(true)
-            });
+        let currently_allowed = self.runtime_join_admission_allowed();
         let allowed = !currently_allowed;
         let Some(network) = self.network.as_ref() else {
             return Ok(true);
