@@ -1377,6 +1377,7 @@ impl GameApp {
             ("Network", "Comment"),
             ("Network", "LastPassword"),
             ("General", "Record"),
+            ("General", "NoCrew"),
             ("Graphics", "MsgBoard"),
             ("Startup", "HideMsgStartDedicated"),
             ("Startup", "HideMsgPlrNoTakeOver"),
@@ -2181,6 +2182,9 @@ impl GameApp {
         if let Some(record) = pending_bool("General", "Record") {
             values.record = record;
         }
+        if let Some(fair_crew) = pending_bool("General", "NoCrew") {
+            values.fair_crew = fair_crew;
+        }
         if let Some(password) = self.deferred_config.get("Network", "LastPassword") {
             values.last_password = password.to_owned();
         }
@@ -2397,7 +2401,17 @@ impl GameApp {
                 }
                 GameOptionAction::FairCrewPreferenceChanged(enabled) => {
                     self.startup_view_flags.fair_crew = enabled;
-                    self.persist_fair_crew_preference(enabled);
+                    // `OnBtnFairCrew` outside the lobby "simply changes config
+                    // setting" — an in-memory flip with no `Config.Save()`,
+                    // exactly like the `OnBtnRecord` beside it
+                    // (src/C4Network2Dialogs.cpp:704-710,713-715). The
+                    // serialized key is `NoCrew`, not `FairCrew`
+                    // (src/C4Config.cpp:384).
+                    self.persist_game_option_value(
+                        "General",
+                        "NoCrew",
+                        if enabled { "true" } else { "false" }.to_string(),
+                    );
                 }
                 GameOptionAction::RecordPreferenceChanged(enabled) => {
                     self.startup_view_flags.record = enabled;
