@@ -7057,6 +7057,106 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
         }
     }
 
+    // 16b8. cross_map_reactions: which builtin reaction each (PXS material,
+    //       landscape material) pair gets, from the selection loop in
+    //       `C4MaterialMap::CrossMapMaterials` (C4Material.cpp:311-346).
+    //
+    //       This is the decision every arm section depends on, and it has two
+    //       properties worth pinning. The chain is an if/else-if LADDER, so its
+    //       ORDER is the behaviour: InMatConvert wins over everything, then poof
+    //       (incindiary vs extinguisher), then incinerate (incindiary vs
+    //       inflammable), then corrode (corrosive vs corrode), then insert as
+    //       the fallthrough. And every rung but convert sits behind
+    //       `MatDensity(PXS) <= MatDensity(LS)`, so a heavier PXS material
+    //       hitting a lighter landscape one gets NO reaction at all.
+    //
+    //       The material set is adversarial about both. Magma is incindiary AND
+    //       corrosive while Tinder is inflammable AND corroding, so
+    //       Magma→Tinder separates "incinerate before corrode" from any other
+    //       arrangement; Acid reaches corrode against the same Tinder. Snow
+    //       declares InMatConvert=Water. Tinder and Granite are heavy, so their
+    //       rows are mostly the density gate. Sky participates on both axes,
+    //       because C++'s loops start at -1.
+    {
+        let library = clonk_resources::MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Extinguisher=1
+
+            [Material Magma]
+            Name=Magma
+            Density=25
+            Incindiary=1
+            Corrosive=100
+
+            [Material Acid]
+            Name=Acid
+            Density=25
+            Corrosive=100
+
+            [Material Tinder]
+            Name=Tinder
+            Density=50
+            Inflammable=1
+            Corrode=100
+
+            [Material Granite]
+            Name=Granite
+            Density=100
+
+            [Material Snow]
+            Name=Snow
+            Density=25
+            InMatConvert=Water
+            "#,
+        )
+        .expect("cross map oracle materials parse");
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+
+        for case in golden["cross_map_reactions"].as_array().unwrap() {
+            let pxs = i(case, "pxs") as i32;
+            let ls = i(case, "ls") as i32;
+            let label = format!(
+                "cross_map_reactions[{}->{}]",
+                case["pxs_name"].as_str().unwrap_or("?"),
+                case["ls_name"].as_str().unwrap_or("?")
+            );
+
+            // C++ indexes the map from -1, where -1 is sky and 0 is the first
+            // declared material — the same numbering the port assigns, since
+            // this fixture declares no reserved slot ahead of Water.
+            let to_id = |index: i32| {
+                (index >= 0)
+                    .then(|| crate::material::MaterialId::new(index as usize))
+                    .flatten()
+            };
+
+            let reaction = engine.materials.reaction_for_event(
+                to_id(pxs),
+                to_id(ls),
+                MaterialInteractionEvent::PxsMove,
+            );
+            let got = match reaction.kind {
+                crate::material::MaterialReactionKind::None => "none",
+                crate::material::MaterialReactionKind::Convert { .. } => "convert",
+                crate::material::MaterialReactionKind::Poof => "poof",
+                crate::material::MaterialReactionKind::Incinerate => "incinerate",
+                crate::material::MaterialReactionKind::Corrode { .. } => "corrode",
+                crate::material::MaterialReactionKind::Insert => "insert",
+                crate::material::MaterialReactionKind::Script { .. } => "script",
+            };
+            assert_eq!(
+                case["reaction"].as_str().unwrap_or("?"),
+                got,
+                "PARITY DIVERGENCE in `{label}` field `reaction`",
+            );
+        }
+    }
+
     // 16b7. dig_free: `C4Landscape::DigFree` (C4Landscape.cpp:1023-1044) walks a
     //       circle row by row, and two of its details are easy to "tidy" into
     //       something that digs a different shape.

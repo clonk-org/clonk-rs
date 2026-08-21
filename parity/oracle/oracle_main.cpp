@@ -6080,6 +6080,8 @@ template <class T> static T BoundBy(T v, T lo, T hi) { return v < lo ? lo : (v >
 #include "find_mat_path_push.inc"
 #include "insert_material.inc"
 
+#undef MatDensity
+
 } // namespace insert_material_check
 
 // C4Landscape::ExtractMaterial (src/C4Landscape.cpp:1191-1199) and the
@@ -6296,6 +6298,177 @@ int32_t C4Landscape::GetDensity(int32_t x, int32_t y)
 #include "dig_free.inc"
 
 } // namespace dig_free_check
+
+// The builtin reaction-selection loop from C4MaterialMap::CrossMapMaterials
+// (src/C4Material.cpp:311-346) -- the decision every arm section above depends
+// on: which builtin reaction a (PXS material, landscape material) pair gets in
+// the first place.
+//
+// Only that first loop is lifted. The rest of CrossMapMaterials initialises
+// textures and PXS facets and would drag in the whole graphics layer; the
+// custom-reaction overlay that follows it is a separate concern with its own
+// ExecMask handling. Everything the section asserts still comes from the
+// extracted source.
+//
+// Two things make it worth pinning:
+//
+//   * the chain is an if/else-if LADDER, so its ORDER is the behaviour.
+//     InMatConvert wins over everything; then poof (incindiary vs
+//     extinguisher), then incinerate (incindiary vs inflammable), then corrode
+//     (corrosive vs corrode), then insert as the fallthrough. A material that is
+//     both incindiary and corrosive against one that is both inflammable and
+//     corroding gets INCINERATE, never corrode.
+//   * every branch but the convert one sits behind
+//     `MatDensity(PXS) <= MatDensity(LS)`, so a heavier PXS material hitting a
+//     lighter landscape one gets NO reaction at all. That gate is easy to lose
+//     when the ladder is rewritten as a match on material properties.
+//
+// Sky is a real participant here: the loops start at -1, and `sInMatConvert`
+// is compared against `C4TLS_MatSky` when the landscape side is sky.
+namespace cross_map_check
+{
+
+// `sInMatConvert` is a StdStrBuf in C++. The lifted line asks it only for its
+// length and its data, so this stands in for both and keeps that line
+// byte-for-byte rather than editing it.
+struct StrRef
+{
+    const char *p = nullptr;
+    int32_t getLength() const { return p ? static_cast<int32_t>(strlen(p)) : 0; }
+    const char *getData() const { return p; }
+};
+
+// The C4Material fields the lifted loop touches, and nothing else.
+struct C4Material
+{
+    const char *Name;
+    int32_t Density;
+    int32_t Incindiary;
+    int32_t Extinguisher;
+    int32_t Inflammable;
+    int32_t Corrosive;
+    int32_t Corrode;
+    StrRef sInMatConvert;
+};
+
+constexpr const char *C4TLS_MatSky = "Sky";
+
+// The five builtin reactions are identified by which object was selected, so
+// the recorder stores a tag rather than a function pointer.
+enum ReactionTag
+{
+    ReactNone = 0,
+    ReactConvert = 1,
+    ReactPoof = 2,
+    ReactIncinerate = 3,
+    ReactCorrode = 4,
+    ReactInsert = 5,
+};
+
+struct C4MaterialReaction
+{
+    ReactionTag tag;
+};
+
+static C4MaterialReaction DefReactConvert{ReactConvert};
+static C4MaterialReaction DefReactPoof{ReactPoof};
+static C4MaterialReaction DefReactIncinerate{ReactIncinerate};
+static C4MaterialReaction DefReactCorrode{ReactCorrode};
+static C4MaterialReaction DefReactInsert{ReactInsert};
+
+constexpr int32_t MaxMat = 6;
+static int32_t g_selected[MaxMat + 1][MaxMat + 1];
+
+struct C4MaterialMap
+{
+    C4Material *Map = nullptr;
+    int32_t Num = 0;
+    // ppReactionMap is deleted and reallocated by the lifted code; keep a real
+    // pointer so that stays honest.
+    C4MaterialReaction **ppReactionMap = nullptr;
+
+    int32_t MatDensity(int32_t mat) { return mat < 0 ? 0 : Map[mat].Density; }
+    void SetMatReaction(int32_t iPXS, int32_t iLS, C4MaterialReaction *pReaction)
+    {
+        g_selected[iPXS + 1][iLS + 1] = pReaction ? pReaction->tag : ReactNone;
+    }
+    void CrossMapMaterials();
+};
+
+static C4MaterialMap MaterialMap;
+
+// `SEqualNoCase` with no length limit, which is the form the lifted line uses.
+static bool SEqualNoCase(const char *a, const char *b)
+{
+    if (!a || !b) return false;
+    while (*a && *b)
+    {
+        if (tolower(static_cast<unsigned char>(*a)) != tolower(static_cast<unsigned char>(*b)))
+            return false;
+        a++;
+        b++;
+    }
+    return !*a && !*b;
+}
+
+#include "cross_map_reactions.inc"
+
+} // namespace cross_map_check
+
+// Builds the builtin reaction map once over a material set chosen so that every
+// rung of the ladder fires, and emits the whole (PXS, LS) matrix including sky
+// on both axes.
+//
+// The set is deliberately adversarial about ORDER. Magma is incindiary AND
+// corrosive; Tinder is inflammable AND corroding; so the Magma-into-Tinder cell
+// distinguishes "incinerate before corrode" from any other arrangement. Acid is
+// corrosive but not incindiary, so it reaches corrode against the same Tinder.
+// Snow declares InMatConvert=Water, which must win even against a lighter
+// target, and against sky.
+static void printCrossMapCases()
+{
+    using cross_map_check::MaterialMap;
+    using cross_map_check::MaxMat;
+    using cross_map_check::ReactNone;
+    using cross_map_check::g_selected;
+
+    static cross_map_check::C4Material materials[] = {
+        // Name        Dens Inc Ext Infl Corrosive Corrode  InMatConvert
+        {"Water",        25,  0,  1,   0,        0,      0, {}},
+        {"Magma",        25,  1,  0,   0,      100,      0, {}},
+        {"Acid",         25,  0,  0,   0,      100,      0, {}},
+        {"Tinder",       50,  0,  0,   1,        0,    100, {}},
+        {"Granite",     100,  0,  0,   0,        0,      0, {}},
+        {"Snow",         25,  0,  0,   0,        0,      0, {"Water"}},
+    };
+    MaterialMap.Map = materials;
+    MaterialMap.Num = 6;
+
+    for (int32_t a = 0; a <= MaxMat; a++)
+        for (int32_t b = 0; b <= MaxMat; b++)
+            g_selected[a][b] = ReactNone;
+
+    MaterialMap.CrossMapMaterials();
+
+    static const char *const tags[] = {"none", "convert", "poof", "incinerate",
+                                       "corrode", "insert"};
+
+    printf("%s", "\"cross_map_reactions\":[");
+    bool first = true;
+    for (int32_t iPXS = -1; iPXS < MaterialMap.Num; iPXS++)
+        for (int32_t iLS = -1; iLS < MaterialMap.Num; iLS++)
+        {
+            if (!first) printf(",");
+            first = false;
+            printf("{\"pxs\":%d,\"ls\":%d,\"pxs_name\":\"%s\",\"ls_name\":\"%s\","
+                   "\"reaction\":\"%s\"}",
+                   iPXS, iLS,
+                   iPXS < 0 ? "Sky" : materials[iPXS].Name,
+                   iLS < 0 ? "Sky" : materials[iLS].Name,
+                   tags[g_selected[iPXS + 1][iLS + 1]]);
+        }
+    printf("]");
+}
 
 // Runs one DigFree and records the shape it actually dug. That delta is the
 // whole comparison: DigFree returns void, so the pixels it cleared are the only
@@ -10013,6 +10186,12 @@ int main()
     //       LAST row rather than the circle, whose zero-width row still digs one
     //       pixel, and whose edge passes bite only at a density boundary.
     printDigFreeCases();
+    printf(",\n");
+
+    // 22e8. cross_map_reactions: which builtin reaction each (PXS, landscape)
+    //       material pair gets — the if/else-if ladder's order, and the
+    //       same-or-higher-density gate every rung but convert sits behind.
+    printCrossMapCases();
     printf(",\n");
 
     // 22f. pxs_slots: New's positional slot reuse and Cast's forced draw order.
