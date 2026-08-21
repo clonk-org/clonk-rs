@@ -141,3 +141,136 @@ pub(crate) fn apply_update(package_path: &str) -> Result<ApplyOutcome, String> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_update, ApplyOutcome};
+    use clonk_resources::MutableGroup;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn scratch() -> std::path::PathBuf {
+        let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "clonk-rust-apply-update-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn write_group(path: &std::path::Path, name: &str, payload: &[u8]) {
+        let mut group = MutableGroup::new(name);
+        group.set_maker("OracleHost");
+        group
+            .add_file_with_metadata("Data.bin", payload.to_vec(), 1, false)
+            .unwrap();
+        std::fs::write(path, group.pack().unwrap()).unwrap();
+    }
+
+    /// Re-applying a `.c4u` whose contents the target already carries is a
+    /// **success**, not a refusal (`C4UpdatePackage::Execute`, `C4Update.cpp`).
+    ///
+    /// This is the first check in the sequence and the easy one to get
+    /// backwards: an updater that treats "already at this version" as an error
+    /// turns an idempotent operation into a hard failure, which is what a
+    /// resumed or retried update looks like.
+    ///
+    /// `apply_update` had no test at all — the module implements the whole
+    /// `Execute` sequence, including a garbage-guard that exists to reproduce a
+    /// C++ uninitialised-memory read, and nothing exercised any of it.
+    #[test]
+    fn applying_an_update_twice_reports_already_updated_rather_than_failing() {
+        let directory = scratch();
+        let old_path = directory.join("old.c4g");
+        let new_path = directory.join("new.c4g");
+        let package_path = directory.join("update.c4u");
+
+        write_group(&old_path, "old.c4g", b"version one");
+        write_group(&new_path, "new.c4g", b"version two");
+
+        // `dest_path` is the *source* path, so the package rewrites `old.c4g`
+        // in place to carry `new.c4g`'s contents (make_update.rs:217).
+        let generated = crate::make_update::generate_update(
+            old_path.to_str().unwrap(),
+            new_path.to_str().unwrap(),
+            package_path.to_str().unwrap(),
+            "round trip",
+            false,
+        )
+        .expect("the update package generates");
+        assert!(generated, "the two versions differ, so there is an update");
+
+        assert_eq!(
+            apply_update(package_path.to_str().unwrap()).expect("the first application succeeds"),
+            ApplyOutcome::Applied
+        );
+        // Contents, not bytes: the module's own verdict rule accepts a result
+        // whose contents CRC matches even when the repack is not byte-identical,
+        // and a repack legitimately differs (header filename, entry order).
+        let updated = clonk_resources::Group::open(&old_path).expect("the updated target opens");
+        let entry = updated
+            .entries()
+            .expect("entries")
+            .into_iter()
+            .find(|entry| entry.name_bytes == b"Data.bin")
+            .expect("the payload survives the update");
+        assert_eq!(
+            updated
+                .read_entry_bytes_exact(&entry)
+                .expect("payload reads"),
+            b"version two".to_vec(),
+            "the target now carries the new version's contents"
+        );
+
+        // The second application is the case under test: the contents CRC
+        // already matches, so `Execute` returns success without touching it.
+        assert_eq!(
+            apply_update(package_path.to_str().unwrap())
+                .expect("re-applying an already-applied update is not an error"),
+            ApplyOutcome::AlreadyUpdated
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A package refuses a target that is not one of the source versions it
+    /// knows, rather than applying over it.
+    ///
+    /// This is the two-step source check whose first comparison guards against
+    /// C++'s uninitialised `GrpContentsCRC1[i]`: skipping it would accept
+    /// packages C++ rejects, and skipping the `GrpChks1` fallback would reject
+    /// packages C++ accepts.
+    #[test]
+    fn applying_an_update_to_an_unknown_version_is_refused() {
+        let directory = scratch();
+        let old_path = directory.join("old.c4g");
+        let new_path = directory.join("new.c4g");
+        let package_path = directory.join("update.c4u");
+
+        write_group(&old_path, "old.c4g", b"version one");
+        write_group(&new_path, "new.c4g", b"version two");
+        crate::make_update::generate_update(
+            old_path.to_str().unwrap(),
+            new_path.to_str().unwrap(),
+            package_path.to_str().unwrap(),
+            "round trip",
+            false,
+        )
+        .expect("the update package generates");
+
+        // Replace the target with a version the package has never seen.
+        write_group(&old_path, "old.c4g", b"version three");
+
+        let error = apply_update(package_path.to_str().unwrap())
+            .expect_err("an unknown source version must be refused");
+        assert!(
+            error.contains("does not match any source version"),
+            "unexpected refusal: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+}
