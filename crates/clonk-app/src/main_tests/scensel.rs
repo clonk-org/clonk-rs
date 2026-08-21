@@ -3034,6 +3034,10 @@ fn folder_map_f5_refresh_preserves_map_and_book_only_shortcuts() {
     main_assert!(map.selected_entry().is_none(), "F5 rebuild clears the visible map selection");
     main_assert!(map.scenarios.iter().any(|button| {button.entry.as_ref().is_some_and(|entry| entry.identifier == "Map.c4f/Beta.c4s")}));
     main_assert!(app.scenario_catalog.contains_key("Map.c4f/Beta.c4s"));
+    main_assert!(
+        app.scenario_entry_enabled.is_empty(),
+        "rediscovering a map sheet must not rebuild the book CanOpen cache"
+    );
     reset_cached_app_paths();
 }
 
@@ -3184,6 +3188,36 @@ fn folder_map_loads_renders_titles_access_overlays_and_cpp_click_semantics() {
         .get_pixel(sample_x as u32, sample_y as u32)
         .test_value();
     main_assert_eq!([pixel.r, pixel.g, pixel.b] => [20, 30, 40]);
+}
+
+// C4MapFolderData::CreateGUIElements only filters mission access when it
+// creates map buttons (C4StartupScenSelDlg.cpp:344-357). The map sheet does
+// not render ScenListItem rows, so its children must not populate the book
+// CanOpen cache; activation still performs the exact final check.
+#[test]
+fn folder_map_does_not_build_book_openability_cache() {
+    let root = tempdir();
+    let map_path = root.path().join("Map.c4f");
+    fs::create_dir(&map_path).test_value();
+    write_map_png(&map_path.join("FolderMap.png"), 8, 8, [20, 30, 40, 255]);
+    fs::write(
+        map_path.join("FolderMap.txt"),
+        "[FolderMap]\n    [Scenario]\n    File=Visible.c4s\n    Area=0,0,8,8\n",
+    )
+    .test_value();
+
+    let visible = map_test_scenario(&map_path, "Visible.c4s", "Visible");
+    let hidden = map_test_scenario(&map_path, "Hidden.c4s", "Hidden");
+    let folder = map_test_folder(&map_path, vec![visible, hidden]);
+    let mut app = new_menu_app(640, 480);
+
+    open_map_test_folder(&mut app, folder);
+
+    main_assert!(app.menu_state.current_map().is_some());
+    main_assert!(
+        app.scenario_entry_enabled.is_empty(),
+        "map sheets do not render book rows or use their CanOpen cache"
+    );
 }
 
 #[test]

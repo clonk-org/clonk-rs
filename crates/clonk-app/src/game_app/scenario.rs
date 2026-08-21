@@ -989,6 +989,14 @@ impl GameApp {
     /// activation still reports the boundary. The catalog is recursive, but
     /// hidden descendants must not block opening their parent folder.
     pub(crate) fn refresh_scenario_entry_enabled(&mut self) {
+        // C4MapFolderData creates buttons directly and filters only mission
+        // access (C4StartupScenSelDlg.cpp:344-357); it has no ScenListItem
+        // rows whose label needs the CanOpen color. Map activation still
+        // reaches the exact start-time validation in `handle_menu_actions`.
+        if self.menu_state.current_map().is_some() {
+            self.scenario_entry_enabled.clear();
+            return;
+        }
         let selector_mode = self.scenario_selector_mode;
         self.scenario_entry_enabled = self
             .menu_state

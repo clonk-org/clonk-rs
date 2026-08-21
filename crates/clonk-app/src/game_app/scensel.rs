@@ -859,11 +859,11 @@ impl GameApp {
                 apply_live_search,
             )
         })?;
-        self.refresh_scenario_entry_enabled();
         // Rebuilding the folder stack creates Book layers. Restore the
         // active folder's configured map style before syncing selection-
         // dependent controls so F5 does not silently leave FolderMap view.
         self.configure_current_folder_map();
+        self.refresh_scenario_entry_enabled();
         self.menu_state.sync_definition_checkbox_to_selection();
         self.sync_scenario_game_option_constraint();
         self.scensel_last_click = None;
