@@ -78,15 +78,6 @@ pub struct HostConnectionHandshake {
     pub liveness: ConnectionLivenessState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WallClockSource {
-    System,
-    #[cfg(test)]
-    Monotonic {
-        origin_seconds: i64,
-    },
-}
-
 /// Ping schedule, per-connection counters, and clock phase carried across the
 /// admission/session boundary.
 ///
@@ -101,7 +92,15 @@ pub struct ConnectionLivenessState {
     monotonic_origin: Instant,
     monotonic_origin_ms: u64,
     next_timer_at: Instant,
-    wall_clock: WallClockSource,
+    /// The whole second this connection started on. C++ reads `time(nullptr)`
+    /// for the acceptance and pre-first-pong windows
+    /// (`src/C4Network2IO.cpp:1155-1177`), and this keeps that unit — but every
+    /// use of the value is a DIFFERENCE against this origin, never an absolute
+    /// instant, so the origin is sampled once and the clock then advances with
+    /// the monotonic one. Re-reading a steppable system clock per tick would let
+    /// an NTP correction make the window appear to elapse instantly and drop a
+    /// healthy mid-handshake connection.
+    wall_origin_seconds: i64,
 }
 
 impl ConnectionLivenessState {
@@ -109,7 +108,7 @@ impl ConnectionLivenessState {
         Self::new(
             Instant::now(),
             system_monotonic_seed_ms(),
-            WallClockSource::System,
+            system_wall_seconds(),
         )
     }
 
@@ -122,30 +121,17 @@ impl ConnectionLivenessState {
 
     #[cfg(test)]
     pub(crate) fn new_test(origin_ms: u64, origin_seconds: i64) -> Self {
-        Self::new(
-            Instant::now(),
-            origin_ms,
-            WallClockSource::Monotonic { origin_seconds },
-        )
+        Self::new(Instant::now(), origin_ms, origin_seconds)
     }
 
-    fn new(
-        monotonic_origin: Instant,
-        monotonic_origin_ms: u64,
-        wall_clock: WallClockSource,
-    ) -> Self {
-        let wall_seconds = match wall_clock {
-            WallClockSource::System => system_wall_seconds(),
-            #[cfg(test)]
-            WallClockSource::Monotonic { origin_seconds } => origin_seconds,
-        };
+    fn new(monotonic_origin: Instant, monotonic_origin_ms: u64, wall_origin_seconds: i64) -> Self {
         Self {
-            connection: ConnectionLiveness::new_connected(wall_seconds),
+            connection: ConnectionLiveness::new_connected(wall_origin_seconds),
             ping_schedule: PingSchedule::new(monotonic_origin_ms),
             monotonic_origin,
             monotonic_origin_ms,
             next_timer_at: monotonic_origin + Duration::from_millis(NETWORK_TIMER_INTERVAL_MS),
-            wall_clock,
+            wall_origin_seconds,
         }
     }
 
@@ -215,13 +201,9 @@ impl ConnectionLivenessState {
         let monotonic_ms = self
             .monotonic_origin_ms
             .wrapping_add(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
-        let wall_seconds = match self.wall_clock {
-            WallClockSource::System => system_wall_seconds(),
-            #[cfg(test)]
-            WallClockSource::Monotonic { origin_seconds } => {
-                origin_seconds.saturating_add(i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
-            }
-        };
+        let wall_seconds = self
+            .wall_origin_seconds
+            .saturating_add(i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX));
         LivenessClock::new(monotonic_ms, wall_seconds)
     }
 }
@@ -1294,6 +1276,49 @@ fn packet_name(message: &ControlMessage) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_acceptance_clock_advances_only_with_the_monotonic_origin() {
+        // `check_timeout` measures the acceptance window as a DIFFERENCE of two
+        // `wall_seconds` reads (connection_liveness.rs:216-223), and every other
+        // use of `wall_seconds` is a difference too — none of it is absolute,
+        // serialized, or compared against another host. Reading a steppable
+        // system clock for each side of that subtraction means an NTP correction
+        // can make the window appear to elapse instantly, which drops a
+        // mid-handshake connection that is perfectly healthy.
+        //
+        // So the clock has to advance with the monotonic origin: five seconds of
+        // elapsed monotonic time is five seconds of acceptance window, whatever
+        // the system clock does in between.
+        let state = ConnectionLivenessState::new_system();
+        let origin = state.monotonic_origin;
+        let at_origin = state.clock_at(origin).wall_seconds();
+        let five_later = state
+            .clock_at(origin + Duration::from_secs(5))
+            .wall_seconds();
+        assert_eq!(five_later - at_origin, 5);
+    }
+
+    #[test]
+    fn a_healthy_handshake_does_not_time_out_when_the_system_clock_steps() {
+        // The same property stated as the behaviour it protects: a connection
+        // one millisecond old must not report an acceptance timeout, and the
+        // only clock that may say otherwise is elapsed monotonic time.
+        let state = ConnectionLivenessState::new_system();
+        let origin = state.monotonic_origin;
+        assert!(state
+            .connection
+            .check_timeout(state.clock_at(origin + Duration::from_millis(1)))
+            .is_none());
+        assert!(state
+            .connection
+            .check_timeout(
+                state.clock_at(
+                    origin + Duration::from_secs(crate::ACCEPT_TIMEOUT_SECONDS as u64 + 1)
+                )
+            )
+            .is_some());
+    }
+
     use std::{collections::BTreeMap, time::Duration};
 
     use clonk_engine::{ClientCoreControlData, LegacyCString, NetworkResourceCore};
