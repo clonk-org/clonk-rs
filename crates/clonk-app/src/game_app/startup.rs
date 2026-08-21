@@ -3429,6 +3429,15 @@ impl GameApp {
                     );
                     self.show_startup_portrait_error(message);
                 }
+                PlayerPropertiesAction::GuiSound(sound) => {
+                    use clonk_frontend::startup_portraitsel::PortraitSelSound;
+                    self.play_ui_sound(match sound {
+                        PortraitSelSound::DoorOpen => "DoorOpen",
+                        PortraitSelSound::DoorClose => "DoorClose",
+                        PortraitSelSound::Command => "Command",
+                        PortraitSelSound::Click => "Click",
+                    });
+                }
                 PlayerPropertiesAction::ApplyPicture(commit) => {
                     self.apply_startup_player_portrait_selection(commit);
                 }
