@@ -2835,20 +2835,24 @@ impl GameApp {
                         }
                     }
                 } else {
-                    let lobby = NetworkLobbyState::new(
-                        manager.local_client_id(),
-                        self.player_name.clone(),
-                        false,
-                    )
-                    .with_external_chat(self.startup_irc_client_active())
-                    .with_preloading(
-                        load_options_program_state(
-                            self.app_paths.as_ref(),
-                            Some(&self.startup_tooltip_resources),
-                        )
-                        .preloading,
-                        self.classic_lobby_labels(),
-                    );
+                    let control_clients = initial_control_clients(Some(&manager), Some(&mode));
+                    let local_name = i32::try_from(manager.local_client_id())
+                        .ok()
+                        .and_then(|client_id| control_clients.state(client_id))
+                        .filter(|client| !client.name.is_empty())
+                        .map(|client| legacy_presentation_text(client.name.as_bytes()))
+                        .unwrap_or_else(|| self.player_name.clone());
+                    let lobby =
+                        NetworkLobbyState::new(manager.local_client_id(), local_name, false)
+                            .with_external_chat(self.startup_irc_client_active())
+                            .with_preloading(
+                                load_options_program_state(
+                                    self.app_paths.as_ref(),
+                                    Some(&self.startup_tooltip_resources),
+                                )
+                                .preloading,
+                                self.classic_lobby_labels(),
+                            );
                     self.network_game_advertiser = None;
                     self.advertised_game_reference = None;
                     self.host_reference_paused = false;
@@ -2865,7 +2869,7 @@ impl GameApp {
                         &self.control_player_infos,
                     );
                     self.network_control_clock = initial_network_control_clock(Some(&mode));
-                    self.control_clients = initial_control_clients(Some(&manager), Some(&mode));
+                    self.control_clients = control_clients;
                     self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
                     self.network_mode = Some(mode);
                     self.network = Some(manager);

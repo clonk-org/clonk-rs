@@ -4635,7 +4635,7 @@ impl GameApp {
         let (resource_directory, maker) = match self.network_mode.as_ref() {
             Some(NetworkMode::Client(settings)) => (
                 settings.resource_directory.clone(),
-                settings.client_name.clone(),
+                settings.group_maker.clone(),
             ),
             _ => return Err("lobby preload has no staged host or client scenario".to_string()),
         };
@@ -4784,8 +4784,12 @@ impl GameApp {
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned())
                             .unwrap_or_else(|| format!("Combined{}.c4s", join_data.client_id));
-                        let packed = compose_client_network_scenario(resources, &filename, &maker)
-                            .map_err(|error| error.to_string())?;
+                        let packed = compose_client_network_scenario_with_maker_bytes(
+                            resources,
+                            &filename,
+                            maker.as_bytes(),
+                        )
+                        .map_err(|error| error.to_string())?;
                         fs::create_dir_all(&resource_directory).map_err(|error| {
                             format!("failed to create {}: {error}", resource_directory.display())
                         })?;

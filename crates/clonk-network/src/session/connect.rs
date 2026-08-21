@@ -1144,13 +1144,27 @@ where
         mesh_punchers: _,
         voice_enabled,
     } = config;
-    let wire_name =
-        clonk_engine::LegacyCString::from_bytes(name.into_bytes()).ok_or_else(|| {
-            ClientError::Handshake("client name contains an interior NUL".to_string())
+    let wire_name = clonk_resources::encode_legacy_script_text(&name)
+        .ok_or_else(|| {
+            ClientError::Handshake(
+                "client name is not representable in the native character set".to_string(),
+            )
+        })
+        .and_then(|bytes| {
+            clonk_engine::LegacyCString::from_bytes(bytes).ok_or_else(|| {
+                ClientError::Handshake("client name contains an interior NUL".to_string())
+            })
         })?;
-    let wire_nick =
-        clonk_engine::LegacyCString::from_bytes(nick.into_bytes()).ok_or_else(|| {
-            ClientError::Handshake("client nick contains an interior NUL".to_string())
+    let wire_nick = clonk_resources::encode_legacy_script_text(&nick)
+        .ok_or_else(|| {
+            ClientError::Handshake(
+                "client nick is not representable in the native character set".to_string(),
+            )
+        })
+        .and_then(|bytes| {
+            clonk_engine::LegacyCString::from_bytes(bytes).ok_or_else(|| {
+                ClientError::Handshake("client nick contains an interior NUL".to_string())
+            })
         })?;
     let local_core = clonk_engine::ClientCoreControlData {
         client_id: -1,

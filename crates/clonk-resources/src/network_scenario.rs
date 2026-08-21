@@ -66,7 +66,9 @@ pub fn combine_network_scenario_with_maker_bytes(
         .map(|entry| case_fold(&entry.name_bytes))
         .collect::<HashSet<_>>();
     let mut combined = MutableGroup::new(output_filename);
-    combined.set_maker_bytes(maker);
+    if !maker.is_empty() {
+        combined.set_maker_bytes(maker);
+    }
     for entry in scenario_entries
         .iter()
         .filter(|entry| !overwritten.contains(&case_fold(&entry.name_bytes)))
@@ -199,7 +201,9 @@ fn rebuild_material_entry(
     let source = open_child_entry_exact(source, entry)
         .map_err(|_| NetworkScenarioError::InvalidMaterialGroup)?;
     let mut rebuilt = MutableGroup::new_bytes(entry.name_bytes.clone());
-    rebuilt.set_maker_bytes(maker);
+    if !maker.is_empty() {
+        rebuilt.set_maker_bytes(maker);
+    }
     for child_entry in source.entries()? {
         copy_entry(&mut rebuilt, &source, &child_entry)?;
     }

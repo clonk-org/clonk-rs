@@ -202,7 +202,7 @@ use clonk_app_netplay::prepared_host_bootstrap::{
     ProcessInitialHostTeamAssignmentOracle, CLASSIC_SAFE_RANDOM_LOCK,
 };
 use clonk_app_netplay::{
-    compose_client_network_scenario, load_configured_mission_access,
+    compose_client_network_scenario_with_maker_bytes, load_configured_mission_access,
     load_snapshotted_client_players, publish_initial_configured_client_players,
     resolve_client_game_resources, resolve_client_scenario_resources,
     snapshot_configured_client_player_selection, ClientScenarioResources, ClientStartBarrier,
@@ -2209,21 +2209,29 @@ impl GameApp {
             .iter()
             .map(|entry| entry.render_model.clone())
             .collect();
+        let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
         let network_lobby = match (&network_mode, &network) {
-            (Some(mode), Some(manager)) => Some(
-                NetworkLobbyState::new(
-                    manager.local_client_id(),
-                    player_name.clone(),
-                    matches!(mode, NetworkMode::Host(_)),
+            (Some(mode), Some(manager)) => {
+                let local_name = i32::try_from(manager.local_client_id())
+                    .ok()
+                    .and_then(|client_id| control_clients.state(client_id))
+                    .filter(|client| !client.name.is_empty())
+                    .map(|client| legacy_presentation_text(client.name.as_bytes()))
+                    .unwrap_or_else(|| player_name.clone());
+                Some(
+                    NetworkLobbyState::new(
+                        manager.local_client_id(),
+                        local_name,
+                        matches!(mode, NetworkMode::Host(_)),
+                    )
+                    .with_preloading(
+                        load_options_program_state(paths, None).preloading,
+                        LobbyLabels::default(),
+                    ),
                 )
-                .with_preloading(
-                    load_options_program_state(paths, None).preloading,
-                    LobbyLabels::default(),
-                ),
-            ),
+            }
             _ => None,
         };
-        let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
         let network_control_running = network.is_none();
         let network_control_clock = initial_network_control_clock(network_mode.as_ref());
         let network_client_next_control_ticks =

@@ -5758,25 +5758,36 @@ pub(crate) fn initial_control_clients(
         .unwrap_or(0);
     let activated = network.is_none() || matches!(network_mode, Some(NetworkMode::Host(_)));
     let string_name = |name: &str| {
-        let bytes = name
-            .as_bytes()
-            .iter()
-            .copied()
+        let bytes = clonk_resources::encode_legacy_script_text(name)
+            .unwrap_or_default()
+            .into_iter()
             .take_while(|byte| *byte != 0)
             .collect();
         clonk_engine::LegacyCString::from_bytes(bytes).unwrap_or_default()
     };
-    let name = match network_mode {
-        Some(NetworkMode::Host(settings)) => string_name(&settings.player_name),
-        Some(NetworkMode::Client(settings)) => string_name(&settings.client_name),
-        None => string_name("Local"),
+    let (name, nick, observer) = match network_mode {
+        Some(NetworkMode::Host(settings)) => (
+            string_name(&settings.player_name),
+            clonk_engine::LegacyCString::default(),
+            false,
+        ),
+        Some(NetworkMode::Client(settings)) => (
+            string_name(&settings.client_name),
+            string_name(&settings.client_nick),
+            settings.observer,
+        ),
+        None => (
+            string_name("Local"),
+            clonk_engine::LegacyCString::default(),
+            false,
+        ),
     };
     clients.replace_snapshot([clonk_engine::ClientCoreControlData {
         client_id,
         activated,
-        observer: false,
+        observer,
         name,
-        nick: clonk_engine::LegacyCString::default(),
+        nick,
         lobby_ready: false,
     }]);
     clients

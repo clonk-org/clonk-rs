@@ -482,6 +482,8 @@ fn ordinary_client_go_completes_nonpreloaded_resource_merge_before_acknowledging
     app.network = Some(manager);
     let mut settings = client_network_settings();
     settings.resource_directory = directory.path().to_path_buf();
+    settings.group_maker =
+        clonk_engine::LegacyCString::from_bytes(b"M\x81ker".to_vec()).test_value();
     app.network_mode = Some(NetworkMode::Client(settings));
     app.startup_view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
@@ -548,6 +550,7 @@ fn ordinary_client_go_completes_nonpreloaded_resource_merge_before_acknowledging
     );
     let mut commands = removal_observer.test_join();
     main_assert!(combined_path.exists());
+    main_assert_eq!(Group::open(&combined_path).test_value().maker_bytes() => Some(&b"M\x81ker"[..]));
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -2103,7 +2106,8 @@ fn client_network_settings_supply_the_local_system_resource_candidate() {
     let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     let address = SocketAddr::from(([127, 0, 0, 1], 11_112));
 
-    let settings = client_settings_for_paths(address, "Client".to_string(), Some(&paths));
+    let settings = client_settings_for_paths(address, "Client".to_string(), Some(&paths))
+        .test_value();
 
     main_assert_eq!(
         settings.server_addresses =>
@@ -4696,4 +4700,3 @@ fn load_install_definitions_discovers_mixed_case_objects_group() {
 
     reset_cached_app_paths();
 }
-

@@ -470,8 +470,9 @@ pub struct ClientConfig {
 impl ClientConfig {
     pub fn new(name: impl Into<String>, kind: ParticipantKind) -> Self {
         let name = name.into();
-        let group_maker =
-            clonk_engine::LegacyCString::from_bytes(name.as_bytes().to_vec()).unwrap_or_default();
+        let group_maker = clonk_resources::encode_legacy_script_text(&name)
+            .and_then(clonk_engine::LegacyCString::from_bytes)
+            .unwrap_or_default();
         Self {
             nick: name.clone(),
             name,

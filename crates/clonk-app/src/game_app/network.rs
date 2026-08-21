@@ -2760,7 +2760,7 @@ impl GameApp {
             return Ok(());
         };
         let resource_directory = settings.resource_directory.clone();
-        let maker = settings.client_name.clone();
+        let maker = settings.group_maker.clone();
         if self.client_combined_scenario_path.is_none() {
             let resources = match resolve_client_scenario_resources(&join_data, |core| {
                 self.admission_resources
@@ -2774,8 +2774,12 @@ impl GameApp {
                 }
             };
             let filename = format!("Combined{}.c4s", join_data.client_id);
-            let packed = compose_client_network_scenario(&resources, &filename, &maker)
-                .map_err(|error| error.to_string())?;
+            let packed = compose_client_network_scenario_with_maker_bytes(
+                &resources,
+                &filename,
+                maker.as_bytes(),
+            )
+            .map_err(|error| error.to_string())?;
             fs::create_dir_all(&resource_directory).map_err(|error| {
                 format!("failed to create {}: {error}", resource_directory.display())
             })?;
@@ -5304,7 +5308,11 @@ impl GameApp {
                 return Err(NetworkStartError::Cancelled);
             }
             let mut settings =
-                client_settings_for_paths(server_addr, player_name, app_paths.as_ref());
+                client_settings_for_paths(server_addr, player_name, app_paths.as_ref()).map_err(
+                    |error| {
+                        NetworkStartError::Other(format!("cannot load network identity: {error:#}"))
+                    },
+                )?;
             if let Some(group_maker) = group_maker {
                 settings.group_maker = group_maker;
             }
@@ -5357,11 +5365,17 @@ impl GameApp {
             ipv4: reference.netpuncher_ipv4,
             ipv6: reference.netpuncher_ipv6,
         };
-        let mut settings = client_settings_for_paths(
+        let mut settings = match client_settings_for_paths(
             reference.source_address,
             self.player_name.clone(),
             self.app_paths.as_ref(),
-        );
+        ) {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.status_text = format!("Unable to load network identity: {error:#}");
+                return Ok(());
+            }
+        };
         if let Some(selection) = self.configured_client_player_selection.as_ref() {
             settings.group_maker = selection.group_maker().clone();
         }
@@ -6224,23 +6238,32 @@ impl GameApp {
         // The host is not going away, so the reconnect this client may have
         // armed from an earlier notice is now the wrong answer.
         self.pending_host_rejoin = None;
+        let clients = self.control_clients.snapshot();
         self.return_to_menu_retaining_network_session();
         let Some(manager) = self.network.as_ref() else {
             // The teardown found the session unusable after all. It has already
             // dropped it, which leaves the ordinary dead-host presentation.
             return Ok(());
         };
-        let lobby =
-            NetworkLobbyState::new(manager.local_client_id(), self.player_name.clone(), false)
-                .with_external_chat(self.startup_irc_client_active())
-                .with_preloading(
-                    load_options_program_state(
-                        self.app_paths.as_ref(),
-                        Some(&self.startup_tooltip_resources),
-                    )
-                    .preloading,
-                    self.classic_lobby_labels(),
-                );
+        let local_client_id = manager.local_client_id();
+        let local_name = clients
+            .iter()
+            .find(|client| ClientId::try_from(client.client_id) == Ok(local_client_id))
+            .map(|client| legacy_presentation_text(client.name.as_bytes()))
+            .unwrap_or_else(|| self.player_name.clone());
+        let mut lobby = NetworkLobbyState::new(local_client_id, local_name, false)
+            .with_external_chat(self.startup_irc_client_active())
+            .with_preloading(
+                load_options_program_state(
+                    self.app_paths.as_ref(),
+                    Some(&self.startup_tooltip_resources),
+                )
+                .preloading,
+                self.classic_lobby_labels(),
+            );
+        if !clients.is_empty() {
+            lobby.replace_participants_from_clients(&clients);
+        }
         self.network_lobby = Some(lobby);
         self.classic_host_lobby = None;
         self.network_control_running = false;
