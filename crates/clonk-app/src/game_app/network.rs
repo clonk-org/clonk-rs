@@ -5575,17 +5575,15 @@ impl GameApp {
             .engine
             .max_players()
             .unwrap_or_else(|| i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
-        let join_allowed = self
-            .network_mode
-            .as_ref()
-            .and_then(|mode| match mode {
-                NetworkMode::Host(HostSettings {
-                    prepared: Some(prepared),
-                    ..
-                }) => Some(prepared.admission().runtime_join_allowed()),
-                NetworkMode::Host(_) | NetworkMode::Client(_) => None,
-            })
-            .unwrap_or(template.summary().join_allowed);
+        // Advertise the admission this host is enforcing, not the template's.
+        // C++ never gates the accept path on fAllowJoin - it publishes it
+        // (C4Network2Reference.cpp:75) and the joining client's browser is what
+        // refuses (C4StartupNetDlg.cpp:480,495) - so a stale flag here is the
+        // whole reason a runtime join cannot be attempted
+        // (clonk-org/clonk-rs#948). Reading only `prepared` missed every host
+        // that did not come through the prepared-lobby flow, and missed the
+        // runtime toggle even for one that did.
+        let join_allowed = self.runtime_join_admission_allowed();
         let control_mode = self.runtime_network_control_mode;
         let updated = match running_host_reference(
             &template,
